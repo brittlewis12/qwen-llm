@@ -21,7 +21,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::{mat_vec_q4_k_f32_bufs, MetalContext};
+use qwen_llm::metal::{mat_vec_q4_k_f32_chained, mat_vec_q6_k_f32_chained, MetalContext};
 use qwen_llm::tensor::{GgmlType, TensorDesc};
 
 const MODEL_27B: &str = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
@@ -88,34 +88,31 @@ fn bench_q4k_mat_vec(c: &mut Criterion) {
             }])
             .expect("args");
 
-        // Throughput annotation: bytes-of-weights touched per dispatch.
+        // Throughput annotation: bytes-of-weights touched per dispatch
+        // (single) or per chained batch of 64 (chained64). criterion
+        // reports `thrpt = bytes/iter ÷ time/iter`, so for chained64 we
+        // multiply by 64 to keep the GiB/s number per-dispatch.
         group.throughput(Throughput::Bytes(t.n_bytes));
-
-        // 1) Single dispatch per command buffer.
         group.bench_with_input(
             BenchmarkId::new("single", label),
             &(label, t.n_bytes),
             |b, _| {
                 b.iter(|| {
-                    mat_vec_q4_k_f32_bufs(&ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out)
+                    mat_vec_q4_k_f32_chained(&ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out, 1)
                         .expect("dispatch");
                     black_box(&buf_y);
                 });
             },
         );
 
-        // 2) 64 dispatches per command buffer, single wait. Approximates
-        // what a layered forward pass sees with persistent buffers and
-        // chained command encoding.
+        group.throughput(Throughput::Bytes(t.n_bytes * 64));
         group.bench_with_input(
             BenchmarkId::new("chained64", label),
             &(label, t.n_bytes),
             |b, _| {
                 b.iter(|| {
-                    qwen_llm::metal::mat_vec_q4_k_f32_chained(
-                        &ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out, 64,
-                    )
-                    .expect("chained");
+                    mat_vec_q4_k_f32_chained(&ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out, 64)
+                        .expect("chained");
                     black_box(&buf_y);
                 });
             },
@@ -124,5 +121,79 @@ fn bench_q4k_mat_vec(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_q4k_mat_vec);
+fn bench_q6k_mat_vec(c: &mut Criterion) {
+    if !std::path::Path::new(MODEL_27B).exists() {
+        return;
+    }
+    let ctx = match MetalContext::new() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let g = GgufFile::open(MODEL_27B).expect("open");
+
+    let names = [
+        ("attn_qkv_27b", "blk.0.attn_qkv.weight"),
+        ("attn_v_27b", "blk.3.attn_v.weight"),
+        ("ffn_down_27b", "blk.0.ffn_down.weight"),
+        ("output_27b", "output.weight"),
+    ];
+
+    let mut group = c.benchmark_group("q6_k mat_vec");
+    for (label, name) in names {
+        let Some(t) = g.find(name) else { continue };
+        if t.dtype != GgmlType::Q6_K {
+            continue;
+        }
+        let n_in = t.shape[0] as usize;
+        let n_out = t.shape[1] as usize;
+
+        let buf_w = ctx.buffer_from(g.slice(t)).expect("w");
+        let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+        let buf_x = ctx.buffer_from(&x).expect("x");
+        let buf_y = ctx
+            .buffer_uninit(n_out * std::mem::size_of::<f32>())
+            .expect("y");
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Args {
+            n_in: u32,
+            n_out: u32,
+        }
+        let buf_args = ctx
+            .buffer_from(&[Args {
+                n_in: n_in as u32,
+                n_out: n_out as u32,
+            }])
+            .expect("args");
+
+        group.throughput(Throughput::Bytes(t.n_bytes));
+        group.bench_with_input(
+            BenchmarkId::new("single", label),
+            &(label, t.n_bytes),
+            |b, _| {
+                b.iter(|| {
+                    mat_vec_q6_k_f32_chained(&ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out, 1)
+                        .expect("dispatch");
+                    black_box(&buf_y);
+                });
+            },
+        );
+        group.throughput(Throughput::Bytes(t.n_bytes * 64));
+        group.bench_with_input(
+            BenchmarkId::new("chained64", label),
+            &(label, t.n_bytes),
+            |b, _| {
+                b.iter(|| {
+                    mat_vec_q6_k_f32_chained(&ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out, 64)
+                        .expect("chained");
+                    black_box(&buf_y);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_q4k_mat_vec, bench_q6k_mat_vec);
 criterion_main!(benches);

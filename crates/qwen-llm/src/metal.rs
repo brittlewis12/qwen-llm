@@ -256,6 +256,82 @@ pub fn mat_vec_q4_k_f32_chained(
     Ok(())
 }
 
+/// Q6_K mat-vec on persistent buffers. See `mat_vec_q4_k_f32_chained` for
+/// rationale. Q6_K has the same NSG/NR0=2/2 launch geometry as Q4_K.
+pub fn mat_vec_q6_k_f32_chained(
+    ctx: &MetalContext,
+    buf_args: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_w: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_x: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_y: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    n_out: usize,
+    n_dispatches: usize,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline("kernel_mat_vec_q6_K_f32")?;
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    let rows_per_tg = NR0 * NSG;
+    let n_tg = n_out.div_ceil(rows_per_tg);
+    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = cmd_buf.computeCommandEncoder().expect("compute encoder");
+    enc.setComputePipelineState(&pso);
+    unsafe {
+        enc.setBuffer_offset_atIndex(Some(buf_args.as_ref()), 0, 0);
+        enc.setBuffer_offset_atIndex(Some(buf_w.as_ref()), 0, 1);
+        enc.setBuffer_offset_atIndex(Some(buf_x.as_ref()), 0, 2);
+        enc.setBuffer_offset_atIndex(Some(buf_y.as_ref()), 0, 3);
+    }
+    let grid = MTLSize {
+        width: n_tg,
+        height: 1,
+        depth: 1,
+    };
+    let tg = MTLSize {
+        width: NSG * 32,
+        height: 1,
+        depth: 1,
+    };
+    for _ in 0..n_dispatches {
+        enc.dispatchThreadgroups_threadsPerThreadgroup(grid, tg);
+    }
+    enc.endEncoding();
+    cmd_buf.commit();
+    unsafe { cmd_buf.waitUntilCompleted() };
+    Ok(())
+}
+
+pub fn mat_vec_q6_k_f32(
+    ctx: &MetalContext,
+    weight_bytes: &[u8],
+    x: &[f32],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, MetalError> {
+    debug_assert!(n_in % 256 == 0);
+    debug_assert_eq!(weight_bytes.len(), n_out * (n_in / 256) * 210);
+    debug_assert_eq!(x.len(), n_in);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    let buf_args = ctx.buffer_from(&[Args {
+        n_in: n_in as u32,
+        n_out: n_out as u32,
+    }])?;
+    let buf_w = ctx.buffer_from(weight_bytes)?;
+    let buf_x = ctx.buffer_from(x)?;
+    let buf_y = ctx.buffer_uninit(n_out * std::mem::size_of::<f32>())?;
+    mat_vec_q6_k_f32_chained(ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out, 1)?;
+    let mut out = vec![0.0f32; n_out];
+    unsafe {
+        let src = buf_y.contents().as_ptr() as *const f32;
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n_out);
+    }
+    Ok(out)
+}
+
 /// Dispatch the Q4_K mat-vec kernel directly on raw block_q4_K bytes.
 ///
 /// `weight_bytes` is `n_out * (n_in/256) * 144` bytes; `x` is `[n_in]` f32.
@@ -679,6 +755,52 @@ mod tests {
             per_iter_ms,
             bw / 5.46
         );
+    }
+
+    #[test]
+    fn mat_vec_q6_k_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let q6k = g
+            .tensors
+            .iter()
+            .find(|t| {
+                t.name.starts_with("blk.0.")
+                    && t.dtype == crate::tensor::GgmlType::Q6_K
+                    && t.shape.len() == 2
+                    && t.shape[0] % 256 == 0
+            })
+            .expect("no Q6_K tensor");
+        let n_in = q6k.shape[0] as usize;
+        let n_out = q6k.shape[1] as usize;
+        eprintln!(
+            "[q6_k-test] {} shape=[{n_in}, {n_out}] {} bytes",
+            q6k.name, q6k.n_bytes
+        );
+
+        let weight_f32 = crate::codec::dequant_to_f32(q6k, g.slice(q6k)).expect("dequant");
+        let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+        let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
+        let gpu = mat_vec_q6_k_f32(&ctx, g.slice(q6k), &x, n_in, n_out).expect("metal q6k");
+
+        let mut max_abs = 0.0f32;
+        let mut max_rel = 0.0f32;
+        for (a, b) in gpu.iter().zip(cpu.iter()) {
+            let d = (a - b).abs();
+            max_abs = max_abs.max(d);
+            let r = d / b.abs().max(1e-6);
+            max_rel = max_rel.max(r);
+        }
+        eprintln!("[q6_k] max|Δ|={max_abs:.2e} rel={max_rel:.2e}");
+        assert!(max_abs < 1e-2, "q6_k drift {max_abs}");
     }
 
     /// Validate the Q4_K mat-vec kernel against the CPU dequant + mat_vec

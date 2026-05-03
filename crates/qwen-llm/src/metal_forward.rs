@@ -401,6 +401,140 @@ impl<'a> MetalForward<'a> {
     /// Same as [`single_token`] but also returns a profile with CPU
     /// encode, GPU execution, and total wall-clock times. Caller pays
     /// the cost of an `addCompletedHandler`-backed timestamp roundtrip.
+    /// Phase-resolved profiling: splits the per-token forward across
+    /// multiple command buffers so we can attribute GPU time to logical
+    /// phases (embedding, GDN layers, attn layers, lm head). The cost
+    /// of the split is roughly (n_phases - 1) × command-buffer overhead;
+    /// at our ~0.3 ms/buffer, splitting into ~6 phases adds ~1.5 ms to
+    /// total wall but gives per-phase GPU timing.
+    ///
+    /// Returns: (logits, total wall ms, per-phase GPU ms map)
+    pub fn single_token_phase_profiled(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(Vec<f32>, f64, Vec<(String, f64)>), MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let mut phases: Vec<(String, f64)> = Vec::new();
+
+        // Phase: embedding lookup.
+        {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_get_rows_f32(
+                self.ctx,
+                &enc,
+                &self.model.token_embd,
+                &session.ids_buf,
+                &session.x,
+                1,
+                arch.hidden_size as usize,
+            )?;
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push(("embedding".into(), ms));
+        }
+
+        // One command buffer per block. We aggregate by class (gdn vs attn)
+        // so the report is digestible.
+        let mut gdn_total_ms = 0.0f64;
+        let mut attn_total_ms = 0.0f64;
+        let mut gdn_count = 0usize;
+        let mut attn_count = 0usize;
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            self.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position,
+                session,
+            )?;
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            match block {
+                MetalBlock::Gdn(_) => {
+                    gdn_total_ms += ms;
+                    gdn_count += 1;
+                }
+                MetalBlock::Attn(_) => {
+                    attn_total_ms += ms;
+                    attn_count += 1;
+                }
+            }
+        }
+        phases.push((format!("gdn layers (×{gdn_count})"), gdn_total_ms));
+        phases.push((format!("attn layers (×{attn_count})"), attn_total_ms));
+
+        // Phase: final norm.
+        {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push(("final norm".into(), ms));
+        }
+
+        // Phase: lm head.
+        {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                arch.hidden_size as usize,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push(("lm head".into(), ms));
+        }
+
+        let mut out = vec![0.0f32; arch.vocab_size as usize];
+        unsafe {
+            let src = session.logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+        }
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((out, total_ms, phases))
+    }
+
     pub fn single_token_profiled(
         &self,
         token_id: i32,
@@ -1793,6 +1927,407 @@ mod tests {
         {
             eprintln!("[mtp] metadata key: {k}");
         }
+    }
+
+    /// **GDN intra-layer profile**: split a single GDN block across its
+    /// 8+ logical sub-phases so we can attribute the ~0.64 ms/layer cost
+    /// to which sub-kernels. Free fn (not on MetalForward) because it
+    /// lives in the test module.
+    fn gdn_intra_profile_single_block(
+        mf: &MetalForward,
+        gdn_block_idx: usize,
+        gdn_idx_in_session: usize,
+        s: &mut MetalSession,
+    ) -> Result<Vec<(String, f64)>, MfError> {
+        let gb = match &mf.model.blocks[gdn_block_idx] {
+            MetalBlock::Gdn(g) => g,
+            _ => {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "gdn_intra_profile",
+                    detail: format!("block {gdn_block_idx} is not GDN"),
+                }))
+            }
+        };
+        let arch = &mf.model.arch;
+        let h = arch.hidden_size as usize;
+        let n_v = arch.gdn_n_v_heads as usize;
+        let n_k = arch.gdn_n_k_heads as usize;
+        let head_dim = arch.gdn_head_dim as usize;
+        let conv_dim = (2 * n_k + n_v) * head_dim;
+        let v_dim = n_v * head_dim;
+
+        let mut phases: Vec<(String, f64)> = Vec::new();
+        let timed = |label: &str,
+                     cb: &dyn Fn(&KernelEncoder) -> Result<(), MfError>,
+                     phases: &mut Vec<(String, f64)>|
+         -> Result<(), MfError> {
+            let cmd = mf.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            cb(&enc)?;
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push((label.into(), ms));
+            Ok(())
+        };
+
+        // Pre-mixer norm.
+        timed(
+            "pre_norm (rms_norm)",
+            &|enc| {
+                encode_rms_norm_mul_f32(mf.ctx, enc, &s.x, &gb.attn_norm, &s.h, RMS_EPS)
+                    .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+
+        // QKV projection.
+        timed(
+            "in_proj_qkv (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(mf.ctx, enc, &gb.in_proj_qkv, &s.h, &s.gdn_qkv, h, conv_dim)
+            },
+            &mut phases,
+        )?;
+        // z projection.
+        timed(
+            "in_proj_z (mat_vec)",
+            &|enc| encode_mat_vec_dispatch(mf.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim),
+            &mut phases,
+        )?;
+        // beta proj + sigmoid.
+        timed(
+            "beta_proj+sigmoid",
+            &|enc| {
+                encode_mat_vec_dispatch(mf.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
+                encode_sigmoid_f32(mf.ctx, enc, &s.gdn_b, &s.gdn_beta).map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // alpha proj + add_dt + softplus + mul.
+        timed(
+            "alpha_proj+softplus+mul",
+            &|enc| {
+                encode_mat_vec_dispatch(mf.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
+                encode_add_inplace_f32(mf.ctx, enc, &s.gdn_a, &gb.dt_bias)?;
+                encode_softplus_f32(mf.ctx, enc, &s.gdn_a, &s.gdn_alpha)?;
+                encode_mul_f32(mf.ctx, enc, &s.gdn_alpha, &gb.a_log, &s.gdn_alpha)
+                    .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // ssm_conv (with internal silu).
+        timed(
+            "ssm_conv_silu",
+            &|enc| {
+                encode_ssm_conv_silu_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_qkv,
+                    &s.gdn_conv[gdn_idx_in_session],
+                    &gb.conv1d,
+                    &s.gdn_qkv_conv,
+                    conv_dim,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // 3 copy_offset + 2 l2_norm.
+        timed(
+            "split_qkv (3 copy_offset)",
+            &|enc| {
+                encode_copy_offset_f32(mf.ctx, enc, &s.gdn_qkv_conv, 0, &s.gdn_q, n_k * head_dim)?;
+                encode_copy_offset_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_qkv_conv,
+                    n_k * head_dim,
+                    &s.gdn_k,
+                    n_k * head_dim,
+                )?;
+                encode_copy_offset_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_qkv_conv,
+                    2 * n_k * head_dim,
+                    &s.gdn_v,
+                    v_dim,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "l2_norm_qk (2 batched)",
+            &|enc| {
+                encode_l2_norm_batched_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_q,
+                    &s.gdn_q_norm,
+                    n_k,
+                    head_dim,
+                    RMS_EPS,
+                )?;
+                encode_l2_norm_batched_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_k,
+                    &s.gdn_k_norm,
+                    n_k,
+                    head_dim,
+                    RMS_EPS,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // gdn_step (the recurrence kernel — likely dominant).
+        timed(
+            "gdn_step (recurrence)",
+            &|enc| {
+                encode_gdn_step_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_q_norm,
+                    &s.gdn_k_norm,
+                    &s.gdn_v,
+                    &s.gdn_alpha,
+                    &s.gdn_beta,
+                    &s.gdn_state[gdn_idx_in_session],
+                    &s.gdn_out,
+                    n_v,
+                    n_k,
+                    head_dim,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // rmsnorm_gated.
+        timed(
+            "rmsnorm_gated",
+            &|enc| {
+                encode_rmsnorm_gated_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_out,
+                    &gb.norm,
+                    &s.gdn_z,
+                    &s.gdn_normed,
+                    n_v,
+                    head_dim,
+                    RMS_EPS,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // out_proj.
+        timed(
+            "out_proj (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    &gb.out_proj,
+                    &s.gdn_normed,
+                    &s.mixer_out,
+                    v_dim,
+                    h,
+                )
+            },
+            &mut phases,
+        )?;
+        // residual #1.
+        timed(
+            "residual_add #1",
+            &|enc| encode_add_inplace_f32(mf.ctx, enc, &s.x, &s.mixer_out).map_err(MfError::from),
+            &mut phases,
+        )?;
+        // post-FFN norm.
+        timed(
+            "post_norm (rms_norm)",
+            &|enc| {
+                encode_rms_norm_mul_f32(mf.ctx, enc, &s.x, &gb.post_attn_norm, &s.h, RMS_EPS)
+                    .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // FFN gate.
+        timed(
+            "ffn_gate (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    &gb.ffn_gate,
+                    &s.h,
+                    &s.ffn_gate,
+                    h,
+                    arch.intermediate_size as usize,
+                )
+            },
+            &mut phases,
+        )?;
+        // FFN up.
+        timed(
+            "ffn_up (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    &gb.ffn_up,
+                    &s.h,
+                    &s.ffn_up,
+                    h,
+                    arch.intermediate_size as usize,
+                )
+            },
+            &mut phases,
+        )?;
+        // silu_mul.
+        timed(
+            "silu_mul",
+            &|enc| {
+                encode_silu_mul_f32(mf.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)
+                    .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // FFN down.
+        timed(
+            "ffn_down (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    &gb.ffn_down,
+                    &s.ffn_inner,
+                    &s.ffn_out,
+                    arch.intermediate_size as usize,
+                    h,
+                )
+            },
+            &mut phases,
+        )?;
+        // residual #2.
+        timed(
+            "residual_add #2",
+            &|enc| encode_add_inplace_f32(mf.ctx, enc, &s.x, &s.ffn_out).map_err(MfError::from),
+            &mut phases,
+        )?;
+        Ok(phases)
+    }
+
+    /// **Phase-resolved profile**: at each context length we care about,
+    /// run a phase-split forward to attribute GPU time to logical phases.
+    /// This is the experiment that should tell us whether the long-context
+    /// regression lives in attn layers, GDN layers, or somewhere else.
+    #[test]
+    #[ignore]
+    fn metal_27b_phase_profile() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        let max_n = 4096usize;
+        let mf = MetalForward::new(&ctx, &mm);
+        // Single warmup session for pipeline cache.
+        {
+            let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("warmup");
+            for i in 0..3 {
+                let _ = mf.single_token(0, i as u32, &mut s).expect("warmup");
+            }
+        }
+
+        for &target in &[1usize, 1024, 4096] {
+            let mut s = MetalSession::fresh(&ctx, &mm, max_n + 16).expect("session");
+            // Ramp to `target` positions (no timing).
+            for p in 0..(target as u32) {
+                let _ = mf.single_token(0, p, &mut s).expect("ramp");
+            }
+            // Now do a phase-profiled call at position `target`.
+            let (_logits, total_ms, phases) = mf
+                .single_token_phase_profiled(0, target as u32, &mut s)
+                .expect("phase");
+
+            let phase_sum_ms: f64 = phases.iter().map(|p| p.1).sum();
+            eprintln!("[phase ctx={target:>5}] total wall {total_ms:.2} ms, phase sum {phase_sum_ms:.2} ms");
+            for (name, ms) in &phases {
+                let pct = ms / phase_sum_ms * 100.0;
+                eprintln!("[phase ctx={target:>5}]   {name:25} {ms:7.2} ms  ({pct:5.1}%)");
+            }
+        }
+    }
+
+    /// **GDN intra-layer breakdown**: profile a single GDN block by
+    /// sub-phase. Tells us where the ~0.64 ms/layer cost lives —
+    /// which sub-kernels are big, which are negligible, and which
+    /// fusion targets are worth pursuing.
+    #[test]
+    #[ignore]
+    fn metal_27b_gdn_intra_profile() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Warmup pipeline cache.
+        let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("session");
+        for i in 0..3 {
+            let _ = mf.single_token(0, i as u32, &mut s).expect("warmup");
+        }
+
+        // Run a real forward to populate state, then profile block 0 (a
+        // GDN block).
+        let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("session");
+        let _ = mf.single_token(9419, 0, &mut s).expect("p0");
+
+        // Profile just one GDN block in isolation. Aggregate across
+        // 5 runs to get noise-floor stable numbers.
+        let n_runs = 5usize;
+        let mut agg: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for run in 0..n_runs {
+            let phases = gdn_intra_profile_single_block(&mf, 0, 0, &mut s).expect("intra");
+            for (name, ms) in phases {
+                if run == 0 {
+                    order.push(name.clone());
+                }
+                *agg.entry(name).or_default() += ms;
+            }
+        }
+        let total: f64 = agg.values().sum::<f64>() / n_runs as f64;
+        eprintln!("[gdn-intra] === per-sub-phase breakdown (avg of {n_runs} runs) ===");
+        eprintln!("[gdn-intra] one GDN layer total: {total:.3} ms");
+        for name in &order {
+            let avg_ms = agg[name] / n_runs as f64;
+            let pct = avg_ms / total * 100.0;
+            eprintln!("[gdn-intra]   {name:35} {avg_ms:6.3} ms  ({pct:5.1}%)");
+        }
+        eprintln!(
+            "[gdn-intra] extrapolated to 48 layers: {:.2} ms",
+            total * 48.0
+        );
     }
 
     /// **Context-length sweep**: how does decode throughput scale as the

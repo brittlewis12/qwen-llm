@@ -222,6 +222,23 @@ kernel void kernel_l2_norm_batched_f32(
     }
 }
 
+// Copy with offset: y[i] = x[src_off + i]  for i in 0..n.
+// Used to slice the GDN post-conv qkv buffer into per-role Q/K/V views
+// without doing a CPU round-trip. v2 will replace this with kernels
+// that read the slice via offset directly.
+struct copy_offset_args {
+    uint n;
+    uint src_off;
+};
+kernel void kernel_copy_offset_f32(
+        constant copy_offset_args & args [[buffer(0)]],
+        device const float * x [[buffer(1)]],
+        device       float * y [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    y[tid] = x[args.src_off + tid];
+}
+
 // get_rows: y[r * n_cols + i] = embed[ids[r] * n_cols + i].
 // For embedding lookup at decode (n_rows=1) and prefill (n_rows=batch).
 struct get_rows_args {

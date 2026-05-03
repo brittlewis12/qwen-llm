@@ -830,6 +830,69 @@ pub fn encode_l2_norm_f32(
     Ok(())
 }
 
+/// Copy `n_elements` floats starting at `src_off` (in elements) of `src`
+/// into `dst[0..n_elements]`. Used to slice fused buffers (e.g. the GDN
+/// post-conv qkv buffer) into per-role tensors. v2 will replace many of
+/// these with kernels that take offsets directly.
+pub fn encode_copy_offset_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    src_off: usize,
+    dst: &MetalTensor,
+    n_elements: usize,
+) -> Result<(), MetalError> {
+    if dst.n_elements() as usize != n_elements {
+        return Err(MetalError::BadShape {
+            kernel: "copy_offset",
+            detail: format!("dst.n={} != n_elements={n_elements}", dst.n_elements()),
+        });
+    }
+    if (src_off + n_elements) as u64 > src.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel: "copy_offset",
+            detail: format!(
+                "src_off+n={} > src.n={}",
+                src_off + n_elements,
+                src.n_elements()
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        src_off: u32,
+    }
+    let pso = ctx.pipeline("kernel_copy_offset_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n_elements as u32,
+            src_off: src_off as u32,
+        },
+    );
+    enc.set_tensor(1, src);
+    enc.set_tensor(2, dst);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n_elements.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Per-head L2-norm: `y[h, :] = x[h, :] / max(||x[h, :]||, eps)` for
 /// `h ∈ [0, n_heads)`. One dispatch covers all heads. Used in the GDN
 /// front-end where Q and K are l2-normed per K-head before the

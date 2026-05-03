@@ -1518,6 +1518,98 @@ pub fn encode_scatter_offset_f32_to_f16(
     Ok(())
 }
 
+/// Fused K+V scatter — writes K and V into their respective F16 caches at
+/// `dst_off` in a single dispatch. K and V always share `n` and `dst_off`
+/// at decode time (`n = kv_dim, dst_off = position * kv_dim`), so we
+/// amortize one dispatch per attn layer.
+///
+/// Per Jeff & Sanjay (Bulk APIs / amortize boundary crossings).
+/// Saves 16 dispatches/token for the 27B (16 attn layers).
+pub fn encode_scatter_offset_f32_to_f16_kv(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    k_src: &MetalTensor,
+    v_src: &MetalTensor,
+    k_dst: &MetalTensor,
+    v_dst: &MetalTensor,
+    dst_off: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    if k_src.dtype != GgmlType::F32 || v_src.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv",
+            detail: format!(
+                "expected F32 sources, got k={:?} v={:?}",
+                k_src.dtype, v_src.dtype
+            ),
+        });
+    }
+    if k_dst.dtype != GgmlType::F16 || v_dst.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv",
+            detail: format!(
+                "expected F16 dests, got k={:?} v={:?}",
+                k_dst.dtype, v_dst.dtype
+            ),
+        });
+    }
+    if k_src.n_elements() as usize != n || v_src.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv",
+            detail: format!(
+                "src lengths k={} v={} != n={n}",
+                k_src.n_elements(),
+                v_src.n_elements()
+            ),
+        });
+    }
+    if (dst_off + n) as u64 > k_dst.n_elements() || (dst_off + n) as u64 > v_dst.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv",
+            detail: format!(
+                "dst_off+n={} exceeds k.n={} or v.n={}",
+                dst_off + n,
+                k_dst.n_elements(),
+                v_dst.n_elements()
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        dst_off: u32,
+    }
+    let pso = ctx.pipeline("kernel_scatter_offset_f32_to_f16_kv")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            dst_off: dst_off as u32,
+        },
+    );
+    enc.set_tensor(1, k_src);
+    enc.set_tensor(2, v_src);
+    enc.set_tensor(3, k_dst);
+    enc.set_tensor(4, v_dst);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Fused attention decode (single-token Q step). For each Q head:
 ///   1. scores[p] = (q · k_cache[p, kvh, :]) * scale
 ///   2. softmax over scores
@@ -2679,6 +2771,87 @@ mod tests {
                 (1.0 + v.exp()).ln()
             };
             assert!((sp[i] - exp_sp).abs() < 1e-5);
+        }
+    }
+
+    /// Fused K+V scatter (one dispatch writes both caches) must produce
+    /// identical bytes to the two-dispatch sequence.
+    #[test]
+    fn scatter_kv_fused_matches_unfused() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let kv_dim = 4 * 256; // n_kv_heads * head_dim for 27B
+        let cap = 64usize;
+
+        let k_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+            .collect();
+        let v_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.07)
+            .collect();
+        let k_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&k_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let v_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&v_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        for &dst_off_slot in &[0usize, 7, 31, 63] {
+            let dst_off = dst_off_slot * kv_dim;
+
+            // --- Reference: two unfused dispatches ---
+            let k_ref = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_ref = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_f16(&ctx, enc, &k_src_t, &k_ref, dst_off, kv_dim)?;
+                encode_scatter_offset_f32_to_f16(&ctx, enc, &v_src_t, &v_ref, dst_off, kv_dim)
+            })
+            .unwrap();
+
+            // --- Fused: one dispatch ---
+            let k_fused = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_fused = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_f16_kv(
+                    &ctx, enc, &k_src_t, &v_src_t, &k_fused, &v_fused, dst_off, kv_dim,
+                )
+            })
+            .unwrap();
+
+            // Compare F16 bytes directly (must be byte-identical).
+            let n_bytes = cap * kv_dim * 2;
+            let k_ref_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(k_ref.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            let k_fused_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(k_fused.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            let v_ref_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(v_ref.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            let v_fused_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(v_fused.buffer.contents().as_ptr() as *const u8, n_bytes)
+            };
+            assert_eq!(
+                k_ref_bytes, k_fused_bytes,
+                "K mismatch at slot={dst_off_slot}"
+            );
+            assert_eq!(
+                v_ref_bytes, v_fused_bytes,
+                "V mismatch at slot={dst_off_slot}"
+            );
+            eprintln!("[scatter_kv_fused slot={dst_off_slot}] byte-identical to unfused");
         }
     }
 

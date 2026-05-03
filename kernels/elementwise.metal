@@ -267,6 +267,26 @@ kernel void kernel_scatter_offset_f32_to_f16(
     y[args.dst_off + tid] = (half)x[tid];
 }
 
+// Fused K+V scatter: writes both K and V into their respective F16 caches
+// in a single dispatch. K and V always share the same `n` (= kv_dim) and
+// the same `dst_off` (= position * kv_dim) at decode time, so we amortize
+// dispatch overhead across both writes.
+//
+// Per Jeff & Sanjay (Bulk APIs): "amortize boundary crossings". Saves
+// 1 dispatch per attn layer × 16 attn layers = 16 dispatches/token.
+kernel void kernel_scatter_offset_f32_to_f16_kv(
+        constant scatter_offset_args & args [[buffer(0)]],
+        device const float * k_src [[buffer(1)]],
+        device const float * v_src [[buffer(2)]],
+        device       half  * k_dst [[buffer(3)]],
+        device       half  * v_dst [[buffer(4)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const uint i = args.dst_off + tid;
+    k_dst[i] = (half)k_src[tid];
+    v_dst[i] = (half)v_src[tid];
+}
+
 // get_rows: y[r * n_cols + i] = embed[ids[r] * n_cols + i].
 // For embedding lookup at decode (n_rows=1) and prefill (n_rows=batch).
 struct get_rows_args {

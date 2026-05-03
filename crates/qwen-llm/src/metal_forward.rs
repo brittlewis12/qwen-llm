@@ -37,9 +37,9 @@ use crate::metal::{
     encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
     encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
     encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
-    MetalTensor,
+    encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_softplus_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    KernelEncoder, MetalContext, MetalError, MetalTensor,
 };
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -987,19 +987,14 @@ impl<'a> MetalForward<'a> {
         // We need the opposite: copy from src[0..n] into dst+off. So
         // we add a small "scatter_offset" kernel below.
         // KV cache append: F32 source → F16 destination (cache is F16 to
-        // halve attention bandwidth at long context).
-        encode_scatter_offset_f32_to_f16(
+        // halve attention bandwidth at long context). Fused K+V scatter
+        // (Bulk-API principle): one dispatch writes both, saving 16 dispatches/token.
+        encode_scatter_offset_f32_to_f16_kv(
             self.ctx,
             enc,
             &s.attn_k_normed,
-            &s.kv_k[attn_i],
-            (position as usize) * kv_dim,
-            kv_dim,
-        )?;
-        encode_scatter_offset_f32_to_f16(
-            self.ctx,
-            enc,
             &s.attn_v_now,
+            &s.kv_k[attn_i],
             &s.kv_v[attn_i],
             (position as usize) * kv_dim,
             kv_dim,
@@ -2145,22 +2140,16 @@ mod tests {
             },
             &mut phases,
         )?;
-        // KV scatter.
+        // KV scatter (fused K+V, 1 dispatch).
         timed(
-            "kv scatter (2 dispatches)",
+            "kv scatter (fused)",
             &|enc| {
-                encode_scatter_offset_f32_to_f16(
+                encode_scatter_offset_f32_to_f16_kv(
                     mf.ctx,
                     enc,
                     &s.attn_k_normed,
-                    &s.kv_k[attn_idx_in_session],
-                    (position as usize) * kv_dim,
-                    kv_dim,
-                )?;
-                encode_scatter_offset_f32_to_f16(
-                    mf.ctx,
-                    enc,
                     &s.attn_v_now,
+                    &s.kv_k[attn_idx_in_session],
                     &s.kv_v[attn_idx_in_session],
                     (position as usize) * kv_dim,
                     kv_dim,

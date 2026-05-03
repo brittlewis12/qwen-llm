@@ -9,24 +9,47 @@ single-stream and batched, on the dense 27B variant.
 
 ## Baseline to beat
 
-llama.cpp on master (commit family `d05fe1d7d`) on this M4 Max, via `llama-bench`:
+llama.cpp `b8995` on this M4 Max, via `llama-bench` on a **quiet box** (no
+competing workloads):
 
-| model                  | size     | pp512   | tg128 | decode BW | % of 546 GB/s |
-| ---------------------- | -------- | ------- | ----- | --------- | ------------- |
-| Qwen3.5-0.8B BF16      | 1.40 GiB | —       | 90.9  | 127 GB/s  | 23%           |
-| Qwen3.5-0.8B F32       | 2.80 GiB | —       | 33.4  |  94 GB/s  | 17%           |
-| Qwen3.5-4B   BF16      | 7.84 GiB | —       | 22.0  | 172 GB/s  | 31.5%         |
-| Qwen3.6-27B  Q4_K_M    | 16.8 GiB | 196.75  | 11.13 | 187 GB/s  | 34%           |
+| model                  | size      | pp512          | tg128          | decode BW | % of 546 GB/s |
+| ---------------------- | --------- | -------------- | -------------- | --------- | ------------- |
+| Qwen3.6-27B Q4_K_M     | 15.65 GiB | 234.62 ± 3.72  | 21.21 ± 0.12   | 357 GB/s  | **62%**       |
 
-The 31–34% peak-bandwidth plateau from 4B → 27B is the headroom. It is **not** a
-matmul ceiling — historical hand-tuned mat-vec on M2 Ultra hit 70–78% of peak BW
-in isolation (llama.cpp PR #2891). The lost throughput is in per-step graph
-walk, per-dispatch encoding overhead, and dequant-on-the-fly cost. Those are
-addressable.
+> Earlier runs reported lower numbers (197 pp / 11 tg = 32% peak) — that was
+> a contended-box measurement. Re-baselined cleanly on 2025-05-02.
 
-**v1 target:** match llama.cpp tg, beat its pp by ≥1.5×.
-**v2 target:** ≥22 t/s tg128 on Qwen3.6-27B Q4_K_M (≈ 64% of peak BW), ≥350 t/s
-pp512.
+**The honest framing**: llama.cpp's full-decode is already at 62% of peak,
+much closer to the bandwidth ceiling than the prior 32% suggested. Our
+**isolated** Q4_K/Q6_K kernels run at 77-88% peak, but capturing that
+headroom end-to-end requires beating llama.cpp's already-good dispatch +
+graph-walk overhead, not just writing fast kernels.
+
+**v1 target:** match llama.cpp's tg128 (~21 t/s) end-to-end. The bar is
+already in "high single-digit % gains" territory, not 2×.
+
+**v2 target:** ≥26 t/s tg128 (≈30% over llama.cpp baseline), ≥280 t/s pp512.
+Beyond requires NEXTN/MTP speculative decoding (1.5-2× effective decode
+multiplier per the architecture spec).
+
+**v3 stretch:** ≥35 t/s tg128 with NEXTN, ≥400 t/s pp512.
+
+### Per-kernel headroom (cargo bench, persistent buffers, chained64)
+
+| kernel                          | shape (n_in × n_out) | size   | GiB/s  | % peak |
+| ------------------------------- | -------------------- | ------ | ------ | ------ |
+| Q4_K mat-vec / attn_gate        | 5120 × 6144          | 17 MB  | 449    | **88%** |
+| Q4_K mat-vec / ffn_gate         | 5120 × 17408         | 47 MB  | 413    | **81%** |
+| Q4_K mat-vec / ffn_up           | 5120 × 17408         | 47 MB  | 415    | **82%** |
+| Q4_K mat-vec / embed            | 5120 × 248320        | 715 MB | 393    | **77%** |
+| Q6_K mat-vec / attn_qkv         | 5120 × 10240         | 41 MB  | 438    | **86%** |
+| Q6_K mat-vec / ffn_down         | 17408 × 5120         | 70 MB  | 404    | **79%** |
+| Q6_K mat-vec / output           | 5120 × 248320        | 1 GB   | 447    | **88%** |
+| Q6_K mat-vec / attn_v (skinny)  | 5120 × 1024          | 4 MB   | 270    | 53%    |
+
+The skinny attn_v shape is the only outlier — GQA's n_kv=4 limits parallel
+work. On 27B it represents <1% of weight bytes touched per token, so the
+end-to-end impact is small.
 
 ## Decisions
 
@@ -134,28 +157,91 @@ Design ideas to lift from `~/code/vllm-metal/vllm_metal/metal/kernels_v2/` (MIT 
 Reference for the fp32 state pool layout: `vllm_metal/mlx_backend/gdn_cache.py`
 (`[max_seqs, n_gdn_layers, num_v_heads, value_head_dim, key_head_dim]`).
 
-## v1 scope (target: match llama.cpp tg, beat pp ≥1.5×)
+## v1 scope (target: match llama.cpp tg128 ≈ 21 t/s on 27B Q4_K_M)
 
-1. Project skeleton: `objc2-metal` host, kernels in `kernels/*.metal`, build script compiles to embedded `.metallib` + `MTLBinaryArchive`.
-2. GGUF mmap loader. Parse metadata, build tensor descriptor table. No copies.
-3. Tokenizer (Qwen2 byte-level BPE, vocab 248,320). Implement directly — vocab.json + merges.txt are embedded in GGUF metadata.
-4. End-to-end forward pass for `Qwen3.5-0.8B.F32.gguf` first, all-fp32, kernels lifted unchanged. Validate logits byte-for-byte vs `llama-cli`.
-5. Bring up Q4_K mat-vec / mat-mat once F32 path is correct. Validate against `Qwen3.5-0.8B-Q4_K_M.gguf`.
-6. **CPU↔GPU pipelining**: worker thread builds the next batch's command buffer while the GPU runs the current one. `mlx-swift-lm#49` got 14.6× prefill from this single change on Qwen3.6-35B-A3B. Implement from day 1; this is the single biggest "free" win.
-7. `MTLBinaryArchive` precompilation of all kernel pipeline state objects, shipped beside the binary.
-8. `llama-bench`-shaped benchmark binary for apples-to-apples vs `~/code/llm`. Same prompt corpus, same Q8_0 GGUF, sweep context 4K → 32K, log pp/tg/peak-RSS.
+> Reordered after a comprehensive code review that surfaced two architectural
+> issues blocking forward motion: the test-shaped Metal API and the
+> position-blind `KvCache`. Both will become tech debt within hours of
+> writing more kernels on top, so we fix them first.
 
-## v2 scope (target: ≥22 t/s tg128 on 27B Q4_K_M)
+### v1.0 — foundation (current)
 
-1. **NEXTN multi-token-prediction speculative decode** with the native head — accept rate ~70–80% on natural text per the model card → 1.5–1.7× tg. Largest single tg win on the table.
-2. **Indirect Command Buffers (ICB)** for per-layer kernel sequences. Encode once, reuse every step. Removes most of the per-step encoding cost in the 31% utilization ceiling.
-3. **Paged KV on the 16 attn layers**. Lift mistral.rs's PagedAttention v2 layout.
-4. **KV-Q8 on the 16 attn layers**. Halves attn-layer BW. At 16/64 layers it's modest but free quality-wise.
-5. **MTL4** (`MTL4CommandBuffer`) — `objc2-metal` 0.3.2 already exposes the bindings.
-6. Profile-driven re-pack-on-load decision: only if the K-quant block walk shows up dominant after (1)–(5).
+1. ✅ Project skeleton, GGUF loader, model binder, tokenizer.
+2. ✅ CPU reference forward bit-tight against `llm`/`llama_core` snapshot
+   dump (cosine = 1.000000 on Qwen3.5-0.8B-F32 single + multi-token, and
+   on Qwen3.6-27B-Q4_K_M single token).
+3. ✅ Metal kernels for RMSNorm, F32 mat-vec, Q4_K mat-vec (fast lifted),
+   Q6_K mat-vec — all validated against the CPU oracle.
+4. ✅ Criterion bench suite. K-quant kernels at 77-88% peak BW chained64.
+
+### v1.1 — production Metal API + foundational fixes
+
+5. **Fix `KvCache` semantics**: explicit `(layer, seq_slot, position)`
+   addressing instead of inferred `len/n_pos`. CPU oracle should assert
+   `position == n_pos` for now; GPU equivalent should be paged from day 1.
+6. **27B multi-token oracle test** (5-9 tokens). Currently the n_v=48 /
+   n_k=16 head-repeat path is exercised against zero SSM state only.
+7. **Production Metal types**: `MetalTensor`, `MetalModel`, `MetalSession`,
+   `ActivationArena`, `ScratchArena`. Encode-only kernel API (caller owns
+   command buffer; kernels never commit/wait internally). Test wrappers
+   keep the `Vec<f32>`-readback API behind `*_readback_for_test` names.
+8. **MetalModel loader**: walk every `TensorDesc`, allocate one
+   `MTLBuffer` per tensor at load (one-time copy from mmap is acceptable;
+   true zero-copy via `newBufferWithBytesNoCopy` is a v2 question).
+9. **Migrate existing dispatchers** (Q4_K, Q6_K, F32, RMSNorm) to the
+   encode-only API. Update tests + benches.
+
+### v1.2 — end-to-end Metal forward
+
+10. **Metal kernels lifted from llama.cpp** (correctness-first, final
+    state layout — *do not* CPU-bridge GDN):
+    - `get_rows` (embedding lookup)
+    - `ssm_conv` + SiLU (GDN front-end)
+    - `l2_norm` (Q/K normalization in GDN)
+    - `gated_delta_net` (the recurrence; FP32 state non-negotiable)
+    - `rmsnorm_gated` (post-recurrence norm)
+    - elementwise: silu, sigmoid, softplus, add, residual_add (fuse where possible)
+    - **Fused full-attention block**: q/k norm + RoPE + KV append + attention + gate + output
+      (a standalone softmax kernel would explode dispatch count)
+11. **End-to-end single-token Metal decode** on Qwen3.5-0.8B-F32. One
+    command buffer per token, one logits readback. Cosine = 1.0 vs CPU oracle.
+12. **27B Q4_K_M Metal decode**, validated vs `llm`/`llama.cpp`.
+
+### v1.3 — beat the baseline
+
+13. **`qwen-bench` end-to-end vs `llama-bench`** via `hyperfine`. Same prompt
+    corpus, same model file. Target: ≥21 t/s tg128 (match), stretch ≥26 t/s.
+14. **Q4_K/Q6_K mat-mat for prefill** — pp512 path. Decode mat-vec doesn't
+    buy prompt throughput. llama.cpp `kernel_mul_mm_*` template is the lift.
+15. **Profile dispatch count and CPU encode time per token.** At 5-20 µs
+    per dispatch and ~1100-1400 dispatches/token naive (~700-900 with
+    obvious fusions), dispatch overhead alone could consume 5-20 ms of
+    the ~45 ms/token budget. This is the *real* ceiling on tg, not kernel
+    perf. Measure before tuning kernels further.
+
+## v2 scope (target: ≥26 t/s tg128 with stretch toward NEXTN-amplified 35+)
+
+1. **NEXTN multi-token-prediction speculative decode** with the native
+   head (1.5-1.7× effective tg). Largest single tg win on the table.
+2. **Indirect Command Buffers (ICB)** — encode once, reuse every step.
+   Designed for from v1: stable buffers, fixed pipeline sequence, dynamic
+   scalar args only.
+3. **Paged KV on the 16 attn layers**. Lift mistral.rs's PagedAttention
+   v2 layout. Required for prefix reuse, multi-request batching.
+4. **KV-Q8 on the 16 attn layers**. Halves attn-layer BW.
+5. **GPU top-k / argmax**. Avoids full logits readback for sampling.
+6. **MTL4** (`MTL4CommandBuffer`) — `objc2-metal` 0.3.2 already exposes
+   the bindings.
+7. **Adversarial Q4_K/Q6_K block fixtures** — synthetic shapes covering
+   nibble-edge values, sign handling, sub-block boundaries. Codex's
+   prior review flagged that single-real-tensor validation is necessary
+   but not sufficient.
+8. **Profile-driven re-pack-on-load decision**: only if the K-quant block
+   walk shows up dominant after (1)–(7).
 
 ## v3+ research spikes (non-blocking)
 
+- **Beat MLX too** — `mlx_vlm` is the other strong Apple-Silicon Qwen3.5 path; `hyperfine` comparison once v1 lands.
 - ANE for FFN-only prefill on the 16 full-attn layers (1×1 conv via `_ANEInMemoryModel`, lifting `ane-infer`'s playbook). Not GDN.
 - Continuous batching scheduler (the `cu_seqlens` / `slot_mapping` layout in v2 is already designed for this).
 - Cross-request KV reuse / prefix caching. Cheap once paging exists.

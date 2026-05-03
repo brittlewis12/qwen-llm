@@ -447,6 +447,21 @@ pub fn encode_mat_vec_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    // Defense against the silent-NaN class of bug. If a quantized weight
+    // tensor lands here by mistake (someone forgot to call
+    // encode_mat_vec_dispatch), we'd reinterpret block bytes as floats
+    // and produce garbage that propagates as NaNs through later layers.
+    // Caught codex-review-style by adding this guard. v1.
+    if weight.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_f32",
+            detail: format!(
+                "weight.dtype = {:?}, expected F32 — use encode_mat_vec_dispatch \
+                 to handle quantized weights",
+                weight.dtype
+            ),
+        });
+    }
     if x.n_elements() as usize != n_in {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_f32",

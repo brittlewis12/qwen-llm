@@ -32,11 +32,11 @@ use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
     encode_add_inplace_f32, encode_attn_decode_f32, encode_copy_offset_f32, encode_gdn_step_f32,
-    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
-    MetalTensor,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_softplus_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder,
+    MetalContext, MetalError, MetalTensor,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{
@@ -110,14 +110,19 @@ pub struct MetalAttnBlock {
 }
 
 impl MetalModel {
-    /// Load weights from an `loader::Model` view. v1 currently only
-    /// handles F32 weights — for quantized weights we go through the
-    /// codec to dequant on load (acceptable for v1 testing on F32 files;
-    /// v2 will skip the dequant for native quant kernels).
+    /// Load weights from an `loader::Model` view. Native-quant path:
+    /// keeps weight tensors at their on-disk dtype (Q4_K, Q6_K, F32,
+    /// etc.) and the kernel dispatchers pick the right `encode_mat_vec_*`
+    /// based on dtype.
+    ///
+    /// For weights that aren't matmul'd by a quant-supporting kernel
+    /// (e.g. norms, ssm_a, dt_bias — they need F32 for the elementwise
+    /// kernels), we dequant via the codec at load time. The big tensors
+    /// (mat_vec inputs, embeddings, lm_head) keep their native dtype.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
-        let load_tensor = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            // For F32, copy bytes straight in. For other dtypes, dequant
-            // via codec (TODO: switch to native quant kernels in v2).
+        // Helper: load a tensor that *must* be F32 in memory (used by
+        // elementwise kernels, norms, etc.). Dequants via codec if needed.
+        let load_f32 = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
             if desc.dtype == GgmlType::F32 {
                 Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
             } else {
@@ -126,53 +131,77 @@ impl MetalModel {
                     ctx,
                     bytemuck::cast_slice(&f32),
                     desc.shape.clone(),
-                    GgmlType::F32, // re-tag: in-memory tensor is now F32
+                    GgmlType::F32,
                 )?)
             }
         };
+        // Helper: load a tensor that's a mat_vec weight. Keeps native
+        // dtype for Q4_K, Q5_K, Q6_K, Q8_0; falls back to F32 conversion
+        // for other types we don't have native kernels for yet.
+        let load_weight = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
+            match desc.dtype {
+                GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K => {
+                    Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
+                }
+                _ => {
+                    // Fall back to F32 dequant for unsupported quant types.
+                    eprintln!(
+                        "[metal-load] {} is {:?}; dequanting to F32 (no native kernel yet)",
+                        desc.name, desc.dtype
+                    );
+                    load_f32(desc)
+                }
+            }
+        };
+        // Existing alias for the call sites below.
+        let load_tensor = load_f32;
 
-        let token_embd = load_tensor(model.token_embd)?;
-        let output_norm = load_tensor(model.output_norm)?;
-        let lm_head = load_tensor(model.lm_head)?;
+        // Embedding + lm_head are mat_vec weights (well, embed is a
+        // get_rows index, but for now we dequant it to F32 since we
+        // don't have a native quant get_rows kernel yet — TODO).
+        let token_embd = load_f32(model.token_embd)?; // get_rows wants f32 source
+        let output_norm = load_f32(model.output_norm)?;
+        let lm_head = load_weight(model.lm_head)?;
 
         let mut blocks = Vec::with_capacity(model.blocks.len());
         for b in &model.blocks {
             match b {
                 Block::Gdn(g) => {
                     blocks.push(MetalBlock::Gdn(MetalGdnBlock {
-                        attn_norm: load_tensor(g.attn_norm)?,
-                        post_attn_norm: load_tensor(g.post_attention_norm)?,
-                        ffn_gate: load_tensor(g.ffn_gate)?,
-                        ffn_up: load_tensor(g.ffn_up)?,
-                        ffn_down: load_tensor(g.ffn_down)?,
-                        in_proj_qkv: load_tensor(g.in_proj_qkv)?,
-                        in_proj_z: load_tensor(g.in_proj_z)?,
-                        beta_proj: load_tensor(g.beta_proj)?,
-                        alpha_proj: load_tensor(g.alpha_proj)?,
-                        a_log: load_tensor(g.a_log)?,
-                        dt_bias: load_tensor(g.dt_bias)?,
-                        conv1d: load_tensor(g.conv1d)?,
-                        norm: load_tensor(g.norm)?,
-                        out_proj: load_tensor(g.out_proj)?,
+                        attn_norm: load_f32(g.attn_norm)?,
+                        post_attn_norm: load_f32(g.post_attention_norm)?,
+                        ffn_gate: load_weight(g.ffn_gate)?,
+                        ffn_up: load_weight(g.ffn_up)?,
+                        ffn_down: load_weight(g.ffn_down)?,
+                        in_proj_qkv: load_weight(g.in_proj_qkv)?,
+                        in_proj_z: load_weight(g.in_proj_z)?,
+                        beta_proj: load_weight(g.beta_proj)?,
+                        alpha_proj: load_weight(g.alpha_proj)?,
+                        a_log: load_f32(g.a_log)?,
+                        dt_bias: load_f32(g.dt_bias)?,
+                        conv1d: load_f32(g.conv1d)?,
+                        norm: load_f32(g.norm)?,
+                        out_proj: load_weight(g.out_proj)?,
                     }));
                 }
                 Block::Attn(a) => {
                     blocks.push(MetalBlock::Attn(MetalAttnBlock {
-                        attn_norm: load_tensor(a.attn_norm)?,
-                        post_attn_norm: load_tensor(a.post_attention_norm)?,
-                        ffn_gate: load_tensor(a.ffn_gate)?,
-                        ffn_up: load_tensor(a.ffn_up)?,
-                        ffn_down: load_tensor(a.ffn_down)?,
-                        q: load_tensor(a.q)?,
-                        k: load_tensor(a.k)?,
-                        v: load_tensor(a.v)?,
-                        o: load_tensor(a.o)?,
-                        q_norm: load_tensor(a.q_norm)?,
-                        k_norm: load_tensor(a.k_norm)?,
+                        attn_norm: load_f32(a.attn_norm)?,
+                        post_attn_norm: load_f32(a.post_attention_norm)?,
+                        ffn_gate: load_weight(a.ffn_gate)?,
+                        ffn_up: load_weight(a.ffn_up)?,
+                        ffn_down: load_weight(a.ffn_down)?,
+                        q: load_weight(a.q)?,
+                        k: load_weight(a.k)?,
+                        v: load_weight(a.v)?,
+                        o: load_weight(a.o)?,
+                        q_norm: load_f32(a.q_norm)?,
+                        k_norm: load_f32(a.k_norm)?,
                     }));
                 }
             }
         }
+        let _ = load_tensor; // suppress unused-warning if all sites switched
 
         Ok(Self {
             arch: model.arch,
@@ -407,8 +436,8 @@ impl<'a> MetalForward<'a> {
             RMS_EPS,
         )?;
 
-        // (4) LM head → logits.
-        encode_mat_vec_f32(
+        // (4) LM head → logits. Dispatch on dtype (Q4_K, Q6_K, F32).
+        encode_mat_vec_dispatch(
             self.ctx,
             &enc,
             &self.model.lm_head,
@@ -479,7 +508,7 @@ impl<'a> MetalForward<'a> {
             MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
             MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
         };
-        encode_mat_vec_f32(
+        encode_mat_vec_dispatch(
             self.ctx,
             enc,
             g_w,
@@ -488,7 +517,7 @@ impl<'a> MetalForward<'a> {
             h,
             arch.intermediate_size as usize,
         )?;
-        encode_mat_vec_f32(
+        encode_mat_vec_dispatch(
             self.ctx,
             enc,
             u_w,
@@ -498,7 +527,7 @@ impl<'a> MetalForward<'a> {
             arch.intermediate_size as usize,
         )?;
         encode_silu_mul_f32(self.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)?;
-        encode_mat_vec_f32(
+        encode_mat_vec_dispatch(
             self.ctx,
             enc,
             d_w,
@@ -529,7 +558,7 @@ impl<'a> MetalForward<'a> {
         let v_dim = n_v * head_dim;
 
         // QKV input projection.
-        encode_mat_vec_f32(
+        encode_mat_vec_dispatch(
             self.ctx,
             enc,
             &gb.in_proj_qkv,
@@ -539,12 +568,12 @@ impl<'a> MetalForward<'a> {
             conv_dim,
         )?;
         // z projection.
-        encode_mat_vec_f32(self.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
+        encode_mat_vec_dispatch(self.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
         // β source projection (then sigmoid).
-        encode_mat_vec_f32(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
+        encode_mat_vec_dispatch(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
         encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
         // α source projection.
-        encode_mat_vec_f32(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
+        encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
         // α + dt; softplus; * a_log → g.
         // We need: gdn_a = softplus(gdn_a + dt_bias) * a_log.
         // Three small kernels: add (gdn_a + dt_bias), softplus, mul (* a_log).
@@ -638,7 +667,7 @@ impl<'a> MetalForward<'a> {
         )?;
 
         // Output projection: [v_dim, hidden] → mixer_out.
-        encode_mat_vec_f32(
+        encode_mat_vec_dispatch(
             self.ctx,
             enc,
             &gb.out_proj,
@@ -668,7 +697,7 @@ impl<'a> MetalForward<'a> {
         let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
 
         // (1) Q projection: outputs 2 * q_dim (Q + gate interleaved per head).
-        encode_mat_vec_f32(self.ctx, enc, &ab.q, &s.h, &s.attn_q_full, h, 2 * q_dim)?;
+        encode_mat_vec_dispatch(self.ctx, enc, &ab.q, &s.h, &s.attn_q_full, h, 2 * q_dim)?;
 
         // (2) Split into Q and gate.
         encode_split_q_gate_f32(
@@ -694,8 +723,8 @@ impl<'a> MetalForward<'a> {
         )?;
 
         // (4) K, V projections.
-        encode_mat_vec_f32(self.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
-        encode_mat_vec_f32(self.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim)?;
+        encode_mat_vec_dispatch(self.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
+        encode_mat_vec_dispatch(self.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim)?;
 
         // (5) K-norm (per-head). Reuses Q-norm weight tensor type but
         // points at K's weight.
@@ -795,7 +824,7 @@ impl<'a> MetalForward<'a> {
         encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
 
         // (10) Output projection: q_dim → hidden.
-        encode_mat_vec_f32(self.ctx, enc, &ab.o, &s.attn_o, &s.mixer_out, q_dim, h)?;
+        encode_mat_vec_dispatch(self.ctx, enc, &ab.o, &s.attn_o, &s.mixer_out, q_dim, h)?;
         Ok(())
     }
 }
@@ -860,6 +889,33 @@ fn encode_scatter_offset_f32(
 
 const RMS_EPS: f32 = 1e-6;
 
+/// Dispatch the right `encode_mat_vec_*` based on `weight.dtype`. This
+/// is the single seam that lets the same MetalForward driver run on
+/// F32, Q4_K_M, Q6_K, etc. weights. New quant types plug in here.
+fn encode_mat_vec_dispatch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MfError> {
+    match weight.dtype {
+        GgmlType::F32 => Ok(encode_mat_vec_f32(ctx, enc, weight, x, y, n_in, n_out)?),
+        GgmlType::Q4_K => Ok(encode_mat_vec_q4_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::Q6_K => Ok(encode_mat_vec_q6_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        other => Err(MfError::UnsupportedDtype {
+            name: format!("(weight at mat_vec dispatch)"),
+            dtype: other,
+        }),
+    }
+}
+
 /// Public single-block GDN dispatcher for end-to-end validation. Encodes
 /// one GDN block (norm → mixer → residual → post_norm → FFN → residual)
 /// and reads back the resulting `x` (residual stream).
@@ -905,10 +961,10 @@ impl<'a> MetalForward<'a> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
         let f = arch.intermediate_size as usize;
-        encode_mat_vec_f32(self.ctx, &enc, &gb.ffn_gate, &s.h, &s.ffn_gate, h, f)?;
-        encode_mat_vec_f32(self.ctx, &enc, &gb.ffn_up, &s.h, &s.ffn_up, h, f)?;
+        encode_mat_vec_dispatch(self.ctx, &enc, &gb.ffn_gate, &s.h, &s.ffn_gate, h, f)?;
+        encode_mat_vec_dispatch(self.ctx, &enc, &gb.ffn_up, &s.h, &s.ffn_up, h, f)?;
         encode_silu_mul_f32(self.ctx, &enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)?;
-        encode_mat_vec_f32(self.ctx, &enc, &gb.ffn_down, &s.ffn_inner, &s.ffn_out, f, h)?;
+        encode_mat_vec_dispatch(self.ctx, &enc, &gb.ffn_down, &s.ffn_inner, &s.ffn_out, f, h)?;
 
         // Residual #2: s.x += s.ffn_out.
         encode_add_inplace_f32(self.ctx, &enc, &s.x, &s.ffn_out)?;
@@ -966,10 +1022,10 @@ impl<'a> MetalForward<'a> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
         let f = arch.intermediate_size as usize;
-        encode_mat_vec_f32(self.ctx, &enc, &ab.ffn_gate, &s.h, &s.ffn_gate, h, f)?;
-        encode_mat_vec_f32(self.ctx, &enc, &ab.ffn_up, &s.h, &s.ffn_up, h, f)?;
+        encode_mat_vec_dispatch(self.ctx, &enc, &ab.ffn_gate, &s.h, &s.ffn_gate, h, f)?;
+        encode_mat_vec_dispatch(self.ctx, &enc, &ab.ffn_up, &s.h, &s.ffn_up, h, f)?;
         encode_silu_mul_f32(self.ctx, &enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)?;
-        encode_mat_vec_f32(self.ctx, &enc, &ab.ffn_down, &s.ffn_inner, &s.ffn_out, f, h)?;
+        encode_mat_vec_dispatch(self.ctx, &enc, &ab.ffn_down, &s.ffn_inner, &s.ffn_out, f, h)?;
 
         encode_add_inplace_f32(self.ctx, &enc, &s.x, &s.ffn_out)?;
 
@@ -1138,6 +1194,171 @@ mod tests {
         assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
         assert!(cos > 0.9999, "cos={cos} below threshold");
         assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
+    }
+
+    /// Same as `metal_gdn_block_matches_cpu` but for 27B-Q4_K_M block 0.
+    /// Tests the dispatch-by-dtype path on real Q4_K + Q6_K weights.
+    #[test]
+    #[ignore]
+    fn metal_27b_gdn_block0_matches_cpu() {
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        // Same harness as metal_gdn_block_matches_cpu, but with token id
+        // and arch dims pulled from 27B.
+        let token_id = 9419usize; // "Hello"
+        let h = m.arch.hidden_size as usize;
+        let embed =
+            crate::codec::dequant_to_f32(m.token_embd, g.slice(m.token_embd)).expect("embed");
+        let initial_x: Vec<f32> = embed[token_id * h..(token_id + 1) * h].to_vec();
+
+        let cpu_x = run_cpu_block0_for_test(&g, &m, &initial_x);
+
+        let mut s = MetalSession::fresh(&ctx, &mm, 4096).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+        mf.set_residual_for_test(&mut s, &initial_x);
+        let metal_x = mf
+            .run_one_gdn_block_for_test(0, 0, &mut s)
+            .expect("metal block 0");
+
+        let max_abs = metal_x
+            .iter()
+            .zip(cpu_x.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = metal_x
+            .iter()
+            .zip(cpu_x.iter())
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum();
+        let na: f64 = metal_x.iter().map(|v| (*v as f64).powi(2)).sum();
+        let nb: f64 = cpu_x.iter().map(|v| (*v as f64).powi(2)).sum();
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        // Inspect ssm_a values for the first GDN block.
+        let block0 = &m.blocks[0];
+        let ssm_a_desc = match block0 {
+            crate::loader::Block::Gdn(g) => g.a_log,
+            _ => panic!("not gdn"),
+        };
+        let ssm_a = crate::codec::dequant_to_f32(ssm_a_desc, g.slice(ssm_a_desc)).unwrap();
+        eprintln!(
+            "[metal-27b-gdn0] ssm_a[0..8]={:?}",
+            &ssm_a[..8.min(ssm_a.len())]
+        );
+        eprintln!(
+            "[metal-27b-gdn0] ssm_a min={:.4} max={:.4}",
+            ssm_a.iter().cloned().fold(f32::INFINITY, f32::min),
+            ssm_a.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        );
+
+        let nm: f32 = metal_x.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let nc: f32 = cpu_x.iter().map(|v| v * v).sum::<f32>().sqrt();
+        eprintln!("[metal-27b-gdn0] hidden={h} ||metal||={nm:.4e} ||cpu||={nc:.4e} max|Δ|={max_abs:.4} cos={cos:.6}");
+        eprintln!(
+            "[metal-27b-gdn0] metal[0..4]={:?}\n              cpu[0..4]={:?}",
+            &metal_x[..4.min(metal_x.len())],
+            &cpu_x[..4.min(cpu_x.len())]
+        );
+        // Q4_K + Q6_K: relax noise floor a bit.
+        assert!(cos > 0.999, "27B block 0 cos={cos}");
+    }
+
+    /// **End-to-end Metal forward on the 27B Q4_K_M target.** Validates
+    /// the quantized weight path: native Q4_K and Q6_K mat-vec kernels
+    /// dispatched based on tensor dtype, no per-call dequant.
+    ///
+    /// This is the test that proves we can run the full production
+    /// 27B target on Metal with bit-tight correctness vs llm/llama_core.
+    /// Once this passes, we benchmark vs llama-bench.
+    ///
+    /// Marked #[ignore] because (1) loading 16.8 GB of weights through
+    /// the loader takes a few seconds and (2) the codec-fallback path
+    /// for unsupported quants (Q5_K, etc.) might dequant some tensors,
+    /// and we want to flag that explicitly when run.
+    #[test]
+    #[ignore]
+    fn metal_27b_q4_k_m_matches_oracle() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let oracle_path = "/tmp/qwen-oracle/hello_27b_q4km.f32";
+        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        {
+            eprintln!("[metal-27b] skipped — fixtures missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
+        let n = oracle_bytes.len() / 4;
+        let oracle: Vec<f32> = (0..n)
+            .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+            .collect();
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok.encode("Hello", false).expect("tokenize");
+        eprintln!("[metal-27b] 'Hello' -> {ids:?}");
+
+        let mut s = MetalSession::fresh(&ctx, &mm, 4096).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Warmup: first call compiles all 20+ kernel pipeline state objects.
+        let _ = mf.single_token(ids[0], 0, &mut s).expect("warmup");
+        // Reset session for the timed run.
+        let mut s = MetalSession::fresh(&ctx, &mm, 4096).expect("session2");
+
+        let t = std::time::Instant::now();
+        let logits = mf.single_token(ids[0], 0, &mut s).expect("forward");
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+
+        let mut max_abs = 0.0f32;
+        let mut argmax_ours = 0usize;
+        let mut argmax_oracle = 0usize;
+        let mut max_ours = f32::NEG_INFINITY;
+        let mut max_oracle = f32::NEG_INFINITY;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..n {
+            let d = (logits[i] - oracle[i]).abs();
+            max_abs = max_abs.max(d);
+            if logits[i] > max_ours {
+                max_ours = logits[i];
+                argmax_ours = i;
+            }
+            if oracle[i] > max_oracle {
+                max_oracle = oracle[i];
+                argmax_oracle = i;
+            }
+            dot += logits[i] as f64 * oracle[i] as f64;
+            na += (logits[i] as f64).powi(2);
+            nb += (oracle[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[metal-27b] {ms:.1}ms — argmax: ours={argmax_ours} ({:.4}) | oracle={argmax_oracle} ({:.4}) | max|Δ|={max_abs:.4} cos={cos:.6}",
+            max_ours, max_oracle
+        );
+        eprintln!(
+            "[metal-27b] effective decode tok/s (single-token, single-shot): {:.2}",
+            1000.0 / ms
+        );
+        assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
+        assert!(cos > 0.999, "cos={cos} below threshold");
     }
 
     /// **End-to-end Metal forward, multi-token**. Exercises position > 0

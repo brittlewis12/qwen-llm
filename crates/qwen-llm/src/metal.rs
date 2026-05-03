@@ -193,6 +193,73 @@ fn load_library(device: &Device, bytes: &[u8]) -> Result<Library, MetalError> {
 
 // ===== Kernels =====
 
+/// Dispatch the F32 mat-vec kernel.
+///
+/// `y[o] = sum_i weight[o*n_in + i] * x[i]` for `o ∈ [0, n_out)`.
+///
+/// CPU oracle: [`crate::forward::mat_vec_pub`].
+pub fn mat_vec_f32(
+    ctx: &MetalContext,
+    weight: &[f32],
+    x: &[f32],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, MetalError> {
+    debug_assert_eq!(weight.len(), n_in * n_out);
+    debug_assert_eq!(x.len(), n_in);
+
+    let pso = ctx.pipeline("kernel_mat_vec_f32_f32")?;
+    let buf_w = ctx.buffer_from(weight)?;
+    let buf_x = ctx.buffer_from(x)?;
+    let buf_y = ctx.buffer_uninit(n_out * std::mem::size_of::<f32>())?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    let args = Args {
+        n_in: n_in as u32,
+        n_out: n_out as u32,
+    };
+    let buf_args = ctx.buffer_from(&[args])?;
+
+    const ROWS_PER_TG: usize = 4;
+    let n_tg = n_out.div_ceil(ROWS_PER_TG);
+
+    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = cmd_buf.computeCommandEncoder().expect("compute encoder");
+    enc.setComputePipelineState(&pso);
+    unsafe {
+        enc.setBuffer_offset_atIndex(Some(&*buf_args), 0, 0);
+        enc.setBuffer_offset_atIndex(Some(&*buf_w), 0, 1);
+        enc.setBuffer_offset_atIndex(Some(&*buf_x), 0, 2);
+        enc.setBuffer_offset_atIndex(Some(&*buf_y), 0, 3);
+    }
+    let grid = MTLSize {
+        width: n_tg,
+        height: 1,
+        depth: 1,
+    };
+    let tg = MTLSize {
+        width: ROWS_PER_TG * 32,
+        height: 1,
+        depth: 1,
+    };
+    enc.dispatchThreadgroups_threadsPerThreadgroup(grid, tg);
+    enc.endEncoding();
+    cmd_buf.commit();
+    unsafe { cmd_buf.waitUntilCompleted() };
+
+    let mut out = vec![0.0f32; n_out];
+    unsafe {
+        let src = buf_y.contents().as_ptr() as *const f32;
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n_out);
+    }
+    Ok(out)
+}
+
 /// Dispatch the lifted RMSNorm-with-weight kernel.
 ///
 /// `y[i] = (x[i] / sqrt(mean(x^2) + eps)) * weight[i]`
@@ -282,6 +349,56 @@ mod tests {
             Err(e) => panic!("unexpected error: {e}"),
         };
         eprintln!("[metal] {}", ctx.describe());
+    }
+
+    /// Validate the F32 mat-vec kernel against the CPU oracle on the
+    /// shapes that matter for the 0.8B and 27B forward pass:
+    ///   - 1024 x 248320 (lm_head 0.8B)
+    ///   - 1024 x 6144 (GDN attn_qkv 0.8B)
+    ///   - 5120 x 17408 (FFN gate/up 27B)
+    ///   - 5120 x 5120 (attn_q 27B half — output dim 2x)
+    #[test]
+    fn mat_vec_f32_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_in, n_out) in &[
+            (1024usize, 248_320usize), // 0.8B lm_head
+            (1024, 6144),              // 0.8B GDN attn_qkv
+            (5120, 17408),             // 27B FFN gate/up
+            (5120, 5120),              // 27B attn_q (half of 2x)
+        ] {
+            // Deterministic synthetic inputs.
+            let w: Vec<f32> = (0..n_in * n_out)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-3)
+                .collect();
+            let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+
+            let cpu_t = std::time::Instant::now();
+            let cpu = crate::forward::mat_vec_pub(&w, n_in, n_out, &x);
+            let cpu_ms = cpu_t.elapsed().as_secs_f64() * 1e3;
+
+            let gpu_t = std::time::Instant::now();
+            let gpu = mat_vec_f32(&ctx, &w, &x, n_in, n_out).expect("metal mat_vec");
+            let gpu_ms = gpu_t.elapsed().as_secs_f64() * 1e3;
+
+            let mut max_abs = 0.0f32;
+            let mut max_rel = 0.0f32;
+            for (a, b) in gpu.iter().zip(cpu.iter()) {
+                let d = (a - b).abs();
+                max_abs = max_abs.max(d);
+                let r = d / b.abs().max(1e-6);
+                max_rel = max_rel.max(r);
+            }
+            let bytes = (n_in * n_out + n_in + n_out) * 4;
+            let bw = bytes as f64 / (gpu_ms * 1e-3) / 1e9;
+            eprintln!(
+                "[mat_vec n_in={n_in} n_out={n_out}] cpu={cpu_ms:.1}ms gpu={gpu_ms:.1}ms ({bw:.0} GB/s) max|Δ|={max_abs:.2e} rel={max_rel:.2e}"
+            );
+            assert!(max_abs < 1e-3, "mat_vec drift {max_abs} exceeds 1e-3");
+        }
     }
 
     /// Validate the lifted RMSNorm kernel against the CPU oracle.

@@ -584,6 +584,11 @@ pub fn rms_norm_pub(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     rms_norm(x, weight, eps)
 }
 
+/// Public re-export of [`mat_vec`] for kernel-validation tests.
+pub fn mat_vec_pub(w: &[f32], n_in: usize, n_out: usize, x: &[f32]) -> Vec<f32> {
+    mat_vec(w, n_in, n_out, x)
+}
+
 fn rms_norm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     let n = x.len();
     let mean_sq: f32 = x.iter().map(|&v| v * v).sum::<f32>() / n as f32;

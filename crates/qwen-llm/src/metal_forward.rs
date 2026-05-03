@@ -1929,6 +1929,303 @@ mod tests {
         }
     }
 
+    /// **Attn intra-layer profile**: same idea as the GDN intra
+    /// profiler but for full-attn blocks. Critical for the long-context
+    /// regression — tells us whether the cost lives in the score loop,
+    /// softmax, or V-aggregate inside attn_decode.
+    fn attn_intra_profile_single_block(
+        mf: &MetalForward,
+        attn_block_idx: usize,
+        attn_idx_in_session: usize,
+        position: u32,
+        s: &mut MetalSession,
+    ) -> Result<Vec<(String, f64)>, MfError> {
+        let ab = match &mf.model.blocks[attn_block_idx] {
+            MetalBlock::Attn(a) => a,
+            _ => {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "attn_intra",
+                    detail: format!("block {attn_block_idx} is not attn"),
+                }))
+            }
+        };
+        let arch = &mf.model.arch;
+        let h = arch.hidden_size as usize;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_q = arch.n_q_heads as usize;
+        let n_kv = arch.n_kv_heads as usize;
+        let q_dim = n_q * head_dim;
+        let kv_dim = n_kv * head_dim;
+        let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+
+        let mut phases: Vec<(String, f64)> = Vec::new();
+        let timed = |label: &str,
+                     cb: &dyn Fn(&KernelEncoder) -> Result<(), MfError>,
+                     phases: &mut Vec<(String, f64)>|
+         -> Result<(), MfError> {
+            let cmd = mf.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            cb(&enc)?;
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push((label.into(), ms));
+            Ok(())
+        };
+
+        // Pre-mixer norm.
+        timed(
+            "pre_norm (rms_norm)",
+            &|enc| {
+                encode_rms_norm_mul_f32(mf.ctx, enc, &s.x, &ab.attn_norm, &s.h, RMS_EPS)
+                    .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // Q projection.
+        timed(
+            "q_proj_2x (mat_vec)",
+            &|enc| encode_mat_vec_dispatch(mf.ctx, enc, &ab.q, &s.h, &s.attn_q_full, h, 2 * q_dim),
+            &mut phases,
+        )?;
+        // Split Q + gate.
+        timed(
+            "split_q_gate",
+            &|enc| {
+                encode_split_q_gate_f32(
+                    mf.ctx,
+                    enc,
+                    &s.attn_q_full,
+                    &s.attn_q,
+                    &s.attn_gate,
+                    n_q,
+                    head_dim,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // Q-norm.
+        timed(
+            "q_norm (batched rms)",
+            &|enc| {
+                encode_rms_norm_batched_f32(
+                    mf.ctx,
+                    enc,
+                    &s.attn_q,
+                    &ab.q_norm,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    RMS_EPS,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // K, V projections.
+        timed(
+            "k_proj (mat_vec)",
+            &|enc| encode_mat_vec_dispatch(mf.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim),
+            &mut phases,
+        )?;
+        timed(
+            "v_proj (mat_vec)",
+            &|enc| encode_mat_vec_dispatch(mf.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim),
+            &mut phases,
+        )?;
+        // K-norm.
+        timed(
+            "k_norm (batched rms)",
+            &|enc| {
+                encode_rms_norm_batched_f32(
+                    mf.ctx,
+                    enc,
+                    &s.attn_k_now,
+                    &ab.k_norm,
+                    &s.attn_k_normed,
+                    n_kv,
+                    head_dim,
+                    RMS_EPS,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // RoPE Q.
+        timed(
+            "rope Q",
+            &|enc| {
+                encode_rope_neox_f32(
+                    mf.ctx,
+                    enc,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // RoPE K.
+        timed(
+            "rope K",
+            &|enc| {
+                encode_rope_neox_f32(
+                    mf.ctx,
+                    enc,
+                    &s.attn_k_normed,
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // KV scatter.
+        timed(
+            "kv scatter (2 dispatches)",
+            &|enc| {
+                encode_scatter_offset_f32_to_f16(
+                    mf.ctx,
+                    enc,
+                    &s.attn_k_normed,
+                    &s.kv_k[attn_idx_in_session],
+                    (position as usize) * kv_dim,
+                    kv_dim,
+                )?;
+                encode_scatter_offset_f32_to_f16(
+                    mf.ctx,
+                    enc,
+                    &s.attn_v_now,
+                    &s.kv_v[attn_idx_in_session],
+                    (position as usize) * kv_dim,
+                    kv_dim,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        s.kv_n_pos[attn_idx_in_session] = position as usize + 1;
+        // Attn decode.
+        timed(
+            "attn_decode_f16kv",
+            &|enc| {
+                encode_attn_decode_f16kv_f32(
+                    mf.ctx,
+                    enc,
+                    &s.attn_q_normed,
+                    &s.kv_k[attn_idx_in_session],
+                    &s.kv_v[attn_idx_in_session],
+                    &s.attn_o,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    s.kv_n_pos[attn_idx_in_session],
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // Sigmoid + mul (gated-attn).
+        timed(
+            "gate sigmoid + mul",
+            &|enc| {
+                encode_sigmoid_f32(mf.ctx, enc, &s.attn_gate, &s.attn_q)?;
+                encode_mul_f32(mf.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o).map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // Output proj.
+        timed(
+            "o_proj (mat_vec)",
+            &|enc| encode_mat_vec_dispatch(mf.ctx, enc, &ab.o, &s.attn_o, &s.mixer_out, q_dim, h),
+            &mut phases,
+        )?;
+        // Residual #1.
+        timed(
+            "residual_add #1",
+            &|enc| encode_add_inplace_f32(mf.ctx, enc, &s.x, &s.mixer_out).map_err(MfError::from),
+            &mut phases,
+        )?;
+        // Pre-FFN norm.
+        timed(
+            "post_norm (rms_norm)",
+            &|enc| {
+                encode_rms_norm_mul_f32(mf.ctx, enc, &s.x, &ab.post_attn_norm, &s.h, RMS_EPS)
+                    .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        // FFN.
+        timed(
+            "ffn_gate (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    &ab.ffn_gate,
+                    &s.h,
+                    &s.ffn_gate,
+                    h,
+                    arch.intermediate_size as usize,
+                )
+            },
+            &mut phases,
+        )?;
+        timed(
+            "ffn_up (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    &ab.ffn_up,
+                    &s.h,
+                    &s.ffn_up,
+                    h,
+                    arch.intermediate_size as usize,
+                )
+            },
+            &mut phases,
+        )?;
+        timed(
+            "silu_mul",
+            &|enc| {
+                encode_silu_mul_f32(mf.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)
+                    .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "ffn_down (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    &ab.ffn_down,
+                    &s.ffn_inner,
+                    &s.ffn_out,
+                    arch.intermediate_size as usize,
+                    h,
+                )
+            },
+            &mut phases,
+        )?;
+        timed(
+            "residual_add #2",
+            &|enc| encode_add_inplace_f32(mf.ctx, enc, &s.x, &s.ffn_out).map_err(MfError::from),
+            &mut phases,
+        )?;
+        Ok(phases)
+    }
+
     /// **GDN intra-layer profile**: split a single GDN block across its
     /// 8+ logical sub-phases so we can attribute the ~0.64 ms/layer cost
     /// to which sub-kernels. Free fn (not on MetalForward) because it
@@ -2268,6 +2565,77 @@ mod tests {
                 let pct = ms / phase_sum_ms * 100.0;
                 eprintln!("[phase ctx={target:>5}]   {name:25} {ms:7.2} ms  ({pct:5.1}%)");
             }
+        }
+    }
+
+    /// **Attn intra-layer breakdown across context lengths**. Tells us
+    /// which sub-phase of attention scales with n_pos. Critical: only
+    /// `attn_decode` should grow with context; everything else should
+    /// be flat. If something else grows, that's an unexpected scaling
+    /// problem.
+    #[test]
+    #[ignore]
+    fn metal_27b_attn_intra_profile() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Warmup.
+        {
+            let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("session");
+            for i in 0..3 {
+                let _ = mf.single_token(0, i as u32, &mut s).expect("warmup");
+            }
+        }
+
+        // Find first attn block index (0.8B has it at block 3 — let me find it
+        // for 27B). 27B has pattern [GDN×3, attn×1] × 16, so block 3 is the
+        // first attn block; 27B has 16 attn blocks total.
+        let attn_block_idx = 3usize;
+
+        for &target in &[1usize, 1024, 4096] {
+            let mut s = MetalSession::fresh(&ctx, &mm, target + 32).expect("session");
+            // Ramp to `target`.
+            for p in 0..(target as u32) {
+                let _ = mf.single_token(0, p, &mut s).expect("ramp");
+            }
+            // Profile one attn block in isolation, averaging 5 runs.
+            let n_runs = 5usize;
+            let mut agg: std::collections::BTreeMap<String, f64> =
+                std::collections::BTreeMap::new();
+            let mut order: Vec<String> = Vec::new();
+            for run in 0..n_runs {
+                // Position must increment with each call (for KV scatter).
+                let pos = target as u32 + run as u32;
+                let phases = attn_intra_profile_single_block(&mf, attn_block_idx, 0, pos, &mut s)
+                    .expect("attn-intra");
+                for (name, ms) in phases {
+                    if run == 0 {
+                        order.push(name.clone());
+                    }
+                    *agg.entry(name).or_default() += ms;
+                }
+            }
+            let total: f64 = agg.values().sum::<f64>() / n_runs as f64;
+            eprintln!(
+                "[attn-intra ctx={target}] one ATTN layer total: {total:.3} ms (×16 = {:.2} ms)",
+                total * 16.0
+            );
+            for name in &order {
+                let avg_ms = agg[name] / n_runs as f64;
+                let pct = avg_ms / total * 100.0;
+                eprintln!("[attn-intra ctx={target}]   {name:35} {avg_ms:6.3} ms  ({pct:5.1}%)");
+            }
+            eprintln!();
         }
     }
 

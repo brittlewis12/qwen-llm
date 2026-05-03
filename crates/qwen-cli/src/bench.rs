@@ -48,6 +48,9 @@ enum Cmd {
     /// Phase-resolved profile at one context length (uses the
     /// `phase_sum` GPU time, NOT the per-phase-cmdbuf wall artifact).
     Phase(PhaseArgs),
+    /// **H2 falsification**: compare cold prefill TTFT vs snapshot-restore
+    /// TTFT for two requests sharing a token prefix.
+    PrefixCache(PrefixCacheArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -98,6 +101,28 @@ struct PhaseArgs {
     ctx: usize,
 }
 
+#[derive(Parser, Debug)]
+struct PrefixCacheArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Shared prefix prompt (used for cold prefill of request 1, then
+    /// cached). Pad with --prefix-pad-tokens to hit a target prefix len.
+    #[arg(short = 'p', long, default_value = "You are a helpful assistant.")]
+    prefix: String,
+    /// Optionally pad the prefix to a target token count by repeating
+    /// "lorem ipsum" filler. Used to hit specific prefix lengths
+    /// (per codex's H2 kill criteria: 64, 256, 1024, 4096).
+    #[arg(long)]
+    target_prefix_len: Option<usize>,
+    /// Suffix prompt for request 2 (concatenated to the cached prefix).
+    #[arg(long, default_value = "\n\nUser: What time is it?\nAssistant:")]
+    suffix: String,
+    /// Decode tokens to generate after each request's prefill.
+    #[arg(long, default_value = "8")]
+    tokens: usize,
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -108,6 +133,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     match args.cmd {
+        Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::Decode(a) => run_decode(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
@@ -370,4 +396,192 @@ fn compare_logits(ours: &[f32], oracle: &[f32]) -> (f64, f32, usize, usize) {
     }
     let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
     (cos, max_abs, argmax_ours, argmax_oracle)
+}
+
+/// **H2 falsification mode.** Compare cold-prefill TTFT vs snapshot-restore
+/// TTFT for two requests sharing a token prefix.
+///
+/// Codex's H2 kill criteria (any failure → kill the experiment):
+///   * 2nd-request TTFT ≥ 2× faster at prefix=64
+///   * 2nd-request TTFT ≥ 5× faster at prefix=1024
+///   * Restore p95 < 25 ms at prefix=4096
+///   * (We also assert: cold-decoded-token == warm-decoded-token,
+///      since both should produce identical greedy output.)
+fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
+    let PrefixCacheArgs {
+        model,
+        prefix,
+        target_prefix_len,
+        suffix,
+        tokens,
+    } = args;
+
+    let ctx = MetalContext::new()?;
+    eprintln!("[prefix-cache] device: {}", ctx.describe());
+    let g = GgufFile::open(&model)?;
+    let m = Model::from_gguf(&g)?;
+    let mm = MetalModel::load(&ctx, &g, &m)?;
+    let tok = Tokenizer::open(&model)?;
+
+    let mut prefix_ids = tok.encode(&prefix, false)?;
+    if let Some(target) = target_prefix_len {
+        // Pad with filler tokens to reach the target length.
+        // Use a deterministic, semantically inert filler.
+        let filler = " lorem ipsum dolor sit amet consectetur adipiscing elit";
+        let filler_ids = tok.encode(filler, false)?;
+        while prefix_ids.len() < target {
+            for &id in &filler_ids {
+                if prefix_ids.len() >= target {
+                    break;
+                }
+                prefix_ids.push(id);
+            }
+        }
+        prefix_ids.truncate(target);
+    }
+    let suffix_ids = tok.encode(&suffix, false)?;
+    let total_len = prefix_ids.len() + suffix_ids.len();
+    eprintln!(
+        "[prefix-cache] prefix={} tokens, suffix={} tokens, total={} tokens",
+        prefix_ids.len(),
+        suffix_ids.len(),
+        total_len
+    );
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let cap = total_len + tokens + 16;
+
+    // Warmup pass to compile pipeline state objects.
+    {
+        let mut s = MetalSession::fresh(&ctx, &mm, 32)?;
+        let _ = mf.single_token(prefix_ids[0], 0, &mut s)?;
+    }
+
+    // ---- COLD path: prefill (prefix + suffix), decode N tokens ----
+    let cold_t0 = Instant::now();
+    let mut sess_cold = MetalSession::fresh(&ctx, &mm, cap)?;
+    let mut last_logits = vec![];
+    for (i, &tid) in prefix_ids.iter().chain(suffix_ids.iter()).enumerate() {
+        last_logits = mf.single_token(tid, i as u32, &mut sess_cold)?;
+    }
+    let cold_prefill_ms = cold_t0.elapsed().as_secs_f64() * 1e3;
+
+    // First decoded token = TTFT-equivalent measurement.
+    let cold_first_decode_t = Instant::now();
+    let cold_first_id = argmax_i32(&last_logits);
+    let _ = mf.single_token(cold_first_id, total_len as u32, &mut sess_cold)?;
+    let cold_first_decode_ms = cold_first_decode_t.elapsed().as_secs_f64() * 1e3;
+
+    let cold_ttft_ms = cold_prefill_ms + cold_first_decode_ms;
+    eprintln!(
+        "[prefix-cache] COLD: prefill {} tokens in {cold_prefill_ms:.1} ms, first-decode {cold_first_decode_ms:.1} ms, TTFT {cold_ttft_ms:.1} ms",
+        total_len
+    );
+
+    // ---- WARM path: prefill prefix, snapshot. Then fresh session, restore, ----
+    // ---- prefill suffix, decode 1 token. Time the second-request portion. ----
+    let mut sess_pre = MetalSession::fresh(&ctx, &mm, cap)?;
+    let mut last_pre_logits = vec![];
+    for (i, &tid) in prefix_ids.iter().enumerate() {
+        last_pre_logits = mf.single_token(tid, i as u32, &mut sess_pre)?;
+    }
+    let identity = sess_pre.snapshot_identity(0xAA, 0xBB);
+    let snap_t = Instant::now();
+    let snap = sess_pre.snapshot(identity, prefix_ids.clone(), Some(last_pre_logits));
+    let snap_create_ms = snap_t.elapsed().as_secs_f64() * 1e3;
+    eprintln!(
+        "[prefix-cache] (snapshot built: {:.1} MB in {snap_create_ms:.1} ms)",
+        snap.n_bytes() as f64 / 1e6
+    );
+
+    // Now simulate request 2 starting fresh and finding the cached prefix.
+    let warm_t0 = Instant::now();
+    let mut sess_warm = MetalSession::fresh(&ctx, &mm, cap)?;
+    let restore_t = Instant::now();
+    sess_warm.restore_from(&snap)?;
+    let restore_ms = restore_t.elapsed().as_secs_f64() * 1e3;
+
+    let mut last_warm_logits = vec![];
+    for (k, &tid) in suffix_ids.iter().enumerate() {
+        let pos = (prefix_ids.len() + k) as u32;
+        last_warm_logits = mf.single_token(tid, pos, &mut sess_warm)?;
+    }
+    let warm_prefill_ms = warm_t0.elapsed().as_secs_f64() * 1e3;
+    let warm_suffix_ms = warm_prefill_ms - restore_ms;
+
+    let warm_first_decode_t = Instant::now();
+    let warm_first_id = argmax_i32(&last_warm_logits);
+    let _ = mf.single_token(warm_first_id, total_len as u32, &mut sess_warm)?;
+    let warm_first_decode_ms = warm_first_decode_t.elapsed().as_secs_f64() * 1e3;
+
+    let warm_ttft_ms = warm_prefill_ms + warm_first_decode_ms;
+    eprintln!(
+        "[prefix-cache] WARM: restore {restore_ms:.1} ms + suffix-prefill {} tokens in {warm_suffix_ms:.1} ms + first-decode {warm_first_decode_ms:.1} ms = TTFT {warm_ttft_ms:.1} ms",
+        suffix_ids.len()
+    );
+
+    let speedup = cold_ttft_ms / warm_ttft_ms;
+    eprintln!();
+    eprintln!("[prefix-cache] === H2 falsification ===");
+    eprintln!(
+        "[prefix-cache] cold TTFT: {cold_ttft_ms:.1} ms  | warm TTFT: {warm_ttft_ms:.1} ms  | speedup: {speedup:.2}x"
+    );
+
+    // Codex's kill criteria check
+    let prefix_len = prefix_ids.len();
+    let required_speedup = if prefix_len >= 1024 {
+        5.0
+    } else if prefix_len >= 64 {
+        2.0
+    } else {
+        1.0 // tiny prefix; only assert > 1×
+    };
+    let restore_ok = restore_ms < 25.0;
+    let speedup_ok = speedup >= required_speedup;
+    let first_token_match = cold_first_id == warm_first_id;
+
+    eprintln!(
+        "[prefix-cache] required_speedup_at_prefix_{prefix_len}: {required_speedup}x  → {} ({:.2}x measured)",
+        if speedup_ok { "PASS" } else { "FAIL" },
+        speedup
+    );
+    eprintln!(
+        "[prefix-cache] restore_p95_under_25ms: {} ({restore_ms:.1} ms measured)",
+        if restore_ok { "PASS" } else { "FAIL" }
+    );
+    eprintln!(
+        "[prefix-cache] cold/warm first decoded token match: {} (cold={cold_first_id} warm={warm_first_id})",
+        if first_token_match { "PASS" } else { "FAIL" }
+    );
+
+    // Decode a few more tokens on each path to confirm full convergence.
+    if tokens > 1 {
+        let mut cold_extra = vec![cold_first_id];
+        let mut warm_extra = vec![warm_first_id];
+        for k in 1..tokens {
+            let pos = (total_len + k) as u32;
+            let cold_logits = mf.single_token(*cold_extra.last().unwrap(), pos, &mut sess_cold)?;
+            let warm_logits = mf.single_token(*warm_extra.last().unwrap(), pos, &mut sess_warm)?;
+            cold_extra.push(argmax_i32(&cold_logits));
+            warm_extra.push(argmax_i32(&warm_logits));
+        }
+        let same: Vec<bool> = cold_extra
+            .iter()
+            .zip(warm_extra.iter())
+            .map(|(a, b)| a == b)
+            .collect();
+        let n_same = same.iter().filter(|x| **x).count();
+        eprintln!(
+            "[prefix-cache] cold/warm decoded sequence agreement: {}/{} tokens ({:.0}%)",
+            n_same,
+            tokens,
+            100.0 * n_same as f64 / tokens as f64
+        );
+        let cold_text = tok.decode(&cold_extra);
+        let warm_text = tok.decode(&warm_extra);
+        eprintln!("[prefix-cache] cold generated: {:?}", cold_text);
+        eprintln!("[prefix-cache] warm generated: {:?}", warm_text);
+    }
+
+    Ok(())
 }

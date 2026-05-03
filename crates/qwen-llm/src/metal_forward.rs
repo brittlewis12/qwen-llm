@@ -31,15 +31,20 @@
 use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
-    encode_add_inplace_f32, encode_attn_decode_f16kv_f32, encode_attn_decode_f32,
-    encode_attn_decode_flash_f32, encode_copy_offset_f32, encode_gdn_step_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    attn_v4_choose_nwg, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_f32, encode_attn_decode_v4_f32, encode_copy_offset_f32, encode_gdn_step_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
     encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
     encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
     encode_scatter_offset_f32_to_f16, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
     encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
     MetalTensor,
 };
+
+/// Max NWG (split-K partitions) the v4 dispatcher will ever request.
+/// Sets the size of session-resident partial buffers; see
+/// `attn_v4_choose_nwg` for the selection heuristic.
+pub const ATTN_V4_MAX_NWG: usize = 32;
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState,
@@ -266,6 +271,10 @@ pub struct MetalSession {
     pub attn_k_normed: MetalTensor, // kv_dim
     pub attn_scores: MetalTensor,   // capacity_tokens — scores for current step
     pub attn_o: MetalTensor,        // q_dim — attention output
+    // v4 flash-attn split-K partials. Sized for ATTN_V4_MAX_NWG; the
+    // dispatcher passes the chosen NWG ≤ this value.
+    pub attn_v4_o_partial: MetalTensor, // n_kv * NWG_max * GROUP * head_dim
+    pub attn_v4_ml_partial: MetalTensor, // n_kv * NWG_max * GROUP * 2
 
     pub logits: MetalTensor,  // vocab_size
     pub ids_buf: MetalTensor, // 1-element scratch for the input token id (i32 in an F32 buf)
@@ -366,6 +375,15 @@ impl MetalSession {
             attn_k_normed: MetalTensor::zeros_f32(ctx, vec![kv_dim])?,
             attn_scores: MetalTensor::zeros_f32(ctx, vec![kv_capacity as u64])?,
             attn_o: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
+            // v4 partials: n_kv * NWG_max * GROUP * head_dim (and *2 for ml).
+            attn_v4_o_partial: MetalTensor::zeros_f32(
+                ctx,
+                vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * head_dim],
+            )?,
+            attn_v4_ml_partial: MetalTensor::zeros_f32(
+                ctx,
+                vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * 2],
+            )?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
             ids_buf: MetalTensor::zeros_f32(ctx, vec![1])?,
         })
@@ -981,21 +999,49 @@ impl<'a> MetalForward<'a> {
         s.kv_n_pos[attn_i] = position as usize + 1;
 
         // (8) Fused attention decode: scoring + softmax + V-aggregate.
-        // F16 KV variant: reads K/V as half, casts to float in the dot
-        // product. Halves attention bandwidth at long context — the
-        // critical fix for the 4K decode regression vs llama.cpp.
-        encode_attn_decode_f16kv_f32(
-            self.ctx,
-            enc,
-            &s.attn_q_normed,
-            &s.kv_k[attn_i],
-            &s.kv_v[attn_i],
-            &s.attn_o,
-            n_q,
-            n_kv,
-            head_dim,
-            s.kv_n_pos[attn_i],
-        )?;
+        //
+        // Selection: v4 (GQA-dedup + online softmax + split-K) when the
+        // shape matches its hardcoded constants (head_dim=256, GROUP=6 →
+        // 27B). Falls back to f16kv naive kernel for other shapes
+        // (e.g. 0.8B has GROUP=4).
+        //
+        // v4 gives 2-8× speedup over naive on the 27B shape AND removes
+        // the n_pos ≤ ~7000 correctness cliff (naive's threadgroup-mem
+        // scores buffer caps out around there).
+        const V4_HEAD_DIM: usize = 256;
+        const V4_GROUP: usize = 6;
+        let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+        if use_v4 {
+            let nwg = attn_v4_choose_nwg(s.kv_n_pos[attn_i]);
+            encode_attn_decode_v4_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_normed,
+                &s.kv_k[attn_i],
+                &s.kv_v[attn_i],
+                &s.attn_v4_o_partial,
+                &s.attn_v4_ml_partial,
+                &s.attn_o,
+                n_q,
+                n_kv,
+                head_dim,
+                s.kv_n_pos[attn_i],
+                nwg,
+            )?;
+        } else {
+            encode_attn_decode_f16kv_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_normed,
+                &s.kv_k[attn_i],
+                &s.kv_v[attn_i],
+                &s.attn_o,
+                n_q,
+                n_kv,
+                head_dim,
+                s.kv_n_pos[attn_i],
+            )?;
+        }
 
         // (9) Apply gated-attention sigmoid gate: attn_o *= sigmoid(gate).
         // We need: y = attn_o * sigmoid(gate). Decompose into
@@ -2722,10 +2768,12 @@ mod tests {
         let m = Model::from_gguf(&g).expect("load");
         let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
 
-        // Sweep targets — ramp up until threadgroup memory or time get
-        // unreasonable. attn_decode_f32 currently caps at ~7000 positions
-        // (28KB threadgroup memory ÷ 4 B/score).
-        let checkpoints = [1usize, 64, 256, 1024, 4096, 6000];
+        // Sweep targets. Naive attn_decode_f32 / f16kv had a hard cap at
+        // ~7000 positions (28KB threadgroup memory ÷ 4 B/score). v4
+        // (online softmax + split-K) unlocks arbitrary context.
+        // 16384 ramp + window costs ~5 minutes; trim if quick iteration is
+        // needed.
+        let checkpoints = [1usize, 64, 256, 1024, 4096, 8192, 16384];
 
         let max_n = *checkpoints.iter().max().unwrap();
         let mut s = MetalSession::fresh(&ctx, &mm, max_n + 16).expect("session");

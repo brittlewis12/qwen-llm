@@ -1053,87 +1053,6 @@ pub fn encode_split_q_gate_f32(
     Ok(())
 }
 
-/// Flash-attention-style decode: streaming softmax over K/V tiles.
-/// Same I/O contract as `encode_attn_decode_f32` but no upper bound on
-/// `n_pos` — works at any context length.
-///
-/// CPU oracle: same as the naive kernel (numerical equivalence within
-/// fp32 reorder noise; the streaming softmax is mathematically identical
-/// to the full-buffer version).
-pub fn encode_attn_decode_flash_f32(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    q: &MetalTensor,
-    k_cache: &MetalTensor,
-    v_cache: &MetalTensor,
-    out: &MetalTensor,
-    n_q_heads: usize,
-    n_kv_heads: usize,
-    head_dim: usize,
-    n_pos: usize,
-) -> Result<(), MetalError> {
-    if n_q_heads % n_kv_heads != 0 {
-        return Err(MetalError::BadShape {
-            kernel: "attn_decode_flash",
-            detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
-        });
-    }
-    let want = (n_q_heads * head_dim) as u64;
-    if q.n_elements() != want || out.n_elements() != want {
-        return Err(MetalError::BadShape {
-            kernel: "attn_decode_flash",
-            detail: format!("q/out expected {want} elements"),
-        });
-    }
-    let kv_stride = n_kv_heads * head_dim;
-    let scale = 1.0f32 / (head_dim as f32).sqrt();
-
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        n_q_heads: u32,
-        n_kv_heads: u32,
-        head_dim: u32,
-        n_pos: u32,
-        kv_stride: u32,
-        scale: f32,
-    }
-    let pso = ctx.pipeline("kernel_attn_decode_flash_f32")?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            n_q_heads: n_q_heads as u32,
-            n_kv_heads: n_kv_heads as u32,
-            head_dim: head_dim as u32,
-            n_pos: n_pos as u32,
-            kv_stride: kv_stride as u32,
-            scale,
-        },
-    );
-    enc.set_tensor(1, q);
-    enc.set_tensor(2, k_cache);
-    enc.set_tensor(3, v_cache);
-    enc.set_tensor(4, out);
-
-    let tg_bytes = head_dim * std::mem::size_of::<f32>();
-    enc.set_threadgroup_memory(0, tg_bytes.max(32));
-
-    enc.dispatch(
-        MTLSize {
-            width: n_q_heads,
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width: 32,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
-}
-
 /// F16 KV-cache variant of `encode_attn_decode_f32`. Same algorithm,
 /// reads K and V as half-precision. Halves attention bandwidth at long
 /// context (saves ~4 GB of reads/token at 4K positions on 27B). Q is
@@ -1232,6 +1151,221 @@ pub fn encode_attn_decode_f16kv_f32(
             depth: 1,
         },
     );
+    Ok(())
+}
+
+// =============================================================================
+// Flash-attention v4: GQA-dedup + online softmax + split-K. Hardcoded for
+// Qwen3.6-27B's attn shape (DK=DV=256, GROUP=6) and F16 KV cache.
+//
+// Caller is responsible for owning per-call partial buffers:
+//   o_partial : F32, n_kv_heads * NWG * GROUP * head_dim elements
+//   ml_partial: F32, n_kv_heads * NWG * GROUP * 2 elements
+// Sized for the maximum NWG you'll ever pass.
+// =============================================================================
+
+/// Compute v4-friendly NWG (split-K partition count) for a given context length.
+///
+/// Heuristic determined empirically on M4 Max via `attn_v4_nwg_sweep` bench:
+///   - For our shape (n_kv=4 KV heads on ~40 GPU cores), NWG=32 dominates
+///     across the full range tested (n_pos 64..16384), even at very short
+///     context where you'd expect overhead to matter.
+///   - NWG=16 is competitive for n_pos < 256 (very-cold-start regime).
+///   - NWG=1 is catastrophically under-occupied (4 TGs total) — DO NOT
+///     ship as performance config; useful only for correctness debugging.
+///
+/// Bench data (per-call ms, M4 Max, F16 KV, head_dim=256, n_q=24, n_kv=4):
+///   n_pos= 64: nwg=16 → 0.017 ms (best)
+///   n_pos= 256: nwg=16 → 0.025 ms (nwg=32 = 0.030 ms)
+///   n_pos=1024: nwg=32 → 0.036 ms
+///   n_pos=4096: nwg=32 → 0.136 ms
+///   n_pos=8192: nwg=32 → 0.315 ms
+///   n_pos=16384: nwg=32 → 0.632 ms
+///
+/// Future: NWG > 32 will require updating the reduce kernel (currently
+/// uses simd_shuffle broadcast across 32 lanes). At very long context
+/// (128K+) we may want NWG=64 or 128 if per-TG row counts get unwieldy.
+pub fn attn_v4_choose_nwg(n_pos: usize) -> usize {
+    if n_pos < 256 {
+        16
+    } else {
+        32
+    }
+}
+
+/// Encode v4 main kernel + reduce kernel in sequence.
+/// Hardcoded constants (must match `kernels/attn_v4.metal`):
+///   GROUP = 6, DK = DV = 256, lanes = 32, C = 32.
+pub fn encode_attn_decode_v4_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    out: &MetalTensor,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_pos: usize,
+    nwg: usize,
+) -> Result<(), MetalError> {
+    // Hardcoded shape preconditions.
+    const GROUP: usize = 6;
+    const DK: usize = 256;
+    if head_dim != DK {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4",
+            detail: format!("head_dim={head_dim} but kernel hardcodes {DK}"),
+        });
+    }
+    if n_q_heads != n_kv_heads * GROUP {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4",
+            detail: format!("n_q={n_q_heads}, n_kv={n_kv_heads}, expected n_q = n_kv * {GROUP}"),
+        });
+    }
+    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4",
+            detail: format!(
+                "k/v expected F16 dtype, got {:?}/{:?}",
+                k_cache.dtype, v_cache.dtype
+            ),
+        });
+    }
+    let want_q = (n_q_heads * head_dim) as u64;
+    if q.n_elements() != want_q || out.n_elements() != want_q {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4",
+            detail: format!("q/out expected {want_q} elements"),
+        });
+    }
+    if nwg == 0 || nwg > 32 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4",
+            detail: format!("nwg={nwg} out of range [1, 32]"),
+        });
+    }
+    let want_o_partial = (n_kv_heads * nwg * GROUP * head_dim) as u64;
+    let want_ml_partial = (n_kv_heads * nwg * GROUP * 2) as u64;
+    if o_partial.n_elements() < want_o_partial {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4",
+            detail: format!(
+                "o_partial too small: have {}, need ≥ {want_o_partial}",
+                o_partial.n_elements()
+            ),
+        });
+    }
+    if ml_partial.n_elements() < want_ml_partial {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4",
+            detail: format!(
+                "ml_partial too small: have {}, need ≥ {want_ml_partial}",
+                ml_partial.n_elements()
+            ),
+        });
+    }
+
+    let kv_stride = n_kv_heads * head_dim;
+    // Pre-multiply scale by log2(e) so kernel uses exp2 (Apple GPU fast path).
+    let scale = (1.0f32 / (head_dim as f32).sqrt()) * std::f32::consts::LOG2_E;
+    let rows_per_partition = n_pos.div_ceil(nwg.max(1));
+
+    // -------- Main kernel ------------------------------------------------
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct MainArgs {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        n_partitions: u32,
+        rows_per_partition: u32,
+        scale: f32,
+    }
+    let pso_main = ctx.pipeline("kernel_attn_decode_v4_f32")?;
+    enc.set_pipeline(&pso_main);
+    enc.set_bytes(
+        0,
+        &MainArgs {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_pos: n_pos as u32,
+            kv_stride: kv_stride as u32,
+            n_partitions: nwg as u32,
+            rows_per_partition: rows_per_partition as u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, o_partial);
+    enc.set_tensor(5, ml_partial);
+
+    // Threadgroup memory:
+    //   threadgroup(0) sq[GROUP * DK halves]  = 6 * 256 * 2 = 3072 B
+    //   threadgroup(1) ss[GROUP * C floats]   = 6 * 32 * 4  = 768 B
+    let sq_bytes = GROUP * DK * 2; // f16 = 2 bytes per element
+    let ss_bytes = GROUP * 32 * std::mem::size_of::<f32>();
+    enc.set_threadgroup_memory(0, sq_bytes);
+    enc.set_threadgroup_memory(1, ss_bytes);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_kv_heads,
+            height: 1,
+            depth: nwg,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    // -------- Reduce kernel ----------------------------------------------
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct ReduceArgs {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_partitions: u32,
+    }
+    let pso_red = ctx.pipeline("kernel_attn_decode_v4_reduce_f32")?;
+    enc.set_pipeline(&pso_red);
+    enc.set_bytes(
+        0,
+        &ReduceArgs {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_partitions: nwg as u32,
+        },
+    );
+    enc.set_tensor(1, o_partial);
+    enc.set_tensor(2, ml_partial);
+    enc.set_tensor(3, out);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_q_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
     Ok(())
 }
 
@@ -2240,88 +2374,6 @@ mod tests {
         }
     }
 
-    /// Flash-attention vs naive attn_decode: same inputs, both kernels,
-    /// must produce numerically equivalent outputs across n_pos values.
-    #[test]
-    fn flash_attn_matches_naive() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
-        };
-        let n_q = 24usize;
-        let n_kv = 4usize;
-        let hd = 256usize;
-        for &n_pos in &[1usize, 64, 256, 1024, 4096] {
-            let q: Vec<f32> = (0..n_q * hd)
-                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
-                .collect();
-            let cap = n_pos.max(64);
-            let k: Vec<f32> = (0..cap * n_kv * hd)
-                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
-                .collect();
-            let v: Vec<f32> = (0..cap * n_kv * hd)
-                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
-                .collect();
-            let q_t = MetalTensor::from_bytes(
-                &ctx,
-                bytemuck::cast_slice(&q),
-                vec![(n_q * hd) as u64],
-                GgmlType::F32,
-            )
-            .unwrap();
-            let k_t = MetalTensor::from_bytes(
-                &ctx,
-                bytemuck::cast_slice(&k),
-                vec![(cap * n_kv * hd) as u64],
-                GgmlType::F32,
-            )
-            .unwrap();
-            let v_t = MetalTensor::from_bytes(
-                &ctx,
-                bytemuck::cast_slice(&v),
-                vec![(cap * n_kv * hd) as u64],
-                GgmlType::F32,
-            )
-            .unwrap();
-            let naive_works = n_pos * std::mem::size_of::<f32>() <= 28 * 1024;
-            let out_naive = if naive_works {
-                let y = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
-                one_shot(&ctx, |enc| {
-                    encode_attn_decode_f32(&ctx, enc, &q_t, &k_t, &v_t, &y, n_q, n_kv, hd, n_pos)
-                })
-                .unwrap();
-                Some(read_back_f32(&y.buffer, n_q * hd))
-            } else {
-                None
-            };
-            let y_flash = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
-            one_shot(&ctx, |enc| {
-                encode_attn_decode_flash_f32(
-                    &ctx, enc, &q_t, &k_t, &v_t, &y_flash, n_q, n_kv, hd, n_pos,
-                )
-            })
-            .unwrap();
-            let flash = read_back_f32(&y_flash.buffer, n_q * hd);
-            if let Some(naive) = &out_naive {
-                let max_abs = flash
-                    .iter()
-                    .zip(naive.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
-                eprintln!("[flash-attn n_pos={n_pos:>4}] max|flash - naive|={max_abs:.2e}");
-                assert!(
-                    max_abs < 1e-3,
-                    "flash vs naive mismatch at n_pos={n_pos}: max|Δ|={max_abs}"
-                );
-            } else {
-                eprintln!("[flash-attn n_pos={n_pos:>4}] naive skipped (tg memory cap)");
-                let n_finite = flash.iter().filter(|v| v.is_finite()).count();
-                assert_eq!(n_finite, flash.len(), "flash produced non-finite values");
-            }
-        }
-    }
-
     #[test]
     fn mat_vec_f32_matches_cpu() {
         let ctx = match MetalContext::new() {
@@ -3293,5 +3345,278 @@ mod tests {
             max_abs < 1e-3,
             "chained encoding diverged: max|Δ|={max_abs}"
         );
+    }
+
+    /// v4 flash-attn (GQA-dedup + online softmax + split-K) vs production
+    /// `attn_decode_f16kv_f32`. Same F16 K/V inputs, multiple n_pos and NWG
+    /// settings. Must produce numerically equivalent outputs (cos > 0.9999;
+    /// max|Δ| ~1e-3 — the bound expected from F32 reorder noise across
+    /// completely different reduction orderings).
+    #[test]
+    fn attn_v4_matches_naive_f16kv() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        // Match the 27B attention shape: head_dim=256, n_q=24, n_kv=4, GROUP=6.
+        let n_q = 24usize;
+        let n_kv = 4usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+
+        // Test multiple n_pos × NWG combinations.
+        let cases: &[(usize, usize)] = &[
+            (1, 1),
+            (32, 1),
+            (32, 2),
+            (64, 1),
+            (256, 4),
+            (1024, 8),
+            (4096, 16),
+            // Skip 6000 because the naive kernel is bounded at ~7K and we want apples-to-apples.
+        ];
+
+        for &(n_pos, nwg) in cases {
+            // Synthesize Q (F32) and K, V (F32 scratch → F16 cache).
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let cap = n_pos.max(64);
+            let k_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            // Build F16 KV cache by scattering F32 source into a F16 dest.
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            // Use scatter to convert F32 → F16 in cache.
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+
+            // --- Reference: naive f16kv kernel ---
+            let y_naive_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_f16kv_f32(
+                    &ctx, enc, &q_t, &k_cache, &v_cache, &y_naive_t, n_q, n_kv, hd, n_pos,
+                )
+            })
+            .unwrap();
+            let y_naive = read_back_f32(&y_naive_t.buffer, n_q * hd);
+
+            // --- v4: allocate partials, dispatch main + reduce ---
+            const GROUP: usize = 6;
+            let o_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * hd) as u64]).unwrap();
+            let ml_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * 2) as u64]).unwrap();
+            let y_v4_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_cache,
+                    &v_cache,
+                    &o_partial,
+                    &ml_partial,
+                    &y_v4_t,
+                    n_q,
+                    n_kv,
+                    hd,
+                    n_pos,
+                    nwg,
+                )
+            })
+            .unwrap();
+            let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
+
+            // Compare element-wise + cosine sim.
+            let max_abs = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let dot: f64 = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (*a as f64) * (*b as f64))
+                .sum();
+            let na: f64 = y_v4.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            let nb: f64 = y_naive
+                .iter()
+                .map(|x| (*x as f64).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let cos = dot / (na * nb);
+            eprintln!("[v4 n_pos={n_pos:>4} nwg={nwg:>2}] max|Δ|={max_abs:.2e}  cos={cos:.6}");
+            assert!(
+                cos > 0.9999,
+                "v4 vs naive cosine too low at n_pos={n_pos} nwg={nwg}: cos={cos}"
+            );
+            assert!(
+                max_abs < 5e-3,
+                "v4 vs naive max|Δ| too high at n_pos={n_pos} nwg={nwg}: {max_abs}"
+            );
+        }
+    }
+
+    /// Bench: sweep NWG (split-K count) across context lengths to discover
+    /// the optimal NWG for our shape on the host GPU. Compares against the
+    /// naive f16kv kernel.
+    ///
+    /// Run with: `cargo test --release --lib -p qwen-llm attn_v4_nwg_sweep
+    /// --ignored -- --nocapture`
+    #[test]
+    #[ignore]
+    fn attn_v4_nwg_sweep() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-bench] {}", ctx.describe());
+
+        let n_q = 24usize;
+        let n_kv = 4usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+        const GROUP: usize = 6;
+
+        let n_iters = 200usize; // chained dispatches per command buffer
+        let warmup = 20usize;
+
+        // Each context length we want to characterize.
+        for &n_pos in &[64usize, 256, 1024, 4096, 8192, 16384] {
+            let cap = n_pos.max(64);
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+            // ----- Naive f16kv baseline (skip if past tg-mem cap ~7000) -----
+            let naive_works = n_pos * std::mem::size_of::<f32>() <= 28 * 1024;
+            if naive_works {
+                let bench = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_f16kv_f32(
+                            &ctx, &enc, &q_t, &k_cache, &v_cache, &y_t, n_q, n_kv, hd, n_pos,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let t = Instant::now();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    let wall = t.elapsed().as_secs_f64() * 1e3;
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[n_pos={n_pos:>5} {label}] {n}× chained: wall={wall:7.2} ms  gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                // Warmup
+                bench("naive_f16kv_warmup", warmup);
+                bench("naive_f16kv       ", n_iters);
+            } else {
+                eprintln!("[n_pos={n_pos:>5} naive_f16kv       ] skipped (past tg-mem cap)");
+            }
+
+            // ----- v4: sweep NWG -----
+            for &nwg in &[1usize, 2, 4, 8, 16, 32] {
+                let o_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * hd) as u64]).unwrap();
+                let ml_partial =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * 2) as u64]).unwrap();
+                let bench = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_f32(
+                            &ctx,
+                            &enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            &y_t,
+                            n_q,
+                            n_kv,
+                            hd,
+                            n_pos,
+                            nwg,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let t = Instant::now();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    let wall = t.elapsed().as_secs_f64() * 1e3;
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[n_pos={n_pos:>5} {label} nwg={nwg:>2}] {n}× chained: wall={wall:7.2} ms  gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                bench("v4_warmup           ", warmup);
+                bench("v4                  ", n_iters);
+            }
+            eprintln!();
+        }
     }
 }

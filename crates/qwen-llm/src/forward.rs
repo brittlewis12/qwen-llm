@@ -266,11 +266,10 @@ impl<'a> Forward<'a> {
             let q_slice = &qcur[qh * head_dim..(qh + 1) * head_dim];
 
             // Score against every cached K position for this layer & kv-head.
-            let cache = kv_cache.layer(layer_idx);
-            let n_pos = cache.len(); // includes the position we just appended
+            let n_pos = kv_cache.n_pos(layer_idx); // includes the just-appended position
             let mut scores = vec![0.0f32; n_pos];
             for p in 0..n_pos {
-                let k_slice = cache.k(p, kvh, head_dim);
+                let k_slice = kv_cache.k(layer_idx, p, kvh);
                 let mut s = 0.0f32;
                 for i in 0..head_dim {
                     s += q_slice[i] * k_slice[i];
@@ -282,7 +281,7 @@ impl<'a> Forward<'a> {
             // Aggregate V.
             let out_slice = &mut attn_out[qh * head_dim..(qh + 1) * head_dim];
             for p in 0..n_pos {
-                let v_slice = cache.v(p, kvh, head_dim);
+                let v_slice = kv_cache.v(layer_idx, p, kvh);
                 let w = scores[p];
                 for i in 0..head_dim {
                     out_slice[i] += w * v_slice[i];
@@ -508,70 +507,132 @@ impl<'a> Forward<'a> {
     }
 }
 
-/// KV cache for full-attention layers, append-only. One entry per
-/// (layer, position). Stored as flat f32; not the long-term layout but
-/// simple to validate.
+/// Per-layer KV cache for full-attention layers, with **explicit position
+/// addressing** instead of inferring offsets from buffer length.
+///
+/// Layout per layer: contiguous `[pos, kv_head, head_dim]` row-major
+/// storage. Position `p` lives at `data[p * stride .. (p+1) * stride]`
+/// where `stride = n_kv_heads * head_dim`. Slots are allocated up to
+/// [`KvCache::capacity_tokens`] when the cache is constructed; the writer
+/// must declare each `position` it writes, and the reader queries up to
+/// `n_pos` valid positions.
+///
+/// Why this matters (codex review, fc6f43e): the previous implementation
+/// discarded the `position` argument and inferred it from `buffer.len() /
+/// n_pos`. That works for strict-monotonic single-sequence decode from
+/// position 0, but breaks the moment we want prefix reuse, paging,
+/// chunked prefill, NEXTN draft acceptance/rollback, or batching. The
+/// CPU oracle is going to be mirrored into a paged Metal cache; getting
+/// the abstraction right here pays off there.
+///
+/// For v1 we still enforce **strict-monotonic-from-zero** semantics
+/// (every `append` asserts `position == n_pos`). The change is that we
+/// *track* positions explicitly and the read API takes position indices,
+/// so the GPU equivalent can drop the strict assertion later without
+/// changing any caller.
 pub struct KvCache {
     layers: Vec<LayerKv>,
     head_dim: usize,
     n_kv_heads: usize,
+    /// Per-position byte stride in elements: `n_kv_heads * head_dim`.
+    stride: usize,
+    capacity_tokens: usize,
 }
 
 struct LayerKv {
-    k: Vec<f32>, // [pos, kv_head, head_dim]
+    /// `[capacity_tokens, n_kv_heads, head_dim]` row-major. Pre-allocated
+    /// to `capacity_tokens * stride` zeros.
+    k: Vec<f32>,
     v: Vec<f32>,
+    /// Number of valid positions written so far. Equal to the largest
+    /// `position` we've ever appended + 1, given strict-monotonic semantics.
     n_pos: usize,
 }
 
-impl LayerKv {
-    fn len(&self) -> usize {
-        self.n_pos
-    }
-    fn k(&self, pos: usize, kv_head: usize, head_dim: usize) -> &[f32] {
-        let stride = head_dim;
-        let base = pos * (self.k.len() / self.n_pos.max(1));
-        let _ = (stride, base);
-        // Simpler: head-major-per-pos layout: k[pos * (n_kv*hd) + kv_head*hd .. + hd]
-        // But we don't have n_kv here. Recompute via division:
-        let per_pos = self.k.len() / self.n_pos.max(1);
-        let n_kv = per_pos / head_dim;
-        let _ = n_kv;
-        &self.k[pos * per_pos + kv_head * head_dim..pos * per_pos + (kv_head + 1) * head_dim]
-    }
-    fn v(&self, pos: usize, kv_head: usize, head_dim: usize) -> &[f32] {
-        let per_pos = self.v.len() / self.n_pos.max(1);
-        &self.v[pos * per_pos + kv_head * head_dim..pos * per_pos + (kv_head + 1) * head_dim]
-    }
-}
-
 impl KvCache {
+    /// Allocate a fresh cache with room for `capacity_tokens` per layer.
+    /// Default capacity is the model's `qwen35.context_length` if known
+    /// from metadata, otherwise 4096. Caller can override via
+    /// [`KvCache::with_capacity`].
     pub fn new(model: &Model<'_>) -> Self {
+        // Sensible default for v1 oracle tests; production sessions will
+        // call `with_capacity` once they know their context budget.
+        Self::with_capacity(model, 4096)
+    }
+
+    pub fn with_capacity(model: &Model<'_>, capacity_tokens: usize) -> Self {
         let arch = &model.arch;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_kv_heads = arch.n_kv_heads as usize;
+        let stride = n_kv_heads * head_dim;
+        let bytes_per_layer = capacity_tokens * stride;
         let layers = (0..arch.n_layer)
             .map(|_| LayerKv {
-                k: Vec::new(),
-                v: Vec::new(),
+                k: vec![0.0; bytes_per_layer],
+                v: vec![0.0; bytes_per_layer],
                 n_pos: 0,
             })
             .collect();
         Self {
             layers,
-            head_dim: arch.attn_head_dim as usize,
-            n_kv_heads: arch.n_kv_heads as usize,
+            head_dim,
+            n_kv_heads,
+            stride,
+            capacity_tokens,
         }
     }
 
-    fn layer(&self, idx: usize) -> &LayerKv {
-        &self.layers[idx]
+    /// Number of valid (written) positions for this layer.
+    pub fn n_pos(&self, layer: usize) -> usize {
+        self.layers[layer].n_pos
     }
 
-    fn append(&mut self, layer: usize, _pos: u32, k: &[f32], v: &[f32]) {
+    /// Read the K row at `(layer, pos, kv_head)`. Length = `head_dim`.
+    pub fn k(&self, layer: usize, pos: usize, kv_head: usize) -> &[f32] {
+        let lk = &self.layers[layer];
+        debug_assert!(pos < lk.n_pos, "kv read pos {pos} >= n_pos {}", lk.n_pos);
+        debug_assert!(kv_head < self.n_kv_heads);
+        let base = pos * self.stride + kv_head * self.head_dim;
+        &lk.k[base..base + self.head_dim]
+    }
+
+    /// Read the V row at `(layer, pos, kv_head)`. Length = `head_dim`.
+    pub fn v(&self, layer: usize, pos: usize, kv_head: usize) -> &[f32] {
+        let lk = &self.layers[layer];
+        debug_assert!(pos < lk.n_pos, "kv read pos {pos} >= n_pos {}", lk.n_pos);
+        let base = pos * self.stride + kv_head * self.head_dim;
+        &lk.v[base..base + self.head_dim]
+    }
+
+    /// Write a K/V pair at an explicit position. v1 enforces
+    /// strict-monotonic-from-zero (`position == current n_pos`); the
+    /// GPU paged cache will relax this.
+    pub fn append(&mut self, layer: usize, position: u32, k: &[f32], v: &[f32]) {
         let lk = &mut self.layers[layer];
-        debug_assert_eq!(k.len(), self.n_kv_heads * self.head_dim);
-        debug_assert_eq!(v.len(), self.n_kv_heads * self.head_dim);
-        lk.k.extend_from_slice(k);
-        lk.v.extend_from_slice(v);
-        lk.n_pos += 1;
+        let pos = position as usize;
+        assert_eq!(
+            pos, lk.n_pos,
+            "kv cache: out-of-order append at layer {layer}: \
+             position={pos} but n_pos={}",
+            lk.n_pos
+        );
+        assert!(
+            pos < self.capacity_tokens,
+            "kv cache: position {pos} >= capacity {}",
+            self.capacity_tokens
+        );
+        assert_eq!(
+            k.len(),
+            self.stride,
+            "kv cache: k.len()={} != stride={}",
+            k.len(),
+            self.stride
+        );
+        assert_eq!(v.len(), self.stride, "kv cache: v.len() != stride");
+        let base = pos * self.stride;
+        lk.k[base..base + self.stride].copy_from_slice(k);
+        lk.v[base..base + self.stride].copy_from_slice(v);
+        lk.n_pos = pos + 1;
     }
 }
 
@@ -989,6 +1050,108 @@ mod tests {
             "argmax disagreement on 27B Q4_K_M"
         );
         // Q4_K introduces real quant noise — relax cosine to 0.999.
+        assert!(cos > 0.999, "cosine={cos} below threshold");
+    }
+
+    /// **27B multi-token oracle** — the critical test that exercises:
+    /// * `n_v=48 / n_k=16` GDN head-repeat against *nonzero* SSM state
+    ///   (the single-token 27B test only validated repeat-against-zero-state)
+    /// * Multi-position `KvCache` reads on the 16 full-attn layers across
+    ///   the new explicit-position addressing path
+    /// * Conv1d state (kernel=4) accumulating real history beyond first 4 tokens
+    ///
+    /// Codex review (fc6f43e) flagged the test gap. Oracle generated via:
+    /// ```sh
+    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf \
+    ///   --snapshot /tmp/qwen-oracle --snapshot-id longprompt_27b \
+    ///   --raw "The quick brown fox jumps over the lazy dog"
+    /// ```
+    /// Expected argmax: "." (token 13).
+    ///
+    /// Slow (~minutes per token via CPU triple-loop matmul through 27B).
+    /// Marked `#[ignore]` so default `cargo test` doesn't run it.
+    #[test]
+    #[ignore]
+    fn oracle_match_longprompt_27b_q4_k_m() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let oracle_path = "/tmp/qwen-oracle/longprompt_27b.f32";
+        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        {
+            eprintln!("[oracle-27b-long] skipped — fixtures missing");
+            return;
+        }
+
+        let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
+        let n = oracle_bytes.len() / 4;
+        let oracle: Vec<f32> = (0..n)
+            .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+            .collect();
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert_eq!(oracle.len(), m.arch.vocab_size as usize);
+        // Sanity: this must be the n_v != n_k path.
+        assert_eq!(m.arch.gdn_n_v_heads, 48);
+        assert_eq!(m.arch.gdn_n_k_heads, 16);
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        eprintln!("[oracle-27b-long] {} tokens: {ids:?}", ids.len());
+        assert_eq!(ids.len(), 9);
+
+        let f = Forward::new(&g, &m);
+        let mut state = GdnState::fresh(&m);
+        let mut kv = KvCache::with_capacity(&m, ids.len() + 4);
+        let t_start = std::time::Instant::now();
+        let mut last_logits = vec![];
+        for (i, &tid) in ids.iter().enumerate() {
+            let t_token = std::time::Instant::now();
+            last_logits = f
+                .single_token(tid, i as u32, &mut state, &mut kv)
+                .expect("forward");
+            eprintln!(
+                "[oracle-27b-long] token {i}/{} done in {:.1}s",
+                ids.len(),
+                t_token.elapsed().as_secs_f64()
+            );
+        }
+        eprintln!(
+            "[oracle-27b-long] total: {:.1}s",
+            t_start.elapsed().as_secs_f64()
+        );
+
+        let mut max_abs = 0.0f32;
+        let mut argmax_ours = 0usize;
+        let mut argmax_oracle = 0usize;
+        let mut max_ours = f32::NEG_INFINITY;
+        let mut max_oracle = f32::NEG_INFINITY;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..n {
+            let d = (last_logits[i] - oracle[i]).abs();
+            max_abs = max_abs.max(d);
+            if last_logits[i] > max_ours {
+                max_ours = last_logits[i];
+                argmax_ours = i;
+            }
+            if oracle[i] > max_oracle {
+                max_oracle = oracle[i];
+                argmax_oracle = i;
+            }
+            dot += last_logits[i] as f64 * oracle[i] as f64;
+            na += (last_logits[i] as f64).powi(2);
+            nb += (oracle[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[oracle-27b-long] argmax: ours={argmax_ours} ({:.4}) | oracle={argmax_oracle} ({:.4}) | max|Δ|={max_abs:.4} cos={cos:.6}",
+            max_ours, max_oracle
+        );
+        assert_eq!(argmax_ours, 13, "argmax should be '.' (token 13)");
+        // Q4_K + 9-token GDN drift accumulates more than F32 single-token.
         assert!(cos > 0.999, "cosine={cos} below threshold");
     }
 

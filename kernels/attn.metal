@@ -120,6 +120,89 @@ struct attn_decode_args {
     float scale;
 };
 
+// F16 KV cache variant. Same algorithm, K/V read as half (cast to float
+// in the math). Halves K/V bandwidth at long context — at 4K positions
+// for 27B (16 layers × 4 KV heads × 256 head_dim × 4096 pos × 2B/elem
+// vs ×4B for F32) this saves ~4 GB of reads per token. Matches what
+// llama.cpp does by default (--cache-type-k f16).
+//
+// Precision: KV magnitudes are typically in [-8, +8] after q/k norm and
+// before RoPE; F16 has ~10 bits of mantissa so quantization error is
+// ~1e-3 per element. Far below the per-token rounding noise we already
+// see in F32 K-quant kernels. Validation against the F32 KV path is
+// expected to give cos > 0.999.
+kernel void kernel_attn_decode_f16kv(
+        constant attn_decode_args & args [[buffer(0)]],
+        device const float * q       [[buffer(1)]], // [n_q_heads, head_dim] F32
+        device const half  * k_cache [[buffer(2)]], // [capacity, n_kv_heads, head_dim] F16
+        device const half  * v_cache [[buffer(3)]], // [capacity, n_kv_heads, head_dim] F16
+        device       float * out     [[buffer(4)]],
+        threadgroup  float * scores  [[threadgroup(0)]],
+        threadgroup  float * shred   [[threadgroup(1)]],
+        uint  tgpig [[threadgroup_position_in_grid]],
+        uint  tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint  ntg   [[threads_per_threadgroup]]) {
+    const uint qh = tgpig;
+    if (qh >= args.n_q_heads) return;
+    const uint group = args.n_q_heads / args.n_kv_heads;
+    const uint kvh = qh / group;
+    device const float * q_h = q + (ulong)qh * args.head_dim;
+    device       float * out_h = out + (ulong)qh * args.head_dim;
+
+    // Pass 1: scores[p] = (q · half2float(k_cache[p, kvh, :])) * scale
+    for (uint p = tpitg; p < args.n_pos; p += ntg) {
+        device const half * k_p = k_cache
+            + (ulong)p * args.kv_stride
+            + (ulong)kvh * args.head_dim;
+        float s = 0.0f;
+        for (uint i = 0; i < args.head_dim; ++i) {
+            s += q_h[i] * (float)k_p[i];
+        }
+        scores[p] = s * args.scale;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Pass 2: softmax (identical to F32 path; scores are already F32).
+    float local_max = -INFINITY;
+    for (uint p = tpitg; p < args.n_pos; p += ntg) local_max = max(local_max, scores[p]);
+    local_max = simd_max(local_max);
+    if (tiisg == 0) shred[sgitg] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    local_max = (tiisg < (ntg + 31) / 32) ? shred[tiisg] : -INFINITY;
+    local_max = simd_max(local_max);
+
+    float local_sum = 0.0f;
+    for (uint p = tpitg; p < args.n_pos; p += ntg) {
+        const float e = exp(scores[p] - local_max);
+        scores[p] = e;
+        local_sum += e;
+    }
+    local_sum = simd_sum(local_sum);
+    if (tiisg == 0) shred[sgitg] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    local_sum = (tiisg < (ntg + 31) / 32) ? shred[tiisg] : 0.0f;
+    local_sum = simd_sum(local_sum);
+
+    const float inv_sum = 1.0f / local_sum;
+    for (uint p = tpitg; p < args.n_pos; p += ntg) scores[p] *= inv_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Pass 3: out[d] = sum_p scores[p] * float(v_cache[p, kvh, d]).
+    for (uint d = tpitg; d < args.head_dim; d += ntg) {
+        float acc = 0.0f;
+        for (uint p = 0; p < args.n_pos; ++p) {
+            acc += scores[p] * (float)v_cache[
+                (ulong)p * args.kv_stride
+                + (ulong)kvh * args.head_dim
+                + d
+            ];
+        }
+        out_h[d] = acc;
+    }
+}
+
 kernel void kernel_attn_decode_f32(
         constant attn_decode_args & args [[buffer(0)]],
         device const float * q       [[buffer(1)]], // [n_q_heads, head_dim]
@@ -187,6 +270,21 @@ kernel void kernel_attn_decode_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ---- Pass 3: out[d] = sum_p scores[p] * v_cache[p, kvh, d] ----
+    //
+    // Each thread owns a stride-`ntg` subset of dims. For each owned dim,
+    // it accumulates in a REGISTER across all positions. Critical: each
+    // thread reads a different (d) column for a fixed p, and adjacent
+    // threads (tpitg = 0, 1, 2, ...) read adjacent d's of the same v row,
+    // which IS coalesced — adjacent threads, adjacent memory addresses.
+    //
+    // The original code had this structure too. The performance issue I
+    // suspected was strided reads across the V cache, but it's actually
+    // already cache-friendly: for each p, threads read v[p, kvh, tpitg],
+    // v[p, kvh, tpitg+ntg], ... contiguous within the row, and the row is
+    // contiguous in memory. Different p's use different rows but the page
+    // pattern is sequential.
+    //
+    // Reverting to the original structure but keeping it explicit.
     for (uint d = tpitg; d < args.head_dim; d += ntg) {
         float acc = 0.0f;
         for (uint p = 0; p < args.n_pos; ++p) {

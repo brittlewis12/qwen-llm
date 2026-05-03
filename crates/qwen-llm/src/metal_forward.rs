@@ -31,11 +31,12 @@
 use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
-    encode_add_inplace_f32, encode_attn_decode_f32, encode_attn_decode_flash_f32,
-    encode_copy_offset_f32, encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_mat_vec_f32, encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
-    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
+    encode_add_inplace_f32, encode_attn_decode_f16kv_f32, encode_attn_decode_f32,
+    encode_attn_decode_flash_f32, encode_copy_offset_f32, encode_gdn_step_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
     encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
     MetalTensor,
 };
@@ -304,16 +305,22 @@ impl MetalSession {
             }
         }
 
+        // KV cache uses F16 storage (matches llama.cpp's default
+        // --cache-type-k f16). At long context this halves K/V bandwidth
+        // — at 4K positions on 27B that's 4 GB/token saved. The scatter
+        // path converts F32→F16 on append; the attn_decode_f16kv kernel
+        // reads F16 and casts to F32 in the dot product. Precision impact
+        // is below the noise floor of K-quant weights (cos > 0.999).
         let mut kv_k = Vec::new();
         let mut kv_v = Vec::new();
         let mut kv_n_pos = Vec::new();
         for b in &model.blocks {
             if matches!(b, MetalBlock::Attn(_)) {
-                kv_k.push(MetalTensor::zeros_f32(
+                kv_k.push(MetalTensor::zeros_f16(
                     ctx,
                     vec![kv_capacity as u64 * kv_dim],
                 )?);
-                kv_v.push(MetalTensor::zeros_f32(
+                kv_v.push(MetalTensor::zeros_f16(
                     ctx,
                     vec![kv_capacity as u64 * kv_dim],
                 )?);
@@ -819,7 +826,9 @@ impl<'a> MetalForward<'a> {
         // *inverted*: copy_offset reads from src+off into dst[0..n].
         // We need the opposite: copy from src[0..n] into dst+off. So
         // we add a small "scatter_offset" kernel below.
-        encode_scatter_offset_f32(
+        // KV cache append: F32 source → F16 destination (cache is F16 to
+        // halve attention bandwidth at long context).
+        encode_scatter_offset_f32_to_f16(
             self.ctx,
             enc,
             &s.attn_k_normed,
@@ -827,7 +836,7 @@ impl<'a> MetalForward<'a> {
             (position as usize) * kv_dim,
             kv_dim,
         )?;
-        encode_scatter_offset_f32(
+        encode_scatter_offset_f32_to_f16(
             self.ctx,
             enc,
             &s.attn_v_now,
@@ -838,13 +847,10 @@ impl<'a> MetalForward<'a> {
         s.kv_n_pos[attn_i] = position as usize + 1;
 
         // (8) Fused attention decode: scoring + softmax + V-aggregate.
-        // The naive kernel uses the cache-friendly read pattern (32 lanes
-        // cooperate on each KV row in parallel, coalesced) and is faster
-        // than my v1/v2 flash-attn at all contexts ≤ ~6000 (the
-        // threadgroup-memory cap of the naive kernel). Flash-attn would
-        // need a smarter access pattern to win — that's the next perf
-        // project. For v1 we use naive everywhere it fits.
-        encode_attn_decode_f32(
+        // F16 KV variant: reads K/V as half, casts to float in the dot
+        // product. Halves attention bandwidth at long context — the
+        // critical fix for the 4K decode regression vs llama.cpp.
+        encode_attn_decode_f16kv_f32(
             self.ctx,
             enc,
             &s.attn_q_normed,

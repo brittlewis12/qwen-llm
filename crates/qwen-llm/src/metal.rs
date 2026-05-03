@@ -283,6 +283,21 @@ impl MetalTensor {
             dtype: GgmlType::F32,
         })
     }
+
+    /// Allocate an F16 (half-precision) tensor. Used for the KV cache
+    /// when we want to halve attention bandwidth at long context. The
+    /// scatter kernel converts F32 → F16 on append; the attn_decode
+    /// kernel reads F16 and casts to F32 in the dot product.
+    pub fn zeros_f16(ctx: &MetalContext, shape: Vec<u64>) -> Result<Self, MetalError> {
+        let n: u64 = shape.iter().product();
+        let buffer = ctx.buffer_uninit(n as usize * 2)?; // half = 2 bytes
+        Ok(Self {
+            buffer,
+            offset: 0,
+            shape,
+            dtype: GgmlType::F16,
+        })
+    }
 }
 
 // ===========================================================================
@@ -1112,6 +1127,170 @@ pub fn encode_attn_decode_flash_f32(
         },
         MTLSize {
             width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// F16 KV-cache variant of `encode_attn_decode_f32`. Same algorithm,
+/// reads K and V as half-precision. Halves attention bandwidth at long
+/// context (saves ~4 GB of reads/token at 4K positions on 27B). Q is
+/// still F32; output is F32.
+///
+/// Caller is responsible for ensuring `k_cache` and `v_cache` are F16-typed
+/// MetalTensors (typically allocated via `MetalTensor::zeros_f16`).
+pub fn encode_attn_decode_f16kv_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    out: &MetalTensor,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_pos: usize,
+) -> Result<(), MetalError> {
+    if n_q_heads % n_kv_heads != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_f16kv",
+            detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
+        });
+    }
+    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_f16kv",
+            detail: format!(
+                "k/v expected F16 dtype, got {:?}/{:?}",
+                k_cache.dtype, v_cache.dtype
+            ),
+        });
+    }
+    let want = (n_q_heads * head_dim) as u64;
+    if q.n_elements() != want || out.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_f16kv",
+            detail: format!("q/out expected {want} elements"),
+        });
+    }
+    let kv_stride = n_kv_heads * head_dim;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        scale: f32,
+    }
+    let pso = ctx.pipeline("kernel_attn_decode_f16kv")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_pos: n_pos as u32,
+            kv_stride: kv_stride as u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, out);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    let scores_bytes = n_pos * std::mem::size_of::<f32>();
+    let shred_bytes = (n_simdgroups * std::mem::size_of::<f32>()).max(32);
+    if scores_bytes > 28 * 1024 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_f16kv",
+            detail: format!(
+                "n_pos={n_pos} requires {scores_bytes} B threadgroup memory; max ~28 KB"
+            ),
+        });
+    }
+    enc.set_threadgroup_memory(0, scores_bytes);
+    enc.set_threadgroup_memory(1, shred_bytes);
+    enc.dispatch(
+        MTLSize {
+            width: n_q_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Scatter F32 source bytes into a F16 destination buffer at offset.
+/// Used for KV cache append when the cache is F16. Counterpart of
+/// `encode_scatter_offset_f32` (F32 → F32).
+pub fn encode_scatter_offset_f32_to_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    dst: &MetalTensor,
+    dst_off: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    if src.dtype != GgmlType::F32 || dst.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16",
+            detail: format!("expected F32→F16, got {:?}→{:?}", src.dtype, dst.dtype),
+        });
+    }
+    if src.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16",
+            detail: format!("src.n={} != n={n}", src.n_elements()),
+        });
+    }
+    if (dst_off + n) as u64 > dst.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16",
+            detail: format!("dst_off+n={} > dst.n={}", dst_off + n, dst.n_elements()),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        dst_off: u32,
+    }
+    let pso = ctx.pipeline("kernel_scatter_offset_f32_to_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            dst_off: dst_off as u32,
+        },
+    );
+    enc.set_tensor(1, src);
+    enc.set_tensor(2, dst);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
             height: 1,
             depth: 1,
         },

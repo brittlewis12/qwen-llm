@@ -254,6 +254,19 @@ kernel void kernel_scatter_offset_f32(
     y[args.dst_off + tid] = x[tid];
 }
 
+// Same but writes F16 destination from F32 source. Used for F16 KV
+// cache append. Precision: x is f32 in the model's residual stream,
+// half() conversion is fine for K/V (llama.cpp also defaults to f16
+// KV). The half value is what attn_decode_f16 will read back.
+kernel void kernel_scatter_offset_f32_to_f16(
+        constant scatter_offset_args & args [[buffer(0)]],
+        device const float * x [[buffer(1)]],
+        device       half  * y [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    y[args.dst_off + tid] = (half)x[tid];
+}
+
 // get_rows: y[r * n_cols + i] = embed[ids[r] * n_cols + i].
 // For embedding lookup at decode (n_rows=1) and prefill (n_rows=batch).
 struct get_rows_args {

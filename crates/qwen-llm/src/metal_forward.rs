@@ -3587,4 +3587,190 @@ mod tests {
         let out_w = crate::codec::dequant_to_f32(gb.out_proj, f.gguf.slice(gb.out_proj)).unwrap();
         crate::forward::mat_vec_pub(&out_w, v_dim, h, &gated)
     }
+
+    /// **H2.0 — prefix-cache correctness spike.** Validates that
+    /// snapshot+restore at a prefix boundary yields the same final
+    /// logits as cold prefill of the full sequence.
+    ///
+    /// Mechanism (deliberately minimal — no public API yet, just to
+    /// prove the principle):
+    ///   1. Prefill prompt into session A (cold path).
+    ///   2. Capture last-position logits from A.
+    ///   3. Make a fresh session B, prefill ONLY the prefix into B.
+    ///   4. Snapshot B's state by raw-byte-cloning all six per-layer
+    ///      MTLBuffers via `MTLBuffer.contents()` → `Vec<u8>`.
+    ///   5. Make a fresh session C, restore the snapshot bytes into C's
+    ///      buffers (also via raw `contents()` write).
+    ///   6. Run the suffix tokens through C, capture last-position logits.
+    ///   7. Assert cos(A_logits, C_logits) ≥ 0.99999 and same argmax.
+    ///
+    /// If this passes, snapshot mechanism is sound and we can build the
+    /// real packed-arena LRU on top. If it fails, H2 is dead and we
+    /// pivot to backend sampler / attention-surround fusions.
+    ///
+    /// Falsifiable kill criterion (per codex's H2 review): cos < 0.99999
+    /// or argmax mismatch at any tested prefix length.
+    #[test]
+    #[ignore]
+    fn h2_prefix_cache_correctness_spike() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[h2-spike] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Use a longer prompt so we can split it into prefix+suffix.
+        let prompt =
+            "The quick brown fox jumps over the lazy dog and then runs into the deep forest";
+        let ids = tok.encode(prompt, false).expect("tokenize");
+        eprintln!("[h2-spike] {} prompt tokens: {ids:?}", ids.len());
+        // Test multiple prefix split points (per codex's kill criteria).
+        let prefix_lens = [3usize, 5, 8, ids.len() - 1];
+
+        // Read all bytes from a MetalTensor's MTLBuffer (shared storage).
+        let read_bytes = |t: &MetalTensor| -> Vec<u8> {
+            let n = t.n_bytes() as usize;
+            let mut out = vec![0u8; n];
+            unsafe {
+                let src = (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize);
+                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+            }
+            out
+        };
+        let write_bytes = |t: &MetalTensor, bytes: &[u8]| {
+            assert_eq!(
+                bytes.len() as u64,
+                t.n_bytes(),
+                "snapshot byte size mismatch"
+            );
+            unsafe {
+                let dst = (t.buffer.contents().as_ptr() as *mut u8).add(t.offset as usize);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+            }
+        };
+
+        for &prefix_len in &prefix_lens {
+            assert!(prefix_len < ids.len() && prefix_len > 0);
+            let suffix_len = ids.len() - prefix_len;
+            eprintln!("[h2-spike] === prefix_len={prefix_len} suffix_len={suffix_len} ===");
+
+            // ---- 1+2: Cold prefill of full prompt. Capture last logits. ----
+            let mut sess_cold = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("session A");
+            let mut logits_cold = vec![];
+            for (i, &tid) in ids.iter().enumerate() {
+                logits_cold = mf
+                    .single_token(tid, i as u32, &mut sess_cold)
+                    .expect("cold");
+            }
+            let n = logits_cold.len();
+
+            // ---- 3: Fresh session, prefill only the prefix. ----
+            let mut sess_pre = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("session B");
+            for i in 0..prefix_len {
+                let _ = mf
+                    .single_token(ids[i], i as u32, &mut sess_pre)
+                    .expect("pre");
+            }
+
+            // ---- 4: Snapshot all six per-layer state bytes. ----
+            let snap_kv_k: Vec<Vec<u8>> = sess_pre.kv_k.iter().map(read_bytes).collect();
+            let snap_kv_v: Vec<Vec<u8>> = sess_pre.kv_v.iter().map(read_bytes).collect();
+            let snap_kv_n_pos = sess_pre.kv_n_pos.clone();
+            let snap_gdn_conv: Vec<Vec<u8>> = sess_pre.gdn_conv.iter().map(read_bytes).collect();
+            let snap_gdn_state: Vec<Vec<u8>> = sess_pre.gdn_state.iter().map(read_bytes).collect();
+
+            let total_snap_bytes: usize = snap_kv_k.iter().map(|v| v.len()).sum::<usize>()
+                + snap_kv_v.iter().map(|v| v.len()).sum::<usize>()
+                + snap_gdn_conv.iter().map(|v| v.len()).sum::<usize>()
+                + snap_gdn_state.iter().map(|v| v.len()).sum::<usize>();
+            eprintln!(
+                "[h2-spike]   snapshot size: {:.1} MB ({} attn KV + {} GDN conv + {} GDN state buffers)",
+                total_snap_bytes as f64 / 1e6,
+                snap_kv_k.len() * 2,
+                snap_gdn_conv.len(),
+                snap_gdn_state.len()
+            );
+
+            // ---- 5: Fresh session, restore the snapshot bytes. ----
+            let mut sess_restored =
+                MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("session C");
+            for (i, src) in snap_kv_k.iter().enumerate() {
+                write_bytes(&sess_restored.kv_k[i], src);
+            }
+            for (i, src) in snap_kv_v.iter().enumerate() {
+                write_bytes(&sess_restored.kv_v[i], src);
+            }
+            sess_restored.kv_n_pos.copy_from_slice(&snap_kv_n_pos);
+            for (i, src) in snap_gdn_conv.iter().enumerate() {
+                write_bytes(&sess_restored.gdn_conv[i], src);
+            }
+            for (i, src) in snap_gdn_state.iter().enumerate() {
+                write_bytes(&sess_restored.gdn_state[i], src);
+            }
+
+            // ---- 6: Run suffix tokens through restored session. ----
+            let mut logits_restored = vec![];
+            for k in 0..suffix_len {
+                let pos = (prefix_len + k) as u32;
+                let tid = ids[prefix_len + k];
+                logits_restored = mf
+                    .single_token(tid, pos, &mut sess_restored)
+                    .expect("restored forward");
+            }
+
+            // ---- 7: Compare last-position logits. ----
+            assert_eq!(
+                logits_cold.len(),
+                logits_restored.len(),
+                "logits len mismatch"
+            );
+            let mut max_abs = 0.0f32;
+            let mut argmax_cold = 0usize;
+            let mut argmax_restored = 0usize;
+            let mut max_cold = f32::NEG_INFINITY;
+            let mut max_restored = f32::NEG_INFINITY;
+            let mut dot = 0.0f64;
+            let mut na = 0.0f64;
+            let mut nb = 0.0f64;
+            for i in 0..n {
+                let d = (logits_cold[i] - logits_restored[i]).abs();
+                max_abs = max_abs.max(d);
+                if logits_cold[i] > max_cold {
+                    max_cold = logits_cold[i];
+                    argmax_cold = i;
+                }
+                if logits_restored[i] > max_restored {
+                    max_restored = logits_restored[i];
+                    argmax_restored = i;
+                }
+                dot += logits_cold[i] as f64 * logits_restored[i] as f64;
+                na += (logits_cold[i] as f64).powi(2);
+                nb += (logits_restored[i] as f64).powi(2);
+            }
+            let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+            eprintln!(
+                "[h2-spike]   cos={cos:.7} max|Δ|={max_abs:.4} argmax: cold={argmax_cold} restored={argmax_restored} {}",
+                if argmax_cold == argmax_restored { "✓" } else { "✗ MISMATCH" }
+            );
+            assert_eq!(
+                argmax_cold, argmax_restored,
+                "argmax mismatch at prefix_len={prefix_len}: cold={argmax_cold} restored={argmax_restored}"
+            );
+            assert!(
+                cos > 0.99999,
+                "cos={cos} below 0.99999 at prefix_len={prefix_len}"
+            );
+        }
+        eprintln!("[h2-spike] ALL prefix splits passed — H2 mechanism validated.");
+    }
 }

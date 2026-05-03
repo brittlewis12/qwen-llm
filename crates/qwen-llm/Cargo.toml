@@ -1,0 +1,35 @@
+[package]
+name = "qwen-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-metal.workspace = true
+block2.workspace = true
+
+memmap2.workspace = true
+byteorder.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+gguf-rs.workspace = true
+serde_json.workspace = true
+
+llama-cpp-sys-2.workspace = true
+
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+crossbeam.workspace = true
+parking_lot.workspace = true
+
+[build-dependencies]
+anyhow.workspace = true

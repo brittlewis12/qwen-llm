@@ -1,0 +1,15 @@
+target/
+**/*.rs.bk
+.DS_Store
+
+# don't check in compiled metal artifacts; build.rs regenerates
+*.air
+*.metallib
+
+# benchmark scratch
+bench/results/
+*.trace/
+
+# editor
+.vscode/
+.idea/

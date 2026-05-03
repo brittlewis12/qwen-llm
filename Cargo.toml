@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = ["crates/qwen-llm", "crates/qwen-cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Britt Lewis"]
+
+[workspace.dependencies]
+# host-side metal bindings (objc2-metal is the active successor to metal-rs)
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSError", "NSData"] }
+objc2-metal = { version = "0.3", features = [
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLComputeCommandEncoder",
+    "MTLBuffer",
+    "MTLLibrary",
+    "MTLComputePipeline",
+    "MTLBinaryArchive",
+    "MTLResource",
+    "MTLTypes",
+    "MTLArgumentEncoder",
+    "block2",
+] }
+block2 = "0.6"
+
+# loader / codec
+memmap2 = "0.9"
+byteorder = "1.5"
+half = { version = "2.6", features = ["bytemuck"] }
+bytemuck = { version = "1.16", features = ["derive"] }
+gguf-rs = { path = "../gguf" }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+
+# dequant codec for tooling / re-pack-on-load (see docs/PLAN.md weight-format role table)
+llama-cpp-sys-2 = { path = "../llama-cpp-rs/llama-cpp-sys-2" }
+
+# error / logging
+thiserror = "2"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# cli
+clap = { version = "4.5", features = ["derive"] }
+
+# parallel prep + worker threads for cpu↔gpu pipelining
+crossbeam = "0.8"
+parking_lot = "0.12"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"
+debug = "full"

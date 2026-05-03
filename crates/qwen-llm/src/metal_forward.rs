@@ -33,10 +33,10 @@ use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
     encode_add_inplace_f32, encode_attn_decode_f32, encode_copy_offset_f32, encode_gdn_step_f32,
     encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_softplus_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder,
-    MetalContext, MetalError, MetalTensor,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_softplus_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    KernelEncoder, MetalContext, MetalError, MetalTensor,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{
@@ -140,7 +140,7 @@ impl MetalModel {
         // for other types we don't have native kernels for yet.
         let load_weight = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
             match desc.dtype {
-                GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K => {
+                GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K => {
                     Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
                 }
                 _ => {
@@ -960,6 +960,9 @@ fn encode_mat_vec_dispatch(
     match weight.dtype {
         GgmlType::F32 => Ok(encode_mat_vec_f32(ctx, enc, weight, x, y, n_in, n_out)?),
         GgmlType::Q4_K => Ok(encode_mat_vec_q4_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::Q5_K => Ok(encode_mat_vec_q5_k_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
         GgmlType::Q6_K => Ok(encode_mat_vec_q6_k_f32(

@@ -1611,6 +1611,94 @@ pub fn encode_gdn_step_f32(
     Ok(())
 }
 
+/// Q5_K mat-vec, same API shape as [`encode_mat_vec_q4_k_f32`].
+/// Block size 176 bytes / 256 elements.
+pub fn encode_mat_vec_q5_k_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q5_k",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::Q5_K {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q5_k",
+            detail: format!("weight.dtype = {:?}, expected Q5_K", weight.dtype),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_vec_q5_K_f32")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+
+    // NR0=1, NSG=2 → 2 output rows per threadgroup.
+    const NR0: usize = 1;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// One-shot Q5_K mat-vec for tests.
+pub fn mat_vec_q5_k_f32_readback_for_test(
+    ctx: &MetalContext,
+    weight_bytes: &[u8],
+    x: &[f32],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, MetalError> {
+    let w_t = MetalTensor::from_bytes(
+        ctx,
+        weight_bytes,
+        vec![n_in as u64, n_out as u64],
+        GgmlType::Q5_K,
+    )?;
+    let x_t = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(x),
+        vec![n_in as u64],
+        GgmlType::F32,
+    )?;
+    let y_t = MetalTensor::zeros_f32(ctx, vec![n_out as u64])?;
+    one_shot(ctx, |enc| {
+        encode_mat_vec_q5_k_f32(ctx, enc, &w_t, &x_t, &y_t, n_in, n_out)
+    })?;
+    Ok(read_back_f32(&y_t.buffer, n_out))
+}
+
 /// Q6_K mat-vec, same API shape as [`encode_mat_vec_q4_k_f32`].
 pub fn encode_mat_vec_q6_k_f32(
     ctx: &MetalContext,
@@ -1958,6 +2046,46 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         eprintln!("[q4_k] max|Δ|={max_abs:.2e}");
+        assert!(max_abs < 1e-2);
+    }
+
+    #[test]
+    fn mat_vec_q5_k_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let q5k = g
+            .tensors
+            .iter()
+            .find(|t| {
+                t.name.starts_with("blk.0.")
+                    && t.dtype == GgmlType::Q5_K
+                    && t.shape.len() == 2
+                    && t.shape[0] % 256 == 0
+            })
+            .expect("no Q5_K tensor in 27B layer 0");
+        let n_in = q5k.shape[0] as usize;
+        let n_out = q5k.shape[1] as usize;
+        eprintln!("[q5_k-test] {} shape=[{n_in}, {n_out}]", q5k.name);
+
+        let weight_f32 = crate::codec::dequant_to_f32(q5k, g.slice(q5k)).expect("dequant");
+        let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+        let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
+        let gpu = mat_vec_q5_k_f32_readback_for_test(&ctx, g.slice(q5k), &x, n_in, n_out)
+            .expect("metal q5k");
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[q5_k] max|Δ|={max_abs:.2e}");
         assert!(max_abs < 1e-2);
     }
 

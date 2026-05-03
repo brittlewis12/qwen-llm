@@ -31,12 +31,13 @@
 use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
-    encode_add_inplace_f32, encode_attn_decode_f32, encode_copy_offset_f32, encode_gdn_step_f32,
-    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_softplus_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    KernelEncoder, MetalContext, MetalError, MetalTensor,
+    encode_add_inplace_f32, encode_attn_decode_f32, encode_attn_decode_flash_f32,
+    encode_copy_offset_f32, encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
+    encode_mat_vec_f32, encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
+    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
+    MetalTensor,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{
@@ -837,6 +838,12 @@ impl<'a> MetalForward<'a> {
         s.kv_n_pos[attn_i] = position as usize + 1;
 
         // (8) Fused attention decode: scoring + softmax + V-aggregate.
+        // Naive single-buffer version is faster than v1 flash-attn at
+        // all contexts ≤ ~6000 (which is also the threadgroup-memory cap).
+        // The flash kernel I wrote does O(positions × head_dim) reads
+        // per lane in the V-aggregate inner loop, which makes it 4× slower
+        // at 4K than the naive version. Need to fix the V-aggregate
+        // memory access pattern before turning flash on for long context.
         encode_attn_decode_f32(
             self.ctx,
             enc,
@@ -1737,6 +1744,125 @@ mod tests {
             "[ledger]   estimated cost of fallbacks: {:+.2} ms",
             bw_floor_metal - bw_floor_native
         );
+    }
+
+    /// **MTP tensor inventory**: scan the 27B GGUF for `mtp.*` tensors
+    /// to see what speculative-decoding state is shipped in the file.
+    /// Per the Qwen3.5/3.6 spec, the MTP head is a single decoder layer
+    /// with shared `embed_tokens` + `lm_head`. The released checkpoint
+    /// includes the trained MTP weights even though HF transformers
+    /// ignores them.
+    #[test]
+    #[ignore]
+    fn mtp_tensor_inventory() {
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = GgufFile::open(path).expect("open");
+        let mtp_tensors: Vec<_> = g
+            .tensors
+            .iter()
+            .filter(|t| t.name.starts_with("mtp") || t.name.contains(".mtp"))
+            .collect();
+        eprintln!("[mtp] found {} MTP-prefixed tensors:", mtp_tensors.len());
+        let mut total_bytes = 0u64;
+        for t in &mtp_tensors {
+            eprintln!(
+                "[mtp]   {:40} {:?}  shape={:?}  ({} bytes)",
+                t.name, t.dtype, t.shape, t.n_bytes
+            );
+            total_bytes += t.n_bytes;
+        }
+        eprintln!(
+            "[mtp] total MTP weight bytes: {:.2} MiB",
+            total_bytes as f64 / (1024.0 * 1024.0)
+        );
+        // For comparison: also list the canonical "next" architecture key.
+        for k in g
+            .model
+            .metadata()
+            .keys()
+            .filter(|k| k.contains("mtp") || k.contains("next") || k.contains("speculative"))
+        {
+            eprintln!("[mtp] metadata key: {k}");
+        }
+    }
+
+    /// **Context-length sweep**: how does decode throughput scale as the
+    /// KV cache and GDN state grow? llama-bench's `tg128` is at fixed
+    /// position 0..127. We sweep further to see where the cliffs are.
+    ///
+    /// Drives 1, 64, 256, 1024, 4096 tokens and reports per-token cost
+    /// at each prefix length. The KV cache grows linearly with context
+    /// (16 attn layers × 64 KB / token), so attn_decode kernel
+    /// time should grow linearly too. GDN state is fixed-size so GDN
+    /// layer cost is invariant.
+    #[test]
+    #[ignore]
+    fn metal_27b_context_sweep() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        // Sweep targets — ramp up until threadgroup memory or time get
+        // unreasonable. attn_decode_f32 currently caps at ~7000 positions
+        // (28KB threadgroup memory ÷ 4 B/score).
+        let checkpoints = [1usize, 64, 256, 1024, 4096, 6000];
+
+        let max_n = *checkpoints.iter().max().unwrap();
+        let mut s = MetalSession::fresh(&ctx, &mm, max_n + 16).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Warmup pipeline state cache.
+        for i in 0..3 {
+            let _ = mf.single_token(0, i as u32, &mut s).expect("warmup");
+        }
+        let mut s = MetalSession::fresh(&ctx, &mm, max_n + 16).expect("session2");
+        // One pre-warmed token at position 0 to populate everything.
+        let _ = mf.single_token(0, 0, &mut s).expect("p0");
+
+        eprintln!("[ctx-sweep] === per-token decode cost vs context ===");
+        eprintln!("[ctx-sweep] context  total_ms  gpu_ms  cpu_enc_ms  t/s   GB/s   %peak");
+
+        let mut prev_pos = 1u32;
+        for &target in &checkpoints {
+            // Ramp KV cache + GDN state to `target` positions.
+            // For positions 1..target we don't need to time; just need them
+            // populated. Use any token id (0).
+            for p in prev_pos..(target as u32) {
+                let _ = mf.single_token(0, p, &mut s).expect("ramp");
+            }
+            prev_pos = target as u32;
+
+            // Time a window at this context length.
+            const WINDOW: usize = 5;
+            let mut samples = Vec::with_capacity(WINDOW);
+            for i in 0..WINDOW {
+                let pos = prev_pos + i as u32;
+                let (_, p) = mf.single_token_profiled(0, pos, &mut s).expect("timed");
+                samples.push(p);
+            }
+            prev_pos += WINDOW as u32;
+
+            let avg_total = samples.iter().map(|p| p.total_ms).sum::<f64>() / WINDOW as f64;
+            let avg_gpu = samples.iter().map(|p| p.gpu_kernel_ms).sum::<f64>() / WINDOW as f64;
+            let avg_enc = samples.iter().map(|p| p.cpu_encode_ms).sum::<f64>() / WINDOW as f64;
+            let bw = 16.8_f64 / (avg_gpu / 1000.0); // model-only bytes
+            eprintln!(
+                "[ctx-sweep] {target:>7}  {avg_total:>8.2}  {avg_gpu:>6.2}  {avg_enc:>10.2}  {:>4.1}  {bw:>5.0}   {:>4.0}%",
+                1000.0 / avg_total,
+                bw / 5.46
+            );
+        }
     }
 
     /// **Per-token profiling on 27B-Q4_K_M.** Runs N steady-state tokens,

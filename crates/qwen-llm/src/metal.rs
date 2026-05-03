@@ -1038,6 +1038,87 @@ pub fn encode_split_q_gate_f32(
     Ok(())
 }
 
+/// Flash-attention-style decode: streaming softmax over K/V tiles.
+/// Same I/O contract as `encode_attn_decode_f32` but no upper bound on
+/// `n_pos` — works at any context length.
+///
+/// CPU oracle: same as the naive kernel (numerical equivalence within
+/// fp32 reorder noise; the streaming softmax is mathematically identical
+/// to the full-buffer version).
+pub fn encode_attn_decode_flash_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    out: &MetalTensor,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_pos: usize,
+) -> Result<(), MetalError> {
+    if n_q_heads % n_kv_heads != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_flash",
+            detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
+        });
+    }
+    let want = (n_q_heads * head_dim) as u64;
+    if q.n_elements() != want || out.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_flash",
+            detail: format!("q/out expected {want} elements"),
+        });
+    }
+    let kv_stride = n_kv_heads * head_dim;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        scale: f32,
+    }
+    let pso = ctx.pipeline("kernel_attn_decode_flash_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_pos: n_pos as u32,
+            kv_stride: kv_stride as u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, out);
+
+    let tg_bytes = head_dim * std::mem::size_of::<f32>();
+    enc.set_threadgroup_memory(0, tg_bytes.max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: n_q_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Fused attention decode (single-token Q step). For each Q head:
 ///   1. scores[p] = (q · k_cache[p, kvh, :]) * scale
 ///   2. softmax over scores
@@ -1977,6 +2058,88 @@ mod tests {
                 .fold(0f32, f32::max);
             eprintln!("[rms_norm n={n}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-4, "rms_norm n={n}: max|Δ|={max_abs}");
+        }
+    }
+
+    /// Flash-attention vs naive attn_decode: same inputs, both kernels,
+    /// must produce numerically equivalent outputs across n_pos values.
+    #[test]
+    fn flash_attn_matches_naive() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n_q = 24usize;
+        let n_kv = 4usize;
+        let hd = 256usize;
+        for &n_pos in &[1usize, 64, 256, 1024, 4096] {
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let cap = n_pos.max(64);
+            let k: Vec<f32> = (0..cap * n_kv * hd)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v: Vec<f32> = (0..cap * n_kv * hd)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&k),
+                vec![(cap * n_kv * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let v_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&v),
+                vec![(cap * n_kv * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let naive_works = n_pos * std::mem::size_of::<f32>() <= 28 * 1024;
+            let out_naive = if naive_works {
+                let y = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_f32(&ctx, enc, &q_t, &k_t, &v_t, &y, n_q, n_kv, hd, n_pos)
+                })
+                .unwrap();
+                Some(read_back_f32(&y.buffer, n_q * hd))
+            } else {
+                None
+            };
+            let y_flash = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_flash_f32(
+                    &ctx, enc, &q_t, &k_t, &v_t, &y_flash, n_q, n_kv, hd, n_pos,
+                )
+            })
+            .unwrap();
+            let flash = read_back_f32(&y_flash.buffer, n_q * hd);
+            if let Some(naive) = &out_naive {
+                let max_abs = flash
+                    .iter()
+                    .zip(naive.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                eprintln!("[flash-attn n_pos={n_pos:>4}] max|flash - naive|={max_abs:.2e}");
+                assert!(
+                    max_abs < 1e-3,
+                    "flash vs naive mismatch at n_pos={n_pos}: max|Δ|={max_abs}"
+                );
+            } else {
+                eprintln!("[flash-attn n_pos={n_pos:>4}] naive skipped (tg memory cap)");
+                let n_finite = flash.iter().filter(|v| v.is_finite()).count();
+                assert_eq!(n_finite, flash.len(), "flash produced non-finite values");
+            }
         }
     }
 

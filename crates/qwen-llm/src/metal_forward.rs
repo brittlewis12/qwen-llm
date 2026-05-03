@@ -33,13 +33,13 @@ use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
     attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
     encode_attn_decode_f16kv_f32, encode_attn_decode_f32, encode_attn_decode_v4_f32,
-    encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_gdn_step_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_softplus_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    KernelEncoder, MetalContext, MetalError, MetalTensor,
+    encode_copy_offset_f32, encode_ffn_swiglu_q4_K_f32, encode_gdn_alpha_chain_f32,
+    encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
+    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv,
+    encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32, encode_split_q_gate_f32,
+    encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError, MetalTensor,
 };
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -704,34 +704,20 @@ impl<'a> MetalForward<'a> {
             MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
             MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
         };
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            g_w,
-            &s.h,
-            &s.ffn_gate,
-            h,
-            arch.intermediate_size as usize,
-        )?;
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            u_w,
-            &s.h,
-            &s.ffn_up,
-            h,
-            arch.intermediate_size as usize,
-        )?;
-        encode_silu_mul_f32(self.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)?;
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            d_w,
-            &s.ffn_inner,
-            &s.ffn_out,
-            arch.intermediate_size as usize,
-            h,
-        )?;
+        let f = arch.intermediate_size as usize;
+        // Fused SwiGLU when both gate and up are Q4_K (27B production).
+        // Falls back to 3-dispatch path for F32 weights (0.8B) or other dtypes.
+        // Per Jeff & Sanjay: amortize boundary crossings + eliminate
+        // intermediate materialization (no separate gate/up writes).
+        let ffn_fused = g_w.dtype == GgmlType::Q4_K && u_w.dtype == GgmlType::Q4_K;
+        if ffn_fused {
+            encode_ffn_swiglu_q4_K_f32(self.ctx, enc, g_w, u_w, &s.h, &s.ffn_inner, h, f)?;
+        } else {
+            encode_mat_vec_dispatch(self.ctx, enc, g_w, &s.h, &s.ffn_gate, h, f)?;
+            encode_mat_vec_dispatch(self.ctx, enc, u_w, &s.h, &s.ffn_up, h, f)?;
+            encode_silu_mul_f32(self.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)?;
+        }
+        encode_mat_vec_dispatch(self.ctx, enc, d_w, &s.ffn_inner, &s.ffn_out, f, h)?;
 
         // Residual #2: x += ffn_out.
         encode_add_inplace_f32(self.ctx, enc, &s.x, &s.ffn_out)?;

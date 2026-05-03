@@ -585,6 +585,101 @@ pub fn encode_mat_vec_q4_k_f32(
     Ok(())
 }
 
+/// Fused SwiGLU FFN dispatch for Q4_K weights.
+///
+/// Replaces the 3-dispatch sequence:
+///   mat_vec_q4_K(W_gate, x) -> gate
+///   mat_vec_q4_K(W_up,   x) -> up
+///   silu_mul(gate, up)      -> inner
+/// with a single kernel that:
+///   * reads x ONCE per super-block (shared across both gate and up paths)
+///   * eliminates the n_out-element `gate` and `up` intermediate buffers
+///   * fuses silu(gate) * up into the final lane-0 write
+///
+/// At the 27B FFN shape (n_in=5120, n_out=17408), this saves ~140 KB of
+/// intermediate writes+reads per layer × 48 layers = ~6.5 MB/token.
+///
+/// CPU oracle: equivalent to the unfused 3-dispatch sequence (validated
+/// by `ffn_swiglu_q4_K_matches_unfused`).
+#[allow(non_snake_case)]
+pub fn encode_ffn_swiglu_q4_K_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_swiglu_q4_K",
+            detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
+        });
+    }
+    if w_gate.dtype != GgmlType::Q4_K || w_up.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_swiglu_q4_K",
+            detail: format!(
+                "expected Q4_K weights, got gate={:?} up={:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_in {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_swiglu_q4_K",
+            detail: format!("x.n={} != n_in={n_in}", x.n_elements()),
+        });
+    }
+    if inner.n_elements() as usize != n_out {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_swiglu_q4_K",
+            detail: format!("inner.n={} != n_out={n_out}", inner.n_elements()),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_ffn_swiglu_q4_K_f32")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, inner);
+
+    // Same threadgroup shape as kernel_mat_vec_q4_K_f32: NR0=2 rows per
+    // simdgroup, NSG=2 simdgroups per threadgroup.
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 // ----- elementwise + small ops -----
 
 /// Per-element kernel arg used by silu/sigmoid/softplus/add/mul/silu_mul.
@@ -2772,6 +2867,121 @@ mod tests {
             };
             assert!((sp[i] - exp_sp).abs() < 1e-5);
         }
+    }
+
+    /// Fused SwiGLU FFN (1 dispatch) must match the unfused
+    /// (mat_vec_q4_K + mat_vec_q4_K + silu_mul) 3-dispatch sequence
+    /// within fp32 reorder noise. Uses real Q4_K weights from the 27B
+    /// model's first FFN.
+    #[test]
+    fn ffn_swiglu_q4_K_matches_unfused() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+
+        // Find ffn_gate and ffn_up Q4_K tensors from layer 0.
+        let gate = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("no blk.0.ffn_gate.weight Q4_K");
+        let up = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("no blk.0.ffn_up.weight Q4_K");
+        assert_eq!(gate.shape, up.shape, "gate/up shape mismatch");
+        let n_in = gate.shape[0] as usize;
+        let n_out = gate.shape[1] as usize;
+        eprintln!(
+            "[ffn-fused] gate={} up={} n_in={n_in} n_out={n_out}",
+            gate.name, up.name
+        );
+
+        // Build inputs.
+        let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let w_gate = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(gate),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+        let w_up = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(up),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+
+        // --- Unfused reference: 3 dispatches ---
+        let gate_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+        let up_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+        let inner_ref_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_mat_vec_q4_k_f32(&ctx, enc, &w_gate, &x_t, &gate_t, n_in, n_out)?;
+            encode_mat_vec_q4_k_f32(&ctx, enc, &w_up, &x_t, &up_t, n_in, n_out)?;
+            encode_silu_mul_f32(&ctx, enc, &gate_t, &up_t, &inner_ref_t)
+        })
+        .unwrap();
+        let inner_ref = read_back_f32(&inner_ref_t.buffer, n_out);
+
+        // --- Fused: 1 dispatch ---
+        let inner_fused_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_ffn_swiglu_q4_K_f32(&ctx, enc, &w_gate, &w_up, &x_t, &inner_fused_t, n_in, n_out)
+        })
+        .unwrap();
+        let inner_fused = read_back_f32(&inner_fused_t.buffer, n_out);
+
+        let max_abs = inner_fused
+            .iter()
+            .zip(inner_ref.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = inner_fused
+            .iter()
+            .zip(inner_ref.iter())
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum();
+        let na: f64 = inner_fused
+            .iter()
+            .map(|x| (*x as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let nb: f64 = inner_ref
+            .iter()
+            .map(|x| (*x as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let cos = dot / (na * nb);
+        eprintln!("[ffn-fused] n_out={n_out} max|Δ|={max_abs:.2e} cos={cos:.6}");
+        // The two paths do the same fp32 reductions in the same order
+        // (both use simd_sum over the same 32 lanes per row, producing
+        // identical totals). Difference should be ~0 except for the
+        // silu compositional difference (silu computed before vs after
+        // the float -> device write -> float read roundtrip; should
+        // also be 0). Allow tiny tolerance for safety.
+        assert!(
+            cos > 0.9999,
+            "fused FFN cos too low: {cos} (max|Δ|={max_abs})"
+        );
+        assert!(max_abs < 1e-3, "fused FFN diverged: max|Δ|={max_abs}");
     }
 
     /// Fused K+V scatter (one dispatch writes both caches) must produce

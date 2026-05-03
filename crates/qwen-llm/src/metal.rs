@@ -893,6 +893,108 @@ pub fn encode_get_rows_f32(
     Ok(())
 }
 
+/// Single-step GDN recurrence: per-V-head delta-rule update + output.
+///
+/// Performs (per V-head) all of:
+///   * decay:  S ← exp(g) · S
+///   * inner:  s_k = S · k
+///   * delta:  Δ = (v − s_k) · β
+///   * update: S += Δ ⊗ k
+///   * output: o = (S · q) / √head_dim
+///
+/// All in one kernel, with S held in registers across the (decay → inner
+/// → update → output) sequence. State is read from / written back to
+/// `state`; the rest are read-only (one timestep per call). For multi-
+/// token prefill we'd loop the recurrence inside the kernel; v1 is
+/// single-token decode, so T=1.
+///
+/// Hardcoded for `head_dim = 128` (Qwen3.5/3.6 GDN). When that changes,
+/// the kernel needs templating on `dks_per_lane = head_dim / 32`.
+///
+/// CPU oracle: per-V-head loop in `crate::forward::Forward::gdn_step`.
+pub fn encode_gdn_step_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k: &MetalTensor,
+    v: &MetalTensor,
+    g: &MetalTensor,
+    beta: &MetalTensor,
+    state: &MetalTensor,
+    out: &MetalTensor,
+    n_v_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    if head_dim != 128 {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step",
+            detail: format!("head_dim={head_dim} but kernel hardcodes 128"),
+        });
+    }
+    let want_qkv = (n_v_heads * head_dim) as u64;
+    if q.n_elements() != want_qkv || k.n_elements() != want_qkv || v.n_elements() != want_qkv {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step",
+            detail: format!("q/k/v expected {want_qkv} elements"),
+        });
+    }
+    if g.n_elements() != n_v_heads as u64 || beta.n_elements() != n_v_heads as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step",
+            detail: format!("g/beta expected {n_v_heads} elements"),
+        });
+    }
+    let want_state = (n_v_heads * head_dim * head_dim) as u64;
+    if state.n_elements() != want_state {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step",
+            detail: format!("state expected {want_state} elements"),
+        });
+    }
+    if out.n_elements() != want_qkv {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step",
+            detail: format!("out expected {want_qkv} elements"),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_v_heads: u32,
+    }
+    let pso = ctx.pipeline("kernel_gdn_step_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_v_heads: n_v_heads as u32,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k);
+    enc.set_tensor(3, v);
+    enc.set_tensor(4, g);
+    enc.set_tensor(5, beta);
+    enc.set_tensor(6, state);
+    enc.set_tensor(7, out);
+
+    // 2D grid: (head_dim, n_v_heads). One simdgroup (32 threads) per (dv, hi).
+    enc.dispatch(
+        MTLSize {
+            width: head_dim,
+            height: n_v_heads,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Q6_K mat-vec, same API shape as [`encode_mat_vec_q4_k_f32`].
 pub fn encode_mat_vec_q6_k_f32(
     ctx: &MetalContext,
@@ -1554,6 +1656,175 @@ mod tests {
                     ids[r]
                 );
             }
+        }
+    }
+
+    /// CPU reference for the GDN-step kernel — mirrors the per-V-head
+    /// inner loop in `forward::Forward::gdn_step` exactly. Mutates
+    /// `state` in place and returns `out`.
+    fn gdn_step_cpu_ref(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state: &mut [f32],
+        n_v: usize,
+        hd: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; n_v * hd];
+        let scale = 1.0 / (hd as f32).sqrt();
+        for hi in 0..n_v {
+            let s_off = hi * hd * hd;
+            let q_h = &q[hi * hd..(hi + 1) * hd];
+            let k_h = &k[hi * hd..(hi + 1) * hd];
+            let v_h = &v[hi * hd..(hi + 1) * hd];
+            let g_h = g[hi].exp();
+            let b_h = beta[hi];
+
+            // Decay: S *= g_h
+            for j in 0..hd * hd {
+                state[s_off + j] *= g_h;
+            }
+            // s_k[dv] = sum_dk S[dv,dk] * k[dk]
+            let mut sk = vec![0.0f32; hd];
+            for dv in 0..hd {
+                let mut s = 0.0f32;
+                for dk in 0..hd {
+                    s += state[s_off + dv * hd + dk] * k_h[dk];
+                }
+                sk[dv] = s;
+            }
+            // Update: S[dv,dk] += beta * (v[dv] - sk[dv]) * k[dk]
+            for dv in 0..hd {
+                let coeff = b_h * (v_h[dv] - sk[dv]);
+                for dk in 0..hd {
+                    state[s_off + dv * hd + dk] += coeff * k_h[dk];
+                }
+            }
+            // Output: o[dv] = (sum_dk S[dv,dk] * q[dk]) * scale
+            for dv in 0..hd {
+                let mut s = 0.0f32;
+                for dk in 0..hd {
+                    s += state[s_off + dv * hd + dk] * q_h[dk];
+                }
+                out[hi * hd + dv] = s * scale;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn gdn_step_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        // Cover both Qwen3.5/3.6 sizes:
+        //   0.8B: n_v_heads = 16, head_dim = 128
+        //   27B:  n_v_heads = 48, head_dim = 128
+        for &n_v in &[16usize, 48] {
+            let hd = 128usize;
+            // Synthetic but realistic-magnitude inputs.
+            let q: Vec<f32> = (0..n_v * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k: Vec<f32> = (0..n_v * hd)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v: Vec<f32> = (0..n_v * hd)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+            let g: Vec<f32> = (0..n_v).map(|i| -((i % 7) as f32) * 1e-3).collect();
+            let beta: Vec<f32> = (0..n_v).map(|i| 0.5 + ((i % 11) as f32) * 1e-2).collect();
+            // Random-ish but deterministic state, including the
+            // post-first-token regime (nonzero initial state) since
+            // codex flagged "first-token only" coverage as inadequate.
+            let mut state: Vec<f32> = (0..n_v * hd * hd)
+                .map(|i| ((i % 13) as f32 - 6.0) * 1e-3)
+                .collect();
+
+            // CPU oracle.
+            let mut state_cpu = state.clone();
+            let out_cpu = gdn_step_cpu_ref(&q, &k, &v, &g, &beta, &mut state_cpu, n_v, hd);
+
+            // GPU.
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_v * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&k),
+                vec![(n_v * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let v_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&v),
+                vec![(n_v * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let g_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&g),
+                vec![n_v as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let beta_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&beta),
+                vec![n_v as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let state_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&state),
+                vec![(n_v * hd * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let out_t = MetalTensor::zeros_f32(&ctx, vec![(n_v * hd) as u64]).unwrap();
+
+            one_shot(&ctx, |enc| {
+                encode_gdn_step_f32(
+                    &ctx, enc, &q_t, &k_t, &v_t, &g_t, &beta_t, &state_t, &out_t, n_v, hd,
+                )
+            })
+            .unwrap();
+
+            let out_gpu = read_back_f32(&out_t.buffer, n_v * hd);
+            let state_gpu = read_back_f32(&state_t.buffer, n_v * hd * hd);
+
+            // Output comparison.
+            let max_out = out_gpu
+                .iter()
+                .zip(out_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            // State comparison (this is the recurrent variable; correctness
+            // here matters more than the output for multi-step decode).
+            let max_state = state_gpu
+                .iter()
+                .zip(state_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+
+            eprintln!(
+                "[gdn_step n_v={n_v}] max|out_Δ|={max_out:.2e}  max|state_Δ|={max_state:.2e}"
+            );
+            // simd_sum reduction order can drift slightly from the
+            // sequential CPU version; 1e-4 covers it for our magnitudes.
+            assert!(max_out < 1e-4, "out drift {max_out}");
+            assert!(max_state < 1e-4, "state drift {max_state}");
         }
     }
 

@@ -62,3 +62,10 @@ debug = "line-tables-only"
 [profile.bench]
 inherits = "release"
 debug = "full"
+
+# Criterion for proper statistical benchmarking. cargo bench replaces our
+# #[ignore] perf tests; hyperfine handles the end-to-end wall-clock
+# comparisons against llama-bench.
+[workspace.dependencies.criterion]
+version = "0.5"
+features = ["html_reports"]

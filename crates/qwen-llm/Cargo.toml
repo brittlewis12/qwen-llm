@@ -31,5 +31,12 @@ tracing.workspace = true
 crossbeam.workspace = true
 parking_lot.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
 [build-dependencies]
 anyhow.workspace = true
+
+[[bench]]
+name = "kernels"
+harness = false

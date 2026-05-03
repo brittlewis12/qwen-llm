@@ -193,6 +193,143 @@ fn load_library(device: &Device, bytes: &[u8]) -> Result<Library, MetalError> {
 
 // ===== Kernels =====
 
+/// Single-dispatch Q4_K mat-vec on persistent buffers. Useful for testing
+/// and as the building block for `mat_vec_q4_k_f32_chained`.
+pub fn mat_vec_q4_k_f32_bufs(
+    ctx: &MetalContext,
+    buf_args: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_w: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_x: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_y: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    mat_vec_q4_k_f32_chained(ctx, buf_args, buf_w, buf_x, buf_y, n_out, 1)
+}
+
+/// Chain `n_dispatches` Q4_K mat-vec dispatches into a single command
+/// buffer with one `waitUntilCompleted` at the end. Approximates the
+/// per-step economics of a layered forward where many kernels run back
+/// to back without serialized waits. Useful for benchmarking how
+/// dispatch overhead amortizes; for production inference the layers
+/// would each have different weights, but the per-dispatch cost is
+/// approximately equivalent.
+pub fn mat_vec_q4_k_f32_chained(
+    ctx: &MetalContext,
+    buf_args: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_w: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_x: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    buf_y: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    n_out: usize,
+    n_dispatches: usize,
+) -> Result<(), MetalError> {
+    let pso = ctx.pipeline("kernel_mat_vec_q4_K_f32")?;
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    let rows_per_tg = NR0 * NSG;
+    let n_tg = n_out.div_ceil(rows_per_tg);
+
+    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = cmd_buf.computeCommandEncoder().expect("compute encoder");
+    enc.setComputePipelineState(&pso);
+    unsafe {
+        enc.setBuffer_offset_atIndex(Some(buf_args.as_ref()), 0, 0);
+        enc.setBuffer_offset_atIndex(Some(buf_w.as_ref()), 0, 1);
+        enc.setBuffer_offset_atIndex(Some(buf_x.as_ref()), 0, 2);
+        enc.setBuffer_offset_atIndex(Some(buf_y.as_ref()), 0, 3);
+    }
+    let grid = MTLSize {
+        width: n_tg,
+        height: 1,
+        depth: 1,
+    };
+    let tg = MTLSize {
+        width: NSG * 32,
+        height: 1,
+        depth: 1,
+    };
+    for _ in 0..n_dispatches {
+        enc.dispatchThreadgroups_threadsPerThreadgroup(grid, tg);
+    }
+    enc.endEncoding();
+    cmd_buf.commit();
+    unsafe { cmd_buf.waitUntilCompleted() };
+    Ok(())
+}
+
+/// Dispatch the Q4_K mat-vec kernel directly on raw block_q4_K bytes.
+///
+/// `weight_bytes` is `n_out * (n_in/256) * 144` bytes; `x` is `[n_in]` f32.
+/// Returns `[n_out]` f32 logits.
+///
+/// CPU oracle: dequant via `crate::codec::dequant_to_f32` then
+/// `crate::forward::mat_vec_pub`.
+pub fn mat_vec_q4_k_f32(
+    ctx: &MetalContext,
+    weight_bytes: &[u8],
+    x: &[f32],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, MetalError> {
+    debug_assert!(n_in % 256 == 0, "Q4_K requires n_in % 256 == 0");
+    debug_assert_eq!(weight_bytes.len(), n_out * (n_in / 256) * 144);
+    debug_assert_eq!(x.len(), n_in);
+
+    let pso = ctx.pipeline("kernel_mat_vec_q4_K_f32")?;
+    let buf_w = ctx.buffer_from(weight_bytes)?;
+    let buf_x = ctx.buffer_from(x)?;
+    let buf_y = ctx.buffer_uninit(n_out * std::mem::size_of::<f32>())?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    let args = Args {
+        n_in: n_in as u32,
+        n_out: n_out as u32,
+    };
+    let buf_args = ctx.buffer_from(&[args])?;
+
+    // Lifted-from-llama.cpp kernel: 2 simdgroups per threadgroup, 2 rows
+    // per simdgroup → 4 rows per threadgroup.
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    let rows_per_tg = NR0 * NSG;
+    let n_tg = n_out.div_ceil(rows_per_tg);
+
+    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = cmd_buf.computeCommandEncoder().expect("compute encoder");
+    enc.setComputePipelineState(&pso);
+    unsafe {
+        enc.setBuffer_offset_atIndex(Some(&*buf_args), 0, 0);
+        enc.setBuffer_offset_atIndex(Some(&*buf_w), 0, 1);
+        enc.setBuffer_offset_atIndex(Some(&*buf_x), 0, 2);
+        enc.setBuffer_offset_atIndex(Some(&*buf_y), 0, 3);
+    }
+    let grid = MTLSize {
+        width: n_tg,
+        height: 1,
+        depth: 1,
+    };
+    let tg = MTLSize {
+        width: NSG * 32,
+        height: 1,
+        depth: 1,
+    };
+    enc.dispatchThreadgroups_threadsPerThreadgroup(grid, tg);
+    enc.endEncoding();
+    cmd_buf.commit();
+    unsafe { cmd_buf.waitUntilCompleted() };
+
+    let mut out = vec![0.0f32; n_out];
+    unsafe {
+        let src = buf_y.contents().as_ptr() as *const f32;
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n_out);
+    }
+    Ok(out)
+}
+
 /// Dispatch the F32 mat-vec kernel.
 ///
 /// `y[o] = sum_i weight[o*n_in + i] * x[i]` for `o ∈ [0, n_out)`.
@@ -399,6 +536,220 @@ mod tests {
             );
             assert!(max_abs < 1e-3, "mat_vec drift {max_abs} exceeds 1e-3");
         }
+    }
+
+    fn bench_q4k_one(
+        ctx: &MetalContext,
+        g: &crate::gguf::GgufFile,
+        q4k: &crate::tensor::TensorDesc,
+    ) {
+        let n_in = q4k.shape[0] as usize;
+        let n_out = q4k.shape[1] as usize;
+        let buf_w = ctx.buffer_from(g.slice(q4k)).expect("w");
+        let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+        let buf_x = ctx.buffer_from(&x).expect("x");
+        let buf_y = ctx
+            .buffer_uninit(n_out * std::mem::size_of::<f32>())
+            .expect("y");
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Args {
+            n_in: u32,
+            n_out: u32,
+        }
+        let buf_args = ctx
+            .buffer_from(&[Args {
+                n_in: n_in as u32,
+                n_out: n_out as u32,
+            }])
+            .expect("args");
+
+        for _ in 0..3 {
+            mat_vec_q4_k_f32_bufs(ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out).expect("dispatch");
+        }
+        const ITERS: usize = 100;
+        let t0 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            mat_vec_q4_k_f32_bufs(ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out).expect("dispatch");
+        }
+        let elapsed = t0.elapsed().as_secs_f64();
+        let per_iter_ms = (elapsed / ITERS as f64) * 1e3;
+        let bw = q4k.n_bytes as f64 / (elapsed / ITERS as f64) / 1e9;
+        eprintln!(
+            "    {ITERS} iters: {per_iter_ms:.3} ms/iter → {bw:.0} GB/s ({:.0}% of 546 GB/s)",
+            bw / 5.46
+        );
+    }
+
+    /// Performance benchmark for Q4_K mat_vec on a real 27B tensor with
+    /// persistent buffers. Reports kernel-only time after warmup, isolating
+    /// kernel cost from buffer-setup overhead. This is the honest number
+    /// to use for "are we beating llama.cpp."
+    #[test]
+    #[ignore]
+    fn mat_vec_q4_k_perf() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+
+        // Sweep across the Q4_K shapes that actually run during 27B decode.
+        let candidates: Vec<&str> = vec![
+            "blk.0.attn_gate.weight", //  5120 x 6144   — GDN gate
+            "blk.0.ssm_out.weight",   //  6144 x 5120   — GDN out
+            "blk.0.ffn_gate.weight",  //  5120 x 17408  — FFN gate (the heavy one)
+            "blk.0.ffn_up.weight",    //  5120 x 17408  — FFN up
+            "token_embd.weight",      //  5120 x 248320 — embedding
+        ];
+        for name in &candidates {
+            if let Some(t) = g.find(name) {
+                eprintln!(
+                    "--- {name} ({:?} {:?}, {} MB) ---",
+                    t.dtype,
+                    t.shape,
+                    t.n_bytes / (1024 * 1024)
+                );
+                if t.dtype == crate::tensor::GgmlType::Q4_K {
+                    bench_q4k_one(&ctx, &g, t);
+                }
+            }
+        }
+        // Then keep going with the original biggest-tensor measurement.
+        let q4k = g
+            .tensors
+            .iter()
+            .filter(|t| {
+                t.dtype == crate::tensor::GgmlType::Q4_K && t.shape.len() == 2 && t.shape[0] >= 5120
+            })
+            .max_by_key(|t| t.n_bytes)
+            .expect("no Q4_K tensor");
+        let n_in = q4k.shape[0] as usize;
+        let n_out = q4k.shape[1] as usize;
+        eprintln!(
+            "[perf-q4_k] {} shape=[{n_in}, {n_out}] {} bytes",
+            q4k.name, q4k.n_bytes
+        );
+
+        // Persistent buffers (mimics what real inference does).
+        let buf_w = ctx.buffer_from(g.slice(q4k)).expect("w");
+        let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+        let buf_x = ctx.buffer_from(&x).expect("x");
+        let buf_y = ctx
+            .buffer_uninit(n_out * std::mem::size_of::<f32>())
+            .expect("y");
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Args {
+            n_in: u32,
+            n_out: u32,
+        }
+        let args = Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        };
+        let buf_args = ctx.buffer_from(&[args]).expect("args");
+
+        // Warmup.
+        for _ in 0..3 {
+            mat_vec_q4_k_f32_bufs(&ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out)
+                .expect("dispatch");
+        }
+
+        // Timed loop.
+        const ITERS: usize = 100;
+        let t0 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            mat_vec_q4_k_f32_bufs(&ctx, &buf_args, &buf_w, &buf_x, &buf_y, n_out)
+                .expect("dispatch");
+        }
+        let elapsed = t0.elapsed().as_secs_f64();
+        let per_iter_ms = (elapsed / ITERS as f64) * 1e3;
+        let bw = q4k.n_bytes as f64 / (elapsed / ITERS as f64) / 1e9;
+        eprintln!(
+            "[perf-q4_k] {ITERS} iters: {:.2} ms each → {bw:.0} GB/s ({:.0}% of 546 GB/s peak)",
+            per_iter_ms,
+            bw / 5.46
+        );
+    }
+
+    /// Validate the Q4_K mat-vec kernel against the CPU dequant + mat_vec
+    /// path. Uses a real tensor from the 27B Q4_K_M GGUF if available;
+    /// skips otherwise.
+    #[test]
+    fn mat_vec_q4_k_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+
+        // Find a Q4_K tensor we can use (FFN gate or up are Q4_K in Q4_K_M).
+        let q4k = g
+            .tensors
+            .iter()
+            .find(|t| {
+                t.name.starts_with("blk.0.")
+                    && t.dtype == crate::tensor::GgmlType::Q4_K
+                    && t.shape.len() == 2
+                    && t.shape[0] % 256 == 0
+            })
+            .expect("no suitable Q4_K tensor in 27B");
+        let n_in = q4k.shape[0] as usize;
+        let n_out = q4k.shape[1] as usize;
+        eprintln!(
+            "[q4_k-test] tensor {} shape=[{n_in}, {n_out}] bytes={}",
+            q4k.name, q4k.n_bytes
+        );
+
+        // CPU dequant via the codec seam.
+        let cpu_dequant_t = std::time::Instant::now();
+        let weight_f32 = crate::codec::dequant_to_f32(q4k, g.slice(q4k)).expect("dequant");
+        let cpu_dequant_ms = cpu_dequant_t.elapsed().as_secs_f64() * 1e3;
+        eprintln!("[q4_k-test] cpu dequant: {cpu_dequant_ms:.1}ms");
+
+        // Synthetic input.
+        let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+
+        // CPU oracle.
+        let cpu_t = std::time::Instant::now();
+        let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
+        let cpu_ms = cpu_t.elapsed().as_secs_f64() * 1e3;
+
+        // Metal Q4_K mat_vec.
+        let weight_bytes = g.slice(q4k);
+        let gpu_t = std::time::Instant::now();
+        let gpu =
+            mat_vec_q4_k_f32(&ctx, weight_bytes, &x, n_in, n_out).expect("metal mat_vec_q4_k");
+        let gpu_ms = gpu_t.elapsed().as_secs_f64() * 1e3;
+
+        let mut max_abs = 0.0f32;
+        let mut max_rel = 0.0f32;
+        for (a, b) in gpu.iter().zip(cpu.iter()) {
+            let d = (a - b).abs();
+            max_abs = max_abs.max(d);
+            let r = d / b.abs().max(1e-6);
+            max_rel = max_rel.max(r);
+        }
+        let bw = q4k.n_bytes as f64 / (gpu_ms * 1e-3) / 1e9;
+        eprintln!(
+            "[q4_k] cpu={cpu_ms:.1}ms gpu={gpu_ms:.1}ms ({bw:.0} GB/s) max|Δ|={max_abs:.2e} rel={max_rel:.2e}"
+        );
+        assert!(max_abs < 1e-2, "mat_vec_q4_k drift {max_abs}");
     }
 
     /// Validate the lifted RMSNorm kernel against the CPU oracle.

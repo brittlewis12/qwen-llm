@@ -316,9 +316,17 @@ fn check_shape(t: &TensorDesc, expected: &[u64]) -> Result<(), LoadError> {
 /// Build an [`Arch`] from the GGUF's `qwen35.*` metadata keys. Cross-checks
 /// against the known constants in [`crate::model`] are the caller's job.
 fn build_arch_from_metadata(g: &GgufFile) -> Result<Arch, LoadError> {
-    let n_layer = g
+    // GGUF's `block_count` includes any trailing MTP/NEXTN predict layers
+    // (per the patched converter that preserves them). The main forward
+    // path iterates only the base layers, so subtract any MTP layers from
+    // n_layer here. Older GGUFs (pre-MTP-converter) don't have the
+    // nextn_predict_layers key, in which case we default to 0 and the
+    // subtraction is a no-op (preserving the prior behavior).
+    let block_count = g
         .get_u64("qwen35.block_count")
         .ok_or(LoadError::BadMetadata("qwen35.block_count"))? as u32;
+    let mtp_n_hidden_layers = g.get_u64("qwen35.nextn_predict_layers").unwrap_or(0) as u32;
+    let n_layer = block_count.saturating_sub(mtp_n_hidden_layers);
     let hidden_size = g
         .get_u64("qwen35.embedding_length")
         .ok_or(LoadError::BadMetadata("qwen35.embedding_length"))? as u32;
@@ -384,7 +392,7 @@ fn build_arch_from_metadata(g: &GgufFile) -> Result<Arch, LoadError> {
         gdn_n_k_heads: ssm_group_count,
         gdn_head_dim: ssm_state_size,
         gdn_conv_kernel: ssm_conv_kernel,
-        mtp_n_hidden_layers: 1,
+        mtp_n_hidden_layers,
     })
 }
 
@@ -475,6 +483,55 @@ mod tests {
             .count();
         assert_eq!(gdn, 18);
         assert_eq!(attn, 6);
+    }
+
+    /// H4 smoke test: a 0.8B GGUF freshly converted with the
+    /// MTP-aware converter (block_count=25, the trailing block being
+    /// the NEXTN/MTP head). The main forward path must continue to
+    /// see only the 24 base layers; the MTP block is ignored for now.
+    #[test]
+    fn loads_0_8b_with_mtp() {
+        let path = "/Users/tito/models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load model");
+        eprintln!("[loader] {}", summary(&m));
+        // block_count=25 in metadata, MTP=1, so main forward sees 24.
+        assert_eq!(m.arch.n_layer, 24);
+        assert_eq!(m.arch.mtp_n_hidden_layers, 1);
+        assert_eq!(m.blocks.len(), 24);
+        let gdn = m
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Gdn(_)))
+            .count();
+        let attn = m
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Attn(_)))
+            .count();
+        assert_eq!(gdn, 18);
+        assert_eq!(attn, 6);
+        // Confirm the MTP block (blk.24) tensors are present in the GGUF
+        // (we just don't load them into Block enum yet).
+        assert!(g
+            .tensors
+            .iter()
+            .any(|t| t.name == "blk.24.nextn.eh_proj.weight"));
+        assert!(g
+            .tensors
+            .iter()
+            .any(|t| t.name == "blk.24.nextn.enorm.weight"));
+        assert!(g
+            .tensors
+            .iter()
+            .any(|t| t.name == "blk.24.nextn.hnorm.weight"));
+        assert!(g
+            .tensors
+            .iter()
+            .any(|t| t.name == "blk.24.nextn.shared_head_norm.weight"));
     }
 
     #[test]

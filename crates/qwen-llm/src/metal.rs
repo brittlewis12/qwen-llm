@@ -555,6 +555,344 @@ pub fn encode_mat_vec_q4_k_f32(
     Ok(())
 }
 
+// ----- elementwise + small ops -----
+
+/// Per-element kernel arg used by silu/sigmoid/softplus/add/mul/silu_mul.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct NArgs {
+    n: u32,
+}
+
+/// Per-element kernel arg shape for L2 norm.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct L2NormArgs {
+    n_dim: u32,
+    eps: f32,
+}
+
+/// Generic 1-input → 1-output elementwise dispatcher (silu, sigmoid,
+/// softplus). All share the (NArgs, x, y) bind pattern.
+fn encode_elementwise_1in_1out(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    kernel: &str,
+    x: &MetalTensor,
+    y: &MetalTensor,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    if y.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "elementwise_1in_1out",
+            detail: format!("y.n={} != x.n={n}", y.n_elements()),
+        });
+    }
+    let pso = ctx.pipeline(kernel)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_silu_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+) -> Result<(), MetalError> {
+    encode_elementwise_1in_1out(ctx, enc, "kernel_silu_f32", x, y)
+}
+
+pub fn encode_sigmoid_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+) -> Result<(), MetalError> {
+    encode_elementwise_1in_1out(ctx, enc, "kernel_sigmoid_f32", x, y)
+}
+
+pub fn encode_softplus_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+) -> Result<(), MetalError> {
+    encode_elementwise_1in_1out(ctx, enc, "kernel_softplus_f32", x, y)
+}
+
+/// Generic 2-input → 1-output elementwise (add, mul, silu_mul). All share
+/// the (NArgs, a, b, out) bind pattern.
+fn encode_elementwise_2in_1out(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    kernel: &str,
+    a: &MetalTensor,
+    b: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<(), MetalError> {
+    let n = a.n_elements() as usize;
+    if b.n_elements() as usize != n || out.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "elementwise_2in_1out",
+            detail: format!("lengths a={} b={} out={n}", a.n_elements(), b.n_elements()),
+        });
+    }
+    let pso = ctx.pipeline(kernel)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_tensor(1, a);
+    enc.set_tensor(2, b);
+    enc.set_tensor(3, out);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_add_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: &MetalTensor,
+    b: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<(), MetalError> {
+    encode_elementwise_2in_1out(ctx, enc, "kernel_add_f32", a, b, out)
+}
+
+pub fn encode_mul_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: &MetalTensor,
+    b: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<(), MetalError> {
+    encode_elementwise_2in_1out(ctx, enc, "kernel_mul_f32", a, b, out)
+}
+
+/// SwiGLU FFN inner: out = silu(gate) * up. Fuses two ops + saves a
+/// scratch buffer on the FFN path. Used as
+/// `down(silu_mul(gate(x), up(x)))`.
+pub fn encode_silu_mul_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<(), MetalError> {
+    encode_elementwise_2in_1out(ctx, enc, "kernel_silu_mul_f32", gate, up, out)
+}
+
+/// In-place residual add: x += y. Used after each transformer block's
+/// mixer and FFN to add the residual stream back. Saves a scratch buffer
+/// vs out-of-place add.
+pub fn encode_add_inplace_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    if y.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "add_inplace",
+            detail: format!("y.n={} != x.n={n}", y.n_elements()),
+        });
+    }
+    let pso = ctx.pipeline("kernel_add_inplace_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// In-place softmax over the (only) dimension of `x`. Used for attention
+/// scores. Input is mutated.
+pub fn encode_softmax_inplace_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    let pso = ctx.pipeline("kernel_softmax_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_tensor(1, x);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// L2 norm: y = x / max(||x||, eps). Per-vector. ggml semantics (NOT
+/// `1/sqrt(sum+eps)` — that's RMSNorm).
+pub fn encode_l2_norm_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    if y.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "l2_norm",
+            detail: format!("y.n={} != x.n={n}", y.n_elements()),
+        });
+    }
+    let pso = ctx.pipeline("kernel_l2_norm_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &L2NormArgs {
+            n_dim: n as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Embedding lookup: `y[r * n_cols + i] = embed[ids[r] * n_cols + i]`.
+/// `embed` is `[vocab, n_cols]`-shaped F32; `ids` is `[n_rows]` i32.
+/// Decode uses `n_rows = 1`; prefill uses `n_rows = batch`.
+pub fn encode_get_rows_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    embed: &MetalTensor,
+    ids: &MetalTensor,
+    y: &MetalTensor,
+    n_rows: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    if y.n_elements() as usize != n_rows * n_cols {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                "y.n={} != n_rows*n_cols={}",
+                y.n_elements(),
+                n_rows * n_cols
+            ),
+        });
+    }
+    if ids.n_elements() as usize != n_rows {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!("ids.n={} != n_rows={n_rows}", ids.n_elements()),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GetRowsArgs {
+        n_rows: u32,
+        n_cols: u32,
+    }
+    let pso = ctx.pipeline("kernel_get_rows_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &GetRowsArgs {
+            n_rows: n_rows as u32,
+            n_cols: n_cols as u32,
+        },
+    );
+    enc.set_tensor(1, embed);
+    enc.set_tensor(2, ids);
+    enc.set_tensor(3, y);
+
+    // 2D grid: (n_cols, n_rows).
+    enc.dispatch(
+        MTLSize {
+            width: n_cols.div_ceil(32),
+            height: n_rows,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Q6_K mat-vec, same API shape as [`encode_mat_vec_q4_k_f32`].
 pub fn encode_mat_vec_q6_k_f32(
     ctx: &MetalContext,
@@ -942,6 +1280,281 @@ mod tests {
             .fold(0f32, f32::max);
         eprintln!("[q6_k] max|Δ|={max_abs:.2e}");
         assert!(max_abs < 1e-2);
+    }
+
+    /// Helper: take an `encode_*` closure that produces a single F32
+    /// output buffer of length `n_out`, run it one-shot, and return the
+    /// readback. Common shape across the elementwise tests.
+    fn one_shot_f32_out<F>(ctx: &MetalContext, n_out: usize, encode: F) -> Vec<f32>
+    where
+        F: FnOnce(&KernelEncoder, &MetalTensor) -> Result<(), MetalError>,
+    {
+        let y_t = MetalTensor::zeros_f32(ctx, vec![n_out as u64]).unwrap();
+        one_shot(ctx, |enc| encode(enc, &y_t)).unwrap();
+        read_back_f32(&y_t.buffer, n_out)
+    }
+
+    #[test]
+    fn elementwise_silu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let x: Vec<f32> = (-50..50).map(|i| i as f32 * 0.1).collect();
+        let n = x.len();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gpu = one_shot_f32_out(&ctx, n, |enc, y| encode_silu_f32(&ctx, enc, &x_t, y));
+        for (i, &v) in x.iter().enumerate() {
+            let expected = v / (1.0 + (-v).exp());
+            assert!(
+                (gpu[i] - expected).abs() < 1e-5,
+                "silu[{i}] {v} -> {} vs {}",
+                gpu[i],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn elementwise_sigmoid_softplus() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let x: Vec<f32> = (-30..30).map(|i| i as f32 * 0.5).collect();
+        let n = x.len();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        let sig = one_shot_f32_out(&ctx, n, |enc, y| encode_sigmoid_f32(&ctx, enc, &x_t, y));
+        let sp = one_shot_f32_out(&ctx, n, |enc, y| encode_softplus_f32(&ctx, enc, &x_t, y));
+
+        for (i, &v) in x.iter().enumerate() {
+            let exp_sig = 1.0 / (1.0 + (-v).exp());
+            assert!((sig[i] - exp_sig).abs() < 1e-5);
+            let exp_sp = if v > 20.0 {
+                v
+            } else if v < -20.0 {
+                v.exp()
+            } else {
+                (1.0 + v.exp()).ln()
+            };
+            assert!((sp[i] - exp_sp).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn elementwise_add_mul_silu_mul() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n = 17408usize; // FFN dim — exercise the realistic shape
+        let a: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+        let b: Vec<f32> = (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.2).collect();
+        let a_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&a),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let b_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&b),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        let added = one_shot_f32_out(&ctx, n, |enc, y| encode_add_f32(&ctx, enc, &a_t, &b_t, y));
+        for i in 0..n {
+            assert!((added[i] - (a[i] + b[i])).abs() < 1e-5);
+        }
+        let muled = one_shot_f32_out(&ctx, n, |enc, y| encode_mul_f32(&ctx, enc, &a_t, &b_t, y));
+        for i in 0..n {
+            assert!((muled[i] - (a[i] * b[i])).abs() < 1e-5);
+        }
+        let silumul = one_shot_f32_out(&ctx, n, |enc, y| {
+            encode_silu_mul_f32(&ctx, enc, &a_t, &b_t, y)
+        });
+        for i in 0..n {
+            let silu_a = a[i] / (1.0 + (-a[i]).exp());
+            assert!(
+                (silumul[i] - silu_a * b[i]).abs() < 1e-5,
+                "silu_mul[{i}] = {} vs {}",
+                silumul[i],
+                silu_a * b[i]
+            );
+        }
+    }
+
+    #[test]
+    fn elementwise_add_inplace() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n = 5120usize;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) * 1e-3).collect();
+        let b: Vec<f32> = (0..n).map(|i| -(i as f32) * 2e-3).collect();
+        let a_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&a),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let b_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&b),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(&ctx, |enc| encode_add_inplace_f32(&ctx, enc, &a_t, &b_t)).unwrap();
+        let result = read_back_f32(&a_t.buffer, n);
+        for i in 0..n {
+            assert!((result[i] - (a[i] + b[i])).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn softmax_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        // Cover small (one warp) to large (multi-warp reduce) shapes.
+        for &n in &[16usize, 256, 4096, 32768] {
+            let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.01).sin()).collect();
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| encode_softmax_inplace_f32(&ctx, enc, &x_t)).unwrap();
+            let gpu = read_back_f32(&x_t.buffer, n);
+
+            // CPU reference.
+            let mut cpu = x.clone();
+            let m = cpu.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut s = 0.0f32;
+            for v in cpu.iter_mut() {
+                *v = (*v - m).exp();
+                s += *v;
+            }
+            for v in cpu.iter_mut() {
+                *v /= s;
+            }
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let total: f32 = gpu.iter().sum();
+            assert!((total - 1.0).abs() < 1e-4, "softmax sum n={n}: {total}");
+            assert!(max_abs < 1e-5, "softmax n={n} max|Δ|={max_abs}");
+        }
+    }
+
+    #[test]
+    fn l2_norm_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &n in &[128usize, 256, 1024] {
+            // include a few that hit the eps clamp (very small magnitudes)
+            let x: Vec<f32> = (0..n).map(|i| (i as f32 * 1e-2).sin()).collect();
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let gpu = one_shot_f32_out(&ctx, n, |enc, y| {
+                encode_l2_norm_f32(&ctx, enc, &x_t, y, 1e-6)
+            });
+
+            // CPU reference: y = x / max(||x||, eps).
+            let sq: f32 = x.iter().map(|v| v * v).sum();
+            let scale = 1.0 / sq.sqrt().max(1e-6);
+            let cpu: Vec<f32> = x.iter().map(|v| v * scale).collect();
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(max_abs < 1e-5, "l2_norm n={n}: max|Δ|={max_abs}");
+        }
+    }
+
+    #[test]
+    fn get_rows_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let vocab = 100usize;
+        let n_cols = 64usize;
+        let embed: Vec<f32> = (0..vocab * n_cols).map(|i| i as f32 * 0.001).collect();
+        let ids: Vec<i32> = vec![3, 17, 42, 99];
+        let n_rows = ids.len();
+
+        let embed_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&embed),
+            vec![n_cols as u64, vocab as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let ids_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![n_rows as u64],
+            GgmlType::F32, // dtype tag is unused for the i32 buffer here
+        )
+        .unwrap();
+        let y_t = MetalTensor::zeros_f32(&ctx, vec![n_rows as u64, n_cols as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed_t, &ids_t, &y_t, n_rows, n_cols)
+        })
+        .unwrap();
+        let gpu = read_back_f32(&y_t.buffer, n_rows * n_cols);
+        for r in 0..n_rows {
+            let row = ids[r] as usize;
+            for i in 0..n_cols {
+                let expected = embed[row * n_cols + i];
+                let got = gpu[r * n_cols + i];
+                assert!(
+                    (got - expected).abs() < 1e-7,
+                    "get_rows row={r} ids={} col={i}: {got} vs {expected}",
+                    ids[r]
+                );
+            }
+        }
     }
 
     /// Ensures the chained-encoding API is correctness-equivalent to one-shot.

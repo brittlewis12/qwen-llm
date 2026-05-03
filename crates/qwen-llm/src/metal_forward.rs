@@ -32,14 +32,14 @@ use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
     attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_f32, encode_attn_decode_v4_f32,
-    encode_copy_offset_f32, encode_ffn_swiglu_q4_K_f32, encode_gdn_alpha_chain_f32,
-    encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
-    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv,
-    encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32, encode_split_q_gate_f32,
-    encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError, MetalTensor,
+    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32,
+    encode_gdn_alpha_chain_f32, encode_gdn_step_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
+    MetalTensor,
 };
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -252,15 +252,14 @@ pub struct MetalSession {
     pub gdn_beta: MetalTensor,     // n_v   (post-sigmoid)
     pub gdn_a: MetalTensor,        // n_v   (α source, pre-softplus)
     pub gdn_alpha: MetalTensor,    // n_v   (post-softplus * a_log)
-    pub gdn_q: MetalTensor,        // n_k * head_dim — Q view of gdn_qkv_conv
-    pub gdn_k: MetalTensor,        // n_k * head_dim — K view
-    pub gdn_v: MetalTensor,        // n_v * head_dim — V view
-    pub gdn_q_norm: MetalTensor,   // n_k * head_dim — l2-normed
-    pub gdn_k_norm: MetalTensor,   // n_k * head_dim — l2-normed
-    pub gdn_out: MetalTensor,      // n_v * head_dim — recurrence output
-    pub gdn_normed: MetalTensor,   // n_v * head_dim — RMSNormGated output
-    pub gdn_proj: MetalTensor,     // hidden_size — out_proj output
-    pub mixer_out: MetalTensor,    // hidden_size — mixer output (GDN or attn)
+    // gdn_q/k/v removed in v0.31: q/k/v are now zero-copy views into
+    // gdn_qkv_conv via MetalTensor::view_subrange; no scratch buffers needed.
+    pub gdn_q_norm: MetalTensor, // n_k * head_dim — l2-normed
+    pub gdn_k_norm: MetalTensor, // n_k * head_dim — l2-normed
+    pub gdn_out: MetalTensor,    // n_v * head_dim — recurrence output
+    pub gdn_normed: MetalTensor, // n_v * head_dim — RMSNormGated output
+    pub gdn_proj: MetalTensor,   // hidden_size — out_proj output
+    pub mixer_out: MetalTensor,  // hidden_size — mixer output (GDN or attn)
 
     // Attention scratch.
     pub attn_q_full: MetalTensor,   // 2 * q_dim — Q + gate interleaved
@@ -358,9 +357,6 @@ impl MetalSession {
             gdn_beta: MetalTensor::zeros_f32(ctx, vec![n_v])?,
             gdn_a: MetalTensor::zeros_f32(ctx, vec![n_v])?,
             gdn_alpha: MetalTensor::zeros_f32(ctx, vec![n_v])?,
-            gdn_q: MetalTensor::zeros_f32(ctx, vec![k_dim])?,
-            gdn_k: MetalTensor::zeros_f32(ctx, vec![k_dim])?,
-            gdn_v: MetalTensor::zeros_f32(ctx, vec![v_dim])?,
             gdn_q_norm: MetalTensor::zeros_f32(ctx, vec![k_dim])?,
             gdn_k_norm: MetalTensor::zeros_f32(ctx, vec![k_dim])?,
             gdn_out: MetalTensor::zeros_f32(ctx, vec![v_dim])?,
@@ -782,35 +778,27 @@ impl<'a> MetalForward<'a> {
             conv_dim,
         )?;
 
-        // Split conv output into Q, K, V slices via aliasing offsets.
-        // We have separate scratch buffers (gdn_q, gdn_k, gdn_v) so we
-        // do small explicit copies for now. The right v2 move is to make
-        // the gdn_step kernel read the offsets directly.
-        // For v1 correctness: copy via add with 0 (cheap on Metal,
-        // exercises the same path as the CPU oracle for shape).
-        encode_copy_offset_f32(self.ctx, enc, &s.gdn_qkv_conv, 0, &s.gdn_q, n_k * head_dim)?;
-        encode_copy_offset_f32(
-            self.ctx,
-            enc,
-            &s.gdn_qkv_conv,
-            n_k * head_dim,
-            &s.gdn_k,
-            n_k * head_dim,
-        )?;
-        encode_copy_offset_f32(
-            self.ctx,
-            enc,
-            &s.gdn_qkv_conv,
-            2 * n_k * head_dim,
-            &s.gdn_v,
-            v_dim,
-        )?;
+        // Split conv output into Q, K, V via zero-copy views (no dispatch).
+        // Per Jeff & Sanjay (avoid copies / use indices instead of pointers):
+        // the previous code did 3 copy_offset dispatches per layer × 32
+        // GDN layers = 96 dispatches/token just to alias subranges.
+        // view_subrange returns a sub-tensor pointing at the same MTLBuffer
+        // with shifted offset, consumed by the next kernel directly.
+        let q_view = s
+            .gdn_qkv_conv
+            .view_subrange(0, vec![(n_k * head_dim) as u64]);
+        let k_view = s
+            .gdn_qkv_conv
+            .view_subrange((n_k * head_dim) as u64, vec![(n_k * head_dim) as u64]);
+        let v_view = s
+            .gdn_qkv_conv
+            .view_subrange((2 * n_k * head_dim) as u64, vec![v_dim as u64]);
 
         // Per-head L2-norm of Q and K.
         encode_l2_norm_batched_f32(
             self.ctx,
             enc,
-            &s.gdn_q,
+            &q_view,
             &s.gdn_q_norm,
             n_k,
             head_dim,
@@ -819,7 +807,7 @@ impl<'a> MetalForward<'a> {
         encode_l2_norm_batched_f32(
             self.ctx,
             enc,
-            &s.gdn_k,
+            &k_view,
             &s.gdn_k_norm,
             n_k,
             head_dim,
@@ -832,7 +820,7 @@ impl<'a> MetalForward<'a> {
             enc,
             &s.gdn_q_norm,
             &s.gdn_k_norm,
-            &s.gdn_v,
+            &v_view,
             &s.gdn_alpha,
             &s.gdn_beta,
             &s.gdn_state[gdn_i],
@@ -2367,38 +2355,24 @@ mod tests {
             },
             &mut phases,
         )?;
-        // 3 copy_offset + 2 l2_norm.
-        timed(
-            "split_qkv (3 copy_offset)",
-            &|enc| {
-                encode_copy_offset_f32(mf.ctx, enc, &s.gdn_qkv_conv, 0, &s.gdn_q, n_k * head_dim)?;
-                encode_copy_offset_f32(
-                    mf.ctx,
-                    enc,
-                    &s.gdn_qkv_conv,
-                    n_k * head_dim,
-                    &s.gdn_k,
-                    n_k * head_dim,
-                )?;
-                encode_copy_offset_f32(
-                    mf.ctx,
-                    enc,
-                    &s.gdn_qkv_conv,
-                    2 * n_k * head_dim,
-                    &s.gdn_v,
-                    v_dim,
-                )
-                .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
+        // qkv split via zero-copy views (no dispatch). Per Jeff & Sanjay:
+        // avoid copies / use indices instead of pointers.
+        let q_view = s
+            .gdn_qkv_conv
+            .view_subrange(0, vec![(n_k * head_dim) as u64]);
+        let k_view = s
+            .gdn_qkv_conv
+            .view_subrange((n_k * head_dim) as u64, vec![(n_k * head_dim) as u64]);
+        let v_view = s
+            .gdn_qkv_conv
+            .view_subrange((2 * n_k * head_dim) as u64, vec![v_dim as u64]);
         timed(
             "l2_norm_qk (2 batched)",
             &|enc| {
                 encode_l2_norm_batched_f32(
                     mf.ctx,
                     enc,
-                    &s.gdn_q,
+                    &q_view,
                     &s.gdn_q_norm,
                     n_k,
                     head_dim,
@@ -2407,7 +2381,7 @@ mod tests {
                 encode_l2_norm_batched_f32(
                     mf.ctx,
                     enc,
-                    &s.gdn_k,
+                    &k_view,
                     &s.gdn_k_norm,
                     n_k,
                     head_dim,
@@ -2426,7 +2400,7 @@ mod tests {
                     enc,
                     &s.gdn_q_norm,
                     &s.gdn_k_norm,
-                    &s.gdn_v,
+                    &v_view,
                     &s.gdn_alpha,
                     &s.gdn_beta,
                     &s.gdn_state[gdn_idx_in_session],

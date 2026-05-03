@@ -298,6 +298,43 @@ impl MetalTensor {
             dtype: GgmlType::F16,
         })
     }
+
+    /// Build a zero-copy sub-view of this tensor: same underlying MTLBuffer,
+    /// shifted by `elem_offset` elements (of the tensor's dtype), with a
+    /// new logical `shape`. The resulting view shares storage and aliases
+    /// the parent — use only when you know the parent isn't being read by
+    /// concurrent dispatches.
+    ///
+    /// Per Jeff & Sanjay (avoid copies / use indices instead of pointers):
+    /// turns aliasing-via-explicit-copy into aliasing-via-offset, eliminating
+    /// the entire copy_offset dispatch. Used to slice GDN's fused QKV
+    /// conv-output buffer into Q / K / V subranges with zero kernels.
+    ///
+    /// Constraint: only valid for non-quantized dtypes (F32, F16) where
+    /// elem_offset translates trivially to byte offset. For quantized
+    /// types (Q4_K, Q5_K, Q6_K) the byte offset would need to align to
+    /// the super-block boundary, which `view_subrange` does not check.
+    pub fn view_subrange(&self, elem_offset: u64, shape: Vec<u64>) -> Self {
+        let elem_size: u64 = match self.dtype {
+            GgmlType::F32 => 4,
+            GgmlType::F16 => 2,
+            other => panic!(
+                "view_subrange only supports F32/F16 (no super-block alignment), got {other:?}"
+            ),
+        };
+        let n_view: u64 = shape.iter().product();
+        let parent_n = self.n_elements();
+        debug_assert!(
+            elem_offset + n_view <= parent_n,
+            "view_subrange OOB: elem_offset={elem_offset} + n_view={n_view} > parent_n={parent_n}"
+        );
+        Self {
+            buffer: self.buffer.clone(),
+            offset: self.offset + elem_offset * elem_size,
+            shape,
+            dtype: self.dtype,
+        }
+    }
 }
 
 // ===========================================================================

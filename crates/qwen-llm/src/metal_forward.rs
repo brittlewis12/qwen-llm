@@ -838,12 +838,12 @@ impl<'a> MetalForward<'a> {
         s.kv_n_pos[attn_i] = position as usize + 1;
 
         // (8) Fused attention decode: scoring + softmax + V-aggregate.
-        // Naive single-buffer version is faster than v1 flash-attn at
-        // all contexts ≤ ~6000 (which is also the threadgroup-memory cap).
-        // The flash kernel I wrote does O(positions × head_dim) reads
-        // per lane in the V-aggregate inner loop, which makes it 4× slower
-        // at 4K than the naive version. Need to fix the V-aggregate
-        // memory access pattern before turning flash on for long context.
+        // The naive kernel uses the cache-friendly read pattern (32 lanes
+        // cooperate on each KV row in parallel, coalesced) and is faster
+        // than my v1/v2 flash-attn at all contexts ≤ ~6000 (the
+        // threadgroup-memory cap of the naive kernel). Flash-attn would
+        // need a smarter access pattern to win — that's the next perf
+        // project. For v1 we use naive everywhere it fits.
         encode_attn_decode_f32(
             self.ctx,
             enc,

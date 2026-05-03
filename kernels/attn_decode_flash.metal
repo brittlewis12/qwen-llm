@@ -1,69 +1,47 @@
-// Flash-attention-style single-token decode.
+// Flash-attention-style single-token decode (v2).
 //
-// Replaces the naive `kernel_attn_decode_f32` for long contexts. The
-// naive version holds all `n_pos` scores in threadgroup memory before
-// softmaxing, which caps context at ~7000 (28 KB tg memory budget /
-// 4 B/score) AND scales poorly because:
-//   * scoring loop is serial over the full n_pos,
-//   * softmax requires global max + sum reductions across n_pos,
-//   * V-aggregate is again serial over n_pos.
+// Replaces the naive `kernel_attn_decode_f32` for long contexts. Online
+// (running-max + running-sum) softmax over K/V tiles. Each KV row is
+// read EXACTLY ONCE (bandwidth-optimal).
 //
-// This kernel uses online (Welford-style) softmax over K/V tiles. Per
-// Q head, we maintain (m, l, o):
-//   m = running max of scores so far
-//   l = running sum of exp(score - m)
-//   o = running V-weighted sum, in scaled form
-// For each tile of K/V positions:
-//   - compute the tile's scores and tile_max
-//   - rescale (m, l, o) to absorb the new max
-//   - update l += sum(exp(tile_score - new_max))
-//   - update o += sum(exp(tile_score - new_max) * v[pos])
-// At the end: out[d] = o[d] / l.
+// One threadgroup per Q head, single simdgroup (32 lanes). Per tile:
+//   1. Each lane loads its 1-of-TILE K row, computes its score.
+//   2. Tile max reduced across lanes via simd_max.
+//   3. Rescale running (m, l, o); add tile contribution.
 //
-// Properties:
-//   * Each KV row is read exactly once (bandwidth-optimal).
-//   * No threadgroup-memory scaling with n_pos (constant per dispatch).
-//   * Numerically stable (max subtracted before exp).
-//
-// One threadgroup per Q head (same as naive). 32 threads cooperate per
-// tile via simdgroup operations.
-//
-// Reference: FlashAttention paper (Dao et al. 2022), but specialized for
-// the single-token-Q case. llama.cpp's `kernel_flash_attn_ext_*` does
-// the same thing in a heavily-templated way; we strip down to the
-// single-Q-row case + 32-thread simdgroup tiling.
+// Critical fix vs v1: V-aggregate uses sequential per-position
+// accumulation, NOT simd_shuffle broadcasting. Each lane processes its
+// own positions and adds (score * v_row) to the output accumulator
+// (held in shared memory across head_dim). The cross-lane reduce
+// happens via threadgroup-memory atomic accumulate (since each lane
+// touches different positions but all dims).
 
 #include <metal_stdlib>
 using namespace metal;
 
 constant constexpr ushort SIMD_LANES = 32;
-
-// Tile size: how many KV positions we process per inner loop iteration.
-// Bigger tile = better instruction-level parallelism but more registers.
-// Each lane processes 1 position per tile (32 positions per simdgroup
-// iteration). Tile of 128 = 4 iterations.
-constant constexpr ushort TILE = 128;
+constant constexpr ushort TILE = 32; // one position per lane per iter
 
 struct attn_decode_flash_args {
     uint  n_q_heads;
     uint  n_kv_heads;
     uint  head_dim;
     uint  n_pos;
-    uint  kv_stride; // n_kv_heads * head_dim
+    uint  kv_stride;
     float scale;
 };
 
 kernel void kernel_attn_decode_flash_f32(
         constant attn_decode_flash_args & args [[buffer(0)]],
-        device const float * q       [[buffer(1)]], // [n_q_heads, head_dim]
-        device const float * k_cache [[buffer(2)]], // [capacity, n_kv_heads, head_dim]
-        device const float * v_cache [[buffer(3)]], // [capacity, n_kv_heads, head_dim]
-        device       float * out     [[buffer(4)]], // [n_q_heads, head_dim]
-        threadgroup  float * tg_scratch [[threadgroup(0)]], // [head_dim] for o accumulator
+        device const float * q       [[buffer(1)]],
+        device const float * k_cache [[buffer(2)]],
+        device const float * v_cache [[buffer(3)]],
+        device       float * out     [[buffer(4)]],
+        threadgroup  float * tg_o    [[threadgroup(0)]], // [head_dim]
         uint  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    if (sgitg != 0) return; // single-simdgroup design; ignore others
+    if (sgitg != 0) return;
     const uint qh = tgpig;
     if (qh >= args.n_q_heads) return;
 
@@ -73,129 +51,96 @@ kernel void kernel_attn_decode_flash_f32(
     device const float * q_h = q + (ulong)qh * args.head_dim;
     device       float * out_h = out + (ulong)qh * args.head_dim;
 
-    // Online softmax state, register-resident:
-    //   m: running max
-    //   l: running sum of exp(score - m)
-    //   o[d]: V-weighted accumulator (in shmem since head_dim > register count)
+    // Initialize the o-accumulator (head_dim floats in shared memory).
+    for (uint d = tiisg; d < args.head_dim; d += SIMD_LANES) {
+        tg_o[d] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Online softmax state.
     float m = -INFINITY;
     float l = 0.0f;
 
-    // Initialize o-accumulator in shared memory.
-    for (uint d = tiisg; d < args.head_dim; d += SIMD_LANES) {
-        tg_scratch[d] = 0.0f;
-    }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Iterate through K/V positions in tiles of TILE size.
+    // Stride through K/V positions in tiles of TILE size = SIMD_LANES.
+    // Each lane handles one position per tile (lane `tiisg` -> position
+    // p_tile + tiisg).
     for (uint p_tile = 0; p_tile < args.n_pos; p_tile += TILE) {
-        const uint p_end = min(p_tile + TILE, args.n_pos);
-        // Each lane handles positions p_tile + tiisg, p_tile + tiisg + 32, ...
-        // up to TILE/32 = 4 positions per lane.
+        const uint p = p_tile + tiisg;
+        const bool valid = p < args.n_pos;
 
-        // (1) Compute scores for this tile, in registers.
-        // Lane `tiisg` owns position p_tile + tiisg + 0, +32, +64, +96.
-        const ushort POSES_PER_LANE = TILE / SIMD_LANES;
-        float scores[POSES_PER_LANE];
-        bool valid[POSES_PER_LANE];
-        for (ushort i = 0; i < POSES_PER_LANE; ++i) {
-            const uint p = p_tile + i * SIMD_LANES + tiisg;
-            valid[i] = p < p_end;
-            if (valid[i]) {
-                device const float * k_p = k_cache
-                    + (ulong)p * args.kv_stride
-                    + (ulong)kvh * args.head_dim;
-                float s = 0.0f;
-                for (uint d = 0; d < args.head_dim; ++d) {
-                    s += q_h[d] * k_p[d];
-                }
-                scores[i] = s * args.scale;
-            } else {
-                scores[i] = -INFINITY;
+        // (1) Score: q · k[p]. Each lane computes its own score.
+        float score = 0.0f;
+        if (valid) {
+            device const float * k_p = k_cache
+                + (ulong)p * args.kv_stride
+                + (ulong)kvh * args.head_dim;
+            for (uint d = 0; d < args.head_dim; ++d) {
+                score += q_h[d] * k_p[d];
             }
+            score *= args.scale;
+        } else {
+            score = -INFINITY;
         }
 
-        // (2) tile_max = max over all lanes' scores.
-        float tile_max = -INFINITY;
-        for (ushort i = 0; i < POSES_PER_LANE; ++i) {
-            tile_max = max(tile_max, scores[i]);
-        }
-        tile_max = simd_max(tile_max);
-
-        // (3) Rescale running state to the new global max.
+        // (2) Tile max + global rescale.
+        const float tile_max = simd_max(score);
         const float m_new = max(m, tile_max);
         const float rescale = (m == -INFINITY) ? 0.0f : exp(m - m_new);
 
-        // l_new = l * rescale + sum(exp(scores - m_new))
-        float tile_sum = 0.0f;
-        for (ushort i = 0; i < POSES_PER_LANE; ++i) {
-            if (valid[i]) {
-                scores[i] = exp(scores[i] - m_new);
-                tile_sum += scores[i];
-            } else {
-                scores[i] = 0.0f;
-            }
-        }
-        tile_sum = simd_sum(tile_sum);
-
+        // (3) Convert score → exp(score - m_new) (per-lane, then sum).
+        const float weight = valid ? exp(score - m_new) : 0.0f;
+        const float tile_sum = simd_sum(weight);
         const float l_new = l * rescale + tile_sum;
 
-        // (4) Rescale o accumulator and add tile contribution.
-        // o_new[d] = o[d] * rescale + sum_p (scores[p] * v_cache[p, kvh, d])
-        // Each lane accumulates v contributions from its 4 positions.
-        // We do this dim-by-dim, distributed across lanes via simd_sum.
+        // (4) Rescale o-accumulator. Then accumulate this tile's V
+        // contribution: tg_o[d] += sum_p (weight[p] * v_cache[p, kvh, d]).
         //
-        // For correctness: rescale step needs barrier before V-aggregation
-        // because tg_scratch is shared between all lanes.
+        // Memory access strategy: each lane owns one position; it walks
+        // its V row sequentially across head_dim, atomically (well, via
+        // serial+barrier) accumulating into the shared o buffer.
         if (rescale != 1.0f) {
             for (uint d = tiisg; d < args.head_dim; d += SIMD_LANES) {
-                tg_scratch[d] *= rescale;
+                tg_o[d] *= rescale;
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
 
-        // V-aggregation: each (lane, position-in-tile) contributes its
-        // scores[i] * v_cache[p, kvh, :] to the o-accumulator across head_dim.
-        // We stride over head_dim by SIMD_LANES, with each lane handling
-        // one (d) at a time, summing across all 4 positions and across
-        // all lanes via simd_sum.
-        for (uint d = tiisg; d < args.head_dim; d += SIMD_LANES) {
-            // Each lane computes its own contribution: sum of scores[i] *
-            // v_cache[p_tile + i*SIMD + tiisg, kvh, d] for i in 0..POSES_PER_LANE.
-            // But that's the WRONG index — we want the lane that owns dim
-            // `d` to sum over all positions in the tile. So we need to
-            // gather scores from the lane that owns each position.
-            //
-            // Simplest pattern: each lane writes its scores[i] into shmem,
-            // then any lane can iterate.
-            // But we don't have shmem space for 128 scores. Instead:
-            // re-broadcast the scores via simd_shuffle in the inner loop.
-            //
-            // Cleaner approach: each lane processes a SET of dims and a
-            // SET of positions. With POSES_PER_LANE=4 and head_dim=256,
-            // dims_per_lane = 8, so 32 lanes × 4 positions × 8 dims is
-            // a 4×8 inner block per lane. We do this via simd_shuffle
-            // to get scores[i] for any position from the owning lane.
-            float acc = 0.0f;
-            for (ushort i = 0; i < POSES_PER_LANE; ++i) {
-                // Position p = p_tile + i * SIMD_LANES + lane_id
-                // The score for that position lives in lane lane_id, register i.
-                // So for each (i, lane_id), we want score = scores[i] from lane_id,
-                // and v_cache[p, kvh, d].
-                for (ushort lane = 0; lane < SIMD_LANES; ++lane) {
-                    const float s = simd_shuffle(scores[i], lane);
-                    const uint p = p_tile + i * SIMD_LANES + lane;
-                    if (p < p_end) {
-                        acc += s * v_cache[
-                            (ulong)p * args.kv_stride
-                            + (ulong)kvh * args.head_dim
-                            + d
-                        ];
-                    }
-                }
+        // Per-lane V contribution. We need to add `weight * v_row` to
+        // tg_o, summed across all 32 lanes. Do this via simd_sum per
+        // dim — for each dim d we want sum_lane(weight_lane * v_lane[d]).
+        //
+        // Each lane reads its own v_row[d] (one read per d per lane,
+        // total = head_dim reads per lane = head_dim*32 reads per tile,
+        // = 32*32 = 1024 reads per tile for head_dim=32 ... but
+        // head_dim=256 so 256*32 = 8192 reads per tile.
+        //
+        // BUT the natural pattern is: each lane reads its v_row once
+        // (head_dim reads), and contributes to all dims of tg_o. That's
+        // 256 reads per lane per tile = 8192 reads per tile total =
+        // 32 KB / tile. With 4096 positions / 32 = 128 tiles, total =
+        // 4 MB read of V per Q head. Per token: 24 Q heads × 4 MB = 96 MB
+        // of V reads at 4K context. That's the LOWER bound — same as
+        // naive.
+        //
+        // The serialization happens across lanes: each lane writes its
+        // (weight × v_row[d]) into the shared accumulator for ONE
+        // d-slice at a time, with the cross-lane sum via simd_sum.
+        for (uint d = 0; d < args.head_dim; ++d) {
+            float my_contrib = 0.0f;
+            if (valid) {
+                const float v_d = v_cache[
+                    (ulong)p * args.kv_stride
+                    + (ulong)kvh * args.head_dim
+                    + d
+                ];
+                my_contrib = weight * v_d;
             }
-            tg_scratch[d] += acc;
+            const float sum = simd_sum(my_contrib);
+            if (tiisg == 0) {
+                tg_o[d] += sum;
+            }
         }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
         m = m_new;
         l = l_new;
@@ -204,6 +149,6 @@ kernel void kernel_attn_decode_flash_f32(
     // Final: out[d] = o[d] / l.
     const float inv_l = 1.0f / l;
     for (uint d = tiisg; d < args.head_dim; d += SIMD_LANES) {
-        out_h[d] = tg_scratch[d] * inv_l;
+        out_h[d] = tg_o[d] * inv_l;
     }
 }

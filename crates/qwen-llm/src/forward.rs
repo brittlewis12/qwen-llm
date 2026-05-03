@@ -659,7 +659,16 @@ fn mat_vec(w: &[f32], n_in: usize, n_out: usize, x: &[f32]) -> Vec<f32> {
     y
 }
 
-/// Apply partial-RoPE in place to a `[n_heads * head_dim]` flat buffer.
+/// Apply partial-RoPE in place to a `[n_heads * head_dim]` flat buffer,
+/// using **NEOX ordering** (pair `(buf[i], buf[i + n_rot/2])`), which is
+/// what `GGML_ROPE_TYPE_IMROPE` uses for text-only positions in qwen35.
+/// MRoPE sections collapse to `t` (time) for pure text, so this reduces
+/// to standard NEOX RoPE with `position` as the time coordinate.
+///
+/// Reference: ggml/include/ggml.h docstring (line 1836):
+/// "IMROPE n_dims = 16 --> [ttyxttyxttyxttyx00] (interleaved M-RoPE,
+/// still NEOX ordering)".
+///
 /// First `n_rot` dims of each head are rotated; the rest pass through.
 fn rope_in_place(
     buf: &mut [f32],
@@ -670,20 +679,19 @@ fn rope_in_place(
     theta_base: f32,
 ) {
     let pos = position as f32;
+    let half = n_rot / 2;
     for hi in 0..n_heads {
         let h_off = hi * head_dim;
-        // Rotate pairs (i, i+1) for i in 0..n_rot step 2.
-        // Frequency: theta_i = position / theta_base^(2i / n_rot)
-        let mut i = 0;
-        while i < n_rot {
-            let exponent = i as f32 / n_rot as f32;
+        for i in 0..half {
+            // Frequency for the i-th pair (NEOX: pair (i, i+half)).
+            // theta_i = position / theta_base^(2i / n_rot)
+            let exponent = (2 * i) as f32 / n_rot as f32;
             let freq = pos / theta_base.powf(exponent);
             let (s, c) = freq.sin_cos();
             let a = buf[h_off + i];
-            let b = buf[h_off + i + 1];
+            let b = buf[h_off + i + half];
             buf[h_off + i] = a * c - b * s;
-            buf[h_off + i + 1] = a * s + b * c;
-            i += 2;
+            buf[h_off + i + half] = a * s + b * c;
         }
     }
 }
@@ -885,7 +893,172 @@ mod tests {
         let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
         eprintln!("[oracle] cosine={cos:.6}");
 
-        // Don't assert hard match yet — first run will tell us how close
-        // the structure is. Once we see numbers, harden into a real bound.
+        // Hard bounds: cosine ≥ 0.9999 and argmax must match. Element-wise
+        // |Δ| up to ~1e-2 is fp32 reordering noise across 24 layers; we're
+        // currently at 2.4e-3.
+        assert!(cos > 0.9999, "cosine={cos} below threshold");
+        assert_eq!(
+            argmax_ours, argmax_oracle,
+            "argmax disagreement: ours={argmax_ours} oracle={argmax_oracle}"
+        );
+        assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
+    }
+
+    /// 27B Q4_K_M oracle test. Exercises:
+    /// * the codec seam (real dequant on Q4_K, Q6_K weights)
+    /// * the n_v=48 / n_k=16 GDN head-repeat path (3:1 ratio)
+    /// * untied embeddings (token_embd is Q4_K, output is Q6_K)
+    /// * 64 layers (16 full-attn + 48 GDN, vs 0.8B's 24)
+    ///
+    /// Slow: ~minutes per token in debug, single-digit seconds in release.
+    /// Marked `#[ignore]` so default `cargo test` doesn't run it; invoke
+    /// explicitly with `cargo test --release -p qwen-llm 27b -- --ignored`.
+    #[test]
+    #[ignore]
+    fn oracle_match_27b_q4_k_m() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let oracle_path = "/tmp/qwen-oracle/hello_27b_q4km.f32";
+        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        {
+            eprintln!("[oracle-27b] skipped — fixtures missing");
+            return;
+        }
+
+        let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
+        let n = oracle_bytes.len() / 4;
+        let oracle: Vec<f32> = (0..n)
+            .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+            .collect();
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert_eq!(oracle.len(), m.arch.vocab_size as usize);
+        assert!(!m.tied_embeddings);
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok.encode("Hello", false).expect("tokenize");
+        eprintln!("[oracle-27b] {ids:?}");
+
+        let f = Forward::new(&g, &m);
+        let mut state = GdnState::fresh(&m);
+        let mut kv = KvCache::new(&m);
+        let logits = f
+            .single_token(ids[0], 0, &mut state, &mut kv)
+            .expect("forward");
+
+        let mut argmax_ours = 0usize;
+        let mut argmax_oracle = 0usize;
+        let mut max_ours = f32::NEG_INFINITY;
+        let mut max_oracle = f32::NEG_INFINITY;
+        let mut max_abs = 0.0f32;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..n {
+            let d = (logits[i] - oracle[i]).abs();
+            max_abs = max_abs.max(d);
+            if logits[i] > max_ours {
+                max_ours = logits[i];
+                argmax_ours = i;
+            }
+            if oracle[i] > max_oracle {
+                max_oracle = oracle[i];
+                argmax_oracle = i;
+            }
+            dot += logits[i] as f64 * oracle[i] as f64;
+            na += (logits[i] as f64).powi(2);
+            nb += (oracle[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[oracle-27b] argmax: ours={argmax_ours} ({:.4}) | oracle={argmax_oracle} ({:.4}) | max|Δ|={max_abs:.4} cos={cos:.6}",
+            max_ours, max_oracle
+        );
+        assert_eq!(
+            argmax_ours, argmax_oracle,
+            "argmax disagreement on 27B Q4_K_M"
+        );
+        // Q4_K introduces real quant noise — relax cosine to 0.999.
+        assert!(cos > 0.999, "cosine={cos} below threshold");
+    }
+
+    /// Multi-token prompt (9 tokens). Exercises position > 0 in attention
+    /// layers and incremental GDN state across the prefill.
+    ///
+    /// Oracle generated via:
+    /// ```sh
+    /// ~/code/llm/target/release/llm --model /Users/tito/models/Qwen3.5-0.8B.F32.gguf \
+    ///   --snapshot /tmp/qwen-oracle --snapshot-id longprompt_t0 \
+    ///   --raw "The quick brown fox jumps over the lazy dog"
+    /// ```
+    /// Expected argmax: "." (token 13).
+    #[test]
+    fn oracle_match_longprompt_0_8b_f32() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let oracle_path = "/tmp/qwen-oracle/longprompt_t0.f32";
+        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        {
+            eprintln!("[oracle-long] skipped — fixtures missing");
+            return;
+        }
+
+        let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
+        let n = oracle_bytes.len() / 4;
+        let oracle: Vec<f32> = (0..n)
+            .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+            .collect();
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert_eq!(oracle.len(), m.arch.vocab_size as usize);
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        eprintln!("[oracle-long] {} tokens: {ids:?}", ids.len());
+        assert_eq!(ids.len(), 9, "tokenization should match oracle's 9 tokens");
+
+        let f = Forward::new(&g, &m);
+        let mut state = GdnState::fresh(&m);
+        let mut kv = KvCache::new(&m);
+
+        let mut last_logits = vec![];
+        for (i, &tid) in ids.iter().enumerate() {
+            last_logits = f
+                .single_token(tid, i as u32, &mut state, &mut kv)
+                .expect("forward");
+        }
+
+        let mut max_abs = 0.0f32;
+        let mut argmax_ours = 0usize;
+        let mut argmax_oracle = 0usize;
+        let mut max_ours = f32::NEG_INFINITY;
+        let mut max_oracle = f32::NEG_INFINITY;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..n {
+            let d = (last_logits[i] - oracle[i]).abs();
+            max_abs = max_abs.max(d);
+            if last_logits[i] > max_ours {
+                max_ours = last_logits[i];
+                argmax_ours = i;
+            }
+            if oracle[i] > max_oracle {
+                max_oracle = oracle[i];
+                argmax_oracle = i;
+            }
+            dot += last_logits[i] as f64 * oracle[i] as f64;
+            na += (last_logits[i] as f64).powi(2);
+            nb += (oracle[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[oracle-long] argmax: ours={argmax_ours} (logit {:.4}) | oracle={argmax_oracle} (logit {:.4}) | max|Δ|={max_abs:.4} cos={cos:.6}",
+            max_ours, max_oracle
+        );
+        assert_eq!(argmax_ours, 13, "argmax should be '.' (token 13)");
+        assert!(cos > 0.9999, "cosine={cos} below threshold");
     }
 }

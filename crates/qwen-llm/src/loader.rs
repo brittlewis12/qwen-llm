@@ -16,15 +16,23 @@
 //!
 //! GDN-only:
 //!
-//! * `blk.{i}.attn_qkv.weight`     : GDN's `in_proj_qkv` (combined Q/K/V)
-//! * `blk.{i}.attn_gate.weight`    : GDN's `in_proj_z` (output gate)
-//! * `blk.{i}.ssm_alpha.weight`    : `in_proj_b`  (per-token-per-head β source)
-//! * `blk.{i}.ssm_beta.weight`     : `in_proj_a`  (per-token-per-head g source)
-//! * `blk.{i}.ssm_a`               : `A_log`     (per-head decay log)
-//! * `blk.{i}.ssm_dt.bias`         : `dt_bias`   (per-head time-step bias)
+//! * `blk.{i}.attn_qkv.weight`     : combined Q/K/V projection
+//! * `blk.{i}.attn_gate.weight`    : `in_proj_z` (output gate)
+//! * `blk.{i}.ssm_beta.weight`     : β-projection — sigmoid'd into per-token β
+//!                                   (this is named `ssm_beta` in GGUF and `wq_beta`-like
+//!                                   in HF — `beta = sigmoid(ssm_beta @ x)`)
+//! * `blk.{i}.ssm_alpha.weight`    : α-projection — `softplus(ssm_alpha @ x + ssm_dt) * (-A_log.exp())`
+//!                                   produces the gate
+//! * `blk.{i}.ssm_a`               : already-`-A_log.exp()`-baked at convert time
+//!                                   (multiplied with softplus(α + dt) to make `g`)
+//! * `blk.{i}.ssm_dt.bias`         : per-head time-step bias
 //! * `blk.{i}.ssm_conv1d.weight`   : depthwise conv1d kernel
 //! * `blk.{i}.ssm_norm.weight`     : RMSNormGated norm weight
-//! * `blk.{i}.ssm_out.weight`      : `out_proj`  (back to hidden_size)
+//! * `blk.{i}.ssm_out.weight`      : `out_proj` (back to hidden_size)
+//!
+//! Reference: `~/code/llama.cpp/src/llama-model.cpp` case `LLM_ARCH_QWEN35`
+//! (tensor creation) and `~/code/llama.cpp/src/models/qwen35.cpp`
+//! `build_layer_attn_linear` (forward).
 //!
 //! Full-attn-only:
 //!
@@ -66,6 +74,13 @@ pub enum LoadError {
 }
 
 /// Per-block weight references for a GDN layer.
+///
+/// Field names follow the *forward-pass role*, not the GGUF tensor name —
+/// the mapping is documented at the module level. In particular, the
+/// β-source projection is the GGUF tensor `ssm_beta.weight` and the
+/// α-source (which feeds softplus → multiplies with A_log → forms the
+/// gate `g`) is `ssm_alpha.weight`. These are easy to invert; double-check
+/// against `~/code/llama.cpp/src/models/qwen35.cpp` if in doubt.
 #[derive(Clone)]
 pub struct GdnBlock<'a> {
     // shared with attn-block layout
@@ -74,16 +89,16 @@ pub struct GdnBlock<'a> {
     pub ffn_gate: &'a TensorDesc,
     pub ffn_up: &'a TensorDesc,
     pub ffn_down: &'a TensorDesc,
-    // GDN-specific
-    pub in_proj_qkv: &'a TensorDesc, // attn_qkv
-    pub in_proj_z: &'a TensorDesc,   // attn_gate
-    pub in_proj_b: &'a TensorDesc,   // ssm_alpha (β source)
-    pub in_proj_a: &'a TensorDesc,   // ssm_beta (g source)
-    pub a_log: &'a TensorDesc,       // ssm_a
+    // GDN-specific (GGUF name → forward-pass role)
+    pub in_proj_qkv: &'a TensorDesc, // attn_qkv         — combined QKV input projection
+    pub in_proj_z: &'a TensorDesc,   // attn_gate        — z (gate) input projection
+    pub beta_proj: &'a TensorDesc,   // ssm_beta.weight  — β = sigmoid(beta_proj @ x)
+    pub alpha_proj: &'a TensorDesc,  // ssm_alpha.weight — softplus(alpha_proj @ x + dt) * a_log
+    pub a_log: &'a TensorDesc,       // ssm_a            — already negated/exp'd at convert
     pub dt_bias: &'a TensorDesc,     // ssm_dt.bias
     pub conv1d: &'a TensorDesc,      // ssm_conv1d.weight
-    pub norm: &'a TensorDesc,        // ssm_norm.weight
-    pub out_proj: &'a TensorDesc,    // ssm_out.weight
+    pub norm: &'a TensorDesc,        // ssm_norm.weight  — RMSNorm before silu(z) gate
+    pub out_proj: &'a TensorDesc,    // ssm_out.weight   — back to hidden_size
 }
 
 /// Per-block weight references for a full-attention layer.
@@ -182,14 +197,19 @@ impl<'a> Model<'a> {
                     check_shape(in_proj_qkv, &[arch.hidden_size as u64, qkv_out as u64])?;
                     let in_proj_z = need(g, &format!("blk.{i}.attn_gate.weight"))?;
                     check_shape(in_proj_z, &[arch.hidden_size as u64, z_out as u64])?;
-                    let in_proj_b = need(g, &format!("blk.{i}.ssm_alpha.weight"))?;
+                    // GGUF `ssm_beta.weight` feeds β = sigmoid(...).
+                    // GGUF `ssm_alpha.weight` feeds the softplus → gate path.
+                    // The names are confusing — don't read them as the
+                    // Greek letters they share with the math; trust the
+                    // qwen35.cpp reference implementation.
+                    let beta_proj = need(g, &format!("blk.{i}.ssm_beta.weight"))?;
                     check_shape(
-                        in_proj_b,
+                        beta_proj,
                         &[arch.hidden_size as u64, arch.gdn_n_v_heads as u64],
                     )?;
-                    let in_proj_a = need(g, &format!("blk.{i}.ssm_beta.weight"))?;
+                    let alpha_proj = need(g, &format!("blk.{i}.ssm_alpha.weight"))?;
                     check_shape(
-                        in_proj_a,
+                        alpha_proj,
                         &[arch.hidden_size as u64, arch.gdn_n_v_heads as u64],
                     )?;
                     let a_log = need(g, &format!("blk.{i}.ssm_a"))?;
@@ -218,8 +238,8 @@ impl<'a> Model<'a> {
                         ffn_down,
                         in_proj_qkv,
                         in_proj_z,
-                        in_proj_b,
-                        in_proj_a,
+                        beta_proj,
+                        alpha_proj,
                         a_log,
                         dt_bias,
                         conv1d,

@@ -4,27 +4,46 @@
 //! tokens occupy the high range starting at 248,044
 //! (`<|endoftext|>`, `<|im_start|>`, `<|im_end|>`, vision/audio pads, etc).
 //!
-//! ## Implementation choice
+//! ## Implementation choice (and the swap path)
 //!
 //! Tokenization is a non-hot-path operation: it runs once per prompt at
 //! ingest, and again only when streaming user output. The throughput
-//! ceiling we care about is in the kernels and graph executor; spending
-//! days reimplementing Qwen2 BPE from scratch would not move the
-//! needle and would create a *new* class of bug (off-by-one merges,
-//! byte-fallback edge cases, special-token regex misses) right at the
-//! input/output boundary where we want maximum confidence.
+//! ceiling we care about is in the kernels and graph executor.
 //!
-//! Instead, we delegate tokenization to llama.cpp via `llama-cpp-sys-2`
-//! (already linked for the codec seam). This gives byte-perfect
-//! correspondence with `llama-cli` — which is also our numerical oracle —
-//! and removes a pile of moving parts. If we ever ship a binary that
-//! wants to drop the llama.cpp link, this is the same translation
-//! decision as the dequant codec: trace, vendor, replace.
+//! Three real options:
+//!
+//! | option | byte-perfect w/ llama-cli oracle | drops llama-cpp link | LOC |
+//! |---|---|---|---|
+//! | **`llama-cpp-sys-2` shim (current)** | yes — shared codepath | no | ~50 |
+//! | **`tokenizers` (huggingface) crate** | not guaranteed (BPE tie-break edges) | yes | ~30 |
+//! | **`tiktoken-rs`** | n/a — different vocab family | yes | n/a |
+//!
+//! For the v1 phase where we're chasing byte-for-byte logit equivalence
+//! with `llama-cli` on `Qwen3.5-0.8B.F32.gguf`, the llama-cpp shim is
+//! the safer call because it shares the exact tokenizer used by the
+//! oracle — any divergence in our kernels can't be confused with a BPE
+//! edge case.
+//!
+//! Once kernels are validated, swapping to the `tokenizers` crate (which
+//! reads Qwen's shipping `tokenizer.json` directly from HF, pure Rust,
+//! no FFI) is a 30-line change behind the [`Tokenize`] trait below. The
+//! same way the codec seam is staged for in-tree replacement.
 
 use crate::gguf::GgufFile;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::path::Path;
 use std::sync::Once;
+
+/// Backend-agnostic tokenizer interface. Implemented today by the
+/// llama.cpp-backed [`Tokenizer`]; the planned `huggingface_tokenizers`
+/// backend will implement the same trait.
+pub trait Tokenize {
+    fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError>;
+    fn decode(&self, tokens: &[i32]) -> String;
+    fn n_vocab(&self) -> u32;
+    fn bos(&self) -> Option<i32>;
+    fn eos(&self) -> Option<i32>;
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TokError {
@@ -185,6 +204,24 @@ impl Tokenizer {
             out.push_str(&self.decode_piece(t));
         }
         out
+    }
+}
+
+impl Tokenize for Tokenizer {
+    fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError> {
+        Tokenizer::encode(self, text, add_special)
+    }
+    fn decode(&self, tokens: &[i32]) -> String {
+        Tokenizer::decode(self, tokens)
+    }
+    fn n_vocab(&self) -> u32 {
+        self.n_vocab
+    }
+    fn bos(&self) -> Option<i32> {
+        self.bos
+    }
+    fn eos(&self) -> Option<i32> {
+        self.eos
     }
 }
 

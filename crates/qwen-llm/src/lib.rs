@@ -25,6 +25,7 @@
 //! pair is the v1 correctness bar.
 
 pub mod codec;
+pub mod forward;
 pub mod gguf;
 pub mod loader;
 pub mod metal;

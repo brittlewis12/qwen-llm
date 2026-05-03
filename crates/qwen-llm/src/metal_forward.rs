@@ -1285,6 +1285,299 @@ impl<'a> MetalForward<'a> {
     }
 }
 
+// ============================================================================
+// Prefix-cache snapshots (H2): packed-arena state capture for warm-restart.
+// ============================================================================
+//
+// Per the H2 design (validated bit-exact in v0.34's correctness spike):
+// snapshot the full per-sequence state at a token prefix boundary so a
+// later request sharing that prefix can restore-and-resume instead of
+// cold-prefilling.
+//
+// Storage layout (CPU-side `Vec<u8>` arenas, NOT Metal-managed buffers):
+//   * Four packed arenas: kv_k, kv_v, gdn_conv, gdn_state.
+//   * One CPU vec each, contiguous across layers (NOT 4*n_layers small
+//     allocations -- per codex review, that's a long-term mistake).
+//   * Final logits stored for the exact-hit case (request == cached
+//     prefix exactly).
+//
+// Lifecycle:
+//   * `MetalSession::snapshot(ctx, identity, prefix_tokens)` builds
+//     a `SessionSnapshot` by reading the live MTLBuffer.contents() of
+//     each session field via raw memcpy. Shared-storage UMA makes this
+//     safe and fast (no command-buffer round-trip); Apple docs
+//     guarantee the producer's writes are visible after that command
+//     buffer completes.
+//   * `MetalSession::restore_from(snap)` validates identity matches,
+//     then memcpys arena bytes back into session buffers and copies
+//     `kv_n_pos`. Subsequent forward passes see the restored state.
+//
+// Why CPU-side `Vec<u8>` instead of `MetalTensor` arenas (which would
+// also be shared-storage on UMA): LRU eviction and cross-session
+// disk persistence get cleaner; system memory pressure handler sees
+// the cost; Metal's buffer pool stays uncluttered.
+
+/// Identity tag for a snapshot. Checked at restore to refuse silent
+/// corruption from model drift / dtype change / layout-version bump.
+///
+/// `model_id` is content-addressable (typically a hash of the GGUF
+/// metadata + tensor descriptor table). `layout_version` is a manual
+/// counter bumped whenever the `MetalSession` field layout changes
+/// in a way that would invalidate prior snapshots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotIdentity {
+    pub model_id: u64,
+    pub tokenizer_id: u64,
+    pub layout_version: u32,
+    pub n_attn_layers: u32,
+    pub n_gdn_layers: u32,
+    pub kv_dim_elements: u32,
+    pub gdn_state_elements_per_layer: u32,
+    pub gdn_conv_elements_per_layer: u32,
+}
+
+/// Bump this when MetalSession's per-layer state shape changes.
+pub const SNAPSHOT_LAYOUT_VERSION: u32 = 1;
+
+/// Captured state at the end of prefilling `prefix_tokens` through a
+/// fresh session. Restoring into a fresh session and running additional
+/// tokens is bit-equivalent to cold prefill of the full sequence
+/// (validated by `h2_prefix_cache_correctness_spike`).
+#[derive(Clone)]
+pub struct SessionSnapshot {
+    pub identity: SnapshotIdentity,
+    /// Tokens consumed up to the snapshot boundary. Used as cache key.
+    pub prefix_tokens: Vec<i32>,
+    /// `kv_n_pos[attn_layer]` after prefill. Same value across layers
+    /// for our forward pass (single-stream); kept per-layer for safety.
+    pub kv_n_pos: Vec<usize>,
+    /// Packed K cache slice: `n_attn × prefix_len × kv_dim_elements × 2 bytes` (F16).
+    /// Sized exactly to the prefix; doesn't carry the unused tail of
+    /// the session's full-capacity KV buffer.
+    pub kv_k_arena: Vec<u8>,
+    /// Packed V cache slice (same shape).
+    pub kv_v_arena: Vec<u8>,
+    /// Packed GDN conv buffers: `n_gdn × gdn_conv_elements_per_layer × 4 bytes` (F32).
+    pub gdn_conv_arena: Vec<u8>,
+    /// Packed GDN recurrent state: `n_gdn × gdn_state_elements_per_layer × 4 bytes` (F32).
+    pub gdn_state_arena: Vec<u8>,
+    /// Logits at the last prefix token (vocab_size F32). Lets a
+    /// subsequent exact-hit (request == cached prefix) sample directly
+    /// without a forward pass. None if not stored at snapshot time.
+    pub final_logits: Option<Vec<f32>>,
+}
+
+impl SessionSnapshot {
+    /// Total in-memory cost of this snapshot, in bytes.
+    pub fn n_bytes(&self) -> u64 {
+        (self.kv_k_arena.len()
+            + self.kv_v_arena.len()
+            + self.gdn_conv_arena.len()
+            + self.gdn_state_arena.len()
+            + self.final_logits.as_ref().map_or(0, |v| v.len() * 4)
+            + self.prefix_tokens.len() * 4
+            + self.kv_n_pos.len() * 8) as u64
+    }
+
+    /// Number of tokens consumed up to this snapshot.
+    pub fn prefix_len(&self) -> usize {
+        self.prefix_tokens.len()
+    }
+}
+
+/// Copy raw bytes FROM a shared-storage MetalTensor's MTLBuffer INTO an
+/// existing destination slice (single memcpy, no intermediate alloc).
+/// Caller must ensure any prior GPU write is complete (i.e., the command
+/// buffer that wrote this tensor was committed AND waitUntilCompleted'd).
+fn read_tensor_into(dst: &mut [u8], t: &MetalTensor) {
+    debug_assert!(
+        dst.len() as u64 + t.offset <= t.buffer.length() as u64,
+        "read OOB: offset={} + n={} > buffer.len={}",
+        t.offset,
+        dst.len(),
+        t.buffer.length()
+    );
+    unsafe {
+        let src = (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize);
+        std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
+    }
+}
+
+/// Write raw bytes into a shared-storage MetalTensor's MTLBuffer at offset.
+/// Caller must ensure any in-flight GPU read of this tensor has completed
+/// before calling. Subsequent GPU work will see the written bytes.
+fn write_tensor_bytes(t: &MetalTensor, bytes: &[u8]) {
+    debug_assert!(
+        bytes.len() as u64 + t.offset <= t.buffer.length() as u64,
+        "write OOB: offset={} + n={} > buffer.len={}",
+        t.offset,
+        bytes.len(),
+        t.buffer.length()
+    );
+    unsafe {
+        let dst = (t.buffer.contents().as_ptr() as *mut u8).add(t.offset as usize);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+    }
+}
+
+impl MetalSession {
+    /// Compute the identity tag for snapshots produced by this session
+    /// shape under the given model. Stable across runs of the same
+    /// (model, tokenizer, layout) tuple.
+    pub fn snapshot_identity(&self, model_id: u64, tokenizer_id: u64) -> SnapshotIdentity {
+        SnapshotIdentity {
+            model_id,
+            tokenizer_id,
+            layout_version: SNAPSHOT_LAYOUT_VERSION,
+            n_attn_layers: self.kv_k.len() as u32,
+            n_gdn_layers: self.gdn_state.len() as u32,
+            kv_dim_elements: (self.kv_k.first().map(|t| t.n_elements()).unwrap_or(0)
+                / self.kv_capacity as u64) as u32,
+            gdn_state_elements_per_layer: self
+                .gdn_state
+                .first()
+                .map(|t| t.n_elements())
+                .unwrap_or(0) as u32,
+            gdn_conv_elements_per_layer: self.gdn_conv.first().map(|t| t.n_elements()).unwrap_or(0)
+                as u32,
+        }
+    }
+
+    /// Build a `SessionSnapshot` from the current session state.
+    ///
+    /// `prefix_tokens` is the token sequence that was just consumed
+    /// (used as the cache key). `final_logits` is the logits at the
+    /// last consumed token (stored for exact-hit lookups; pass `None`
+    /// to skip).
+    ///
+    /// The caller must ensure all prior forward-pass work on this
+    /// session has completed (i.e., the last `single_token` call has
+    /// returned, which implies its command buffer was waited on).
+    /// Reads bytes from MTLBuffer.contents() directly via memcpy --
+    /// safe on shared-storage UMA per Apple docs once writes are
+    /// scheduled and complete.
+    pub fn snapshot(
+        &self,
+        identity: SnapshotIdentity,
+        prefix_tokens: Vec<i32>,
+        final_logits: Option<Vec<f32>>,
+    ) -> SessionSnapshot {
+        let prefix_len = prefix_tokens.len();
+        let n_attn = self.kv_k.len();
+        let n_gdn = self.gdn_state.len();
+        let kv_dim = identity.kv_dim_elements as usize;
+
+        // KV: per-layer slice is exactly prefix_len * kv_dim F16 elements.
+        let kv_slice_bytes = prefix_len * kv_dim * 2;
+        let kv_arena_bytes = n_attn * kv_slice_bytes;
+
+        // Allocate each arena UNINITIALIZED (no zero-init), then memcpy
+        // directly from MTLBuffer.contents() into slices. ONE write per byte.
+        // Zero-init costs almost as much as the actual copy at this scale
+        // (158 MB of writes), so skipping it ~halves wall time.
+        // Safety: the entire allocation is overwritten by read_tensor_into
+        // before any read; no uninitialized bytes ever escape.
+        let mut kv_k_arena: Vec<u8> = Vec::with_capacity(kv_arena_bytes);
+        let mut kv_v_arena: Vec<u8> = Vec::with_capacity(kv_arena_bytes);
+        // SAFETY: capacity is exactly arena_bytes; we will fully overwrite
+        // before any read; u8 has no Drop and no validity invariants.
+        unsafe {
+            kv_k_arena.set_len(kv_arena_bytes);
+            kv_v_arena.set_len(kv_arena_bytes);
+        }
+        for i in 0..n_attn {
+            let off = i * kv_slice_bytes;
+            read_tensor_into(&mut kv_k_arena[off..off + kv_slice_bytes], &self.kv_k[i]);
+            read_tensor_into(&mut kv_v_arena[off..off + kv_slice_bytes], &self.kv_v[i]);
+        }
+
+        // GDN: each layer's full buffer (size doesn't depend on prefix_len).
+        let gdn_conv_per = (identity.gdn_conv_elements_per_layer as usize) * 4;
+        let gdn_state_per = (identity.gdn_state_elements_per_layer as usize) * 4;
+        let gdn_conv_total = n_gdn * gdn_conv_per;
+        let gdn_state_total = n_gdn * gdn_state_per;
+        let mut gdn_conv_arena: Vec<u8> = Vec::with_capacity(gdn_conv_total);
+        let mut gdn_state_arena: Vec<u8> = Vec::with_capacity(gdn_state_total);
+        // SAFETY: same as above.
+        unsafe {
+            gdn_conv_arena.set_len(gdn_conv_total);
+            gdn_state_arena.set_len(gdn_state_total);
+        }
+        for i in 0..n_gdn {
+            let off_c = i * gdn_conv_per;
+            let off_s = i * gdn_state_per;
+            read_tensor_into(
+                &mut gdn_conv_arena[off_c..off_c + gdn_conv_per],
+                &self.gdn_conv[i],
+            );
+            read_tensor_into(
+                &mut gdn_state_arena[off_s..off_s + gdn_state_per],
+                &self.gdn_state[i],
+            );
+        }
+
+        SessionSnapshot {
+            identity,
+            prefix_tokens,
+            kv_n_pos: self.kv_n_pos.clone(),
+            kv_k_arena,
+            kv_v_arena,
+            gdn_conv_arena,
+            gdn_state_arena,
+            final_logits,
+        }
+    }
+
+    /// Restore a session to the state captured in `snap`. The session
+    /// MUST have been freshly created with the same architecture as
+    /// the one that produced `snap` (validated by identity check).
+    /// Returns Err on identity mismatch (to avoid silent corruption).
+    ///
+    /// The caller must ensure no in-flight GPU work is reading these
+    /// session buffers (i.e., this should be called after
+    /// `MetalSession::fresh` and before the first `single_token`).
+    pub fn restore_from(&mut self, snap: &SessionSnapshot) -> Result<(), MfError> {
+        let want = self.snapshot_identity(snap.identity.model_id, snap.identity.tokenizer_id);
+        if want != snap.identity {
+            return Err(MfError::Metal(crate::metal::MetalError::BadShape {
+                kernel: "snapshot_restore",
+                detail: format!(
+                    "identity mismatch: snapshot={:?}, session-shape={:?}",
+                    snap.identity, want
+                ),
+            }));
+        }
+        let n_attn = self.kv_k.len();
+        let n_gdn = self.gdn_state.len();
+        let prefix_len = snap.prefix_len();
+        let kv_dim = snap.identity.kv_dim_elements as usize;
+        let kv_slice_bytes = prefix_len * kv_dim * 2;
+
+        for i in 0..n_attn {
+            let off = i * kv_slice_bytes;
+            write_tensor_bytes(&self.kv_k[i], &snap.kv_k_arena[off..off + kv_slice_bytes]);
+            write_tensor_bytes(&self.kv_v[i], &snap.kv_v_arena[off..off + kv_slice_bytes]);
+        }
+        self.kv_n_pos.copy_from_slice(&snap.kv_n_pos);
+
+        let gdn_conv_per = (snap.identity.gdn_conv_elements_per_layer as usize) * 4;
+        let gdn_state_per = (snap.identity.gdn_state_elements_per_layer as usize) * 4;
+        for i in 0..n_gdn {
+            let off_c = i * gdn_conv_per;
+            let off_s = i * gdn_state_per;
+            write_tensor_bytes(
+                &self.gdn_conv[i],
+                &snap.gdn_conv_arena[off_c..off_c + gdn_conv_per],
+            );
+            write_tensor_bytes(
+                &self.gdn_state[i],
+                &snap.gdn_state_arena[off_s..off_s + gdn_state_per],
+            );
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3772,5 +4065,162 @@ mod tests {
             );
         }
         eprintln!("[h2-spike] ALL prefix splits passed — H2 mechanism validated.");
+    }
+
+    /// **H2.1 — packed-arena snapshot via the production API.**
+    /// Same correctness guarantee as the H2.0 spike, but uses the new
+    /// `MetalSession::snapshot` / `restore_from` methods on top of
+    /// `SessionSnapshot` arenas. Validates the production API matches
+    /// the bit-exact spike.
+    ///
+    /// Also reports snapshot/restore wall-clock so we can compare to
+    /// the bandwidth model (codex predicted ~0.9-2 ms; let's see).
+    #[test]
+    #[ignore]
+    fn h2_packed_arena_snapshot_matches_cold() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[h2-arena] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Larger prompt for more meaningful prefix lengths.
+        let prompt = "The quick brown fox jumps over the lazy dog and then runs into the deep dark forest where it meets a wise old owl who teaches it the meaning of life";
+        let ids = tok.encode(prompt, false).expect("tokenize");
+        eprintln!("[h2-arena] {} prompt tokens", ids.len());
+
+        for &prefix_len in &[1usize, 5, 16, ids.len() - 1] {
+            assert!(prefix_len < ids.len() && prefix_len > 0);
+            let suffix_len = ids.len() - prefix_len;
+            eprintln!("[h2-arena] === prefix_len={prefix_len} suffix_len={suffix_len} ===");
+
+            // Cold reference.
+            let mut sess_cold = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("A");
+            let mut logits_cold = vec![];
+            for (i, &tid) in ids.iter().enumerate() {
+                logits_cold = mf
+                    .single_token(tid, i as u32, &mut sess_cold)
+                    .expect("cold");
+            }
+
+            // Build a snapshot via the production API.
+            let mut sess_pre = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("B");
+            let mut last_pre_logits = vec![];
+            for i in 0..prefix_len {
+                last_pre_logits = mf
+                    .single_token(ids[i], i as u32, &mut sess_pre)
+                    .expect("pre");
+            }
+            let identity = sess_pre.snapshot_identity(0xDEADBEEF, 0xCAFE);
+            let prefix_tokens: Vec<i32> = ids[..prefix_len].to_vec();
+
+            let t = std::time::Instant::now();
+            let snap = sess_pre.snapshot(identity, prefix_tokens, Some(last_pre_logits));
+            let snap_ms = t.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "[h2-arena]   snapshot: {:.2} MB in {:.2} ms = {:.1} GB/s",
+                snap.n_bytes() as f64 / 1e6,
+                snap_ms,
+                (snap.n_bytes() as f64 / 1e9) / (snap_ms / 1e3)
+            );
+
+            // Restore into a fresh session via the production API.
+            let mut sess_restored = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("C");
+            let t = std::time::Instant::now();
+            sess_restored.restore_from(&snap).expect("restore");
+            let restore_ms = t.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "[h2-arena]   restore:  {:.2} ms = {:.1} GB/s",
+                restore_ms,
+                (snap.n_bytes() as f64 / 1e9) / (restore_ms / 1e3)
+            );
+
+            // Run suffix tokens through restored session.
+            let mut logits_restored = vec![];
+            for k in 0..suffix_len {
+                let pos = (prefix_len + k) as u32;
+                let tid = ids[prefix_len + k];
+                logits_restored = mf
+                    .single_token(tid, pos, &mut sess_restored)
+                    .expect("restored forward");
+            }
+
+            // Compare last-position logits.
+            let n = logits_cold.len();
+            assert_eq!(n, logits_restored.len());
+            let mut max_abs = 0.0f32;
+            let mut argmax_cold = 0usize;
+            let mut argmax_restored = 0usize;
+            let mut max_cold = f32::NEG_INFINITY;
+            let mut max_restored = f32::NEG_INFINITY;
+            let mut dot = 0.0f64;
+            let mut na = 0.0f64;
+            let mut nb = 0.0f64;
+            for i in 0..n {
+                let d = (logits_cold[i] - logits_restored[i]).abs();
+                max_abs = max_abs.max(d);
+                if logits_cold[i] > max_cold {
+                    max_cold = logits_cold[i];
+                    argmax_cold = i;
+                }
+                if logits_restored[i] > max_restored {
+                    max_restored = logits_restored[i];
+                    argmax_restored = i;
+                }
+                dot += logits_cold[i] as f64 * logits_restored[i] as f64;
+                na += (logits_cold[i] as f64).powi(2);
+                nb += (logits_restored[i] as f64).powi(2);
+            }
+            let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+            eprintln!(
+                "[h2-arena]   cos={cos:.7} max|Δ|={max_abs:.4} argmax: cold={argmax_cold} restored={argmax_restored} {}",
+                if argmax_cold == argmax_restored { "✓" } else { "✗ MISMATCH" }
+            );
+            assert_eq!(argmax_cold, argmax_restored);
+            assert!(cos > 0.99999, "cos={cos} below threshold");
+        }
+
+        // Identity-mismatch refusal.
+        {
+            let sess = MetalSession::fresh(&ctx, &mm, 64).expect("ident");
+            let bogus_identity = SnapshotIdentity {
+                model_id: 0,
+                tokenizer_id: 0,
+                layout_version: 999,
+                n_attn_layers: 0,
+                n_gdn_layers: 0,
+                kv_dim_elements: 0,
+                gdn_state_elements_per_layer: 0,
+                gdn_conv_elements_per_layer: 0,
+            };
+            let bad_snap = SessionSnapshot {
+                identity: bogus_identity,
+                prefix_tokens: vec![],
+                kv_n_pos: vec![],
+                kv_k_arena: vec![],
+                kv_v_arena: vec![],
+                gdn_conv_arena: vec![],
+                gdn_state_arena: vec![],
+                final_logits: None,
+            };
+            let mut s2 = sess;
+            assert!(
+                s2.restore_from(&bad_snap).is_err(),
+                "identity mismatch must error"
+            );
+            eprintln!("[h2-arena]   identity-mismatch refusal: ✓");
+        }
+
+        eprintln!("[h2-arena] all prefix splits passed via packed-arena API.");
     }
 }

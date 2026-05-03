@@ -1361,6 +1361,99 @@ mod tests {
         assert!(cos > 0.999, "cos={cos} below threshold");
     }
 
+    /// **27B Q4_K_M, multi-token**: validates position > 0 + steady-state
+    /// throughput. The headline number we've been working toward.
+    #[test]
+    #[ignore]
+    fn metal_27b_multi_token_perf() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let oracle_path = "/tmp/qwen-oracle/longprompt_27b.f32";
+        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        {
+            eprintln!("[metal-27b-multi] skipped — fixtures missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
+        let n = oracle_bytes.len() / 4;
+        let oracle: Vec<f32> = (0..n)
+            .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+            .collect();
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        eprintln!("[metal-27b-multi] {} tokens: {ids:?}", ids.len());
+        assert_eq!(ids.len(), 9);
+
+        let mut s = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Warmup pass to compile pipeline state objects + warm caches.
+        let _ = mf.single_token(ids[0], 0, &mut s).expect("warmup");
+        // Reset session for the actual run.
+        let mut s = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("session2");
+
+        let t = std::time::Instant::now();
+        let mut last = vec![];
+        let mut per_token_ms: Vec<f64> = Vec::new();
+        for (i, &tid) in ids.iter().enumerate() {
+            let tt = std::time::Instant::now();
+            last = mf.single_token(tid, i as u32, &mut s).expect("forward");
+            per_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
+        }
+        let total_ms = t.elapsed().as_secs_f64() * 1e3;
+
+        let mut max_abs = 0.0f32;
+        let mut argmax_ours = 0usize;
+        let mut argmax_oracle = 0usize;
+        let mut max_ours = f32::NEG_INFINITY;
+        let mut max_oracle = f32::NEG_INFINITY;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..n {
+            let d = (last[i] - oracle[i]).abs();
+            max_abs = max_abs.max(d);
+            if last[i] > max_ours {
+                max_ours = last[i];
+                argmax_ours = i;
+            }
+            if oracle[i] > max_oracle {
+                max_oracle = oracle[i];
+                argmax_oracle = i;
+            }
+            dot += last[i] as f64 * oracle[i] as f64;
+            na += (last[i] as f64).powi(2);
+            nb += (oracle[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[metal-27b-multi] {total_ms:.1}ms total, {:.1}ms/token (avg) — argmax: ours={argmax_ours} ({:.4}) | oracle={argmax_oracle} ({:.4}) | max|Δ|={max_abs:.4} cos={cos:.6}",
+            total_ms / ids.len() as f64,
+            max_ours,
+            max_oracle
+        );
+        eprintln!("[metal-27b-multi] per-token (ms): {per_token_ms:?}");
+        let avg_excl_first =
+            per_token_ms[1..].iter().sum::<f64>() / (per_token_ms.len() - 1) as f64;
+        eprintln!(
+            "[metal-27b-multi] steady-state (excl. first): {avg_excl_first:.1} ms/token = {:.2} t/s",
+            1000.0 / avg_excl_first
+        );
+        assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
+        assert!(cos > 0.999, "cos={cos} below threshold");
+    }
+
     /// **End-to-end Metal forward, multi-token**. Exercises position > 0
     /// in the attn block (RoPE, KV cache reads at multiple positions).
     /// Oracle: llm/llama_core's snapshot dump for "The quick brown fox

@@ -579,6 +579,11 @@ impl KvCache {
 
 const RMS_EPS: f32 = 1e-6;
 
+/// Public re-export of [`rms_norm`] for kernel-validation tests.
+pub fn rms_norm_pub(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+    rms_norm(x, weight, eps)
+}
+
 fn rms_norm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     let n = x.len();
     let mean_sq: f32 = x.iter().map(|&v| v * v).sum::<f32>() / n as f32;

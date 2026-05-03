@@ -1140,6 +1140,85 @@ mod tests {
         assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
     }
 
+    /// **End-to-end Metal forward, multi-token**. Exercises position > 0
+    /// in the attn block (RoPE, KV cache reads at multiple positions).
+    /// Oracle: llm/llama_core's snapshot dump for "The quick brown fox
+    /// jumps over the lazy dog" (9 tokens), Qwen3.5-0.8B-F32.
+    #[test]
+    fn metal_multi_token_matches_cpu_oracle() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let oracle_path = "/tmp/qwen-oracle/longprompt_t0.f32";
+        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        {
+            eprintln!("[metal-e2e-multi] skipped — fixtures missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
+        let n = oracle_bytes.len() / 4;
+        let oracle: Vec<f32> = (0..n)
+            .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+            .collect();
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        eprintln!("[metal-e2e-multi] {} tokens: {ids:?}", ids.len());
+        assert_eq!(ids.len(), 9);
+
+        let mut s = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+        let t = std::time::Instant::now();
+        let mut last = vec![];
+        for (i, &tid) in ids.iter().enumerate() {
+            last = mf.single_token(tid, i as u32, &mut s).expect("forward");
+        }
+        let total_ms = t.elapsed().as_secs_f64() * 1e3;
+
+        let mut max_abs = 0.0f32;
+        let mut argmax_ours = 0usize;
+        let mut argmax_oracle = 0usize;
+        let mut max_ours = f32::NEG_INFINITY;
+        let mut max_oracle = f32::NEG_INFINITY;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..n {
+            let d = (last[i] - oracle[i]).abs();
+            max_abs = max_abs.max(d);
+            if last[i] > max_ours {
+                max_ours = last[i];
+                argmax_ours = i;
+            }
+            if oracle[i] > max_oracle {
+                max_oracle = oracle[i];
+                argmax_oracle = i;
+            }
+            dot += last[i] as f64 * oracle[i] as f64;
+            na += (last[i] as f64).powi(2);
+            nb += (oracle[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[metal-e2e-multi] {total_ms:.1}ms ({:.1}ms/token) — argmax: ours={argmax_ours} ({:.4}) | oracle={argmax_oracle} ({:.4}) | max|Δ|={max_abs:.4} cos={cos:.6}",
+            total_ms / ids.len() as f64,
+            max_ours,
+            max_oracle
+        );
+        assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
+        assert!(cos > 0.9999, "cos={cos} below threshold");
+    }
+
     /// Validate a single full-attention block end-to-end on Metal vs the
     /// CPU oracle. Uses block 3 of Qwen3.5-0.8B-F32 (the first attn block,
     /// n_q=8, n_kv=2, head_dim=256, 4:1 GQA).

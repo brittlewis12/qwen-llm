@@ -668,6 +668,66 @@ pub fn encode_softplus_f32(
     encode_elementwise_1in_1out(ctx, enc, "kernel_softplus_f32", x, y)
 }
 
+/// GDN α-chain fusion: fused (a + dt_bias), softplus, then mul by a_log.
+///
+/// Replaces 3 dispatches per GDN layer:
+///   encode_add_inplace_f32(a, dt_bias)
+///   encode_softplus_f32(a → out)
+///   encode_mul_f32(out, a_log → out)
+///
+/// Saves 2 dispatches × 32 layers = 64 dispatches/token. Per the v0.25
+/// intra-profiler the chain measured ~0.04 ms/layer; this should shave
+/// 1.5–2.5 ms/token (Codex predicted 2–3 ms upper bound).
+///
+/// CPU oracle: `softplus(a + dt_bias) * a_log` from `crate::forward`.
+pub fn encode_gdn_alpha_chain_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: &MetalTensor,
+    dt_bias: &MetalTensor,
+    a_log: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<(), MetalError> {
+    let n = a.n_elements() as usize;
+    if dt_bias.n_elements() as usize != n
+        || a_log.n_elements() as usize != n
+        || out.n_elements() as usize != n
+    {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_alpha_chain",
+            detail: format!(
+                "lengths a={} dt={} alog={} out={n}",
+                a.n_elements(),
+                dt_bias.n_elements(),
+                a_log.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_gdn_alpha_chain_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_tensor(1, a);
+    enc.set_tensor(2, dt_bias);
+    enc.set_tensor(3, a_log);
+    enc.set_tensor(4, out);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Generic 2-input → 1-output elementwise (add, mul, silu_mul). All share
 /// the (NArgs, a, b, out) bind pattern.
 fn encode_elementwise_2in_1out(
@@ -2619,6 +2679,94 @@ mod tests {
                 (1.0 + v.exp()).ln()
             };
             assert!((sp[i] - exp_sp).abs() < 1e-5);
+        }
+    }
+
+    /// GDN α-chain fusion vs the 3-dispatch reference (add_inplace +
+    /// softplus + mul). Must match within fp32 rounding noise.
+    #[test]
+    fn gdn_alpha_chain_matches_unfused() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n = 48usize; // n_v_heads for 27B
+        let a: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 - 11.0) * 0.5).collect();
+        let dt: Vec<f32> = (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+        let alog: Vec<f32> = (0..n).map(|i| -1.0 - (i % 5) as f32 * 0.2).collect();
+
+        let a_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&a),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let dt_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&dt),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let alog_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&alog),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        // Fused path.
+        let fused = one_shot_f32_out(&ctx, n, |enc, out| {
+            encode_gdn_alpha_chain_f32(&ctx, enc, &a_t, &dt_t, &alog_t, out)
+        });
+
+        // Unfused reference: build via 3 sequential dispatches in one cmdbuf.
+        let a_ref = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&a),
+            vec![n as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let unfused_t = MetalTensor::zeros_f32(&ctx, vec![n as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_add_inplace_f32(&ctx, enc, &a_ref, &dt_t)?;
+            encode_softplus_f32(&ctx, enc, &a_ref, &unfused_t)?;
+            encode_mul_f32(&ctx, enc, &unfused_t, &alog_t, &unfused_t)
+        })
+        .unwrap();
+        let unfused = read_back_f32(&unfused_t.buffer, n);
+
+        let max_abs = fused
+            .iter()
+            .zip(unfused.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[gdn_alpha_chain] max|Δ|={max_abs:.2e}");
+        assert!(
+            max_abs < 1e-5,
+            "gdn_alpha_chain fused vs unfused mismatch: max|Δ|={max_abs}"
+        );
+
+        // Also validate vs explicit CPU formula.
+        for i in 0..n {
+            let v = a[i] + dt[i];
+            let sp = if v > 20.0 {
+                v
+            } else if v < -20.0 {
+                v.exp()
+            } else {
+                (1.0 + v.exp()).ln()
+            };
+            let expected = sp * alog[i];
+            assert!(
+                (fused[i] - expected).abs() < 1e-5,
+                "i={i}: fused={} expected={expected}",
+                fused[i]
+            );
         }
     }
 

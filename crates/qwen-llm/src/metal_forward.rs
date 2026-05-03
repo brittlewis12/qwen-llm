@@ -33,12 +33,13 @@ use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
     attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
     encode_attn_decode_f16kv_f32, encode_attn_decode_f32, encode_attn_decode_v4_f32,
-    encode_copy_offset_f32, encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_mat_vec_f32, encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
-    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_softplus_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    KernelEncoder, MetalContext, MetalError, MetalTensor,
+    encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_gdn_step_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
+    MetalTensor,
 };
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -769,12 +770,19 @@ impl<'a> MetalForward<'a> {
         encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
         // α source projection.
         encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
-        // α + dt; softplus; * a_log → g.
-        // We need: gdn_a = softplus(gdn_a + dt_bias) * a_log.
-        // Three small kernels: add (gdn_a + dt_bias), softplus, mul (* a_log).
-        encode_add_inplace_f32(self.ctx, enc, &s.gdn_a, &gb.dt_bias)?;
-        encode_softplus_f32(self.ctx, enc, &s.gdn_a, &s.gdn_alpha)?;
-        encode_mul_f32(self.ctx, enc, &s.gdn_alpha, &gb.a_log, &s.gdn_alpha)?;
+        // α-chain fusion: gdn_alpha = softplus(gdn_a + dt_bias) * a_log.
+        // Replaces 3 dispatches (add_inplace + softplus + mul) with 1 fused
+        // kernel. Bit-exact vs the unfused sequence (validated by
+        // gdn_alpha_chain_matches_unfused). Saves 64 dispatches/token across
+        // 32 GDN layers.
+        encode_gdn_alpha_chain_f32(
+            self.ctx,
+            enc,
+            &s.gdn_a,
+            &gb.dt_bias,
+            &gb.a_log,
+            &s.gdn_alpha,
+        )?;
         // Now `gdn_alpha` is the per-head g (scalar log-decay).
 
         // Conv1d step + SiLU. Mutates the conv buffer in place.
@@ -2350,15 +2358,20 @@ mod tests {
             },
             &mut phases,
         )?;
-        // alpha proj + add_dt + softplus + mul.
+        // alpha proj + α-chain (fused: add_dt + softplus + mul).
         timed(
-            "alpha_proj+softplus+mul",
+            "alpha_proj+alpha_chain",
             &|enc| {
                 encode_mat_vec_dispatch(mf.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
-                encode_add_inplace_f32(mf.ctx, enc, &s.gdn_a, &gb.dt_bias)?;
-                encode_softplus_f32(mf.ctx, enc, &s.gdn_a, &s.gdn_alpha)?;
-                encode_mul_f32(mf.ctx, enc, &s.gdn_alpha, &gb.a_log, &s.gdn_alpha)
-                    .map_err(MfError::from)
+                encode_gdn_alpha_chain_f32(
+                    mf.ctx,
+                    enc,
+                    &s.gdn_a,
+                    &gb.dt_bias,
+                    &gb.a_log,
+                    &s.gdn_alpha,
+                )
+                .map_err(MfError::from)
             },
             &mut phases,
         )?;

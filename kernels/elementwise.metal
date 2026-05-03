@@ -239,6 +239,21 @@ kernel void kernel_copy_offset_f32(
     y[tid] = x[args.src_off + tid];
 }
 
+// Scatter with destination offset: y[dst_off + i] = x[i]  for i in 0..n.
+// Used for KV cache append (write current K/V at slot `position`).
+struct scatter_offset_args {
+    uint n;
+    uint dst_off;
+};
+kernel void kernel_scatter_offset_f32(
+        constant scatter_offset_args & args [[buffer(0)]],
+        device const float * x [[buffer(1)]],
+        device       float * y [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    y[args.dst_off + tid] = x[tid];
+}
+
 // get_rows: y[r * n_cols + i] = embed[ids[r] * n_cols + i].
 // For embedding lookup at decode (n_rows=1) and prefill (n_rows=batch).
 struct get_rows_args {

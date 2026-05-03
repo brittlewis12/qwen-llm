@@ -31,13 +31,17 @@
 use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
-    encode_add_inplace_f32, encode_copy_offset_f32, encode_gdn_step_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mul_f32, encode_rms_norm_mul_f32,
-    encode_rmsnorm_gated_f32, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
-    encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError, MetalTensor,
+    encode_add_inplace_f32, encode_attn_decode_f32, encode_copy_offset_f32, encode_gdn_step_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32, encode_softplus_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
+    MetalTensor,
 };
 use crate::tensor::{GgmlType, TensorDesc};
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MfError {
@@ -648,21 +652,210 @@ impl<'a> MetalForward<'a> {
 
     fn encode_attn(
         &self,
-        _enc: &KernelEncoder,
-        _ab: &MetalAttnBlock,
-        _attn_i: usize,
-        _position: u32,
-        _s: &mut MetalSession,
+        enc: &KernelEncoder,
+        ab: &MetalAttnBlock,
+        attn_i: usize,
+        position: u32,
+        s: &mut MetalSession,
     ) -> Result<(), MfError> {
-        // TODO(v1): full-attn block on Metal. For now, panic — first
-        // milestone is to validate the GDN layer end-to-end on a
-        // hypothetical "all GDN" model. Once that's clean we land the
-        // attn block (composition of existing kernels).
-        Err(MfError::Metal(MetalError::BadShape {
-            kernel: "attn",
-            detail: "encode_attn not yet implemented; use a GDN-only validation harness".into(),
-        }))
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_q = arch.n_q_heads as usize;
+        let n_kv = arch.n_kv_heads as usize;
+        let q_dim = n_q * head_dim;
+        let kv_dim = n_kv * head_dim;
+        let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+
+        // (1) Q projection: outputs 2 * q_dim (Q + gate interleaved per head).
+        encode_mat_vec_f32(self.ctx, enc, &ab.q, &s.h, &s.attn_q_full, h, 2 * q_dim)?;
+
+        // (2) Split into Q and gate.
+        encode_split_q_gate_f32(
+            self.ctx,
+            enc,
+            &s.attn_q_full,
+            &s.attn_q,
+            &s.attn_gate,
+            n_q,
+            head_dim,
+        )?;
+
+        // (3) Q-norm (per-head RMSNorm, shared per-channel weight).
+        encode_rms_norm_batched_f32(
+            self.ctx,
+            enc,
+            &s.attn_q,
+            &ab.q_norm,
+            &s.attn_q_normed,
+            n_q,
+            head_dim,
+            RMS_EPS,
+        )?;
+
+        // (4) K, V projections.
+        encode_mat_vec_f32(self.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
+        encode_mat_vec_f32(self.ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim)?;
+
+        // (5) K-norm (per-head). Reuses Q-norm weight tensor type but
+        // points at K's weight.
+        encode_rms_norm_batched_f32(
+            self.ctx,
+            enc,
+            &s.attn_k_now,
+            &ab.k_norm,
+            &s.attn_k_normed,
+            n_kv,
+            head_dim,
+            RMS_EPS,
+        )?;
+
+        // (6) Partial RoPE on Q (in `attn_q_normed`) and K (in `attn_k_normed`).
+        encode_rope_neox_f32(
+            self.ctx,
+            enc,
+            &s.attn_q_normed,
+            n_q,
+            head_dim,
+            n_rot,
+            position,
+            arch.rope_theta,
+        )?;
+        encode_rope_neox_f32(
+            self.ctx,
+            enc,
+            &s.attn_k_normed,
+            n_kv,
+            head_dim,
+            n_rot,
+            position,
+            arch.rope_theta,
+        )?;
+
+        // (7) KV cache append. v1 enforces strict-monotonic-from-zero;
+        // we copy K and V at slot `position` directly via copy_offset
+        // running in reverse direction. Since we don't yet have a
+        // "scatter" kernel, we synchronously fill the KV cache slot via
+        // CPU-visible memory under StorageModeShared. This requires a
+        // wait-on-encoder boundary, which is the kind of CPU/GPU
+        // synchronization codex warned against. **Acceptable for v1
+        // single-token decode** because the readback is one row of
+        // `kv_dim` floats (4 KB), and the next dispatch will see the
+        // updated bytes. We just need to make sure the encoder is split
+        // so the previous K/V projection has completed before we read.
+        //
+        // For v2 we'll add a `kv_append_f32` kernel that writes into the
+        // cache slot using a small dispatch (no CPU sync needed).
+        //
+        // For now: emit a `copy_offset_f32` from the encoded K/V into
+        // the right cache slot. The cache is `[capacity, n_kv_heads, head_dim]`
+        // row-major, so slot `position` starts at `position * kv_stride`
+        // bytes (here, in elements). We use copy_offset's offset arg
+        // *inverted*: copy_offset reads from src+off into dst[0..n].
+        // We need the opposite: copy from src[0..n] into dst+off. So
+        // we add a small "scatter_offset" kernel below.
+        encode_scatter_offset_f32(
+            self.ctx,
+            enc,
+            &s.attn_k_normed,
+            &s.kv_k[attn_i],
+            (position as usize) * kv_dim,
+            kv_dim,
+        )?;
+        encode_scatter_offset_f32(
+            self.ctx,
+            enc,
+            &s.attn_v_now,
+            &s.kv_v[attn_i],
+            (position as usize) * kv_dim,
+            kv_dim,
+        )?;
+        s.kv_n_pos[attn_i] = position as usize + 1;
+
+        // (8) Fused attention decode: scoring + softmax + V-aggregate.
+        encode_attn_decode_f32(
+            self.ctx,
+            enc,
+            &s.attn_q_normed,
+            &s.kv_k[attn_i],
+            &s.kv_v[attn_i],
+            &s.attn_o,
+            n_q,
+            n_kv,
+            head_dim,
+            s.kv_n_pos[attn_i],
+        )?;
+
+        // (9) Apply gated-attention sigmoid gate: attn_o *= sigmoid(gate).
+        // We need: y = attn_o * sigmoid(gate). Decompose into
+        //   sigmoid(gate) → tmp; attn_o * tmp → attn_o (in-place)
+        // We don't have a buffer for tmp. Reuse attn_q (no longer needed
+        // after attn_decode).
+        encode_sigmoid_f32(self.ctx, enc, &s.attn_gate, &s.attn_q)?;
+        encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
+
+        // (10) Output projection: q_dim → hidden.
+        encode_mat_vec_f32(self.ctx, enc, &ab.o, &s.attn_o, &s.mixer_out, q_dim, h)?;
+        Ok(())
     }
+}
+
+/// Helper: scatter `n` floats from `src[0..n]` into `dst[off..off+n]`.
+/// Inverse of `copy_offset` (which gathers). Used to write into the KV
+/// cache slot for the current position.
+fn encode_scatter_offset_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    dst: &MetalTensor,
+    dst_off: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    if src.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset",
+            detail: format!("src.n={} != n={n}", src.n_elements()),
+        });
+    }
+    if (dst_off + n) as u64 > dst.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset",
+            detail: format!("dst_off+n={} > dst.n={}", dst_off + n, dst.n_elements()),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        dst_off: u32,
+    }
+    let pso = ctx.pipeline("kernel_scatter_offset_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            dst_off: dst_off as u32,
+        },
+    );
+    enc.set_tensor(1, src);
+    enc.set_tensor(2, dst);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 const RMS_EPS: f32 = 1e-6;
@@ -738,6 +931,58 @@ impl<'a> MetalForward<'a> {
             let dst = s.x.buffer.contents().as_ptr() as *mut f32;
             std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
         }
+    }
+
+    /// Test helper: run one full-attn block end-to-end (norm → attn →
+    /// residual → post_norm → FFN → residual) and read back the residual
+    /// stream. Mirrors `run_one_gdn_block_for_test` for the attn path.
+    pub fn run_one_attn_block_for_test(
+        &self,
+        block_idx: usize,
+        attn_idx_in_session: usize,
+        position: u32,
+        s: &mut MetalSession,
+    ) -> Result<Vec<f32>, MfError> {
+        let block = &self.model.blocks[block_idx];
+        let ab = match block {
+            MetalBlock::Attn(a) => a,
+            MetalBlock::Gdn(_) => {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "run_one_attn_block",
+                    detail: format!("block {block_idx} is not an attn block"),
+                }));
+            }
+        };
+
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        encode_rms_norm_mul_f32(self.ctx, &enc, &s.x, &ab.attn_norm, &s.h, RMS_EPS)?;
+        self.encode_attn(&enc, ab, attn_idx_in_session, position, s)?;
+        encode_add_inplace_f32(self.ctx, &enc, &s.x, &s.mixer_out)?;
+
+        encode_rms_norm_mul_f32(self.ctx, &enc, &s.x, &ab.post_attn_norm, &s.h, RMS_EPS)?;
+
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f = arch.intermediate_size as usize;
+        encode_mat_vec_f32(self.ctx, &enc, &ab.ffn_gate, &s.h, &s.ffn_gate, h, f)?;
+        encode_mat_vec_f32(self.ctx, &enc, &ab.ffn_up, &s.h, &s.ffn_up, h, f)?;
+        encode_silu_mul_f32(self.ctx, &enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)?;
+        encode_mat_vec_f32(self.ctx, &enc, &ab.ffn_down, &s.ffn_inner, &s.ffn_out, f, h)?;
+
+        encode_add_inplace_f32(self.ctx, &enc, &s.x, &s.ffn_out)?;
+
+        enc.end();
+        cmd_buf.commit();
+        unsafe { cmd_buf.waitUntilCompleted() };
+
+        let mut out = vec![0.0f32; h];
+        unsafe {
+            let src = s.x.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), h);
+        }
+        Ok(out)
     }
 }
 
@@ -818,6 +1063,300 @@ mod tests {
         eprintln!("[metal-gdn-block0] hidden={h} max|Δ|={max_abs:.2e} cos={cos:.6}");
         assert!(max_abs < 1e-3, "block-0 drift {max_abs}");
         assert!(cos > 0.9999, "block-0 cos {cos}");
+    }
+
+    /// **End-to-end Metal forward** validated against `llm`/`llama_core`'s
+    /// snapshot dump (which uses llama.cpp under the hood and is what
+    /// the CPU oracle is also validated against). One token, one
+    /// command buffer, all 24 blocks of Qwen3.5-0.8B-F32 chained.
+    #[test]
+    fn metal_single_token_matches_cpu_oracle() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        let oracle_path = "/tmp/qwen-oracle/hello_t0.f32";
+        if !std::path::Path::new(model_path).exists() || !std::path::Path::new(oracle_path).exists()
+        {
+            eprintln!("[metal-e2e] skipped — fixtures missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let oracle_bytes = std::fs::read(oracle_path).expect("read oracle");
+        let n = oracle_bytes.len() / 4;
+        let oracle: Vec<f32> = (0..n)
+            .map(|i| f32::from_le_bytes(oracle_bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+            .collect();
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        assert_eq!(oracle.len(), m.arch.vocab_size as usize);
+
+        // Tokenize "Hello" → 9419.
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok.encode("Hello", false).expect("tokenize");
+        eprintln!("[metal-e2e] 'Hello' -> {ids:?}");
+        assert_eq!(ids.len(), 1);
+
+        let mut s = MetalSession::fresh(&ctx, &mm, 4096).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+        let t = std::time::Instant::now();
+        let logits = mf.single_token(ids[0], 0, &mut s).expect("forward");
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+
+        let mut max_abs = 0.0f32;
+        let mut argmax_ours = 0usize;
+        let mut argmax_oracle = 0usize;
+        let mut max_ours = f32::NEG_INFINITY;
+        let mut max_oracle = f32::NEG_INFINITY;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..n {
+            let d = (logits[i] - oracle[i]).abs();
+            max_abs = max_abs.max(d);
+            if logits[i] > max_ours {
+                max_ours = logits[i];
+                argmax_ours = i;
+            }
+            if oracle[i] > max_oracle {
+                max_oracle = oracle[i];
+                argmax_oracle = i;
+            }
+            dot += logits[i] as f64 * oracle[i] as f64;
+            na += (logits[i] as f64).powi(2);
+            nb += (oracle[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[metal-e2e] {ms:.1}ms — argmax: ours={argmax_ours} ({:.4}) | oracle={argmax_oracle} ({:.4}) | max|Δ|={max_abs:.4} cos={cos:.6}",
+            max_ours, max_oracle
+        );
+        assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
+        assert!(cos > 0.9999, "cos={cos} below threshold");
+        assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
+    }
+
+    /// Validate a single full-attention block end-to-end on Metal vs the
+    /// CPU oracle. Uses block 3 of Qwen3.5-0.8B-F32 (the first attn block,
+    /// n_q=8, n_kv=2, head_dim=256, 4:1 GQA).
+    #[test]
+    fn metal_attn_block_matches_cpu() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[metal-attn] skipped — model missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        // Inputs: a synthetic but fixed residual stream (no need for a
+        // real model state for block-level validation; we just need
+        // identical inputs to CPU and GPU paths).
+        let h = m.arch.hidden_size as usize;
+        let initial_x: Vec<f32> = (0..h).map(|i| ((i % 31) as f32 - 15.0) * 0.02).collect();
+        let position: u32 = 0;
+        let attn_block_idx = 3usize; // first attn block in 0.8B
+                                     // attn_idx_in_session is the 0-indexed count among ATTN blocks
+                                     // before this one. block 3 is the first attn block, so 0.
+        let attn_idx_in_session = 0usize;
+
+        // CPU reference: replicate exactly what forward.rs:attn_step does.
+        let cpu_x = run_cpu_attn_block_for_test(&g, &m, &initial_x, attn_block_idx, position);
+
+        // Metal.
+        let mut s = MetalSession::fresh(&ctx, &mm, 4096).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+        mf.set_residual_for_test(&mut s, &initial_x);
+        let metal_x = mf
+            .run_one_attn_block_for_test(attn_block_idx, attn_idx_in_session, position, &mut s)
+            .expect("metal attn block");
+
+        let max_abs = metal_x
+            .iter()
+            .zip(cpu_x.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = metal_x
+            .iter()
+            .zip(cpu_x.iter())
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum();
+        let na: f64 = metal_x.iter().map(|v| (*v as f64).powi(2)).sum();
+        let nb: f64 = cpu_x.iter().map(|v| (*v as f64).powi(2)).sum();
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!("[metal-attn-block3] hidden={h} max|Δ|={max_abs:.2e} cos={cos:.6}");
+        assert!(max_abs < 1e-3, "attn block-3 drift {max_abs}");
+        assert!(cos > 0.9999, "attn block-3 cos {cos}");
+    }
+
+    /// CPU reference: full-attn block (norm → attn → residual → post_norm
+    /// → FFN → residual) replicated inline. Mirrors forward.rs's
+    /// single_token block flow for an attn block.
+    fn run_cpu_attn_block_for_test(
+        gguf: &GgufFile,
+        model: &Model<'_>,
+        initial_x: &[f32],
+        block_idx: usize,
+        position: u32,
+    ) -> Vec<f32> {
+        let block = &model.blocks[block_idx];
+        let ab = match block {
+            crate::loader::Block::Attn(a) => a,
+            _ => panic!("not an attn block"),
+        };
+        let arch = &model.arch;
+        let h = arch.hidden_size as usize;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_q = arch.n_q_heads as usize;
+        let n_kv = arch.n_kv_heads as usize;
+        let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+        let q_dim = n_q * head_dim;
+        let kv_dim = n_kv * head_dim;
+        let group = n_q / n_kv;
+        let theta = arch.rope_theta;
+
+        let mut x = initial_x.to_vec();
+
+        // Pre-mixer norm.
+        let attn_norm_w =
+            crate::codec::dequant_to_f32(ab.attn_norm, gguf.slice(ab.attn_norm)).unwrap();
+        let cur = crate::forward::rms_norm_pub(&x, &attn_norm_w, super::RMS_EPS);
+
+        // Q projection (2 * q_dim) → split.
+        let q_w = crate::codec::dequant_to_f32(ab.q, gguf.slice(ab.q)).unwrap();
+        let q_full = crate::forward::mat_vec_pub(&q_w, h, 2 * q_dim, &cur);
+        let mut qcur = vec![0.0f32; q_dim];
+        let mut gate = vec![0.0f32; q_dim];
+        for hi in 0..n_q {
+            let src = &q_full[hi * 2 * head_dim..(hi + 1) * 2 * head_dim];
+            qcur[hi * head_dim..(hi + 1) * head_dim].copy_from_slice(&src[..head_dim]);
+            gate[hi * head_dim..(hi + 1) * head_dim].copy_from_slice(&src[head_dim..]);
+        }
+
+        // Q-norm.
+        let qnorm_w = crate::codec::dequant_to_f32(ab.q_norm, gguf.slice(ab.q_norm)).unwrap();
+        for hi in 0..n_q {
+            let s = hi * head_dim;
+            let n = crate::forward::rms_norm_pub(&qcur[s..s + head_dim], &qnorm_w, super::RMS_EPS);
+            qcur[s..s + head_dim].copy_from_slice(&n);
+        }
+
+        // K, V.
+        let k_w = crate::codec::dequant_to_f32(ab.k, gguf.slice(ab.k)).unwrap();
+        let v_w = crate::codec::dequant_to_f32(ab.v, gguf.slice(ab.v)).unwrap();
+        let mut kcur = crate::forward::mat_vec_pub(&k_w, h, kv_dim, &cur);
+        let vcur = crate::forward::mat_vec_pub(&v_w, h, kv_dim, &cur);
+
+        // K-norm.
+        let knorm_w = crate::codec::dequant_to_f32(ab.k_norm, gguf.slice(ab.k_norm)).unwrap();
+        for hi in 0..n_kv {
+            let s = hi * head_dim;
+            let n = crate::forward::rms_norm_pub(&kcur[s..s + head_dim], &knorm_w, super::RMS_EPS);
+            kcur[s..s + head_dim].copy_from_slice(&n);
+        }
+
+        // RoPE on Q and K (NEOX/IMROPE pairing for text positions).
+        rope_in_place_local(&mut qcur, n_q, head_dim, n_rot, position, theta);
+        rope_in_place_local(&mut kcur, n_kv, head_dim, n_rot, position, theta);
+
+        // Single-token cache: KV is just the current step.
+        // Attention with one position (position itself).
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let mut attn_out = vec![0.0f32; q_dim];
+        for qh in 0..n_q {
+            let kvh = qh / group;
+            let q_slice = &qcur[qh * head_dim..(qh + 1) * head_dim];
+            let k_slice = &kcur[kvh * head_dim..(kvh + 1) * head_dim];
+            let v_slice = &vcur[kvh * head_dim..(kvh + 1) * head_dim];
+
+            let mut s = 0.0f32;
+            for i in 0..head_dim {
+                s += q_slice[i] * k_slice[i];
+            }
+            let _score = s * scale;
+            // softmax over a single value = 1.0 → out = v
+            for i in 0..head_dim {
+                attn_out[qh * head_dim + i] = v_slice[i];
+            }
+        }
+
+        // Apply gated-attention sigmoid gate.
+        for i in 0..attn_out.len() {
+            let sg = 1.0 / (1.0 + (-gate[i]).exp());
+            attn_out[i] *= sg;
+        }
+
+        // Output projection.
+        let o_w = crate::codec::dequant_to_f32(ab.o, gguf.slice(ab.o)).unwrap();
+        let mixer_out = crate::forward::mat_vec_pub(&o_w, q_dim, h, &attn_out);
+
+        // Residual #1.
+        for (xi, mo) in x.iter_mut().zip(mixer_out.iter()) {
+            *xi += *mo;
+        }
+
+        // Pre-FFN norm.
+        let post_norm_w = crate::codec::dequant_to_f32(
+            ab.post_attention_norm,
+            gguf.slice(ab.post_attention_norm),
+        )
+        .unwrap();
+        let cur = crate::forward::rms_norm_pub(&x, &post_norm_w, super::RMS_EPS);
+
+        // FFN.
+        let f = arch.intermediate_size as usize;
+        let g_w = crate::codec::dequant_to_f32(ab.ffn_gate, gguf.slice(ab.ffn_gate)).unwrap();
+        let u_w = crate::codec::dequant_to_f32(ab.ffn_up, gguf.slice(ab.ffn_up)).unwrap();
+        let d_w = crate::codec::dequant_to_f32(ab.ffn_down, gguf.slice(ab.ffn_down)).unwrap();
+        let gated = crate::forward::mat_vec_pub(&g_w, h, f, &cur);
+        let upped = crate::forward::mat_vec_pub(&u_w, h, f, &cur);
+        let mut hidden = vec![0.0f32; f];
+        for i in 0..f {
+            let g = gated[i];
+            let silu_g = g / (1.0 + (-g).exp());
+            hidden[i] = silu_g * upped[i];
+        }
+        let ffn_out = crate::forward::mat_vec_pub(&d_w, f, h, &hidden);
+
+        // Residual #2.
+        for (xi, fo) in x.iter_mut().zip(ffn_out.iter()) {
+            *xi += *fo;
+        }
+        x
+    }
+
+    fn rope_in_place_local(
+        buf: &mut [f32],
+        n_heads: usize,
+        head_dim: usize,
+        n_rot: usize,
+        position: u32,
+        theta_base: f32,
+    ) {
+        let pos = position as f32;
+        let half = n_rot / 2;
+        for hi in 0..n_heads {
+            let h_off = hi * head_dim;
+            for i in 0..half {
+                let exponent = (2 * i) as f32 / n_rot as f32;
+                let freq = pos / theta_base.powf(exponent);
+                let (s, c) = freq.sin_cos();
+                let a = buf[h_off + i];
+                let b = buf[h_off + i + half];
+                buf[h_off + i] = a * c - b * s;
+                buf[h_off + i + half] = a * s + b * c;
+            }
+        }
     }
 
     /// CPU reference: replicate exactly what forward.rs:single_token does

@@ -893,6 +893,234 @@ pub fn encode_copy_offset_f32(
     Ok(())
 }
 
+/// Per-head RMSNorm with shared per-channel weight. Used for Q-norm
+/// and K-norm in the gated-attention block. One dispatch covers all
+/// heads (n_heads threadgroups, simdgroup-reduce inside).
+pub fn encode_rms_norm_batched_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    weight: &MetalTensor,
+    y: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let want = (n_heads * head_dim) as u64;
+    if x.n_elements() != want || y.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_batched",
+            detail: format!("x/y expected {want} elements"),
+        });
+    }
+    if weight.n_elements() as usize != head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_batched",
+            detail: format!("weight expected {head_dim} elements"),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        eps: f32,
+    }
+    let pso = ctx.pipeline("kernel_rms_norm_batched_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: n_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Split the gated-attention Q-projection output into separate Q and
+/// gate tensors. Input layout per head: `[head_dim Q, head_dim gate]`,
+/// total length `n_heads * 2 * head_dim`. Outputs are
+/// `[n_heads, head_dim]` each.
+pub fn encode_split_q_gate_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_full: &MetalTensor,
+    q: &MetalTensor,
+    gate: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    let want_full = (n_heads * 2 * head_dim) as u64;
+    let want_each = (n_heads * head_dim) as u64;
+    if q_full.n_elements() != want_full {
+        return Err(MetalError::BadShape {
+            kernel: "split_q_gate",
+            detail: format!("q_full expected {want_full} elements"),
+        });
+    }
+    if q.n_elements() != want_each || gate.n_elements() != want_each {
+        return Err(MetalError::BadShape {
+            kernel: "split_q_gate",
+            detail: format!("q/gate expected {want_each} elements"),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+    }
+    let pso = ctx.pipeline("kernel_split_q_gate_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+        },
+    );
+    enc.set_tensor(1, q_full);
+    enc.set_tensor(2, q);
+    enc.set_tensor(3, gate);
+
+    let total = n_heads * head_dim;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = total.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Fused attention decode (single-token Q step). For each Q head:
+///   1. scores[p] = (q · k_cache[p, kvh, :]) * scale
+///   2. softmax over scores
+///   3. out[d] = Σ_p scores[p] · v_cache[p, kvh, d]
+///
+/// `kvh = qh / (n_q_heads / n_kv_heads)` — GQA group mapping.
+///
+/// Constraint: `n_pos * sizeof(f32)` must fit in threadgroup memory.
+/// Apple Silicon's typical max is 32 KB, so `n_pos ≤ ~8000`. For longer
+/// contexts in v2 we'll switch to streaming softmax.
+pub fn encode_attn_decode_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    out: &MetalTensor,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_pos: usize,
+) -> Result<(), MetalError> {
+    if n_q_heads % n_kv_heads != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode",
+            detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
+        });
+    }
+    let want = (n_q_heads * head_dim) as u64;
+    if q.n_elements() != want || out.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode",
+            detail: format!("q/out expected {want} elements"),
+        });
+    }
+
+    let kv_stride = n_kv_heads * head_dim;
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        scale: f32,
+    }
+    let pso = ctx.pipeline("kernel_attn_decode_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_pos: n_pos as u32,
+            kv_stride: kv_stride as u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, out);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    let scores_bytes = n_pos * std::mem::size_of::<f32>();
+    let shred_bytes = (n_simdgroups * std::mem::size_of::<f32>()).max(32);
+    if scores_bytes > 28 * 1024 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode",
+            detail: format!(
+                "n_pos={n_pos} requires {scores_bytes} B threadgroup memory; \
+                 v1 max ~28 KB. Use streaming softmax for longer contexts."
+            ),
+        });
+    }
+    enc.set_threadgroup_memory(0, scores_bytes);
+    enc.set_threadgroup_memory(1, shred_bytes);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_q_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Per-head L2-norm: `y[h, :] = x[h, :] / max(||x[h, :]||, eps)` for
 /// `h ∈ [0, n_heads)`. One dispatch covers all heads. Used in the GDN
 /// front-end where Q and K are l2-normed per K-head before the

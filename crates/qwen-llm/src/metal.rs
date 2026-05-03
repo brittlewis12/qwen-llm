@@ -1193,9 +1193,23 @@ pub fn attn_v4_choose_nwg(n_pos: usize) -> usize {
     }
 }
 
+/// Pick the v4 tile size (KV positions per inner softmax tile) for a given
+/// context. Determined empirically by `attn_v4_tile_c_sweep`.
+///
+/// Default tile_c=32 matches llama.cpp's vec kernel and is the safe choice.
+/// The sweep may surface ranges where C=16 (very short ctx, lower softmax
+/// overhead per tile) or C=64 (long ctx, fewer tiles + barriers) win.
+pub fn attn_v4_choose_tile_c(_n_pos: usize) -> usize {
+    // Until the C-sweep tells us otherwise, default to 32.
+    32
+}
+
 /// Encode v4 main kernel + reduce kernel in sequence.
 /// Hardcoded constants (must match `kernels/attn_v4.metal`):
-///   GROUP = 6, DK = DV = 256, lanes = 32, C = 32.
+///   GROUP = 6, DK = DV = 256, lanes = 32.
+/// Tile size `tile_c ∈ {16, 32, 64}` selects the kernel variant.
+/// Use `attn_v4_choose_tile_c(n_pos)` for the empirically-tuned choice
+/// or pass 32 (default; backward-compat) if unsure.
 pub fn encode_attn_decode_v4_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1210,6 +1224,7 @@ pub fn encode_attn_decode_v4_f32(
     head_dim: usize,
     n_pos: usize,
     nwg: usize,
+    tile_c: usize,
 ) -> Result<(), MetalError> {
     // Hardcoded shape preconditions.
     const GROUP: usize = 6;
@@ -1287,7 +1302,18 @@ pub fn encode_attn_decode_v4_f32(
         rows_per_partition: u32,
         scale: f32,
     }
-    let pso_main = ctx.pipeline("kernel_attn_decode_v4_f32")?;
+    let pipeline_name = match tile_c {
+        16 => "kernel_attn_decode_v4_c16_f32",
+        32 => "kernel_attn_decode_v4_f32",
+        64 => "kernel_attn_decode_v4_c64_f32",
+        _ => {
+            return Err(MetalError::BadShape {
+                kernel: "attn_decode_v4",
+                detail: format!("tile_c={tile_c} not in {{16, 32, 64}}"),
+            })
+        }
+    };
+    let pso_main = ctx.pipeline(pipeline_name)?;
     enc.set_pipeline(&pso_main);
     enc.set_bytes(
         0,
@@ -1309,10 +1335,10 @@ pub fn encode_attn_decode_v4_f32(
     enc.set_tensor(5, ml_partial);
 
     // Threadgroup memory:
-    //   threadgroup(0) sq[GROUP * DK halves]  = 6 * 256 * 2 = 3072 B
-    //   threadgroup(1) ss[GROUP * C floats]   = 6 * 32 * 4  = 768 B
+    //   threadgroup(0) sq[GROUP * DK halves]  = 6 * 256 * 2 = 3072 B (constant)
+    //   threadgroup(1) ss[GROUP * C floats]   = 6 * tile_c * 4
     let sq_bytes = GROUP * DK * 2; // f16 = 2 bytes per element
-    let ss_bytes = GROUP * 32 * std::mem::size_of::<f32>();
+    let ss_bytes = GROUP * tile_c * std::mem::size_of::<f32>();
     enc.set_threadgroup_memory(0, sq_bytes);
     enc.set_threadgroup_memory(1, ss_bytes);
 
@@ -3432,53 +3458,59 @@ mod tests {
             let ml_partial =
                 MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * 2) as u64]).unwrap();
             let y_v4_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
-            one_shot(&ctx, |enc| {
-                encode_attn_decode_v4_f32(
-                    &ctx,
-                    enc,
-                    &q_t,
-                    &k_cache,
-                    &v_cache,
-                    &o_partial,
-                    &ml_partial,
-                    &y_v4_t,
-                    n_q,
-                    n_kv,
-                    hd,
-                    n_pos,
-                    nwg,
-                )
-            })
-            .unwrap();
-            let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
 
-            // Compare element-wise + cosine sim.
-            let max_abs = y_v4
-                .iter()
-                .zip(y_naive.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
-            let dot: f64 = y_v4
-                .iter()
-                .zip(y_naive.iter())
-                .map(|(a, b)| (*a as f64) * (*b as f64))
-                .sum();
-            let na: f64 = y_v4.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-            let nb: f64 = y_naive
-                .iter()
-                .map(|x| (*x as f64).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            let cos = dot / (na * nb);
-            eprintln!("[v4 n_pos={n_pos:>4} nwg={nwg:>2}] max|Δ|={max_abs:.2e}  cos={cos:.6}");
-            assert!(
-                cos > 0.9999,
-                "v4 vs naive cosine too low at n_pos={n_pos} nwg={nwg}: cos={cos}"
-            );
-            assert!(
-                max_abs < 5e-3,
-                "v4 vs naive max|Δ| too high at n_pos={n_pos} nwg={nwg}: {max_abs}"
-            );
+            // Sweep all three tile-C variants — each must match naive within
+            // fp32 reorder noise (cos > 0.9999, max|Δ| < 5e-3).
+            for &tile_c in &[16usize, 32, 64] {
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_v4_f32(
+                        &ctx,
+                        enc,
+                        &q_t,
+                        &k_cache,
+                        &v_cache,
+                        &o_partial,
+                        &ml_partial,
+                        &y_v4_t,
+                        n_q,
+                        n_kv,
+                        hd,
+                        n_pos,
+                        nwg,
+                        tile_c,
+                    )
+                })
+                .unwrap();
+                let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
+                let max_abs = y_v4
+                    .iter()
+                    .zip(y_naive.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                let dot: f64 = y_v4
+                    .iter()
+                    .zip(y_naive.iter())
+                    .map(|(a, b)| (*a as f64) * (*b as f64))
+                    .sum();
+                let na: f64 = y_v4.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+                let nb: f64 = y_naive
+                    .iter()
+                    .map(|x| (*x as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let cos = dot / (na * nb);
+                eprintln!(
+                    "[v4 n_pos={n_pos:>4} nwg={nwg:>2} C={tile_c:>2}] max|Δ|={max_abs:.2e}  cos={cos:.6}"
+                );
+                assert!(
+                    cos > 0.9999,
+                    "v4(C={tile_c}) vs naive cos too low at n_pos={n_pos} nwg={nwg}: cos={cos}"
+                );
+                assert!(
+                    max_abs < 5e-3,
+                    "v4(C={tile_c}) vs naive max|Δ| too high at n_pos={n_pos} nwg={nwg}: {max_abs}"
+                );
+            }
         }
     }
 
@@ -3509,7 +3541,8 @@ mod tests {
         let warmup = 20usize;
 
         // Each context length we want to characterize.
-        for &n_pos in &[64usize, 256, 1024, 4096, 8192, 16384] {
+        // Past 16K we skip naive_f16kv (cap'd) and only run v4 NWG sweep.
+        for &n_pos in &[64usize, 256, 1024, 4096, 8192, 16384, 32768, 65536, 131072] {
             let cap = n_pos.max(64);
             let q: Vec<f32> = (0..n_q * hd)
                 .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
@@ -3599,6 +3632,7 @@ mod tests {
                             hd,
                             n_pos,
                             nwg,
+                            32, // tile_c — NWG sweep holds tile constant
                         )
                         .unwrap();
                     }
@@ -3615,6 +3649,117 @@ mod tests {
                 };
                 bench("v4_warmup           ", warmup);
                 bench("v4                  ", n_iters);
+            }
+            eprintln!();
+        }
+    }
+
+    /// Bench: sweep TILE-C (KV positions per inner softmax tile) at
+    /// production NWG settings. Per Codex's review, GQA-dedup raises
+    /// arithmetic intensity per K row, which may shift the optimal C
+    /// away from llama.cpp's vec-kernel default of 32.
+    ///
+    /// Run with: `cargo test --release --lib -p qwen-llm
+    /// attn_v4_tile_c_sweep -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn attn_v4_tile_c_sweep() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-c-sweep] {}", ctx.describe());
+
+        let n_q = 24usize;
+        let n_kv = 4usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+        const GROUP: usize = 6;
+
+        let n_iters = 200usize;
+        let warmup = 20usize;
+
+        // For each ctx, use the production NWG heuristic (16 below 256, 32 above).
+        for &n_pos in &[64usize, 256, 1024, 4096, 16384, 65536, 131072] {
+            let nwg = if n_pos < 256 { 16usize } else { 32usize };
+            let cap = n_pos.max(64);
+
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            let o_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * hd) as u64]).unwrap();
+            let ml_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * GROUP * 2) as u64]).unwrap();
+
+            for &tile_c in &[16usize, 32, 64] {
+                let bench = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_f32(
+                            &ctx,
+                            &enc,
+                            &q_t,
+                            &k_cache,
+                            &v_cache,
+                            &o_partial,
+                            &ml_partial,
+                            &y_t,
+                            n_q,
+                            n_kv,
+                            hd,
+                            n_pos,
+                            nwg,
+                            tile_c,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let t = Instant::now();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    let wall = t.elapsed().as_secs_f64() * 1e3;
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] {n}× chained: wall={wall:7.2} ms  gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                bench("warmup", warmup);
+                bench("bench ", n_iters);
             }
             eprintln!();
         }

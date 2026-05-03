@@ -893,6 +893,241 @@ pub fn encode_get_rows_f32(
     Ok(())
 }
 
+/// In-place partial RoPE with NEOX pairing. Rotates the first `n_rot`
+/// dims of each head; leaves `[n_rot, head_dim)` untouched. For text-only
+/// positions, IMROPE/MROPE collapse to this plain form — sections only
+/// differ for vision/video.
+///
+/// `n_rot` should be `head_dim * partial_rotary_factor` (= 64 for
+/// Qwen3.5/3.6 with head_dim=256, factor=0.25).
+///
+/// CPU oracle: `forward::rope_in_place`.
+pub fn encode_rope_neox_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    buf: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    n_rot: usize,
+    position: u32,
+    theta_base: f32,
+) -> Result<(), MetalError> {
+    if buf.n_elements() as usize != n_heads * head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rope_neox",
+            detail: format!(
+                "buf.n={} != n_heads*head_dim={}",
+                buf.n_elements(),
+                n_heads * head_dim
+            ),
+        });
+    }
+    if n_rot % 2 != 0 || n_rot > head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rope_neox",
+            detail: format!("n_rot={n_rot} must be even and ≤ head_dim={head_dim}"),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        n_rot: u32,
+        position: u32,
+        theta_base: f32,
+    }
+    let pso = ctx.pipeline("kernel_rope_neox_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            n_rot: n_rot as u32,
+            position,
+            theta_base,
+        },
+    );
+    enc.set_tensor(1, buf);
+
+    let total_pairs = n_heads * (n_rot / 2);
+    let tg_threads = 64usize;
+    let n_tg = total_pairs.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// SSM conv1d step + SiLU. Per-channel depthwise convolution of width K
+/// (=4 for Qwen3.5/3.6), then SiLU. Mutates `conv_buf` (slides time
+/// window). See `kernels/ssm_conv.metal` for layout details.
+///
+/// CPU oracle: the conv block in `forward::Forward::gdn_step` (lines
+/// ~358-400 of forward.rs).
+pub fn encode_ssm_conv_silu_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_now: &MetalTensor,
+    conv_buf: &MetalTensor,
+    conv_w: &MetalTensor,
+    out: &MetalTensor,
+    conv_dim: usize,
+) -> Result<(), MetalError> {
+    if qkv_now.n_elements() as usize != conv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "ssm_conv",
+            detail: format!("qkv_now.n={} != conv_dim={conv_dim}", qkv_now.n_elements()),
+        });
+    }
+    if out.n_elements() as usize != conv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "ssm_conv",
+            detail: format!("out.n={} != conv_dim", out.n_elements()),
+        });
+    }
+    // conv_buf must be (K-1) * conv_dim
+    if conv_buf.n_elements() as usize != 3 * conv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "ssm_conv",
+            detail: format!(
+                "conv_buf.n={} != (K-1)*conv_dim={}",
+                conv_buf.n_elements(),
+                3 * conv_dim
+            ),
+        });
+    }
+    // conv_w must be conv_dim * K
+    if conv_w.n_elements() as usize != 4 * conv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "ssm_conv",
+            detail: format!(
+                "conv_w.n={} != K*conv_dim={}",
+                conv_w.n_elements(),
+                4 * conv_dim
+            ),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        conv_dim: u32,
+    }
+    let pso = ctx.pipeline("kernel_ssm_conv_silu_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            conv_dim: conv_dim as u32,
+        },
+    );
+    enc.set_tensor(1, qkv_now);
+    enc.set_tensor(2, conv_buf);
+    enc.set_tensor(3, conv_w);
+    enc.set_tensor(4, out);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_tg = conv_dim.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// RMSNormGated: per-head RMSNorm of `o` with weight, multiplied by
+/// silu(z). Used immediately after the GDN recurrence, before out_proj.
+///
+/// CPU oracle: per-head loop in `forward::Forward::gdn_step` (the
+/// "RMSNormGated" block).
+pub fn encode_rmsnorm_gated_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    o: &MetalTensor,
+    weight: &MetalTensor,
+    z: &MetalTensor,
+    y: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let want = (n_heads * head_dim) as u64;
+    if o.n_elements() != want || z.n_elements() != want || y.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "rmsnorm_gated",
+            detail: format!(
+                "o/z/y expected {want} elements (n_heads={n_heads} * head_dim={head_dim})"
+            ),
+        });
+    }
+    if weight.n_elements() as usize != head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rmsnorm_gated",
+            detail: format!("weight expected {head_dim} elements"),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        eps: f32,
+    }
+    let pso = ctx.pipeline("kernel_rmsnorm_gated_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, o);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, z);
+    enc.set_tensor(4, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: n_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Single-step GDN recurrence: per-V-head delta-rule update + output.
 ///
 /// Performs (per V-head) all of:
@@ -1656,6 +1891,274 @@ mod tests {
                     ids[r]
                 );
             }
+        }
+    }
+
+    /// CPU reference: forward::rope_in_place — applies NEOX-pairing partial
+    /// RoPE in place. We use it via the existing `forward::rope_in_place_pub`
+    /// helper added below.
+    fn rope_neox_cpu_ref(
+        buf: &mut [f32],
+        n_heads: usize,
+        head_dim: usize,
+        n_rot: usize,
+        position: u32,
+        theta_base: f32,
+    ) {
+        let pos = position as f32;
+        let half = n_rot / 2;
+        for hi in 0..n_heads {
+            let h_off = hi * head_dim;
+            for i in 0..half {
+                let exponent = (2 * i) as f32 / n_rot as f32;
+                let freq = pos / theta_base.powf(exponent);
+                let (s, c) = freq.sin_cos();
+                let a = buf[h_off + i];
+                let b = buf[h_off + i + half];
+                buf[h_off + i] = a * c - b * s;
+                buf[h_off + i + half] = a * s + b * c;
+            }
+        }
+    }
+
+    #[test]
+    fn rope_neox_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        // Real shapes from Qwen3.5 family:
+        //   0.8B: 8 Q heads, 256 head_dim, 64 rotated dims
+        //   27B:  24 Q heads or 4 KV heads, 256 head_dim, 64 rotated dims
+        let head_dim = 256;
+        let n_rot = 64;
+        let theta_base = 10_000_000.0f32;
+        for &n_heads in &[8usize, 24, 4] {
+            for &position in &[0u32, 1, 7, 100] {
+                let total = n_heads * head_dim;
+                let buf_init: Vec<f32> =
+                    (0..total).map(|i| ((i % 19) as f32 - 9.0) * 0.05).collect();
+
+                let mut buf_cpu = buf_init.clone();
+                rope_neox_cpu_ref(&mut buf_cpu, n_heads, head_dim, n_rot, position, theta_base);
+
+                let buf_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&buf_init),
+                    vec![total as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_rope_neox_f32(
+                        &ctx, enc, &buf_t, n_heads, head_dim, n_rot, position, theta_base,
+                    )
+                })
+                .unwrap();
+                let gpu = read_back_f32(&buf_t.buffer, total);
+
+                let max_abs = gpu
+                    .iter()
+                    .zip(buf_cpu.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                assert!(
+                    max_abs < 1e-5,
+                    "rope_neox n_heads={n_heads} pos={position}: max|Δ|={max_abs}"
+                );
+            }
+        }
+    }
+
+    /// CPU reference for ssm_conv_silu — mirrors the conv block in
+    /// `forward::Forward::gdn_step`. Mutates `conv_buf` in place,
+    /// returns conv output (post-SiLU).
+    fn ssm_conv_silu_cpu_ref(
+        qkv_now: &[f32],
+        conv_buf: &mut [f32],
+        conv_w: &[f32],
+        conv_dim: usize,
+    ) -> Vec<f32> {
+        const K: usize = 4;
+        let kmin1 = K - 1;
+        let mut conv_input = vec![0.0f32; K * conv_dim];
+        for t in 0..kmin1 {
+            conv_input[t * conv_dim..(t + 1) * conv_dim]
+                .copy_from_slice(&conv_buf[t * conv_dim..(t + 1) * conv_dim]);
+        }
+        conv_input[kmin1 * conv_dim..].copy_from_slice(qkv_now);
+
+        let mut out = vec![0.0f32; conv_dim];
+        for c in 0..conv_dim {
+            let mut s = 0.0f32;
+            for k in 0..K {
+                s += conv_w[c * K + k] * conv_input[k * conv_dim + c];
+            }
+            out[c] = s / (1.0 + (-s).exp());
+        }
+        // Slide buffer (drop oldest, append current).
+        for t in 0..kmin1 - 1 {
+            for i in 0..conv_dim {
+                conv_buf[t * conv_dim + i] = conv_buf[(t + 1) * conv_dim + i];
+            }
+        }
+        conv_buf[(kmin1 - 1) * conv_dim..].copy_from_slice(qkv_now);
+        out
+    }
+
+    #[test]
+    fn ssm_conv_silu_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        // Real shapes: 0.8B has conv_dim = 2*16*128 + 16*128 = 6144;
+        // 27B has conv_dim = 2*16*128 + 48*128 = 10240.
+        for &conv_dim in &[6144usize, 10240] {
+            const K: usize = 4;
+            let qkv_now: Vec<f32> = (0..conv_dim)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let mut conv_buf: Vec<f32> = (0..(K - 1) * conv_dim)
+                .map(|i| ((i % 13) as f32 - 6.0) * 5e-3)
+                .collect();
+            let conv_w: Vec<f32> = (0..conv_dim * K)
+                .map(|i| ((i % 7) as f32 - 3.0) * 1e-2)
+                .collect();
+
+            // CPU oracle.
+            let mut buf_cpu = conv_buf.clone();
+            let out_cpu = ssm_conv_silu_cpu_ref(&qkv_now, &mut buf_cpu, &conv_w, conv_dim);
+
+            // GPU.
+            let qkv_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&qkv_now),
+                vec![conv_dim as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let buf_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&conv_buf),
+                vec![((K - 1) * conv_dim) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let w_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&conv_w),
+                vec![(conv_dim * K) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let out_t = MetalTensor::zeros_f32(&ctx, vec![conv_dim as u64]).unwrap();
+
+            one_shot(&ctx, |enc| {
+                encode_ssm_conv_silu_f32(&ctx, enc, &qkv_t, &buf_t, &w_t, &out_t, conv_dim)
+            })
+            .unwrap();
+
+            let out_gpu = read_back_f32(&out_t.buffer, conv_dim);
+            let buf_gpu = read_back_f32(&buf_t.buffer, (K - 1) * conv_dim);
+
+            let max_out = out_gpu
+                .iter()
+                .zip(out_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let max_buf = buf_gpu
+                .iter()
+                .zip(buf_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!(
+                "[ssm_conv conv_dim={conv_dim}] max|out_Δ|={max_out:.2e} max|buf_Δ|={max_buf:.2e}"
+            );
+            assert!(max_out < 1e-5, "out drift {max_out}");
+            assert!(max_buf < 1e-7, "buf drift {max_buf}");
+        }
+    }
+
+    /// CPU reference for rmsnorm_gated — per-head RMSNorm of `o` * silu(z).
+    fn rmsnorm_gated_cpu_ref(
+        o: &[f32],
+        weight: &[f32],
+        z: &[f32],
+        n_heads: usize,
+        head_dim: usize,
+        eps: f32,
+    ) -> Vec<f32> {
+        let mut y = vec![0.0f32; n_heads * head_dim];
+        for hi in 0..n_heads {
+            let off = hi * head_dim;
+            let sumsq: f32 = (0..head_dim).map(|i| o[off + i].powi(2)).sum();
+            let scale = 1.0 / (sumsq / head_dim as f32 + eps).sqrt();
+            for i in 0..head_dim {
+                let zi = z[off + i];
+                let silu_z = zi / (1.0 + (-zi).exp());
+                y[off + i] = (o[off + i] * scale * weight[i]) * silu_z;
+            }
+        }
+        y
+    }
+
+    #[test]
+    fn rmsnorm_gated_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128)] {
+            let total = n_heads * head_dim;
+            let o: Vec<f32> = (0..total)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.05)
+                .collect();
+            let z: Vec<f32> = (0..total).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+            let weight: Vec<f32> = (0..head_dim).map(|i| 0.5 + (i % 5) as f32 * 0.2).collect();
+            let eps = 1e-6;
+
+            let cpu = rmsnorm_gated_cpu_ref(&o, &weight, &z, n_heads, head_dim, eps);
+
+            let o_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&o),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let w_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&weight),
+                vec![head_dim as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let z_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&z),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+
+            one_shot(&ctx, |enc| {
+                encode_rmsnorm_gated_f32(&ctx, enc, &o_t, &w_t, &z_t, &y_t, n_heads, head_dim, eps)
+            })
+            .unwrap();
+
+            let gpu = read_back_f32(&y_t.buffer, total);
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("[rmsnorm_gated n_heads={n_heads} head_dim={head_dim}] max|Δ|={max_abs:.2e}");
+            assert!(max_abs < 1e-4, "rmsnorm_gated drift {max_abs}");
         }
     }
 

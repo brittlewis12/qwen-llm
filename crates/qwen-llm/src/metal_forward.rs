@@ -47,6 +47,17 @@ use crate::metal::{
 /// `attn_v4_choose_nwg` for the selection heuristic.
 pub const ATTN_V4_MAX_NWG: usize = 32;
 use crate::tensor::{GgmlType, TensorDesc};
+
+/// Single source of truth for which weight dtypes the loader keeps in
+/// their native form (vs. dequant'ing to F32). Used by both `load_weight`
+/// in `MetalModel::load` and the byte-ledger diagnostic, so they stay
+/// in sync. If you add a new native quant kernel, list its dtype here.
+pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
+    matches!(
+        dtype,
+        GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K
+    )
+}
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState,
 };
@@ -147,18 +158,14 @@ impl MetalModel {
         // dtype for Q4_K, Q5_K, Q6_K, Q8_0; falls back to F32 conversion
         // for other types we don't have native kernels for yet.
         let load_weight = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            match desc.dtype {
-                GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K => {
-                    Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
-                }
-                _ => {
-                    // Fall back to F32 dequant for unsupported quant types.
-                    eprintln!(
-                        "[metal-load] {} is {:?}; dequanting to F32 (no native kernel yet)",
-                        desc.name, desc.dtype
-                    );
-                    load_f32(desc)
-                }
+            if weight_dtype_kept_native(desc.dtype) {
+                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
+            } else {
+                eprintln!(
+                    "[metal-load] {} is {:?}; dequanting to F32 (no native kernel yet)",
+                    desc.name, desc.dtype
+                );
+                load_f32(desc)
             }
         };
         // Existing alias for the call sites below.
@@ -413,17 +420,22 @@ impl<'a> MetalForward<'a> {
         Ok(logits)
     }
 
-    /// Same as [`single_token`] but also returns a profile with CPU
-    /// encode, GPU execution, and total wall-clock times. Caller pays
-    /// the cost of an `addCompletedHandler`-backed timestamp roundtrip.
     /// Phase-resolved profiling: splits the per-token forward across
-    /// multiple command buffers so we can attribute GPU time to logical
-    /// phases (embedding, GDN layers, attn layers, lm head). The cost
-    /// of the split is roughly (n_phases - 1) × command-buffer overhead;
-    /// at our ~0.3 ms/buffer, splitting into ~6 phases adds ~1.5 ms to
-    /// total wall but gives per-phase GPU timing.
+    /// MANY command buffers (one per block, plus embedding and lm_head)
+    /// so we can attribute GPU time to logical phases. ★ ARTIFACT WARNING:
+    /// the returned `wall_with_artifact_ms` is the WALL CLOCK of this
+    /// split execution and includes ~10-15 ms of per-phase command-buffer
+    /// overhead (commit + waitUntilCompleted + setup) NOT present in
+    /// production single-token decode. Use the per-phase GPU times
+    /// (sum-of-phases) for proportional reasoning, NOT the wall number,
+    /// when comparing to production.
     ///
-    /// Returns: (logits, total wall ms, per-phase GPU ms map)
+    /// For production-realistic ms/token, use [`single_token_profiled`]
+    /// instead — that uses one command buffer per token (matching
+    /// production) and returns true wall + true CPU encode + true GPU
+    /// kernel times.
+    ///
+    /// Returns: (logits, wall_with_artifact_ms, per-phase GPU ms map)
     pub fn single_token_phase_profiled(
         &self,
         token_id: i32,
@@ -1774,10 +1786,7 @@ mod tests {
             m.output_norm.n_bytes,
             f32_size(&m.output_norm.shape),
         );
-        let lm_head_kept = matches!(
-            m.lm_head.dtype,
-            GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K
-        );
+        let lm_head_kept = weight_dtype_kept_native(m.lm_head.dtype);
         bump(
             &mut stats,
             if lm_head_kept {
@@ -1823,8 +1832,7 @@ mod tests {
                         (g.ffn_down, "gdn ffn_down"),
                     ];
                     for (d, role) in weight_descs {
-                        let kept =
-                            matches!(d.dtype, GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K);
+                        let kept = weight_dtype_kept_native(d.dtype);
                         let key = format!(
                             "{role} ({:?}{})",
                             d.dtype,
@@ -1859,8 +1867,7 @@ mod tests {
                         (a.ffn_down, "attn ffn_down"),
                     ];
                     for (d, role) in weight_descs {
-                        let kept =
-                            matches!(d.dtype, GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K);
+                        let kept = weight_dtype_kept_native(d.dtype);
                         let key = format!(
                             "{role} ({:?}{})",
                             d.dtype,
@@ -2183,45 +2190,70 @@ mod tests {
             },
             &mut phases,
         )?;
-        // FFN.
-        timed(
-            "ffn_gate (mat_vec)",
-            &|enc| {
-                encode_mat_vec_dispatch(
-                    mf.ctx,
-                    enc,
-                    &ab.ffn_gate,
-                    &s.h,
-                    &s.ffn_gate,
-                    h,
-                    arch.intermediate_size as usize,
-                )
-            },
-            &mut phases,
-        )?;
-        timed(
-            "ffn_up (mat_vec)",
-            &|enc| {
-                encode_mat_vec_dispatch(
-                    mf.ctx,
-                    enc,
-                    &ab.ffn_up,
-                    &s.h,
-                    &s.ffn_up,
-                    h,
-                    arch.intermediate_size as usize,
-                )
-            },
-            &mut phases,
-        )?;
-        timed(
-            "silu_mul",
-            &|enc| {
-                encode_silu_mul_f32(mf.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)
+        // FFN — mirror the production fused-or-fallback path from
+        // encode_block, so the intra-profiler measurements track what
+        // actually runs at decode. Q4_K + Q4_K weights take the fused
+        // SwiGLU path (1 dispatch); other dtypes fall back to the
+        // 3-dispatch sequence.
+        let ffn_fused = ab.ffn_gate.dtype == GgmlType::Q4_K && ab.ffn_up.dtype == GgmlType::Q4_K;
+        if ffn_fused {
+            timed(
+                "ffn_swiglu_q4_K (fused gate+up+silu_mul)",
+                &|enc| {
+                    encode_ffn_swiglu_q4_K_f32(
+                        mf.ctx,
+                        enc,
+                        &ab.ffn_gate,
+                        &ab.ffn_up,
+                        &s.h,
+                        &s.ffn_inner,
+                        h,
+                        arch.intermediate_size as usize,
+                    )
                     .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
+                },
+                &mut phases,
+            )?;
+        } else {
+            timed(
+                "ffn_gate (mat_vec) [unfused fallback]",
+                &|enc| {
+                    encode_mat_vec_dispatch(
+                        mf.ctx,
+                        enc,
+                        &ab.ffn_gate,
+                        &s.h,
+                        &s.ffn_gate,
+                        h,
+                        arch.intermediate_size as usize,
+                    )
+                },
+                &mut phases,
+            )?;
+            timed(
+                "ffn_up (mat_vec) [unfused fallback]",
+                &|enc| {
+                    encode_mat_vec_dispatch(
+                        mf.ctx,
+                        enc,
+                        &ab.ffn_up,
+                        &s.h,
+                        &s.ffn_up,
+                        h,
+                        arch.intermediate_size as usize,
+                    )
+                },
+                &mut phases,
+            )?;
+            timed(
+                "silu_mul [unfused fallback]",
+                &|enc| {
+                    encode_silu_mul_f32(mf.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)
+                        .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+        }
         timed(
             "ffn_down (mat_vec)",
             &|enc| {
@@ -2463,48 +2495,66 @@ mod tests {
             },
             &mut phases,
         )?;
-        // FFN gate.
-        timed(
-            "ffn_gate (mat_vec)",
-            &|enc| {
-                encode_mat_vec_dispatch(
-                    mf.ctx,
-                    enc,
-                    &gb.ffn_gate,
-                    &s.h,
-                    &s.ffn_gate,
-                    h,
-                    arch.intermediate_size as usize,
-                )
-            },
-            &mut phases,
-        )?;
-        // FFN up.
-        timed(
-            "ffn_up (mat_vec)",
-            &|enc| {
-                encode_mat_vec_dispatch(
-                    mf.ctx,
-                    enc,
-                    &gb.ffn_up,
-                    &s.h,
-                    &s.ffn_up,
-                    h,
-                    arch.intermediate_size as usize,
-                )
-            },
-            &mut phases,
-        )?;
-        // silu_mul.
-        timed(
-            "silu_mul",
-            &|enc| {
-                encode_silu_mul_f32(mf.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)
+        // FFN — mirror the production fused-or-fallback path.
+        let ffn_fused = gb.ffn_gate.dtype == GgmlType::Q4_K && gb.ffn_up.dtype == GgmlType::Q4_K;
+        if ffn_fused {
+            timed(
+                "ffn_swiglu_q4_K (fused gate+up+silu_mul)",
+                &|enc| {
+                    encode_ffn_swiglu_q4_K_f32(
+                        mf.ctx,
+                        enc,
+                        &gb.ffn_gate,
+                        &gb.ffn_up,
+                        &s.h,
+                        &s.ffn_inner,
+                        h,
+                        arch.intermediate_size as usize,
+                    )
                     .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
-        // FFN down.
+                },
+                &mut phases,
+            )?;
+        } else {
+            timed(
+                "ffn_gate (mat_vec) [unfused fallback]",
+                &|enc| {
+                    encode_mat_vec_dispatch(
+                        mf.ctx,
+                        enc,
+                        &gb.ffn_gate,
+                        &s.h,
+                        &s.ffn_gate,
+                        h,
+                        arch.intermediate_size as usize,
+                    )
+                },
+                &mut phases,
+            )?;
+            timed(
+                "ffn_up (mat_vec) [unfused fallback]",
+                &|enc| {
+                    encode_mat_vec_dispatch(
+                        mf.ctx,
+                        enc,
+                        &gb.ffn_up,
+                        &s.h,
+                        &s.ffn_up,
+                        h,
+                        arch.intermediate_size as usize,
+                    )
+                },
+                &mut phases,
+            )?;
+            timed(
+                "silu_mul [unfused fallback]",
+                &|enc| {
+                    encode_silu_mul_f32(mf.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)
+                        .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+        }
         timed(
             "ffn_down (mat_vec)",
             &|enc| {
@@ -2565,12 +2615,18 @@ mod tests {
                 let _ = mf.single_token(0, p, &mut s).expect("ramp");
             }
             // Now do a phase-profiled call at position `target`.
-            let (_logits, total_ms, phases) = mf
+            let (_logits, wall_with_artifact_ms, phases) = mf
                 .single_token_phase_profiled(0, target as u32, &mut s)
                 .expect("phase");
 
             let phase_sum_ms: f64 = phases.iter().map(|p| p.1).sum();
-            eprintln!("[phase ctx={target:>5}] total wall {total_ms:.2} ms, phase sum {phase_sum_ms:.2} ms");
+            // ★ phase_sum is the production-realistic GPU time; the wall
+            // includes ~12 ms of per-phase cmdbuf overhead (artifact).
+            // For production ms/token use metal_27b_context_sweep instead.
+            eprintln!(
+                "[phase ctx={target:>5}] phase_sum {phase_sum_ms:.2} ms (production-realistic) | \
+                 wall_with_artifact {wall_with_artifact_ms:.2} ms (DO NOT use for prod ms/token)"
+            );
             for (name, ms) in &phases {
                 let pct = ms / phase_sum_ms * 100.0;
                 eprintln!("[phase ctx={target:>5}]   {name:25} {ms:7.2} ms  ({pct:5.1}%)");

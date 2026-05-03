@@ -386,10 +386,25 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<Vec<f32>, MfError> {
+        let (logits, _) = self.single_token_profiled(token_id, position, session)?;
+        Ok(logits)
+    }
+
+    /// Same as [`single_token`] but also returns a profile with CPU
+    /// encode, GPU execution, and total wall-clock times. Caller pays
+    /// the cost of an `addCompletedHandler`-backed timestamp roundtrip.
+    pub fn single_token_profiled(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(Vec<f32>, TokenProfile), MfError> {
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
         }
+
+        let t_total = std::time::Instant::now();
 
         // Stage the token id into the ids_buf (i32 view of the F32 buffer).
         unsafe {
@@ -397,6 +412,7 @@ impl<'a> MetalForward<'a> {
             *ptr = token_id;
         }
 
+        let t_encode = std::time::Instant::now();
         let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
         let enc = KernelEncoder::begin(&cmd_buf);
 
@@ -448,15 +464,34 @@ impl<'a> MetalForward<'a> {
         )?;
 
         enc.end();
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+
+        let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
         unsafe { cmd_buf.waitUntilCompleted() };
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+
+        // GPU-reported wall-clock execution time (CFTimeInterval seconds).
+        let gpu_start = cmd_buf.GPUStartTime();
+        let gpu_end = cmd_buf.GPUEndTime();
+        let gpu_kernel_ms = ((gpu_end - gpu_start) * 1e3) as f64;
 
         let mut out = vec![0.0f32; arch.vocab_size as usize];
         unsafe {
             let src = session.logits.buffer.contents().as_ptr() as *const f32;
             std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
         }
-        Ok(out)
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+
+        Ok((
+            out,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+            },
+        ))
     }
 
     fn encode_block(
@@ -885,6 +920,27 @@ fn encode_scatter_offset_f32(
         },
     );
     Ok(())
+}
+
+/// Per-token timing profile.
+///
+/// * `cpu_encode_ms` — time spent in `KernelEncoder::begin` through
+///   `enc.end()`. This is the CPU-side cost of encoding all dispatches
+///   into the command buffer. ICB will collapse this to ~0.
+/// * `gpu_kernel_ms` — `GPUEndTime - GPUStartTime`, the wall-clock the
+///   GPU spent actually executing kernels. This is the floor a
+///   correctness-preserving optimization can reach.
+/// * `cpu_to_gpu_complete_ms` — `commit() + waitUntilCompleted()` wall
+///   clock. Difference vs `gpu_kernel_ms` is mostly driver/queue
+///   submission + completion handler overhead.
+/// * `total_ms` — the user-visible per-token latency (incl. logits
+///   readback).
+#[derive(Debug, Clone, Copy)]
+pub struct TokenProfile {
+    pub cpu_encode_ms: f64,
+    pub cpu_to_gpu_complete_ms: f64,
+    pub gpu_kernel_ms: f64,
+    pub total_ms: f64,
 }
 
 const RMS_EPS: f32 = 1e-6;
@@ -1359,6 +1415,443 @@ mod tests {
         );
         assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
         assert!(cos > 0.999, "cos={cos} below threshold");
+    }
+
+    /// **Bench the Q5_K → F32 fallback cost.** Replay all 48 GDN layers'
+    /// `ssm_out.weight` mat-vecs in F32 (current state), measure GPU
+    /// kernel time. Then estimate the native-Q5_K time as
+    /// `f32_time × (q5_bytes / f32_bytes)` and report the delta.
+    #[test]
+    #[ignore]
+    fn metal_27b_q5_fallback_bench() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+
+        // Find all blk.*.ssm_out.weight tensors with Q5_K dtype.
+        let q5_tensors: Vec<&TensorDesc> = g
+            .tensors
+            .iter()
+            .filter(|t| {
+                t.name.ends_with(".ssm_out.weight")
+                    && t.dtype == GgmlType::Q5_K
+                    && t.shape.len() == 2
+            })
+            .collect();
+        eprintln!("[q5-bench] {} Q5_K ssm_out tensors", q5_tensors.len());
+        if q5_tensors.is_empty() {
+            return;
+        }
+
+        // For each one: current path is dequant-to-F32 then F32 mat_vec.
+        // Build the F32 weight buffers, plus a constant input vector and
+        // an output buffer. Replay all 48 mat_vecs in one command buffer
+        // and time it.
+        let n_in = q5_tensors[0].shape[0] as usize; // 6144 for 27B GDN
+        let n_out = q5_tensors[0].shape[1] as usize; // 5120
+        let total_q5_bytes: u64 = q5_tensors.iter().map(|t| t.n_bytes).sum();
+        let total_f32_bytes: u64 = q5_tensors
+            .iter()
+            .map(|t| (t.shape.iter().product::<u64>()) * 4)
+            .sum();
+
+        eprintln!("[q5-bench] shape [{n_in}, {n_out}], 48 layers");
+        eprintln!(
+            "[q5-bench] total Q5_K bytes: {:.2} MiB",
+            total_q5_bytes as f64 / (1024.0 * 1024.0)
+        );
+        eprintln!(
+            "[q5-bench] total F32 bytes:  {:.2} MiB (current resident)",
+            total_f32_bytes as f64 / (1024.0 * 1024.0)
+        );
+
+        // Dequant all to F32 + upload as MetalTensor.
+        let f32_weights: Vec<MetalTensor> = q5_tensors
+            .iter()
+            .map(|t| {
+                let f = crate::codec::dequant_to_f32(t, g.slice(t)).unwrap();
+                MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&f),
+                    t.shape.clone(),
+                    GgmlType::F32,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Input + output buffers.
+        let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let y_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+
+        // Warmup.
+        for _ in 0..3 {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for w in &f32_weights {
+                crate::metal::encode_mat_vec_f32(&ctx, &enc, w, &x_t, &y_t, n_in, n_out).unwrap();
+            }
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+        }
+
+        // Timed replay.
+        const ITERS: usize = 30;
+        let t = std::time::Instant::now();
+        let mut gpu_sum_ms = 0.0f64;
+        for _ in 0..ITERS {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for w in &f32_weights {
+                crate::metal::encode_mat_vec_f32(&ctx, &enc, w, &x_t, &y_t, n_in, n_out).unwrap();
+            }
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            gpu_sum_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+        }
+        let total_ms = t.elapsed().as_secs_f64() * 1e3;
+        let per_iter_total = total_ms / ITERS as f64;
+        let per_iter_gpu = gpu_sum_ms / ITERS as f64;
+
+        let bytes_per_iter_f32 = total_f32_bytes as f64;
+        let bytes_per_iter_q5 = total_q5_bytes as f64;
+        let bw_f32 = bytes_per_iter_f32 / (per_iter_gpu / 1000.0) / 1e9;
+        let predicted_q5_ms = per_iter_gpu * (bytes_per_iter_q5 / bytes_per_iter_f32);
+
+        eprintln!("[q5-bench] {ITERS} iters: total {per_iter_total:.2} ms/iter, gpu {per_iter_gpu:.2} ms/iter");
+        eprintln!("[q5-bench]   F32 BW achieved:    {bw_f32:.0} GB/s");
+        eprintln!("[q5-bench]   F32 mat_vec cost (current):  {per_iter_gpu:.2} ms/token");
+        eprintln!(
+            "[q5-bench]   estimated native Q5_K cost:  {predicted_q5_ms:.2} ms/token  (BW-scaled)"
+        );
+        eprintln!(
+            "[q5-bench]   POTENTIAL SAVINGS:           {:.2} ms/token",
+            per_iter_gpu - predicted_q5_ms
+        );
+        eprintln!("[q5-bench]   we're at 51.26 ms total; saving this would put us at {:.2} ms = {:.2} t/s",
+            51.26 - (per_iter_gpu - predicted_q5_ms),
+            1000.0 / (51.26 - (per_iter_gpu - predicted_q5_ms)));
+    }
+
+    /// **Per-tensor byte ledger.** Audit what's actually loaded into Metal
+    /// memory vs what came out of the GGUF. Specifically: which tensors
+    /// got native dtype, which got dequant-fallback to F32, and how many
+    /// bytes per category. Run before optimization to ground decisions.
+    #[test]
+    #[ignore]
+    fn metal_27b_byte_ledger() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+
+        // Walk loader::Model and classify each tensor.
+        // Loader emits: token_embd, output_norm, lm_head, then per-block.
+        // For each tensor, we ask: would MetalModel::load() preserve native
+        // or fallback to F32?
+        // Match the policy in MetalModel::load:
+        //   * load_f32 (ALWAYS dequant to F32): norms, ssm_a, ssm_dt, conv1d,
+        //     ssm_norm, q_norm, k_norm, output_norm, token_embd
+        //   * load_weight (preserves F32/Q4_K/Q6_K, falls back to F32 for
+        //     others): all the mat_vec weights — lm_head, ffn_*, attn_q/k/v/o,
+        //     attn_qkv, attn_gate, in_proj_qkv, in_proj_z, beta_proj,
+        //     alpha_proj, out_proj
+        let mut stats: std::collections::BTreeMap<String, (u64, u64, u64)> =
+            std::collections::BTreeMap::new(); // role -> (gguf_bytes, metal_bytes, count)
+        let bump = |stats: &mut std::collections::BTreeMap<String, (u64, u64, u64)>,
+                    role: &str,
+                    gguf_b: u64,
+                    metal_b: u64| {
+            let e = stats.entry(role.into()).or_insert((0, 0, 0));
+            e.0 += gguf_b;
+            e.1 += metal_b;
+            e.2 += 1;
+        };
+        let f32_size = |shape: &[u64]| -> u64 { shape.iter().product::<u64>() * 4 };
+
+        // Top-level tensors.
+        bump(
+            &mut stats,
+            "token_embd (load_f32)",
+            m.token_embd.n_bytes,
+            f32_size(&m.token_embd.shape),
+        );
+        bump(
+            &mut stats,
+            "output_norm (load_f32)",
+            m.output_norm.n_bytes,
+            f32_size(&m.output_norm.shape),
+        );
+        let lm_head_kept = matches!(
+            m.lm_head.dtype,
+            GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K
+        );
+        bump(
+            &mut stats,
+            if lm_head_kept {
+                "lm_head (native)"
+            } else {
+                "lm_head (FALLBACK F32)"
+            },
+            m.lm_head.n_bytes,
+            if lm_head_kept {
+                m.lm_head.n_bytes
+            } else {
+                f32_size(&m.lm_head.shape)
+            },
+        );
+
+        for b in &m.blocks {
+            match b {
+                crate::loader::Block::Gdn(g) => {
+                    let f32_descs: &[&TensorDesc] = &[
+                        g.attn_norm,
+                        g.post_attention_norm,
+                        g.a_log,
+                        g.dt_bias,
+                        g.conv1d,
+                        g.norm,
+                    ];
+                    for d in f32_descs {
+                        bump(
+                            &mut stats,
+                            "gdn f32-required",
+                            d.n_bytes,
+                            f32_size(&d.shape),
+                        );
+                    }
+                    let weight_descs: &[(&TensorDesc, &str)] = &[
+                        (g.in_proj_qkv, "gdn in_proj_qkv"),
+                        (g.in_proj_z, "gdn in_proj_z"),
+                        (g.beta_proj, "gdn beta_proj"),
+                        (g.alpha_proj, "gdn alpha_proj"),
+                        (g.out_proj, "gdn out_proj"),
+                        (g.ffn_gate, "gdn ffn_gate"),
+                        (g.ffn_up, "gdn ffn_up"),
+                        (g.ffn_down, "gdn ffn_down"),
+                    ];
+                    for (d, role) in weight_descs {
+                        let kept =
+                            matches!(d.dtype, GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K);
+                        let key = format!(
+                            "{role} ({:?}{})",
+                            d.dtype,
+                            if kept { "" } else { " FALLBACK→F32" }
+                        );
+                        bump(
+                            &mut stats,
+                            &key,
+                            d.n_bytes,
+                            if kept { d.n_bytes } else { f32_size(&d.shape) },
+                        );
+                    }
+                }
+                crate::loader::Block::Attn(a) => {
+                    let f32_descs: &[&TensorDesc] =
+                        &[a.attn_norm, a.post_attention_norm, a.q_norm, a.k_norm];
+                    for d in f32_descs {
+                        bump(
+                            &mut stats,
+                            "attn f32-required",
+                            d.n_bytes,
+                            f32_size(&d.shape),
+                        );
+                    }
+                    let weight_descs: &[(&TensorDesc, &str)] = &[
+                        (a.q, "attn q"),
+                        (a.k, "attn k"),
+                        (a.v, "attn v"),
+                        (a.o, "attn o"),
+                        (a.ffn_gate, "attn ffn_gate"),
+                        (a.ffn_up, "attn ffn_up"),
+                        (a.ffn_down, "attn ffn_down"),
+                    ];
+                    for (d, role) in weight_descs {
+                        let kept =
+                            matches!(d.dtype, GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q6_K);
+                        let key = format!(
+                            "{role} ({:?}{})",
+                            d.dtype,
+                            if kept { "" } else { " FALLBACK→F32" }
+                        );
+                        bump(
+                            &mut stats,
+                            &key,
+                            d.n_bytes,
+                            if kept { d.n_bytes } else { f32_size(&d.shape) },
+                        );
+                    }
+                }
+            }
+        }
+
+        eprintln!("[ledger] role  count  gguf_MB  metal_MB  delta_MB");
+        let mut total_gguf = 0u64;
+        let mut total_metal = 0u64;
+        for (role, (gguf_b, metal_b, count)) in &stats {
+            let dg = *gguf_b as f64 / (1024.0 * 1024.0);
+            let dm = *metal_b as f64 / (1024.0 * 1024.0);
+            let delta = dm - dg;
+            eprintln!(
+                "[ledger]   {role:60} {count:4}  {dg:8.2}  {dm:8.2}  {:+.2}",
+                delta
+            );
+            total_gguf += gguf_b;
+            total_metal += metal_b;
+        }
+        let total_gguf_gb = total_gguf as f64 / (1024.0 * 1024.0 * 1024.0);
+        let total_metal_gb = total_metal as f64 / (1024.0 * 1024.0 * 1024.0);
+        eprintln!("[ledger] === TOTALS ===");
+        eprintln!("[ledger]   gguf  bytes: {total_gguf_gb:.2} GiB");
+        eprintln!("[ledger]   metal bytes: {total_metal_gb:.2} GiB");
+        eprintln!(
+            "[ledger]   inflation:    {:+.2} GiB ({:+.1}% from quant fallbacks)",
+            total_metal_gb - total_gguf_gb,
+            (total_metal_gb / total_gguf_gb - 1.0) * 100.0
+        );
+        let bw_floor_native = total_gguf_gb * 1024.0 / 546.0; // ms at peak BW (note: GiB->GB unit fudge but consistent)
+        let bw_floor_metal = total_metal_gb * 1024.0 / 546.0;
+        eprintln!("[ledger]   bandwidth floor at GGUF native bytes: {bw_floor_native:.2} ms");
+        eprintln!("[ledger]   bandwidth floor at Metal bytes:       {bw_floor_metal:.2} ms");
+        eprintln!(
+            "[ledger]   estimated cost of fallbacks: {:+.2} ms",
+            bw_floor_metal - bw_floor_native
+        );
+    }
+
+    /// **Per-token profiling on 27B-Q4_K_M.** Runs N steady-state tokens,
+    /// reports the CPU-encode / GPU-kernel / total-wall split, and the
+    /// dispatch count. The data we feed to optimization decisions.
+    #[test]
+    #[ignore]
+    fn metal_27b_perf_profile() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok
+            .encode(
+                "The quick brown fox jumps over the lazy dog and runs into the field where",
+                false,
+            )
+            .expect("tokenize");
+        eprintln!("[perf-27b] {} prompt tokens", ids.len());
+
+        let mut s = MetalSession::fresh(&ctx, &mm, ids.len() + 32).expect("session");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Warmup: enough tokens to fully populate pipeline cache.
+        for (i, &tid) in ids.iter().take(3).enumerate() {
+            let _ = mf.single_token(tid, i as u32, &mut s).expect("warmup");
+        }
+        // Reset session for a clean steady-state run.
+        let mut s = MetalSession::fresh(&ctx, &mm, ids.len() + 32).expect("session2");
+        // Re-warmup PSO cache by running once.
+        let _ = mf.single_token(ids[0], 0, &mut s).expect("warmup2");
+        let mut s = MetalSession::fresh(&ctx, &mm, ids.len() + 32).expect("session3");
+
+        let mut profiles: Vec<TokenProfile> = Vec::new();
+        for (i, &tid) in ids.iter().enumerate() {
+            let (_, p) = mf
+                .single_token_profiled(tid, i as u32, &mut s)
+                .expect("forward");
+            profiles.push(p);
+        }
+
+        // Skip the first to avoid first-call jitter.
+        let steady = &profiles[1..];
+        let avg = |f: fn(&TokenProfile) -> f64| -> f64 {
+            steady.iter().map(f).sum::<f64>() / steady.len() as f64
+        };
+        let total = avg(|p| p.total_ms);
+        let cpu_enc = avg(|p| p.cpu_encode_ms);
+        let gpu_kern = avg(|p| p.gpu_kernel_ms);
+        let cpu_gpu = avg(|p| p.cpu_to_gpu_complete_ms);
+        let queue_overhead = cpu_gpu - gpu_kern;
+        let readback_etc = total - cpu_enc - cpu_gpu;
+
+        eprintln!(
+            "[perf-27b] === avg over {} steady-state tokens ===",
+            steady.len()
+        );
+        eprintln!(
+            "[perf-27b]   total wall:           {total:.2} ms = {:.2} t/s",
+            1000.0 / total
+        );
+        eprintln!(
+            "[perf-27b]   cpu encode:           {cpu_enc:.2} ms ({:.0}%)",
+            cpu_enc / total * 100.0
+        );
+        eprintln!(
+            "[perf-27b]   gpu kernels:          {gpu_kern:.2} ms ({:.0}%)",
+            gpu_kern / total * 100.0
+        );
+        eprintln!(
+            "[perf-27b]   queue/sched overhead: {queue_overhead:.2} ms ({:.0}%)",
+            queue_overhead / total * 100.0
+        );
+        eprintln!(
+            "[perf-27b]   readback + misc:      {readback_etc:.2} ms ({:.0}%)",
+            readback_etc / total * 100.0
+        );
+
+        // Theoretical bandwidth-bound floor for this model: 16.8 GB / 546 GB/s
+        // = 30.7 ms. So gpu_kernel_ms tells us how close we are to the BW wall.
+        let gb = 16.8_f64;
+        let peak = 546.0_f64;
+        let bw_floor = gb / peak * 1000.0;
+        eprintln!(
+            "[perf-27b]   bandwidth floor:      {bw_floor:.2} ms ({:.0} GB/s peak; we're at {:.0} GB/s = {:.0}%)",
+            peak, gb / (gpu_kern / 1000.0), gb / (gpu_kern / 1000.0) / peak * 100.0
+        );
+        // llama.cpp clean baseline: 21.21 t/s = 47.1 ms/token.
+        eprintln!("[perf-27b]   llama.cpp baseline:   47.15 ms (21.21 t/s)");
+        eprintln!(
+            "[perf-27b]   our headroom to BW floor: {:.2} ms",
+            gpu_kern - bw_floor
+        );
+        eprintln!(
+            "[perf-27b]   our headroom to llama.cpp: {:.2} ms ({:+.1} t/s)",
+            total - 47.15,
+            1000.0 / total - 21.21
+        );
+
+        eprintln!("[perf-27b] per-token profiles:");
+        for (i, p) in profiles.iter().enumerate() {
+            eprintln!(
+                "[perf-27b]   t{i}: total={:.2} cpu_enc={:.2} gpu={:.2} q={:.2}",
+                p.total_ms,
+                p.cpu_encode_ms,
+                p.gpu_kernel_ms,
+                p.cpu_to_gpu_complete_ms - p.gpu_kernel_ms
+            );
+        }
     }
 
     /// **27B Q4_K_M, multi-token**: validates position > 0 + steady-state

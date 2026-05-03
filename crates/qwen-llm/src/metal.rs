@@ -830,6 +830,65 @@ pub fn encode_l2_norm_f32(
     Ok(())
 }
 
+/// Per-head L2-norm: `y[h, :] = x[h, :] / max(||x[h, :]||, eps)` for
+/// `h ∈ [0, n_heads)`. One dispatch covers all heads. Used in the GDN
+/// front-end where Q and K are l2-normed per K-head before the
+/// recurrence; replaces n_heads separate calls.
+pub fn encode_l2_norm_batched_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let want = (n_heads * head_dim) as u64;
+    if x.n_elements() != want || y.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "l2_norm_batched",
+            detail: format!("x/y expected {want} elements"),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        eps: f32,
+    }
+    let pso = ctx.pipeline("kernel_l2_norm_batched_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: n_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Embedding lookup: `y[r * n_cols + i] = embed[ids[r] * n_cols + i]`.
 /// `embed` is `[vocab, n_cols]`-shaped F32; `ids` is `[n_rows]` i32.
 /// Decode uses `n_rows = 1`; prefill uses `n_rows = batch`.
@@ -1158,6 +1217,7 @@ pub fn encode_gdn_step_f32(
     state: &MetalTensor,
     out: &MetalTensor,
     n_v_heads: usize,
+    n_k_heads: usize,
     head_dim: usize,
 ) -> Result<(), MetalError> {
     if head_dim != 128 {
@@ -1166,11 +1226,24 @@ pub fn encode_gdn_step_f32(
             detail: format!("head_dim={head_dim} but kernel hardcodes 128"),
         });
     }
-    let want_qkv = (n_v_heads * head_dim) as u64;
-    if q.n_elements() != want_qkv || k.n_elements() != want_qkv || v.n_elements() != want_qkv {
+    if n_v_heads % n_k_heads != 0 {
         return Err(MetalError::BadShape {
             kernel: "gdn_step",
-            detail: format!("q/k/v expected {want_qkv} elements"),
+            detail: format!("n_v_heads={n_v_heads} not multiple of n_k_heads={n_k_heads}"),
+        });
+    }
+    let want_qk = (n_k_heads * head_dim) as u64;
+    let want_v = (n_v_heads * head_dim) as u64;
+    if q.n_elements() != want_qk || k.n_elements() != want_qk {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step",
+            detail: format!("q/k expected {want_qk} elements (n_k_heads={n_k_heads})"),
+        });
+    }
+    if v.n_elements() != want_v {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step",
+            detail: format!("v expected {want_v} elements (n_v_heads={n_v_heads})"),
         });
     }
     if g.n_elements() != n_v_heads as u64 || beta.n_elements() != n_v_heads as u64 {
@@ -1186,10 +1259,10 @@ pub fn encode_gdn_step_f32(
             detail: format!("state expected {want_state} elements"),
         });
     }
-    if out.n_elements() != want_qkv {
+    if out.n_elements() != want_v {
         return Err(MetalError::BadShape {
             kernel: "gdn_step",
-            detail: format!("out expected {want_qkv} elements"),
+            detail: format!("out expected {want_v} elements"),
         });
     }
 
@@ -1197,6 +1270,7 @@ pub fn encode_gdn_step_f32(
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
         n_v_heads: u32,
+        n_k_heads: u32,
     }
     let pso = ctx.pipeline("kernel_gdn_step_f32")?;
     enc.set_pipeline(&pso);
@@ -1204,6 +1278,7 @@ pub fn encode_gdn_step_f32(
         0,
         &Args {
             n_v_heads: n_v_heads as u32,
+            n_k_heads: n_k_heads as u32,
         },
     );
     enc.set_tensor(1, q);
@@ -1848,6 +1923,57 @@ mod tests {
     }
 
     #[test]
+    fn l2_norm_batched_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128), (8, 256)] {
+            let total = n_heads * head_dim;
+            let x: Vec<f32> = (0..total)
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+                .collect();
+            let eps = 1e-6f32;
+
+            // CPU reference: per head, y_h = x_h / max(||x_h||, eps).
+            let mut cpu = vec![0.0f32; total];
+            for h in 0..n_heads {
+                let off = h * head_dim;
+                let sq: f32 = (0..head_dim).map(|i| x[off + i].powi(2)).sum();
+                let scale = 1.0 / sq.sqrt().max(eps);
+                for i in 0..head_dim {
+                    cpu[off + i] = x[off + i] * scale;
+                }
+            }
+
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_l2_norm_batched_f32(&ctx, enc, &x_t, &y_t, n_heads, head_dim, eps)
+            })
+            .unwrap();
+            let gpu = read_back_f32(&y_t.buffer, total);
+
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs < 1e-5,
+                "l2_norm_batched n_heads={n_heads} head_dim={head_dim}: max|Δ|={max_abs}"
+            );
+        }
+    }
+
+    #[test]
     fn get_rows_matches_cpu() {
         let ctx = match MetalContext::new() {
             Ok(c) => c,
@@ -2173,14 +2299,16 @@ mod tests {
         beta: &[f32],
         state: &mut [f32],
         n_v: usize,
+        n_k: usize,
         hd: usize,
     ) -> Vec<f32> {
         let mut out = vec![0.0f32; n_v * hd];
         let scale = 1.0 / (hd as f32).sqrt();
         for hi in 0..n_v {
+            let hk = hi % n_k;
             let s_off = hi * hd * hd;
-            let q_h = &q[hi * hd..(hi + 1) * hd];
-            let k_h = &k[hi * hd..(hi + 1) * hd];
+            let q_h = &q[hk * hd..(hk + 1) * hd];
+            let k_h = &k[hk * hd..(hk + 1) * hd];
             let v_h = &v[hi * hd..(hi + 1) * hd];
             let g_h = g[hi].exp();
             let b_h = beta[hi];
@@ -2227,13 +2355,15 @@ mod tests {
         // Cover both Qwen3.5/3.6 sizes:
         //   0.8B: n_v_heads = 16, head_dim = 128
         //   27B:  n_v_heads = 48, head_dim = 128
-        for &n_v in &[16usize, 48] {
+        // 0.8B has n_v == n_k == 16; 27B has n_v=48, n_k=16 (3:1 repeat).
+        for &(n_v, n_k) in &[(16usize, 16usize), (48, 16)] {
             let hd = 128usize;
-            // Synthetic but realistic-magnitude inputs.
-            let q: Vec<f32> = (0..n_v * hd)
+            // Synthetic but realistic-magnitude inputs. Q/K are sized to
+            // n_k heads; V is sized to n_v heads.
+            let q: Vec<f32> = (0..n_k * hd)
                 .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
                 .collect();
-            let k: Vec<f32> = (0..n_v * hd)
+            let k: Vec<f32> = (0..n_k * hd)
                 .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
                 .collect();
             let v: Vec<f32> = (0..n_v * hd)
@@ -2244,26 +2374,26 @@ mod tests {
             // Random-ish but deterministic state, including the
             // post-first-token regime (nonzero initial state) since
             // codex flagged "first-token only" coverage as inadequate.
-            let mut state: Vec<f32> = (0..n_v * hd * hd)
+            let state: Vec<f32> = (0..n_v * hd * hd)
                 .map(|i| ((i % 13) as f32 - 6.0) * 1e-3)
                 .collect();
 
             // CPU oracle.
             let mut state_cpu = state.clone();
-            let out_cpu = gdn_step_cpu_ref(&q, &k, &v, &g, &beta, &mut state_cpu, n_v, hd);
+            let out_cpu = gdn_step_cpu_ref(&q, &k, &v, &g, &beta, &mut state_cpu, n_v, n_k, hd);
 
             // GPU.
             let q_t = MetalTensor::from_bytes(
                 &ctx,
                 bytemuck::cast_slice(&q),
-                vec![(n_v * hd) as u64],
+                vec![(n_k * hd) as u64],
                 GgmlType::F32,
             )
             .unwrap();
             let k_t = MetalTensor::from_bytes(
                 &ctx,
                 bytemuck::cast_slice(&k),
-                vec![(n_v * hd) as u64],
+                vec![(n_k * hd) as u64],
                 GgmlType::F32,
             )
             .unwrap();
@@ -2299,7 +2429,7 @@ mod tests {
 
             one_shot(&ctx, |enc| {
                 encode_gdn_step_f32(
-                    &ctx, enc, &q_t, &k_t, &v_t, &g_t, &beta_t, &state_t, &out_t, n_v, hd,
+                    &ctx, enc, &q_t, &k_t, &v_t, &g_t, &beta_t, &state_t, &out_t, n_v, n_k, hd,
                 )
             })
             .unwrap();
@@ -2322,7 +2452,7 @@ mod tests {
                 .fold(0f32, f32::max);
 
             eprintln!(
-                "[gdn_step n_v={n_v}] max|out_Δ|={max_out:.2e}  max|state_Δ|={max_state:.2e}"
+                "[gdn_step n_v={n_v} n_k={n_k}] max|out_Δ|={max_out:.2e}  max|state_Δ|={max_state:.2e}"
             );
             // simd_sum reduction order can drift slightly from the
             // sequential CPU version; 1e-4 covers it for our magnitudes.

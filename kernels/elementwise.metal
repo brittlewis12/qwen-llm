@@ -180,6 +180,48 @@ kernel void kernel_l2_norm_f32(
     }
 }
 
+// Batched per-head L2 norm: y[h, :] = x[h, :] / max(||x[h, :]||, eps),
+// for h in 0..n_heads. One threadgroup per head. Used in the GDN
+// front-end where Q and K are l2-normed per K-head before the
+// recurrence kernel. Replaces n_heads separate dispatches with one.
+struct l2_norm_batched_args {
+    uint n_heads;
+    uint head_dim;
+    float eps;
+};
+kernel void kernel_l2_norm_batched_f32(
+        constant l2_norm_batched_args & args [[buffer(0)]],
+        device const float * x      [[buffer(1)]], // [n_heads, head_dim]
+        device       float * y      [[buffer(2)]], // [n_heads, head_dim]
+        threadgroup  float * shmem  [[threadgroup(0)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        uint   tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint   ntg   [[threads_per_threadgroup]]) {
+    const uint hi = tgpig;
+    if (hi >= args.n_heads) return;
+
+    device const float * x_h = x + (ulong)hi * args.head_dim;
+    device       float * y_h = y + (ulong)hi * args.head_dim;
+
+    float sumsq = 0.0f;
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        const float v = x_h[i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+    if (tiisg == 0) shmem[sgitg] = sumsq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = (tiisg < (ntg + 31) / 32) ? shmem[tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+
+    const float scale = 1.0f / max(sqrt(sumsq), args.eps);
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        y_h[i] = x_h[i] * scale;
+    }
+}
+
 // get_rows: y[r * n_cols + i] = embed[ids[r] * n_cols + i].
 // For embedding lookup at decode (n_rows=1) and prefill (n_rows=batch).
 struct get_rows_args {

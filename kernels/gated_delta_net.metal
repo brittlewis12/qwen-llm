@@ -38,12 +38,13 @@ constant constexpr ushort DKS_PER_LANE = HEAD_DIM / SIMD_LANES; // 4
 
 struct gdn_step_args {
     uint n_v_heads;
+    uint n_k_heads;  // q/k have this many heads; we map V-head hi -> K-head (hi % n_k_heads)
 };
 
 kernel void kernel_gdn_step_f32(
         constant gdn_step_args & args  [[buffer(0)]],
-        device const float     * q     [[buffer(1)]], // [n_v_heads, head_dim]
-        device const float     * k     [[buffer(2)]], // [n_v_heads, head_dim]
+        device const float     * q     [[buffer(1)]], // [n_k_heads, head_dim]
+        device const float     * k     [[buffer(2)]], // [n_k_heads, head_dim]
         device const float     * v     [[buffer(3)]], // [n_v_heads, head_dim]
         device const float     * g     [[buffer(4)]], // [n_v_heads]   per-head decay (already exp-arg)
         device const float     * beta  [[buffer(5)]], // [n_v_heads]   per-head, already sigmoid'd
@@ -55,13 +56,19 @@ kernel void kernel_gdn_step_f32(
     const uint hi = tgpig.y;
     if (hi >= args.n_v_heads || dv >= HEAD_DIM) return;
 
+    // Q/K head index: GGML-style repeat tiling, hi % n_k_heads.
+    // For 0.8B (n_v == n_k) this is identity; for 27B (n_v=48, n_k=16) this
+    // gives [h0,h1,...,h15, h0,h1,...,h15, h0,h1,...,h15] — matching
+    // ggml_repeat_4d semantics in qwen35.cpp.
+    const uint hk = hi % args.n_k_heads;
+
     // Pointer to S[hi, dv, :] — one row of head_dim elements.
     device float * s_row = state + (ulong)hi * HEAD_DIM * HEAD_DIM
                                   + (ulong)dv * HEAD_DIM;
 
     // Per-head vectors.
-    device const float * q_h = q + (ulong)hi * HEAD_DIM;
-    device const float * k_h = k + (ulong)hi * HEAD_DIM;
+    device const float * q_h = q + (ulong)hk * HEAD_DIM;
+    device const float * k_h = k + (ulong)hk * HEAD_DIM;
     const float v_dv = v[(ulong)hi * HEAD_DIM + dv];
     const float g_exp = exp(g[hi]);
     const float beta_h = beta[hi];

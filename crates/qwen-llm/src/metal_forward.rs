@@ -420,6 +420,117 @@ impl<'a> MetalForward<'a> {
         Ok(logits)
     }
 
+    /// Same as [`single_token`] but ALSO copies the pre-output_norm hidden
+    /// state (the residual stream right before the final RMSNorm + lm_head)
+    /// into `hidden_dst`. This is the input the MTP head's `prev_hidden`
+    /// argument expects per `docs/H4-MTP.md` §1.2.
+    ///
+    /// `hidden_dst` must be a zero-copy F32 tensor of shape `[H]`. It's
+    /// kept GPU-resident so the next MTP draft call can consume it
+    /// without a CPU readback. The copy happens inside the same command
+    /// buffer as the forward, so `hidden_dst` is up-to-date by the time
+    /// this call returns (which commits + waits).
+    ///
+    /// Caller must ensure `hidden_dst` is not aliased with any tensor
+    /// the next forward call writes (typically allocate it as part of
+    /// the MTP session arena).
+    pub fn single_token_with_hidden(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        hidden_dst: &MetalTensor,
+    ) -> Result<Vec<f32>, MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        if hidden_dst.n_elements() as usize != h {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_hidden.hidden_dst",
+                detail: format!("expected {h} elements, got {}", hidden_dst.n_elements()),
+            }));
+        }
+
+        // Stage token id into the ids buffer.
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        // (1) Embedding lookup → s.x.
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        // (2) Per-block.
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            self.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position,
+                session,
+            )?;
+        }
+
+        // (3) Final RMSNorm over residual stream. session.x is read,
+        // session.h is written. After this point s.x is still untouched
+        // (output_norm doesn't write back to its input).
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            &enc,
+            &session.x,
+            &self.model.output_norm,
+            &session.h,
+            RMS_EPS,
+        )?;
+
+        // (4) LM head → logits.
+        encode_mat_vec_dispatch(
+            self.ctx,
+            &enc,
+            &self.model.lm_head,
+            &session.h,
+            &session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+
+        // (5) Capture pre-output_norm hidden into the caller-supplied dst.
+        // Runs LAST in the command buffer to avoid any chance of
+        // interleaving with the rms_norm + lm_head reads of session.x.
+        // session.x has not been mutated since step (2) ended; the read
+        // here pulls the same bytes RMSNorm read.
+        encode_scatter_offset_f32(self.ctx, &enc, &session.x, hidden_dst, 0, h)?;
+
+        enc.end();
+        cmd_buf.commit();
+        unsafe { cmd_buf.waitUntilCompleted() };
+
+        // Read back logits to CPU.
+        let mut logits = vec![0.0f32; arch.vocab_size as usize];
+        unsafe {
+            let src = session.logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
+        }
+        Ok(logits)
+    }
+
     /// Phase-resolved profiling: splits the per-token forward across
     /// MANY command buffers (one per block, plus embedding and lm_head)
     /// so we can attribute GPU time to logical phases. ★ ARTIFACT WARNING:

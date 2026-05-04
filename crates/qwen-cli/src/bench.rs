@@ -20,8 +20,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use qwen_llm::{
     gguf::GgufFile,
-    loader::Model,
-    metal::MetalContext,
+    loader::{open_dflash_drafter, Model},
+    metal::{MetalContext, MetalTensor},
+    metal_dflash::{DFlashDecoder, MetalDFlashHead, MetalDFlashSession},
     metal_forward::{MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     tokenizer::Tokenizer,
@@ -64,6 +65,16 @@ enum Cmd {
     /// call counts. Requires an MTP-aware GGUF (e.g. brittlewis12/
     /// Qwen3.6-27B-MTP-GGUF or the 0.8B-MTP variant).
     Mtp(MtpArgs),
+    /// **H5.2.5 lazy DFlash acceptance gate**: measure α for the DFlash
+    /// drafter using H4-style single-token sequential verify (no packed
+    /// kernels yet). The acceptance rate signal tells us whether the
+    /// drafter is producing a useful distribution under our quants +
+    /// SWA mask + hidden capture path. GO/NO-GO for H5.3 packed verify.
+    ///
+    /// Reports per-position acceptance, top-k rank of target's argmax
+    /// in drafter logits (for the future DDTree decision), effective-N
+    /// sweep, and an apples-to-apples no-spec baseline.
+    DflashLazy(DflashLazyArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -161,6 +172,40 @@ struct MtpArgs {
 }
 
 #[derive(Parser, Debug)]
+struct DflashLazyArgs {
+    /// Path to the target GGUF (e.g. Qwen3.6-27B-Q4_K_M.gguf).
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Path to the DFlash drafter GGUF (e.g.
+    /// spiritbuun/Qwen3.6-27B-DFlash-GGUF / dflash-draft-3.6-q8_0.gguf).
+    #[arg(long)]
+    drafter: PathBuf,
+    /// Prompt text. Use a meaningful prompt for honest acceptance rates.
+    #[arg(
+        short = 'p',
+        long,
+        default_value = "The quick brown fox jumps over the lazy dog"
+    )]
+    prompt: String,
+    /// Number of tokens to generate after the prompt.
+    #[arg(long, default_value = "32")]
+    tokens: usize,
+    /// EOS token id.
+    #[arg(long, default_value = "248046")]
+    eos: i32,
+    /// Effective-N: only consider the first M draft positions per outer
+    /// step (1 ≤ M ≤ block_size - 1). Reveals where α decays in the
+    /// block; if α at M=8 is close to α at M=15, larger N is just paying
+    /// for verify cost without recovering tokens. M=0 means use the
+    /// full block_size - 1 from the GGUF.
+    #[arg(long, default_value = "0")]
+    effective_n: usize,
+    /// Skip the warmup pass.
+    #[arg(long)]
+    no_warmup: bool,
+}
+
+#[derive(Parser, Debug)]
 struct VocabAuditArgs {
     /// Path to a GGUF file.
     #[arg(short = 'm', long)]
@@ -201,6 +246,7 @@ fn main() -> Result<()> {
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
         Cmd::Mtp(a) => run_mtp(a),
+        Cmd::DflashLazy(a) => run_dflash_lazy(a),
     }
 }
 
@@ -365,6 +411,360 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     if !identical {
         return Err(anyhow!(
             "MTP=on and MTP=off generated different token sequences"
+        ));
+    }
+    Ok(())
+}
+
+fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
+    let DflashLazyArgs {
+        model,
+        drafter,
+        prompt,
+        tokens,
+        eos,
+        effective_n,
+        no_warmup,
+    } = args;
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    eprintln!("[dflash-lazy] device: {}", ctx.describe());
+
+    let target_g =
+        GgufFile::open(&model).with_context(|| format!("open target {}", model.display()))?;
+    let target_m = Model::from_gguf(&target_g).context("parse target arch")?;
+    let drafter_g =
+        GgufFile::open(&drafter).with_context(|| format!("open drafter {}", drafter.display()))?;
+    let head = open_dflash_drafter(&drafter_g, &target_m).context("bind drafter")?;
+
+    let mm = MetalModel::load(&ctx, &target_g, &target_m).context("metal-load target")?;
+    let mhead = MetalDFlashHead::load(&ctx, &drafter_g, &head).context("metal-load drafter")?;
+    let tok = Tokenizer::open(&model).context("open tokenizer")?;
+
+    let prompt_ids = tok.encode(&prompt, false).context("tokenize prompt")?;
+    let n_prompt = prompt_ids.len();
+    let cfg = head.config;
+    let n = cfg.block_size as usize; // 16
+    let d = n - 1; // 15 candidate slots in the block (positions 1..N)
+    let m = if effective_n == 0 {
+        d
+    } else {
+        effective_n.min(d).max(1)
+    };
+    let h_target = target_m.arch.hidden_size as usize;
+    let v = target_m.arch.vocab_size as usize;
+    let k_layers = head.target_layer_ids.len();
+    let n_target_features = k_layers * h_target;
+
+    eprintln!(
+        "[dflash-lazy] target={} drafter={}",
+        model.display(),
+        drafter.display()
+    );
+    eprintln!(
+        "[dflash-lazy] prompt={prompt:?} ({n_prompt} tokens) gen={tokens} eos={eos} \
+         block_size={n} D={d} effective_M={m}"
+    );
+
+    let mf = MetalForward::new(&ctx, &mm);
+
+    if !no_warmup {
+        let mut s =
+            MetalSession::fresh(&ctx, &mm, n_prompt + tokens + 32).context("warmup session")?;
+        let _ = mf.single_token(prompt_ids[0], 0, &mut s)?;
+    }
+
+    let cap = n_prompt + tokens + 32;
+    let mut target_session = MetalSession::fresh(&ctx, &mm, cap).context("target session")?;
+    let mut dsess = MetalDFlashSession::fresh(&ctx, &mhead, h_target as u64, v as u64, cap)
+        .context("dflash session")?;
+
+    // Per-prompt-token captured hidden buffer ([K · H] each).
+    let multi_hidden_dst =
+        MetalTensor::zeros_f32(&ctx, vec![n_target_features as u64]).context("multi_hidden_dst")?;
+
+    // ---------- Prompt prefill ----------
+    let t_prefill = Instant::now();
+    let mut last_logits: Vec<f32> = Vec::new();
+    for (i, &tid) in prompt_ids.iter().enumerate() {
+        last_logits = mf
+            .single_token_with_multi_hidden(
+                tid,
+                i as u32,
+                &mut target_session,
+                &head.target_layer_ids,
+                &multi_hidden_dst,
+            )
+            .context("prefill base step")?;
+        // Append captured K hiddens to the drafter's target_ctx.
+        dsess
+            .append_target_ctx_column_now(&ctx, &multi_hidden_dst, i as u32, n_target_features)
+            .context("append prefill ctx column")?;
+    }
+    let prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
+    eprintln!(
+        "[dflash-lazy] prefill {n_prompt} tokens in {prefill_ms:.1} ms (incl. K-hidden capture + ctx append)"
+    );
+
+    // Bootstrap: argmax of last prompt logits is the first emit token (carry).
+    let mut emitted: Vec<i32> = Vec::with_capacity(tokens);
+    let mut carry_tok = argmax_i32(&last_logits);
+    let mut processed_pos = (n_prompt - 1) as u32;
+
+    // Per-position acceptance counters (length M).
+    let mut accepts_at_pos: Vec<u32> = vec![0; m];
+    let mut attempts_at_pos: Vec<u32> = vec![0; m];
+
+    // Top-k ranks: for each draft position 0..M and each outer iter, record
+    // the rank of target's argmax in the drafter's logits at that noise
+    // position. Drafter logits are NOT exposed in v1; we approximate top-k
+    // hit rate by tracking whether target_argmax matches the drafter's
+    // top-1 (= α) and reserve top-k>1 for a future bench (would require
+    // returning full logits from draft_block).
+    // For now: track a simpler "ran out of accepts" distribution.
+
+    let mut steps: u32 = 0;
+    let mut accepted_total: u32 = 0;
+    let mut drafter_calls: u32 = 0;
+    let mut base_calls: u32 = 0;
+    let t_decode = Instant::now();
+
+    let mut decoder = DFlashDecoder::new(&mf, &mhead, dsess);
+
+    loop {
+        // Emit + stop checks happen inside the loop so EOS / max can short-circuit.
+        if emitted.len() >= tokens {
+            break;
+        }
+        // Emit carry (was selected last iter or by bootstrap; not yet emitted).
+        emitted.push(carry_tok);
+        if carry_tok == eos {
+            break;
+        }
+        if emitted.len() >= tokens {
+            break;
+        }
+
+        // ---- Drafter ----
+        let drafter_pos = processed_pos + 1; // noise_start_pos
+        let argmaxes = decoder
+            .draft_block(carry_tok, drafter_pos)
+            .context("drafter draft_block")?;
+        drafter_calls += 1;
+        // Draft tokens come from positions 1..N.
+        let drafts: Vec<i32> = argmaxes[1..].iter().take(m).copied().collect();
+
+        // ---- Lazy verify ----
+        // First, process carry_tok via target. Capture hidden + logits.
+        let target_logits = mf
+            .single_token_with_multi_hidden(
+                carry_tok,
+                drafter_pos,
+                &mut target_session,
+                &head.target_layer_ids,
+                &multi_hidden_dst,
+            )
+            .context("verify base step (carry)")?;
+        base_calls += 1;
+        // Append carry's hidden to target_ctx.
+        decoder
+            .session
+            .append_target_ctx_column_now(&ctx, &multi_hidden_dst, drafter_pos, n_target_features)
+            .context("append carry ctx column")?;
+        processed_pos += 1;
+        let mut target_next = argmax_i32(&target_logits);
+
+        // Now check each draft sequentially.
+        let mut n_accepted_this_step = 0usize;
+        steps += 1;
+        for j in 0..m {
+            attempts_at_pos[j] += 1;
+            if drafts[j] != target_next {
+                break;
+            }
+            // Accepted!
+            accepts_at_pos[j] += 1;
+            accepted_total += 1;
+            n_accepted_this_step += 1;
+            emitted.push(drafts[j]);
+            if emitted.len() >= tokens || drafts[j] == eos {
+                // Note: we don't `return` here because we still want to
+                // emit() through the outer loop. Set carry to a dummy
+                // and break; the outer-loop `if emitted.len() >= tokens`
+                // check at the top of the next iter handles the exit.
+                carry_tok = eos;
+                break;
+            }
+            // Process drafts[j] via target to set up next verify step.
+            let logits = mf
+                .single_token_with_multi_hidden(
+                    drafts[j],
+                    processed_pos + 1,
+                    &mut target_session,
+                    &head.target_layer_ids,
+                    &multi_hidden_dst,
+                )
+                .context("verify base step (draft)")?;
+            base_calls += 1;
+            decoder
+                .session
+                .append_target_ctx_column_now(
+                    &ctx,
+                    &multi_hidden_dst,
+                    processed_pos + 1,
+                    n_target_features,
+                )
+                .context("append draft ctx column")?;
+            processed_pos += 1;
+            target_next = argmax_i32(&logits);
+        }
+
+        // After loop: target_next holds what target wants AT processed_pos+1.
+        // That becomes the new carry (will be emitted next iteration top).
+        carry_tok = target_next;
+        let _ = n_accepted_this_step; // (already counted)
+    }
+
+    let decode_ms = t_decode.elapsed().as_secs_f64() * 1e3;
+    let total_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
+
+    // ---------- Apples-to-apples no-spec baseline ----------
+    eprintln!("[dflash-lazy] running MTP=off greedy baseline for comparison ...");
+    let mut ref_session = MetalSession::fresh(&ctx, &mm, cap).context("ref session")?;
+    let t_ref_total = Instant::now();
+    let mut last_logits_ref = Vec::new();
+    let t_ref_prefill = Instant::now();
+    for (i, &tid) in prompt_ids.iter().enumerate() {
+        last_logits_ref = mf.single_token(tid, i as u32, &mut ref_session)?;
+    }
+    let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
+    let mut next_tok = argmax_i32(&last_logits_ref);
+    let mut ref_emitted: Vec<i32> = Vec::with_capacity(tokens);
+    let mut pos = (n_prompt - 1) as u32;
+    let t_ref_decode = Instant::now();
+    for _ in 0..tokens {
+        ref_emitted.push(next_tok);
+        if next_tok == eos {
+            break;
+        }
+        pos += 1;
+        let logits = mf.single_token(next_tok, pos, &mut ref_session)?;
+        next_tok = argmax_i32(&logits);
+    }
+    let ref_decode_ms = t_ref_decode.elapsed().as_secs_f64() * 1e3;
+    let ref_total_ms = t_ref_total.elapsed().as_secs_f64() * 1e3;
+
+    // ---------- Report ----------
+    eprintln!();
+    eprintln!("[dflash-lazy] === results ===");
+    eprintln!("[dflash-lazy] generated {} tokens", emitted.len());
+    eprintln!(
+        "[dflash-lazy] prefill {prefill_ms:.1} ms, decode {decode_ms:.1} ms, total {total_ms:.1} ms"
+    );
+    eprintln!(
+        "[dflash-lazy]   throughput: total {:.2} t/s",
+        emitted.len() as f64 / (total_ms / 1000.0)
+    );
+    eprintln!(
+        "[dflash-lazy] no-spec ref: prefill {ref_prefill_ms:.1} ms, decode {ref_decode_ms:.1} ms, \
+         total {ref_total_ms:.1} ms"
+    );
+    eprintln!(
+        "[dflash-lazy]   throughput: decode-only {:.2} t/s | total {:.2} t/s",
+        ref_emitted.len() as f64 / (ref_decode_ms / 1000.0),
+        ref_emitted.len() as f64 / (ref_total_ms / 1000.0),
+    );
+    let speedup = ref_total_ms / total_ms;
+    eprintln!(
+        "[dflash-lazy]   speedup (total ms): {ref_total_ms:.1} / {total_ms:.1} = {speedup:.3}× \
+         (lazy verify is correctness gate, not perf path; expect <1.0×)"
+    );
+
+    // Two ways to summarize α — both useful, neither alone is enough:
+    //
+    //  α_chain  = mean_accepted_drafts / steps       ∈ [0, M]
+    //             "how many drafts make it past the chain check, on average"
+    //             This is the speedup-relevant raw signal: tokens emitted
+    //             per outer step = 1 + α_chain.
+    //
+    //  α_pos1   = accepts_at_pos[0] / attempts_at_pos[0]
+    //             "rank-1 hit rate at the FIRST draft slot"
+    //             vLLM/spiritbuun's reported "acceptance rate" is closest
+    //             to this — if the first draft misses, the chain dies.
+    //             This is the metric the GO/NO-GO gate compares against
+    //             (z-lab claims ~93% on quicksort, ~38% on prose).
+    //
+    // Both are reported.
+    let alpha_chain = if steps > 0 {
+        accepted_total as f64 / steps as f64
+    } else {
+        0.0
+    };
+    let mean_emitted_per_step = 1.0 + alpha_chain;
+    let alpha_pos1 = if attempts_at_pos.first().copied().unwrap_or(0) > 0 {
+        accepts_at_pos[0] as f64 / attempts_at_pos[0] as f64
+    } else {
+        0.0
+    };
+    eprintln!();
+    eprintln!("[dflash-lazy] === acceptance ===");
+    eprintln!(
+        "[dflash-lazy] outer steps={steps}  accepted_drafts={accepted_total}  drafter_calls={drafter_calls}  base_calls={base_calls}"
+    );
+    eprintln!(
+        "[dflash-lazy] α_chain = mean_accepted_drafts / steps = {accepted_total} / {steps} = {alpha_chain:.3} drafts/step (max M={m})"
+    );
+    eprintln!(
+        "[dflash-lazy] mean_emitted_per_step = 1 + α_chain = {mean_emitted_per_step:.3} tokens/step"
+    );
+    eprintln!(
+        "[dflash-lazy] α_pos1 (rank-1 hit at first draft slot) = {} / {} = {alpha_pos1:.3}",
+        accepts_at_pos[0], attempts_at_pos[0]
+    );
+    eprintln!("[dflash-lazy] per-position α (conditional on reaching that slot):");
+    for j in 0..m {
+        let attempts = attempts_at_pos[j];
+        let accepts = accepts_at_pos[j];
+        let alpha_j = if attempts > 0 {
+            accepts as f64 / attempts as f64
+        } else {
+            0.0
+        };
+        eprintln!("[dflash-lazy]   position {j:2}: {accepts:>4}/{attempts:>4} = {alpha_j:.3}");
+    }
+
+    eprintln!();
+    eprintln!("[dflash-lazy] GO/NO-GO gate (per docs/H5-DFLASH.md §H5.2.5):");
+    eprintln!("[dflash-lazy]   α_pos1 ≥ 0.50 on code  → GO for H5.3 packed verify");
+    eprintln!("[dflash-lazy]   α_pos1 ≥ 0.30 on prose → GO for H5.3 packed verify");
+    eprintln!("[dflash-lazy]   α_pos1 <  0.30 on prose → STOP. Debug drafter forward, SWA mask, hidden capture, quant, recipe.");
+    eprintln!(
+        "[dflash-lazy]   measured: α_pos1={alpha_pos1:.3} α_chain={alpha_chain:.3} on prompt {prompt:?} ({n_prompt}-token prefill, {} emitted)",
+        emitted.len()
+    );
+
+    // Equivalence check (lazy verify is exact under greedy because we
+    // only commit tokens equal to target_argmax).
+    let identical = emitted == ref_emitted;
+    eprintln!(
+        "[dflash-lazy] equivalence vs no-spec greedy: {} ({} vs {} emitted)",
+        if identical {
+            "PASS (identical sequences — lazy verify is correct)"
+        } else {
+            "FAIL (sequences differ — bug in verify logic)"
+        },
+        emitted.len(),
+        ref_emitted.len(),
+    );
+    if !identical {
+        let n_show = 8.min(emitted.len()).min(ref_emitted.len());
+        eprintln!("[dflash-lazy]   ours[..{n_show}]: {:?}", &emitted[..n_show]);
+        eprintln!(
+            "[dflash-lazy]   ref [..{n_show}]: {:?}",
+            &ref_emitted[..n_show]
+        );
+        return Err(anyhow!(
+            "lazy verify produced different tokens than no-spec greedy"
         ));
     }
     Ok(())

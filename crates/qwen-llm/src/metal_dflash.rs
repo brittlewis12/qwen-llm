@@ -227,6 +227,25 @@ impl MetalDFlashSession {
         })
     }
 
+    /// Convenience wrapper: builds its own command buffer and waits.
+    /// Use when caller doesn't already own a `KernelEncoder` (e.g. CLI
+    /// tools that don't depend on `objc2-metal` directly).
+    pub fn append_target_ctx_column_now(
+        &mut self,
+        ctx: &MetalContext,
+        hidden_block: &MetalTensor,
+        position: u32,
+        n_target_features: usize,
+    ) -> Result<(), DFlashError> {
+        let cmd = ctx.queue.commandBuffer().expect("cmd buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        self.append_target_ctx_column(ctx, &enc, hidden_block, position, n_target_features)?;
+        enc.end();
+        cmd.commit();
+        unsafe { cmd.waitUntilCompleted() };
+        Ok(())
+    }
+
     /// Append one column of K-target-layer hiddens at the next free slot.
     /// `hidden_block` is `[K · H_target]`. Caller obtains it from
     /// `MetalForward::single_token_with_multi_hidden`.

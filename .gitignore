@@ -13,3 +13,7 @@ bench/results/
 # editor
 .vscode/
 .idea/
+
+# colab CLI workspace state (recoverable from HF + scripts; not source)
+.colab/
+colab/

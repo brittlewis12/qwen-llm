@@ -243,6 +243,24 @@ fragile to:
 - `T_rollback`: per-token GDN + conv checkpoints inline in the packed
   kernel (NOT pre-verify snapshot, which would force replay).
 
+**Worst-case scenario (don't be surprised at H5.5):**
+- α_draft on prose lands at 0.30 (not 0.55)
+- T_drafter is 0.7·T_base (drafter still pays full lm_head over N rows + Q8_0 dequant cost)
+- T_verify_N is 6·T_base (GDN sequential + checkpoint write BW + command overhead don't amortize cleanly)
+- T_rollback is 0.10·T_base (2.3 GiB SSM copy + cache perturbation)
+
+```
+mean_emitted   = 1 + 0.30 · 15 = 5.5 tokens/step
+wall_per_step  = 0.7 + 6.0 + 0.10 = 6.8 · T_base
+speedup        = 5.5 / 6.8 ≈ 0.81×
+```
+
+That's a slowdown. Concretely: if T_verify_N actually lands at 6× and
+α at 0.30, DFlash hurts. Not a corner case — that's a normal failure
+mode if packed verify underdelivers OR α is bad. The H5.2.5 lazy
+DFlash gate exists specifically to detect the α-bad arm of this risk
+before we pay for packed verify.
+
 ### 1.5 The packed verify forward
 
 The target processes `verify_input = [carry_tok, draft_tokens[0..D-1]]`
@@ -575,9 +593,8 @@ impl<'a> MetalForward<'a> {
 
 ### H5.1 — Drafter Metal forward + SWA
 
-**Combined H5.1 + the original H5.6.** Build the drafter forward right
-the first time, including SWA, since SWA is needed for correct output
-distribution per spiritbuun.
+Build the drafter forward right the first time, including SWA, since
+SWA is needed for correct output distribution per spiritbuun.
 
 1. Implement `DFlashDecoder::draft_block` — full Metal forward on
    the drafter:
@@ -586,8 +603,23 @@ distribution per spiritbuun.
      concat → full or SWA mask depending on `is_swa` → FFN.
    - Final `output_norm` → target's `lm_head` → argmax → `[N]` tokens.
 2. SWA mask construction (host-side, uploaded per outer step).
-3. Test: shape + finiteness (smoke). Logit-level oracle vs spiritbuun
-   comes in H5.5.
+
+### H5.1.5 — Metal-vs-CPU drafter cosine gate (mandatory)
+
+Finiteness alone is too weak. Add a bit-exactness test before any
+infrastructure that depends on the drafter's distribution being
+correct:
+
+1. Pick a deterministic 4-token prompt (`"The quick brown fox"`).
+2. Run target prefill on Metal AND CPU; capture multi-layer hiddens
+   at `target_layer_ids` from each.
+3. Run `DFlashDecoder::draft_block` (Metal) AND `Forward::dflash_draft`
+   (CPU) with the same `(noise_ids, target_ctx_stacked)` inputs.
+4. Pass criterion: cosine ≥ 0.9999 between Metal and CPU draft logits
+   at every noise position. Argmax must match.
+
+This is the same pattern that caught the cross-GGUF bug at H5.1
+(round-2 codex review).
 
 ### H5.2 — Multi-layer target hidden capture (single-token first)
 
@@ -597,6 +629,56 @@ distribution per spiritbuun.
 2. Use this to bootstrap `target_ctx` from prompt prefill.
 3. Test: hidden values at `target_layer_ids` are non-zero and
    different across layers (sanity).
+4. **Layout sanity test (cheap, catches silent bugs):** run drafter
+   with the captured `target_ctx`, then run drafter with `target_ctx`
+   shuffled along the K-layer axis (or with positions reversed).
+   Correctly captured `target_ctx` must produce materially better α
+   downstream — a no-op test is OK if the layout is wrong because
+   shuffled noise on shuffled input still yields valid-looking
+   logits. So we test *acceptance* sensitivity, not just shape.
+
+### H5.2.5 — Lazy DFlash acceptance gate (NEW; mandatory before H5.3)
+
+The most expensive thing on the road to H5 is packed verify
+(H5.3). Before paying for it, prove DFlash actually drafts a useful
+distribution under our engine's quants, hidden capture, SWA mask,
+RoPE, and shared-lm_head path. **Cost-model α was the only thing the
+review couldn't predict; this gate measures it cheaply.**
+
+1. Implement `DFlashDecoder::decode_lazy` — uses the H4-style
+   single-token verify path (already shipped) instead of packed
+   verify:
+   - Outer step: `draft_block(carry, processed_pos)` → `[D]` tokens
+   - For each draft: run `single_token_with_multi_hidden` on the
+     target → check `argmax == draft_tok`; on first mismatch, emit
+     accepted prefix + bonus = `argmax(target)`, restart.
+   - GDN/conv state is consistent at every accepted position because
+     we processed each token sequentially (lazy verify; no rollback
+     needed).
+2. Bench `--dflash-lazy` reports α for code/prose/mixed workloads.
+3. Cheap experiments to run while we're here:
+   - **Effective-N**: use only first `m ∈ {4, 8, 12, 15}` draft rows;
+     report α as a function of m. Reveals where α decays in the block.
+   - **Top-k rank instrumentation**: for each draft position, record
+     the rank of the target's argmax in the drafter's top-k logits.
+     Tells us whether α=0.4 is "drafter is near-correct" (top-4 hit
+     rate ~0.7 → tree verify viable) or "drafter is way off"
+     (top-4 hit rate ~0.4 → no easy uplift from tree verify).
+   - **Shuffled-target_ctx baseline** (continued from H5.2): if
+     shuffled target_ctx achieves α within 30% of correct target_ctx,
+     hidden capture is broken or the model isn't actually conditioning
+     on it.
+
+**GO/NO-GO gate:**
+- α_draft ≥ 0.50 on code, ≥ 0.30 on prose: PROCEED to H5.3 (packed
+  verify earns its complexity).
+- α_draft < 0.30 on prose: STOP. Debug drafter forward, SWA mask,
+  hidden capture, quant, recipe. Do NOT build packed verify on a
+  broken drafter.
+
+This phase produces no speedup (lazy verify is `(1+α)/(1+α+ε_drafter)`
+≈ 0.5-0.8× depending on drafter cost) — that's expected. The
+deliverable is a number, not a perf win.
 
 ### H5.3 — Packed verify forward (the perf-critical chunk)
 
@@ -653,14 +735,46 @@ distribution per spiritbuun.
    - decode-only and total t/s
    - speedup vs no-spec (total wall vs total wall)
    - per-call counts (drafter, verify_N, restore)
-5. **Workloads:** code (`humaneval_short`), prose (`pile_short`),
+   - **bytes_readback_per_outer_step**: anti-regression counter. If
+     the bench reports `≥ N · V · 4` bytes per step, a debug logits
+     readback path is enabled in production and the throughput number
+     is invalid.
+   - **Effective-N CLI flag** `--effective-n m`: ignore drafter
+     positions `m..N` even though the drafter computed all of them.
+     Reduces verify and rollback cost; reveals whether N=16 is
+     actually the M4 Max sweet spot.
+5. **Per-step state-hash diagnostic** (paranoid mode, off by default
+   for prod runs): in addition to comparing emitted tokens between
+   DFlash=on and DFlash=off, hash + compare per outer step:
+   - `processed_pos`
+   - per-layer `kv_n_pos`
+   - GDN SSM state checksum
+   - GDN conv state checksum
+   - `target_ctx_n` and last-column hash
+   Catches latent state corruption that would otherwise silently
+   surface only as α/quality drift later.
+6. **Workloads:** code (`humaneval_short`), prose (`pile_short`),
    mixed (`mmlu_easy`).
 
-### H5.6 — Cross-impl validation against spiritbuun (optional)
+### H5.6 — Cross-impl validation against spiritbuun (no longer optional)
 
-If schedule permits: for the same (target_gguf, drafter_gguf, prompt,
-seed), build spiritbuun's fork on M4 Max and compare emitted token
-sequences. They must be identical.
+Promoted from optional. Cross-impl validation must run alongside
+H5.2.5 (acceptance gate) — the cheapest place to discover that
+"layer 31" means different things in different impls, or that our
+SWA mask is off by one but still produces finite logits.
+
+Phased:
+- **Cheap trace-equivalence (alongside H5.2.5):** for one fixed
+  prompt and seed, compare against MLX reference at
+  `~/code/dflash/dflash/model_mlx.py`:
+    * captured target hidden slices at `target_layer_ids`
+    * `dflash_fc + hidden_norm` output
+    * drafter logits at every noise position
+    * accepted-prefix length under lazy verify
+- **End-to-end token equivalence (after H5.5):** build spiritbuun's
+  fork on M4 Max, run the same `(target_gguf, drafter_gguf, prompt,
+  seed)`, compare emitted token sequences. They must be identical.
+  Schedule-dependent.
 
 ### H5.7 — Probabilistic rejection sampling
 
@@ -769,18 +883,103 @@ wrapper pattern, drafter loader boilerplate, prompt-prefill streaming,
 EOS / max_new_tokens edge cases, GPU-resident hidden carry, `processed_pos
 + carry_tok` cursor model.
 
-## 9. Future directions (not in scope)
+## 9. Follow-on opportunities (after H5.5 lands)
 
-- **Tree verify (DDTree)** — different fork lineage, different recipe.
-- **Continuous batching** — multi-slot drafter forward.
-- **Approximate / pollution-tolerant mode** — skip GDN rollback, accept
-  drift.
-- **Probabilistic rejection sampling** with retained drafter probabilities
-  — needs sampling temp > 0 path.
+Prioritized for "what to do if H5.5 hits α ≥ 0.5 and speedup ≥ 1.5×."
+Order is bang-for-buck, easiest first.
+
+1. **GPU-resident sampling kernel (top-k, top-p, argmax).** If any
+   vocab-sized logits readback remains in the production path
+   (per-iteration `N · V · 4 B`), kill it. spiritbuun's fork does this
+   for a reason. The lm_head compute is unavoidable; the 16 MB CPU
+   transfer + sync per outer step is not. Bench's
+   `bytes_readback_per_outer_step` counter (per H5.5) flags it
+   automatically.
+
+2. **Indirect Command Buffers / MTL4** to amortize CPU encode cost.
+   At N=9 tokens emitted per step, ~3-5 ms encode overhead per outer
+   step. The architecture already has stable buffers and a fixed
+   pipeline sequence — likely a clean win.
+
+3. **Effective-N tuning.** Cheap experiment via `--effective-n m`
+   (already in the bench per H5.5). If N=8 captures 85% of the
+   emitted tokens at half the verify+rollback pain, latency wins
+   even when throughput doesn't. M4 Max's BW profile may favor
+   smaller N than the trained default.
+
+4. **Profile-driven packed kernel work.** Optimize what's actually
+   slow, not what we expected to be slow. Phases to break down:
+   GDN recurrence, lm_head, FFN mat-mat, attention, checkpoint
+   writes, command-buffer overhead. The phase profiler from
+   `single_token_phase_profiled` extends to the packed path.
+
+5. **PLD (prompt-lookup decoding) as a baseline.** Cheap experiment
+   that reuses H5's packed verify primitive but with a trivial
+   "next-N tokens copied from the prompt where they appeared earlier"
+   drafter. If PLD + packed verify achieves 1.3× and DFlash + packed
+   verify achieves 1.4×, the engineering investment beyond PLD is
+   small. If the ratio is more like 1.3× vs 2.0×, the learned drafter
+   is genuinely earning its complexity. Either answer is informative.
+
+6. **Tree verify (DDTree) — only if instrumentation says so.** The
+   H5.2.5 top-k rank diagnostic measures: rank-1 hit rate (= α_draft)
+   and rank-4 hit rate. If rank-1 is mediocre but rank-4 is rich
+   (e.g. α=0.4 but rank-4=0.8), DDTree can recover more emitted
+   tokens per verify. If rank-4 is also poor, tree verify just burns
+   compute. DDTree is a second speculative engine, not a driver
+   change — defer until measurements demand it.
+
+Lower priority / different product:
+
+- **KV-Q8 on the 16 attn layers** (PLAN.md v2 item). Important for
+  long context + memory pressure; not ahead of DFlash-specific
+  bottlenecks unless attention KV bandwidth shows up dominant.
+- **Continuous batching (multi-slot drafter)** — different product
+  (multi-user serving). Don't let it distract H5 unless we decide
+  the product is multi-user.
+- **Approximate / pollution-tolerant mode** — skip GDN rollback,
+  accept drift. Quality-vs-throughput tradeoff. Would surface as an
+  opt-in `--dflash-approximate` flag with perplexity-drift telemetry.
+- **Probabilistic rejection sampling** with retained drafter
+  probabilities — needs sampling temp > 0 path; H5.7 stub.
+
+If H5.5 does NOT hit 1.5×, the next action depends on which arm of
+the failure:
+- Low α: drafter correctness, SWA mask, hidden capture, quant choice
+  (Q4_K vs Q8_0), or domain mismatch (try `enable_thinking=false` or
+  different workloads).
+- Slow verify: packed kernel investment, checkpoint strategy,
+  command overhead.
+- High α + low speedup: implementation problem, profile and fix.
+- Low α + perfect kernels: this is a model/speculation problem;
+  DFlash with current weights doesn't work for this stack.
 
 ## Document history
 
-- **rev 2 (current).** Reviewed and rewritten after codex round 1
+- **rev 3 (current).** Open-ended codex review after H5.0 + H5.1
+  shipped. Insertions:
+  - **H5.1.5 Metal-vs-CPU drafter cosine gate** — finiteness alone
+    proved too weak in the cross-GGUF dequant bug (caught by codex
+    in H5.1).
+  - **H5.2 layout sanity test** — shuffled `target_ctx` should
+    materially degrade α; if it doesn't, hidden capture is broken
+    or the model isn't actually conditioning on `target_ctx`.
+  - **H5.2.5 Lazy DFlash acceptance gate (NEW, mandatory before
+    H5.3)** — measures α end-to-end using cheap H4-style
+    single-token verify before paying for packed verify. GO/NO-GO:
+    α ≥ 0.50 code, ≥ 0.30 prose. Includes effective-N sweep and
+    top-k rank instrumentation as cheap experiments.
+  - **§1.4 worst-case scenario** explicitly documented (0.81×
+    speedup if α=0.30 and T_verify_N=6×). Not a corner case.
+  - **§4 / H5.5 bench additions**: bytes-readback counter (production
+    no-readback guard), `--effective-n m` flag, paranoid
+    per-step state-hash diagnostic.
+  - **H5.6 cross-impl validation** promoted from optional to
+    mandatory; cheap trace-equivalence runs alongside H5.2.5
+    against MLX, full token-equivalence against spiritbuun after H5.5.
+  - **§9 reframed** as prioritized follow-on opportunities with a
+    "what to do if speedup is bad" decision tree.
+- **rev 2.** Reviewed and rewritten after codex round 1
   surfaced 3 BLOCKERs and 8 MAJORs:
   - Renamed cursor state to `processed_pos` + `carry_tok` (matches H4
     contract). Algorithm now flows through carry properly: draft input

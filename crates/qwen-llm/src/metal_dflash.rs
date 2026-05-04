@@ -518,12 +518,19 @@ impl<'a> DFlashDecoder<'a> {
                 RMS_EPS,
             )?;
             if ctx_len > 0 {
+                // Sub-view of just the populated rows (k_ctx_buf is
+                // sized for ctx_capacity, but only first ctx_len * kv_dim
+                // elements are valid this call).
+                let view = self
+                    .session
+                    .k_ctx_buf
+                    .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
                 encode_rms_norm_batched_f32(
                     ctx_metal,
                     &enc,
-                    &self.session.k_ctx_buf,
+                    &view,
                     &layer.k_norm,
-                    &self.session.k_ctx_buf,
+                    &view,
                     ctx_len * n_kv,
                     head_dim,
                     RMS_EPS,
@@ -819,3 +826,7 @@ fn rms_norm_cpu(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
         .map(|(&xi, &wi)| xi * scale * wi)
         .collect()
 }
+
+// H5.1.5 metal_drafter_cosine_vs_cpu moved to tests/dflash_correctness.rs
+// (slow: ~142s on 27B-Q4_K_M prefill + drafter forward; not a fast-
+// feedback gate). Run with `cargo test --test dflash_correctness --release`.

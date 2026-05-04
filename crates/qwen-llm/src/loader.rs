@@ -123,6 +123,45 @@ pub enum Block<'a> {
     Attn(AttnBlock<'a>),
 }
 
+/// Multi-Token-Prediction (NEXTN) head. Present when the GGUF contains
+/// the `blk.{n_layer}.nextn.*` tensor set. The MTP head is structurally
+/// a normal full-attention block at block index `n_layer` (one past the
+/// last base layer) plus four adornment tensors (`eh_proj`, `enorm`,
+/// `hnorm`, `shared_head_norm`). See `docs/H4-MTP.md` §1.1 for the
+/// per-tensor shape table.
+///
+/// Note: `nextn.embed_tokens` and `nextn.shared_head_head` are
+/// `TENSOR_NOT_REQUIRED` in the converter — Qwen3.5/3.6 ties them to
+/// the main model's `token_embd` and `output` weights respectively.
+/// We don't store separate references; consumers read from
+/// `Model.token_embd` / `Model.lm_head`.
+#[derive(Clone)]
+pub struct MtpHead<'a> {
+    /// Block index in the GGUF (typically `arch.n_layer`, e.g. 64 for 27B
+    /// or 24 for 0.8B). All `attn` and adornment tensors live under
+    /// `blk.{block_idx}.*`.
+    pub block_idx: u32,
+    /// Standard full-attention block at `blk.{block_idx}.*` — same
+    /// tensor names as a regular attn layer (`attn_norm`, `attn_q`,
+    /// `attn_k`, `attn_v`, `attn_output`, `attn_q_norm`, `attn_k_norm`,
+    /// `post_attention_norm`, `ffn_gate`, `ffn_up`, `ffn_down`).
+    pub attn: AttnBlock<'a>,
+    /// `blk.{block_idx}.nextn.eh_proj.weight` — `[2*H, H]`. Projects
+    /// the concatenated `[RMSNorm(embed(t_{i+1})), RMSNorm(h_i)]` down
+    /// to `H`. Concat order is `[embed, hidden]` (vLLM canonical).
+    pub eh_proj: &'a TensorDesc,
+    /// `blk.{block_idx}.nextn.enorm.weight` — `[H]`. RMSNorm gain
+    /// applied to the embedding side of the eh_proj input.
+    pub enorm: &'a TensorDesc,
+    /// `blk.{block_idx}.nextn.hnorm.weight` — `[H]`. RMSNorm gain
+    /// applied to the hidden side of the eh_proj input.
+    pub hnorm: &'a TensorDesc,
+    /// `blk.{block_idx}.nextn.shared_head_norm.weight` — `[H]`.
+    /// RMSNorm gain applied between the MTP block output and the
+    /// (shared) lm_head projection.
+    pub shared_head_norm: &'a TensorDesc,
+}
+
 /// Bound model: a static description (Arch) plus tensor references into the
 /// mmap'd GGUF. The `GgufFile` it borrows from must outlive this view.
 pub struct Model<'a> {
@@ -136,6 +175,12 @@ pub struct Model<'a> {
     pub blocks: Vec<Block<'a>>,
     /// True when `lm_head` is the same tensor as `token_embd`.
     pub tied_embeddings: bool,
+    /// MTP head, present when the GGUF was produced by the patched
+    /// `mtp-converter` lcpp branch. `None` for older GGUFs (rejected
+    /// MTP tensors at convert time). Bound by tensor presence, not
+    /// metadata — the upstream converter doesn't always write
+    /// `qwen35.nextn_predict_layers`. See `docs/H4-MTP.md` §2.
+    pub mtp: Option<MtpHead<'a>>,
 }
 
 impl<'a> Model<'a> {
@@ -283,6 +328,13 @@ impl<'a> Model<'a> {
             blocks.push(block);
         }
 
+        // MTP head — bind iff the eh_proj tensor exists at blk.{n_layer}.
+        // Qwen3.5/3.6 ships at most ONE MTP block (`mtp_num_hidden_layers=1`)
+        // located at block index `arch.n_layer` (one past the last base
+        // layer). All MTP-aware GGUFs from the patched mtp-converter put
+        // it there; older GGUFs (pre-converter-patch) don't have it.
+        let mtp = bind_mtp_head(g, &arch)?;
+
         Ok(Self {
             arch,
             token_embd,
@@ -290,8 +342,101 @@ impl<'a> Model<'a> {
             lm_head,
             blocks,
             tied_embeddings,
+            mtp,
         })
     }
+}
+
+/// Probe for the MTP head at `blk.{arch.n_layer}.*` and bind it if the
+/// eh_proj tensor is present. Tensor presence is the ground truth — the
+/// `qwen35.nextn_predict_layers` metadata key may be absent on some
+/// GGUFs even when the tensors are there (and vice versa for older
+/// metadata-only stubs).
+///
+/// Returns `Ok(None)` if the GGUF has no MTP head; `Err` only on
+/// partial / shape-mismatched MTP tensor sets (the eh_proj being
+/// present but other required tensors missing is a converter bug
+/// worth surfacing).
+fn bind_mtp_head<'a>(g: &'a GgufFile, arch: &Arch) -> Result<Option<MtpHead<'a>>, LoadError> {
+    let i = arch.n_layer; // MTP block index
+    let eh_proj_name = format!("blk.{i}.nextn.eh_proj.weight");
+    let Some(eh_proj) = g.find(&eh_proj_name) else {
+        // No MTP head present — older GGUF or non-MTP-aware converter.
+        return Ok(None);
+    };
+    // eh_proj: [2*H, H]
+    check_shape(
+        eh_proj,
+        &[2 * arch.hidden_size as u64, arch.hidden_size as u64],
+    )?;
+
+    let enorm = need(g, &format!("blk.{i}.nextn.enorm.weight"))?;
+    check_shape(enorm, &[arch.hidden_size as u64])?;
+    let hnorm = need(g, &format!("blk.{i}.nextn.hnorm.weight"))?;
+    check_shape(hnorm, &[arch.hidden_size as u64])?;
+    let shared_head_norm = need(g, &format!("blk.{i}.nextn.shared_head_norm.weight"))?;
+    check_shape(shared_head_norm, &[arch.hidden_size as u64])?;
+
+    // The MTP block's own attention + FFN tensors live at the same
+    // block index, with the SAME tensor names as a regular full-attn
+    // block. The converter at lcpp@mtp-converter remaps HF
+    // `mtp.layers.0.*` → `model.layers.{n_base}.*`. So we can reuse
+    // the AttnBlock binder logic verbatim.
+    let attn_norm = need(g, &format!("blk.{i}.attn_norm.weight"))?;
+    check_shape(attn_norm, &[arch.hidden_size as u64])?;
+    let post_attention_norm = need(g, &format!("blk.{i}.post_attention_norm.weight"))?;
+    check_shape(post_attention_norm, &[arch.hidden_size as u64])?;
+    let ffn_gate = need(g, &format!("blk.{i}.ffn_gate.weight"))?;
+    check_shape(
+        ffn_gate,
+        &[arch.hidden_size as u64, arch.intermediate_size as u64],
+    )?;
+    let ffn_up = need(g, &format!("blk.{i}.ffn_up.weight"))?;
+    check_shape(
+        ffn_up,
+        &[arch.hidden_size as u64, arch.intermediate_size as u64],
+    )?;
+    let ffn_down = need(g, &format!("blk.{i}.ffn_down.weight"))?;
+    check_shape(
+        ffn_down,
+        &[arch.intermediate_size as u64, arch.hidden_size as u64],
+    )?;
+    let q_dim = arch.n_q_heads * arch.attn_head_dim;
+    let kv_dim = arch.n_kv_heads * arch.attn_head_dim;
+    let q = need(g, &format!("blk.{i}.attn_q.weight"))?;
+    // Gated attention: q_proj outputs 2× q_dim (Q + sigmoid gate).
+    check_shape(q, &[arch.hidden_size as u64, 2 * q_dim as u64])?;
+    let k = need(g, &format!("blk.{i}.attn_k.weight"))?;
+    check_shape(k, &[arch.hidden_size as u64, kv_dim as u64])?;
+    let v = need(g, &format!("blk.{i}.attn_v.weight"))?;
+    check_shape(v, &[arch.hidden_size as u64, kv_dim as u64])?;
+    let o = need(g, &format!("blk.{i}.attn_output.weight"))?;
+    check_shape(o, &[q_dim as u64, arch.hidden_size as u64])?;
+    let q_norm = need(g, &format!("blk.{i}.attn_q_norm.weight"))?;
+    check_shape(q_norm, &[arch.attn_head_dim as u64])?;
+    let k_norm = need(g, &format!("blk.{i}.attn_k_norm.weight"))?;
+    check_shape(k_norm, &[arch.attn_head_dim as u64])?;
+
+    Ok(Some(MtpHead {
+        block_idx: i,
+        attn: AttnBlock {
+            attn_norm,
+            post_attention_norm,
+            ffn_gate,
+            ffn_up,
+            ffn_down,
+            q,
+            k,
+            v,
+            o,
+            q_norm,
+            k_norm,
+        },
+        eh_proj,
+        enorm,
+        hnorm,
+        shared_head_norm,
+    }))
 }
 
 fn need<'a>(g: &'a GgufFile, name: &str) -> Result<&'a TensorDesc, LoadError> {
@@ -483,12 +628,14 @@ mod tests {
             .count();
         assert_eq!(gdn, 18);
         assert_eq!(attn, 6);
+        // Pre-MTP-converter GGUF; no MTP head expected.
+        assert!(m.mtp.is_none(), "F32 0.8B GGUF should have no MTP head");
     }
 
-    /// H4 smoke test: a 0.8B GGUF freshly converted with the
+    /// H4.0 smoke test: a 0.8B GGUF freshly converted with the
     /// MTP-aware converter (block_count=25, the trailing block being
-    /// the NEXTN/MTP head). The main forward path must continue to
-    /// see only the 24 base layers; the MTP block is ignored for now.
+    /// the NEXTN/MTP head). The main forward path sees only the 24
+    /// base layers; the MTP head is bound separately under `m.mtp`.
     #[test]
     fn loads_0_8b_with_mtp() {
         let path = "/Users/tito/models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
@@ -514,24 +661,20 @@ mod tests {
             .count();
         assert_eq!(gdn, 18);
         assert_eq!(attn, 6);
-        // Confirm the MTP block (blk.24) tensors are present in the GGUF
-        // (we just don't load them into Block enum yet).
-        assert!(g
-            .tensors
-            .iter()
-            .any(|t| t.name == "blk.24.nextn.eh_proj.weight"));
-        assert!(g
-            .tensors
-            .iter()
-            .any(|t| t.name == "blk.24.nextn.enorm.weight"));
-        assert!(g
-            .tensors
-            .iter()
-            .any(|t| t.name == "blk.24.nextn.hnorm.weight"));
-        assert!(g
-            .tensors
-            .iter()
-            .any(|t| t.name == "blk.24.nextn.shared_head_norm.weight"));
+        // MTP head must bind successfully.
+        let mtp = m.mtp.as_ref().expect("MTP head should be bound");
+        assert_eq!(mtp.block_idx, 24);
+        // Verify shapes (H=1024 for 0.8B).
+        assert_eq!(mtp.eh_proj.shape, vec![2 * 1024, 1024]);
+        assert_eq!(mtp.enorm.shape, vec![1024]);
+        assert_eq!(mtp.hnorm.shape, vec![1024]);
+        assert_eq!(mtp.shared_head_norm.shape, vec![1024]);
+        // Inner attn block uses the standard tensor layout.
+        // 0.8B: n_q_heads=16, n_kv_heads=4, attn_head_dim=128 → q_dim=2048, kv_dim=512.
+        assert_eq!(mtp.attn.q.shape, vec![1024, 2 * 2048]); // gated
+        assert_eq!(mtp.attn.k.shape, vec![1024, 512]);
+        assert_eq!(mtp.attn.v.shape, vec![1024, 512]);
+        assert_eq!(mtp.attn.o.shape, vec![2048, 1024]);
     }
 
     #[test]
@@ -558,5 +701,38 @@ mod tests {
             .count();
         assert_eq!(gdn, 48);
         assert_eq!(attn, 16);
+        // Pre-MTP-converter Q4_K_M; no MTP head. The MTP-aware variant lives
+        // at brittlewis12/Qwen3.6-27B-MTP-GGUF (see loads_27b_mtp_q4_k_m).
+        assert!(m.mtp.is_none(), "non-MTP 27B GGUF should have no MTP head");
+    }
+
+    /// H4.0 27B smoke test: validates the loader bind on the
+    /// MTP-aware Q4_K_M GGUF at brittlewis12/Qwen3.6-27B-MTP-GGUF.
+    /// Skipped if the file isn't present locally.
+    #[test]
+    fn loads_27b_mtp_q4_k_m() {
+        let path = "/Users/tito/models/Qwen3.6-27B-MTP-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load model");
+        eprintln!("[loader] {}", summary(&m));
+        // 64 base layers + 1 MTP block at index 64.
+        assert_eq!(m.arch.n_layer, 64);
+        assert_eq!(m.arch.mtp_n_hidden_layers, 1);
+        assert_eq!(m.blocks.len(), 64);
+        let mtp = m.mtp.as_ref().expect("MTP head should be bound");
+        assert_eq!(mtp.block_idx, 64);
+        // 27B: H=5120, F=17408, n_q=24, n_kv=4, head_dim=256
+        // → q_dim=24*256=6144, kv_dim=4*256=1024.
+        assert_eq!(mtp.eh_proj.shape, vec![2 * 5120, 5120]);
+        assert_eq!(mtp.enorm.shape, vec![5120]);
+        assert_eq!(mtp.hnorm.shape, vec![5120]);
+        assert_eq!(mtp.shared_head_norm.shape, vec![5120]);
+        assert_eq!(mtp.attn.q.shape, vec![5120, 2 * 6144]);
+        assert_eq!(mtp.attn.k.shape, vec![5120, 1024]);
+        assert_eq!(mtp.attn.v.shape, vec![5120, 1024]);
+        assert_eq!(mtp.attn.o.shape, vec![6144, 5120]);
     }
 }

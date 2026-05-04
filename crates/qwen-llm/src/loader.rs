@@ -162,6 +162,72 @@ pub struct MtpHead<'a> {
     pub shared_head_norm: &'a TensorDesc,
 }
 
+/// Per-layer DFlash drafter weights. Same tensor-name conventions as a
+/// regular Qwen3-family attention block (NOT gated like Qwen3.6 base —
+/// `attn_q.weight` is `[H, n_q · head_dim]`, not `[H, 2 · n_q · head_dim]`).
+/// The drafter has its own `post_attention_norm` per layer and a final
+/// `output_norm` (see `DFlashHead`).
+#[derive(Clone)]
+pub struct DFlashLayer<'a> {
+    pub attn_norm: &'a TensorDesc,
+    pub q: &'a TensorDesc,
+    pub k: &'a TensorDesc,
+    pub v: &'a TensorDesc,
+    pub o: &'a TensorDesc,
+    pub q_norm: &'a TensorDesc,
+    pub k_norm: &'a TensorDesc,
+    pub post_attention_norm: &'a TensorDesc,
+    pub ffn_gate: &'a TensorDesc,
+    pub ffn_up: &'a TensorDesc,
+    pub ffn_down: &'a TensorDesc,
+    /// True for sliding-window-attention layers (per the GGUF
+    /// `sliding_window_pattern` array). False for full-attention layers.
+    pub is_swa: bool,
+}
+
+/// Static config for the DFlash drafter, derived from GGUF metadata.
+#[derive(Clone, Copy, Debug)]
+pub struct DFlashConfig {
+    pub n_layer: u32,
+    /// Drafter hidden size. Must equal target's `hidden_size` for shared
+    /// `tok_embd` / `lm_head` to compose.
+    pub hidden_size: u32,
+    pub intermediate_size: u32,
+    pub n_q_heads: u32,
+    pub n_kv_heads: u32,
+    pub head_dim: u32,
+    pub rope_theta: f32,
+    /// Sliding-window size (in tokens) for SWA layers. 0 if no SWA layers.
+    pub swa_window: u32,
+    /// `block_size` from GGUF — number of noise tokens fed to the drafter
+    /// per call (e.g. 16 for the 27B-DFlash). Maximum tokens emitted per
+    /// outer step is also `block_size`.
+    pub block_size: u32,
+    /// Token id used for unfilled noise positions in the drafter input.
+    pub mask_token_id: i32,
+    /// `K = target_layer_ids.len()`. Number of target layers whose hidden
+    /// states get fused via `dflash_fc`.
+    pub n_target_features_layers: u32,
+}
+
+/// DFlash drafter head. Loaded from a separate GGUF (e.g.
+/// `spiritbuun/Qwen3.6-27B-DFlash-GGUF`) and bound to a pre-existing
+/// target [`Model`]. Shares `tok_embd` and `output` (lm_head) with
+/// the target — the drafter GGUF doesn't carry its own.
+pub struct DFlashHead<'a> {
+    pub config: DFlashConfig,
+    /// K target layer indices whose hiddens get fused.
+    pub target_layer_ids: Vec<u32>,
+    /// `dflash_fc.weight`, shape `[K · H_target, H_drafter]`.
+    pub fc: &'a TensorDesc,
+    /// `dflash_hidden_norm.weight`, shape `[H_drafter]`.
+    pub hidden_norm: &'a TensorDesc,
+    /// `output_norm.weight`, shape `[H_drafter]`. The drafter's own final
+    /// RMSNorm before the (target's) lm_head.
+    pub output_norm: &'a TensorDesc,
+    pub layers: Vec<DFlashLayer<'a>>,
+}
+
 /// Bound model: a static description (Arch) plus tensor references into the
 /// mmap'd GGUF. The `GgufFile` it borrows from must outlive this view.
 pub struct Model<'a> {
@@ -439,6 +505,186 @@ fn bind_mtp_head<'a>(g: &'a GgufFile, arch: &Arch) -> Result<Option<MtpHead<'a>>
     }))
 }
 
+/// Open a separately-distributed DFlash drafter GGUF and bind it to a
+/// pre-existing target [`Model`]. The drafter doesn't carry its own
+/// vocab embedding or lm_head; it shares the target's via `target_model.token_embd`
+/// and `target_model.lm_head`. Hidden size compatibility is enforced.
+///
+/// Reference: `~/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf`.
+/// Arch string: `dflash-draft`. KV namespace: `dflash-draft.*` (NOT
+/// `qwen35.dflash.*` — that's a different fork's convention).
+pub fn open_dflash_drafter<'a>(
+    drafter_gguf: &'a GgufFile,
+    target_model: &Model<'_>,
+) -> Result<DFlashHead<'a>, LoadError> {
+    let arch_str = drafter_gguf.architecture();
+    if arch_str.as_deref() != Some("dflash-draft") {
+        return Err(LoadError::UnsupportedArch(arch_str));
+    }
+
+    // -------- Read drafter config from KV metadata --------
+    let n_layer = drafter_gguf
+        .get_u64("dflash-draft.block_count")
+        .ok_or(LoadError::BadMetadata("dflash-draft.block_count"))? as u32;
+    let hidden_size = drafter_gguf
+        .get_u64("dflash-draft.embedding_length")
+        .ok_or(LoadError::BadMetadata("dflash-draft.embedding_length"))?
+        as u32;
+    let intermediate_size = drafter_gguf
+        .get_u64("dflash-draft.feed_forward_length")
+        .ok_or(LoadError::BadMetadata("dflash-draft.feed_forward_length"))?
+        as u32;
+    let n_q_heads = drafter_gguf
+        .get_u64("dflash-draft.attention.head_count")
+        .ok_or(LoadError::BadMetadata("dflash-draft.attention.head_count"))?
+        as u32;
+    let n_kv_heads = drafter_gguf
+        .get_u64("dflash-draft.attention.head_count_kv")
+        .ok_or(LoadError::BadMetadata(
+            "dflash-draft.attention.head_count_kv",
+        ))? as u32;
+    let head_dim = drafter_gguf
+        .get_u64("dflash-draft.attention.key_length")
+        .ok_or(LoadError::BadMetadata("dflash-draft.attention.key_length"))?
+        as u32;
+    let rope_theta = drafter_gguf
+        .get_f32("dflash-draft.rope.freq_base")
+        .unwrap_or(10_000_000.0);
+    let swa_window = drafter_gguf
+        .get_u64("dflash-draft.attention.sliding_window")
+        .unwrap_or(0) as u32;
+    let block_size = drafter_gguf
+        .get_u64("dflash-draft.dflash.block_size")
+        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.block_size"))?
+        as u32;
+    let mask_token_id = drafter_gguf
+        .get_u64("dflash-draft.dflash.mask_token_id")
+        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.mask_token_id"))?
+        as i32;
+    let target_layer_ids: Vec<u32> = drafter_gguf
+        .get_u64_array("dflash-draft.dflash.target_layer_ids")
+        .ok_or(LoadError::BadMetadata(
+            "dflash-draft.dflash.target_layer_ids",
+        ))?
+        .into_iter()
+        .map(|v| v as u32)
+        .collect();
+    let n_target_features = drafter_gguf
+        .get_u64("dflash-draft.dflash.n_target_features")
+        .ok_or(LoadError::BadMetadata(
+            "dflash-draft.dflash.n_target_features",
+        ))? as u32;
+    let swa_pattern: Vec<bool> = drafter_gguf
+        .get_bool_array("dflash-draft.attention.sliding_window_pattern")
+        .ok_or(LoadError::BadMetadata(
+            "dflash-draft.attention.sliding_window_pattern",
+        ))?;
+
+    // -------- Compatibility validation --------
+    let target_h = target_model.arch.hidden_size;
+    if hidden_size != target_h {
+        return Err(LoadError::BadMetadata(
+            "dflash-draft.embedding_length must equal target's hidden_size \
+             (drafter shares target's tok_embd / lm_head; H mismatch breaks composition)",
+        ));
+    }
+    let expected_n_target_features = (target_layer_ids.len() as u32) * target_h;
+    if n_target_features != expected_n_target_features {
+        return Err(LoadError::BadMetadata(
+            "dflash-draft.dflash.n_target_features mismatch: \
+             expected K · H_target",
+        ));
+    }
+    for &lid in &target_layer_ids {
+        if lid >= target_model.arch.n_layer {
+            return Err(LoadError::BadMetadata(
+                "dflash-draft.dflash.target_layer_ids references a layer past target's n_layer",
+            ));
+        }
+    }
+    if swa_pattern.len() as u32 != n_layer {
+        return Err(LoadError::BadMetadata(
+            "dflash-draft.attention.sliding_window_pattern length must equal block_count",
+        ));
+    }
+
+    // -------- Top-level adornment tensors --------
+    let fc = need(drafter_gguf, "dflash_fc.weight")?;
+    check_shape(fc, &[n_target_features as u64, hidden_size as u64])?;
+    let hidden_norm = need(drafter_gguf, "dflash_hidden_norm.weight")?;
+    check_shape(hidden_norm, &[hidden_size as u64])?;
+    let output_norm = need(drafter_gguf, "output_norm.weight")?;
+    check_shape(output_norm, &[hidden_size as u64])?;
+
+    // -------- Per-layer tensors --------
+    let q_dim = (n_q_heads * head_dim) as u64;
+    let kv_dim = (n_kv_heads * head_dim) as u64;
+    let h = hidden_size as u64;
+    let f = intermediate_size as u64;
+    let mut layers: Vec<DFlashLayer<'a>> = Vec::with_capacity(n_layer as usize);
+    for i in 0..n_layer {
+        let attn_norm = need(drafter_gguf, &format!("blk.{i}.attn_norm.weight"))?;
+        check_shape(attn_norm, &[h])?;
+        let q = need(drafter_gguf, &format!("blk.{i}.attn_q.weight"))?;
+        // NOT gated: shape [H, n_q · head_dim], not [H, 2 · n_q · head_dim].
+        check_shape(q, &[h, q_dim])?;
+        let k = need(drafter_gguf, &format!("blk.{i}.attn_k.weight"))?;
+        check_shape(k, &[h, kv_dim])?;
+        let v = need(drafter_gguf, &format!("blk.{i}.attn_v.weight"))?;
+        check_shape(v, &[h, kv_dim])?;
+        let o = need(drafter_gguf, &format!("blk.{i}.attn_output.weight"))?;
+        check_shape(o, &[q_dim, h])?;
+        let q_norm = need(drafter_gguf, &format!("blk.{i}.attn_q_norm.weight"))?;
+        check_shape(q_norm, &[head_dim as u64])?;
+        let k_norm = need(drafter_gguf, &format!("blk.{i}.attn_k_norm.weight"))?;
+        check_shape(k_norm, &[head_dim as u64])?;
+        let post_attention_norm =
+            need(drafter_gguf, &format!("blk.{i}.post_attention_norm.weight"))?;
+        check_shape(post_attention_norm, &[h])?;
+        let ffn_gate = need(drafter_gguf, &format!("blk.{i}.ffn_gate.weight"))?;
+        check_shape(ffn_gate, &[h, f])?;
+        let ffn_up = need(drafter_gguf, &format!("blk.{i}.ffn_up.weight"))?;
+        check_shape(ffn_up, &[h, f])?;
+        let ffn_down = need(drafter_gguf, &format!("blk.{i}.ffn_down.weight"))?;
+        check_shape(ffn_down, &[f, h])?;
+        layers.push(DFlashLayer {
+            attn_norm,
+            q,
+            k,
+            v,
+            o,
+            q_norm,
+            k_norm,
+            post_attention_norm,
+            ffn_gate,
+            ffn_up,
+            ffn_down,
+            is_swa: swa_pattern[i as usize],
+        });
+    }
+
+    Ok(DFlashHead {
+        config: DFlashConfig {
+            n_layer,
+            hidden_size,
+            intermediate_size,
+            n_q_heads,
+            n_kv_heads,
+            head_dim,
+            rope_theta,
+            swa_window,
+            block_size,
+            mask_token_id,
+            n_target_features_layers: target_layer_ids.len() as u32,
+        },
+        target_layer_ids,
+        fc,
+        hidden_norm,
+        output_norm,
+        layers,
+    })
+}
+
 fn need<'a>(g: &'a GgufFile, name: &str) -> Result<&'a TensorDesc, LoadError> {
     g.find(name)
         .ok_or_else(|| LoadError::Missing(name.to_string()))
@@ -704,6 +950,62 @@ mod tests {
         // Pre-MTP-converter Q4_K_M; no MTP head. The MTP-aware variant lives
         // at brittlewis12/Qwen3.6-27B-MTP-GGUF (see loads_27b_mtp_q4_k_m).
         assert!(m.mtp.is_none(), "non-MTP 27B GGUF should have no MTP head");
+    }
+
+    /// H5.0 smoke test: load the spiritbuun DFlash drafter alongside
+    /// a target Qwen3.6-27B model and verify all dims + tensor shapes
+    /// match the GGUF metadata exactly. Skipped if either file is
+    /// missing locally.
+    #[test]
+    fn loads_dflash_drafter_3_6_27b() {
+        let target_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let drafter_path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        if !std::path::Path::new(target_path).exists()
+            || !std::path::Path::new(drafter_path).exists()
+        {
+            eprintln!("[dflash-load] skipped — fixtures missing");
+            return;
+        }
+        let target_g = GgufFile::open(target_path).expect("open target");
+        let target_m = Model::from_gguf(&target_g).expect("load target");
+        let drafter_g = GgufFile::open(drafter_path).expect("open drafter");
+
+        let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
+
+        // Config from GGUF (cross-checked against direct hexdump in
+        // /tmp + the spiritbuun HF README).
+        assert_eq!(head.config.n_layer, 5);
+        assert_eq!(head.config.hidden_size, 5120);
+        assert_eq!(head.config.hidden_size, target_m.arch.hidden_size);
+        assert_eq!(head.config.intermediate_size, 17408);
+        assert_eq!(head.config.n_q_heads, 32);
+        assert_eq!(head.config.n_kv_heads, 8);
+        assert_eq!(head.config.head_dim, 128);
+        assert_eq!(head.config.swa_window, 2048);
+        assert_eq!(head.config.block_size, 16);
+        assert_eq!(head.config.mask_token_id, 248070);
+        assert_eq!(head.config.n_target_features_layers, 5);
+        assert_eq!(head.target_layer_ids, vec![1, 16, 31, 46, 61]);
+        assert_eq!(head.layers.len(), 5);
+
+        // Per-layer SWA pattern: [T, T, T, T, F].
+        let swa_flags: Vec<bool> = head.layers.iter().map(|l| l.is_swa).collect();
+        assert_eq!(swa_flags, vec![true, true, true, true, false]);
+
+        // Tensor shapes (top-level adornments).
+        assert_eq!(head.fc.shape, vec![25600, 5120]); // K · H_target = 5 · 5120
+        assert_eq!(head.hidden_norm.shape, vec![5120]);
+        assert_eq!(head.output_norm.shape, vec![5120]);
+
+        // Layer 0: spot-check Q is NOT gated (shape [H, n_q · head_dim],
+        // not [H, 2 · n_q · head_dim]).
+        let l0 = &head.layers[0];
+        assert_eq!(l0.q.shape, vec![5120, 4096]); // 32 · 128 = 4096
+        assert_eq!(l0.k.shape, vec![5120, 1024]); // 8 · 128 = 1024
+        assert_eq!(l0.v.shape, vec![5120, 1024]);
+        assert_eq!(l0.o.shape, vec![4096, 5120]);
+        assert_eq!(l0.ffn_gate.shape, vec![5120, 17408]);
+        assert_eq!(l0.ffn_down.shape, vec![17408, 5120]);
     }
 
     /// H4.0 27B smoke test: validates the loader bind on the

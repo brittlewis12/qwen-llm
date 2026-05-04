@@ -269,6 +269,37 @@ impl GgufFile {
     pub fn get_str(&self, key: &str) -> Option<&str> {
         self.model.metadata().get(key).and_then(|v| v.as_str())
     }
+
+    /// Convenience: lookup an array-of-u64 typed metadata value by key.
+    /// Returns `None` if the key is missing OR not an array. Skips elements
+    /// that don't parse as u64.
+    pub fn get_u64_array(&self, key: &str) -> Option<Vec<u64>> {
+        self.model
+            .metadata()
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+    }
+
+    /// Convenience: lookup an array-of-bool typed metadata value by key.
+    /// Returns `None` if the key is missing OR not an array. Skips elements
+    /// that don't parse as bool.
+    pub fn get_bool_array(&self, key: &str) -> Option<Vec<bool>> {
+        self.model
+            .metadata()
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_bool()).collect())
+    }
+
+    /// Convenience: lookup an f32-typed metadata value by key.
+    pub fn get_f32(&self, key: &str) -> Option<f32> {
+        self.model
+            .metadata()
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .map(|f| f as f32)
+    }
 }
 
 /// Read `general.alignment` (default 32). Rejects values that would cause

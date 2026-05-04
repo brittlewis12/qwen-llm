@@ -1050,8 +1050,9 @@ impl<'a> MetalForward<'a> {
 
 /// Helper: scatter `n` floats from `src[0..n]` into `dst[off..off+n]`.
 /// Inverse of `copy_offset` (which gathers). Used to write into the KV
-/// cache slot for the current position.
-fn encode_scatter_offset_f32(
+/// cache slot for the current position, and (via the metal_mtp module)
+/// to assemble the `[e_normed, h_normed]` concat for the eh_proj input.
+pub fn encode_scatter_offset_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     src: &MetalTensor,
@@ -1127,12 +1128,12 @@ pub struct TokenProfile {
     pub total_ms: f64,
 }
 
-const RMS_EPS: f32 = 1e-6;
+pub const RMS_EPS: f32 = 1e-6;
 
 /// Dispatch the right `encode_mat_vec_*` based on `weight.dtype`. This
 /// is the single seam that lets the same MetalForward driver run on
 /// F32, Q4_K_M, Q6_K, etc. weights. New quant types plug in here.
-fn encode_mat_vec_dispatch(
+pub fn encode_mat_vec_dispatch(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     weight: &MetalTensor,

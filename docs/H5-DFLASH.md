@@ -698,34 +698,136 @@ This phase produces no speedup (lazy verify is `(1+α)/(1+α+ε_drafter)`
 ≈ 0.5-0.8× depending on drafter cost) — that's expected. The
 deliverable is a number, not a perf win.
 
-### H5.3 — Packed verify forward (the perf-critical chunk)
+### H5.3 — Packed verify forward
 
-1. Extend GDN kernel: iterate over N tokens internally with per-token
-   SSM and conv checkpoint writes.
-2. Extend full-attn kernel: mat-mat Q/K/V/O across N rows. KV append
-   writes N contiguous slots. Attention scores against
-   `start_position + i + 1` keys for query at relative position i.
-3. Extend FFN kernel for N rows.
-4. Final norm + lm_head per position; **GPU argmax** writes
-   `verify_argmax[N]`.
-5. Multi-layer hidden capture at K target layers.
-6. Implement `MetalForward::packed_forward` and the `_with_logits`
-   debug variant.
-7. **Bit-exactness test (H5.3 cosine gate):** for fixed seed,
-   `packed_forward(tokens, start, ...)` produces logits cosine ≥ 0.9999
-   with the result of N successive `single_token(tokens[i], start+i, ...)`
-   calls. This is the gate that says packed semantics match.
+Codex partner session (post-H5.2.5-GREEN) re-sequenced this phase.
+**Original instinct:** front-load Bucket A (mechanical N-grid extends) →
+GPU argmax → naive C/D → Bucket B (per-token GDN/conv checkpoints).
+**Codex pushback:** "risks getting a pretty packed API that cannot roll
+back. The earliest high-value signal is: can this API advance N tokens,
+checkpoint every intermediate state, restore any accepted prefix, and
+match N single-token decode?"
 
-### H5.4 — Rollback primitive
+Same playbook as the H5.2.5 pivot — split the phase. **H5.3a** ships a
+state-correct packed verifier scaffold (production-shaped API,
+correctness-verified, allowed to be slow). **H5.3b** is the perf pass
+(tiled Q4_K mat-mat first because naive 16× weight re-reads is
+structurally fatal; internalized GDN/conv recurrence second; packed
+attention only if profiling forces it).
 
-1. Implement `restore_after_partial_accept`. Reads checkpoint at
-   `n_accepted_in_batch`, writes into session SSM + conv state. Resets
-   `kv_n_pos`.
-2. Test: pick arbitrary `n_accepted ∈ [0, N-1]`. Run `packed_forward`,
-   then `restore_after_partial_accept(n_accepted)`, then a single
-   `single_token` at the next position. Compare the resulting state
-   to one produced by N+1 single_token calls through carry +
-   n_accepted drafts + bonus. Bit-exact match required.
+#### H5.3a — Correctness scaffold (no speedup expected)
+
+The deliverable is the production API surface + bit-exactness, NOT
+throughput. H5.3a packed_forward is naive: N successive single-token
+encodes inside one command buffer, with checkpoint copies between
+tokens. Allowed to be slower than 16× single_token wall — that's fine
+because it lands the API + restore primitive cleanly.
+
+1. **`MetalDFlashVerifyScratch` struct** (NEW; codex Q5 expansion).
+   Owns ALL N-shaped state for packed forward — outputs (verify_argmax,
+   hidden_capture, conv_ckpt, gdn_ckpt) AND target-side activations
+   (packed_ids_buf, x_pack `[N,H]`, h_pack, q/k/v/o pack buffers, ffn
+   pack buffers, debug logits). Threaded `&mut` through `packed_forward`.
+   `MetalSession` stays unchanged; single_token keeps its scratch.
+   Lifetime: per-`DFlashDecoder`, allocated once.
+2. **Per-token checkpoint machinery via Metal blit copies** (codex Q4
+   v1: design ii — keep `kernel_gdn_step_f32` as-is, append a blit copy
+   into `gdn_ckpt[layer, n, ...]` after each step). Same for conv state
+   into `conv_ckpt[layer, n, ...]`. Blits are bulk-memory ops on GPU DMA
+   engines — faster than a compute "copy kernel" and avoid kernel
+   dispatch overhead. The 2.3 GiB SSM checkpoint is contiguous bulk
+   memory; treat it like bulk memory.
+3. **`packed_ids_buf: MetalTensor [N]`** (codex Q7 mitigation — the
+   bug we'd otherwise ship). NEVER mutate `MetalSession::ids_buf` from
+   the host inside the packed encode loop; `get_rows` would race and
+   every call would read the last-written CPU value. Upload once at
+   the top of `packed_forward`; each block reads by offset
+   `packed_ids_buf[n..n+1]`.
+4. **`MetalForward::packed_forward(tokens, start_pos, target_layer_ids,
+   scratch, session) → Vec<i32>`** — naive encoding: for `n in 0..N`
+   { write tokens[n] at packed_ids_buf[n]; encode N single-token paths;
+   blit GDN+conv state into checkpoints; capture hidden at K target
+   layers into hidden_capture[K, n, :] }. Final lm_head + GPU argmax →
+   verify_argmax[N].
+5. **`packed_forward_with_logits` debug variant** — adds `[N, V]`
+   readback for the bit-exactness test. Production `packed_forward`
+   does NOT spill `[N, V]` (anti-regression assertion in tests).
+6. **GPU argmax kernel** (Bucket E, mandatory in H5.3a, not deferred).
+   Standard reduction-tree two-stage `[N, V] → [N] i32`. Avoids the
+   15.9 MB readback per outer step.
+7. **`restore_after_partial_accept`** — H5.4 was originally a separate
+   phase, but lands in H5.3a because the checkpoint contract isn't
+   testable without it. Blit `conv_ckpt[*, k]` and `gdn_ckpt[*, k]`
+   back into session GDN+conv state; reset `kv_n_pos = start_pos +
+   k + 1`. Same blit primitive as the forward writes, reversed.
+
+**H5.3a gates** (per codex Q6 — 7 cheap tests, ALL gating):
+- **G1 — packed-vs-single logits cosine.** `packed_forward_with_logits(tokens,
+  start)` cosine ≥ 0.9999 against N successive `single_token(tokens[i],
+  start+i)` per row. The headline correctness signal.
+- **G2 — final state equivalence.** After full-N packed: `gdn_state`,
+  `gdn_conv`, `kv_n_pos` bit-exact (or ≥ 0.9999 cosine on f32 state)
+  vs N successive single_token's terminal session state.
+- **G3 — checkpoint replay equivalence.** For arbitrary k ∈ {0,
+  N/2, N-1}: run packed_forward, restore_after_partial_accept(k+1),
+  run single_token at start+k+1; result bit-exact vs running k+1
+  single_tokens then one more. Catches checkpoint contents.
+- **G4 — hidden capture layout.** `hidden_capture[k, n, :]` matches
+  layer `target_layer_ids[k]`'s residual after token n in packed.
+  Run `single_token_with_multi_hidden` N times, compare per layer per
+  row. Catches dim-order bugs that pass cosine.
+- **G5 — GPU argmax vs debug logits.** verify_argmax[n] ==
+  argmax_cpu(debug_logits[n]) for all n. Test deterministic tie
+  policy explicitly (e.g., lowest index wins).
+- **G6 — restore boundary cases.** k = 1 (almost-full-reject),
+  k = N (full accept; no rollback needed but the call must be a
+  no-op), k = N/2 (typical partial accept).
+- **G7 — nonzero start_pos / attention partition exercise.**
+  start_position chosen so `n_pos > rows_per_partition` for attn-v4,
+  i.e. >1 partition is in play. Catches partition-edge bugs that
+  position-0 tests miss.
+
+**Production API anti-regression assertion** (in tests):
+`bytes_readback_per_outer_step < N · V · 4` always for the production
+path. Caught here, also surfaced by the H5.5 bench counter.
+
+#### H5.3b — Performance pass (where the speedup actually lands)
+
+Profile-driven, but the order is partially predetermined by structural
+analysis:
+
+1. **Tiled Q4_K mat-mat (Bucket C).** Mandatory before any H5.5
+   speedup claim. Naive 16× weight re-read at 27B = ~100 GB extra
+   weight traffic per outer step ≈ 200 ms wasted. Q4_K dominates the
+   weight bytes so this lands the bulk of the win. Then F32, Q5_K,
+   Q6_K mat-mat, fused FFN mat-mat (gate+up shares weights AND
+   shares x across N).
+2. **Internalized packed GDN recurrence (Bucket B design i).** New
+   kernel that loops N steps internally, writing checkpoints inline.
+   Saves 16× state-load BW + dispatch overhead. Bit-exactness oracle:
+   the H5.3a design-(ii) impl. Same for ssm_conv.
+3. **Packed flash-attn-v4 (Bucket D)** — ONLY if profile data shows
+   attention dominating. Codex Q3: "real long-context cost is N·L,
+   not N²/2. FFN/projection weight traffic is the larger structural
+   waste first. Don't touch attn_v4 until profile data forces it —
+   it's already delicate, adding an N axis to m/l/o state is exactly
+   the kind of change that can pass short-context tests and fail at
+   partition boundaries."
+
+**H5.3b gate**: every optimized kernel keeps cosine ≥ 0.9999 against
+the naive H5.3a baseline.
+
+### H5.4 — (folded into H5.3a)
+
+`restore_after_partial_accept` originally a separate phase, now lands
+inside H5.3a. The checkpoint contract isn't actually testable without
+the restore primitive — H5.3a gate G3 (checkpoint replay equivalence)
+requires it. Per codex partner session: "build the rollback contract
+in the same phase that ships the checkpoints; the rest is unverifiable
+without it."
+
+The bit-exactness test that previously lived in H5.4 (test 2 above) is
+H5.3a gate G3 + G6 combined.
 
 ### H5.5 — End-to-end DFlash decode + bench
 
@@ -974,7 +1076,45 @@ the failure:
 
 ## Document history
 
-- **rev 3 (current).** Open-ended codex review after H5.0 + H5.1
+- **rev 4 (current).** Open-ended codex partner session after H5.2.5
+  GREEN — re-sequenced H5.3 before any code shipped.
+  - **H5.3 split into H5.3a (correctness scaffold) + H5.3b (perf
+    pass).** Same playbook as the rev-3 H5.2.5 pivot. Codex called the
+    front-loaded "Bucket A → E → C-naive → D-naive → B" ordering as
+    "risks getting a pretty packed API that cannot roll back."
+  - **H5.3a is naive: N successive single-token encodes inside one
+    command buffer, blit checkpoints between tokens.** Allowed to be
+    slow. Deliverable is the production API + bit-exactness, not
+    throughput. H5.3b is the perf pass (tiled Q4_K mat-mat first).
+  - **H5.4 (rollback primitive) folded into H5.3a.** Checkpoint contract
+    isn't testable without restore — gate G3 (checkpoint replay
+    equivalence) requires it. The H5.4 bit-exactness test moves into
+    G3 + G6.
+  - **§H5.3a `MetalDFlashVerifyScratch` expansion**: not just outputs;
+    also owns target-side N-shaped activations (packed_ids_buf, x_pack,
+    h_pack, q/k/v/o pack, ffn pack, debug logits). Codex Q5 expansion.
+  - **§H5.3a per-token checkpoint via Metal blit copies, NOT a compute
+    "ckpt_write" kernel.** 2.3 GiB SSM checkpoint is bulk contiguous
+    memory — blits use GPU DMA engines, faster than dispatch + faster
+    than a compute copy. Codex Q4 v1 design (ii) refinement.
+  - **§H5.3a `packed_ids_buf: [N]` is mandatory.** Catches the failure
+    mode codex predicted: reusing single-token `ids_buf` inside the
+    packed encode loop means every queued `get_rows` reads the
+    last-written CPU value (CPU mutations don't sequence with the
+    GPU encode). Would have shipped as a silent bug.
+  - **§H5.3a 7-gate suite** (was 1 in rev 3): packed-vs-single cosine,
+    final state equivalence, checkpoint replay equivalence, hidden
+    capture layout, GPU argmax vs debug logits, restore boundary cases,
+    nonzero start_pos / partition exercise. Anti-regression assertion
+    that production `packed_forward` does not read back `[N, V]`.
+  - **§H5.3b ordering = tiled Q4_K mat-mat → internalized GDN → packed
+    attn-v4 (only if profile demands).** Codex Q3: "real long-context
+    cost is N·L not N²/2; FFN/projection weight traffic is the larger
+    structural waste first. Don't touch attn_v4 — adding an N axis to
+    m/l/o state can pass short-ctx tests and fail at partition
+    boundaries."
+
+- **rev 3.** Open-ended codex review after H5.0 + H5.1
   shipped, then a follow-up codex partner session pressure-tested the
   v1 hybrid Metal drafter design before commit.
   - **H5.1.5 demoted** from "DFlash correctness gate" to "plumbing

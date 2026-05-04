@@ -434,6 +434,143 @@ impl<'a> MetalForward<'a> {
     /// Caller must ensure `hidden_dst` is not aliased with any tensor
     /// the next forward call writes (typically allocate it as part of
     /// the MTP session arena).
+    /// Multi-layer hidden-state capture variant of [`single_token`].
+    /// Captures the residual stream `s.x` (post-FFN, post-residual) at
+    /// each layer index in `target_layer_ids`, writing into the
+    /// caller-supplied `hidden_dst` of shape `[K · H]` where
+    /// `K = target_layer_ids.len()`.
+    ///
+    /// Captured layout: `hidden_dst[k * H .. (k+1) * H]` holds the
+    /// residual after `target_layer_ids[k]` runs (in the same K order
+    /// the caller specified, NOT sorted by layer index).
+    ///
+    /// All scatters happen inside the same command buffer as the
+    /// forward, so `hidden_dst` is up-to-date by the time this returns.
+    /// `target_layer_ids` may be empty (degenerate case: produces no
+    /// hidden capture; equivalent to `single_token`).
+    ///
+    /// Used by H5 to bootstrap `target_ctx` from prompt prefill: per
+    /// docs/H5-DFLASH.md §1.1, the DFlash drafter consumes K=5 target
+    /// layer hiddens fused via `dflash_fc`. Caller is responsible for
+    /// stacking these K hiddens into the final
+    /// `[K · H_target, ctx_len]` cross-context buffer.
+    pub fn single_token_with_multi_hidden(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        hidden_dst: &MetalTensor,
+    ) -> Result<Vec<f32>, MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let k = target_layer_ids.len();
+        if hidden_dst.n_elements() as usize != k * h {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_multi_hidden.hidden_dst",
+                detail: format!(
+                    "expected {} elements (K={k} layers × H={h}), got {}",
+                    k * h,
+                    hidden_dst.n_elements()
+                ),
+            }));
+        }
+        for &lid in target_layer_ids {
+            if (lid as usize) >= self.model.blocks.len() {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_with_multi_hidden.target_layer_ids",
+                    detail: format!("layer id {lid} >= n_layer {}", self.model.blocks.len()),
+                }));
+            }
+        }
+
+        // Stage token id.
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        // Embed → s.x.
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        // Per-block, capturing at requested layer indices AFTER each
+        // block's residual #2 (s.x is the post-FFN residual, exactly
+        // matching the CPU `single_token_capture_layers` capture point).
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            self.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position,
+                session,
+            )?;
+            // Capture at any (possibly multiple) target_layer_ids slot
+            // matching this block. Scatters run inline with the rest of
+            // the command buffer; reads s.x BEFORE the next block writes
+            // it, which is required since s.x is reused per layer.
+            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                if lid as usize == il {
+                    encode_scatter_offset_f32(
+                        self.ctx,
+                        &enc,
+                        &session.x,
+                        hidden_dst,
+                        k_idx * h,
+                        h,
+                    )?;
+                }
+            }
+        }
+
+        // Final RMSNorm + lm_head — produces final logits as usual.
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            &enc,
+            &session.x,
+            &self.model.output_norm,
+            &session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            &enc,
+            &self.model.lm_head,
+            &session.h,
+            &session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+
+        enc.end();
+        cmd_buf.commit();
+        unsafe { cmd_buf.waitUntilCompleted() };
+
+        let mut logits = vec![0.0f32; arch.vocab_size as usize];
+        unsafe {
+            let src = session.logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
+        }
+        Ok(logits)
+    }
+
     pub fn single_token_with_hidden(
         &self,
         token_id: i32,
@@ -1842,6 +1979,125 @@ mod tests {
         assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
         assert!(cos > 0.9999, "cos={cos} below threshold");
         assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
+    }
+
+    /// **H5.2** — Metal multi-layer hidden capture matches CPU oracle.
+    /// Reads hiddens at K layer indices via Metal in one command buffer,
+    /// then captures the same hiddens via the CPU
+    /// `single_token_capture_layers` reference. Cosine ≥ 0.9999 per
+    /// captured layer (Q4_K_M + Q6_K weights through F32 norms +
+    /// elementwise residual chain — same noise floor as the single-token
+    /// oracle test above).
+    ///
+    /// Skipped on the F32 0.8B model since its layer count (24) does
+    /// fit `target_layer_ids = [1, 16, 31, 46, 61]` which is a 27B-style
+    /// list. We use [1, 5, 10, 15, 23] for the 0.8B variant — different
+    /// indices, same shape K=5.
+    #[test]
+    fn metal_multi_hidden_matches_cpu() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[metal-multi-hidden] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        let h = m.arch.hidden_size as usize;
+        let target_layer_ids: Vec<u32> = vec![1, 5, 10, 15, 23];
+        let k = target_layer_ids.len();
+        let token_id = 9419i32; // "Hello"
+        let position = 0u32;
+
+        // Metal capture.
+        let mf = MetalForward::new(&ctx, &mm);
+        let mut sm = MetalSession::fresh(&ctx, &mm, 256).expect("session-m");
+        let hidden_dst = MetalTensor::zeros_f32(&ctx, vec![(k * h) as u64]).expect("hidden_dst");
+        let _logits_metal = mf
+            .single_token_with_multi_hidden(
+                token_id,
+                position,
+                &mut sm,
+                &target_layer_ids,
+                &hidden_dst,
+            )
+            .expect("metal multi-hidden");
+        // Read back hidden_dst.
+        let mut metal_hidden = vec![0.0f32; k * h];
+        unsafe {
+            let src = hidden_dst.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, metal_hidden.as_mut_ptr(), metal_hidden.len());
+        }
+
+        // CPU capture via the existing oracle.
+        let cpu = crate::forward::Forward::new(&g, &m);
+        let mut cpu_state = crate::forward::GdnState::fresh(&m);
+        let mut cpu_kv = crate::forward::KvCache::new(&m);
+        let cpu_hidden = cpu
+            .single_token_capture_layers(
+                token_id,
+                position,
+                &mut cpu_state,
+                &mut cpu_kv,
+                &target_layer_ids,
+            )
+            .expect("cpu multi-hidden");
+        assert_eq!(metal_hidden.len(), cpu_hidden.len());
+
+        // Compare per-layer cosine + max|Δ|.
+        for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+            let off = k_idx * h;
+            let mh = &metal_hidden[off..off + h];
+            let ch = &cpu_hidden[off..off + h];
+            let mut dot = 0.0f64;
+            let mut na = 0.0f64;
+            let mut nb = 0.0f64;
+            let mut max_abs = 0.0f32;
+            for i in 0..h {
+                dot += mh[i] as f64 * ch[i] as f64;
+                na += (mh[i] as f64).powi(2);
+                nb += (ch[i] as f64).powi(2);
+                max_abs = max_abs.max((mh[i] - ch[i]).abs());
+            }
+            let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+            eprintln!(
+                "[metal-multi-hidden] k={k_idx} (layer {lid}): cos={cos:.6} max|Δ|={max_abs:.4}"
+            );
+            assert!(
+                cos > 0.9999,
+                "k={k_idx} layer {lid}: cos {cos} below threshold"
+            );
+            assert!(
+                mh.iter().all(|x| x.is_finite()),
+                "k={k_idx} layer {lid}: NaN/Inf in metal hidden"
+            );
+            // 0.8B-F32 has effectively zero quant noise; bound tight.
+            assert!(
+                max_abs < 1e-2,
+                "k={k_idx} layer {lid}: max|Δ| {max_abs} above F32 noise floor"
+            );
+        }
+
+        // Sanity: hiddens at different layers must NOT be identical
+        // (catches a layout bug where we'd accidentally write the same
+        // layer's residual into all K slots).
+        for k_idx in 0..k - 1 {
+            let a = &metal_hidden[k_idx * h..(k_idx + 1) * h];
+            let b = &metal_hidden[(k_idx + 1) * h..(k_idx + 2) * h];
+            let identical = a.iter().zip(b.iter()).all(|(x, y)| x == y);
+            assert!(
+                !identical,
+                "captured hiddens at k={k_idx} and k={} are identical — multi-hidden layout bug",
+                k_idx + 1
+            );
+        }
     }
 
     /// Same as `metal_gdn_block_matches_cpu` but for 27B-Q4_K_M block 0.

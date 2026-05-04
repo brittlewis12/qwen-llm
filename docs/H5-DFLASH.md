@@ -604,22 +604,40 @@ SWA is needed for correct output distribution per spiritbuun.
    - Final `output_norm` → target's `lm_head` → argmax → `[N]` tokens.
 2. SWA mask construction (host-side, uploaded per outer step).
 
-### H5.1.5 — Metal-vs-CPU drafter cosine gate (mandatory)
+### H5.1.5 — Plumbing cosine gate (Metal-vs-CPU on the hybrid impl)
 
-Finiteness alone is too weak. Add a bit-exactness test before any
-infrastructure that depends on the drafter's distribution being
-correct:
+A plumbing test, NOT a DFlash correctness gate. The hybrid v1 of
+`DFlashDecoder::draft_block` runs Metal-resident kernels for
+projections + RMSNorms + RoPE and falls back to CPU for the
+asymmetric SWA-masked attention + SwiGLU FFN. The cosine vs CPU
+oracle therefore tests that:
+
+* drafter weight tensors are scoped to the drafter GGUF (catches the
+  cross-GGUF dequant bug class)
+* `target_ctx_stacked` column layout, `pos_ctx` ordering, row
+  slicing, and shared-target-lm_head wiring are coherent
+* per-call command-buffer encode + readback rhythm doesn't introduce
+  ordering hazards
+
+It does NOT validate the drafter's actual *distribution* — most of
+the per-layer compute that determines logits (attention with SWA
+mask + FFN silu_mul) runs on CPU on both paths. The H5.5 greedy
+equivalence test + the H5.2.5 measured α are the real correctness +
+usefulness gates. **If H5.1.5 cosine fails, suspect plumbing
+(buffers, scoping, layout). If H5.2.5 α is bad, suspect algorithm
+(SWA mask, hidden capture, recipe).**
 
 1. Pick a deterministic 4-token prompt (`"The quick brown fox"`).
 2. Run target prefill on Metal AND CPU; capture multi-layer hiddens
    at `target_layer_ids` from each.
-3. Run `DFlashDecoder::draft_block` (Metal) AND `Forward::dflash_draft`
-   (CPU) with the same `(noise_ids, target_ctx_stacked)` inputs.
-4. Pass criterion: cosine ≥ 0.9999 between Metal and CPU draft logits
-   at every noise position. Argmax must match.
+3. Run `DFlashDecoder::draft_block` (Metal hybrid) AND
+   `Forward::dflash_draft` (CPU oracle) with the same
+   `(noise_ids, target_ctx_stacked)` inputs.
+4. Pass criterion: cosine ≥ 0.9999 between Metal hybrid and CPU draft
+   logits at every noise position. Argmax must match.
 
-This is the same pattern that caught the cross-GGUF bug at H5.1
-(round-2 codex review).
+A separate cheap CPU-vs-MLX trace equivalence check (H5.6) tests the
+algorithm independently of the Metal dispatch.
 
 ### H5.2 — Multi-layer target hidden capture (single-token first)
 
@@ -957,7 +975,18 @@ the failure:
 ## Document history
 
 - **rev 3 (current).** Open-ended codex review after H5.0 + H5.1
-  shipped. Insertions:
+  shipped, then a follow-up codex partner session pressure-tested the
+  v1 hybrid Metal drafter design before commit.
+  - **H5.1.5 demoted** from "DFlash correctness gate" to "plumbing
+    cosine gate" — most of the per-layer compute (attention + FFN
+    silu_mul) is identical CPU code on both paths, so cosine doesn't
+    actually validate the SWA-mask algorithm. Algorithmic check
+    moves to a CPU-vs-MLX trace equivalence (part of H5.6).
+  - **v1 hybrid drafter** explicitly labeled as a debug scaffold,
+    not a perf path. Native Q8_0 storage and SWA Metal kernel both
+    deferred to H5.3 — both are real wins, neither helps the H5.2.5
+    α measurement.
+  Insertions:
   - **H5.1.5 Metal-vs-CPU drafter cosine gate** — finiteness alone
     proved too weak in the cross-GGUF dequant bug (caught by codex
     in H5.1).

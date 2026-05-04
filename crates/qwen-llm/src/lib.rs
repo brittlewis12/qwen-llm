@@ -29,6 +29,7 @@ pub mod forward;
 pub mod gguf;
 pub mod loader;
 pub mod metal;
+pub mod metal_dflash;
 pub mod metal_forward;
 pub mod metal_mtp;
 pub mod model;

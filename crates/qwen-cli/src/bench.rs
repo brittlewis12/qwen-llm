@@ -292,32 +292,52 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let spec_generated = &result.tokens[prompt_ids.len()..];
     let identical = ref_generated == spec_generated;
 
+    // Apples-to-apples reporting. The earlier version mixed phases —
+    // comparing MTP=off decode-only t/s (excludes prefill) with
+    // MTP=on overall t/s (includes prefill) made the regression look
+    // worse than it was. Wall-time-vs-wall-time is the honest signal.
+    let ref_decode_only_tps = ref_emitted as f64 / (ref_decode_ms / 1000.0);
+    let ref_total_tps = ref_emitted as f64 / (ref_total_ms / 1000.0);
+    let spec_total_tps = spec_emitted as f64 / (spec_total_ms / 1000.0);
+    let _ = ref_decode_tps; // unused (replaced by ref_decode_only_tps)
+    let _ = spec_decode_tps; // unused (replaced by spec_total_tps for clarity)
+
     eprintln!();
     eprintln!("[mtp-bench] === results ===");
     eprintln!(
-        "[mtp-bench] MTP=off: {ref_emitted} tokens in {ref_decode_ms:.1} ms decode + \
-         {ref_prefill_ms:.1} ms prefill = {ref_total_ms:.1} ms total \
-         ({ref_decode_tps:.2} t/s decode)"
+        "[mtp-bench] MTP=off: {ref_emitted} tokens, prefill {ref_prefill_ms:.1} ms + \
+         decode {ref_decode_ms:.1} ms = {ref_total_ms:.1} ms total"
     );
     eprintln!(
-        "[mtp-bench] MTP=on : {spec_emitted} tokens in {spec_total_ms:.1} ms total \
-         ({spec_decode_tps:.2} t/s overall)"
+        "[mtp-bench]   t/s: decode-only {ref_decode_only_tps:.1} | total \
+         {ref_total_tps:.1}"
     );
     eprintln!(
-        "[mtp-bench]    α (acceptance rate) = {:.3}    steps={}    accepted={}",
+        "[mtp-bench] MTP=on : {spec_emitted} tokens, {spec_total_ms:.1} ms total \
+         (prefill + decode lumped — spec_decode internally streams MTP-KV \
+         prefill alongside base prefill)"
+    );
+    eprintln!("[mtp-bench]   t/s: total {spec_total_tps:.1}");
+    eprintln!(
+        "[mtp-bench]   α (acceptance rate) = {:.3}   steps={}  accepted={}",
         result.stats.acceptance_rate(),
         result.stats.steps,
         result.stats.accepted,
     );
     eprintln!(
-        "[mtp-bench]    base_calls={}  mtp_calls={} (= prefill + drafts + bridges)",
+        "[mtp-bench]   base_calls={}  mtp_calls={} \
+         (= prompt prefill + step-B drafts + step-E bridges)",
         result.stats.base_forward_calls, result.stats.mtp_calls,
     );
 
-    let speedup = ref_total_ms / spec_total_ms;
+    // Wall-time speedup: total-vs-total, the apples-to-apples ratio that
+    // matches docs/H4-MTP.md §3.2's `1/(1+ε)` prediction. The earlier
+    // 'decode-only-vs-total' phrasing was misleading — let people see
+    // both interpretations.
+    let total_speedup = ref_total_ms / spec_total_ms;
     eprintln!(
-        "[mtp-bench]    speedup = {ref_total_ms:.1} / {spec_total_ms:.1} = {speedup:.3}× \
-         (>1.0 means MTP wins)"
+        "[mtp-bench]   speedup (total ms): {ref_total_ms:.1} / {spec_total_ms:.1} = \
+         {total_speedup:.3}× (>1.0 means MTP wins)"
     );
 
     eprintln!(

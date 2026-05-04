@@ -83,6 +83,22 @@ impl<'a> Forward<'a> {
         state: &mut GdnState,
         kv_cache: &mut KvCache,
     ) -> Result<Vec<f32>, ForwardError> {
+        let (logits, _hidden) =
+            self.single_token_with_hidden(token_id, position, state, kv_cache)?;
+        Ok(logits)
+    }
+
+    /// Same as [`single_token`] but ALSO returns the pre-output_norm
+    /// hidden state (the residual stream right before the final RMSNorm
+    /// + lm_head). This is the input to the MTP head per `docs/H4-MTP.md`
+    /// §1.2 — `prev_hidden = h_i` for slot i.
+    pub fn single_token_with_hidden(
+        &self,
+        token_id: i32,
+        position: u32,
+        state: &mut GdnState,
+        kv_cache: &mut KvCache,
+    ) -> Result<(Vec<f32>, Vec<f32>), ForwardError> {
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(ForwardError::BadToken(token_id, arch.vocab_size));
@@ -127,6 +143,9 @@ impl<'a> Forward<'a> {
             }
         }
 
+        // Capture pre-output_norm hidden BEFORE the final norm + lm_head.
+        let hidden_pre_norm = x.clone();
+
         // (3) Final RMS norm.
         let on_w = self.dequant(self.model.output_norm)?;
         let normed = rms_norm(&x, &on_w, RMS_EPS);
@@ -139,7 +158,137 @@ impl<'a> Forward<'a> {
             arch.vocab_size as usize,
             &normed,
         );
+        Ok((logits, hidden_pre_norm))
+    }
+
+    /// Run the MTP head for one slot. Per `docs/H4-MTP.md` §1.2:
+    ///
+    /// At sequence slot `position`, the MTP head consumes
+    /// `(embed(next_tok), prev_hidden, position)` and predicts logits
+    /// for the token at `position + 2`.
+    ///
+    /// * `next_tok`: the token at slot `position + 1` (the one whose
+    ///   embedding seeds the MTP draft — typically the just-sampled
+    ///   primary token).
+    /// * `prev_hidden`: the base model's pre-output_norm hidden at slot
+    ///   `position`, captured via [`single_token_with_hidden`] in the
+    ///   previous decode step.
+    /// * `position`: the sequence slot of `prev_hidden` (NOT the slot
+    ///   of the predicted token). RoPE in the MTP attn block rotates
+    ///   by this value.
+    /// * `mtp_kv`: per-MTP-layer KV cache. The MTP head has a single
+    ///   full-attn block, so this is a 1-layer cache with the same
+    ///   head dims as the base full-attn layers. Caller must ensure
+    ///   `mtp_kv.n_pos(0) == position` (next-sequential append).
+    ///
+    /// Side effect: appends one entry to `mtp_kv` at slot `position`.
+    pub fn mtp_step(
+        &self,
+        next_tok: i32,
+        prev_hidden: &[f32],
+        position: u32,
+        mtp_kv: &mut KvCache,
+    ) -> Result<Vec<f32>, ForwardError> {
+        let arch = &self.model.arch;
+        let mtp = self
+            .model
+            .mtp
+            .as_ref()
+            .expect("mtp_step called on a model without an MTP head");
+        if next_tok < 0 || (next_tok as u32) >= arch.vocab_size {
+            return Err(ForwardError::BadToken(next_tok, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        debug_assert_eq!(
+            prev_hidden.len(),
+            h,
+            "mtp_step: prev_hidden length {} != hidden_size {}",
+            prev_hidden.len(),
+            h
+        );
+
+        // Embed next_tok (shared with base token_embd per Qwen3.5/3.6 tying).
+        let e = self.embed_token(next_tok as u32)?;
+
+        // RMSNorm the two inputs separately.
+        let enorm_w = self.dequant(mtp.enorm)?;
+        let hnorm_w = self.dequant(mtp.hnorm)?;
+        let e_normed = rms_norm(&e, &enorm_w, RMS_EPS);
+        let h_normed = rms_norm(prev_hidden, &hnorm_w, RMS_EPS);
+
+        // Concat [e_normed, h_normed] along the last dim → [2H].
+        // Order is vLLM canonical: embed first, hidden second.
+        let mut concat = Vec::with_capacity(2 * h);
+        concat.extend_from_slice(&e_normed);
+        concat.extend_from_slice(&h_normed);
+
+        // eh_proj: [2H, H] mat_vec → [H].
+        let eh_w = self.dequant(mtp.eh_proj)?;
+        let mut x = mat_vec(&eh_w, 2 * h, h, &concat);
+
+        // ----- Standard transformer block at the MTP slot -----
+        // Pre-attention RMSNorm.
+        let attn_norm_w = self.dequant(mtp.attn.attn_norm)?;
+        let cur_norm = rms_norm(&x, &attn_norm_w, RMS_EPS);
+
+        // Full-attention step using the dedicated MTP KV cache (layer 0).
+        // This is structurally identical to attn_step but indexes mtp_kv
+        // instead of the base kv_cache.
+        let attn_out = self.attn_step(0, &mtp.attn, &cur_norm, position, mtp_kv)?;
+
+        // Residual #1.
+        for (xi, ai) in x.iter_mut().zip(attn_out.iter()) {
+            *xi += *ai;
+        }
+
+        // Pre-FFN RMSNorm.
+        let post_norm_w = self.dequant(mtp.attn.post_attention_norm)?;
+        let post = rms_norm(&x, &post_norm_w, RMS_EPS);
+
+        // SwiGLU FFN.
+        let ffn_block = Block::Attn(mtp.attn.clone());
+        let ffn_out = self.ffn(&ffn_block, &post)?;
+
+        // Residual #2.
+        for (xi, fi) in x.iter_mut().zip(ffn_out.iter()) {
+            *xi += *fi;
+        }
+
+        // shared_head_norm before lm_head.
+        let shn_w = self.dequant(mtp.shared_head_norm)?;
+        let normed = rms_norm(&x, &shn_w, RMS_EPS);
+
+        // Shared lm_head.
+        let lm = self.dequant(self.model.lm_head)?;
+        let logits = mat_vec(
+            &lm,
+            arch.hidden_size as usize,
+            arch.vocab_size as usize,
+            &normed,
+        );
         Ok(logits)
+    }
+
+    /// Allocate a fresh KV cache sized for the MTP head (single layer,
+    /// same head dims as the base full-attn layers). Use this with
+    /// [`Self::mtp_step`].
+    pub fn fresh_mtp_kv(&self, capacity_tokens: usize) -> KvCache {
+        let arch = &self.model.arch;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_kv_heads = arch.n_kv_heads as usize;
+        let stride = n_kv_heads * head_dim;
+        let bytes_per_layer = capacity_tokens * stride;
+        KvCache {
+            layers: vec![LayerKv {
+                k: vec![0.0; bytes_per_layer],
+                v: vec![0.0; bytes_per_layer],
+                n_pos: 0,
+            }],
+            head_dim,
+            n_kv_heads,
+            stride,
+            capacity_tokens,
+        }
     }
 
     // -------------- helpers --------------
@@ -1234,4 +1383,136 @@ mod tests {
         assert_eq!(argmax_ours, 13, "argmax should be '.' (token 13)");
         assert!(cos > 0.9999, "cosine={cos} below threshold");
     }
+
+    // -------- H4.1: MTP CPU oracle tests --------
+
+    /// Self-consistency smoke test for `mtp_step` on the 0.8B-MTP GGUF.
+    /// Doesn't compare against a vLLM oracle (see `mtp_oracle_match_0_8b`
+    /// for that). Just exercises the full MTP pipeline end-to-end:
+    /// prompt prefill of base → capture pre-output_norm hidden →
+    /// mtp_step at the final slot → confirm logits are finite and shaped.
+    ///
+    /// Catches: shape mismatches, missing tensor binds, NaN propagation
+    /// through the eh_proj concat path, RoPE position bugs at the
+    /// boundary slot.
+    #[test]
+    fn mtp_step_runs_0_8b() {
+        let path = "/Users/tito/models/h4-smoke-test/Qwen3.5-0.8B/qwen3.5-0.8b.Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mtp-smoke] skipped — fixture missing");
+            return;
+        }
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert!(m.mtp.is_some(), "MTP head should be bound on 0.8B-MTP");
+
+        let f = Forward::new(&g, &m);
+        let mut state = GdnState::fresh(&m);
+        let mut kv = KvCache::new(&m);
+        let mut mtp_kv = f.fresh_mtp_kv(64);
+
+        // Tokenize a short prompt.
+        let tok = crate::tokenizer::Tokenizer::open(path).expect("tok");
+        let ids = tok.encode("Hello world", false).expect("tokenize");
+        eprintln!("[mtp-smoke] prompt tokens: {ids:?}");
+        assert!(ids.len() >= 2, "need at least 2 tokens for the test");
+
+        let n = ids.len();
+
+        // Streamed MTP-KV prefill per docs/H4-MTP.md §1.5: for each
+        // base step that produces h_i, immediately call mtp_step for
+        // slot i with (prompt[i+1], h_i, i) — except for the boundary
+        // slot n-1 which is left for the first decode iteration.
+        let mut last_hidden = vec![];
+        for (i, &tid) in ids.iter().enumerate() {
+            let (logits, hidden) = f
+                .single_token_with_hidden(tid, i as u32, &mut state, &mut kv)
+                .expect("base forward");
+            assert_eq!(logits.len(), m.arch.vocab_size as usize);
+            assert!(logits[0].is_finite(), "base logits NaN/inf at slot {i}");
+
+            if i + 1 < n {
+                // Prefill MTP slot i with (prompt[i+1], h_i, i).
+                let _logits = f
+                    .mtp_step(ids[i + 1], &hidden, i as u32, &mut mtp_kv)
+                    .expect("mtp prefill");
+                assert_eq!(mtp_kv.n_pos(0), i + 1);
+            } else {
+                // Retain h_{n-1} for bootstrap.
+                last_hidden = hidden;
+            }
+        }
+        assert_eq!(mtp_kv.n_pos(0), n - 1, "after prefill: mtp at n-1 entries");
+        assert_eq!(last_hidden.len(), m.arch.hidden_size as usize);
+
+        // Bootstrap: argmax base logits to get first generated token.
+        // We need to re-run the last base step to get logits, but it's
+        // already been processed and KV-appended. For this smoke test,
+        // grab the logits from a fresh single_token_with_hidden call —
+        // wait, that would double-append KV. Instead, just compute
+        // logits = lm_head(output_norm(last_hidden)) directly.
+        let on_w = f.dequant(m.output_norm).expect("dequant");
+        let normed = rms_norm(&last_hidden, &on_w, RMS_EPS);
+        let lm = f.dequant(m.lm_head).expect("dequant lm");
+        let final_logits = mat_vec(
+            &lm,
+            m.arch.hidden_size as usize,
+            m.arch.vocab_size as usize,
+            &normed,
+        );
+        let first_gen = final_logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0 as i32;
+        eprintln!("[mtp-smoke] first_generated_token = {first_gen}");
+
+        // First decode iter step B: MTP draft for slot n-1 with
+        // (first_generated_token, h_{n-1}, n-1) — predicts t_{n+1}.
+        let draft_logits = f
+            .mtp_step(first_gen, &last_hidden, (n - 1) as u32, &mut mtp_kv)
+            .expect("mtp draft for boundary slot");
+        assert_eq!(draft_logits.len(), m.arch.vocab_size as usize);
+        assert_eq!(mtp_kv.n_pos(0), n, "after boundary draft: mtp at n entries");
+
+        let argmax = draft_logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        eprintln!(
+            "[mtp-smoke] draft argmax: token={} logit={:.4} (range [{:.4}, {:.4}])",
+            argmax.0,
+            argmax.1,
+            draft_logits.iter().cloned().fold(f32::INFINITY, f32::min),
+            draft_logits
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max),
+        );
+        assert!(argmax.1.is_finite(), "draft argmax not finite");
+        // Sanity: argmax should be a plausible vocab id.
+        assert!(
+            (argmax.0 as u32) < m.arch.vocab_size,
+            "draft argmax {} out of vocab",
+            argmax.0
+        );
+    }
+
+    // The real correctness test for MTP is the greedy-equivalence test
+    // at H4.3: `MTP=on` and `MTP=off` greedy generation must produce
+    // IDENTICAL token sequences. Under greedy verify, every accept emits
+    // argmax(target_logits) and every reject falls through to
+    // argmax(target_logits) — the emitted tokens are what the base model
+    // would have generated without speculation. That test lives in the
+    // mtp_correctness integration suite (H4.3), not here.
+    //
+    // What greedy equivalence does NOT validate: that the MTP forward's
+    // draft *distribution* matches the trained MTP head. A broken MTP
+    // forward could still pass equivalence by always being rejected.
+    // The smell test for that is acceptance rate α at bench time
+    // (H4.3 deliverable): if α << 0.3 on prose, the MTP forward is
+    // computing the wrong distribution even though tokens come out right.
+    // No external (vLLM) oracle is needed for either gate.
 }

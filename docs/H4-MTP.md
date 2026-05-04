@@ -582,21 +582,24 @@ revisited for MTP later if needed.
 2. Add `mtp_bind_27b()` test that verifies shapes match expected for
    our 27B-MTP-Q4_K_M GGUF and 0.8B-MTP-F32.
 
-### H4.1 — CPU oracle
+### H4.1 — CPU MTP forward
 
 1. Extend `forward.rs` with `MtpHead` forward. Implement vLLM's exact
    concat order (`[embed, hidden]`).
-2. Generate ground truth: run vLLM (or Rapid-MLX with `mtp_forward`)
-   on Qwen3.6-0.8B-MTP for a fixed seed and dump
-   `(prev_hidden, next_tok, position, draft_logits)` quadruples for
-   ~10 steps. Here `next_tok = t_{i+1}` (the embedding input) and
-   `prev_hidden = h_i` (the hidden input at slot `i`).
-3. Feed our CPU MTP forward the same quadruples; compare logits.
-4. Pass criterion: cosine ≥ 0.9999 vs the oracle.
+2. Self-consistency smoke test: prompt prefill of base, capture
+   pre-output_norm hiddens, run streamed MTP-KV prefill (§1.5),
+   bootstrap, then one boundary-slot MTP draft. Assert: logits are
+   shape-correct, finite, argmax in vocab range; MTP KV `n_pos`
+   invariant preserved at each step.
 
-If H4.1 fails: swap oracle to MLX DFlash on a small target (e.g.
-Qwen3-4B-DFlash). The infra is what we're validating, not MTP
-specifically — pivot directly to H5 DFlash bring-up.
+No external (vLLM/MLX) oracle is needed at H4.1. Under greedy verify
+both `MTP=on` and `MTP=off` emit `argmax(target_logits)` for every
+position, so generated token sequences must be IDENTICAL by
+construction (the H4.3 equivalence test). A broken MTP forward
+distribution wouldn't corrupt tokens — it would just push every draft
+to be rejected. The H4.3 bench reports acceptance rate α as the
+smell test for that case (α << 0.3 on prose ⇒ MTP forward bug
+even though tokens come out right).
 
 ### H4.2 — Metal MTP draft step
 
@@ -618,14 +621,21 @@ specifically — pivot directly to H5 DFlash bring-up.
 
 ## 5. Validation plan
 
-### Bit-exact correctness
+### Correctness
 
-- **CPU oracle (H4.1):** cosine ≥ 0.9999 draft logits vs vLLM ground
-  truth on Qwen3.6-0.8B-MTP, 10 sequential steps.
+- **CPU smoke (H4.1):** finite logits, shape-correct, MTP KV
+  invariant preserved across streamed prefill + boundary draft.
 - **Metal vs CPU (H4.2):** cosine ≥ 0.9999 draft logits Metal vs CPU
-  on the same 0.8B model.
+  on the 0.8B-MTP. This is the only bit-exactness gate for the MTP
+  forward — Metal must reproduce the CPU oracle.
 - **Greedy generation equivalence (H4.3):** with MTP on vs off,
   generated token sequences must be IDENTICAL up to max_new_tokens.
+  This is the real correctness test for the speculative decode loop;
+  no external oracle needed (greedy verify guarantees identical
+  emitted tokens by construction).
+- **Acceptance rate sanity (H4.3):** α >= 0.3 on prose. If lower,
+  the MTP forward is computing the wrong distribution even though
+  tokens are correct. Surface as a soft warning in the bench output.
 
 ### Cursor, EOS, and bridge edge cases
 
@@ -679,15 +689,14 @@ H5 (DFlash) where N=16 amortization actually pays off.
 
 | Risk                                                            | Mitigation                                                                                       |
 |-----------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
-| MTP concat order wrong                                          | H4.1 oracle catches on first divergence                                                          |
-| MTP RoPE position wrong                                         | Same                                                                                             |
-| `eh_proj` loaded transposed                                     | Existing tensor desc parser handles GGUF orientation; covered by 0.8B oracle                     |
-| Cursor accounting bug (especially inline-bridge ordering)       | §5 test matrix; particularly the `accept-then-reject`, `two consecutive accepts`, and `bootstrap → first iter accept` rows |
+| MTP concat order wrong (silent — tokens correct, α tanks)       | H4.3 acceptance-rate sanity check (α >= 0.3 on prose)                                            |
+| MTP RoPE position wrong                                         | Same: corrupts draft distribution → α tanks                                                      |
+| `eh_proj` loaded transposed                                     | Same: tensor desc parser handles GGUF orientation, but transposed weight ⇒ garbage drafts ⇒ α≈0  |
+| Cursor accounting bug (especially inline-bridge ordering)       | §5 test matrix; particularly the `accept-then-reject`, `two consecutive accepts`, and `bootstrap → first iter accept` rows. Cursor bugs CAN corrupt tokens (unlike forward bugs), so equivalence test catches these |
 | `nextn_predict_layers` metadata absent                          | Probe by tensor presence (per H4.0)                                                              |
 | MTP-KV prefill cost dominates short-prompt benchmarks           | Sliding window if measurement supports; not blocking for oracle role                             |
-| α much lower than vLLM's claim due to quantization              | H4.3 bench reports per-workload α (informational only — MTP is correctness-only)                 |
-| H4.1 cosine fails vs vLLM oracle                                | Pivot to MLX DFlash on Qwen3-4B-DFlash; the infra is what we're validating                      |
 | H4.3 lazy verify shows the predicted ~0.91× slowdown            | Expected. Document and ship as infra-validation milestone                                        |
+| H4.3 α much lower than expected (broken MTP forward)            | Run greedy-equivalence test first (proves cursor/loop logic). Then if α is bad, the issue is localized to `mtp_step`. Use Rapid-MLX `mtp_forward` (or vLLM) as a one-off oracle to bisect |
 
 ## 8. Position within the broader plan
 

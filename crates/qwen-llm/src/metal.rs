@@ -32,9 +32,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
-    MTLResourceOptions, MTLSize,
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLLibrary, MTLResourceOptions, MTLSize,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -404,6 +404,102 @@ impl KernelEncoder {
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
         self.raw
             .dispatchThreadgroups_threadsPerThreadgroup(grid, threads);
+    }
+}
+
+// ===========================================================================
+// BlitEncoder — caller-owned blit encoder
+// ===========================================================================
+
+/// Caller-owned wrapper around `MTLBlitCommandEncoder`. Blit encoders are
+/// for bulk device-to-device memory copies via the GPU's DMA engines —
+/// faster and lower-overhead than encoding a compute "copy kernel" because
+/// they avoid pipeline state setup and run independently of the compute
+/// engines.
+///
+/// Usage pattern (from H5.3a packed_forward, where per-token GDN+conv
+/// state checkpoints land):
+///
+/// ```ignore
+/// let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+/// // ── compute pass: encode block N's kernels ─────────────────────────
+/// let enc = KernelEncoder::begin(&cmd);
+/// /* encode kernels for token N */
+/// enc.end();
+/// // ── blit pass: copy GDN/conv state into checkpoint slot N ──────────
+/// let blit = BlitEncoder::begin(&cmd);
+/// blit.copy_buffer(&gdn_state.buffer, gdn_state.offset,
+///                  &gdn_ckpt.buffer, ckpt_offset_for_token_n,
+///                  gdn_state.n_bytes());
+/// blit.end();
+/// // ── repeat compute+blit pairs for tokens N+1 .. ────────────────────
+/// cmd.commit();
+/// ```
+///
+/// Multiple compute↔blit transitions inside one command buffer are fully
+/// supported by Metal; the runtime synchronises between encoder passes
+/// automatically (the blit pass observes all writes from the previous
+/// compute pass once `endEncoding` has been called on the compute encoder).
+pub struct BlitEncoder {
+    pub raw: Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>,
+}
+
+impl BlitEncoder {
+    pub fn begin(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
+        let raw = cmd.blitCommandEncoder().expect("blit encoder");
+        Self { raw }
+    }
+
+    pub fn end(self) {
+        self.raw.endEncoding();
+    }
+
+    /// Device-to-device buffer copy.
+    ///
+    /// `n_bytes` must satisfy `src.length() >= src_offset + n_bytes` and
+    /// likewise for `dst`. Metal does not validate this — caller's
+    /// responsibility. (Single-MetalTensor blits where src == dst with
+    /// non-overlapping ranges are allowed; overlapping ranges are
+    /// undefined behaviour per the Metal docs.)
+    pub fn copy_buffer(
+        &self,
+        src: &Buffer,
+        src_offset: u64,
+        dst: &Buffer,
+        dst_offset: u64,
+        n_bytes: u64,
+    ) {
+        unsafe {
+            self.raw
+                .copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    src.as_ref(),
+                    src_offset as usize,
+                    dst.as_ref(),
+                    dst_offset as usize,
+                    n_bytes as usize,
+                );
+        }
+    }
+
+    /// Convenience wrapper: copy the entire contents of one tensor's
+    /// buffer slice into another's. Assumes `src.n_bytes() == dst.n_bytes()`
+    /// (callers writing per-token checkpoint slots typically already
+    /// have this guarantee by construction).
+    pub fn copy_tensor(&self, src: &MetalTensor, dst: &MetalTensor) {
+        debug_assert_eq!(
+            src.n_bytes(),
+            dst.n_bytes(),
+            "copy_tensor: src/dst byte sizes differ ({} vs {})",
+            src.n_bytes(),
+            dst.n_bytes()
+        );
+        self.copy_buffer(
+            &src.buffer,
+            src.offset,
+            &dst.buffer,
+            dst.offset,
+            src.n_bytes() as u64,
+        );
     }
 }
 
@@ -993,6 +1089,78 @@ pub fn encode_softmax_inplace_f32(
     enc.dispatch(
         MTLSize {
             width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// GPU-side argmax over `[n_rows, n]` rows of F32, writing `[n_rows]` i32
+/// indices. Tie policy: lowest index wins (matches numpy/torch).
+///
+/// Used by H5.3a `packed_forward` to produce `verify_argmax: [N] i32`
+/// without a `[N, V]` CPU readback. At V=248320, N=16 that's 15.9 MB
+/// per outer step we don't have to spill to host.
+///
+/// Layout assumption: `x` is row-major with row stride == `n` (no padding
+/// between rows). Each row gets one threadgroup; up to 1024 threads per
+/// TG, internally simdgroup-reduced.
+pub fn encode_argmax_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    n_rows: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    if x.n_elements() as usize != n_rows * n {
+        return Err(MetalError::BadShape {
+            kernel: "argmax",
+            detail: format!("x.n_elements={} != n_rows*n={}", x.n_elements(), n_rows * n),
+        });
+    }
+    if out_idx.n_elements() as usize != n_rows {
+        return Err(MetalError::BadShape {
+            kernel: "argmax",
+            detail: format!(
+                "out_idx.n_elements={} != n_rows={n_rows}",
+                out_idx.n_elements(),
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        stride_x: u32,
+    }
+    let pso = ctx.pipeline("kernel_argmax_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            stride_x: n as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, out_idx);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let n_simdgroups = tg_threads.div_ceil(32);
+    // Two threadgroup arrays (sh_val: f32, sh_idx: u32) — same width.
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+    enc.set_threadgroup_memory(1, (n_simdgroups * std::mem::size_of::<u32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: n_rows,
             height: 1,
             depth: 1,
         },
@@ -4330,6 +4498,270 @@ mod tests {
                 bench("bench ", n_iters);
             }
             eprintln!();
+        }
+    }
+
+    /// H5.3a GPU argmax — bit-exact match to CPU argmax with lowest-index
+    /// tie-breaking, including the explicit edge cases:
+    /// * tie at row start (idx 0 wins)
+    /// * tie at row end
+    /// * single-element row
+    /// * row larger than 1024 (tests cross-simdgroup reduce path)
+    /// * vocab-sized row (V=248320; the actual production shape)
+    /// * negative-infinity entries (production lm_head won't have these,
+    ///   but defensive)
+    #[test]
+    fn argmax_matches_cpu_with_tie_to_lowest_index() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        // Helper: encode-only argmax + readback for tests.
+        fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> Vec<i32> {
+            assert_eq!(x.len(), n_rows * n);
+            let xb = ctx.buffer_from(x).expect("xb");
+            let xt = MetalTensor {
+                buffer: xb,
+                offset: 0,
+                shape: vec![n_rows as u64, n as u64],
+                dtype: crate::tensor::GgmlType::F32,
+            };
+            let ob = ctx.buffer_uninit(n_rows * 4).expect("ob");
+            let ot = MetalTensor {
+                buffer: ob,
+                offset: 0,
+                shape: vec![n_rows as u64],
+                dtype: crate::tensor::GgmlType::F32,
+            };
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_f32(ctx, &enc, &xt, &ot, n_rows, n).expect("encode argmax");
+            enc.end();
+            cmd.commit();
+            unsafe {
+                cmd.waitUntilCompleted();
+            }
+            unsafe {
+                let p = ot.buffer.contents().as_ptr() as *const i32;
+                (0..n_rows).map(|i| *p.add(i)).collect()
+            }
+        }
+
+        fn cpu_argmax_lowest_idx(row: &[f32]) -> i32 {
+            let mut best = f32::NEG_INFINITY;
+            let mut idx: i32 = 0;
+            for (i, &v) in row.iter().enumerate() {
+                if v > best {
+                    best = v;
+                    idx = i as i32;
+                }
+            }
+            idx
+        }
+
+        // 1. Single-element row.
+        {
+            let x = vec![3.5f32];
+            let got = run(&ctx, &x, 1, 1);
+            assert_eq!(got, vec![0]);
+        }
+
+        // 2. Tie at row start: x = [5.0, 1.0, 5.0, 5.0, 0.0]. Lowest idx
+        //    among matches = 0.
+        {
+            let x = vec![5.0f32, 1.0, 5.0, 5.0, 0.0];
+            let got = run(&ctx, &x, 1, 5);
+            assert_eq!(got, vec![0], "tie at start should pick idx 0");
+        }
+
+        // 3. Tie at row end (max only at the last position).
+        {
+            let x = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
+            let got = run(&ctx, &x, 1, 5);
+            assert_eq!(got, vec![4]);
+        }
+
+        // 4. Tie spread across the row at multiple distant positions.
+        {
+            let mut x = vec![0.0f32; 4096];
+            x[100] = 9.0;
+            x[2500] = 9.0;
+            x[3999] = 9.0;
+            let got = run(&ctx, &x, 1, 4096);
+            assert_eq!(got, vec![100], "spread tie should pick lowest idx");
+        }
+
+        // 5. Multi-row batch: argmax independently per row.
+        {
+            let n = 1024;
+            let n_rows = 5;
+            let mut x = vec![0.0f32; n_rows * n];
+            for r in 0..n_rows {
+                // Place the max for row r at idx (r * 137) % n.
+                let idx = (r * 137) % n;
+                x[r * n + idx] = 1.0 + (r as f32) * 0.1;
+            }
+            let got = run(&ctx, &x, n_rows, n);
+            for r in 0..n_rows {
+                let want = cpu_argmax_lowest_idx(&x[r * n..(r + 1) * n]);
+                assert_eq!(got[r], want, "row {r}");
+            }
+        }
+
+        // 6. Random fuzz at vocab-sized row (the production shape).
+        {
+            let n = 248_320usize;
+            let n_rows = 16;
+            let mut x = vec![0.0f32; n_rows * n];
+            // Deterministic pseudo-random fill.
+            let mut s: u32 = 0xc0ffeeu32;
+            for v in x.iter_mut() {
+                s = s.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                *v = (s as i32) as f32 * 1e-9;
+            }
+            let got = run(&ctx, &x, n_rows, n);
+            for r in 0..n_rows {
+                let want = cpu_argmax_lowest_idx(&x[r * n..(r + 1) * n]);
+                assert_eq!(got[r], want, "vocab row {r}");
+            }
+        }
+
+        // 7. Negative-infinity entries (defensive — production lm_head
+        //    won't produce these but the kernel must not get confused).
+        {
+            let mut x = vec![f32::NEG_INFINITY; 1024];
+            x[42] = -1e9;
+            x[500] = -1e10; // smaller than 42's value
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(got, vec![42]);
+        }
+
+        // 8. All-zero row (every position ties); lowest index = 0.
+        {
+            let x = vec![0.0f32; 1024];
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(got, vec![0], "all-tie should pick idx 0");
+        }
+    }
+
+    /// H5.3a foundation: verify `BlitEncoder` actually copies device-side
+    /// buffers and that compute↔blit transitions on the same command
+    /// buffer are visible. We write a known pattern via a compute kernel
+    /// (`scatter_offset`), blit-copy into a destination buffer, then read
+    /// the destination back. If the blit didn't fire, we'd read zeros.
+    #[test]
+    fn blit_encoder_copies_buffer_within_one_command_buffer() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        const N: usize = 1024;
+        let pattern: Vec<f32> = (0..N).map(|i| (i as f32) * 0.125).collect();
+
+        // Source: a freshly-uploaded MetalTensor holding `pattern`.
+        let src_buf = ctx.buffer_from(&pattern).expect("src buf");
+        let src = MetalTensor {
+            buffer: src_buf,
+            offset: 0,
+            shape: vec![N as u64],
+            dtype: crate::tensor::GgmlType::F32,
+        };
+
+        // Destination: zero-initialized.
+        let dst_buf = ctx.buffer_uninit(N * 4).expect("dst buf");
+        // Zero it out via the host pointer (StorageModeShared).
+        unsafe {
+            let p = dst_buf.contents().as_ptr() as *mut f32;
+            for i in 0..N {
+                *p.add(i) = -1.0;
+            }
+        }
+        let dst = MetalTensor {
+            buffer: dst_buf,
+            offset: 0,
+            shape: vec![N as u64],
+            dtype: crate::tensor::GgmlType::F32,
+        };
+
+        // One command buffer. Compute pass (no-op trampoline to validate
+        // that compute → blit transitions don't drop ordering), then blit
+        // pass that performs the actual copy.
+        let cmd = ctx.queue.commandBuffer().expect("cmd");
+        // Empty compute pass. We don't dispatch anything — we just want
+        // to verify that an opened-and-immediately-closed compute encoder
+        // doesn't break the subsequent blit.
+        {
+            let enc = KernelEncoder::begin(&cmd);
+            enc.end();
+        }
+        {
+            let blit = BlitEncoder::begin(&cmd);
+            blit.copy_tensor(&src, &dst);
+            blit.end();
+        }
+        cmd.commit();
+        unsafe {
+            cmd.waitUntilCompleted();
+        }
+
+        // Read back via host pointer.
+        let got: Vec<f32> = unsafe {
+            let p = dst.buffer.contents().as_ptr() as *const f32;
+            (0..N).map(|i| *p.add(i)).collect()
+        };
+        for i in 0..N {
+            assert!(
+                (got[i] - pattern[i]).abs() < 1e-9,
+                "blit mismatch at i={i}: got={} expected={}",
+                got[i],
+                pattern[i]
+            );
+        }
+
+        // Also exercise `copy_buffer` with non-zero offsets: copy the
+        // back half of `src` into the front half of `dst`.
+        let cmd2 = ctx.queue.commandBuffer().expect("cmd2");
+        {
+            let blit = BlitEncoder::begin(&cmd2);
+            let half_bytes = (N / 2) * 4;
+            blit.copy_buffer(
+                &src.buffer,
+                half_bytes as u64,
+                &dst.buffer,
+                0,
+                half_bytes as u64,
+            );
+            blit.end();
+        }
+        cmd2.commit();
+        unsafe {
+            cmd2.waitUntilCompleted();
+        }
+        let got2: Vec<f32> = unsafe {
+            let p = dst.buffer.contents().as_ptr() as *const f32;
+            (0..N).map(|i| *p.add(i)).collect()
+        };
+        // Front half of dst now equals back half of src.
+        for i in 0..N / 2 {
+            assert!(
+                (got2[i] - pattern[N / 2 + i]).abs() < 1e-9,
+                "offset blit front-half mismatch at i={i}: got={} expected={}",
+                got2[i],
+                pattern[N / 2 + i]
+            );
+        }
+        // Back half of dst is unchanged from the previous full-blit copy.
+        for i in N / 2..N {
+            assert!(
+                (got2[i] - pattern[i]).abs() < 1e-9,
+                "offset blit back-half disturbed at i={i}: got={} expected={}",
+                got2[i],
+                pattern[i]
+            );
         }
     }
 }

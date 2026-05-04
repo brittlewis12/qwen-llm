@@ -340,3 +340,88 @@ kernel void kernel_gdn_alpha_chain_f32(
     }
     out[tid] = sp * a_log[tid];
 }
+
+// =============================================================================
+// kernel_argmax_f32 — GPU-side argmax for one row of length `n`.
+//
+// One threadgroup processes one row. Up to 1024 threads per threadgroup,
+// reduced via simd_max + a small shmem step. Tie policy: LOWEST INDEX wins
+// (matches numpy / torch semantics; tested explicitly in
+// `metal::tests::argmax_tie_breaks_to_lowest_index`).
+//
+// Used by H5.3a `packed_forward` to produce `verify_argmax: [N] i32`
+// without a `[N, V]` CPU readback (saves 15.9 MB per outer step at
+// V=248320, N=16). For packed-N argmax over `[N, V] -> [N] i32`, dispatch
+// with `grid.height = N`; each TG handles row `tgpig.y`.
+//
+// Layout:
+//   x         [n_rows, n] (row-major)        — input logits
+//   out_idx   [n_rows]                       — output argmax index per row (i32)
+//   stride_x  = n (row stride in elements)
+//
+// Reduction strategy:
+//   Pass 1 — each lane scans strided slice; tracks (max_val, min_idx_at_max).
+//   Pass 2 — simdgroup-wide reduce: pick max over lanes, breaking ties to
+//            lowest index. Use simd_max for the value, then
+//            simd_shuffle_and_fill to identify which lane's idx wins.
+//   Pass 3 — across simdgroups via shmem; one thread writes out_idx.
+// =============================================================================
+struct argmax_args {
+    uint n;          // length of each row
+    uint stride_x;   // row stride in elements (= n unless caller asks for padding)
+};
+
+kernel void kernel_argmax_f32(
+        constant argmax_args & args [[buffer(0)]],
+        device const float   * x        [[buffer(1)]],
+        device       int     * out_idx  [[buffer(2)]],
+        threadgroup  float   * sh_val   [[threadgroup(0)]],
+        threadgroup  uint    * sh_idx   [[threadgroup(1)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        uint   tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint   ntg   [[threads_per_threadgroup]]) {
+    const uint row = tgpig;
+    device const float * x_row = x + (ulong)row * args.stride_x;
+
+    // Pass 1: per-lane scan, tracking (best_val, best_idx). Tie-break to
+    // lower idx within a single lane's traversal.
+    float best_val = -INFINITY;
+    uint  best_idx = UINT_MAX;
+    for (uint i = tpitg; i < args.n; i += ntg) {
+        const float v = x_row[i];
+        if (v > best_val || (v == best_val && i < best_idx)) {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+
+    // Pass 2: simdgroup reduce. simd_max gives us the value; then we
+    // broadcast each lane's idx and pick the smallest idx among lanes
+    // whose val equals the max.
+    const float lane_max = simd_max(best_val);
+    // Lanes whose val < lane_max get idx = UINT_MAX (will lose the
+    // simd_min tiebreak); lanes that match get their actual idx.
+    uint lane_idx = (best_val == lane_max) ? best_idx : UINT_MAX;
+    const uint sg_idx = simd_min(lane_idx);
+
+    if (tiisg == 0) {
+        sh_val[sgitg] = lane_max;
+        sh_idx[sgitg] = sg_idx;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Pass 3: cross-simdgroup reduce (simdgroup 0 only).
+    const uint n_simdgroups = (ntg + 31) / 32;
+    if (sgitg == 0) {
+        const float sgv = (tiisg < n_simdgroups) ? sh_val[tiisg] : -INFINITY;
+        const uint  sgi = (tiisg < n_simdgroups) ? sh_idx[tiisg] : UINT_MAX;
+        const float global_max = simd_max(sgv);
+        const uint  match_idx = (sgv == global_max) ? sgi : UINT_MAX;
+        const uint  global_idx = simd_min(match_idx);
+        if (tiisg == 0) {
+            out_idx[row] = (int)global_idx;
+        }
+    }
+}

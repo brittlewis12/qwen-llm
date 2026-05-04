@@ -23,6 +23,7 @@ use qwen_llm::{
     loader::Model,
     metal::MetalContext,
     metal_forward::{MetalForward, MetalModel, MetalSession},
+    metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     tokenizer::Tokenizer,
 };
 use std::path::PathBuf;
@@ -57,6 +58,12 @@ enum Cmd {
     /// 64K, 96K}, by-category breakdown, and decoded examples of any
     /// out-of-K tokens for inspection.
     VocabAudit(VocabAuditArgs),
+    /// **H4.3 measurement**: run greedy generation twice (MTP=on and
+    /// MTP=off) on the same prompt+limit, compare token sequences for
+    /// equivalence, report speedup + acceptance rate + per-iter MTP
+    /// call counts. Requires an MTP-aware GGUF (e.g. brittlewis12/
+    /// Qwen3.6-27B-MTP-GGUF or the 0.8B-MTP variant).
+    Mtp(MtpArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -130,6 +137,30 @@ struct PrefixCacheArgs {
 }
 
 #[derive(Parser, Debug)]
+struct MtpArgs {
+    /// Path to an MTP-aware GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Prompt text. Use a non-trivial prompt for honest acceptance rates.
+    #[arg(
+        short = 'p',
+        long,
+        default_value = "The quick brown fox jumps over the lazy dog"
+    )]
+    prompt: String,
+    /// Number of tokens to generate after the prompt.
+    #[arg(long, default_value = "64")]
+    tokens: usize,
+    /// EOS token id (used to early-terminate generation).
+    /// 0.8B / 27B Qwen3.5/3.6: 248046 (`<|im_end|>`).
+    #[arg(long, default_value = "248046")]
+    eos: i32,
+    /// Skip the warmup pass.
+    #[arg(long)]
+    no_warmup: bool,
+}
+
+#[derive(Parser, Debug)]
 struct VocabAuditArgs {
     /// Path to a GGUF file.
     #[arg(short = 'm', long)]
@@ -169,7 +200,154 @@ fn main() -> Result<()> {
         Cmd::Decode(a) => run_decode(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
+        Cmd::Mtp(a) => run_mtp(a),
     }
+}
+
+fn run_mtp(args: MtpArgs) -> Result<()> {
+    let MtpArgs {
+        model,
+        prompt,
+        tokens,
+        eos,
+        no_warmup,
+    } = args;
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    eprintln!("[mtp-bench] device: {}", ctx.describe());
+
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model arch")?;
+    let mtp_view = m.mtp.as_ref().ok_or_else(|| {
+        anyhow!(
+            "GGUF has no MTP head (\
+             use brittlewis12/Qwen3.6-27B-MTP-GGUF or the 0.8B-MTP variant)"
+        )
+    })?;
+
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
+    let mtp_head = MetalMtpHead::load(&ctx, &g, mtp_view).context("metal-load MTP head")?;
+    let tok = Tokenizer::open(&model).context("open tokenizer")?;
+
+    let prompt_ids = tok.encode(&prompt, false).context("tokenize prompt")?;
+    eprintln!(
+        "[mtp-bench] model={} prompt={:?} ({} tokens) gen={} eos={eos}",
+        model.display(),
+        prompt,
+        prompt_ids.len(),
+        tokens,
+    );
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let cap = prompt_ids.len() + tokens + 16;
+
+    if !no_warmup {
+        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("warmup session")?;
+        let _ = mf.single_token(prompt_ids[0], 0, &mut s)?;
+    }
+
+    // ----- MTP=off: greedy baseline -----
+    let mut ref_session = MetalSession::fresh(&ctx, &mm, cap).context("ref session")?;
+    let mut ref_tokens = prompt_ids.clone();
+    let t_ref_total = Instant::now();
+    let mut last_logits = Vec::new();
+    let t_ref_prefill = Instant::now();
+    for (i, &tid) in prompt_ids.iter().enumerate() {
+        last_logits = mf.single_token(tid, i as u32, &mut ref_session)?;
+    }
+    let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
+
+    let t_ref_decode = Instant::now();
+    let mut next_tok = argmax_i32(&last_logits);
+    let mut pos = (prompt_ids.len() - 1) as u32;
+    let mut ref_emitted = 0usize;
+    for _ in 0..tokens {
+        ref_tokens.push(next_tok);
+        ref_emitted += 1;
+        if next_tok == eos {
+            break;
+        }
+        pos += 1;
+        let logits = mf.single_token(next_tok, pos, &mut ref_session)?;
+        next_tok = argmax_i32(&logits);
+    }
+    let ref_decode_ms = t_ref_decode.elapsed().as_secs_f64() * 1e3;
+    let ref_total_ms = t_ref_total.elapsed().as_secs_f64() * 1e3;
+    let ref_decode_tps = ref_emitted as f64 / (ref_decode_ms / 1000.0);
+
+    // ----- MTP=on: speculative decode -----
+    let mtp_session =
+        MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
+    let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
+    let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+    let result = spec
+        .decode(&prompt_ids, tokens, eos, &mut spec_session)
+        .context("spec decode")?;
+    let spec_emitted = result.tokens.len() - prompt_ids.len();
+    let spec_total_ms = result.stats.wall_ms;
+    let spec_decode_tps = spec_emitted as f64 / (spec_total_ms / 1000.0);
+
+    // ----- Compare -----
+    let ref_generated = &ref_tokens[prompt_ids.len()..];
+    let spec_generated = &result.tokens[prompt_ids.len()..];
+    let identical = ref_generated == spec_generated;
+
+    eprintln!();
+    eprintln!("[mtp-bench] === results ===");
+    eprintln!(
+        "[mtp-bench] MTP=off: {ref_emitted} tokens in {ref_decode_ms:.1} ms decode + \
+         {ref_prefill_ms:.1} ms prefill = {ref_total_ms:.1} ms total \
+         ({ref_decode_tps:.2} t/s decode)"
+    );
+    eprintln!(
+        "[mtp-bench] MTP=on : {spec_emitted} tokens in {spec_total_ms:.1} ms total \
+         ({spec_decode_tps:.2} t/s overall)"
+    );
+    eprintln!(
+        "[mtp-bench]    α (acceptance rate) = {:.3}    steps={}    accepted={}",
+        result.stats.acceptance_rate(),
+        result.stats.steps,
+        result.stats.accepted,
+    );
+    eprintln!(
+        "[mtp-bench]    base_calls={}  mtp_calls={} (= prefill + drafts + bridges)",
+        result.stats.base_forward_calls, result.stats.mtp_calls,
+    );
+
+    let speedup = ref_total_ms / spec_total_ms;
+    eprintln!(
+        "[mtp-bench]    speedup = {ref_total_ms:.1} / {spec_total_ms:.1} = {speedup:.3}× \
+         (>1.0 means MTP wins)"
+    );
+
+    eprintln!(
+        "[mtp-bench] equivalence: {} ({} vs {} emitted)",
+        if identical {
+            "PASS (identical sequences)"
+        } else {
+            "FAIL (sequences differ)"
+        },
+        spec_emitted,
+        ref_emitted,
+    );
+    if !identical {
+        let n_show = 8usize.min(ref_generated.len()).min(spec_generated.len());
+        eprintln!(
+            "[mtp-bench]   ref[..{n_show}]:  {:?}",
+            &ref_generated[..n_show]
+        );
+        eprintln!(
+            "[mtp-bench]   spec[..{n_show}]: {:?}",
+            &spec_generated[..n_show]
+        );
+    }
+
+    if !identical {
+        return Err(anyhow!(
+            "MTP=on and MTP=off generated different token sequences"
+        ));
+    }
+    Ok(())
 }
 
 fn run_decode(args: DecodeArgs) -> Result<()> {

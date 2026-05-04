@@ -290,6 +290,231 @@ impl MetalDFlashSession {
     }
 }
 
+// =============================================================================
+// MetalDFlashVerifyScratch — H5.3a packed verify scratch (PRODUCTION shape)
+// =============================================================================
+//
+// Owns ALL N-shaped state needed by `MetalForward::packed_forward` (H5.3a).
+// Allocated once per `DFlashDecoder`; threaded `&mut` through `packed_forward`.
+//
+// Codex partner-session refinements baked in here:
+//
+//   * **No `x_pack` / `h_pack` / etc.** Naive H5.3a runs N successive
+//     single-token paths inside one command buffer; GPU writes sequence
+//     within a command buffer, so reusing `MetalSession::x` / `h` /
+//     `ffn_inner` etc. across the N tokens is correct (kernel N+1 reads
+//     what kernel N wrote, by Metal's per-encoder ordering guarantee).
+//     H5.3b tiled mat-mat will need N-wide activation buffers; that's
+//     a separate scratch type when we get there.
+//
+//   * **`packed_ids_buf: [N]` is the one buffer that MUST be N-wide
+//     in H5.3a.** `MetalSession::ids_buf` is mutated by HOST CPU in
+//     between encoded kernels — re-using it across N tokens means
+//     every queued `get_rows` reads the LAST-written CPU value
+//     (predicted bug; Q7 mitigation). Each token reads
+//     `packed_ids_buf.view_subrange(n, [1])`.
+//
+//   * **No `[N, V]` `debug_logits` in the production struct.** Per-token
+//     argmax runs on the reused `MetalSession::logits` and writes into
+//     `verify_argmax[n]` via `encode_argmax_f32` with `n_rows=1`. Saves
+//     15.9 MB per outer step that we'd otherwise allocate for nothing
+//     in production. The `_with_logits` debug variant uses
+//     `MetalDFlashDebugScratch` (below) which adds the `[N, V]` buffer.
+//
+//   * **One backing `MetalTensor` per checkpoint class with
+//     `slot_view(layer, n) -> MetalTensor` helpers.** Avoids 1536
+//     `Retained` clones at construction; keeps `BlitEncoder::copy_tensor`
+//     ergonomics at blit time (the per-call clone cost is irrelevant
+//     since we only call `slot_view` during encode).
+//
+// Sizes (Qwen3.6-27B target, N=16, K=5 target_layer_ids, V=248320,
+// n_gdn=48):
+//   verify_argmax:   N · 4 B          =        64 B
+//   hidden_capture:  K · N · H · 4 B  =     1.6 MB     (5 · 16 · 5120 · 4)
+//   gdn_ckpt:        n_gdn · N · ssm  =     2.3 GiB    (48 · 16 · 3 MiB)
+//   conv_ckpt:       n_gdn · N · conv =      90 MiB    (48 · 16 · 120 KiB)
+//   packed_ids_buf:  N · 4 B          =        64 B
+pub struct MetalDFlashVerifyScratch {
+    /// `[N]` i32 — packed verify input tokens. Each block reads from
+    /// `view_subrange(n, [1])`. Filled by `packed_forward` from `tokens`.
+    pub packed_ids_buf: MetalTensor,
+
+    /// `[N]` i32 — GPU-computed argmax tokens, one per packed position.
+    /// Written into via `encode_argmax_f32` after each block's lm_head.
+    pub verify_argmax: MetalTensor,
+
+    /// `[K, N, H]` F32 — multi-layer hidden capture. Layer `target_layer_ids[k]`
+    /// after token n in the packed batch lives at offset `(k * N + n) * H`.
+    pub hidden_capture: MetalTensor,
+
+    /// `[n_gdn, N, ssm_state_elems]` F32 — per-GDN-layer per-token SSM
+    /// checkpoint. `gdn_ckpt_slot(layer, n)` returns the `[ssm_state_elems]`
+    /// view; blit dest after the layer's `gdn_step` for token n.
+    pub gdn_ckpt: MetalTensor,
+
+    /// `[n_gdn, N, conv_state_elems]` F32 — per-GDN-layer per-token conv
+    /// state checkpoint. `conv_ckpt_slot(layer, n)` returns the view.
+    pub conv_ckpt: MetalTensor,
+
+    // -- Cached dimensions (so slot helpers don't have to take a model ref) --
+    pub n: u32,
+    pub k_target_layers: u32,
+    pub n_gdn_layers: u32,
+    pub hidden_size: u64,
+    pub ssm_state_elems: u64,
+    pub conv_state_elems: u64,
+}
+
+impl MetalDFlashVerifyScratch {
+    /// Allocate scratch for one DFlash outer step.
+    ///
+    /// `block_size` (= N) and `target_layer_ids.len()` (= K) come from the
+    /// drafter config; everything else is pulled from the target model
+    /// arch + layer schedule (so we never carry contradictions between
+    /// what we allocate and what packed_forward expects).
+    pub fn fresh(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+        k_target_layers: u32,
+    ) -> Result<Self, MetalError> {
+        let arch = &target_model.arch;
+        let n = block_size as u64;
+        let k = k_target_layers as u64;
+        let h = arch.hidden_size as u64;
+
+        // Count GDN layers from the layer schedule (matches MetalSession::fresh).
+        let n_gdn_layers = target_model
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, crate::metal_forward::MetalBlock::Gdn(_)))
+            .count() as u64;
+
+        // SSM state: n_v_heads · head_dim · head_dim (F32).
+        let ssm_state_elems =
+            (arch.gdn_n_v_heads as u64) * (arch.gdn_head_dim as u64) * (arch.gdn_head_dim as u64);
+
+        // Conv state: (kernel - 1) · conv_dim where
+        // conv_dim = (2 * n_k + n_v) * head_dim.
+        let conv_dim = (2 * (arch.gdn_n_k_heads as u64) + (arch.gdn_n_v_heads as u64))
+            * (arch.gdn_head_dim as u64);
+        let conv_state_elems = ((arch.gdn_conv_kernel as u64) - 1) * conv_dim;
+
+        Ok(Self {
+            packed_ids_buf: MetalTensor::zeros_f32(ctx, vec![n])?, // i32 in F32 buf
+            verify_argmax: MetalTensor::zeros_f32(ctx, vec![n])?,  // i32 in F32 buf
+            hidden_capture: MetalTensor::zeros_f32(ctx, vec![k, n, h])?,
+            gdn_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, n, ssm_state_elems])?,
+            conv_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, n, conv_state_elems])?,
+            n: block_size,
+            k_target_layers,
+            n_gdn_layers: n_gdn_layers as u32,
+            hidden_size: h,
+            ssm_state_elems,
+            conv_state_elems,
+        })
+    }
+
+    /// Zero-copy view of GDN SSM checkpoint slot `(layer, n)` ∈
+    /// `[0, n_gdn) × [0, N)`. Returned shape: `[ssm_state_elems]`.
+    /// Used as a blit destination after the layer's gdn_step for token n,
+    /// or as a blit source on rollback.
+    pub fn gdn_ckpt_slot(&self, layer: u32, n: u32) -> MetalTensor {
+        debug_assert!(layer < self.n_gdn_layers);
+        debug_assert!(n < self.n);
+        let elem_offset = (layer as u64 * self.n as u64 + n as u64) * self.ssm_state_elems;
+        self.gdn_ckpt
+            .view_subrange(elem_offset, vec![self.ssm_state_elems])
+    }
+
+    /// Zero-copy view of conv checkpoint slot `(layer, n)`. Returned shape:
+    /// `[conv_state_elems]`.
+    pub fn conv_ckpt_slot(&self, layer: u32, n: u32) -> MetalTensor {
+        debug_assert!(layer < self.n_gdn_layers);
+        debug_assert!(n < self.n);
+        let elem_offset = (layer as u64 * self.n as u64 + n as u64) * self.conv_state_elems;
+        self.conv_ckpt
+            .view_subrange(elem_offset, vec![self.conv_state_elems])
+    }
+
+    /// Zero-copy view of hidden_capture slot `(k, n)`. Returned shape:
+    /// `[hidden_size]`. Used as a scatter destination after the K-indexed
+    /// target layer's residual for token n.
+    pub fn hidden_capture_slot(&self, k: u32, n: u32) -> MetalTensor {
+        debug_assert!(k < self.k_target_layers);
+        debug_assert!(n < self.n);
+        let elem_offset = (k as u64 * self.n as u64 + n as u64) * self.hidden_size;
+        self.hidden_capture
+            .view_subrange(elem_offset, vec![self.hidden_size])
+    }
+
+    /// Zero-copy view of `packed_ids_buf[n..n+1]`. Used as the
+    /// `get_rows` token-id input for block n; required to avoid the
+    /// shared-CPU-mutable `MetalSession::ids_buf` race that would
+    /// silently corrupt N successive `get_rows` calls in one command
+    /// buffer (codex Q7 — the bug we'd ship without this).
+    pub fn token_slot(&self, n: u32) -> MetalTensor {
+        debug_assert!(n < self.n);
+        self.packed_ids_buf.view_subrange(n as u64, vec![1])
+    }
+
+    /// Zero-copy view of `verify_argmax[n..n+1]`. Used as the destination
+    /// for `encode_argmax_f32` over block n's logits.
+    pub fn argmax_slot(&self, n: u32) -> MetalTensor {
+        debug_assert!(n < self.n);
+        self.verify_argmax.view_subrange(n as u64, vec![1])
+    }
+}
+
+// =============================================================================
+// MetalDFlashDebugScratch — debug-only extension with [N, V] logits buffer
+// =============================================================================
+//
+// Wraps a `MetalDFlashVerifyScratch` and adds an `[N, V]` F32 buffer for
+// the H5.3a bit-exactness gate (G1: cosine ≥ 0.9999 vs N successive
+// `single_token`). Production never allocates `debug_logits`; the
+// `_with_logits` debug entrypoint uses this struct instead.
+//
+// Why two structs vs `Option<debug_logits>` (codex Q3): no dead `Option`
+// paths in prod; allocation is explicit at the type level. Cost: small
+// refactor footprint; debug variant takes `&mut MetalDFlashDebugScratch`
+// and accesses `verify` for the N-shaped fields.
+pub struct MetalDFlashDebugScratch {
+    pub verify: MetalDFlashVerifyScratch,
+    /// `[N, V]` F32 — full vocab logits per packed position, written by
+    /// the debug variant of packed_forward. Used for bit-exactness gate
+    /// only; never read on the production path.
+    pub debug_logits: MetalTensor,
+}
+
+impl MetalDFlashDebugScratch {
+    pub fn fresh(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+        k_target_layers: u32,
+    ) -> Result<Self, MetalError> {
+        let arch = &target_model.arch;
+        let n = block_size as u64;
+        let v = arch.vocab_size as u64;
+        let verify =
+            MetalDFlashVerifyScratch::fresh(ctx, target_model, block_size, k_target_layers)?;
+        Ok(Self {
+            verify,
+            debug_logits: MetalTensor::zeros_f32(ctx, vec![n, v])?,
+        })
+    }
+
+    /// Zero-copy view of `debug_logits[n, :]`. Used as the lm_head
+    /// destination for block n's logits.
+    pub fn logits_slot(&self, n: u32) -> MetalTensor {
+        debug_assert!(n < self.verify.n);
+        let v = self.debug_logits.shape[1];
+        let elem_offset = n as u64 * v;
+        self.debug_logits.view_subrange(elem_offset, vec![v])
+    }
+}
+
 /// Top-level DFlash speculative-decode driver.
 pub struct DFlashDecoder<'a> {
     pub base: &'a MetalForward<'a>,
@@ -849,3 +1074,210 @@ fn rms_norm_cpu(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
 // H5.1.5 metal_drafter_cosine_vs_cpu moved to tests/dflash_correctness.rs
 // (slow: ~142s on 27B-Q4_K_M prefill + drafter forward; not a fast-
 // feedback gate). Run with `cargo test --test dflash_correctness --release`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gguf::GgufFile;
+    use crate::loader::Model;
+    use crate::metal::MetalContext;
+    use crate::metal_forward::MetalModel;
+
+    /// H5.3a foundation: verify `MetalDFlashVerifyScratch` allocates
+    /// correctly-sized buffers, and that `slot_view` helpers land at
+    /// the right offsets with the right shapes. Uses the 0.8B oracle
+    /// (24 layers, all GDN — so n_gdn = n_layer = 24, smaller than
+    /// 27B's 48). Loads in <1 s.
+    #[test]
+    fn dflash_verify_scratch_slots_and_offsets() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[dflash-scratch] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        // Pretend we have a DFlash drafter with N=8, K=3 (synthetic;
+        // doesn't have to match a real drafter — we're only testing the
+        // scratch struct's offset arithmetic against the 0.8B target arch).
+        let n: u32 = 8;
+        let k: u32 = 3;
+        let scratch = MetalDFlashVerifyScratch::fresh(&ctx, &mm, n, k).expect("scratch alloc");
+
+        // Sanity on cached dims.
+        let arch = &mm.arch;
+        assert_eq!(scratch.n, n);
+        assert_eq!(scratch.k_target_layers, k);
+        assert_eq!(scratch.hidden_size, arch.hidden_size as u64);
+        let expected_ssm =
+            (arch.gdn_n_v_heads as u64) * (arch.gdn_head_dim as u64) * (arch.gdn_head_dim as u64);
+        let expected_conv = ((arch.gdn_conv_kernel as u64) - 1)
+            * (2 * (arch.gdn_n_k_heads as u64) + (arch.gdn_n_v_heads as u64))
+            * (arch.gdn_head_dim as u64);
+        assert_eq!(scratch.ssm_state_elems, expected_ssm);
+        assert_eq!(scratch.conv_state_elems, expected_conv);
+        let expected_n_gdn = mm
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, crate::metal_forward::MetalBlock::Gdn(_)))
+            .count() as u32;
+        assert_eq!(scratch.n_gdn_layers, expected_n_gdn);
+        eprintln!(
+            "[dflash-scratch] H={} n_gdn={} ssm_elems={} conv_elems={}",
+            scratch.hidden_size,
+            scratch.n_gdn_layers,
+            scratch.ssm_state_elems,
+            scratch.conv_state_elems
+        );
+
+        // -- backing buffer sizes --
+        let f32_size = std::mem::size_of::<f32>() as u64;
+        assert_eq!(
+            scratch.gdn_ckpt.shape,
+            vec![scratch.n_gdn_layers as u64, n as u64, expected_ssm]
+        );
+        assert_eq!(
+            scratch.gdn_ckpt.n_elements(),
+            scratch.n_gdn_layers as u64 * n as u64 * expected_ssm
+        );
+        assert_eq!(
+            scratch.conv_ckpt.shape,
+            vec![scratch.n_gdn_layers as u64, n as u64, expected_conv]
+        );
+        assert_eq!(
+            scratch.hidden_capture.shape,
+            vec![k as u64, n as u64, scratch.hidden_size]
+        );
+        assert_eq!(scratch.packed_ids_buf.shape, vec![n as u64]);
+        assert_eq!(scratch.verify_argmax.shape, vec![n as u64]);
+
+        // -- gdn_ckpt_slot offsets --
+        // Slot (layer, n) should land at offset (layer * N + n) * ssm_elems
+        // F32 elements. View shape = [ssm_elems].
+        for layer in 0..scratch.n_gdn_layers {
+            for nn in 0..n {
+                let slot = scratch.gdn_ckpt_slot(layer, nn);
+                let expected_elem_off = (layer as u64 * n as u64 + nn as u64) * expected_ssm;
+                let expected_byte_off = expected_elem_off * f32_size;
+                assert_eq!(
+                    slot.shape,
+                    vec![expected_ssm],
+                    "gdn slot ({layer},{nn}) shape"
+                );
+                assert_eq!(
+                    slot.offset, expected_byte_off,
+                    "gdn slot ({layer},{nn}) byte offset"
+                );
+                // Slot must share the underlying buffer with the parent.
+                let slot_buf_ptr: *const _ = &*slot.buffer;
+                let parent_buf_ptr: *const _ = &*scratch.gdn_ckpt.buffer;
+                assert_eq!(
+                    slot_buf_ptr, parent_buf_ptr,
+                    "gdn slot does not share buffer with parent"
+                );
+            }
+        }
+
+        // -- conv_ckpt_slot offsets --
+        for layer in 0..scratch.n_gdn_layers.min(4) {
+            for nn in [0, n / 2, n - 1] {
+                let slot = scratch.conv_ckpt_slot(layer, nn);
+                let expected_elem_off = (layer as u64 * n as u64 + nn as u64) * expected_conv;
+                assert_eq!(slot.shape, vec![expected_conv]);
+                assert_eq!(slot.offset, expected_elem_off * f32_size);
+            }
+        }
+
+        // -- hidden_capture_slot offsets --
+        for kk in 0..k {
+            for nn in 0..n {
+                let slot = scratch.hidden_capture_slot(kk, nn);
+                let expected_elem_off = (kk as u64 * n as u64 + nn as u64) * scratch.hidden_size;
+                assert_eq!(slot.shape, vec![scratch.hidden_size]);
+                assert_eq!(slot.offset, expected_elem_off * f32_size);
+            }
+        }
+
+        // -- token_slot / argmax_slot — single-element views --
+        for nn in 0..n {
+            let tok_slot = scratch.token_slot(nn);
+            assert_eq!(tok_slot.shape, vec![1]);
+            assert_eq!(tok_slot.offset, (nn as u64) * f32_size);
+            let am_slot = scratch.argmax_slot(nn);
+            assert_eq!(am_slot.shape, vec![1]);
+            assert_eq!(am_slot.offset, (nn as u64) * f32_size);
+        }
+
+        // -- write/read round-trip via a slot, to confirm the underlying
+        //    buffer offset actually addresses what we think it does. We
+        //    write a sentinel through gdn_ckpt_slot(layer=2, n=3) and
+        //    read it back through the parent's contents() pointer at
+        //    the same byte offset.
+        {
+            let layer = 2u32;
+            let nn = 3u32;
+            let slot = scratch.gdn_ckpt_slot(layer, nn);
+            // Write 'sentinel' as the FIRST element of the slot.
+            unsafe {
+                let p = (slot.buffer.contents().as_ptr() as *mut u8).add(slot.offset as usize)
+                    as *mut f32;
+                *p = 1234.5;
+            }
+            // Read through the PARENT buffer at the computed byte offset.
+            let parent_byte_off = ((layer as u64 * n as u64 + nn as u64) * expected_ssm) * f32_size;
+            unsafe {
+                let p = (scratch.gdn_ckpt.buffer.contents().as_ptr() as *const u8)
+                    .add(parent_byte_off as usize) as *const f32;
+                assert!(
+                    (*p - 1234.5).abs() < 1e-9,
+                    "round-trip via slot got {} expected 1234.5",
+                    *p
+                );
+            }
+        }
+    }
+
+    /// Verify `MetalDFlashDebugScratch` builds correctly and `logits_slot`
+    /// returns properly-aligned views into the [N, V] buffer.
+    #[test]
+    fn dflash_debug_scratch_logits_slots() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[dflash-debug-scratch] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+
+        let n: u32 = 4;
+        let k: u32 = 2;
+        let dbg = MetalDFlashDebugScratch::fresh(&ctx, &mm, n, k).expect("debug scratch alloc");
+
+        let v = m.arch.vocab_size as u64;
+        let f32_size = std::mem::size_of::<f32>() as u64;
+        assert_eq!(dbg.debug_logits.shape, vec![n as u64, v]);
+        for nn in 0..n {
+            let slot = dbg.logits_slot(nn);
+            assert_eq!(slot.shape, vec![v]);
+            assert_eq!(slot.offset, (nn as u64) * v * f32_size);
+        }
+        // Verify the wrapped verify scratch is independently usable.
+        assert_eq!(dbg.verify.n, n);
+        assert_eq!(dbg.verify.k_target_layers, k);
+    }
+}

@@ -161,6 +161,63 @@ impl<'a> Forward<'a> {
         Ok((logits, hidden_pre_norm))
     }
 
+    /// Same as [`single_token`] but captures the residual stream
+    /// (post-FFN, post-residual) at K specific layer indices. Returns
+    /// `[K · H]` floats (concatenation of K layer outputs in the same
+    /// order as `layer_ids`). Used by the DFlash drafter to fuse
+    /// multi-layer target hiddens into its cross-context conditioning.
+    ///
+    /// Per docs/H5-DFLASH.md §1.1, target_layer_ids[i] indexes into
+    /// `model.blocks` (the BASE layer count, not including any MTP head).
+    pub fn single_token_capture_layers(
+        &self,
+        token_id: i32,
+        position: u32,
+        state: &mut GdnState,
+        kv_cache: &mut KvCache,
+        layer_ids: &[u32],
+    ) -> Result<Vec<f32>, ForwardError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(ForwardError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let mut captured = vec![0.0f32; layer_ids.len() * h];
+
+        let mut x = self.embed_token(token_id as u32)?;
+        let mut gdn_idx: usize = 0;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            let attn_norm_w = self.dequant(self.block_attn_norm(block))?;
+            let mut cur = rms_norm(&x, &attn_norm_w, RMS_EPS);
+            cur = match block {
+                Block::Gdn(gb) => {
+                    let conv = &mut state.conv[gdn_idx];
+                    let ssm = &mut state.ssm[gdn_idx];
+                    gdn_idx += 1;
+                    self.gdn_step(gb, &cur, conv, ssm)?
+                }
+                Block::Attn(ab) => self.attn_step(il, ab, &cur, position, kv_cache)?,
+            };
+            for (xi, ci) in x.iter_mut().zip(cur.iter()) {
+                *xi += *ci;
+            }
+            let post_norm_w = self.dequant(self.block_post_norm(block))?;
+            let post = rms_norm(&x, &post_norm_w, RMS_EPS);
+            let ffn_out = self.ffn(block, &post)?;
+            for (xi, fi) in x.iter_mut().zip(ffn_out.iter()) {
+                *xi += *fi;
+            }
+
+            // Capture if this layer is in layer_ids.
+            for (k, &lid) in layer_ids.iter().enumerate() {
+                if lid as usize == il {
+                    captured[k * h..(k + 1) * h].copy_from_slice(&x);
+                }
+            }
+        }
+        Ok(captured)
+    }
+
     /// Run the MTP head for one slot. Per `docs/H4-MTP.md` §1.2:
     ///
     /// At sequence slot `position`, the MTP head consumes
@@ -289,6 +346,319 @@ impl<'a> Forward<'a> {
             stride,
             capacity_tokens,
         }
+    }
+
+    // -------------- DFlash drafter forward (CPU oracle) --------------
+
+    /// Run the DFlash drafter forward for one outer step. Per
+    /// `docs/H5-DFLASH.md` §1.3:
+    ///
+    /// * `noise_ids` length = `block_size = N`. Position 0 holds
+    ///   `carry_tok`; positions 1..N hold `mask_token_id` (placeholder).
+    /// * `target_ctx_stacked` is the per-position concat of K target
+    ///   layer hiddens, shape `[K · H_target, ctx_len]` — the same
+    ///   buffer the loader's `dflash_fc` consumes. Provided unprojected;
+    ///   this method applies `fc + hidden_norm` internally.
+    /// * `pos_ctx` length = `ctx_len`; absolute target sequence positions
+    ///   for each context column (used by RoPE on K_ctx and SWA mask).
+    /// * `noise_start_pos` = absolute sequence position of `carry_tok`
+    ///   (i.e. `processed_pos + 1`). Subsequent noise positions are
+    ///   `noise_start_pos + 1`, etc.
+    ///
+    /// Returns `[N, vocab]` logits flat-packed (row-major), one row per
+    /// noise position. Caller reads draft tokens from rows `1..N` (row 0
+    /// is the carry seed; its logits are conventionally discarded).
+    ///
+    /// Drafter KV is fully transient — recomputed per call. No state
+    /// carried across calls in this method.
+    pub fn dflash_draft(
+        &self,
+        head: &crate::loader::DFlashHead<'_>,
+        drafter_gguf: &GgufFile,
+        noise_ids: &[i32],
+        target_ctx_stacked: &[f32],
+        ctx_len: usize,
+        pos_ctx: &[u32],
+        noise_start_pos: u32,
+    ) -> Result<Vec<f32>, ForwardError> {
+        let arch = &self.model.arch;
+        let cfg = head.config;
+        let n = noise_ids.len();
+        debug_assert_eq!(n, cfg.block_size as usize);
+        let h_target = arch.hidden_size as usize;
+        let h = cfg.hidden_size as usize;
+        let f = cfg.intermediate_size as usize;
+        let head_dim = cfg.head_dim as usize;
+        let n_q = cfg.n_q_heads as usize;
+        let n_kv = cfg.n_kv_heads as usize;
+        let q_dim = n_q * head_dim;
+        let kv_dim = n_kv * head_dim;
+        let group = n_q / n_kv;
+        let k_layers = head.target_layer_ids.len();
+        let n_target_features = k_layers * h_target;
+
+        debug_assert_eq!(target_ctx_stacked.len(), n_target_features * ctx_len);
+        debug_assert_eq!(pos_ctx.len(), ctx_len);
+        debug_assert_eq!(h, h_target, "drafter requires H_drafter == H_target");
+
+        // Drafter-scoped dequant. Drafter weight TensorDescs index into
+        // `drafter_gguf`'s mmap, NOT `self.gguf` (which is the target).
+        // Conflating these two reads target bytes as drafter weights —
+        // NaN output. Found by codex round 1, 2026-05-04.
+        let dequant_drafter = |t: &TensorDesc| -> Result<Vec<f32>, ForwardError> {
+            Ok(dequant_to_f32(t, drafter_gguf.slice(t))?)
+        };
+
+        // ---------- Step 1: project + norm cross-context (once) ----------
+        // Apply dflash_fc: [K·H_target, H_drafter] @ [n_target_features, ctx_len]
+        // → [H_drafter, ctx_len]. Each context column independently.
+        let fc_w = dequant_drafter(head.fc)?;
+        let mut ctx_h = vec![0.0f32; h * ctx_len];
+        for c in 0..ctx_len {
+            let src = &target_ctx_stacked[c * n_target_features..(c + 1) * n_target_features];
+            let dst = &mut ctx_h[c * h..(c + 1) * h];
+            let proj = mat_vec(&fc_w, n_target_features, h, src);
+            dst.copy_from_slice(&proj);
+        }
+        // Apply dflash_hidden_norm per column.
+        let hidden_norm_w = dequant_drafter(head.hidden_norm)?;
+        for c in 0..ctx_len {
+            let s = c * h;
+            let normed = rms_norm(&ctx_h[s..s + h], &hidden_norm_w, RMS_EPS);
+            ctx_h[s..s + h].copy_from_slice(&normed);
+        }
+
+        // ---------- Step 2: noise embed ----------
+        // x is the noise residual stream, shape [N, H], row-major.
+        let mut x = vec![0.0f32; n * h];
+        for (i, &tid) in noise_ids.iter().enumerate() {
+            if tid < 0 || (tid as u32) >= arch.vocab_size {
+                return Err(ForwardError::BadToken(tid, arch.vocab_size));
+            }
+            let e = self.embed_token(tid as u32)?;
+            x[i * h..(i + 1) * h].copy_from_slice(&e);
+        }
+
+        // ---------- Step 3: per-layer drafter forward ----------
+        let n_rot = head_dim; // full RoPE for drafter (no partial like base)
+        let theta = cfg.rope_theta;
+        let kq_scale = 1.0f32 / (head_dim as f32).sqrt();
+        for layer in &head.layers {
+            // Pre-attn norm: x → noise_norm.
+            let attn_norm_w = dequant_drafter(layer.attn_norm)?;
+            let mut noise_norm = vec![0.0f32; n * h];
+            for i in 0..n {
+                let s = i * h;
+                let nn = rms_norm(&x[s..s + h], &attn_norm_w, RMS_EPS);
+                noise_norm[s..s + h].copy_from_slice(&nn);
+            }
+
+            // Q proj: noise_norm → [N, q_dim]. NOT gated.
+            let q_w = dequant_drafter(layer.q)?;
+            let mut q_full = vec![0.0f32; n * q_dim];
+            for i in 0..n {
+                let row = mat_vec(&q_w, h, q_dim, &noise_norm[i * h..(i + 1) * h]);
+                q_full[i * q_dim..(i + 1) * q_dim].copy_from_slice(&row);
+            }
+
+            // K, V proj on noise.
+            let k_w = dequant_drafter(layer.k)?;
+            let v_w = dequant_drafter(layer.v)?;
+            let mut k_noise = vec![0.0f32; n * kv_dim];
+            let mut v_noise = vec![0.0f32; n * kv_dim];
+            for i in 0..n {
+                let kr = mat_vec(&k_w, h, kv_dim, &noise_norm[i * h..(i + 1) * h]);
+                let vr = mat_vec(&v_w, h, kv_dim, &noise_norm[i * h..(i + 1) * h]);
+                k_noise[i * kv_dim..(i + 1) * kv_dim].copy_from_slice(&kr);
+                v_noise[i * kv_dim..(i + 1) * kv_dim].copy_from_slice(&vr);
+            }
+            // K, V proj on cross-context.
+            let mut k_ctx = vec![0.0f32; ctx_len * kv_dim];
+            let mut v_ctx = vec![0.0f32; ctx_len * kv_dim];
+            for i in 0..ctx_len {
+                let kr = mat_vec(&k_w, h, kv_dim, &ctx_h[i * h..(i + 1) * h]);
+                let vr = mat_vec(&v_w, h, kv_dim, &ctx_h[i * h..(i + 1) * h]);
+                k_ctx[i * kv_dim..(i + 1) * kv_dim].copy_from_slice(&kr);
+                v_ctx[i * kv_dim..(i + 1) * kv_dim].copy_from_slice(&vr);
+            }
+
+            // Per-head Q-norm on q_full.
+            let q_norm_w = dequant_drafter(layer.q_norm)?;
+            for i in 0..n {
+                for hi in 0..n_q {
+                    let s = i * q_dim + hi * head_dim;
+                    let nn = rms_norm(&q_full[s..s + head_dim], &q_norm_w, RMS_EPS);
+                    q_full[s..s + head_dim].copy_from_slice(&nn);
+                }
+            }
+            // Per-head K-norm on both noise and ctx K.
+            let k_norm_w = dequant_drafter(layer.k_norm)?;
+            for i in 0..n {
+                for hi in 0..n_kv {
+                    let s = i * kv_dim + hi * head_dim;
+                    let nn = rms_norm(&k_noise[s..s + head_dim], &k_norm_w, RMS_EPS);
+                    k_noise[s..s + head_dim].copy_from_slice(&nn);
+                }
+            }
+            for i in 0..ctx_len {
+                for hi in 0..n_kv {
+                    let s = i * kv_dim + hi * head_dim;
+                    let nn = rms_norm(&k_ctx[s..s + head_dim], &k_norm_w, RMS_EPS);
+                    k_ctx[s..s + head_dim].copy_from_slice(&nn);
+                }
+            }
+
+            // RoPE Q at noise positions [noise_start_pos, ..., noise_start_pos+N-1].
+            for i in 0..n {
+                let pos = noise_start_pos + i as u32;
+                let s = i * q_dim;
+                rope_in_place(&mut q_full[s..s + q_dim], n_q, head_dim, n_rot, pos, theta);
+            }
+            // RoPE K_noise at the same positions.
+            for i in 0..n {
+                let pos = noise_start_pos + i as u32;
+                let s = i * kv_dim;
+                rope_in_place(
+                    &mut k_noise[s..s + kv_dim],
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    pos,
+                    theta,
+                );
+            }
+            // RoPE K_ctx at pos_ctx[c] for each context column.
+            for c in 0..ctx_len {
+                let s = c * kv_dim;
+                rope_in_place(
+                    &mut k_ctx[s..s + kv_dim],
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    pos_ctx[c],
+                    theta,
+                );
+            }
+
+            // Concat K, V: ctx first, noise second. Shape [ctx_len + N, kv_dim].
+            let n_kv_total = ctx_len + n;
+            let mut k_full = vec![0.0f32; n_kv_total * kv_dim];
+            let mut v_full = vec![0.0f32; n_kv_total * kv_dim];
+            k_full[..ctx_len * kv_dim].copy_from_slice(&k_ctx);
+            k_full[ctx_len * kv_dim..].copy_from_slice(&k_noise);
+            v_full[..ctx_len * kv_dim].copy_from_slice(&v_ctx);
+            v_full[ctx_len * kv_dim..].copy_from_slice(&v_noise);
+
+            // Attention with (full or SWA) mask.
+            let mut attn_out = vec![0.0f32; n * q_dim];
+            for q_idx in 0..n {
+                let q_pos = noise_start_pos + q_idx as u32;
+                for qh in 0..n_q {
+                    let kvh = qh / group;
+                    let q_slice =
+                        &q_full[q_idx * q_dim + qh * head_dim..q_idx * q_dim + (qh + 1) * head_dim];
+
+                    // Scores against every K position with mask gating.
+                    let mut scores = vec![f32::NEG_INFINITY; n_kv_total];
+                    for k_idx in 0..n_kv_total {
+                        let allowed = if k_idx < ctx_len {
+                            // Context slot: real position pos_ctx[k_idx].
+                            let k_pos = pos_ctx[k_idx];
+                            if !layer.is_swa {
+                                true // full-attn layer: any context slot
+                            } else {
+                                // SWA layer: q_pos - k_pos <= window.
+                                q_pos.saturating_sub(k_pos) <= cfg.swa_window
+                            }
+                        } else {
+                            // Noise slot: index in noise = k_idx - ctx_len.
+                            let n_idx = k_idx - ctx_len;
+                            // Block-causal: noise q can only attend to noise k <= q.
+                            n_idx <= q_idx
+                        };
+                        if !allowed {
+                            continue;
+                        }
+                        let k_slice = &k_full[k_idx * kv_dim + kvh * head_dim
+                            ..k_idx * kv_dim + (kvh + 1) * head_dim];
+                        let mut s = 0.0f32;
+                        for d in 0..head_dim {
+                            s += q_slice[d] * k_slice[d];
+                        }
+                        scores[k_idx] = s * kq_scale;
+                    }
+                    softmax_in_place(&mut scores);
+
+                    let out_slice = &mut attn_out
+                        [q_idx * q_dim + qh * head_dim..q_idx * q_dim + (qh + 1) * head_dim];
+                    for k_idx in 0..n_kv_total {
+                        let w = scores[k_idx];
+                        if !w.is_finite() || w == 0.0 {
+                            continue;
+                        }
+                        let v_slice = &v_full[k_idx * kv_dim + kvh * head_dim
+                            ..k_idx * kv_dim + (kvh + 1) * head_dim];
+                        for d in 0..head_dim {
+                            out_slice[d] += w * v_slice[d];
+                        }
+                    }
+                }
+            }
+
+            // O projection.
+            let o_w = dequant_drafter(layer.o)?;
+            let mut attn_proj = vec![0.0f32; n * h];
+            for i in 0..n {
+                let p = mat_vec(&o_w, q_dim, h, &attn_out[i * q_dim..(i + 1) * q_dim]);
+                attn_proj[i * h..(i + 1) * h].copy_from_slice(&p);
+            }
+            // Residual #1: x += attn_proj.
+            for i in 0..n * h {
+                x[i] += attn_proj[i];
+            }
+
+            // Pre-FFN norm.
+            let post_norm_w = dequant_drafter(layer.post_attention_norm)?;
+            let mut h2 = vec![0.0f32; n * h];
+            for i in 0..n {
+                let s = i * h;
+                let nn = rms_norm(&x[s..s + h], &post_norm_w, RMS_EPS);
+                h2[s..s + h].copy_from_slice(&nn);
+            }
+
+            // SwiGLU FFN.
+            let g_w = dequant_drafter(layer.ffn_gate)?;
+            let u_w = dequant_drafter(layer.ffn_up)?;
+            let d_w = dequant_drafter(layer.ffn_down)?;
+            let mut ffn_out = vec![0.0f32; n * h];
+            for i in 0..n {
+                let h2_row = &h2[i * h..(i + 1) * h];
+                let gated = mat_vec(&g_w, h, f, h2_row);
+                let upped = mat_vec(&u_w, h, f, h2_row);
+                let mut inner = vec![0.0f32; f];
+                for j in 0..f {
+                    inner[j] = silu(gated[j]) * upped[j];
+                }
+                let down = mat_vec(&d_w, f, h, &inner);
+                ffn_out[i * h..(i + 1) * h].copy_from_slice(&down);
+            }
+            // Residual #2: x += ffn_out.
+            for i in 0..n * h {
+                x[i] += ffn_out[i];
+            }
+        }
+
+        // ---------- Step 4: final norm + lm_head per position ----------
+        let on_w = dequant_drafter(head.output_norm)?;
+        let lm_w = self.dequant(self.model.lm_head)?;
+        let v = arch.vocab_size as usize;
+        let mut logits = vec![0.0f32; n * v];
+        for i in 0..n {
+            let normed = rms_norm(&x[i * h..(i + 1) * h], &on_w, RMS_EPS);
+            let logits_row = mat_vec(&lm_w, h, v, &normed);
+            logits[i * v..(i + 1) * v].copy_from_slice(&logits_row);
+        }
+        Ok(logits)
     }
 
     // -------------- helpers --------------
@@ -1515,4 +1885,108 @@ mod tests {
     // (H4.3 deliverable): if α << 0.3 on prose, the MTP forward is
     // computing the wrong distribution even though tokens come out right.
     // No external (vLLM) oracle is needed for either gate.
+
+    // -------- H5.1 DFlash drafter CPU smoke --------
+
+    /// Smoke test: bind drafter, run dflash_draft with synthetic target_ctx,
+    /// confirm output shape + finite logits + non-degenerate argmax.
+    /// Real correctness validation (vs spiritbuun) comes in H5.5.
+    #[test]
+    fn dflash_draft_cpu_smoke() {
+        let target_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let drafter_path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        if !std::path::Path::new(target_path).exists()
+            || !std::path::Path::new(drafter_path).exists()
+        {
+            eprintln!("[dflash-cpu-smoke] skipped — fixtures missing");
+            return;
+        }
+        let target_g = GgufFile::open(target_path).expect("open target");
+        let target_m = Model::from_gguf(&target_g).expect("load target");
+        let drafter_g = GgufFile::open(drafter_path).expect("open drafter");
+        let head = crate::loader::open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
+
+        let f = Forward::new(&target_g, &target_m);
+        let cfg = head.config;
+        let n = cfg.block_size as usize;
+        let h_target = target_m.arch.hidden_size as usize;
+        let k_layers = head.target_layer_ids.len();
+
+        // Synthetic target_ctx via REAL prompt prefill on the target.
+        // Captures the last K target-layer hiddens at every prompt
+        // position. This mirrors what H5.2 (multi-layer hidden capture)
+        // will do on Metal; we run CPU here for the smoke test.
+        let prompt = "The quick brown fox";
+        let tok = crate::tokenizer::Tokenizer::open(target_path).expect("tok");
+        let prompt_ids = tok.encode(prompt, false).expect("tok");
+        let ctx_len = prompt_ids.len();
+        let n_target_features = k_layers * h_target;
+        eprintln!("[dflash-cpu-smoke] prompt {prompt:?} → {ctx_len} tokens");
+
+        // Run target prefill, capturing hiddens at K layer indices per token.
+        let mut state = GdnState::fresh(&target_m);
+        let mut kv = KvCache::new(&target_m);
+        let mut target_ctx_stacked = vec![0.0f32; ctx_len * n_target_features];
+        for (i, &tid) in prompt_ids.iter().enumerate() {
+            let captured = f
+                .single_token_capture_layers(
+                    tid,
+                    i as u32,
+                    &mut state,
+                    &mut kv,
+                    &head.target_layer_ids,
+                )
+                .expect("prefill capture");
+            // captured is [K, H_target]; copy into target_ctx_stacked at column i.
+            for k in 0..k_layers {
+                let dst_off = i * n_target_features + k * h_target;
+                target_ctx_stacked[dst_off..dst_off + h_target]
+                    .copy_from_slice(&captured[k * h_target..(k + 1) * h_target]);
+            }
+        }
+        let pos_ctx: Vec<u32> = (0..ctx_len as u32).collect();
+
+        // Noise input: [carry_tok, MASK × (N-1)].
+        let carry_tok = 760_i32; // "The" — arbitrary.
+        let mut noise_ids = vec![cfg.mask_token_id; n];
+        noise_ids[0] = carry_tok;
+
+        // noise_start_pos = ctx_len (first decoded position).
+        let noise_start_pos = ctx_len as u32;
+
+        let logits = f
+            .dflash_draft(
+                &head,
+                &drafter_g,
+                &noise_ids,
+                &target_ctx_stacked,
+                ctx_len,
+                &pos_ctx,
+                noise_start_pos,
+            )
+            .expect("dflash_draft");
+        assert_eq!(logits.len(), n * target_m.arch.vocab_size as usize);
+        // Confirm finiteness and that argmax across noise positions is
+        // not all the same token (which would imply a totally broken
+        // forward).
+        let v = target_m.arch.vocab_size as usize;
+        let mut argmaxes: Vec<i32> = Vec::with_capacity(n);
+        for i in 0..n {
+            let row = &logits[i * v..(i + 1) * v];
+            assert!(row[0].is_finite(), "row {i} produced NaN/Inf");
+            let argmax = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0 as i32;
+            argmaxes.push(argmax);
+        }
+        eprintln!("[dflash-cpu-smoke] argmaxes (per-noise-position): {argmaxes:?}");
+        let unique: std::collections::HashSet<_> = argmaxes.iter().collect();
+        assert!(
+            unique.len() > 1,
+            "all noise positions argmax to the same token — drafter forward likely broken"
+        );
+    }
 }

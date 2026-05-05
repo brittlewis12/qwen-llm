@@ -903,6 +903,73 @@ launch/wait), NOT just dispatch overhead. So:
   partial-tile regime; end-to-end could be dragged down even
   if FFN/embed look healthy.
 
+**H5.3b.4–5 design decisions** (codex layer-major partner session,
+v0.65; baked in here so they aren't re-debated mid-implementation):
+
+* **GDN/conv per-N checkpoints: Option A** — inline compute→blit
+  transitions inside the per-N inner loop. ~1536 transitions per
+  outer step total (48 GDN layers × 16 N × 2). On M-series each
+  transition is ~µs; total overhead is ~1-3 ms / outer step,
+  well under the 184+ ms FFN savings. Post-v1 optimization (NOT
+  blocking H5.3b.4-5): a compute "save checkpoint" kernel that
+  copies `gdn_state[k]` / `gdn_conv[k]` → `ckpt_slot(k, n)` in
+  the same compute encoder, eliminating all transitions with no
+  temp storage. Codex idea; defer.
+
+* **Attn `o_proj`: batched mat-mat across N**. Per-token decode
+  into `attn_o_pack [N, q_dim]`, then one Q4_K mat-mat. Without
+  this, `o_w` (17 MB Q4_K) is read 16× per attn layer × 16 attn
+  layers = ~4.4 GB redundant traffic per outer step — same loss
+  pattern as un-batched FFN.
+
+* **K/V projection fusion: deferred**. Separate Q4_K mat-mats
+  for K and V. Q is special (gated, output `2 * q_dim`). Fusion
+  is a new kernel surface; not blocking. If profile says skinny
+  projections dominate post-ship, add fused K+V mat-mat as
+  follow-on (mirrors how `encode_ffn_swiglu_q4_K_f32` fuses
+  ffn_gate + ffn_up).
+
+* **Token-major path stays as oracle**. Layer-major is new free
+  fn `encode_packed_verify_layer_major_inner`; production
+  `DFlashDecoder::packed_verify` defaults to layer-major behind
+  a feature toggle, fallback to token-major. Tests run BOTH on
+  identical inputs and compare bit-exact wherever possible.
+  Token-major remains the algorithmic ground truth.
+
+* **Dtype dispatch inside `encode_block_packed`**. Single call
+  site decides Q4_K mat-mat vs F32 per-token mat-vec. Scattering
+  dtype branches across layer/mixer/tail code makes rollback
+  bugs hard to localize.
+
+* **Parallel scratch struct `MetalDFlashLayerMajorScratch`**.
+  Holds the new N-wide activation buffers (`x_pack`, `h_pack`,
+  `mixer_out_pack`, `attn_q_full_pack`, K/V/O packs, FFN packs).
+  Total ~5.6 MB at 27B N=16. Sits alongside
+  `MetalDFlashVerifyScratch` (which keeps owning checkpoints,
+  hidden_capture, packed_ids_buf, verify_argmax). Token-major
+  callers don't allocate this.
+
+**H5.3b.4-5 codex-flagged failure mode (mitigation built into
+test plan, not just hoped for)**:
+
+The mat-mat output is col-major `[n_out, n_query]`-flat;
+layer-major scratch is naturally `[N, dim]` row-major. EVERY
+consumer of mat-mat output has to either transpose-on-read or
+be col-major-aware. The H5.3a gates on argmax and final state
+may pass even if intermediate layouts are silently transposed
+(argmax + final state can mask shape-only bugs on lucky
+logits).
+
+Mandatory NEW intermediate-layer correctness tests:
+  * `attn_q_full_pack` row-cosine vs single-token equivalent
+  * `attn_k_now_pack`, `attn_v_now_pack` ditto
+  * `attn_o_pack` (post per-token decode, pre o_proj)
+  * `ffn_gate_pack`, `ffn_up_pack`, `ffn_inner_pack`,
+    `ffn_out_pack` ditto
+Per-row cosine ≥ 0.999 vs N-times-single-token reference. Done
+ONCE on a representative GDN+attn+FFN layer set; no need to
+test every layer if the kernels are bit-exact.
+
 **H5.3b.4–5 → tile retune tripwire** (codex bench-review,
 v0.64; pre-authorized — no need to re-debate):
 

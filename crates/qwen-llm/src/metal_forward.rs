@@ -910,7 +910,7 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
-    pub(crate) fn encode_block(
+    pub fn encode_block(
         &self,
         enc: &KernelEncoder,
         _il: usize,
@@ -979,7 +979,7 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    pub(crate) fn encode_gdn(
+    pub fn encode_gdn(
         &self,
         enc: &KernelEncoder,
         gb: &MetalGdnBlock,
@@ -1115,7 +1115,7 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    pub(crate) fn encode_attn(
+    pub fn encode_attn(
         &self,
         enc: &KernelEncoder,
         ab: &MetalAttnBlock,

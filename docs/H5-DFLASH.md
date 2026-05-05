@@ -1334,7 +1334,97 @@ the failure:
 
 ## Document history
 
-- **rev 6 (current).** H5.3b plan re-sequenced after codex partner
+- **rev 7 (current).** H5.3b SHIPPED (v0.62 → v0.69). Codex
+  next-moves partner session staked the v0.70+ sequence.
+  Headline H5.3b results:
+    * Layer-major packed_verify bit-exact vs token-major oracle on
+      F32 0.8B (993k logit values bit-identical)
+    * 27B Q4_K_M end-to-end: cos = 1.000000 vs token-major across
+      all 16 verify rows; argmax 16/16; max|Δ| 6.4e-3
+    * Speedup: 1.58× over naive packed_verify (was 1.53× before
+      NR1=16 retune; retune drove kernel BW +30-60% but Amdahl shows
+      remaining wall time is in GDN/attn per-token loops + encoder
+      transitions)
+    * Codex tripwire (≥ 2.5×) NOT cleared end-to-end, but kernel-level
+      objective achieved. Remaining gap is non-mat-mat phases that
+      don't show up in isolated mat-mat benches.
+
+  ### v0.70+ sequencing (codex stake: PROFILE BEFORE PLUMBING)
+
+  Codex reframed: profile FIRST, even before H5.5 plumbing. Reasoning:
+  "if profile is really 2-3 hr work, it should precede H5.5 because
+  it can invalidate the whole ranked roadmap cheaply. If profiling
+  starts ballooning into framework work, abort and ship H5.5 first."
+
+  Plan:
+
+    * **v0.70**: Per-phase profiler for layer-major packed_verify;
+      run at ctx ∈ {1K, 4K, 16K, 64K}. Tightly scoped — INSTRUMENTATION
+      ONLY, no kernel changes. Hard timebox: ≤ 3 hours; abort if
+      growing into a framework rebuild. Establishes which phase
+      dominates at which context length.
+    * **v0.71**: H5.5 end-to-end DFlash decode loop +
+      greedy-equivalence test + `qwen-bench dflash` subcommand.
+      Plumbing we can't ship without (cursor state machine, EOS,
+      max_new_tokens, draft+verify+rollback wrapper).
+    * **v0.72**: First public bench table vs llama.cpp tg128 on
+      representative prompts (code / prose / long-ctx). The actual
+      headline number we've been working toward.
+    * **v0.73**: ONE kernel bet, profile-driven. Likely packed
+      flash-attn-v4 if long-ctx dominates the prompts we care about,
+      packed GDN recurrence if short-mid ctx dominates.
+
+  ### Bottleneck shift across context length (Britt + codex)
+
+  Estimated phase contribution (no profile yet — that's v0.70):
+
+    | ctx   | mat-mat | GDN  | attn (KV reads) | dominant            |
+    |-------|---------|------|-----------------|---------------------|
+    | 0–1K  | ~150ms  | ~150 | <5              | mat-mat / GDN tied  |
+    | 4K    | ~150ms  | ~150 | ~10             | mat-mat / GDN tied  |
+    | 16K   | ~150ms  | ~150 | ~35             | still mat-mat / GDN |
+    | 64K   | ~150ms  | ~150 | ~135            | attn catches up     |
+    | 256K  | ~150ms  | ~150 | ~540            | **attn 3:1 dominant** |
+
+  KV BW math: K+V × n_kv_heads × head_dim × fp16 = 2 × 8 × 128 × 2
+  = 4096 B/token/layer; at 10K ctx that's 40.96 MB per attn-v4 call,
+  × 16 layer-major-N calls × 16 attn layers = 10.5 GB per outer step
+  / ~500 GB/s eff BW = ~21 ms attention-only. Linear in ctx until
+  partition / cache effects dominate at very long ctx.
+
+  Codex's earlier "don't touch attn-v4 until profile demands it"
+  presumed short ctx. At long ctx **profile already demands it**.
+
+  ### What we previously missed (codex next-moves session)
+
+  **Acceptance-aware dynamic `N` policy** — non-obvious algorithmic
+  lever filed for v0.74-ish. Currently fixed N=16 every outer step;
+  if α drops on prose, packed verify wastes rows after first
+  mismatch. A policy `N(ctx, observed_acceptance)` could shrink N on
+  prose-class behavior (cheaper verify, fewer wasted rows). At α=0.3
+  the cost-model arithmetic favors going SMALLER on prose:
+    * α=0.3 D=15: 5.5 emitted / ~9 wall = 0.6×
+    * α=0.3 D=5:  2.5 emitted / ~3 wall = 0.83×
+  Wins because verify cost shrinks faster than expected emission.
+  Algorithmic change, no kernel work. Lands AFTER bench infrastructure
+  exists to evaluate it on real workloads.
+
+  ### Other deferred items per codex (unchanged status)
+
+    * Save-checkpoint compute kernel (kills 1536 cross-encoder
+      transitions): NOT NOW unless H5.5 measurement shows
+      restore/checkpoint costs visible.
+    * KV-Q8 cache compression: AFTER packed-attn (algorithmic change
+      first; compression multiplies whatever's left).
+    * Fused FFN gate+up mat-mat: lower priority; doesn't change
+      asymptotics.
+    * GPU sampling kernel (top-k/top-p): not until non-greedy is a
+      product path.
+    * KV append packing: cleanup, only if profile exposes it.
+    * ICB / MTL4 (encode amortization): ~5-10% lever at short ctx;
+      after profile.
+
+- **rev 6.** H5.3b plan re-sequenced after codex partner
   session at start of v0.62. Three sub-phases: H5.3b.0–3 (Q4_K
   mat-mat kernel + bench, no plumbing), H5.3b.4–5 (layer-major
   encode_block_packed + plumbing), H5.3b.6 (Q6_K mat-mat for ffn_down

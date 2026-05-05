@@ -2935,6 +2935,39 @@ pub fn bench_q6_k_chained(
     Ok(())
 }
 
+/// Chain `n_dispatches` Q4_K **mat-mat** (with N_QUERY columns) into one
+/// command buffer. Used to bench the lifted llama mat-mat tile against
+/// theoretical peak BW and against `n_dispatches × n_query` mat-vec
+/// calls.
+///
+/// Per H5.3b plan rev 6: this is the H5.3b.1–3 perf gate. We expect:
+///   * GiB/s should approach the chained64 mat-vec ceiling (77-88% peak
+///     for our existing fast Q4_K kernel) because mat-mat amortizes
+///     weight reads across N_QUERY columns rather than re-reading.
+///   * Wall time vs `n_dispatches × n_query mat_vec` should be ~N_QUERY×
+///     less if the BW ceiling is the same — that's the entire point of
+///     mat-mat.
+pub fn bench_q4_k_mat_mat_chained(
+    ctx: &MetalContext,
+    weight: &MetalTensor,
+    x: &MetalTensor, // [n_query, n_in] row-major F32
+    y: &MetalTensor, // [n_out, n_query] col-major F32
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    n_dispatches: usize,
+) -> Result<(), MetalError> {
+    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = KernelEncoder::begin(&cmd_buf);
+    for _ in 0..n_dispatches {
+        encode_mat_mat_q4_k_f32(ctx, &enc, weight, x, y, n_in, n_out, n_query)?;
+    }
+    enc.end();
+    cmd_buf.commit();
+    unsafe { cmd_buf.waitUntilCompleted() };
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

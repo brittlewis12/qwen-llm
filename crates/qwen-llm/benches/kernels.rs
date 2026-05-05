@@ -16,7 +16,9 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::{MetalContext, MetalTensor, bench_q4_k_chained, bench_q6_k_chained};
+use qwen_llm::metal::{
+    MetalContext, MetalTensor, bench_q4_k_chained, bench_q4_k_mat_mat_chained, bench_q6_k_chained,
+};
 use qwen_llm::tensor::{GgmlType, TensorDesc};
 
 const MODEL_27B: &str = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
@@ -168,5 +170,144 @@ fn bench_q6k_mat_vec(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_q4k_mat_vec, bench_q6k_mat_vec);
+/// H5.3b.1-3 isolated bench for the lifted Q4_K mat-mat kernel.
+///
+/// For each production-shape Q4_K weight, we measure THREE timings at
+/// the DFlash N_QUERY=16 use case:
+///
+///   * `mat_vec_n_query_times` — N_QUERY=16 successive single-row mat-vec
+///     dispatches in ONE command buffer. The naive H5.3a baseline
+///     (matches what `packed_verify` does today for these weights).
+///     Throughput: weight bytes × N_QUERY (we re-read weights N times).
+///
+///   * `mat_mat_single` — ONE mat-mat dispatch covering N_QUERY=16 cols.
+///     Throughput: weight bytes × 1 (weights read ONCE; activations &
+///     output scale with N_QUERY, but N_QUERY × n_in × 4 B is < 1% of
+///     weight bytes at our shapes).
+///
+///   * `mat_mat_chained64` — 64 mat-mat dispatches in ONE command buffer
+///     (approximates the steady-state per-step cost of doing one mat-mat
+///     at every layer of a 64-layer forward).
+///
+/// The HEADLINE NUMBER is the wall-time RATIO of `mat_vec_n_query_times`
+/// to `mat_mat_single` at the same weight shape. Per H5.3b plan rev 6,
+/// we expect ≈ N_QUERY-fold speedup if the kernel hits the BW ceiling.
+/// Anything < 4× at N_QUERY=16 means the lifted tile underdelivers and
+/// we need to revisit (smaller tile, partial-tile path overhead, etc).
+fn bench_q4k_mat_mat(c: &mut Criterion) {
+    if !std::path::Path::new(MODEL_27B).exists() {
+        eprintln!("[bench] skipping q4_k mat_mat — {MODEL_27B} not present");
+        return;
+    }
+    let ctx = match MetalContext::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[bench] no metal context: {e}");
+            return;
+        }
+    };
+    let g = GgufFile::open(MODEL_27B).expect("open 27B");
+    let shapes = pick_q4k_shapes(&g);
+
+    const N_QUERY: usize = 16; // matches DFlash block_size
+
+    let mut group = c.benchmark_group("q4_k mat_mat");
+    for (label, t) in &shapes {
+        let n_in = t.shape[0] as usize;
+        let n_out = t.shape[1] as usize;
+
+        // Skip shapes whose n_out isn't a multiple of NR0_MM=64; the lifted
+        // tile requires this for correctness without a partial-row path.
+        if n_out % 64 != 0 {
+            eprintln!("[bench q4_k mat_mat] skip {label} (n_out={n_out} not % 64)");
+            continue;
+        }
+
+        // Persistent tensors.
+        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("w");
+        // Mat-vec activation: just one row.
+        let x_vec: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+        let x_vec_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x_vec),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x_vec");
+        let y_vec_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y_vec");
+
+        // Mat-mat activation: [N_QUERY, n_in] row-major.
+        let x_mat: Vec<f32> = (0..N_QUERY * n_in)
+            .map(|i| (i as f32 * 1e-3).sin())
+            .collect();
+        let x_mat_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x_mat),
+            vec![N_QUERY as u64, n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x_mat");
+        let y_mat_t =
+            MetalTensor::zeros_f32(&ctx, vec![n_out as u64, N_QUERY as u64]).expect("y_mat");
+
+        // Baseline: N_QUERY successive mat-vec dispatches in one cmd buffer.
+        // This is what naive H5.3a packed_verify does at this weight today.
+        // Throughput: weight bytes × N_QUERY (weights re-read N times).
+        group.throughput(Throughput::Bytes(t.n_bytes * N_QUERY as u64));
+        group.bench_with_input(
+            BenchmarkId::new("mat_vec_n_query_times", label),
+            &(label, t.n_bytes),
+            |b, _| {
+                b.iter(|| {
+                    bench_q4_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("dispatch");
+                    black_box(&y_vec_t);
+                });
+            },
+        );
+
+        // Single mat-mat at N_QUERY=16. Throughput: weight bytes × 1
+        // (weights read ONCE; ratio to mat_vec_n_query_times in wall time
+        // is the headline H5.3b.1-3 number).
+        group.throughput(Throughput::Bytes(t.n_bytes));
+        group.bench_with_input(
+            BenchmarkId::new("mat_mat_single", label),
+            &(label, t.n_bytes),
+            |b, _| {
+                b.iter(|| {
+                    bench_q4_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 1,
+                    )
+                    .expect("dispatch");
+                    black_box(&y_mat_t);
+                });
+            },
+        );
+
+        // Steady-state chained64 — approximates one mat-mat at every layer
+        // of a 64-layer forward.
+        group.throughput(Throughput::Bytes(t.n_bytes * 64));
+        group.bench_with_input(
+            BenchmarkId::new("mat_mat_chained64", label),
+            &(label, t.n_bytes),
+            |b, _| {
+                b.iter(|| {
+                    bench_q4_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 64,
+                    )
+                    .expect("chained");
+                    black_box(&y_mat_t);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_q4k_mat_vec,
+    bench_q6k_mat_vec,
+    bench_q4k_mat_mat
+);
 criterion_main!(benches);

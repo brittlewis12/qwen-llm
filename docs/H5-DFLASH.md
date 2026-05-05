@@ -885,6 +885,37 @@ that the layer-major rewrite didn't break the H5.3a contracts that
 the kernel-level cosine alone can't see (codex Q7 second-most-likely
 failure mode).
 
+**H5.3b.4–5 instrumentation requirements** (codex bench-review,
+v0.64): per the H5.3b.0 isolated bench results, the lifted
+mat-mat kernel hits only 12-20% peak BW even at chained64.
+That's real in-kernel underfill (chained64 already amortizes
+launch/wait), NOT just dispatch overhead. So:
+
+* **Track command-buffer structure explicitly**: encoders,
+  dispatches, waits separately. If layer-major still waits per
+  projection/layer, the scheduling win evaporates.
+* **Record GPU time, not just wall**, so encoder overhead
+  doesn't hide kernel cost. Wall speedup can improve from
+  batching while the kernel itself stays bad — fatal for the
+  H5.5 cost model.
+* **Watch the skinny projections** (attn_gate at 1.68× isolated
+  is the canary). Many ops in layer-major may resemble this
+  partial-tile regime; end-to-end could be dragged down even
+  if FFN/embed look healthy.
+
+**H5.3b.4–5 → tile retune tripwire** (codex bench-review,
+v0.64; pre-authorized — no need to re-debate):
+
+If after layer-major plumbing EITHER condition fires:
+  * packed_verify is **< 2.5× over naive** on FFN-heavy paths, OR
+  * Q4_K mat-mat steady-state is **< 150 GiB/s GPU-time**
+
+then the tile retune is mandatory. Predeclared retune target:
+NR1 = 16 (not 32; matches our N_QUERY=16 with no half-fill),
+keep NR0 = 64 if register pressure allows, REMOVE the partial-N
+hot path, reduce simdgroup layout to match full 16-column
+occupancy. Becomes new sub-phase H5.3b.5.5 if triggered.
+
 ##### H5.3b.6 — Q6_K mat-mat (ffn_down + lm_head)
 
 Same playbook as H5.3b.0: lift `kernel_mul_mm_q6_K_f32` from

@@ -1022,7 +1022,7 @@ pub(crate) fn encode_packed_verify_inner(
 /// to `dbg_scratch.debug_logits`. For correctness/cosine gate use only;
 /// production paths must use `encode_packed_verify_inner` (no extra
 /// vocab-sized buffer touched per token).
-pub(crate) fn encode_packed_verify_with_logits_inner(
+pub fn encode_packed_verify_with_logits_inner(
     base: &MetalForward<'_>,
     target_layer_ids: &[u32],
     tokens: &[i32],
@@ -1450,7 +1450,7 @@ fn encode_packed_verify_inner_impl(
 // (silu_mul, residual_add, chained mat-mat with this output as srcB)
 // work without any transpose. The intermediate-layer cosine tests
 // added in this phase verify this for every per-layer pack buffer.
-pub(crate) fn encode_packed_verify_layer_major_inner(
+pub fn encode_packed_verify_layer_major_inner(
     base: &MetalForward<'_>,
     target_layer_ids: &[u32],
     tokens: &[i32],

@@ -802,7 +802,22 @@ pub fn encode_mat_mat_q4_k_f32(
         });
     }
 
-    let pso = ctx.pipeline("kernel_mat_mat_q4_K_f32")?;
+    // H5.3b.5.5 fast-path gate (codex retune review): when n_query
+    // is exactly 16 (the DFlash N_QUERY case), dispatch the
+    // NR1=16-specialized kernel — no half-fill, smaller shmem,
+    // higher occupancy. For any other n_query, fall back to the
+    // generic NR1=32 kernel (which handles partial N internally).
+    //
+    // Codex's predicted failure mode: "host routing still calls the
+    // retuned kernel for N != 16 somewhere — silently drops columns
+    // or OOB-writes." This branch is the mitigation: NR1=16 kernel
+    // ONLY fires when n_query == 16 exactly.
+    let kernel_name = if n_query == 16 {
+        "kernel_mat_mat_q4_K_f32_n16"
+    } else {
+        "kernel_mat_mat_q4_K_f32"
+    };
+    let pso = ctx.pipeline(kernel_name)?;
     enc.set_pipeline(&pso);
 
     // Q4_K block bytes per row = (n_in / 256) * 144.
@@ -833,11 +848,18 @@ pub fn encode_mat_mat_q4_k_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    // Threadgroup memory: 8192 bytes (4 KiB sa + 4 KiB sb), per kernel header.
+    // Threadgroup memory: 8192 bytes for both kernels.
+    // Generic NR1=32: 4 KiB sa + 4 KiB sb (uses up to 8 KiB depending
+    //   on partial-output staging — sb size 2 KiB live, partial-tile
+    //   temp_str up to 8 KiB but reuses same shmem).
+    // NR1=16:        4 KiB sa + 1 KiB sb live; we still allocate 8 KiB
+    //   to allow the M-partial fallback path to use the front of shmem
+    //   as temp_str. Same allocation = same pipeline state object cost.
     enc.set_threadgroup_memory(0, 8192);
 
-    // Grid: ceil(n_query / 32) × ceil(n_out / 64) threadgroups.
-    let n_tg_x = n_query.div_ceil(32);
+    // Grid: ceil(n_query / NR1) × ceil(n_out / 64) threadgroups.
+    let nr1 = if n_query == 16 { 16 } else { 32 };
+    let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
     enc.dispatch(
         MTLSize {
@@ -846,7 +868,7 @@ pub fn encode_mat_mat_q4_k_f32(
             depth: 1,
         },
         MTLSize {
-            width: 128, // 4 simdgroups × 32 lanes
+            width: 128, // 4 simdgroups × 32 lanes (both kernels use 128)
             height: 1,
             depth: 1,
         },
@@ -2819,7 +2841,15 @@ pub fn encode_mat_mat_q6_k_f32(
         });
     }
 
-    let pso = ctx.pipeline("kernel_mat_mat_q6_K_f32")?;
+    // H5.3b.5.5 fast-path gate (codex retune review): same NR1=16
+    // specialization as Q4_K mat-mat. Only fires when n_query == 16
+    // exactly; otherwise generic NR1=32 kernel handles partial N.
+    let kernel_name = if n_query == 16 {
+        "kernel_mat_mat_q6_K_f32_n16"
+    } else {
+        "kernel_mat_mat_q6_K_f32"
+    };
+    let pso = ctx.pipeline(kernel_name)?;
     enc.set_pipeline(&pso);
 
     // Q6_K block bytes per row = (n_in / 256) * 210.
@@ -2851,7 +2881,8 @@ pub fn encode_mat_mat_q6_k_f32(
 
     enc.set_threadgroup_memory(0, 8192);
 
-    let n_tg_x = n_query.div_ceil(32);
+    let nr1 = if n_query == 16 { 16 } else { 32 };
+    let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
     enc.dispatch(
         MTLSize {

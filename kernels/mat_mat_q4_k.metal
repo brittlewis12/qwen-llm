@@ -352,3 +352,236 @@ kernel void kernel_mat_mat_q4_K_f32(
         }
     }
 }
+
+// =============================================================================
+// kernel_mat_mat_q4_K_f32_n16 — H5.3b.5.5 NR1=16 specialization.
+//
+// Per codex bench-review tripwire (v0.64) + retune partner session
+// (v0.69): generic NR1=32 tile half-fills the column dim at our
+// DFlash N_QUERY=16, leaving real BW on the table (1.53× over naive
+// vs 2.5× tripwire on 27B). This kernel specializes the lifted tile
+// for N_QUERY == 16 exactly.
+//
+// Diffs from generic kernel_mat_mat_q4_K_f32:
+//
+// 1. NR1_SPECIAL=16 (was 32). Each TG produces a 64×16 output tile.
+//    Halves the per-TG work in the N dim; doubles the number of TGs
+//    in the N grid for N_QUERY=16 (= 1 TG total for N=16) — same
+//    grid as the generic kernel just with a tighter per-TG body.
+//
+// 2. Per-sg coverage: still 4 simdgroups, still 128 threads, but
+//    each sg writes 32 M × 8 N (= mc[4] of simdgroup_8x8 tiles, 4
+//    in M × 1 in N) instead of 32×16 (mc[8], 4×2). Codex Q1 option A:
+//    preserve M-axis split, halve N-axis split. Smallest semantic
+//    delta from the working generic kernel.
+//
+// 3. Per-sg mb is `simdgroup_half8x8` (1 tile, not 2). The matmul
+//    inner loop reduces from 8 to 4 multiply-accumulates per ik
+//    iteration.
+//
+// 4. B-loading: codex Q3 — gate B loading to the first
+//    `NR1_SPECIAL × NL1_SPECIAL = 64` threads (which exactly cover
+//    the 16 N-rows × 4 K-chunks needed for the smaller sb tile).
+//    Other 64 threads idle on B; they still participate in A-load
+//    (lr0 ∈ [0, 64) covers 128/2 = 64 unique M-rows; all 128 threads
+//    are useful for A) and the simdgroup matmul.
+//
+// 5. Threadgroup memory: sa stays 4 KiB (64M × 32K × 2 B half), sb
+//    shrinks from 2 KiB (32×32 halves) to 1 KiB (16×32 halves).
+//    Total live shmem ~5 KiB. Host allocates 5120 bytes for the
+//    fast path; the partial-N path is REMOVED — caller MUST ensure
+//    args.N == 16 (host wrapper enforces).
+//
+// 6. The partial-output staging path is REMOVED. Caller responsibility
+//    (host wrapper) is to dispatch this kernel ONLY when
+//    args.N == 16. For args.N != 16 the host falls back to the
+//    generic kernel above. This is codex's predicted failure mode
+//    mitigation: a host-side gate prevents the OOB write that would
+//    silently happen if this kernel ran with args.N < 16 or > 16.
+//
+// 7. M-dim partial tile DOES still need handling: lm_head shape
+//    is [V=248320, h=5120] which is huge in M; n_out is always
+//    multiple of 64 for our weights anyway, but we keep the M-bounds
+//    check for safety. (The H5.3b.0 host wrapper enforces n_out % 64
+//    == 0 already.)
+//
+// Predicted speedup over generic NR1=32: ~1.5-2× per codex retune
+// review. End-to-end DFlash speedup target with this retune: ≥ 2.5×
+// over naive (the codex tripwire that fired in v0.68).
+
+constant constexpr int NR1_SPECIAL_N16 = 16;
+constant constexpr int NL1_SPECIAL_N16 = NK_MM / 8;       // 4
+constant constexpr int B_LOAD_THREADS_N16 =
+    NR1_SPECIAL_N16 * NL1_SPECIAL_N16;                    // 64
+
+kernel void kernel_mat_mat_q4_K_f32_n16(
+        constant mat_mat_q4k_args & args   [[buffer(0)]],
+        device const uchar        * srcA   [[buffer(1)]],
+        device const float        * srcB   [[buffer(2)]],
+        device       float        * dst    [[buffer(3)]],
+        threadgroup  uchar        * shmem  [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    // sb is sized [16 cols × 32 K] half = 1024 B; placed AFTER sa
+    // (which is 4096 B for [64 M × 32 K] half).
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_SPECIAL_N16;
+
+    // M-dim partial tile still possible (M can be any multiple of 64).
+    // N-dim is GUARANTEED to be exactly 16 by the host wrapper, so
+    // nr1 == NR1_SPECIAL_N16 always.
+    const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
+
+    // A-loading thread mapping (unchanged from generic).
+    const short lr0 = ((short)tiitg / NL0_MM) < nr0
+                        ? ((short)tiitg / NL0_MM)
+                        : nr0 - 1;
+    const short il0 = (tiitg % NL0_MM);
+    short il = il0;
+
+    // B-loading thread mapping: codex Q3 — only the first 64 threads
+    // (tiitg < 64) load B. The mapping uses the standard lr1/iy
+    // arithmetic against NL1_SPECIAL_N16=4, so tiitg in [0, 64)
+    // covers lr1 ∈ [0, 16) × iy ∈ {0, 8, 16, 24} exactly.
+    const short lr1 = (short)tiitg / NL1_SPECIAL_N16;
+    const short iy = 8 * (tiitg % NL1_SPECIAL_N16);
+
+    const short offset1 = il0 / Q4K_NL;
+    device const uchar * x_ptr = srcA + (ulong)args.nb01 * (r0 + lr0)
+                                       + (ulong)offset1 * Q4K_BYTES;
+    device const float * y_ptr = srcB + (ulong)args.stride_b * lr1
+                                       + (ulong)iy;
+
+    simdgroup_half8x8   ma[4];
+    simdgroup_half8x8   mb;          // ONE tile per sg (was 2)
+    simdgroup_float8x8  mc[4];       // 4 tiles per sg (was 8)
+
+    for (short i = 0; i < 4; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        // PHASE 1: A-tile load (UNCHANGED — same 64×32 sa layout).
+        {
+            half4x4 temp_a;
+            dequantize_q4_K_half(x_ptr, il, temp_a);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+
+        // PHASE 2: B-tile load — gated to first 64 threads (codex Q3).
+        // The other 64 threads idle on B; they STILL did A-loading
+        // above and will participate in matmul + store below.
+        //
+        // sb layout for NR1=16: 8 simdgroup_8x8 tiles laid out as
+        // (sx ∈ [0, 4) K-sub-blocks-of-8) × (sy ∈ [0, 2) N-sub-blocks-of-8).
+        // The packed index `ib = 2 * sx + sy` (NOT 4*sx+sy as in the
+        // generic kernel) produces ib ∈ [0, 8) with NO GAPS. The
+        // generic kernel used 4*sx+sy because NR1=32 had 4 sub-blocks
+        // in N (sy ∈ [0, 4)); halving N halves the per-K stride.
+        if (tiitg < B_LOAD_THREADS_N16) {
+            const short sx = (tiitg % NL1_SPECIAL_N16);
+            const short sy = (tiitg / NL1_SPECIAL_N16) / 8;
+            const short ly = (tiitg / NL1_SPECIAL_N16) % 8;
+            const short ib = 2 * sx + sy;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        // Pointer advance (unchanged — same Q4_K_BYTES mitigation).
+        il = (il + 2 < Q4K_NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2)
+                  ? x_ptr + Q4K_BYTES * ((2 + Q4K_NL - 1) / Q4K_NL)
+                  : x_ptr;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // PHASE 3: simdgroup matmul.
+        // sg-relative A pointer: same as generic (4 sg, 2 quadrants in
+        // M, 2 in N → A split unchanged).
+        threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
+        // sg-relative B pointer: NEW — N-axis split is 1 sg per
+        // 8-col tile (instead of 2 sg per 16-col, with 2 tiles each).
+        // sb layout: 8 simdgroup tiles total (4 K-tiles × 2 N-tiles
+        // since 16 / 8 = 2).
+        // Each sg consumes ONE N-tile (the one indexed by `sgitg >> 1`).
+        threadgroup const half * lsmb = (sb + 1 * 64 * (sgitg / 2));
+
+        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            // ONE B tile per sg (was 2).
+            simdgroup_load(mb, lsmb, 8, 0, false);
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            // 4 multiply-accumulates per ik (was 8).
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb, ma[i], mc[i]);
+            }
+
+            lsma += 8 * 64;
+            // sb advances by 2 N-tiles × 64 = 128 halves per K-tile-of-8
+            // (was 4 × 64 with NR1=32). i.e. one full sb pass per K
+            // sweep covers 4 ik iters × 128 halves = 512 halves = sb size.
+            lsmb += 2 * 64;
+        }
+    }
+
+    // PHASE 4: store mc[] to dst. M-dim might still be partial; N-dim
+    // is guaranteed full (host wrapper enforces args.N == 16).
+    if (r0 + NR0_MM <= (int)args.M) {
+        // Whole M-tile in-bounds: direct write.
+        // Per-sg output covers 32 M × 8 N. sgitg layout:
+        //   sgitg & 1 → M-quadrant (0 = rows 0..31, 1 = rows 32..63)
+        //   sgitg >> 1 → N-quadrant (0 = cols 0..7, 1 = cols 8..15)
+        device float * C = dst + (r0 + 32 * (sgitg & 1))
+                               + (r1 + 8 * (sgitg >> 1)) * args.M;
+        for (short i = 0; i < 4; ++i) {
+            simdgroup_store(mc[i], C + 8 * i, args.M, 0, false);
+        }
+    } else {
+        // M-partial fallback (rare in our shapes; n_out always %64==0
+        // for the lm_head + FFN paths). Stage mc[] into shmem then
+        // bounds-check copy. Reuses the front of `shmem` since matmul
+        // reads of sa/sb are complete.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float * temp_str = ((threadgroup float *)shmem)
+                                       + 32 * (sgitg & 1)
+                                       + (8 * (sgitg >> 1)) * NR0_MM;
+        for (short i = 0; i < 4; ++i) {
+            simdgroup_store(mc[i], temp_str + 8 * i, NR0_MM, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0) {
+            // N is always 16 here (host enforces); copy all 16 cols.
+            for (int j = tiitg; j < NR1_SPECIAL_N16; j += NR1_SPECIAL_N16) {
+                device float * D = dst + r0 + (r1 + j) * args.M;
+                threadgroup float * C = temp_str + (j * NR0_MM);
+                for (int i = 0; i < nr0; ++i) {
+                    D[i] = C[i];
+                }
+            }
+        }
+    }
+}

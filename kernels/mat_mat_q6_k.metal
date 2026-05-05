@@ -244,3 +244,145 @@ kernel void kernel_mat_mat_q6_K_f32(
         }
     }
 }
+
+// =============================================================================
+// kernel_mat_mat_q6_K_f32_n16 — H5.3b.5.5 NR1=16 specialization for Q6_K.
+//
+// Mirrors mat_mat_q4_k.metal::kernel_mat_mat_q4_K_f32_n16. Same tile
+// shape (NR0=64 M × NR1=16 N × NK=32 K, 4 sg × 32M×8N each, mc[4]),
+// same B-tile layout (`ib = 2*sx + sy`), same B-load gating to first
+// 64 threads. Only the dequant function differs (Q6_K instead of Q4_K).
+//
+// Used for ffn_down (Q6_K [F=17408, H=5120]) and lm_head
+// (Q6_K [H=5120, V=248320]) in the layer-major H5.3b.6 path. lm_head
+// is LATENCY-CRITICAL (last op on the per-token tail before argmax),
+// so the retune win compounds via Amdahl's law.
+
+constant constexpr int NR1_SPECIAL_N16_Q6 = 16;
+constant constexpr int NL1_SPECIAL_N16_Q6 = NK_MM / 8;
+constant constexpr int B_LOAD_THREADS_N16_Q6 =
+    NR1_SPECIAL_N16_Q6 * NL1_SPECIAL_N16_Q6;
+
+kernel void kernel_mat_mat_q6_K_f32_n16(
+        constant mat_mat_q6k_args & args   [[buffer(0)]],
+        device const uchar        * srcA   [[buffer(1)]],
+        device const float        * srcB   [[buffer(2)]],
+        device       float        * dst    [[buffer(3)]],
+        threadgroup  uchar        * shmem  [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_SPECIAL_N16_Q6;
+
+    const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
+
+    const short lr0 = ((short)tiitg / NL0_MM) < nr0
+                        ? ((short)tiitg / NL0_MM)
+                        : nr0 - 1;
+    const short il0 = (tiitg % NL0_MM);
+    short il = il0;
+
+    const short lr1 = (short)tiitg / NL1_SPECIAL_N16_Q6;
+    const short iy = 8 * (tiitg % NL1_SPECIAL_N16_Q6);
+
+    const short offset1 = il0 / Q6K_NL;
+    device const uchar * x_ptr = srcA + (ulong)args.nb01 * (r0 + lr0)
+                                       + (ulong)offset1 * Q6K_BYTES;
+    device const float * y_ptr = srcB + (ulong)args.stride_b * lr1
+                                       + (ulong)iy;
+
+    simdgroup_half8x8   ma[4];
+    simdgroup_half8x8   mb;
+    simdgroup_float8x8  mc[4];
+
+    for (short i = 0; i < 4; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        // PHASE 1: A-tile (Q6_K dequant).
+        {
+            half4x4 temp_a;
+            dequantize_q6_K_half(x_ptr, il, temp_a);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+
+        // PHASE 2: B-tile (gated; ib = 2*sx + sy for NR1=16).
+        if (tiitg < B_LOAD_THREADS_N16_Q6) {
+            const short sx = (tiitg % NL1_SPECIAL_N16_Q6);
+            const short sy = (tiitg / NL1_SPECIAL_N16_Q6) / 8;
+            const short ly = (tiitg / NL1_SPECIAL_N16_Q6) % 8;
+            const short ib = 2 * sx + sy;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        il = (il + 2 < Q6K_NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2)
+                  ? x_ptr + Q6K_BYTES * ((2 + Q6K_NL - 1) / Q6K_NL)
+                  : x_ptr;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // PHASE 3: matmul (4 mc tiles per sg, 1 mb tile per sg).
+        threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
+        threadgroup const half * lsmb = (sb + 1 * 64 * (sgitg / 2));
+
+        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_load(mb, lsmb, 8, 0, false);
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb, ma[i], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 2 * 64;
+        }
+    }
+
+    // PHASE 4: store.
+    if (r0 + NR0_MM <= (int)args.M) {
+        device float * C = dst + (r0 + 32 * (sgitg & 1))
+                               + (r1 + 8 * (sgitg >> 1)) * args.M;
+        for (short i = 0; i < 4; ++i) {
+            simdgroup_store(mc[i], C + 8 * i, args.M, 0, false);
+        }
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float * temp_str = ((threadgroup float *)shmem)
+                                       + 32 * (sgitg & 1)
+                                       + (8 * (sgitg >> 1)) * NR0_MM;
+        for (short i = 0; i < 4; ++i) {
+            simdgroup_store(mc[i], temp_str + 8 * i, NR0_MM, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0) {
+            for (int j = tiitg; j < NR1_SPECIAL_N16_Q6; j += NR1_SPECIAL_N16_Q6) {
+                device float * D = dst + r0 + (r1 + j) * args.M;
+                threadgroup float * C = temp_str + (j * NR0_MM);
+                for (int i = 0; i < nr0; ++i) {
+                    D[i] = C[i];
+                }
+            }
+        }
+    }
+}

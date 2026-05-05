@@ -31,15 +31,14 @@
 use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
-    attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32,
-    encode_gdn_alpha_chain_f32, encode_gdn_step_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
-    MetalTensor,
+    KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
+    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_gdn_alpha_chain_f32,
+    encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
+    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
 };
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -911,7 +910,7 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
-    fn encode_block(
+    pub(crate) fn encode_block(
         &self,
         enc: &KernelEncoder,
         _il: usize,
@@ -2166,7 +2165,9 @@ mod tests {
 
         let nm: f32 = metal_x.iter().map(|v| v * v).sum::<f32>().sqrt();
         let nc: f32 = cpu_x.iter().map(|v| v * v).sum::<f32>().sqrt();
-        eprintln!("[metal-27b-gdn0] hidden={h} ||metal||={nm:.4e} ||cpu||={nc:.4e} max|Δ|={max_abs:.4} cos={cos:.6}");
+        eprintln!(
+            "[metal-27b-gdn0] hidden={h} ||metal||={nm:.4e} ||cpu||={nc:.4e} max|Δ|={max_abs:.4} cos={cos:.6}"
+        );
         eprintln!(
             "[metal-27b-gdn0] metal[0..4]={:?}\n              cpu[0..4]={:?}",
             &metal_x[..4.min(metal_x.len())],
@@ -2381,7 +2382,9 @@ mod tests {
         let bw_f32 = bytes_per_iter_f32 / (per_iter_gpu / 1000.0) / 1e9;
         let predicted_q5_ms = per_iter_gpu * (bytes_per_iter_q5 / bytes_per_iter_f32);
 
-        eprintln!("[q5-bench] {ITERS} iters: total {per_iter_total:.2} ms/iter, gpu {per_iter_gpu:.2} ms/iter");
+        eprintln!(
+            "[q5-bench] {ITERS} iters: total {per_iter_total:.2} ms/iter, gpu {per_iter_gpu:.2} ms/iter"
+        );
         eprintln!("[q5-bench]   F32 BW achieved:    {bw_f32:.0} GB/s");
         eprintln!("[q5-bench]   F32 mat_vec cost (current):  {per_iter_gpu:.2} ms/token");
         eprintln!(
@@ -2391,9 +2394,11 @@ mod tests {
             "[q5-bench]   POTENTIAL SAVINGS:           {:.2} ms/token",
             per_iter_gpu - predicted_q5_ms
         );
-        eprintln!("[q5-bench]   we're at 51.26 ms total; saving this would put us at {:.2} ms = {:.2} t/s",
+        eprintln!(
+            "[q5-bench]   we're at 51.26 ms total; saving this would put us at {:.2} ms = {:.2} t/s",
             51.26 - (per_iter_gpu - predicted_q5_ms),
-            1000.0 / (51.26 - (per_iter_gpu - predicted_q5_ms)));
+            1000.0 / (51.26 - (per_iter_gpu - predicted_q5_ms))
+        );
     }
 
     /// **Per-tensor byte ledger.** Audit what's actually loaded into Metal
@@ -2639,7 +2644,7 @@ mod tests {
                 return Err(MfError::Metal(MetalError::BadShape {
                     kernel: "attn_intra",
                     detail: format!("block {attn_block_idx} is not attn"),
-                }))
+                }));
             }
         };
         let arch = &mf.model.arch;
@@ -2954,7 +2959,7 @@ mod tests {
                 return Err(MfError::Metal(MetalError::BadShape {
                     kernel: "gdn_intra_profile",
                     detail: format!("block {gdn_block_idx} is not GDN"),
-                }))
+                }));
             }
         };
         let arch = &mf.model.arch;
@@ -3595,7 +3600,9 @@ mod tests {
         let bw_floor = gb / peak * 1000.0;
         eprintln!(
             "[perf-27b]   bandwidth floor:      {bw_floor:.2} ms ({:.0} GB/s peak; we're at {:.0} GB/s = {:.0}%)",
-            peak, gb / (gpu_kern / 1000.0), gb / (gpu_kern / 1000.0) / peak * 100.0
+            peak,
+            gb / (gpu_kern / 1000.0),
+            gb / (gpu_kern / 1000.0) / peak * 100.0
         );
         // llama.cpp clean baseline: 21.21 t/s = 47.1 ms/token.
         eprintln!("[perf-27b]   llama.cpp baseline:   47.15 ms (21.21 t/s)");
@@ -3819,8 +3826,8 @@ mod tests {
         let initial_x: Vec<f32> = (0..h).map(|i| ((i % 31) as f32 - 15.0) * 0.02).collect();
         let position: u32 = 0;
         let attn_block_idx = 3usize; // first attn block in 0.8B
-                                     // attn_idx_in_session is the 0-indexed count among ATTN blocks
-                                     // before this one. block 3 is the first attn block, so 0.
+        // attn_idx_in_session is the 0-indexed count among ATTN blocks
+        // before this one. block 3 is the first attn block, so 0.
         let attn_idx_in_session = 0usize;
 
         // CPU reference: replicate exactly what forward.rs:attn_step does.
@@ -4421,7 +4428,11 @@ mod tests {
             let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
             eprintln!(
                 "[h2-spike]   cos={cos:.7} max|Δ|={max_abs:.4} argmax: cold={argmax_cold} restored={argmax_restored} {}",
-                if argmax_cold == argmax_restored { "✓" } else { "✗ MISMATCH" }
+                if argmax_cold == argmax_restored {
+                    "✓"
+                } else {
+                    "✗ MISMATCH"
+                }
             );
             assert_eq!(
                 argmax_cold, argmax_restored,
@@ -4552,7 +4563,11 @@ mod tests {
             let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
             eprintln!(
                 "[h2-arena]   cos={cos:.7} max|Δ|={max_abs:.4} argmax: cold={argmax_cold} restored={argmax_restored} {}",
-                if argmax_cold == argmax_restored { "✓" } else { "✗ MISMATCH" }
+                if argmax_cold == argmax_restored {
+                    "✓"
+                } else {
+                    "✗ MISMATCH"
+                }
             );
             assert_eq!(argmax_cold, argmax_restored);
             assert!(cos > 0.99999, "cos={cos} below threshold");

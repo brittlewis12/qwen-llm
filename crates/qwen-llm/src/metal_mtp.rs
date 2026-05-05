@@ -29,16 +29,16 @@ use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
 use crate::loader::MtpHead;
 use crate::metal::{
-    attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32,
-    encode_get_rows_f32, encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, KernelEncoder, MetalContext, MetalError,
-    MetalTensor,
+    KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
+    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_get_rows_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32,
 };
 use crate::metal_forward::{
-    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native, MetalAttnBlock,
-    MetalForward, MetalSession, ATTN_V4_MAX_NWG, RMS_EPS,
+    ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_vec_dispatch,
+    encode_scatter_offset_f32, weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};

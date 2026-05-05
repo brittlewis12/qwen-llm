@@ -14,9 +14,9 @@
 //! Run all:           cargo bench -p qwen-llm --bench kernels
 //! One filter:        cargo bench -p qwen-llm --bench kernels -- 'q4_k mat_vec/chained64/embed'
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::{bench_q4_k_chained, bench_q6_k_chained, MetalContext, MetalTensor};
+use qwen_llm::metal::{MetalContext, MetalTensor, bench_q4_k_chained, bench_q6_k_chained};
 use qwen_llm::tensor::{GgmlType, TensorDesc};
 
 const MODEL_27B: &str = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";

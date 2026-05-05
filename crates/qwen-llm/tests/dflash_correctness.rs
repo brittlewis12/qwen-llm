@@ -28,7 +28,7 @@
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::forward::{Forward, GdnState, KvCache};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::loader::{open_dflash_drafter, Model};
+use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{KernelEncoder, MetalContext, MetalError, MetalTensor};
 use qwen_llm::metal_dflash::{DFlashDecoder, MetalDFlashHead, MetalDFlashSession};
 use qwen_llm::metal_forward::{MetalForward, MetalModel};

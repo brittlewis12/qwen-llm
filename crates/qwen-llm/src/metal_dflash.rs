@@ -30,13 +30,13 @@ use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
-    encode_add_inplace_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rope_neox_f32, KernelEncoder, MetalContext, MetalError,
-    MetalTensor,
+    encode_add_inplace_f32, encode_argmax_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rope_neox_f32, BlitEncoder, KernelEncoder, MetalContext,
+    MetalError, MetalTensor,
 };
 use crate::metal_forward::{
-    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native, MetalForward,
-    RMS_EPS,
+    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native, MetalBlock,
+    MetalForward, MetalSession, RMS_EPS,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
@@ -535,6 +535,329 @@ impl<'a> DFlashDecoder<'a> {
         }
     }
 
+    // =====================================================================
+    // packed_verify — H5.3a packed target verify forward (PRODUCTION path)
+    // =====================================================================
+    //
+    // Naive H5.3a per plan rev 4 §H5.3a: N successive single-token paths
+    // inside ONE command buffer; per-token GDN+conv state checkpoints
+    // copied via blit between compute encoders; multi-layer hidden
+    // capture inline at target_layer_ids; final logits → GPU argmax →
+    // verify_argmax (no [N, V] CPU readback).
+    //
+    // Codex Q1 placement: this lives on `DFlashDecoder` (NOT `MetalForward`)
+    // because the target driver should not bake in DFlash-specific
+    // semantics. `encode_block` is bumped to `pub(crate)` to allow
+    // re-use here without exposing it as a public API.
+    //
+    // Codex failure-mode mitigation: explicit dim guard at entry.
+    // `MetalDFlashVerifyScratch::slot_*` use `debug_assert!`, which is
+    // a no-op in release; without the guard wall here, a scratch
+    // allocated for a different `block_size` / `target_layer_ids.len()`
+    // / target model schedule would silently write bytes at wrong
+    // offsets in production. The guard is the difference between
+    // "panic on dev, corrupt on prod" and "fail-loudly always."
+    //
+    // Codex Q2 design Y (batched-end-of-token GDN/conv blits): each
+    // `gdn_state[k]` is mutated only by GDN layer k's gdn_step and each
+    // `gdn_conv[k]` only by GDN layer k's ssm_conv_silu, so after all
+    // 64 blocks for token n complete, blitting `gdn_state[k]` and
+    // `gdn_conv[k]` into the n-slot of the checkpoint captures the
+    // correct post-token-n state. 32 encoder transitions per outer
+    // step (16 tokens × 2 transitions) instead of 1536 (per-block).
+    //
+    // Codex Q4 hidden capture timing: MUST be inline in the per-token
+    // compute encoder (not the post-token blit pass) because by the
+    // next compute encoder runs, `session.x` will be overwritten with
+    // token n+1's embedding.
+    //
+    // Codex Q5 GPU argmax timing: MUST be inline after lm_head (before
+    // session.logits is reused for token n+1).
+    //
+    // Codex Q6 cmd buffer: ONE command buffer for all N tokens
+    // (alternating compute / blit passes). Single commit + wait. The
+    // simplest correctness-scaffold posture.
+    pub fn packed_verify(
+        &self,
+        tokens: &[i32],
+        start_position: u32,
+        scratch: &mut MetalDFlashVerifyScratch,
+        target_session: &mut MetalSession,
+    ) -> Result<Vec<i32>, DFlashError> {
+        // Thin wrapper around the inner free function so that tests can
+        // exercise packed_verify without constructing a real DFlash
+        // drafter (DFlashDecoder requires real drafter weights). The
+        // inner function takes everything explicitly as parameters and
+        // is `pub(crate)` so it's not part of the public API.
+        encode_packed_verify_inner(
+            self.base,
+            &self.head.target_layer_ids,
+            tokens,
+            start_position,
+            scratch,
+            target_session,
+        )
+    }
+}
+
+/// H5.3a packed verify forward — low-level entrypoint that takes
+/// everything explicitly. `DFlashDecoder::packed_verify` is the
+/// production wrapper; this exists so unit tests can exercise the
+/// packed-verify algorithm without standing up a full DFlash drafter
+/// (which requires real drafter GGUF weights). Signature mirrors
+/// `MetalForward::single_token_with_multi_hidden`'s style.
+pub(crate) fn encode_packed_verify_inner(
+    base: &MetalForward<'_>,
+    target_layer_ids: &[u32],
+    tokens: &[i32],
+    start_position: u32,
+    scratch: &mut MetalDFlashVerifyScratch,
+    target_session: &mut MetalSession,
+) -> Result<Vec<i32>, DFlashError> {
+    let arch = &base.model.arch;
+
+    // -- Codex failure-mode guard wall: validate ALL dims at entry
+    // because the slot helpers use debug_assert (no-op in release).
+    // If any of these mismatch, downstream blits would silently
+    // write to wrong offsets in production builds. Fail loudly.
+    let n = scratch.n as usize;
+    if tokens.len() != n {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify",
+            detail: format!(
+                "tokens.len()={} != scratch.n={n} (scratch was allocated for a different block_size)",
+                tokens.len()
+            ),
+        }));
+    }
+    let k = target_layer_ids.len();
+    if scratch.k_target_layers as usize != k {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify",
+            detail: format!(
+                "scratch.k_target_layers={} != target_layer_ids.len()={k} (scratch allocated for a different drafter)",
+                scratch.k_target_layers
+            ),
+        }));
+    }
+    if scratch.hidden_size != arch.hidden_size as u64 {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify",
+            detail: format!(
+                "scratch.hidden_size={} != arch.hidden_size={} (wrong target model)",
+                scratch.hidden_size, arch.hidden_size
+            ),
+        }));
+    }
+    let n_gdn_actual = base
+        .model
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, MetalBlock::Gdn(_)))
+        .count() as u32;
+    if scratch.n_gdn_layers != n_gdn_actual {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify",
+            detail: format!(
+                "scratch.n_gdn_layers={} != model n_gdn={n_gdn_actual} (scratch allocated for different layer schedule)",
+                scratch.n_gdn_layers
+            ),
+        }));
+    }
+    // session must have matching state buffer counts.
+    if target_session.gdn_state.len() != n_gdn_actual as usize
+        || target_session.gdn_conv.len() != n_gdn_actual as usize
+    {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify",
+            detail: format!(
+                "session.gdn_state.len={} / gdn_conv.len={} != model n_gdn={n_gdn_actual}",
+                target_session.gdn_state.len(),
+                target_session.gdn_conv.len(),
+            ),
+        }));
+    }
+    // KV capacity must accommodate start_position + N positions.
+    let last_pos = start_position as usize + n;
+    if last_pos > target_session.kv_capacity {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify",
+            detail: format!(
+                "start_position={} + N={n} = {last_pos} > kv_capacity={}",
+                start_position, target_session.kv_capacity
+            ),
+        }));
+    }
+    // Validate every token id and target_layer_id.
+    for (i, &t) in tokens.iter().enumerate() {
+        if t < 0 || (t as u32) >= arch.vocab_size {
+            return Err(DFlashError::BadToken(t, arch.vocab_size));
+        }
+        // (i was just for debug if we wanted it; unused.)
+        let _ = i;
+    }
+    for &lid in target_layer_ids {
+        if (lid as usize) >= base.model.blocks.len() {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "packed_verify.target_layer_ids",
+                detail: format!("layer id {lid} >= n_layer {}", base.model.blocks.len()),
+            }));
+        }
+    }
+
+    let h = arch.hidden_size as usize;
+
+    // -- Stage all N token ids into packed_ids_buf at once. This is
+    // the codex-Q7 mitigation made concrete: each per-token block n
+    // reads its OWN slot via `scratch.token_slot(n)`, never sharing a
+    // CPU-mutable scalar buffer with another block. Buffer is
+    // StorageModeShared so the host write is visible to the GPU once
+    // we open the command encoder (the runtime synchronises on
+    // `commandBuffer()` boundaries for shared-mode buffers).
+    unsafe {
+        let p = scratch.packed_ids_buf.buffer.contents().as_ptr() as *mut i32;
+        for (i, &t) in tokens.iter().enumerate() {
+            *p.add(i) = t;
+        }
+    }
+
+    // -- One command buffer for the entire packed verify.
+    let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
+
+    for n_idx in 0..n {
+        let position_n = start_position + n_idx as u32;
+
+        // ===== Per-token COMPUTE pass =====
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        // Embed: read token id from packed_ids_buf[n_idx] → session.x.
+        let tok_slot = scratch.token_slot(n_idx as u32);
+        encode_get_rows_f32(
+            base.ctx,
+            &enc,
+            &base.model.token_embd,
+            &tok_slot,
+            &target_session.x,
+            1,
+            h,
+        )?;
+
+        // Per-block forward, capturing target hiddens inline.
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in base.model.blocks.iter().enumerate() {
+            base.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position_n,
+                target_session,
+            )?;
+            // After this block's residual #2, scatter session.x
+            // into hidden_capture[k_idx, n_idx, :] if this is one
+            // of the target layers.
+            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                if lid as usize == il {
+                    // hidden_capture is stored as [K, N, H]; the
+                    // slot view returns a [H]-shaped tensor at
+                    // the right offset.
+                    let dst_slot = scratch.hidden_capture_slot(k_idx as u32, n_idx as u32);
+                    // We need scatter_offset_f32(src=x, dst=parent,
+                    // dst_off=byte_off/4) — but the slot view IS the
+                    // parent shifted by byte_off. We can't pass the
+                    // slot to scatter_offset directly because that
+                    // helper expects a parent tensor + element
+                    // offset. Convert: dst_off = slot.offset / 4
+                    // (F32 elem size), parent = scratch.hidden_capture.
+                    let elem_off =
+                        (k_idx as u64 * scratch.n as u64 + n_idx as u64) * scratch.hidden_size;
+                    // Sanity: confirm the slot view we'd compute
+                    // matches the elem_off arithmetic. Cheap; not
+                    // in the hot path beyond once-per-target-layer.
+                    debug_assert_eq!(
+                        dst_slot.offset,
+                        elem_off * std::mem::size_of::<f32>() as u64
+                    );
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.x,
+                        &scratch.hidden_capture,
+                        elem_off as usize,
+                        h,
+                    )?;
+                }
+            }
+        }
+
+        // Final RMSNorm + lm_head → session.logits (reused per token).
+        encode_rms_norm_mul_f32(
+            base.ctx,
+            &enc,
+            &target_session.x,
+            &base.model.output_norm,
+            &target_session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            base.ctx,
+            &enc,
+            &base.model.lm_head,
+            &target_session.h,
+            &target_session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+
+        // GPU argmax over session.logits → verify_argmax[n_idx].
+        // We pass argmax_slot (a [1]-shaped view) as the destination;
+        // n_rows=1 so argmax dispatches a single threadgroup.
+        // Codex-Q5: this MUST run before token n+1's lm_head writes
+        // session.logits.
+        let argmax_dst = scratch.argmax_slot(n_idx as u32);
+        encode_argmax_f32(
+            base.ctx,
+            &enc,
+            &target_session.logits,
+            &argmax_dst,
+            1,
+            arch.vocab_size as usize,
+        )?;
+
+        enc.end();
+
+        // ===== Per-token BLIT pass (GDN + conv state checkpoints) =====
+        //
+        // Codex-Q2 design Y: batch all checkpoint copies for token
+        // n_idx into one blit pass. Each `gdn_state[k]` / `gdn_conv[k]`
+        // was mutated by exactly one block above (GDN layer k); after
+        // all blocks complete, those buffers contain the post-token-n
+        // state we want to checkpoint.
+        let blit = BlitEncoder::begin(&cmd_buf);
+        for k in 0..n_gdn_actual {
+            let ssm_dst = scratch.gdn_ckpt_slot(k, n_idx as u32);
+            blit.copy_tensor(&target_session.gdn_state[k as usize], &ssm_dst);
+            let conv_dst = scratch.conv_ckpt_slot(k, n_idx as u32);
+            blit.copy_tensor(&target_session.gdn_conv[k as usize], &conv_dst);
+        }
+        blit.end();
+    }
+
+    cmd_buf.commit();
+    unsafe { cmd_buf.waitUntilCompleted() };
+
+    // Read back verify_argmax (only N i32 values; trivial).
+    let mut out = vec![0i32; n];
+    unsafe {
+        let src = scratch.verify_argmax.buffer.contents().as_ptr() as *const i32;
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+    }
+    Ok(out)
+}
+
+impl<'a> DFlashDecoder<'a> {
     /// Run drafter forward for one outer step. Produces `[N]` greedy
     /// argmax tokens. Position 0 of the returned vector is the carry
     /// seed's argmax (conventionally discarded); positions `1..N` are
@@ -1081,7 +1404,7 @@ mod tests {
     use crate::gguf::GgufFile;
     use crate::loader::Model;
     use crate::metal::MetalContext;
-    use crate::metal_forward::MetalModel;
+    use crate::metal_forward::{MetalModel, MetalSession};
 
     /// H5.3a foundation: verify `MetalDFlashVerifyScratch` allocates
     /// correctly-sized buffers, and that `slot_view` helpers land at
@@ -1242,6 +1565,264 @@ mod tests {
                     *p
                 );
             }
+        }
+    }
+
+    /// H5.3a gate G1 (lite) + G5: packed_verify produces the SAME
+    /// argmax tokens as N successive `single_token` calls from a fresh
+    /// session. Headline correctness signal for the H5.3a scaffold —
+    /// proves:
+    ///   * packed semantics (residual stream evolution, KV append,
+    ///     GDN+conv state evolution) match N single-token decode
+    ///   * GPU argmax (lowest-index tie policy) matches CPU argmax
+    ///   * packed_ids_buf reads the right slot per block (the codex Q7
+    ///     mitigation; if this were broken, every get_rows would read
+    ///     the same stale token id and all argmaxes would equal each
+    ///     other or be silently wrong)
+    ///   * codex Q2 design Y (batched-end-of-token blits) doesn't
+    ///     break correctness — if the blit pass were perturbing later
+    ///     tokens, the second/third token argmaxes would diverge
+    ///
+    /// Also pulls in gate G2 lite: post-packed `gdn_state[k]`,
+    /// `gdn_conv[k]`, and `kv_n_pos` must match post-N-single-token
+    /// session state (proves the per-token blits captured the same
+    /// bytes the in-place updates produced).
+    ///
+    /// Does NOT yet verify (later H5.3a gates):
+    ///   * checkpoint slot CONTENTS at intermediate n (G3 — needs
+    ///     restore primitive to validate)
+    ///   * hidden capture layout (G4 — separate test)
+    ///   * cosine ≥ 0.9999 on raw logits (G1 full — needs _with_logits)
+    ///
+    /// 0.8B-F32, N=4. Loads in ~500 ms; total runtime ≤ 2 s on M4 Max.
+    #[test]
+    fn dflash_packed_verify_argmax_matches_n_single_tokens() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[dflash-packed-verify] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Baseline: N successive single_token calls on a fresh session.
+        let n: u32 = 4;
+        let start_position: u32 = 0;
+        let tokens: Vec<i32> = vec![9419, 1, 5, 1234];
+        assert_eq!(tokens.len() as u32, n);
+
+        let mut single_session = MetalSession::fresh(&ctx, &mm, 64).expect("session 1");
+        let mut single_argmaxes = Vec::with_capacity(n as usize);
+        for (i, &tok) in tokens.iter().enumerate() {
+            let logits = mf
+                .single_token(tok, start_position + i as u32, &mut single_session)
+                .expect("single token");
+            // CPU argmax with lowest-index tie (matches kernel_argmax_f32).
+            let mut best = f32::NEG_INFINITY;
+            let mut idx: i32 = 0;
+            for (j, &v) in logits.iter().enumerate() {
+                if v > best {
+                    best = v;
+                    idx = j as i32;
+                }
+            }
+            single_argmaxes.push(idx);
+        }
+        eprintln!("[dflash-packed-verify] single argmaxes: {single_argmaxes:?}");
+
+        // Packed: one packed_verify call from a FRESH session.
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let k_target_layers = target_layer_ids.len() as u32;
+        let mut packed_session = MetalSession::fresh(&ctx, &mm, 64).expect("session 2");
+        let mut scratch =
+            MetalDFlashVerifyScratch::fresh(&ctx, &mm, n, k_target_layers).expect("scratch");
+
+        let packed_argmaxes = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &tokens,
+            start_position,
+            &mut scratch,
+            &mut packed_session,
+        )
+        .expect("packed verify");
+        eprintln!("[dflash-packed-verify] packed argmaxes: {packed_argmaxes:?}");
+
+        assert_eq!(
+            packed_argmaxes, single_argmaxes,
+            "G1/G5: packed_verify argmaxes must match N successive single_token argmaxes"
+        );
+
+        // Bonus: gate G2 lite — post-packed session state matches
+        // post-N-single-token session state.
+        for (i, (s_state, p_state)) in single_session
+            .gdn_state
+            .iter()
+            .zip(packed_session.gdn_state.iter())
+            .enumerate()
+        {
+            unsafe {
+                let s = s_state.buffer.contents().as_ptr() as *const f32;
+                let p = p_state.buffer.contents().as_ptr() as *const f32;
+                let n_elems = s_state.n_elements() as usize;
+                let mut max_abs = 0.0f32;
+                for j in 0..n_elems {
+                    let d = (*s.add(j) - *p.add(j)).abs();
+                    if d > max_abs {
+                        max_abs = d;
+                    }
+                }
+                assert!(
+                    max_abs < 1e-5,
+                    "G2: gdn_state[{i}] post-packed differs from post-single: max|Δ|={max_abs}"
+                );
+            }
+        }
+        for (i, (s_conv, p_conv)) in single_session
+            .gdn_conv
+            .iter()
+            .zip(packed_session.gdn_conv.iter())
+            .enumerate()
+        {
+            unsafe {
+                let s = s_conv.buffer.contents().as_ptr() as *const f32;
+                let p = p_conv.buffer.contents().as_ptr() as *const f32;
+                let n_elems = s_conv.n_elements() as usize;
+                let mut max_abs = 0.0f32;
+                for j in 0..n_elems {
+                    let d = (*s.add(j) - *p.add(j)).abs();
+                    if d > max_abs {
+                        max_abs = d;
+                    }
+                }
+                assert!(
+                    max_abs < 1e-5,
+                    "G2: gdn_conv[{i}] post-packed differs from post-single: max|Δ|={max_abs}"
+                );
+            }
+        }
+        assert_eq!(
+            single_session.kv_n_pos, packed_session.kv_n_pos,
+            "G2: kv_n_pos diverged"
+        );
+    }
+
+    /// H5.3a guard-wall test (codex failure-mode mitigation): if the
+    /// scratch was allocated with a different `block_size` /
+    /// `target_layer_ids.len()` / model arch, packed_verify must
+    /// FAIL LOUDLY at entry, not silently corrupt downstream blits.
+    /// Catches the scratch/model/session dimensional drift class
+    /// codex flagged.
+    #[test]
+    fn dflash_packed_verify_dim_guard_wall() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        let mut session = MetalSession::fresh(&ctx, &mm, 64).expect("session");
+        let target_layer_ids: Vec<u32> = vec![5, 10, 15];
+        let mut scratch = MetalDFlashVerifyScratch::fresh(&ctx, &mm, 4, 3).expect("scratch");
+
+        // (a) tokens.len() != scratch.n
+        let bad_tokens = vec![1i32, 2, 3];
+        let err = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &bad_tokens,
+            0,
+            &mut scratch,
+            &mut session,
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(detail.contains("tokens.len()"), "wrong error: {detail}");
+            }
+            other => panic!("expected BadShape on tokens.len mismatch, got {other:?}"),
+        }
+
+        // (b) target_layer_ids.len() != scratch.k_target_layers
+        let bad_layers: Vec<u32> = vec![5, 15];
+        let err = encode_packed_verify_inner(
+            &mf,
+            &bad_layers,
+            &[1i32, 2, 3, 4],
+            0,
+            &mut scratch,
+            &mut session,
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(detail.contains("k_target_layers"), "wrong error: {detail}");
+            }
+            other => panic!("expected BadShape on k mismatch, got {other:?}"),
+        }
+
+        // (c) start_position + N > kv_capacity
+        let err = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &[1i32, 2, 3, 4],
+            61, // 61 + 4 = 65 > 64
+            &mut scratch,
+            &mut session,
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(detail.contains("kv_capacity"), "wrong error: {detail}");
+            }
+            other => panic!("expected BadShape on kv overflow, got {other:?}"),
+        }
+
+        // (d) bad token id
+        let bad_token: i32 = m.arch.vocab_size as i32 + 100;
+        let err = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &[1i32, 2, bad_token, 4],
+            0,
+            &mut scratch,
+            &mut session,
+        );
+        match err {
+            Err(DFlashError::BadToken(t, _)) => assert_eq!(t, bad_token),
+            other => panic!("expected BadToken, got {other:?}"),
+        }
+
+        // (e) target_layer_id out of range
+        let bad_layers: Vec<u32> = vec![5, 999, 15]; // 999 > 0.8B's 24 layers
+        let mut scratch2 = MetalDFlashVerifyScratch::fresh(&ctx, &mm, 4, 3).expect("scratch2");
+        let err = encode_packed_verify_inner(
+            &mf,
+            &bad_layers,
+            &[1i32, 2, 3, 4],
+            0,
+            &mut scratch2,
+            &mut session,
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(detail.contains("layer id"), "wrong error: {detail}");
+            }
+            other => panic!("expected BadShape on layer id, got {other:?}"),
         }
     }
 

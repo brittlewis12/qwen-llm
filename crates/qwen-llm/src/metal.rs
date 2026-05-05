@@ -1546,11 +1546,7 @@ pub fn encode_attn_decode_f16kv_f32(
 /// uses simd_shuffle broadcast across 32 lanes). At very long context
 /// (128K+) we may want NWG=64 or 128 if per-TG row counts get unwieldy.
 pub fn attn_v4_choose_nwg(n_pos: usize) -> usize {
-    if n_pos < 256 {
-        16
-    } else {
-        32
-    }
+    if n_pos < 256 { 16 } else { 32 }
 }
 
 /// Pick the v4 tile size (KV positions per inner softmax tile) for a given
@@ -1670,7 +1666,7 @@ pub fn encode_attn_decode_v4_f32(
             return Err(MetalError::BadShape {
                 kernel: "attn_decode_v4",
                 detail: format!("tile_c={tile_c} not in {{16, 32, 64}}"),
-            })
+            });
         }
     };
     let pso_main = ctx.pipeline(pipeline_name)?;

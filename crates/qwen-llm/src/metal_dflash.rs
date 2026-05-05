@@ -403,7 +403,16 @@ impl MetalDFlashVerifyScratch {
         Ok(Self {
             packed_ids_buf: MetalTensor::zeros_f32(ctx, vec![n])?, // i32 in F32 buf
             verify_argmax: MetalTensor::zeros_f32(ctx, vec![n])?,  // i32 in F32 buf
-            hidden_capture: MetalTensor::zeros_f32(ctx, vec![k, n, h])?,
+            // Layout: [N, K, H] (NOT [K, N, H] as in v0.57). Each per-N
+            // slot is `K * H` contiguous floats — exactly what
+            // `MetalDFlashSession::append_target_ctx_column_now` expects
+            // as a single `[K * H]` hidden_block per column. Per-block
+            // writes during the layer loop now scatter at offset
+            // `(n * K + k) * H` instead of `(k * N + n) * H`. Wins
+            // because reads-by-n (during target_ctx append, hot path
+            // in the H5.5 outer decode loop) are contiguous; writes
+            // (per-block, K times per outer step) stay cheap.
+            hidden_capture: MetalTensor::zeros_f32(ctx, vec![n, k, h])?,
             gdn_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, n, ssm_state_elems])?,
             conv_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, n, conv_state_elems])?,
             n: block_size,
@@ -461,6 +470,14 @@ impl MetalDFlashVerifyScratch {
     /// Zero-copy view of hidden_capture slot `(k, n)`. Returned shape:
     /// `[hidden_size]`. Used as a scatter destination after the K-indexed
     /// target layer's residual for token n.
+    ///
+    /// **Storage layout: `[N, K, H]` row-major** (changed from `[K, N, H]`
+    /// in v0.71). Slot `(k, n)` lives at offset `(n * K + k) * H`. The
+    /// `[N, K, H]` layout makes per-N reads contiguous (`K*H` floats per
+    /// token), which is exactly what
+    /// `MetalDFlashSession::append_target_ctx_column_now` consumes during
+    /// the H5.5 outer decode loop. Per-block writes (K times per outer
+    /// step) stay cheap.
     pub fn hidden_capture_slot(&self, k: u32, n: u32) -> MetalTensor {
         assert!(
             k < self.k_target_layers,
@@ -472,9 +489,27 @@ impl MetalDFlashVerifyScratch {
             "hidden_capture_slot OOB: n={n} >= scratch.n={}",
             self.n
         );
-        let elem_offset = (k as u64 * self.n as u64 + n as u64) * self.hidden_size;
+        let elem_offset = (n as u64 * self.k_target_layers as u64 + k as u64) * self.hidden_size;
         self.hidden_capture
             .view_subrange(elem_offset, vec![self.hidden_size])
+    }
+
+    /// Zero-copy view of hidden_capture for ALL K layers at token `n`.
+    /// Returned shape: `[K * H]`. Convenient for
+    /// `MetalDFlashSession::append_target_ctx_column_now`, which consumes
+    /// exactly this contiguous slab per appended column.
+    ///
+    /// Only valid under the `[N, K, H]` storage layout (which v0.71
+    /// switched to). The N-row stride is `K * H` floats, contiguous.
+    pub fn hidden_capture_n_slot(&self, n: u32) -> MetalTensor {
+        assert!(
+            n < self.n,
+            "hidden_capture_n_slot OOB: n={n} >= scratch.n={}",
+            self.n
+        );
+        let kh = self.k_target_layers as u64 * self.hidden_size;
+        let elem_offset = n as u64 * kh;
+        self.hidden_capture.view_subrange(elem_offset, vec![kh])
     }
 
     /// Zero-copy view of `packed_ids_buf[n..n+1]`. Used as the
@@ -1270,22 +1305,12 @@ fn encode_packed_verify_inner_impl(
             // of the target layers.
             for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
                 if lid as usize == il {
-                    // hidden_capture is stored as [K, N, H]; the
-                    // slot view returns a [H]-shaped tensor at
-                    // the right offset.
+                    // hidden_capture is stored as [N, K, H] (v0.71
+                    // layout change — see hidden_capture_slot doc).
+                    // Slot (k, n) at offset (n * K + k) * H.
                     let dst_slot = scratch.hidden_capture_slot(k_idx as u32, n_idx as u32);
-                    // We need scatter_offset_f32(src=x, dst=parent,
-                    // dst_off=byte_off/4) — but the slot view IS the
-                    // parent shifted by byte_off. We can't pass the
-                    // slot to scatter_offset directly because that
-                    // helper expects a parent tensor + element
-                    // offset. Convert: dst_off = slot.offset / 4
-                    // (F32 elem size), parent = scratch.hidden_capture.
-                    let elem_off =
-                        (k_idx as u64 * scratch.n as u64 + n_idx as u64) * scratch.hidden_size;
-                    // Sanity: confirm the slot view we'd compute
-                    // matches the elem_off arithmetic. Cheap; not
-                    // in the hot path beyond once-per-target-layer.
+                    let elem_off = (n_idx as u64 * scratch.k_target_layers as u64 + k_idx as u64)
+                        * scratch.hidden_size;
                     debug_assert_eq!(
                         dst_slot.offset,
                         elem_off * std::mem::size_of::<f32>() as u64
@@ -1719,13 +1744,14 @@ pub fn encode_packed_verify_layer_major_inner(
 
         // 2d: hidden capture (per codex Q4 timing — INLINE, before
         //     post-norm overwrites the residual stream representation
-        //     downstream consumers see). hidden_capture[k_idx, n, :]
-        //     == x_pack[n, :] AT THIS POINT.
+        //     downstream consumers see). hidden_capture[n, k_idx, :]
+        //     == x_pack[n, :] AT THIS POINT (v0.71 layout: [N, K, H]).
         for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
             if lid as usize == il {
                 let enc = KernelEncoder::begin(&cmd_buf);
                 for n_idx in 0..n {
-                    let elem_off = (k_idx as u64 * verify_scratch.n as u64 + n_idx as u64)
+                    let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
+                        + k_idx as u64)
                         * verify_scratch.hidden_size;
                     encode_scatter_offset_f32(
                         base.ctx,
@@ -1989,7 +2015,7 @@ pub fn encode_packed_verify_layer_major_inner(
     Ok(out)
 }
 
-pub(crate) fn encode_restore_after_partial_accept_inner(
+pub fn encode_restore_after_partial_accept_inner(
     base: &MetalForward<'_>,
     scratch: &MetalDFlashVerifyScratch,
     n_keep: u32,
@@ -2719,9 +2745,11 @@ mod tests {
             scratch.conv_ckpt.shape,
             vec![scratch.n_gdn_layers as u64, n as u64, expected_conv]
         );
+        // v0.71: layout switched from [K, N, H] to [N, K, H] for
+        // contiguous-by-N reads (target_ctx append in H5.5 outer loop).
         assert_eq!(
             scratch.hidden_capture.shape,
-            vec![k as u64, n as u64, scratch.hidden_size]
+            vec![n as u64, k as u64, scratch.hidden_size]
         );
         assert_eq!(scratch.packed_ids_buf.shape, vec![n as u64]);
         assert_eq!(scratch.verify_argmax.shape, vec![n as u64]);
@@ -2763,14 +2791,21 @@ mod tests {
             }
         }
 
-        // -- hidden_capture_slot offsets --
+        // -- hidden_capture_slot offsets (v0.71: [N, K, H] layout) --
         for kk in 0..k {
             for nn in 0..n {
                 let slot = scratch.hidden_capture_slot(kk, nn);
-                let expected_elem_off = (kk as u64 * n as u64 + nn as u64) * scratch.hidden_size;
+                let expected_elem_off = (nn as u64 * k as u64 + kk as u64) * scratch.hidden_size;
                 assert_eq!(slot.shape, vec![scratch.hidden_size]);
                 assert_eq!(slot.offset, expected_elem_off * f32_size);
             }
+        }
+        // -- hidden_capture_n_slot (NEW v0.71): K*H contiguous per token --
+        for nn in 0..n {
+            let n_slot = scratch.hidden_capture_n_slot(nn);
+            let kh = k as u64 * scratch.hidden_size;
+            assert_eq!(n_slot.shape, vec![kh]);
+            assert_eq!(n_slot.offset, (nn as u64) * kh * f32_size);
         }
 
         // -- token_slot / argmax_slot — single-element views --
@@ -3856,16 +3891,17 @@ mod tests {
             std::ptr::copy_nonoverlapping(src, scratch_dump.as_mut_ptr(), scratch_buf_n_elems);
         }
 
+        // v0.71: layout is [N, K, H], so scratch index = (n * K + k) * H + i.
         for k in 0..k_target_layers as usize {
             for n in 0..N as usize {
                 for i in 0..h {
-                    let scratch_idx = k * (N as usize) * h + n * h + i;
+                    let scratch_idx = (n * (k_target_layers as usize) + k) * h + i;
                     let ref_idx_in_row = k * h + i;
                     let s = scratch_dump[scratch_idx];
                     let r = reference[n][ref_idx_in_row];
                     if s.to_bits() != r.to_bits() {
                         panic!(
-                            "G4: hidden_capture[k={k}, n={n}, i={i}] differs: \
+                            "G4: hidden_capture[n={n}, k={k}, i={i}] differs: \
                              scratch={s} (0x{:08x}) reference={r} (0x{:08x})",
                             s.to_bits(),
                             r.to_bits()

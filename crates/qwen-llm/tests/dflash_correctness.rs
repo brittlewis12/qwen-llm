@@ -800,13 +800,14 @@ fn packed_verify_phase_profile_27b() {
                 accum("residual1", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }
 
-            // 2d: hidden capture.
+            // 2d: hidden capture (v0.71 layout: [N, K, H]).
             for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
                 if lid as usize == il {
                     let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
                     for n_idx in 0..N as usize {
-                        let elem_off = (k_idx as u64 * verify_scratch.n as u64 + n_idx as u64)
+                        let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
+                            + k_idx as u64)
                             * verify_scratch.hidden_size;
                         encode_scatter_offset_f32(
                             &ctx_metal,

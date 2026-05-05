@@ -761,31 +761,50 @@ because it lands the API + restore primitive cleanly.
    back into session GDN+conv state; reset `kv_n_pos = start_pos +
    k + 1`. Same blit primitive as the forward writes, reversed.
 
-**H5.3a gates** (per codex Q6 — 7 cheap tests, ALL gating):
-- **G1 — packed-vs-single logits cosine.** `packed_forward_with_logits(tokens,
-  start)` cosine ≥ 0.9999 against N successive `single_token(tokens[i],
-  start+i)` per row. The headline correctness signal.
-- **G2 — final state equivalence.** After full-N packed: `gdn_state`,
-  `gdn_conv`, `kv_n_pos` bit-exact (or ≥ 0.9999 cosine on f32 state)
-  vs N successive single_token's terminal session state.
-- **G3 — checkpoint replay equivalence.** For arbitrary k ∈ {0,
-  N/2, N-1}: run packed_forward, restore_after_partial_accept(k+1),
-  run single_token at start+k+1; result bit-exact vs running k+1
-  single_tokens then one more. Catches checkpoint contents.
-- **G4 — hidden capture layout.** `hidden_capture[k, n, :]` matches
-  layer `target_layer_ids[k]`'s residual after token n in packed.
-  Run `single_token_with_multi_hidden` N times, compare per layer per
-  row. Catches dim-order bugs that pass cosine.
-- **G5 — GPU argmax vs debug logits.** verify_argmax[n] ==
-  argmax_cpu(debug_logits[n]) for all n. Test deterministic tie
-  policy explicitly (e.g., lowest index wins).
-- **G6 — restore boundary cases.** k = 1 (almost-full-reject),
-  k = N (full accept; no rollback needed but the call must be a
-  no-op), k = N/2 (typical partial accept).
+**H5.3a gates** (per codex Q6 — 7 cheap tests, ALL gating). Status
+as of v0.60:
+
+- **G1 — packed-vs-single logits cosine.** ✅ DONE (v0.60).
+  `packed_verify_with_logits(tokens, start)` cosine vs N successive
+  `single_token(tokens[i], start+i)` per row. F32 path: **cos =
+  1.0000000000 EXACTLY**, max|Δ| = 0, 100% bit-exact across 993,280
+  vocab values. The H5.3 plan threshold of 0.9999 was designed for
+  quantized paths; F32 trivially crushes it.
+- **G2 — final state equivalence.** ✅ DONE (v0.57+v0.58, BITWISE).
+  Post-packed `gdn_state`, `gdn_conv`, `kv_n_pos` bit-exact (no slack
+  tolerance) vs N successive single_token's terminal state on all
+  24 GDN layers. Codex review tightened from `< 1e-5` to BITWISE EQ;
+  proves F32 dispatch order is genuinely deterministic.
+- **G3 — checkpoint replay equivalence.** ✅ DONE (v0.59). For each
+  n_keep ∈ {1, N/2, N}: run packed_verify, restore, marker
+  single_token; bit-exact vs n_keep sequential single_tokens +
+  marker. Proves checkpoint CONTENTS at each n ∈ [0, N) are exactly
+  the right bytes to restore to.
+- **G4 — hidden capture layout.** ✅ DONE (v0.60). For each (k, n):
+  `scratch.hidden_capture[k, n, :]` bitwise-equal to
+  `single_token_with_multi_hidden`'s per-token capture at row k.
+  Test ALSO asserts captured layers are L2-distinct so a K↔N
+  transpose bug couldn't pass silently.
+- **G5 — GPU argmax vs CPU argmax.** ✅ DONE (v0.57). `verify_argmax[n]
+  == cpu_lowest_idx_argmax(reference logits[n])` across all n.
+  Lowest-index tie semantics tested explicitly across 8 cases
+  including all-zero, all -inf, all-NaN, vocab-sized 248320×16
+  random fuzz.
+- **G6 — restore boundary cases.** ✅ DONE (v0.59 — folded into
+  G3 test which exercises n_keep ∈ {1, N/2, N} simultaneously).
 - **G7 — nonzero start_pos / attention partition exercise.**
-  start_position chosen so `n_pos > rows_per_partition` for attn-v4,
-  i.e. >1 partition is in play. Catches partition-edge bugs that
-  position-0 tests miss.
+  ⏳ DEFERRED to H5.5 integration. The lib-loop test
+  `dflash_packed_verify_with_primed_session` (v0.58) covers the
+  general start_pos > 0 case on 0.8B (which has no attn layers, so
+  no kv_n_pos to exercise). The full G7 (start_pos > rows_per_partition
+  on attn-v4 multi-partition mode) requires ~7K context on 27B-Q4_K_M
+  → ~10 min CPU prefill; better to ship alongside the H5.5 end-to-end
+  greedy-equivalence integration test.
+
+**v0.60 H5.3a gate summary**: 6 of 7 lib-loop gates green. Six gates
+all bit-exact / cos=1.0 for the F32 packed_verify path. The only
+remaining gate (G7) is fundamentally a 27B integration test that
+will land alongside H5.5.
 
 **Production API anti-regression assertion** (in tests):
 `bytes_readback_per_outer_step < N · V · 4` always for the production
@@ -1076,7 +1095,46 @@ the failure:
 
 ## Document history
 
-- **rev 4 (current).** Open-ended codex partner session after H5.2.5
+- **rev 5 (current).** H5.3a SHIPPED. v0.55 → v0.60.
+  - **6 of 7 H5.3a gates green on the lib loop, all F32 bit-exact /
+    cos=1.0:**
+    - G1 lite (argmax match) — v0.57
+    - G1 full (cosine ≥ 0.9999 raw logits) — v0.60 (cos = 1.0)
+    - G2 (final state, BITWISE) — v0.57+v0.58 (codex-tightened from 1e-5)
+    - G3 (checkpoint replay equivalence) — v0.59
+    - G4 (hidden capture layout) — v0.60
+    - G5 (GPU argmax with tie semantics) — v0.55+v0.57
+    - G6 (restore boundary cases) — v0.59 (folded into G3)
+  - **G7 (nonzero start_pos / partition exercise)** deferred to H5.5
+    integration phase — needs ~7K context on 27B-Q4_K_M, fundamentally
+    not a fast-loop test.
+  - **Codex H5.3a open-ended review (post-v0.57) caught the
+    `kv_n_pos == start_position` precondition gap** — would have
+    silently dropped previously-encoded session state on primed-session
+    calls. Fixed in v0.58 with a fail-loud guard + primed-session test
+    that proves packed_verify produces bit-identical state to continued
+    single_token from a primed session.
+  - **G2 tolerance tightened from `< 1e-5` to BITWISE EQUALITY**
+    (codex: "slack masking signal"). F32 packed_verify is genuinely
+    bit-deterministic; the slack was hiding usable signal.
+  - **Slot-helper `debug_assert!`s promoted to runtime `assert!`s.**
+    Failure mode if a slot is OOB is silent OOB blit on release builds.
+  - **Restore primitive (originally H5.4) folded into H5.3a + shipped
+    in v0.59.** API: `n_keep ∈ [1, N]` (not `n_accepted`; codex pinned
+    the indexing). Algorithm: blit `gdn_ckpt_slot(k, n_keep-1)` →
+    `session.gdn_state[k]` for every k; same for conv; host-update
+    `kv_n_pos[i] := start_position + n_keep`.
+  - Foundation pieces (v0.55–v0.56): BlitEncoder wrapper +
+    GPU argmax kernel + `MetalDFlashVerifyScratch` /
+    `MetalDFlashDebugScratch` two-struct split.
+  - Packed_verify itself (v0.57): `DFlashDecoder::packed_verify` per
+    codex Q1 placement (NOT method on `MetalForward`); inner free fn
+    `encode_packed_verify_inner` lets tests run without a real DFlash
+    drafter; `_with_logits` debug variant added in v0.60 with
+    `Option<&MetalTensor>` plumbing in the inner impl (no code
+    duplication; one inline scatter is the only divergence).
+
+- **rev 4.** Open-ended codex partner session after H5.2.5
   GREEN — re-sequenced H5.3 before any code shipped.
   - **H5.3 split into H5.3a (correctness scaffold) + H5.3b (perf
     pass).** Same playbook as the rev-3 H5.2.5 pivot. Codex called the

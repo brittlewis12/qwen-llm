@@ -631,6 +631,65 @@ impl<'a> DFlashDecoder<'a> {
             target_session,
         )
     }
+
+    // =====================================================================
+    // restore_after_partial_accept — H5.3a rollback primitive
+    // =====================================================================
+    //
+    // Folded into H5.3a from H5.4 per plan rev 4 — the checkpoint
+    // contract isn't testable without restore (gate G3 needs it). This
+    // is the SECOND headline H5.3a feature.
+    //
+    // ## Indexing semantics — pinned brutally clearly per codex review.
+    //
+    // After `packed_verify(tokens[0..N], start_position)`, for each
+    // n ∈ [0, N), the checkpoint slot `gdn_ckpt_slot(k, n)` holds
+    // "state-after-token-n for GDN layer k". Same for `conv_ckpt_slot`.
+    //
+    // `restore_after_partial_accept(n_keep, start_position)` rolls the
+    // session back to "as if exactly `n_keep` tokens were processed
+    // starting at start_position." Concretely:
+    //
+    //   * `gdn_state[k]` ← `gdn_ckpt_slot(k, n_keep - 1)`
+    //   * `gdn_conv[k]`  ← `conv_ckpt_slot(k, n_keep - 1)`
+    //   * `kv_n_pos[i]`  := `start_position + n_keep`
+    //   * KV slot bytes at [start_position + n_keep, ...) physically
+    //     remain but become unreachable (next verify overwrites).
+    //
+    // ## Why `n_keep` instead of `n_accepted`?
+    //
+    // `n_accepted` is overloaded in the plan (acceptance count over
+    // DRAFTS, not over the verify batch). The verify batch is
+    // `[carry_tok, draft_0, draft_1, ..., draft_{D-1}]` of length N=D+1.
+    // The carry is ALWAYS committed (it was selected in the previous
+    // step's bonus); accepted drafts append to it. So:
+    //
+    //   tokens kept after this batch = 1 (carry) + n_accepted (drafts)
+    //   n_keep                       = 1 + n_accepted ∈ [1, N]
+    //
+    // n_keep can never be 0 (the carry is always processed). n_keep=1
+    // means full reject (carry only, no drafts accepted). n_keep=N
+    // means full accept (carry + all D drafts) — the rollback is a
+    // no-op but the call must be safe.
+    //
+    // Codex review: pin the API to `n_keep` so callers can't confuse
+    // "accepted drafts" with "tokens to retain." The conversion lives
+    // in the H5.5 outer loop, not here.
+    pub fn restore_after_partial_accept(
+        &self,
+        scratch: &MetalDFlashVerifyScratch,
+        n_keep: u32,
+        start_position: u32,
+        target_session: &mut MetalSession,
+    ) -> Result<(), DFlashError> {
+        encode_restore_after_partial_accept_inner(
+            self.base,
+            scratch,
+            n_keep,
+            start_position,
+            target_session,
+        )
+    }
 }
 
 /// H5.3a packed verify forward — low-level entrypoint that takes
@@ -942,6 +1001,141 @@ pub(crate) fn encode_packed_verify_inner(
         std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
     }
     Ok(out)
+}
+
+/// H5.3a rollback primitive — low-level entrypoint that takes
+/// everything explicitly. `DFlashDecoder::restore_after_partial_accept`
+/// is the production wrapper; this exists so unit tests can exercise
+/// the rollback algorithm without standing up a full DFlash drafter.
+///
+/// See `DFlashDecoder::restore_after_partial_accept` for the indexing
+/// spec and `n_keep` semantics — they are identical.
+///
+/// Algorithm:
+///   1. Validate dims (n_keep ∈ [1, N], scratch matches model, etc.).
+///   2. Open one MTLCommandBuffer + BlitEncoder.
+///   3. For each GDN layer k:
+///        gdn_state[k] ← gdn_ckpt_slot(k, n_keep - 1)
+///        gdn_conv[k]  ← conv_ckpt_slot(k, n_keep - 1)
+///   4. End blit encoder, commit, wait.
+///   5. CPU update: kv_n_pos[i] := start_position + n_keep for every
+///      attn layer i.
+///
+/// Step 5 is host-side because `MetalSession::kv_n_pos` is a
+/// `Vec<usize>` on the host (matches the existing `encode_attn`
+/// pattern where it's read at encode time, not GPU-side). KV slot
+/// bytes at [start_position + n_keep, ...) physically remain but
+/// become unreachable; next packed_verify call overwrites them.
+pub(crate) fn encode_restore_after_partial_accept_inner(
+    base: &MetalForward<'_>,
+    scratch: &MetalDFlashVerifyScratch,
+    n_keep: u32,
+    start_position: u32,
+    target_session: &mut MetalSession,
+) -> Result<(), DFlashError> {
+    // -- Validation guard wall (same discipline as packed_verify).
+    let n = scratch.n;
+    if n_keep == 0 || n_keep > n {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "restore_after_partial_accept",
+            detail: format!(
+                "n_keep={n_keep} must be in [1, N={n}] (n_keep=0 is impossible \
+                 by construction — the carry token is always processed; \
+                 see DFlashDecoder::restore_after_partial_accept docs)"
+            ),
+        }));
+    }
+    let n_gdn_actual = base
+        .model
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, MetalBlock::Gdn(_)))
+        .count() as u32;
+    if scratch.n_gdn_layers != n_gdn_actual {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "restore_after_partial_accept",
+            detail: format!(
+                "scratch.n_gdn_layers={} != model n_gdn={n_gdn_actual} \
+                 (scratch allocated for different layer schedule)",
+                scratch.n_gdn_layers
+            ),
+        }));
+    }
+    if target_session.gdn_state.len() != n_gdn_actual as usize
+        || target_session.gdn_conv.len() != n_gdn_actual as usize
+    {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "restore_after_partial_accept",
+            detail: format!(
+                "session.gdn_state.len={} / gdn_conv.len={} != model n_gdn={n_gdn_actual}",
+                target_session.gdn_state.len(),
+                target_session.gdn_conv.len(),
+            ),
+        }));
+    }
+    // KV n_pos contract: every attn layer must currently have
+    // kv_n_pos[i] == start_position + N (i.e., we just ran a full
+    // packed_verify of length N and now want to roll back to
+    // n_keep). Failing this means the caller is mismatching
+    // packed_verify and restore.
+    let expected_kv_pre = (start_position as usize)
+        .checked_add(n as usize)
+        .ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "restore_after_partial_accept",
+                detail: format!("start_position={start_position} + N={n} overflows usize"),
+            })
+        })?;
+    for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
+        if kp != expected_kv_pre {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "restore_after_partial_accept",
+                detail: format!(
+                    "kv_n_pos[{i}]={kp} != start_position + N = {expected_kv_pre}; \
+                     restore must be called immediately after packed_verify(.., \
+                     start_position) on the same session"
+                ),
+            }));
+        }
+    }
+
+    // -- Encode all blits in one command buffer.
+    //
+    // Source: gdn_ckpt_slot(k, n_keep - 1) and conv_ckpt_slot(k, n_keep - 1)
+    // for every GDN layer k. Each slot is a zero-copy view into the
+    // big checkpoint buffer at the right offset.
+    //
+    // Destination: target_session.gdn_state[k] / target_session.gdn_conv[k].
+    //
+    // n_keep == N (full accept) edge case: source is gdn_ckpt_slot(k, N-1),
+    // which holds state-after-token-(N-1) — exactly what's currently in
+    // session.gdn_state[k]. The blit is a no-op in semantics but still
+    // copies bytes. Optimization opportunity (skip the blit when n_keep == N)
+    // is deferred — at v1 we want the simplest, most-defensive code path.
+    let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
+    let blit = BlitEncoder::begin(&cmd_buf);
+    let ckpt_n = n_keep - 1; // checkpoint index to restore from
+    for k in 0..n_gdn_actual {
+        let ssm_src = scratch.gdn_ckpt_slot(k, ckpt_n);
+        blit.copy_tensor(&ssm_src, &target_session.gdn_state[k as usize]);
+        let conv_src = scratch.conv_ckpt_slot(k, ckpt_n);
+        blit.copy_tensor(&conv_src, &target_session.gdn_conv[k as usize]);
+    }
+    blit.end();
+    cmd_buf.commit();
+    unsafe { cmd_buf.waitUntilCompleted() };
+
+    // -- Host-side: update kv_n_pos for every attn layer.
+    //
+    // KV slot bytes at [start_position + n_keep, ...) physically remain
+    // but become unreachable; next verify will overwrite them. No need
+    // to clear.
+    let new_kv_pos = (start_position as usize) + (n_keep as usize);
+    for i in 0..target_session.kv_n_pos.len() {
+        target_session.kv_n_pos[i] = new_kv_pos;
+    }
+
+    Ok(())
 }
 
 impl<'a> DFlashDecoder<'a> {
@@ -2100,6 +2294,271 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// H5.3a gate G3 (checkpoint replay equivalence) + G6 (restore
+    /// boundary cases): the headline correctness gate for the
+    /// rollback primitive. Per codex H5.3a review: cosine is independent
+    /// of restore; restore unblocks G3+G6, which prove the checkpoint
+    /// CONTENTS at intermediate n are correct (not just final state).
+    ///
+    /// Setup: prime two fresh sessions identically through M tokens.
+    /// Run packed_verify(verify_tokens, start_position=M) on session_A.
+    /// For each n_keep ∈ {1, N/2, N}:
+    ///   * Restore session_A to n_keep.
+    ///   * Run one single_token at position M + n_keep on session_A
+    ///     with a marker token.
+    ///   * On session_B (separately primed), run n_keep single_tokens
+    ///     of verify_tokens[0..n_keep], then one single_token of the
+    ///     marker. session_A and session_B should now have BIT-EXACT
+    ///     gdn_state, gdn_conv, kv_n_pos, AND argmax token.
+    ///
+    /// This is the strongest possible test of the rollback semantics.
+    /// If checkpoint slot CONTENTS are wrong (e.g., off-by-one indexing),
+    /// session_A's post-restore state diverges from session_B's
+    /// "ground-truth" sequential state and we catch it.
+    ///
+    /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 5 s on M4 Max.
+    #[test]
+    fn dflash_restore_after_partial_accept_replay_equivalence() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        const M: u32 = 2;
+        const N: u32 = 4;
+        let prime_tokens: [i32; M as usize] = [9419, 1];
+        let verify_tokens: [i32; N as usize] = [1234, 7, 999, 42];
+        let marker_token: i32 = 555; // post-restore single_token input
+
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let k_target_layers = target_layer_ids.len() as u32;
+
+        // G6 boundary set: n_keep = 1 (full reject; carry only),
+        // n_keep = N/2 (typical partial), n_keep = N (full accept).
+        for &n_keep in &[1u32, N / 2, N] {
+            // -- session_A: prime + packed_verify + restore + one
+            //    single_token at M + n_keep.
+            let mut sess_a = MetalSession::fresh(&ctx, &mm, 64).expect("sess A");
+            for (i, &tok) in prime_tokens.iter().enumerate() {
+                mf.single_token(tok, i as u32, &mut sess_a)
+                    .expect("prime A");
+            }
+            let mut scratch =
+                MetalDFlashVerifyScratch::fresh(&ctx, &mm, N, k_target_layers).expect("scratch");
+            let _packed = encode_packed_verify_inner(
+                &mf,
+                &target_layer_ids,
+                &verify_tokens,
+                M,
+                &mut scratch,
+                &mut sess_a,
+            )
+            .expect("packed verify");
+
+            encode_restore_after_partial_accept_inner(&mf, &scratch, n_keep, M, &mut sess_a)
+                .expect("restore");
+
+            let logits_a = mf
+                .single_token(marker_token, M + n_keep, &mut sess_a)
+                .expect("marker on A");
+            let mut argmax_a: i32 = 0;
+            let mut best = f32::NEG_INFINITY;
+            for (j, &v) in logits_a.iter().enumerate() {
+                if v > best {
+                    best = v;
+                    argmax_a = j as i32;
+                }
+            }
+
+            // -- session_B: prime + n_keep single_tokens through
+            //    verify_tokens[0..n_keep] + one single_token of marker.
+            //    This is the "ground truth" sequential trajectory.
+            let mut sess_b = MetalSession::fresh(&ctx, &mm, 64).expect("sess B");
+            for (i, &tok) in prime_tokens.iter().enumerate() {
+                mf.single_token(tok, i as u32, &mut sess_b)
+                    .expect("prime B");
+            }
+            for i in 0..n_keep {
+                mf.single_token(verify_tokens[i as usize], M + i, &mut sess_b)
+                    .expect("kept verify token on B");
+            }
+            let logits_b = mf
+                .single_token(marker_token, M + n_keep, &mut sess_b)
+                .expect("marker on B");
+            let mut argmax_b: i32 = 0;
+            let mut best = f32::NEG_INFINITY;
+            for (j, &v) in logits_b.iter().enumerate() {
+                if v > best {
+                    best = v;
+                    argmax_b = j as i32;
+                }
+            }
+
+            eprintln!(
+                "[restore-replay n_keep={n_keep}] argmax_A={argmax_a} \
+                 argmax_B={argmax_b}"
+            );
+
+            // G3: argmax tokens must match (covers logits-after-restore
+            // equivalence at the argmax-coarsened level).
+            assert_eq!(
+                argmax_a, argmax_b,
+                "G3: argmax post-restore differs at n_keep={n_keep}: \
+                 A={argmax_a} B={argmax_b}"
+            );
+
+            // G3 (stronger): bitwise equality on gdn_state / gdn_conv
+            // after the marker single_token. The marker is processed
+            // identically on both paths so divergence indicates a
+            // restore bug, not a forward bug.
+            for (i, (a_state, b_state)) in sess_a
+                .gdn_state
+                .iter()
+                .zip(sess_b.gdn_state.iter())
+                .enumerate()
+            {
+                unsafe {
+                    let a = a_state.buffer.contents().as_ptr() as *const u32;
+                    let b = b_state.buffer.contents().as_ptr() as *const u32;
+                    let n_elems = a_state.n_elements() as usize;
+                    for j in 0..n_elems {
+                        if *a.add(j) != *b.add(j) {
+                            let af = f32::from_bits(*a.add(j));
+                            let bf = f32::from_bits(*b.add(j));
+                            panic!(
+                                "G3: gdn_state[{i}][{j}] post-restore-then-marker \
+                                 differs at n_keep={n_keep}: A={af} B={bf}"
+                            );
+                        }
+                    }
+                }
+            }
+            for (i, (a_conv, b_conv)) in sess_a
+                .gdn_conv
+                .iter()
+                .zip(sess_b.gdn_conv.iter())
+                .enumerate()
+            {
+                unsafe {
+                    let a = a_conv.buffer.contents().as_ptr() as *const u32;
+                    let b = b_conv.buffer.contents().as_ptr() as *const u32;
+                    let n_elems = a_conv.n_elements() as usize;
+                    for j in 0..n_elems {
+                        if *a.add(j) != *b.add(j) {
+                            panic!(
+                                "G3: gdn_conv[{i}][{j}] post-restore-then-marker \
+                                 differs at n_keep={n_keep}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // kv_n_pos must equal M + n_keep + 1 on both (after marker
+            // single_token).
+            let expected_kv = (M as usize) + (n_keep as usize) + 1;
+            for (i, &a_pos) in sess_a.kv_n_pos.iter().enumerate() {
+                assert_eq!(
+                    a_pos, expected_kv,
+                    "G3: sess_A kv_n_pos[{i}]={a_pos} != expected {expected_kv}"
+                );
+                assert_eq!(
+                    sess_b.kv_n_pos[i], expected_kv,
+                    "G3: sess_B kv_n_pos[{i}] != expected {expected_kv}"
+                );
+            }
+        }
+    }
+
+    /// H5.3a guard tests for restore primitive (codex failure-mode
+    /// mitigation): n_keep=0 must fail loudly; n_keep > N must fail;
+    /// stale kv_n_pos must fail.
+    #[test]
+    fn dflash_restore_after_partial_accept_guard_wall() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        const N: u32 = 4;
+        let mut sess = MetalSession::fresh(&ctx, &mm, 64).expect("sess");
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let mut scratch = MetalDFlashVerifyScratch::fresh(&ctx, &mm, N, 2).expect("scratch");
+
+        // Run packed_verify so session is in the post-packed-verify state.
+        let _ = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &[1i32, 2, 3, 4],
+            0,
+            &mut scratch,
+            &mut sess,
+        )
+        .expect("packed verify");
+
+        // (a) n_keep = 0
+        let err = encode_restore_after_partial_accept_inner(&mf, &scratch, 0, 0, &mut sess);
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(detail.contains("n_keep=0"), "wrong error: {detail}");
+            }
+            other => panic!("expected BadShape on n_keep=0, got {other:?}"),
+        }
+
+        // (b) n_keep > N
+        let err = encode_restore_after_partial_accept_inner(&mf, &scratch, N + 1, 0, &mut sess);
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(
+                    detail.contains(&format!("n_keep={}", N + 1)),
+                    "wrong error: {detail}"
+                );
+            }
+            other => panic!("expected BadShape on n_keep>N, got {other:?}"),
+        }
+
+        // (c) wrong start_position (kv_n_pos contract violation).
+        // 0.8B has no attn layers so kv_n_pos.len() == 0 — the loop
+        // is trivially satisfied. Note in stderr; the contract is
+        // exercised on 27B (different test).
+        if !sess.kv_n_pos.is_empty() {
+            let err = encode_restore_after_partial_accept_inner(&mf, &scratch, 2, 99, &mut sess);
+            match err {
+                Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                    assert!(detail.contains("kv_n_pos"), "wrong error: {detail}");
+                }
+                other => {
+                    panic!("expected BadShape on kv_n_pos mismatch, got {other:?}")
+                }
+            }
+        } else {
+            eprintln!(
+                "[restore-guard] 0.8B has no attn layers; \
+                 kv_n_pos contract is exercised at 27B (separate test)"
+            );
         }
     }
 

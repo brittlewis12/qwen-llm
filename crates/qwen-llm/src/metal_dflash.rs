@@ -31,8 +31,9 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rope_neox_f32,
+    encode_argmax_f32, encode_copy_offset_f32, encode_get_rows_f32, encode_mat_mat_q4_k_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_silu_mul_f32,
 };
 use crate::metal_forward::{
     MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_vec_dispatch,
@@ -548,6 +549,206 @@ impl MetalDFlashDebugScratch {
     }
 }
 
+// =============================================================================
+// MetalDFlashLayerMajorScratch — H5.3b.4-5 N-wide activation buffers
+// =============================================================================
+//
+// Owns the [N, *] activation buffers needed by the layer-major
+// packed_verify path (`encode_packed_verify_layer_major_inner`).
+// Sits ALONGSIDE `MetalDFlashVerifyScratch` (which keeps owning
+// outputs + checkpoints + packed_ids_buf). The token-major naive
+// path does NOT allocate this struct — codex Q6 (parallel scratch)
+// to keep oracle/debug paths cheap.
+//
+// All buffers are F32 row-major `[N, dim]`. Total size at
+// Qwen3.6-27B with N=16:
+//   x_pack            [N, H]            16·5120·4   =   320 KiB
+//   h_pack            [N, H]            16·5120·4   =   320 KiB
+//   mixer_out_pack    [N, H]            16·5120·4   =   320 KiB
+//   attn_q_full_pack  [N, 2·q_dim]      16·12288·4  =   768 KiB  (gated Q)
+//   attn_q_pack       [N, q_dim]        16·6144·4   =   384 KiB
+//   attn_gate_pack    [N, q_dim]        16·6144·4   =   384 KiB
+//   attn_q_normed_pack[N, q_dim]        16·6144·4   =   384 KiB
+//   attn_k_now_pack   [N, kv_dim]       16·1024·4   =    64 KiB
+//   attn_v_now_pack   [N, kv_dim]       16·1024·4   =    64 KiB
+//   attn_k_normed_pack[N, kv_dim]       16·1024·4   =    64 KiB
+//   attn_o_pack       [N, q_dim]        16·6144·4   =   384 KiB
+//   ffn_gate_pack     [N, F]            16·17408·4  =  1088 KiB
+//   ffn_up_pack       [N, F]            16·17408·4  =  1088 KiB
+//   ffn_inner_pack    [N, F]            16·17408·4  =  1088 KiB
+//   ffn_out_pack      [N, H]            16·5120·4   =   320 KiB
+//                                                    ----------
+//                                                    ~ 7.0 MiB
+pub struct MetalDFlashLayerMajorScratch {
+    /// `[N, H]` F32 — residual stream across N tokens.
+    pub x_pack: MetalTensor,
+    /// `[N, H]` F32 — post-norm activation across N tokens (reused for
+    /// both pre-attn and pre-FFN norms).
+    pub h_pack: MetalTensor,
+    /// `[N, H]` F32 — mixer output (GDN or attn).
+    pub mixer_out_pack: MetalTensor,
+
+    // Attention scratch (only meaningful on attn layers).
+    /// `[N, 2·q_dim]` F32 — gated Q projection (Q + gate interleaved).
+    pub attn_q_full_pack: MetalTensor,
+    /// `[N, q_dim]` F32 — Q after split.
+    pub attn_q_pack: MetalTensor,
+    /// `[N, q_dim]` F32 — gate after split.
+    pub attn_gate_pack: MetalTensor,
+    /// `[N, q_dim]` F32 — Q after per-head RMSNorm.
+    pub attn_q_normed_pack: MetalTensor,
+    /// `[N, kv_dim]` F32 — K projection.
+    pub attn_k_now_pack: MetalTensor,
+    /// `[N, kv_dim]` F32 — V projection.
+    pub attn_v_now_pack: MetalTensor,
+    /// `[N, kv_dim]` F32 — K after per-head RMSNorm.
+    pub attn_k_normed_pack: MetalTensor,
+    /// `[N, q_dim]` F32 — attention output (post softmax+V agg, post gate).
+    pub attn_o_pack: MetalTensor,
+
+    // FFN scratch.
+    /// `[N, F]` F32 — FFN gate output (skipped when fused Q4_K SwiGLU is used).
+    pub ffn_gate_pack: MetalTensor,
+    /// `[N, F]` F32 — FFN up output.
+    pub ffn_up_pack: MetalTensor,
+    /// `[N, F]` F32 — silu(gate) * up.
+    pub ffn_inner_pack: MetalTensor,
+    /// `[N, H]` F32 — FFN final.
+    pub ffn_out_pack: MetalTensor,
+
+    // Cached dims so callers don't have to re-derive.
+    pub n: u32,
+    pub hidden_size: u64,
+    pub intermediate_size: u64,
+    pub q_dim: u64,
+    pub kv_dim: u64,
+}
+
+impl MetalDFlashLayerMajorScratch {
+    pub fn fresh(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+    ) -> Result<Self, MetalError> {
+        let arch = &target_model.arch;
+        let n = block_size as u64;
+        let h = arch.hidden_size as u64;
+        let f = arch.intermediate_size as u64;
+        let head_dim = arch.attn_head_dim as u64;
+        let q_dim = (arch.n_q_heads as u64) * head_dim;
+        let kv_dim = (arch.n_kv_heads as u64) * head_dim;
+
+        Ok(Self {
+            x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
+            h_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
+            mixer_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
+            attn_q_full_pack: MetalTensor::zeros_f32(ctx, vec![n, 2 * q_dim])?,
+            attn_q_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
+            attn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
+            attn_q_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
+            attn_k_now_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
+            attn_v_now_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
+            attn_k_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
+            attn_o_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
+            ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
+            ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
+            ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
+            ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
+            n: block_size,
+            hidden_size: h,
+            intermediate_size: f,
+            q_dim,
+            kv_dim,
+        })
+    }
+
+    /// Zero-copy view of row n of `x_pack` ([H] elements).
+    pub fn x_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n, "x_row OOB: n={n} >= scratch.n={}", self.n);
+        self.x_pack
+            .view_subrange((n as u64) * self.hidden_size, vec![self.hidden_size])
+    }
+
+    /// Zero-copy view of row n of `h_pack`.
+    pub fn h_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.h_pack
+            .view_subrange((n as u64) * self.hidden_size, vec![self.hidden_size])
+    }
+
+    /// Zero-copy view of row n of `mixer_out_pack`.
+    pub fn mixer_out_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.mixer_out_pack
+            .view_subrange((n as u64) * self.hidden_size, vec![self.hidden_size])
+    }
+
+    /// Zero-copy view of row n of `attn_q_full_pack` (`[2*q_dim]`).
+    pub fn attn_q_full_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        let two_q = 2 * self.q_dim;
+        self.attn_q_full_pack
+            .view_subrange((n as u64) * two_q, vec![two_q])
+    }
+
+    /// Zero-copy view of row n of `attn_q_pack`, `attn_gate_pack`, etc.
+    pub fn attn_q_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.attn_q_pack
+            .view_subrange((n as u64) * self.q_dim, vec![self.q_dim])
+    }
+
+    pub fn attn_gate_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.attn_gate_pack
+            .view_subrange((n as u64) * self.q_dim, vec![self.q_dim])
+    }
+
+    pub fn attn_q_normed_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.attn_q_normed_pack
+            .view_subrange((n as u64) * self.q_dim, vec![self.q_dim])
+    }
+
+    pub fn attn_k_now_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.attn_k_now_pack
+            .view_subrange((n as u64) * self.kv_dim, vec![self.kv_dim])
+    }
+
+    pub fn attn_v_now_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.attn_v_now_pack
+            .view_subrange((n as u64) * self.kv_dim, vec![self.kv_dim])
+    }
+
+    pub fn attn_k_normed_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.attn_k_normed_pack
+            .view_subrange((n as u64) * self.kv_dim, vec![self.kv_dim])
+    }
+
+    pub fn attn_o_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.attn_o_pack
+            .view_subrange((n as u64) * self.q_dim, vec![self.q_dim])
+    }
+
+    pub fn ffn_inner_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.ffn_inner_pack.view_subrange(
+            (n as u64) * self.intermediate_size,
+            vec![self.intermediate_size],
+        )
+    }
+
+    pub fn ffn_out_row(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n);
+        self.ffn_out_pack
+            .view_subrange((n as u64) * self.hidden_size, vec![self.hidden_size])
+    }
+}
+
 /// Top-level DFlash speculative-decode driver.
 pub struct DFlashDecoder<'a> {
     pub base: &'a MetalForward<'a>,
@@ -610,18 +811,77 @@ impl<'a> DFlashDecoder<'a> {
     // Codex Q6 cmd buffer: ONE command buffer for all N tokens
     // (alternating compute / blit passes). Single commit + wait. The
     // simplest correctness-scaffold posture.
+    /// Default packed verify path: **layer-major** (H5.3b.4-5).
+    /// Uses batched RMSNorm + batched mat-mat for FFN/projections,
+    /// per-token GDN/attn mixers. Requires `MetalDFlashLayerMajorScratch`.
+    ///
+    /// Token-major fallback `packed_verify_token_major` is preserved
+    /// as the correctness oracle (per codex Q4 — the two are tested
+    /// bit-exact against each other).
     pub fn packed_verify(
+        &self,
+        tokens: &[i32],
+        start_position: u32,
+        verify_scratch: &mut MetalDFlashVerifyScratch,
+        layer_scratch: &mut MetalDFlashLayerMajorScratch,
+        target_session: &mut MetalSession,
+    ) -> Result<Vec<i32>, DFlashError> {
+        encode_packed_verify_layer_major_inner(
+            self.base,
+            &self.head.target_layer_ids,
+            tokens,
+            start_position,
+            verify_scratch,
+            layer_scratch,
+            target_session,
+            None,
+        )
+    }
+
+    /// Debug variant of layer-major `packed_verify` that ALSO writes
+    /// `[N, V]` raw logits to `dbg_scratch.debug_logits` for the H5.3a
+    /// cosine gate (G1 full). Production code MUST NOT call this — the
+    /// extra `[N, V]` copy is 15.9 MB per outer step at 27B and negates
+    /// the entire point of the GPU-argmax design.
+    pub fn packed_verify_with_logits(
+        &self,
+        tokens: &[i32],
+        start_position: u32,
+        dbg_scratch: &mut MetalDFlashDebugScratch,
+        layer_scratch: &mut MetalDFlashLayerMajorScratch,
+        target_session: &mut MetalSession,
+    ) -> Result<Vec<i32>, DFlashError> {
+        let MetalDFlashDebugScratch {
+            verify,
+            debug_logits,
+        } = dbg_scratch;
+        encode_packed_verify_layer_major_inner(
+            self.base,
+            &self.head.target_layer_ids,
+            tokens,
+            start_position,
+            verify,
+            layer_scratch,
+            target_session,
+            Some(debug_logits),
+        )
+    }
+
+    /// Token-major (naive H5.3a) packed verify path. Preserved as the
+    /// correctness oracle for the layer-major rewrite — codex Q4 from
+    /// the H5.3b.4-5 partner session: "ship both, default to layer-
+    /// major, tests run BOTH on identical inputs and compare."
+    ///
+    /// Production callers should use `packed_verify` (layer-major) for
+    /// throughput. This path is for bisecting / regression-locking the
+    /// layer-major impl to the proven token-major one.
+    pub fn packed_verify_token_major(
         &self,
         tokens: &[i32],
         start_position: u32,
         scratch: &mut MetalDFlashVerifyScratch,
         target_session: &mut MetalSession,
     ) -> Result<Vec<i32>, DFlashError> {
-        // Thin wrapper around the inner free function so that tests can
-        // exercise packed_verify without constructing a real DFlash
-        // drafter (DFlashDecoder requires real drafter weights). The
-        // inner function takes everything explicitly as parameters and
-        // is `pub(crate)` so it's not part of the public API.
         encode_packed_verify_inner(
             self.base,
             &self.head.target_layer_ids,
@@ -632,17 +892,9 @@ impl<'a> DFlashDecoder<'a> {
         )
     }
 
-    /// Debug variant of `packed_verify` that ALSO writes `[N, V]` raw
-    /// logits to `dbg_scratch.debug_logits` for the H5.3a cosine
-    /// gate (G1 full). Production code MUST NOT call this — the
-    /// extra `[N, V]` copy is 15.9 MB per outer step at 27B and
-    /// negates the entire point of the GPU-argmax design.
-    ///
-    /// Same algorithm as `packed_verify` plus one inline
-    /// `encode_scatter_offset_f32` per token to spill
-    /// `session.logits` → `dbg_scratch.debug_logits[n, :]` before
-    /// the next token's lm_head writes session.logits.
-    pub fn packed_verify_with_logits(
+    /// Token-major debug variant — preserved as oracle for the
+    /// layer-major `_with_logits` variant.
+    pub fn packed_verify_token_major_with_logits(
         &self,
         tokens: &[i32],
         start_position: u32,
@@ -1138,6 +1390,526 @@ fn encode_packed_verify_inner_impl(
 /// pattern where it's read at encode time, not GPU-side). KV slot
 /// bytes at [start_position + n_keep, ...) physically remain but
 /// become unreachable; next packed_verify call overwrites them.
+// =============================================================================
+// encode_packed_verify_layer_major_inner — H5.3b.4-5 layer-major path
+// =============================================================================
+//
+// Per H5 plan rev 6 §H5.3b.4-5 (codex layer-major partner session, v0.65):
+// rewrite packed_verify so that each layer's batched-batchable kernels
+// (norms, projections, FFN) run ONCE across all N tokens, sharing weight
+// loads. GDN/attn mixers stay sequential per token (recurrent state can't
+// pack along time).
+//
+// Structural invariants (from codex partner session):
+//   * `MetalDFlashLayerMajorScratch` owns N-wide activation buffers
+//     (`x_pack`, `h_pack`, `mixer_out_pack`, `attn_*_pack`, `ffn_*_pack`).
+//   * `MetalDFlashVerifyScratch` continues to own outputs + checkpoints
+//     (`packed_ids_buf`, `verify_argmax`, `hidden_capture`, `gdn_ckpt`,
+//      `conv_ckpt`).
+//   * GDN/conv per-token checkpoint blits are inlined per-N inside the
+//     mixer inner loop (Option A from codex Q1). Each GDN-layer iter:
+//     compute → blit → compute. ~1536 transitions per outer step total.
+//   * Attn `o_proj` is BATCHED mat-mat across N (Q4_K) — codex Q2.
+//   * K/V projection fusion deferred — codex Q3.
+//   * Dtype dispatch INSIDE this function (Q4_K vs F32 paths) — codex Q5.
+//   * Token-major path stays as the oracle (Q4); this is the new
+//     production path. The two are compared bit-exact in tests.
+//
+// Reuses `MetalForward::encode_gdn` and `MetalForward::encode_attn` for
+// the per-token mixer code by writing per-row inputs into the existing
+// `MetalSession` single-token scratch (`s.h`), running the unchanged
+// mixer, then copying the per-row output back into `mixer_out_pack[n]`.
+// 2 extra row-copy dispatches per token per mixer-bearing-layer; cheap
+// (~20 KB per copy) and avoids re-implementing the mixer math.
+//
+// Mat-mat output layout note (verified bit-equivalent in H5.3b.0): the
+// lifted `kernel_mul_mm_q4_K_f32` writes `dst[r + c*M]` which is byte-
+// identical to row-major `[N, n_out]`. Downstream consumers
+// (silu_mul, residual_add, chained mat-mat with this output as srcB)
+// work without any transpose. The intermediate-layer cosine tests
+// added in this phase verify this for every per-layer pack buffer.
+pub(crate) fn encode_packed_verify_layer_major_inner(
+    base: &MetalForward<'_>,
+    target_layer_ids: &[u32],
+    tokens: &[i32],
+    start_position: u32,
+    verify_scratch: &mut MetalDFlashVerifyScratch,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    target_session: &mut MetalSession,
+    debug_logits_dst: Option<&MetalTensor>,
+) -> Result<Vec<i32>, DFlashError> {
+    let arch = &base.model.arch;
+    let n = verify_scratch.n as usize;
+    let h = arch.hidden_size as usize;
+    let f = arch.intermediate_size as usize;
+    let v = arch.vocab_size as usize;
+
+    // -- guard wall (mirrors token-major; same bug class) --
+    if tokens.len() != n {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!("tokens.len()={} != verify_scratch.n={n}", tokens.len()),
+        }));
+    }
+    let k_target = target_layer_ids.len();
+    if verify_scratch.k_target_layers as usize != k_target {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!(
+                "verify_scratch.k_target_layers={} != target_layer_ids.len()={k_target}",
+                verify_scratch.k_target_layers
+            ),
+        }));
+    }
+    if verify_scratch.hidden_size != h as u64 {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!(
+                "verify_scratch.hidden_size={} != arch.hidden_size={h}",
+                verify_scratch.hidden_size
+            ),
+        }));
+    }
+    if layer_scratch.n != verify_scratch.n
+        || layer_scratch.hidden_size != verify_scratch.hidden_size
+    {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!(
+                "layer_scratch ({} N × {} H) does not match verify_scratch ({} N × {} H)",
+                layer_scratch.n,
+                layer_scratch.hidden_size,
+                verify_scratch.n,
+                verify_scratch.hidden_size
+            ),
+        }));
+    }
+    let n_gdn_actual = base
+        .model
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, MetalBlock::Gdn(_)))
+        .count() as u32;
+    if verify_scratch.n_gdn_layers != n_gdn_actual {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!(
+                "verify_scratch.n_gdn_layers={} != model n_gdn={n_gdn_actual}",
+                verify_scratch.n_gdn_layers
+            ),
+        }));
+    }
+    let last_pos = (start_position as usize).checked_add(n).ok_or_else(|| {
+        DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!("start_position={start_position} + N={n} overflows usize"),
+        })
+    })?;
+    if last_pos > target_session.kv_capacity {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!(
+                "start_position + N = {last_pos} > kv_capacity={}",
+                target_session.kv_capacity
+            ),
+        }));
+    }
+    for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
+        if kp != start_position as usize {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "packed_verify_layer_major",
+                detail: format!("kv_n_pos[{i}]={kp} != start_position={start_position}"),
+            }));
+        }
+    }
+    for &t in tokens.iter() {
+        if t < 0 || (t as u32) >= arch.vocab_size {
+            return Err(DFlashError::BadToken(t, arch.vocab_size));
+        }
+    }
+    for &lid in target_layer_ids {
+        if (lid as usize) >= base.model.blocks.len() {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "packed_verify_layer_major.target_layer_ids",
+                detail: format!("layer id {lid} >= n_layer {}", base.model.blocks.len()),
+            }));
+        }
+    }
+    if let Some(dst) = debug_logits_dst {
+        if dst.shape != vec![n as u64, v as u64] {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "packed_verify_layer_major.debug_logits_dst",
+                detail: format!("expected [{n}, {v}], got {:?}", dst.shape),
+            }));
+        }
+    }
+
+    // -- Stage all N token ids into packed_ids_buf (host write before
+    //    cmd_buf.commit; per Apple StorageModeShared contract). --
+    unsafe {
+        let p = verify_scratch.packed_ids_buf.buffer.contents().as_ptr() as *mut i32;
+        for (i, &t) in tokens.iter().enumerate() {
+            *p.add(i) = t;
+        }
+    }
+
+    // -- One MTLCommandBuffer for the whole forward. We open and close
+    //    compute encoders multiple times (alternating with blit encoders
+    //    around the GDN-layer per-token checkpoint writes). --
+    let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
+
+    // === Phase 1: batched embed of all N tokens into x_pack [N, H]. ===
+    {
+        let enc = KernelEncoder::begin(&cmd_buf);
+        encode_get_rows_f32(
+            base.ctx,
+            &enc,
+            &base.model.token_embd,
+            &verify_scratch.packed_ids_buf,
+            &layer_scratch.x_pack,
+            n,
+            h,
+        )?;
+        enc.end();
+    }
+
+    // === Phase 2: layer loop. ===
+    let mut gdn_idx = 0usize;
+    let mut attn_idx = 0usize;
+    for (il, block) in base.model.blocks.iter().enumerate() {
+        // 2a: pre-mixer norm BATCHED across all N tokens. The kernel
+        //     `kernel_rms_norm_batched_f32` already supports per-row
+        //     RMSNorm with shared weight; we treat (n_heads = N,
+        //     head_dim = H) which gives one RMSNorm per token row.
+        let attn_norm = match block {
+            MetalBlock::Gdn(g) => &g.attn_norm,
+            MetalBlock::Attn(a) => &a.attn_norm,
+        };
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_rms_norm_batched_f32(
+                base.ctx,
+                &enc,
+                &layer_scratch.x_pack,
+                attn_norm,
+                &layer_scratch.h_pack,
+                n,
+                h,
+                RMS_EPS,
+            )?;
+            enc.end();
+        }
+
+        // 2b: mixer. Two paths.
+        //
+        //   GDN: per-token inner loop (recurrent; can't batch over
+        //        time). Per-N: copy h_pack[n] → s.h, run encode_gdn,
+        //        copy s.mixer_out → mixer_out_pack[n], then close
+        //        compute encoder + blit gdn_state[gi] / gdn_conv[gi]
+        //        → ckpt_slot(gi, n) + reopen compute encoder.
+        //   Attn: per-token sequential — KV append + attn-v4 are
+        //        per-token. No checkpoint writes (KV cache is a
+        //        slot-indexed accumulator, not a recurrent state we
+        //        roll back via blit). o_proj BATCHED via mat-mat.
+        match block {
+            MetalBlock::Gdn(g) => {
+                let gi = gdn_idx;
+                gdn_idx += 1;
+                for n_idx in 0..n {
+                    // Compute pass: stage row, run mixer, capture row.
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch.h_pack,
+                            n_idx * h,
+                            &target_session.h,
+                            h,
+                        )?;
+                        base.encode_gdn(&enc, g, gi, target_session)?;
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.mixer_out,
+                            &layer_scratch.mixer_out_pack,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
+                    }
+                    // Blit pass: snapshot post-token-n state into ckpt slots.
+                    {
+                        let blit = BlitEncoder::begin(&cmd_buf);
+                        let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
+                        blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
+                        let conv_dst = verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
+                        blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
+                        blit.end();
+                    }
+                }
+            }
+            MetalBlock::Attn(a) => {
+                let ai = attn_idx;
+                attn_idx += 1;
+                // Per-token attn (KV append + softmax are sequential).
+                // Same per-row stage/run/capture pattern as GDN, but no
+                // checkpoint blit (KV is slot-indexed, not state-blit-
+                // rolled-back).
+                for n_idx in 0..n {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &layer_scratch.h_pack,
+                        n_idx * h,
+                        &target_session.h,
+                        h,
+                    )?;
+                    let position_n = start_position + n_idx as u32;
+                    base.encode_attn(&enc, a, ai, position_n, target_session)?;
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.mixer_out,
+                        &layer_scratch.mixer_out_pack,
+                        n_idx * h,
+                        h,
+                    )?;
+                    enc.end();
+                }
+            }
+        }
+
+        // 2c: residual #1 — x_pack += mixer_out_pack (batched
+        //     elementwise; encode_add_inplace_f32 just walks the flat
+        //     N*H element count).
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_add_inplace_f32(
+                base.ctx,
+                &enc,
+                &layer_scratch.x_pack,
+                &layer_scratch.mixer_out_pack,
+            )?;
+            enc.end();
+        }
+
+        // 2d: hidden capture (per codex Q4 timing — INLINE, before
+        //     post-norm overwrites the residual stream representation
+        //     downstream consumers see). hidden_capture[k_idx, n, :]
+        //     == x_pack[n, :] AT THIS POINT.
+        for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+            if lid as usize == il {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                for n_idx in 0..n {
+                    let elem_off = (k_idx as u64 * verify_scratch.n as u64 + n_idx as u64)
+                        * verify_scratch.hidden_size;
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &layer_scratch
+                            .x_pack
+                            .view_subrange((n_idx * h) as u64, vec![h as u64]),
+                        &verify_scratch.hidden_capture,
+                        elem_off as usize,
+                        h,
+                    )?;
+                }
+                enc.end();
+            }
+        }
+
+        // 2e: post-mixer norm BATCHED.
+        let post_norm = match block {
+            MetalBlock::Gdn(g) => &g.post_attn_norm,
+            MetalBlock::Attn(a) => &a.post_attn_norm,
+        };
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_rms_norm_batched_f32(
+                base.ctx,
+                &enc,
+                &layer_scratch.x_pack,
+                post_norm,
+                &layer_scratch.h_pack,
+                n,
+                h,
+                RMS_EPS,
+            )?;
+            enc.end();
+        }
+
+        // 2f: SwiGLU FFN. Dtype dispatch (codex Q5) — the WIN.
+        //   Q4_K weights → batched mat-mat (mat_mat_q4_k_f32) writing
+        //                  ffn_gate_pack [N, F] then ffn_up_pack [N, F]
+        //                  row-major (= mat-mat output bit-equivalent),
+        //                  then silu_mul on flat N*F elements,
+        //                  then mat-mat ffn_down → ffn_out_pack [N, H].
+        //   F32 weights   → per-token mat-vec loop using the existing
+        //                  fused encode_block path is wasteful for the
+        //                  layer-major case; just call the existing
+        //                  per-token encode_mat_vec_dispatch in a loop.
+        //                  At 0.8B sizes this is still substantial weight
+        //                  re-read but it's the F32 oracle path, NOT a
+        //                  perf target.
+        let (g_w, u_w, d_w) = match block {
+            MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
+            MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
+        };
+        let q4_k_path = g_w.dtype == GgmlType::Q4_K
+            && u_w.dtype == GgmlType::Q4_K
+            && d_w.dtype == GgmlType::Q4_K;
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            if q4_k_path {
+                // Batched mat-mat: gate, up, then silu_mul, then down.
+                encode_mat_mat_q4_k_f32(
+                    base.ctx,
+                    &enc,
+                    g_w,
+                    &layer_scratch.h_pack,
+                    &layer_scratch.ffn_gate_pack,
+                    h,
+                    f,
+                    n,
+                )?;
+                encode_mat_mat_q4_k_f32(
+                    base.ctx,
+                    &enc,
+                    u_w,
+                    &layer_scratch.h_pack,
+                    &layer_scratch.ffn_up_pack,
+                    h,
+                    f,
+                    n,
+                )?;
+                encode_silu_mul_f32(
+                    base.ctx,
+                    &enc,
+                    &layer_scratch.ffn_gate_pack,
+                    &layer_scratch.ffn_up_pack,
+                    &layer_scratch.ffn_inner_pack,
+                )?;
+                encode_mat_mat_q4_k_f32(
+                    base.ctx,
+                    &enc,
+                    d_w,
+                    &layer_scratch.ffn_inner_pack,
+                    &layer_scratch.ffn_out_pack,
+                    f,
+                    h,
+                    n,
+                )?;
+            } else {
+                // F32 (or other non-Q4_K dtypes): per-token loop using
+                // existing mat-vec-dispatch. Layer-major still wins here
+                // through batched norms + scheduling, just not via mat-mat.
+                for n_idx in 0..n {
+                    let h_n = layer_scratch
+                        .h_pack
+                        .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                    let gate_n = layer_scratch
+                        .ffn_gate_pack
+                        .view_subrange((n_idx * f) as u64, vec![f as u64]);
+                    let up_n = layer_scratch
+                        .ffn_up_pack
+                        .view_subrange((n_idx * f) as u64, vec![f as u64]);
+                    let inner_n = layer_scratch
+                        .ffn_inner_pack
+                        .view_subrange((n_idx * f) as u64, vec![f as u64]);
+                    let out_n = layer_scratch
+                        .ffn_out_pack
+                        .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                    encode_mat_vec_dispatch(base.ctx, &enc, g_w, &h_n, &gate_n, h, f)?;
+                    encode_mat_vec_dispatch(base.ctx, &enc, u_w, &h_n, &up_n, h, f)?;
+                    encode_silu_mul_f32(base.ctx, &enc, &gate_n, &up_n, &inner_n)?;
+                    encode_mat_vec_dispatch(base.ctx, &enc, d_w, &inner_n, &out_n, f, h)?;
+                }
+            }
+            // 2g: residual #2 — x_pack += ffn_out_pack.
+            encode_add_inplace_f32(
+                base.ctx,
+                &enc,
+                &layer_scratch.x_pack,
+                &layer_scratch.ffn_out_pack,
+            )?;
+            enc.end();
+        }
+    }
+
+    // === Phase 3: per-token tail (final norm + lm_head + argmax). ===
+    //
+    // lm_head + final norm stay PER-TOKEN for now; H5.3b.6 will lift
+    // them to mat-mat (Q6_K). One compute encoder for the entire phase.
+    {
+        let enc = KernelEncoder::begin(&cmd_buf);
+        for n_idx in 0..n {
+            let x_n = layer_scratch
+                .x_pack
+                .view_subrange((n_idx * h) as u64, vec![h as u64]);
+            // Stage into target_session.x for the unchanged tail path.
+            encode_copy_offset_f32(
+                base.ctx,
+                &enc,
+                &layer_scratch.x_pack,
+                n_idx * h,
+                &target_session.x,
+                h,
+            )?;
+            // Final norm.
+            encode_rms_norm_mul_f32(
+                base.ctx,
+                &enc,
+                &target_session.x,
+                &base.model.output_norm,
+                &target_session.h,
+                RMS_EPS,
+            )?;
+            // lm_head — per-token mat-vec for now.
+            encode_mat_vec_dispatch(
+                base.ctx,
+                &enc,
+                &base.model.lm_head,
+                &target_session.h,
+                &target_session.logits,
+                h,
+                v,
+            )?;
+            // Optional debug logits dump (codex's `_with_logits` variant).
+            if let Some(dst) = debug_logits_dst {
+                let elem_off = (n_idx as u64) * (v as u64);
+                encode_scatter_offset_f32(
+                    base.ctx,
+                    &enc,
+                    &target_session.logits,
+                    dst,
+                    elem_off as usize,
+                    v,
+                )?;
+            }
+            // GPU argmax → verify_argmax[n_idx].
+            let argmax_dst = verify_scratch.argmax_slot(n_idx as u32);
+            encode_argmax_f32(base.ctx, &enc, &target_session.logits, &argmax_dst, 1, v)?;
+            // Silence unused lint.
+            let _ = x_n;
+        }
+        enc.end();
+    }
+
+    cmd_buf.commit();
+    unsafe {
+        cmd_buf.waitUntilCompleted();
+    }
+
+    let mut out = vec![0i32; n];
+    unsafe {
+        let src = verify_scratch.verify_argmax.buffer.contents().as_ptr() as *const i32;
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+    }
+    Ok(out)
+}
+
 pub(crate) fn encode_restore_after_partial_accept_inner(
     base: &MetalForward<'_>,
     scratch: &MetalDFlashVerifyScratch,
@@ -2119,6 +2891,174 @@ mod tests {
         assert_eq!(
             single_session.kv_n_pos, packed_session.kv_n_pos,
             "G2: kv_n_pos diverged"
+        );
+    }
+
+    /// H5.3b.4-5 headline correctness gate: layer-major
+    /// `packed_verify` produces BIT-EXACT identical argmaxes AND
+    /// session state to the token-major oracle on the same inputs.
+    ///
+    /// The two paths use the same kernels with different scheduling
+    /// (token-major: outer-loop over tokens, inner-loop over layers;
+    /// layer-major: outer-loop over layers, inner-loop or batched
+    /// across tokens). On F32 weights both should produce bit-
+    /// identical bytes because the math is identical — only the
+    /// dispatch order differs, and same-encoder same-stream Metal
+    /// dispatches are deterministic.
+    ///
+    /// Per codex Q4 + the codex layer-major partner-session failure-
+    /// mode prediction: "argmax + final-state gates can mask shape-
+    /// only bugs on lucky logits." Therefore this test ALSO compares
+    /// raw `[N, V]` logits row-by-row via the `_with_logits` debug
+    /// variants, requiring bit-exact match.
+    ///
+    /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 2 s.
+    #[test]
+    fn dflash_packed_verify_layer_major_matches_token_major() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        const M: u32 = 2;
+        const N: u32 = 4;
+        let prime_tokens: [i32; M as usize] = [9419, 1];
+        let verify_tokens: [i32; N as usize] = [1234, 7, 999, 42];
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let k_target = target_layer_ids.len() as u32;
+
+        // Two identically-primed sessions.
+        let mut sess_tok = MetalSession::fresh(&ctx, &mm, 64).expect("sess tok");
+        let mut sess_lm = MetalSession::fresh(&ctx, &mm, 64).expect("sess lm");
+        for (i, &tok) in prime_tokens.iter().enumerate() {
+            mf.single_token(tok, i as u32, &mut sess_tok)
+                .expect("prime tok");
+            mf.single_token(tok, i as u32, &mut sess_lm)
+                .expect("prime lm");
+        }
+
+        // Token-major path with logits.
+        let mut dbg_tok =
+            MetalDFlashDebugScratch::fresh(&ctx, &mm, N, k_target).expect("dbg scratch tok");
+        let argmax_tok = encode_packed_verify_with_logits_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens,
+            M,
+            &mut dbg_tok,
+            &mut sess_tok,
+        )
+        .expect("token-major");
+
+        // Layer-major path with logits.
+        let mut dbg_lm =
+            MetalDFlashDebugScratch::fresh(&ctx, &mm, N, k_target).expect("dbg scratch lm");
+        let mut layer_scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, N).expect("layer scratch");
+        let MetalDFlashDebugScratch {
+            verify: lm_verify,
+            debug_logits: lm_debug,
+        } = &mut dbg_lm;
+        let argmax_lm = encode_packed_verify_layer_major_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens,
+            M,
+            lm_verify,
+            &mut layer_scratch,
+            &mut sess_lm,
+            Some(lm_debug),
+        )
+        .expect("layer-major");
+
+        eprintln!(
+            "[layer-major-vs-token-major] argmax_tok={argmax_tok:?} \
+             argmax_lm={argmax_lm:?}"
+        );
+
+        // Bit-exact argmax tokens.
+        assert_eq!(
+            argmax_tok, argmax_lm,
+            "layer-major argmax tokens diverge from token-major"
+        );
+
+        // Bit-exact raw logits (codex's intermediate-layer paranoia
+        // gate; argmax alone could pass even if intermediate layouts
+        // were silently transposed for some shapes).
+        let v = m.arch.vocab_size as usize;
+        unsafe {
+            let p_tok = dbg_tok.debug_logits.buffer.contents().as_ptr() as *const u32;
+            let p_lm = dbg_lm.debug_logits.buffer.contents().as_ptr() as *const u32;
+            for i in 0..(N as usize) * v {
+                let t = *p_tok.add(i);
+                let l = *p_lm.add(i);
+                if t != l {
+                    let n_idx = i / v;
+                    let vocab_idx = i % v;
+                    panic!(
+                        "logits bit-mismatch at n_idx={n_idx} vocab_idx={vocab_idx}: \
+                         token-major=0x{t:08x} (={}) layer-major=0x{l:08x} (={})",
+                        f32::from_bits(t),
+                        f32::from_bits(l)
+                    );
+                }
+            }
+        }
+
+        // Bit-exact session state.
+        for (i, (a, b)) in sess_tok
+            .gdn_state
+            .iter()
+            .zip(sess_lm.gdn_state.iter())
+            .enumerate()
+        {
+            unsafe {
+                let pa = a.buffer.contents().as_ptr() as *const u32;
+                let pb = b.buffer.contents().as_ptr() as *const u32;
+                let n_elems = a.n_elements() as usize;
+                for j in 0..n_elems {
+                    if *pa.add(j) != *pb.add(j) {
+                        panic!(
+                            "gdn_state[{i}][{j}] diverges between token-major and \
+                             layer-major after the same N-token batch"
+                        );
+                    }
+                }
+            }
+        }
+        for (i, (a, b)) in sess_tok
+            .gdn_conv
+            .iter()
+            .zip(sess_lm.gdn_conv.iter())
+            .enumerate()
+        {
+            unsafe {
+                let pa = a.buffer.contents().as_ptr() as *const u32;
+                let pb = b.buffer.contents().as_ptr() as *const u32;
+                let n_elems = a.n_elements() as usize;
+                for j in 0..n_elems {
+                    if *pa.add(j) != *pb.add(j) {
+                        panic!(
+                            "gdn_conv[{i}][{j}] diverges between token-major and \
+                             layer-major"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            sess_tok.kv_n_pos, sess_lm.kv_n_pos,
+            "kv_n_pos diverges between token-major and layer-major"
         );
     }
 

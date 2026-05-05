@@ -719,11 +719,20 @@ pub fn encode_mat_vec_q4_k_f32(
 }
 
 /// Q4_K mat-mat: `Y = W · X^T` where
-///   * `W` is Q4_K [`n_out`, `n_in`] (row-major in Q4_K block bytes)
-///   * `X` is F32 [`n_query`, `n_in`] row-major
-///   * `Y` is F32 [`n_out`, `n_query`] **COLUMN-major** (i.e.,
-///     `Y[row + col * n_out]`) — codex Q7 failure-mode pitfall;
-///     downstream consumers must read with this stride or transpose.
+///   * `W` is Q4_K `[n_out, n_in]` (row-major in Q4_K block bytes)
+///   * `X` is F32 `[n_query, n_in]` row-major
+///   * `Y` is F32 `[n_query, n_out]` row-major — equivalently
+///     `Y[c * n_out + r]` for cell `(r, c)` of the kernel's
+///     "[n_out, n_query] col-major" view (the bytes are bit-identical;
+///     llama's notation just uses column-major framing).
+///
+/// **For layer-major H5.3b.4-5 plumbing, treat the output as
+/// row-major `[n_query, n_out]`.** This means downstream consumers
+/// (FFN silu_mul, residual_add, chained mat-mat with this output
+/// as `srcB`) work without any transpose: the bytes ARE in the
+/// row-major order the next mat-mat call expects as input. The
+/// H5.3b.0 layout sanity test verified this equivalence at three
+/// corner cells.
 ///
 /// Lifts the 64×32×32 simdgroup_matrix tile from llama.cpp
 /// `kernel_mul_mm_q4_K_f32` (classic non-MPS-tensor path,
@@ -749,7 +758,7 @@ pub fn encode_mat_mat_q4_k_f32(
     enc: &KernelEncoder,
     weight: &MetalTensor,
     x: &MetalTensor, // [n_query, n_in] row-major F32
-    y: &MetalTensor, // [n_out, n_query] col-major F32 (= [n_query * n_out] flat)
+    y: &MetalTensor, // F32 [n_out * n_query] flat. SEE LAYOUT NOTE BELOW.
     n_in: usize,
     n_out: usize,
     n_query: usize,

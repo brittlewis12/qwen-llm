@@ -35,12 +35,24 @@
 // scalar-float mat-vec; cosine ≥ 0.999 is the gate.
 //
 // Output layout:
-//   COLUMN-MAJOR `dst[row + col * M]` per the lifted kernel. Codex Q7
-//   failure-mode pitfall: our scratch buffers for downstream ops (FFN
-//   silu_mul, residual_add) are row-major `[N, M]`. The host wrapper
-//   MUST either transpose-on-write OR document the col-major output and
-//   adapt downstream. v0.62 H5.3b.0–3 ships col-major output and a
-//   layout test that asserts the documented stride.
+//   The kernel writes `dst[r + c * M]` per llama. Notation in the
+//   lifted kernel calls this "column-major [M, N]". CRITICALLY: this
+//   is BIT-EQUIVALENT to row-major `[N, M]` — the flat byte offset
+//   for cell `(r, c)` of [M, N] col-major equals the flat offset for
+//   cell `(c, r)` of [N, M] row-major (both are `r + c*M`).
+//
+//   So downstream consumers should treat this buffer as row-major
+//   `[N, M]` (= `[n_query, n_out]`). FFN silu_mul, residual_add,
+//   and chained mat-mat all work without any transpose — the layouts
+//   compose naturally because the bytes ARE in the row-major order
+//   that the next-layer mat-mat call expects as its `srcB`.
+//
+//   The H5.3b.0 layout sanity test verifies this equivalence at three
+//   corner cells; the chained layer-major path in H5.3b.4-5 relies on
+//   it. Codex Q7 failure-mode pitfall (potential transpose mismatch)
+//   does NOT apply at our specific tile shape because llama's
+//   "col-major" naming corresponds bit-for-bit to our "row-major"
+//   storage convention.
 //
 // Q4_K block layout (block_q4_K, 144 bytes / 256 elements):
 //   half  d

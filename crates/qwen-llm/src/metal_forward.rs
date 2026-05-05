@@ -979,7 +979,7 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    fn encode_gdn(
+    pub(crate) fn encode_gdn(
         &self,
         enc: &KernelEncoder,
         gb: &MetalGdnBlock,
@@ -1115,7 +1115,7 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    fn encode_attn(
+    pub(crate) fn encode_attn(
         &self,
         enc: &KernelEncoder,
         ab: &MetalAttnBlock,

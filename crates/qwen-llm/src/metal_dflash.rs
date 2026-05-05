@@ -632,6 +632,33 @@ impl<'a> DFlashDecoder<'a> {
         )
     }
 
+    /// Debug variant of `packed_verify` that ALSO writes `[N, V]` raw
+    /// logits to `dbg_scratch.debug_logits` for the H5.3a cosine
+    /// gate (G1 full). Production code MUST NOT call this — the
+    /// extra `[N, V]` copy is 15.9 MB per outer step at 27B and
+    /// negates the entire point of the GPU-argmax design.
+    ///
+    /// Same algorithm as `packed_verify` plus one inline
+    /// `encode_scatter_offset_f32` per token to spill
+    /// `session.logits` → `dbg_scratch.debug_logits[n, :]` before
+    /// the next token's lm_head writes session.logits.
+    pub fn packed_verify_with_logits(
+        &self,
+        tokens: &[i32],
+        start_position: u32,
+        dbg_scratch: &mut MetalDFlashDebugScratch,
+        target_session: &mut MetalSession,
+    ) -> Result<Vec<i32>, DFlashError> {
+        encode_packed_verify_with_logits_inner(
+            self.base,
+            &self.head.target_layer_ids,
+            tokens,
+            start_position,
+            dbg_scratch,
+            target_session,
+        )
+    }
+
     // =====================================================================
     // restore_after_partial_accept — H5.3a rollback primitive
     // =====================================================================
@@ -705,6 +732,69 @@ pub(crate) fn encode_packed_verify_inner(
     start_position: u32,
     scratch: &mut MetalDFlashVerifyScratch,
     target_session: &mut MetalSession,
+) -> Result<Vec<i32>, DFlashError> {
+    encode_packed_verify_inner_impl(
+        base,
+        target_layer_ids,
+        tokens,
+        start_position,
+        scratch,
+        target_session,
+        None,
+    )
+}
+
+/// Like `encode_packed_verify_inner` but ALSO writes raw `[N, V]` logits
+/// to `dbg_scratch.debug_logits`. For correctness/cosine gate use only;
+/// production paths must use `encode_packed_verify_inner` (no extra
+/// vocab-sized buffer touched per token).
+pub(crate) fn encode_packed_verify_with_logits_inner(
+    base: &MetalForward<'_>,
+    target_layer_ids: &[u32],
+    tokens: &[i32],
+    start_position: u32,
+    dbg_scratch: &mut MetalDFlashDebugScratch,
+    target_session: &mut MetalSession,
+) -> Result<Vec<i32>, DFlashError> {
+    // Validate the debug-logits buffer matches verify scratch dims.
+    let n = dbg_scratch.verify.n;
+    let v = base.model.arch.vocab_size as u64;
+    if dbg_scratch.debug_logits.shape != vec![n as u64, v] {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_with_logits",
+            detail: format!(
+                "debug_logits.shape={:?} != [N={n}, V={v}]",
+                dbg_scratch.debug_logits.shape
+            ),
+        }));
+    }
+    // Borrow split: take &mut to verify scratch (for mutation) and
+    // an immutable handle to debug_logits (for the logits scatter dst).
+    // We can't borrow both fields of dbg_scratch at once via two &mut,
+    // so split the borrow with explicit field access.
+    let MetalDFlashDebugScratch {
+        verify,
+        debug_logits,
+    } = dbg_scratch;
+    encode_packed_verify_inner_impl(
+        base,
+        target_layer_ids,
+        tokens,
+        start_position,
+        verify,
+        target_session,
+        Some(debug_logits),
+    )
+}
+
+fn encode_packed_verify_inner_impl(
+    base: &MetalForward<'_>,
+    target_layer_ids: &[u32],
+    tokens: &[i32],
+    start_position: u32,
+    scratch: &mut MetalDFlashVerifyScratch,
+    target_session: &mut MetalSession,
+    debug_logits_dst: Option<&MetalTensor>,
 ) -> Result<Vec<i32>, DFlashError> {
     let arch = &base.model.arch;
 
@@ -956,6 +1046,28 @@ pub(crate) fn encode_packed_verify_inner(
             h,
             arch.vocab_size as usize,
         )?;
+
+        // Debug-only: spill session.logits → debug_logits[n_idx, :]
+        // for the H5.3a cosine gate (G1 full). This is the ONLY new
+        // dispatch on the debug path. MUST happen before the next
+        // token's lm_head writes session.logits, AND before/after
+        // argmax (both read session.logits). We do it before argmax
+        // so the scatter can overlap with argmax's reduce.
+        //
+        // Production (debug_logits_dst = None) skips this entirely;
+        // no per-vocab CPU readback is created. The 15.9 MB anti-
+        // regression assertion still holds.
+        if let Some(dst) = debug_logits_dst {
+            let elem_off = (n_idx as u64) * (arch.vocab_size as u64);
+            encode_scatter_offset_f32(
+                base.ctx,
+                &enc,
+                &target_session.logits,
+                dst,
+                elem_off as usize,
+                arch.vocab_size as usize,
+            )?;
+        }
 
         // GPU argmax over session.logits → verify_argmax[n_idx].
         // We pass argmax_slot (a [1]-shaped view) as the destination;
@@ -2481,6 +2593,293 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// H5.3a gate G1 (FULL): cosine ≥ 0.9999 between
+    /// `packed_verify_with_logits` row-n logits and N successive
+    /// `single_token` logits. The strongest correctness signal at
+    /// the LOGITS layer (not just argmax-coarsened).
+    ///
+    /// G1 lite (in dflash_packed_verify_argmax_matches_n_single_tokens)
+    /// only checks argmax tokens — it would pass if all rows shifted
+    /// by a constant. G1 full catches:
+    ///   * subtle accumulation differences in the lm_head mat-vec
+    ///   * any per-vocab-row bias from a wrong scatter offset
+    ///   * cosine that's strong but not perfect (e.g. F16 KV
+    ///     accumulation paths in attn-v4) — G1 full's threshold of
+    ///     0.9999 is the H5.3 plan gate per docs/H5-DFLASH.md §3 H5.3.
+    ///
+    /// 0.8B-F32, M=2 prime + N=4 verify. Uses
+    /// MetalDFlashDebugScratch (allocates the [N, V] buffer; debug-
+    /// only path).
+    #[test]
+    fn dflash_packed_verify_with_logits_cosine_match() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        const M: u32 = 2;
+        const N: u32 = 4;
+        let prime_tokens: [i32; M as usize] = [9419, 1];
+        let verify_tokens: [i32; N as usize] = [1234, 7, 999, 42];
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let k_target_layers = target_layer_ids.len() as u32;
+        let v = m.arch.vocab_size as usize;
+
+        // -- Reference: N successive single_token on a primed session.
+        let mut sess_b = MetalSession::fresh(&ctx, &mm, 64).expect("sess B");
+        for (i, &tok) in prime_tokens.iter().enumerate() {
+            mf.single_token(tok, i as u32, &mut sess_b)
+                .expect("prime B");
+        }
+        let mut reference: Vec<Vec<f32>> = Vec::with_capacity(N as usize);
+        for (i, &tok) in verify_tokens.iter().enumerate() {
+            let logits = mf
+                .single_token(tok, M + i as u32, &mut sess_b)
+                .expect("single token");
+            reference.push(logits);
+        }
+
+        // -- Packed with logits dump.
+        let mut sess_a = MetalSession::fresh(&ctx, &mm, 64).expect("sess A");
+        for (i, &tok) in prime_tokens.iter().enumerate() {
+            mf.single_token(tok, i as u32, &mut sess_a)
+                .expect("prime A");
+        }
+        let mut dbg_scratch =
+            MetalDFlashDebugScratch::fresh(&ctx, &mm, N, k_target_layers).expect("dbg scratch");
+        let _ = encode_packed_verify_with_logits_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens,
+            M,
+            &mut dbg_scratch,
+            &mut sess_a,
+        )
+        .expect("packed verify w logits");
+
+        // -- Per-row cosine vs reference. F32 path; we expect bit-exact
+        //    actually, but the H5.3 plan threshold is 0.9999 because
+        //    quantized paths will round-trip differently. Test both
+        //    bounds.
+        let dump_n_elems = dbg_scratch.debug_logits.n_elements() as usize;
+        let mut packed_dump = vec![0.0f32; dump_n_elems];
+        unsafe {
+            let src = dbg_scratch.debug_logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, packed_dump.as_mut_ptr(), dump_n_elems);
+        }
+
+        for n in 0..N as usize {
+            let packed_row = &packed_dump[n * v..(n + 1) * v];
+            let ref_row = &reference[n];
+            // Cosine.
+            let mut dot = 0.0f64;
+            let mut np = 0.0f64;
+            let mut nr = 0.0f64;
+            for i in 0..v {
+                let p = packed_row[i] as f64;
+                let r = ref_row[i] as f64;
+                dot += p * r;
+                np += p * p;
+                nr += r * r;
+            }
+            let cos = dot / (np.sqrt() * nr.sqrt() + 1e-30);
+            // Max abs diff.
+            let mut max_abs = 0.0f32;
+            for i in 0..v {
+                let d = (packed_row[i] - ref_row[i]).abs();
+                if d > max_abs {
+                    max_abs = d;
+                }
+            }
+            // Bitwise equality count (sanity — F32 path should be
+            // mostly bit-exact but some atomic ordering can diverge).
+            let mut bit_eq = 0usize;
+            for i in 0..v {
+                if packed_row[i].to_bits() == ref_row[i].to_bits() {
+                    bit_eq += 1;
+                }
+            }
+            eprintln!(
+                "[g1-full n={n}] cos={cos:.10} max|Δ|={max_abs:.3e} \
+                 bit_eq={}/{} ({:.2}%)",
+                bit_eq,
+                v,
+                100.0 * (bit_eq as f64) / (v as f64)
+            );
+            assert!(cos >= 0.9999, "G1 full: row {n} cosine {cos} < 0.9999");
+        }
+    }
+
+    /// H5.3a gate G4: hidden capture LAYOUT.
+    ///
+    /// Codex flagged this gap: G1 / G2 / G3 all check argmax tokens
+    /// or final session state, but `hidden_capture[k, n, :]` could
+    /// have wrong dim-order (e.g., stored as [N, K, H] instead of
+    /// [K, N, H]) and the rest of the test suite would still pass.
+    /// The dim-order bug only surfaces downstream when the drafter
+    /// reads target_ctx and produces garbage logits.
+    ///
+    /// Setup: prime fresh session through M tokens. Run packed_verify
+    /// on session_A through N tokens; collect scratch.hidden_capture.
+    /// Separately, run `single_token_with_multi_hidden` N times on
+    /// session_B (primed identically), capturing per-token hiddens
+    /// into a `[K, H]` buffer per call. Stack into a `[N, K, H]`
+    /// reference. Compare against scratch.hidden_capture (which is
+    /// layout `[K, N, H]`) under the documented permutation.
+    ///
+    /// Bitwise F32 match required. Catches:
+    ///   * (k, n) → linear-index transpose bugs in slot_view
+    ///   * scatter dst offset miscomputation in packed_verify
+    ///   * the wrong target_layer being captured at index k
+    ///
+    /// 0.8B-F32, M=2 prime + N=4 verify, K=2 layers. ≤ 4 s.
+    #[test]
+    fn dflash_packed_verify_hidden_capture_layout() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        const M: u32 = 2;
+        const N: u32 = 4;
+        let prime_tokens: [i32; M as usize] = [9419, 1];
+        let verify_tokens: [i32; N as usize] = [1234, 7, 999, 42];
+
+        // Pick target_layer_ids such that they MUST be captured
+        // distinctly — different blocks (5, 15) on 0.8B's 24-layer
+        // schedule. If layout is K↔N transposed, the two layers'
+        // hiddens get confused at different (n, k) pairs.
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let k_target_layers = target_layer_ids.len() as u32;
+        let h = m.arch.hidden_size as usize;
+
+        // -- session_A: packed_verify, capture into scratch.hidden_capture.
+        let mut sess_a = MetalSession::fresh(&ctx, &mm, 64).expect("sess A");
+        for (i, &tok) in prime_tokens.iter().enumerate() {
+            mf.single_token(tok, i as u32, &mut sess_a)
+                .expect("prime A");
+        }
+        let mut scratch =
+            MetalDFlashVerifyScratch::fresh(&ctx, &mm, N, k_target_layers).expect("scratch");
+        let _ = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens,
+            M,
+            &mut scratch,
+            &mut sess_a,
+        )
+        .expect("packed verify");
+
+        // -- session_B: prime identically, then for each n in 0..N call
+        //    single_token_with_multi_hidden. The hidden_dst is shape
+        //    [K, H], laid out as `[k * h .. (k+1) * h]` per layer
+        //    (matches MetalForward::single_token_with_multi_hidden).
+        let mut sess_b = MetalSession::fresh(&ctx, &mm, 64).expect("sess B");
+        for (i, &tok) in prime_tokens.iter().enumerate() {
+            mf.single_token(tok, i as u32, &mut sess_b)
+                .expect("prime B");
+        }
+        let single_hidden_buf =
+            MetalTensor::zeros_f32(&ctx, vec![k_target_layers as u64 * h as u64])
+                .expect("hidden dst");
+        // [N][K * H] — flat reference dump per token.
+        let mut reference: Vec<Vec<f32>> = Vec::with_capacity(N as usize);
+        for (i, &tok) in verify_tokens.iter().enumerate() {
+            let _ = mf
+                .single_token_with_multi_hidden(
+                    tok,
+                    M + i as u32,
+                    &mut sess_b,
+                    &target_layer_ids,
+                    &single_hidden_buf,
+                )
+                .expect("single token w multi hidden");
+            let n_elems = k_target_layers as usize * h;
+            let mut row = vec![0.0f32; n_elems];
+            unsafe {
+                let src = single_hidden_buf.buffer.contents().as_ptr() as *const f32;
+                std::ptr::copy_nonoverlapping(src, row.as_mut_ptr(), n_elems);
+            }
+            reference.push(row);
+        }
+
+        // -- Compare scratch.hidden_capture (layout [K, N, H]) against
+        //    reference (layout [N, K * H]) under the documented
+        //    permutation. For each (k, n): scratch[k*N*H + n*H + i]
+        //    == reference[n][k*H + i].
+        let scratch_buf_n_elems = scratch.hidden_capture.n_elements() as usize;
+        let mut scratch_dump = vec![0.0f32; scratch_buf_n_elems];
+        unsafe {
+            let src = scratch.hidden_capture.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, scratch_dump.as_mut_ptr(), scratch_buf_n_elems);
+        }
+
+        for k in 0..k_target_layers as usize {
+            for n in 0..N as usize {
+                for i in 0..h {
+                    let scratch_idx = k * (N as usize) * h + n * h + i;
+                    let ref_idx_in_row = k * h + i;
+                    let s = scratch_dump[scratch_idx];
+                    let r = reference[n][ref_idx_in_row];
+                    if s.to_bits() != r.to_bits() {
+                        panic!(
+                            "G4: hidden_capture[k={k}, n={n}, i={i}] differs: \
+                             scratch={s} (0x{:08x}) reference={r} (0x{:08x})",
+                            s.to_bits(),
+                            r.to_bits()
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[hidden-capture-layout] M={M} N={N} K={k_target_layers} \
+             H={h}: bitwise match across all (k, n, i)"
+        );
+
+        // ALSO: confirm the two captured layers are NOT trivially
+        // identical. If they were, a K↔N layout bug would silently
+        // pass. We require the L2 distance between layer 5 and layer
+        // 15 captures at n=0 to be substantial.
+        let mut l2 = 0.0f64;
+        for i in 0..h {
+            let a = reference[0][i] as f64; // n=0, k=0 (layer 5)
+            let b = reference[0][h + i] as f64; // n=0, k=1 (layer 15)
+            l2 += (a - b).powi(2);
+        }
+        l2 = l2.sqrt();
+        eprintln!(
+            "[hidden-capture-layout] ||layer5_at_n0 - layer15_at_n0||_2 = {l2:.4} \
+             (must be substantially nonzero or the test is degenerate)"
+        );
+        assert!(
+            l2 > 0.1,
+            "test is degenerate: the two captured layers are nearly identical, \
+             a K↔N layout bug would pass silently. Pick more-different layers."
+        );
     }
 
     /// H5.3a guard tests for restore primitive (codex failure-mode

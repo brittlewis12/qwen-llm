@@ -4640,6 +4640,41 @@ mod tests {
             let got = run(&ctx, &x, 1, 1024);
             assert_eq!(got, vec![0], "all-tie should pick idx 0");
         }
+
+        // 9. All -INFINITY row (degenerate but well-defined): every
+        //    position ties at -inf, lowest idx wins. Per codex H5.3a
+        //    review: this returns idx 0, NOT -1. Production lm_head
+        //    cannot produce all -inf, but documenting the contract.
+        {
+            let x = vec![f32::NEG_INFINITY; 1024];
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(
+                got,
+                vec![0],
+                "all -INFINITY: kernel ties at -inf, lowest idx 0 wins"
+            );
+        }
+
+        // 10. All NaN row: IEEE comparison `a > b` is FALSE for any
+        //     NaN operand, so the per-lane scan never updates from
+        //     `best_val=-INF, best_idx=UINT_MAX`. simd_max also returns
+        //     NaN; (NaN == NaN) is false, so lane_idx stays UINT_MAX
+        //     for every lane, simd_min(UINT_MAX) = UINT_MAX, cast to
+        //     i32 = -1.
+        //
+        //     Production lm_head does not produce NaN under correct
+        //     numerics. Treat this as a "this kernel returns -1
+        //     deterministically when the entire row is unranked";
+        //     callers should not feed it NaN rows.
+        {
+            let x = vec![f32::NAN; 1024];
+            let got = run(&ctx, &x, 1, 1024);
+            assert_eq!(
+                got,
+                vec![-1],
+                "all-NaN: kernel returns -1 (UINT_MAX cast); document only — production should never see this"
+            );
+        }
     }
 
     /// H5.3a foundation: verify `BlitEncoder` actually copies device-side

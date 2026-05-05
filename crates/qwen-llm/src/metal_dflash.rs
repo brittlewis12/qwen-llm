@@ -30,13 +30,13 @@ use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
-    encode_add_inplace_f32, encode_argmax_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rope_neox_f32, BlitEncoder, KernelEncoder, MetalContext,
-    MetalError, MetalTensor,
+    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
+    encode_argmax_f32, encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rope_neox_f32,
 };
 use crate::metal_forward::{
-    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native, MetalBlock,
-    MetalForward, MetalSession, RMS_EPS,
+    MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_vec_dispatch,
+    encode_scatter_offset_f32, weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
@@ -419,9 +419,22 @@ impl MetalDFlashVerifyScratch {
     /// `[0, n_gdn) × [0, N)`. Returned shape: `[ssm_state_elems]`.
     /// Used as a blit destination after the layer's gdn_step for token n,
     /// or as a blit source on rollback.
+    ///
+    /// **Runtime-asserts** bounds (NOT debug_assert) per codex H5.3a
+    /// review: the failure mode if `(layer, n)` is OOB is silent
+    /// out-of-bounds bytes written via blit on release builds. Cheap
+    /// guard; compile into release.
     pub fn gdn_ckpt_slot(&self, layer: u32, n: u32) -> MetalTensor {
-        debug_assert!(layer < self.n_gdn_layers);
-        debug_assert!(n < self.n);
+        assert!(
+            layer < self.n_gdn_layers,
+            "gdn_ckpt_slot OOB: layer={layer} >= n_gdn_layers={}",
+            self.n_gdn_layers
+        );
+        assert!(
+            n < self.n,
+            "gdn_ckpt_slot OOB: n={n} >= scratch.n={}",
+            self.n
+        );
         let elem_offset = (layer as u64 * self.n as u64 + n as u64) * self.ssm_state_elems;
         self.gdn_ckpt
             .view_subrange(elem_offset, vec![self.ssm_state_elems])
@@ -430,8 +443,16 @@ impl MetalDFlashVerifyScratch {
     /// Zero-copy view of conv checkpoint slot `(layer, n)`. Returned shape:
     /// `[conv_state_elems]`.
     pub fn conv_ckpt_slot(&self, layer: u32, n: u32) -> MetalTensor {
-        debug_assert!(layer < self.n_gdn_layers);
-        debug_assert!(n < self.n);
+        assert!(
+            layer < self.n_gdn_layers,
+            "conv_ckpt_slot OOB: layer={layer} >= n_gdn_layers={}",
+            self.n_gdn_layers
+        );
+        assert!(
+            n < self.n,
+            "conv_ckpt_slot OOB: n={n} >= scratch.n={}",
+            self.n
+        );
         let elem_offset = (layer as u64 * self.n as u64 + n as u64) * self.conv_state_elems;
         self.conv_ckpt
             .view_subrange(elem_offset, vec![self.conv_state_elems])
@@ -441,8 +462,16 @@ impl MetalDFlashVerifyScratch {
     /// `[hidden_size]`. Used as a scatter destination after the K-indexed
     /// target layer's residual for token n.
     pub fn hidden_capture_slot(&self, k: u32, n: u32) -> MetalTensor {
-        debug_assert!(k < self.k_target_layers);
-        debug_assert!(n < self.n);
+        assert!(
+            k < self.k_target_layers,
+            "hidden_capture_slot OOB: k={k} >= k_target_layers={}",
+            self.k_target_layers
+        );
+        assert!(
+            n < self.n,
+            "hidden_capture_slot OOB: n={n} >= scratch.n={}",
+            self.n
+        );
         let elem_offset = (k as u64 * self.n as u64 + n as u64) * self.hidden_size;
         self.hidden_capture
             .view_subrange(elem_offset, vec![self.hidden_size])
@@ -454,14 +483,14 @@ impl MetalDFlashVerifyScratch {
     /// silently corrupt N successive `get_rows` calls in one command
     /// buffer (codex Q7 — the bug we'd ship without this).
     pub fn token_slot(&self, n: u32) -> MetalTensor {
-        debug_assert!(n < self.n);
+        assert!(n < self.n, "token_slot OOB: n={n} >= scratch.n={}", self.n);
         self.packed_ids_buf.view_subrange(n as u64, vec![1])
     }
 
     /// Zero-copy view of `verify_argmax[n..n+1]`. Used as the destination
     /// for `encode_argmax_f32` over block n's logits.
     pub fn argmax_slot(&self, n: u32) -> MetalTensor {
-        debug_assert!(n < self.n);
+        assert!(n < self.n, "argmax_slot OOB: n={n} >= scratch.n={}", self.n);
         self.verify_argmax.view_subrange(n as u64, vec![1])
     }
 }
@@ -508,7 +537,11 @@ impl MetalDFlashDebugScratch {
     /// Zero-copy view of `debug_logits[n, :]`. Used as the lm_head
     /// destination for block n's logits.
     pub fn logits_slot(&self, n: u32) -> MetalTensor {
-        debug_assert!(n < self.verify.n);
+        assert!(
+            n < self.verify.n,
+            "logits_slot OOB: n={n} >= scratch.n={}",
+            self.verify.n
+        );
         let v = self.debug_logits.shape[1];
         let elem_offset = n as u64 * v;
         self.debug_logits.view_subrange(elem_offset, vec![v])
@@ -678,7 +711,14 @@ pub(crate) fn encode_packed_verify_inner(
         }));
     }
     // KV capacity must accommodate start_position + N positions.
-    let last_pos = start_position as usize + n;
+    // Use checked addition (codex review: avoid silent wrap on
+    // pathological start_position values).
+    let last_pos = (start_position as usize).checked_add(n).ok_or_else(|| {
+        DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify",
+            detail: format!("start_position={start_position} + N={n} overflows usize"),
+        })
+    })?;
     if last_pos > target_session.kv_capacity {
         return Err(DFlashError::Metal(MetalError::BadShape {
             kernel: "packed_verify",
@@ -687,6 +727,43 @@ pub(crate) fn encode_packed_verify_inner(
                 start_position, target_session.kv_capacity
             ),
         }));
+    }
+    // CRITICAL — kv_n_pos == start_position contract.
+    //
+    // The session must already represent the prefix ending at
+    // `start_position`: per-attn-layer KV slots [0, start_position)
+    // are populated and `kv_n_pos[i] == start_position` for every
+    // attn layer i. Without this guard, a stale or misaligned
+    // session silently attends over the wrong KV prefix —
+    // `encode_attn` reads `s.kv_n_pos[attn_i]` (NOT `position`) for
+    // the attention length argument, so a session with
+    // `kv_n_pos=99` going through `packed_verify(start_position=0,
+    // N=4)` would: write to slot 0 (correct), then attn would
+    // attend over keys [0..1] AT POSITION 0, but BEFORE that slot
+    // 0's K/V is what we just scattered (correct) — actually it
+    // reads `s.kv_n_pos[i] = position+1 = 1` after the scatter
+    // (correct for the FIRST token). But for a primed session
+    // (kv_n_pos=99 going in), we'd write to slot 0 (overwriting),
+    // attn at n_pos=1 (correct for re-priming) — so the bug is the
+    // primed prefix is silently DISCARDED, not corrupted.
+    //
+    // Either way: the user expected a continuation at
+    // start_position; what they got was a fresh session at slot 0.
+    // Fail loudly. Codex called this the biggest miss in the v0.57
+    // foundation review.
+    for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
+        if kp != start_position as usize {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "packed_verify",
+                detail: format!(
+                    "kv_n_pos[{i}]={kp} != start_position={start_position} \
+                     (session does not represent the prefix at the requested \
+                     start position; either prime the session up to \
+                     start_position or call with start_position=0 on a \
+                     fresh session)"
+                ),
+            }));
+        }
     }
     // Validate every token id and target_layer_id.
     for (i, &t) in tokens.iter().enumerate() {
@@ -710,10 +787,20 @@ pub(crate) fn encode_packed_verify_inner(
     // -- Stage all N token ids into packed_ids_buf at once. This is
     // the codex-Q7 mitigation made concrete: each per-token block n
     // reads its OWN slot via `scratch.token_slot(n)`, never sharing a
-    // CPU-mutable scalar buffer with another block. Buffer is
-    // StorageModeShared so the host write is visible to the GPU once
-    // we open the command encoder (the runtime synchronises on
-    // `commandBuffer()` boundaries for shared-mode buffers).
+    // CPU-mutable scalar buffer with another block.
+    //
+    // Apple Metal sync contract for StorageModeShared (per
+    // https://developer.apple.com/documentation/Metal/resource-synchronization
+    // and https://developer.apple.com/documentation/metal/mtlresourceoptions/storagemodeshared):
+    //   * Host writes must complete BEFORE `cmd_buf.commit()` for the
+    //     GPU to observe them. Writing here (BEFORE commit, BEFORE
+    //     even opening the first encoder) is well within that contract.
+    //   * Host MUST NOT mutate the buffer while the cmd buffer is in
+    //     flight. We don't; the next host access is the verify_argmax
+    //     readback after waitUntilCompleted.
+    //   * GPU writes are visible to the host after waitUntilCompleted.
+    // The earlier comment "visible once we open the command encoder"
+    // was wrong; ordering is anchored at commit, not encoder open.
     unsafe {
         let p = scratch.packed_ids_buf.buffer.contents().as_ptr() as *mut i32;
         for (i, &t) in tokens.iter().enumerate() {
@@ -1663,6 +1750,14 @@ mod tests {
 
         // Bonus: gate G2 lite — post-packed session state matches
         // post-N-single-token session state.
+        //
+        // **Bitwise equality, NOT a slack tolerance.** Per codex
+        // open-ended review: this path is literally identical
+        // dispatch order and identical state evolution (packed_verify
+        // is N sequential single_token encodes inside one cmd
+        // buffer; same kernels, same args, same bind order). If
+        // bitwise eq fails, that is a real signal — not noise to
+        // be papered over with `< 1e-5`. Keep the bar.
         for (i, (s_state, p_state)) in single_session
             .gdn_state
             .iter()
@@ -1670,20 +1765,23 @@ mod tests {
             .enumerate()
         {
             unsafe {
-                let s = s_state.buffer.contents().as_ptr() as *const f32;
-                let p = p_state.buffer.contents().as_ptr() as *const f32;
+                let s = s_state.buffer.contents().as_ptr() as *const u32;
+                let p = p_state.buffer.contents().as_ptr() as *const u32;
                 let n_elems = s_state.n_elements() as usize;
-                let mut max_abs = 0.0f32;
                 for j in 0..n_elems {
-                    let d = (*s.add(j) - *p.add(j)).abs();
-                    if d > max_abs {
-                        max_abs = d;
+                    let sv = *s.add(j);
+                    let pv = *p.add(j);
+                    if sv != pv {
+                        let sf = f32::from_bits(sv);
+                        let pf = f32::from_bits(pv);
+                        panic!(
+                            "G2: gdn_state[{i}][{j}] bitwise mismatch: \
+                             single={sf} (0x{sv:08x}) packed={pf} (0x{pv:08x}) \
+                             Δ={}",
+                            sf - pf
+                        );
                     }
                 }
-                assert!(
-                    max_abs < 1e-5,
-                    "G2: gdn_state[{i}] post-packed differs from post-single: max|Δ|={max_abs}"
-                );
             }
         }
         for (i, (s_conv, p_conv)) in single_session
@@ -1693,20 +1791,23 @@ mod tests {
             .enumerate()
         {
             unsafe {
-                let s = s_conv.buffer.contents().as_ptr() as *const f32;
-                let p = p_conv.buffer.contents().as_ptr() as *const f32;
+                let s = s_conv.buffer.contents().as_ptr() as *const u32;
+                let p = p_conv.buffer.contents().as_ptr() as *const u32;
                 let n_elems = s_conv.n_elements() as usize;
-                let mut max_abs = 0.0f32;
                 for j in 0..n_elems {
-                    let d = (*s.add(j) - *p.add(j)).abs();
-                    if d > max_abs {
-                        max_abs = d;
+                    let sv = *s.add(j);
+                    let pv = *p.add(j);
+                    if sv != pv {
+                        let sf = f32::from_bits(sv);
+                        let pf = f32::from_bits(pv);
+                        panic!(
+                            "G2: gdn_conv[{i}][{j}] bitwise mismatch: \
+                             single={sf} (0x{sv:08x}) packed={pf} (0x{pv:08x}) \
+                             Δ={}",
+                            sf - pf
+                        );
                     }
                 }
-                assert!(
-                    max_abs < 1e-5,
-                    "G2: gdn_conv[{i}] post-packed differs from post-single: max|Δ|={max_abs}"
-                );
             }
         }
         assert_eq!(
@@ -1823,6 +1924,182 @@ mod tests {
                 assert!(detail.contains("layer id"), "wrong error: {detail}");
             }
             other => panic!("expected BadShape on layer id, got {other:?}"),
+        }
+    }
+
+    /// H5.3a guard test (codex biggest miss): the session must
+    /// represent the prefix ending at `start_position`. A misaligned
+    /// session (kv_n_pos != start_position) must be rejected loudly,
+    /// not silently produce wrong results.
+    ///
+    /// Two scenarios:
+    ///   (a) Fresh session (kv_n_pos=0) called with start_position>0
+    ///       — should fail.
+    ///   (b) Stale session (kv_n_pos=K from prior decode) called with
+    ///       start_position != K — should fail.
+    #[test]
+    fn dflash_packed_verify_kv_n_pos_guard() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let mut scratch = MetalDFlashVerifyScratch::fresh(&ctx, &mm, 4, 2).expect("scratch");
+
+        // Scenario (a): fresh session (kv_n_pos all 0), start_position=5.
+        let mut fresh_session = MetalSession::fresh(&ctx, &mm, 64).expect("session");
+        let err = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &[1i32, 2, 3, 4],
+            5,
+            &mut scratch,
+            &mut fresh_session,
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(detail.contains("kv_n_pos"), "wrong error: {detail}");
+                assert!(detail.contains("start_position"), "wrong error: {detail}");
+            }
+            other => panic!("expected BadShape on fresh-session/start>0, got {other:?}"),
+        }
+
+        // 0.8B has all GDN layers — no attn — so `kv_n_pos` is empty.
+        // Skip the stale-session check; it's better exercised at 27B.
+        // But we DO want to confirm the guard exits cleanly when the
+        // vec is empty (passes through trivially: no entries to
+        // disagree). I.e. with no attn layers, fresh session at
+        // start_position=0 passes the guard.
+        eprintln!(
+            "[dflash-kv-n-pos-guard] 0.8B fresh kv_n_pos.len={} (all GDN layers)",
+            fresh_session.kv_n_pos.len()
+        );
+    }
+
+    /// H5.3a G2++ via PRIMED session: prove packed_verify works
+    /// correctly when the session is partway through a generation,
+    /// i.e. the kv_n_pos==start_position guard isn't masking a bug
+    /// where we silently DROP previously-encoded state.
+    ///
+    /// Setup:
+    ///   1. Run M=2 single_token calls on session_A starting from
+    ///      tokens[0..M]. Session_A.kv_n_pos == M after.
+    ///   2. Run packed_verify(tokens[M..M+N], start_position=M)
+    ///      against session_A. Expected: argmaxes match
+    ///      tokens[M+1..M+N+1]'s argmax under continued single_token
+    ///      decode.
+    ///   3. Compare against single_token continued for N more steps
+    ///      on session_B (also primed identically through M).
+    ///
+    /// This is the test codex specifically called out as more
+    /// important than the cosine gate before writing restore.
+    #[test]
+    fn dflash_packed_verify_with_primed_session() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Prime BOTH sessions identically through M tokens.
+        const M: u32 = 3; // priming length
+        const N: u32 = 4; // packed verify length
+        let prime_tokens: [i32; M as usize] = [9419, 1, 5];
+        let verify_tokens: [i32; N as usize] = [1234, 7, 999, 42];
+
+        let mut session_a = MetalSession::fresh(&ctx, &mm, 64).expect("session A");
+        let mut session_b = MetalSession::fresh(&ctx, &mm, 64).expect("session B");
+        for (i, &tok) in prime_tokens.iter().enumerate() {
+            mf.single_token(tok, i as u32, &mut session_a)
+                .expect("prime A");
+            mf.single_token(tok, i as u32, &mut session_b)
+                .expect("prime B");
+        }
+        // Note: 0.8B has no attn layers, so kv_n_pos is empty — the
+        // guard trivially passes regardless of M. The test still
+        // proves the GDN+conv state evolution is correct under
+        // start_position > 0 on packed_verify.
+
+        // Continue B with N single_token calls; collect argmaxes.
+        let mut single_argmaxes = Vec::with_capacity(N as usize);
+        for (i, &tok) in verify_tokens.iter().enumerate() {
+            let logits = mf
+                .single_token(tok, M + i as u32, &mut session_b)
+                .expect("continue B");
+            let mut best = f32::NEG_INFINITY;
+            let mut idx: i32 = 0;
+            for (j, &v) in logits.iter().enumerate() {
+                if v > best {
+                    best = v;
+                    idx = j as i32;
+                }
+            }
+            single_argmaxes.push(idx);
+        }
+
+        // Run packed_verify on A starting at start_position=M.
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let mut scratch = MetalDFlashVerifyScratch::fresh(&ctx, &mm, N, 2).expect("scratch");
+        let packed_argmaxes = encode_packed_verify_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens,
+            M,
+            &mut scratch,
+            &mut session_a,
+        )
+        .expect("packed verify with primed session");
+
+        eprintln!(
+            "[dflash-primed] M={M} N={N} \
+             single_argmaxes={single_argmaxes:?} \
+             packed_argmaxes={packed_argmaxes:?}"
+        );
+        assert_eq!(
+            packed_argmaxes, single_argmaxes,
+            "packed_verify on primed session must match continued single_token"
+        );
+
+        // Bitwise GDN+conv state equivalence post-packed vs post-single.
+        for (i, (s_state, p_state)) in session_b
+            .gdn_state
+            .iter()
+            .zip(session_a.gdn_state.iter())
+            .enumerate()
+        {
+            unsafe {
+                let s = s_state.buffer.contents().as_ptr() as *const u32;
+                let p = p_state.buffer.contents().as_ptr() as *const u32;
+                let n_elems = s_state.n_elements() as usize;
+                for j in 0..n_elems {
+                    if *s.add(j) != *p.add(j) {
+                        panic!(
+                            "primed-G2: gdn_state[{i}][{j}] bitwise mismatch \
+                             after primed packed_verify"
+                        );
+                    }
+                }
+            }
         }
     }
 

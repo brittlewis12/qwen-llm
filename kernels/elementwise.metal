@@ -347,12 +347,12 @@ kernel void kernel_gdn_alpha_chain_f32(
 // One threadgroup processes one row. Up to 1024 threads per threadgroup,
 // reduced via simd_max + a small shmem step. Tie policy: LOWEST INDEX wins
 // (matches numpy / torch semantics; tested explicitly in
-// `metal::tests::argmax_tie_breaks_to_lowest_index`).
+// `metal::tests::argmax_matches_cpu_with_tie_to_lowest_index`).
 //
-// Used by H5.3a `packed_forward` to produce `verify_argmax: [N] i32`
+// Used by H5.3a `packed_verify` to produce `verify_argmax: [N] i32`
 // without a `[N, V]` CPU readback (saves 15.9 MB per outer step at
 // V=248320, N=16). For packed-N argmax over `[N, V] -> [N] i32`, dispatch
-// with `grid.height = N`; each TG handles row `tgpig.y`.
+// with `grid.width = N`; each TG handles row `tgpig.x`.
 //
 // Layout:
 //   x         [n_rows, n] (row-major)        — input logits
@@ -362,9 +362,27 @@ kernel void kernel_gdn_alpha_chain_f32(
 // Reduction strategy:
 //   Pass 1 — each lane scans strided slice; tracks (max_val, min_idx_at_max).
 //   Pass 2 — simdgroup-wide reduce: pick max over lanes, breaking ties to
-//            lowest index. Use simd_max for the value, then
-//            simd_shuffle_and_fill to identify which lane's idx wins.
+//            lowest index. Use simd_max for the value, then simd_min over
+//            lanes whose value matches lane_max.
 //   Pass 3 — across simdgroups via shmem; one thread writes out_idx.
+//
+// Edge-case contract (per codex H5.3a review + tests 9 / 10 in
+// `argmax_matches_cpu_with_tie_to_lowest_index`):
+//   * All-zero row     → returns 0 (every position ties; lowest idx wins).
+//   * All −INFINITY row → returns 0 (every position ties at −inf;
+//                          lowest idx wins, NOT -1).
+//   * All-NaN row       → returns -1 (UINT_MAX cast). IEEE comparisons
+//                          fail for any NaN operand, so no lane ever
+//                          claims a candidate idx; simd_min(UINT_MAX) =
+//                          UINT_MAX. Production lm_head should never
+//                          produce a NaN row; if it does, the -1
+//                          surfaces it.
+//
+// Bound: this kernel assumes `tg_threads ≤ 1024` (Metal hardware spec
+// → n_simdgroups ≤ 32). The cross-simdgroup reduce in Pass 3 only runs
+// in simdgroup 0; lanes 0..n_simdgroups-1 read shmem entries. If
+// n_simdgroups > 32 we'd silently lose data — but Metal will reject
+// the dispatch first.
 // =============================================================================
 struct argmax_args {
     uint n;          // length of each row

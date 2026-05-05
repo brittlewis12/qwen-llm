@@ -812,29 +812,170 @@ path. Caught here, also surfaced by the H5.5 bench counter.
 
 #### H5.3b — Performance pass (where the speedup actually lands)
 
-Profile-driven, but the order is partially predetermined by structural
-analysis:
+Re-sequenced after a codex partner session at the start of v0.62.
+Three sub-phases, each shippable independently with its own gates.
 
-1. **Tiled Q4_K mat-mat (Bucket C).** Mandatory before any H5.5
-   speedup claim. Naive 16× weight re-read at 27B = ~100 GB extra
-   weight traffic per outer step ≈ 200 ms wasted. Q4_K dominates the
-   weight bytes so this lands the bulk of the win. Then F32, Q5_K,
-   Q6_K mat-mat, fused FFN mat-mat (gate+up shares weights AND
-   shares x across N).
-2. **Internalized packed GDN recurrence (Bucket B design i).** New
-   kernel that loops N steps internally, writing checkpoints inline.
-   Saves 16× state-load BW + dispatch overhead. Bit-exactness oracle:
-   the H5.3a design-(ii) impl. Same for ssm_conv.
-3. **Packed flash-attn-v4 (Bucket D)** — ONLY if profile data shows
-   attention dominating. Codex Q3: "real long-context cost is N·L,
-   not N²/2. FFN/projection weight traffic is the larger structural
-   waste first. Don't touch attn_v4 until profile data forces it —
-   it's already delicate, adding an N axis to m/l/o state is exactly
-   the kind of change that can pass short-context tests and fail at
-   partition boundaries."
+##### H5.3b.0–3 — Q4_K mat-mat kernel + bench (NO plumbing yet)
 
-**H5.3b gate**: every optimized kernel keeps cosine ≥ 0.9999 against
-the naive H5.3a baseline.
+Lift llama.cpp's `kernel_mul_mm_q4_K_f32` (the non-MPS-tensor classic
+path, lines 9440–9648) verbatim into `kernels/mat_mat_q4_k.metal`,
+then bench in isolation.
+
+* **Tile shape** = the lifted classic: NR0=64 (M), NR1=32 (N), NK=32
+  (K-step), 4 simdgroups per TG = 128 threads. Codex Q4 (i): for
+  N_QUERY=16 the column tile half-fills (uses the kernel's existing
+  partial-output-tile path via threadgroup-mem `temp_str` shuffle);
+  accept this for v1, profile-driven retune later if measurements
+  show the half-fill is fatal.
+* **Output stride** = column-major `dst[row + col * ne0 + im*ne1*ne0]`
+  per the lifted kernel. **Codex Q7 failure-mode prediction**: this
+  is THE pitfall — our scratch is row-major `[N, H]`. The host
+  wrapper must explicitly transpose via stride args OR we wrap the
+  kernel to write row-major. Tests must read the result the way
+  downstream consumers will, NOT the way the host wrote it (else
+  cosine passes via shared bug).
+* **Per-kernel correctness gates** (codex Q3 correction — lifted
+  mat-mat is NOT bit-exact with our scalar mat-vec because llama
+  templates stage activations through `half`/simdgroup_matrix
+  before float accumulation; expect cos ≥ 0.999, NOT cos = 1.0):
+    1. `mat_mat_q4_k vs CPU mat-mat oracle` — cos ≥ 0.9999
+    2. `mat_mat_q4_k vs N existing mat-vec outputs` — cos ≥ 0.999
+       per row (relaxed from 0.9999 because of half-staging
+       precision differences)
+    3. **Layout gate** — pick a deterministic per-row signature
+       (e.g. checksum of row 0, row N/2, row N-1) and assert the
+       output buffer is row-major `[N, H]` as expected by
+       downstream FFN/residual paths. This catches the column-major
+       vs row-major bug class codex flagged.
+* **Bench in isolation** before plumbing (codex Q5): chained64
+  GiB/s + wall-time-vs-16×-mat-vec speedup. The naive H5.3a path
+  is the floor; the lifted kernel is the ceiling for now. Report
+  both.
+
+H5.3a packed_verify is unchanged in this sub-phase. Lib loop stays
+green (0.8B is F32, no Q4_K paths affected).
+
+##### H5.3b.4–5 — Layer-major encode_block_packed + plumbing
+
+Codex Q1: the FFN/projection mat-mat win only fires if
+packed_verify is **layer-major** (loop over layers, each layer
+processes all N tokens), NOT token-major (current naive). The
+naive H5.3a path is token-major because it reuses single-token
+scratch — packed_verify ran N successive single_token in one
+cmd buffer.
+
+* New `encode_block_packed(layer, N, ...)` that:
+  * batched RMSNorm across all N tokens
+  * batched mat-mat for projections (using H5.3b.0 Q4_K kernel)
+  * **per-token inner loop for GDN + attn** (sequential by nature;
+    these can't pack along time)
+  * batched FFN gate/up via Q4_K mat-mat, batched silu_mul,
+    batched FFN down via Q4_K mat-mat
+  * residual #1 + #2 batched
+* `packed_verify` switches to layer-major: outer loop over layers,
+  inner per-token-loop only for GDN/attn pieces.
+* Per-layer end: blit GDN+conv state checkpoints (same Codex-Q2
+  design Y as H5.3a), capture hidden if target_layer.
+* Per-token end (after final layer): lm_head mat-mat across all N
+  rows (still mat-vec for now — see H5.3b.6), GPU argmax per row.
+
+**H5.3b.4–5 gate**: ALL H5.3a gates G1–G6 still green. Especially
+G3 (checkpoint replay) and G4 (hidden capture layout) — those test
+that the layer-major rewrite didn't break the H5.3a contracts that
+the kernel-level cosine alone can't see (codex Q7 second-most-likely
+failure mode).
+
+##### H5.3b.6 — Q6_K mat-mat (ffn_down + lm_head)
+
+Same playbook as H5.3b.0: lift `kernel_mul_mm_q6_K_f32` from
+llama, ship + bench + per-kernel gates, then plumb into
+encode_block_packed (lm_head and ffn_down are the remaining
+weight-traffic sinks per layer).
+
+##### Deferred (post-H5.3b)
+
+* Internalized packed GDN recurrence (single kernel, N steps
+  inline, ckpt write per step). Saves 16× state-load BW +
+  dispatch overhead vs the per-token blit-checkpoint approach
+  shipped in H5.3a. Bit-exactness oracle: the H5.3a impl.
+* Packed flash-attn-v4 — ONLY if profile data shows attention
+  dominating. Codex H5.3 Q3: "real long-context cost is N·L,
+  not N²/2. FFN/projection weight traffic is the larger
+  structural waste first. Don't touch attn_v4 until profile
+  data forces it — adding an N axis to m/l/o can pass
+  short-context tests and fail at partition boundaries."
+
+##### H5.3b.7 — Tensor API exploration (POST-H5.3b ship; not immediate)
+
+llama.cpp ships TWO `kernel_mul_mm_q4_K_f32` implementations gated
+on `GGML_METAL_HAS_TENSOR`:
+
+* The **classic path** (lines 9440–9648, lifted in H5.3b.0): explicit
+  `simdgroup_matrix<f16, 8x8>` + manual threadgroup-mem dequant tile
+  + simdgroup loads. Portable across all M-series; supported on
+  every macOS Metal version we'd ship to.
+* The **tensor path** (lines 9315–9431, gated): Apple's
+  `mpp::tensor_ops::matmul2d` cooperative tensor API + `tensor()`
+  wrappers. Uses MPS-Graph-style cooperative-tensor primitives,
+  which on M3+ map to dedicated matrix hardware. Materially faster
+  on M3/M4/M5 in llama.cpp's own benchmarks; tightly coupled to
+  the Apple-private tensor-ops header set; recompiles required when
+  Apple ships changes.
+
+**Timing — strictly AFTER H5.3b.6 ships and we have a stable
+classic-path baseline.** Don't fork the bring-up over an unknown
+perf delta; we need the classic path correct + benched first so we
+have a reliable A/B comparator.
+
+**Deliverables when we get to it:**
+
+1. **Spike: tensor-path mat-mat for one shape** (e.g.,
+   FFN gate at 5120×17408×16). Ship behind a `#ifdef
+   QWEN_LLM_HAS_TENSOR` (mirror llama's gating). Compare
+   against the H5.3b.0 classic baseline on identical inputs:
+   wall, GiB/s, max|Δ| from the established correctness
+   oracle.
+2. **Real measurement on M4 Max** at our shapes (N=16
+   query, not N=512 prefill). The tensor API was designed
+   for prefill batches; our skinny-N case may not benefit
+   as much as llama's pp512 numbers suggest.
+3. **Maintenance evaluation** — the real question. Three
+   axes:
+   * **Apple version churn risk.** `mpp::tensor_ops` is
+     header-versioned; Xcode SDK upgrades have broken it
+     in the past (cite specific llama.cpp issues if found
+     during the spike). Quantify how often we'd need to
+     re-port vs. our classic path which has been stable
+     since simdgroup_matrix shipped in 2018.
+   * **Build-system complexity.** The `GGML_METAL_HAS_TENSOR`
+     macro requires SDK probing at build time. Our build.rs
+     would need a feature-detection step. Acceptable, but
+     non-trivial.
+   * **Backport surface.** If we adopt tensor-path for Q4_K,
+     we'd want it for Q5_K/Q6_K/F32/F16 too for consistency
+     — that's 5+ kernels to maintain in two flavors, OR a
+     hard cutover with no fallback for older OS / non-tensor
+     hardware.
+4. **Decision matrix** for adoption:
+   * **Adopt fully** (classic kernels deleted): only if
+     speedup ≥ 30% AND Apple churn rate ≤ once per major
+     macOS version AND our minimum-OS target is M3+.
+   * **Adopt as opt-in** (both paths shipped, runtime
+     pick): if speedup ≥ 15% AND we're willing to maintain
+     both. This mirrors llama's posture.
+   * **Skip** (classic kernels only): if speedup < 15% OR
+     Apple churn rate is high OR we want one source of
+     truth for Q-quant kernels.
+
+The decision is entirely a measurements-driven call; not
+suitable for design speculation in advance. Filed here so it
+isn't lost; will surface as a separate phase after H5.3b.6
+ships and we have reliable baseline numbers to compare
+against.
+
+**H5.3b gate**: every optimized kernel keeps cosine ≥ 0.999 against
+the naive H5.3a baseline (relaxed from 0.9999 per codex Q3 — half-
+staging in lifted kernels is a real-but-tiny precision diff).
 
 ### H5.4 — (folded into H5.3a)
 
@@ -1095,7 +1236,33 @@ the failure:
 
 ## Document history
 
-- **rev 5 (current).** H5.3a SHIPPED. v0.55 → v0.60.
+- **rev 6 (current).** H5.3b plan re-sequenced after codex partner
+  session at start of v0.62. Three sub-phases: H5.3b.0–3 (Q4_K
+  mat-mat kernel + bench, no plumbing), H5.3b.4–5 (layer-major
+  encode_block_packed + plumbing), H5.3b.6 (Q6_K mat-mat for ffn_down
+  + lm_head). Codex Q1: layer-major rewrite is mandatory (token-major
+  + mat-mat doesn't actually share weights across tokens). Codex Q3
+  correction: lifted mat-mat is NOT bit-exact with mat-vec (half-
+  staging in templates); gate threshold relaxed from cos = 1.0 to
+  cos ≥ 0.999. Codex Q4: lift the classic 64×32×32 simdgroup_matrix
+  tile (NR0=64, NR1=32, NK=32) verbatim, accept the partial-output
+  half-fill at N_QUERY=16 for v1. Codex Q7 failure-mode prediction:
+  column-major dst stride pitfall (lifted kernel writes
+  `dst[row + col*ne0]`; our scratch is row-major `[N, H]`); explicit
+  layout gate added.
+
+  **NEW H5.3b.7 (post-ship; not immediate)**: tensor API exploration
+  spike. llama.cpp ships dual classic + tensor mat-mat paths gated on
+  `GGML_METAL_HAS_TENSOR`. Tensor path uses `mpp::tensor_ops::matmul2d`
+  cooperative-tensor primitives that map to M3+ matrix hardware,
+  materially faster on M3/M4/M5 in llama's own benchmarks but Apple-
+  private and version-coupled. Decision matrix is measurement-driven:
+  adopt fully / opt-in dual-path / skip, depending on real speedup at
+  our N=16 shapes and Apple version churn rate. Filed deliberately
+  for after H5.3b.6 ships so we have a stable classic-path baseline
+  to A/B against; not lost.
+
+- **rev 5.** H5.3a SHIPPED. v0.55 → v0.60.
   - **6 of 7 H5.3a gates green on the lib loop, all F32 bit-exact /
     cos=1.0:**
     - G1 lite (argmax match) — v0.57

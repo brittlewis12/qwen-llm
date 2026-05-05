@@ -31,13 +31,12 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_get_rows_f32, encode_mat_mat_q4_k_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
-    encode_silu_mul_f32,
+    encode_argmax_f32, encode_copy_offset_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_silu_mul_f32,
 };
 use crate::metal_forward::{
-    MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_vec_dispatch,
-    encode_scatter_offset_f32, weight_dtype_kept_native,
+    MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
+    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
@@ -616,12 +615,32 @@ pub struct MetalDFlashLayerMajorScratch {
     /// `[N, H]` F32 — FFN final.
     pub ffn_out_pack: MetalTensor,
 
+    /// `[N, V]` F32 — batched lm_head output (final logits across all N
+    /// tokens). H5.3b.6: lifts lm_head out of the per-token mat-vec
+    /// re-read loop. Allocation is ~16 MB at vocab=248320, N=16.
+    /// Trivial overhead vs the GiB-scale checkpoint scratch already in
+    /// MetalDFlashVerifyScratch.
+    ///
+    /// In the production path (`encode_packed_verify_layer_major_inner`
+    /// with `debug_logits_dst = None`), this buffer holds the batched
+    /// lm_head output, then GPU argmax reads from it row-by-row to
+    /// produce `verify_argmax[N]`. The `[N, V]` bytes never leave the
+    /// GPU — no CPU readback. The H5.3a anti-regression assertion
+    /// (no per-step `[N, V]` spill) still holds.
+    ///
+    /// In the debug path (`Some(debug_logits_dst)`), the
+    /// `MetalDFlashDebugScratch::debug_logits` buffer is used INSTEAD
+    /// (it's already `[N, V]` shaped); this `final_logits_pack` is
+    /// not touched by the debug variant.
+    pub final_logits_pack: MetalTensor,
+
     // Cached dims so callers don't have to re-derive.
     pub n: u32,
     pub hidden_size: u64,
     pub intermediate_size: u64,
     pub q_dim: u64,
     pub kv_dim: u64,
+    pub vocab_size: u64,
 }
 
 impl MetalDFlashLayerMajorScratch {
@@ -637,6 +656,7 @@ impl MetalDFlashLayerMajorScratch {
         let head_dim = arch.attn_head_dim as u64;
         let q_dim = (arch.n_q_heads as u64) * head_dim;
         let kv_dim = (arch.n_kv_heads as u64) * head_dim;
+        let v = arch.vocab_size as u64;
 
         Ok(Self {
             x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
@@ -654,9 +674,11 @@ impl MetalDFlashLayerMajorScratch {
             ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
+            final_logits_pack: MetalTensor::zeros_f32(ctx, vec![n, v])?,
             n: block_size,
             hidden_size: h,
             intermediate_size: f,
+            vocab_size: v,
             q_dim,
             kv_dim,
         })
@@ -1757,14 +1779,22 @@ pub(crate) fn encode_packed_verify_layer_major_inner(
             MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
             MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
         };
-        let q4_k_path = g_w.dtype == GgmlType::Q4_K
-            && u_w.dtype == GgmlType::Q4_K
-            && d_w.dtype == GgmlType::Q4_K;
+        // Per-weight dtype dispatch (codex Q5: dispatch INSIDE the
+        // function so rollback bugs stay localizable). Layer-major
+        // wins via mat-mat for Q4_K and Q6_K weights; falls back to
+        // the per-token mat-vec loop for F32 (0.8B oracle) or any
+        // mixed/unsupported dtype.
+        //
+        // Production 27B Q4_K_M: ffn_gate / ffn_up are Q4_K, ffn_down
+        // is Q6_K. Both legs hit the mat-mat fast path.
+        let mat_mat_eligible = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+        let mat_mat_path = mat_mat_eligible(g_w.dtype)
+            && mat_mat_eligible(u_w.dtype)
+            && mat_mat_eligible(d_w.dtype);
         {
             let enc = KernelEncoder::begin(&cmd_buf);
-            if q4_k_path {
-                // Batched mat-mat: gate, up, then silu_mul, then down.
-                encode_mat_mat_q4_k_f32(
+            if mat_mat_path {
+                encode_mat_mat_dispatch(
                     base.ctx,
                     &enc,
                     g_w,
@@ -1774,7 +1804,7 @@ pub(crate) fn encode_packed_verify_layer_major_inner(
                     f,
                     n,
                 )?;
-                encode_mat_mat_q4_k_f32(
+                encode_mat_mat_dispatch(
                     base.ctx,
                     &enc,
                     u_w,
@@ -1791,7 +1821,7 @@ pub(crate) fn encode_packed_verify_layer_major_inner(
                     &layer_scratch.ffn_up_pack,
                     &layer_scratch.ffn_inner_pack,
                 )?;
-                encode_mat_mat_q4_k_f32(
+                encode_mat_mat_dispatch(
                     base.ctx,
                     &enc,
                     d_w,
@@ -1802,7 +1832,7 @@ pub(crate) fn encode_packed_verify_layer_major_inner(
                     n,
                 )?;
             } else {
-                // F32 (or other non-Q4_K dtypes): per-token loop using
+                // F32 (or other non-mat-mat dtypes): per-token loop using
                 // existing mat-vec-dispatch. Layer-major still wins here
                 // through batched norms + scheduling, just not via mat-mat.
                 for n_idx in 0..n {
@@ -1838,61 +1868,110 @@ pub(crate) fn encode_packed_verify_layer_major_inner(
         }
     }
 
-    // === Phase 3: per-token tail (final norm + lm_head + argmax). ===
+    // === Phase 3: BATCHED tail (final norm + lm_head + argmax). ===
     //
-    // lm_head + final norm stay PER-TOKEN for now; H5.3b.6 will lift
-    // them to mat-mat (Q6_K). One compute encoder for the entire phase.
+    // H5.3b.6: lift lm_head from per-token mat-vec to a single mat-mat
+    // across all N rows. lm_head is the largest weight in the model
+    // (Q6_K [5120, 248320] = ~1 GiB); per-token mat-vec at N=16 would
+    // re-read it 16 times = 16 GiB redundant traffic / outer step on
+    // the LATENCY-CRITICAL tail path.
+    //
+    // Strategy:
+    //   1. rms_norm_batched(x_pack, output_norm) → h_pack [N, H]
+    //      (replaces per-token rms_norm_mul; trivial win)
+    //   2. ONE mat-mat lm_head into final_logits_pack (or
+    //      debug_logits_dst when provided — same shape, saves a copy)
+    //   3. Batched argmax across all N rows → verify_argmax [N]
+    //
+    // Falls back to per-token mat-vec for non-mat-mat-eligible
+    // lm_head dtypes (F32 0.8B oracle path).
+    let lm_dtype = base.model.lm_head.dtype;
+    let lm_mat_mat_path = matches!(lm_dtype, GgmlType::Q4_K | GgmlType::Q6_K);
     {
         let enc = KernelEncoder::begin(&cmd_buf);
-        for n_idx in 0..n {
-            let x_n = layer_scratch
-                .x_pack
-                .view_subrange((n_idx * h) as u64, vec![h as u64]);
-            // Stage into target_session.x for the unchanged tail path.
-            encode_copy_offset_f32(
+        if lm_mat_mat_path {
+            // Batched final norm: x_pack → h_pack.
+            encode_rms_norm_batched_f32(
                 base.ctx,
                 &enc,
                 &layer_scratch.x_pack,
-                n_idx * h,
-                &target_session.x,
-                h,
-            )?;
-            // Final norm.
-            encode_rms_norm_mul_f32(
-                base.ctx,
-                &enc,
-                &target_session.x,
                 &base.model.output_norm,
-                &target_session.h,
+                &layer_scratch.h_pack,
+                n,
+                h,
                 RMS_EPS,
             )?;
-            // lm_head — per-token mat-vec for now.
-            encode_mat_vec_dispatch(
+            // Pick logits destination: debug_logits_dst if provided
+            // (same [N, V] shape; saves a scatter), else
+            // final_logits_pack.
+            let logits_dst = match debug_logits_dst {
+                Some(dst) => dst,
+                None => &layer_scratch.final_logits_pack,
+            };
+            // Batched lm_head mat-mat.
+            encode_mat_mat_dispatch(
                 base.ctx,
                 &enc,
                 &base.model.lm_head,
-                &target_session.h,
-                &target_session.logits,
+                &layer_scratch.h_pack,
+                logits_dst,
                 h,
                 v,
+                n,
             )?;
-            // Optional debug logits dump (codex's `_with_logits` variant).
-            if let Some(dst) = debug_logits_dst {
-                let elem_off = (n_idx as u64) * (v as u64);
-                encode_scatter_offset_f32(
+            // Batched argmax across all N rows in ONE dispatch.
+            encode_argmax_f32(
+                base.ctx,
+                &enc,
+                logits_dst,
+                &verify_scratch.verify_argmax,
+                n,
+                v,
+            )?;
+        } else {
+            // F32 / unsupported lm_head: per-token mat-vec fallback
+            // (the original layer-major tail). Layer-major still wins
+            // through the batched final norm only.
+            for n_idx in 0..n {
+                encode_copy_offset_f32(
                     base.ctx,
                     &enc,
+                    &layer_scratch.x_pack,
+                    n_idx * h,
+                    &target_session.x,
+                    h,
+                )?;
+                encode_rms_norm_mul_f32(
+                    base.ctx,
+                    &enc,
+                    &target_session.x,
+                    &base.model.output_norm,
+                    &target_session.h,
+                    RMS_EPS,
+                )?;
+                encode_mat_vec_dispatch(
+                    base.ctx,
+                    &enc,
+                    &base.model.lm_head,
+                    &target_session.h,
                     &target_session.logits,
-                    dst,
-                    elem_off as usize,
+                    h,
                     v,
                 )?;
+                if let Some(dst) = debug_logits_dst {
+                    let elem_off = (n_idx as u64) * (v as u64);
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.logits,
+                        dst,
+                        elem_off as usize,
+                        v,
+                    )?;
+                }
+                let argmax_dst = verify_scratch.argmax_slot(n_idx as u32);
+                encode_argmax_f32(base.ctx, &enc, &target_session.logits, &argmax_dst, 1, v)?;
             }
-            // GPU argmax → verify_argmax[n_idx].
-            let argmax_dst = verify_scratch.argmax_slot(n_idx as u32);
-            encode_argmax_f32(base.ctx, &enc, &target_session.logits, &argmax_dst, 1, v)?;
-            // Silence unused lint.
-            let _ = x_n;
         }
         enc.end();
     }

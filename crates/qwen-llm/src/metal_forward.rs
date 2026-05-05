@@ -1407,6 +1407,42 @@ pub fn encode_mat_vec_dispatch(
     }
 }
 
+/// Mat-mat dispatch routing for the H5.3b layer-major path. Picks the
+/// right `kernel_mul_mm_*` lift based on weight dtype. Output is
+/// row-major `[n_query, n_out]` (codex H5.3b mid-impl review verified
+/// the col-major framing in the lifted llama kernels is bit-identical
+/// to row-major storage at this stride).
+///
+/// Production 27B Q4_K_M reaches three weight dtypes via mat-mat:
+///   * Q4_K (ffn_gate, ffn_up, attn projections)
+///   * Q6_K (ffn_down, lm_head)
+///
+/// F32 / Q5_K / other dtypes return `UnsupportedDtype`; layer-major
+/// callers fall back to per-token `encode_mat_vec_dispatch` for those.
+pub fn encode_mat_mat_dispatch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MfError> {
+    match weight.dtype {
+        GgmlType::Q4_K => Ok(crate::metal::encode_mat_mat_q4_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::Q6_K => Ok(crate::metal::encode_mat_mat_q6_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        other => Err(MfError::UnsupportedDtype {
+            name: format!("(weight at mat_mat dispatch)"),
+            dtype: other,
+        }),
+    }
+}
+
 /// Public single-block GDN dispatcher for end-to-end validation. Encodes
 /// one GDN block (norm → mixer → residual → post_norm → FFN → residual)
 /// and reads back the resulting `x` (residual stream).

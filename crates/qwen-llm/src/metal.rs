@@ -2762,6 +2762,112 @@ pub fn encode_mat_vec_q6_k_f32(
     Ok(())
 }
 
+/// Q6_K mat-mat: same shape contract as [`encode_mat_mat_q4_k_f32`].
+///
+/// Lifts the same 64×32×32 simdgroup_matrix tile from llama.cpp,
+/// templated on Q6_K dequant. Output is row-major `[n_query, n_out]`
+/// (= bit-equivalent to llama's "[n_out, n_query] col-major" framing).
+///
+/// Used by H5.3b.6 to lift `ffn_down` and `lm_head` out of the
+/// per-token mat-vec re-read loop.
+pub fn encode_mat_mat_q6_k_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor, // [n_query, n_in] row-major F32
+    y: &MetalTensor, // F32 [n_out * n_query] flat (row-major [n_query, n_out]).
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q6_k",
+            detail: format!("n_in={n_in} not divisible by 256 (Q6_K super-block)"),
+        });
+    }
+    if n_in % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q6_k",
+            detail: format!("n_in={n_in} not divisible by 32 (NK_MM tile)"),
+        });
+    }
+    if weight.dtype != GgmlType::Q6_K {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q6_k",
+            detail: format!("weight.dtype = {:?}, expected Q6_K", weight.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q6_k",
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={}",
+                x.n_elements(),
+                n_query * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_query * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q6_k",
+            detail: format!(
+                "y.n_elements={} != n_query*n_out={}",
+                y.n_elements(),
+                n_query * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_mat_mat_q6_K_f32")?;
+    enc.set_pipeline(&pso);
+
+    // Q6_K block bytes per row = (n_in / 256) * 210.
+    let nb01 = ((n_in / 256) * 210) as u32;
+    let stride_b = n_in as u32;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_query as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+
+    enc.set_threadgroup_memory(0, 8192);
+
+    let n_tg_x = n_query.div_ceil(32);
+    let n_tg_y = n_out.div_ceil(64);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg_x,
+            height: n_tg_y,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 // ===========================================================================
 // Test helpers (one-shot wrappers — NOT for the inference hot path)
 // ===========================================================================
@@ -3253,6 +3359,129 @@ mod tests {
                      reshape→row_major[c={c}*n_out+r={r}]; got {raw} vs {row_major_view}"
                 );
             }
+        }
+    }
+
+    /// H5.3b.6 gate: Q6_K mat-mat parity vs N successive mat-vec
+    /// (codex H5.3b plan rev 6 — same playbook as Q4_K mat-mat gate
+    /// in v0.63). Per-row cosine ≥ 0.999 across N_QUERY ∈ {1, 16, 32}
+    /// on real Qwen3.6-27B Q6_K production weights.
+    #[test]
+    fn mat_mat_q6_k_matches_cpu_and_mat_vec() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mat_mat_q6_k] skipped — fixture missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let q6k = g
+            .tensors
+            .iter()
+            .find(|t| {
+                t.name.starts_with("blk.0.")
+                    && t.dtype == GgmlType::Q6_K
+                    && t.shape.len() == 2
+                    && t.shape[0] % 256 == 0
+                    && t.shape[1] % 64 == 0
+            })
+            .expect("no Q6_K tensor with compatible shape");
+        let n_in = q6k.shape[0] as usize;
+        let n_out = q6k.shape[1] as usize;
+        eprintln!(
+            "[mat_mat_q6_k-test] tensor={} shape=[n_in={n_in}, n_out={n_out}]",
+            q6k.name
+        );
+
+        let weight_f32 = crate::codec::dequant_to_f32(q6k, g.slice(q6k)).expect("dequant");
+        let weight_bytes = g.slice(q6k);
+
+        for &n_query in &[1usize, 16, 32] {
+            let mut x = vec![0.0f32; n_query * n_in];
+            for (i, v) in x.iter_mut().enumerate() {
+                *v = ((i % 13) as f32 - 6.0) * 1e-2;
+            }
+
+            // CPU oracle via N mat_vec_pub.
+            let mut cpu_row_major = vec![0.0f32; n_query * n_out];
+            for q in 0..n_query {
+                let row_in = &x[q * n_in..(q + 1) * n_in];
+                let row_out = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, row_in);
+                cpu_row_major[q * n_out..(q + 1) * n_out].copy_from_slice(&row_out);
+            }
+
+            let w_t = MetalTensor::from_bytes(
+                &ctx,
+                weight_bytes,
+                vec![n_in as u64, n_out as u64],
+                GgmlType::Q6_K,
+            )
+            .expect("weight tensor");
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n_query as u64, n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x tensor");
+            let y_t =
+                MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64]).expect("y tensor");
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_q6_k_f32(&ctx, enc, &w_t, &x_t, &y_t, n_in, n_out, n_query)
+            })
+            .expect("mat_mat encode");
+
+            let gpu_flat = read_back_f32(&y_t.buffer, n_out * n_query);
+
+            // Reshape: bit-equivalent col-major [n_out, n_query] →
+            // row-major [n_query, n_out] (same byte ordering trick as Q4_K).
+            let mut gpu_row_major = vec![0.0f32; n_query * n_out];
+            for q in 0..n_query {
+                for o in 0..n_out {
+                    gpu_row_major[q * n_out + o] = gpu_flat[o + q * n_out];
+                }
+            }
+
+            let mut min_cos = f64::INFINITY;
+            let mut max_abs = 0.0f32;
+            for q in 0..n_query {
+                let cpu_row = &cpu_row_major[q * n_out..(q + 1) * n_out];
+                let gpu_row = &gpu_row_major[q * n_out..(q + 1) * n_out];
+                let mut dot = 0.0f64;
+                let mut np = 0.0f64;
+                let mut nc = 0.0f64;
+                for i in 0..n_out {
+                    let p = gpu_row[i] as f64;
+                    let c = cpu_row[i] as f64;
+                    dot += p * c;
+                    np += p * p;
+                    nc += c * c;
+                    let d = (gpu_row[i] - cpu_row[i]).abs();
+                    if d > max_abs {
+                        max_abs = d;
+                    }
+                }
+                let cos = dot / (np.sqrt() * nc.sqrt() + 1e-30);
+                if cos < min_cos {
+                    min_cos = cos;
+                }
+            }
+            eprintln!(
+                "[mat_mat_q6_k n_query={n_query}] min_cos={min_cos:.6} \
+                 max|Δ|={max_abs:.3e}"
+            );
+            assert!(
+                min_cos >= 0.999,
+                "n_query={n_query}: min cos {min_cos} < 0.999"
+            );
+            assert!(
+                max_abs < 1e-2,
+                "n_query={n_query}: max|Δ| {max_abs} >= 1e-2"
+            );
         }
     }
 

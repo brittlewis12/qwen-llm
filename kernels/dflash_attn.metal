@@ -97,8 +97,15 @@ struct dflash_attn_args {
     uint  head_dim;
     uint  n_kv_total;
     uint  ctx_len;
+    uint  n_rows;                // N noise rows (= block_size). Codex code-review
+                                 // catch: previous version had a bogus
+                                 // `q_idx >= n_q_heads * 16` guard (no n_rows
+                                 // arg). Real bound is q_idx < n_rows.
     uint  noise_start_pos;
-    uint  swa_window;            // 0 means full-attn layer (no SWA)
+    uint  swa_window;            // 0 means full-attn layer (no SWA over ctx);
+                                 // codex flag: full-attn ALSO drops the causal
+                                 // restriction over ctx, matching the CPU
+                                 // oracle in `forward.rs::dflash_draft`.
     float scale;                 // 1/sqrt(head_dim)
 };
 
@@ -113,7 +120,11 @@ kernel void kernel_dflash_attn_f32(
         ushort tiisg [[thread_index_in_simdgroup]]) {
     const uint q_head = tgpig.x;
     const uint q_idx  = tgpig.y;
-    if (q_head >= args.n_q_heads || q_idx >= args.n_q_heads * 16) return; // belt-and-suspenders
+    // Codex code-review v0.72.2: real bounds use `n_rows`, not the
+    // bogus `n_q_heads * 16` placeholder. A dispatch-shape bug or
+    // different block_size would silently OOB read/write q/o without
+    // this fix.
+    if (q_head >= args.n_q_heads || q_idx >= args.n_rows) return;
     const uint group = args.n_q_heads / args.n_kv_heads;
     const uint kv_head = q_head / group;
     const uint head_dim = args.head_dim;
@@ -122,7 +133,10 @@ kernel void kernel_dflash_attn_f32(
     const bool full_attn = (args.swa_window == 0);
 
     // ---- Load Q vector for this (q_idx, q_head) into per-lane registers ----
-    float q_reg[8];   // up to head_dim=256/32 = 8; for 128 we use 4
+    // Sized for head_dim ∈ [32, 256]. Host wrapper rejects head_dim
+    // > 256. Codex code-review v0.72.2: previous version sized [8] with
+    // a comment but no host check; head_dim=320 would stack-OOB.
+    float q_reg[8];
     {
         device const float * q_base =
             q + ((ulong)q_idx * args.n_q_heads + (ulong)q_head) * head_dim;
@@ -142,16 +156,28 @@ kernel void kernel_dflash_attn_f32(
     // logic is inlined per pass to avoid a separate branch barrier.
 
     // ---- PASS 1: running max ----
+    //
+    // Mask semantics (codex code-review v0.72.2 — match CPU oracle in
+    // forward.rs::dflash_draft):
+    //   * full-attn ctx key: ALWAYS allowed (no causal restriction).
+    //     CPU oracle treats ctx as committed past + the dflash recipe
+    //     allows the full-attn layer to peek.
+    //   * SWA ctx key: allowed iff causal (k_pos <= q_pos) AND
+    //                  windowed (q_pos - k_pos <= swa_window).
+    //     causal short-circuits FIRST so the unsigned subtraction
+    //     never wraps.
+    //   * Noise key: block-causal (noise_idx <= q_idx).
     float m_run = -INFINITY;
     for (uint kk = 0; kk < args.n_kv_total; ++kk) {
-        // Mask
         bool allowed;
         if (kk < args.ctx_len) {
-            const int k_pos = pos_k[kk];
-            const bool causal = ((uint)k_pos <= q_pos);
-            const bool windowed =
-                full_attn || (q_pos - (uint)k_pos <= args.swa_window);
-            allowed = causal && windowed;
+            if (full_attn) {
+                allowed = true;
+            } else {
+                const uint k_pos = (uint)pos_k[kk];
+                const bool causal = (k_pos <= q_pos);
+                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
+            }
         } else {
             const uint noise_idx = kk - args.ctx_len;
             allowed = (noise_idx <= q_idx);
@@ -168,15 +194,18 @@ kernel void kernel_dflash_attn_f32(
     }
 
     // ---- PASS 2: running sum (stable softmax) ----
+    // Same mask as PASS 1 — see PASS 1 comment.
     float l_sum = 0.0f;
     for (uint kk = 0; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
-            const int k_pos = pos_k[kk];
-            const bool causal = ((uint)k_pos <= q_pos);
-            const bool windowed =
-                full_attn || (q_pos - (uint)k_pos <= args.swa_window);
-            allowed = causal && windowed;
+            if (full_attn) {
+                allowed = true;
+            } else {
+                const uint k_pos = (uint)pos_k[kk];
+                const bool causal = (k_pos <= q_pos);
+                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
+            }
         } else {
             const uint noise_idx = kk - args.ctx_len;
             allowed = (noise_idx <= q_idx);
@@ -194,17 +223,20 @@ kernel void kernel_dflash_attn_f32(
     const float inv_l = (l_sum > 0.0f) ? (1.0f / l_sum) : 0.0f;
 
     // ---- PASS 3: V aggregate ----
+    // Same mask as PASS 1 / PASS 2.
     float o_acc[8];
     for (ushort j = 0; j < dk_per_lane; ++j) o_acc[j] = 0.0f;
 
     for (uint kk = 0; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
-            const int k_pos = pos_k[kk];
-            const bool causal = ((uint)k_pos <= q_pos);
-            const bool windowed =
-                full_attn || (q_pos - (uint)k_pos <= args.swa_window);
-            allowed = causal && windowed;
+            if (full_attn) {
+                allowed = true;
+            } else {
+                const uint k_pos = (uint)pos_k[kk];
+                const bool causal = (k_pos <= q_pos);
+                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
+            }
         } else {
             const uint noise_idx = kk - args.ctx_len;
             allowed = (noise_idx <= q_idx);

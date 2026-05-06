@@ -1334,7 +1334,180 @@ the failure:
 
 ## Document history
 
-- **rev 8 (current).** H5.5 end-to-end DFlash decode SHIPPED
+- **rev 9 (current).** v0.72.x drafter Metal-ization SHIPPED;
+  v0.73 strategy pivoted (codex unbiased recon) from Q8_0 first to
+  target packed-GDN first.
+
+  ### v0.72.x summary
+
+    * **v0.72.0** — drafter batched-tail port (lm_head Q6_K mat-mat
+      + GPU argmax). Marginal end-to-end (tail wasn't dominant) but
+      architectural posture correct.
+    * **v0.72.1** — drafter Metal phase 3 (custom small-N fused
+      SWA-masked attention + Metal Q/K/V/O proj + Metal SwiGLU FFN).
+      End-to-end: 0.024× → 0.452× = **18.5× speedup in one commit**.
+      Greedy equivalence vs DFlash=off PASSES on real 27B-Q4_K_M
+      code prompt (32 tokens identical). H5.1.5 cosine vs CPU
+      oracle PASSES bit-correct (cos = 1.000000 across all 16
+      noise positions).
+    * **v0.72.2** — codex code-review fixes for v0.72.1: real
+      `q_idx >= n_rows` bound (was bogus `n_q_heads * 16`); reject
+      head_dim > 256 host-side (kernel registers sized for ≤ 256);
+      port CPU oracle's permissive full-attn semantics (full-attn
+      ⇒ no causal restriction over ctx); SWA subtraction reordered
+      to short-circuit on causal. NEW lib tests:
+      `dflash_attn_matches_cpu_oracle_under_mask_regimes` (6 mask
+      regimes including ctx_len=0, full-attn, SWA boundary,
+      gapped pos_ctx) and `dflash_attn_rejects_head_dim_over_256`.
+    * **v0.72.3** — drafter phase profiler (`qwen-bench dflash
+      --profile`). Lightweight per-phase GPU timers via
+      `MetalDFlashSession::maybe_record` + `take_phase_timings`.
+      Aggregates same-name phases across all outer steps + layers.
+
+  ### Profile data (v0.72.3, 27B-Q4_K_M, code prompt, ctx≈1-4K)
+
+    | phase                              | sum (ms) | %   | n  | avg/iter |
+    |------------------------------------|----------|-----|----|---------:|
+    | phase3_attn_oproj_ffn_residuals    |   986.05 | 78% | 25 | 39.44 ms |
+    | phase2_proj_norm_rope              |   148.98 | 12% | 25 |  5.96 ms |
+    | phase1_ctx_fc_norm                 |   107.17 |  9% |  5 | 21.43 ms |
+    | phase4_tail_norm_lmhead_argmax     |    23.85 |  2% |  5 |  4.77 ms |
+    | phase2_embed                       |     0.03 |  0% |  5 | trivial  |
+    | TOTAL_DRAFTER_GPU                  |  1266.07 |     |    |          |
+    | TOTAL_DECODE_WALL                  |  3191.89 |     |    |          |
+
+  Bench: 0.452× speedup (DFlash 9.4 t/s vs no-spec 21 t/s).
+  Drafter is now **40% of wall**; packed_verify is the remaining 60%.
+
+  ### v0.73 STRATEGIC PIVOT (codex unbiased recon, end of session)
+
+  After v0.72.3 shipped the profile data, I delegated next-move
+  selection to codex without leading framing. Codex returned a
+  reframe I had missed:
+
+  > "Treat packed verify as a real N-token target forward, NOT a
+  > single-token forward loop with batched FFN islands."
+
+  I had been thinking of layer-major packed_verify as "done" because
+  H5.3b batched FFN/projections/lm_head. **It's not done — GDN and
+  attn are STILL single-token-engine called N times** under the hood.
+  `encode_gdn` is invoked 48 layers × 16 tokens = 768 times per
+  outer step, each running the full single-token GDN mixer with
+  per-call dispatch overhead AND per-call weight reads on the GDN
+  projections (in_proj_qkv, in_proj_z, beta, alpha, out_proj).
+  Same architectural debt for attn (16 attn × 16 tokens = 256
+  per-token attn-v4 calls). Most of those projections are
+  per-token-INDEPENDENT linear ops on h_pack rows that could batch
+  as mat-mat — only the conv + recurrence + RMSNormGated must stay
+  sequential per token.
+
+  The profile labels "gdn_mixer_compute = 229ms / 50% of verify"
+  as a single bucket. Codex's read: most of that 229ms is
+  removable weight-reread + dispatch overhead from the per-token
+  single-token-engine pattern, NOT the recurrence proper.
+
+  ### v0.73+ locked sequence (codex stake)
+
+  * **v0.73a** — Batch GDN projections via existing mat-mat
+    dispatch. Replace per-token mat-vec calls (in_proj_qkv,
+    in_proj_z, beta_proj, alpha_proj, out_proj) with one mat-mat
+    per projection per layer using the H5.3b.5.5 NR1=16 fast-path
+    Q4_K kernel. Preserve per-token recurrence (conv + gdn_step +
+    rmsnorm_gated) loop unchanged. Estimated impact: verify ~50-100ms
+    reduction at ctx=1-4K. LOW risk — reuses validated Q4_K mat-mat
+    kernels; per-token recurrence semantics unchanged. Codex
+    estimate: 0.45× → 0.50-0.55× speedup.
+  * **v0.73b** — Internalized N-step GDN recurrence kernel: single
+    kernel does (decay, sk, delta, update, output) for all N
+    tokens internally with checkpoint write inline per step.
+    Eliminates 768 sequential gdn_step dispatches + the 1536
+    cross-encoder transitions for per-token blits (becomes one
+    blit per layer for the final ckpt slot, or compute-side
+    write inline). Estimated additional verify ~50-100ms.
+    HIGHER risk — bit-exactness vs single-step recurrence is
+    the gate; codex's "checkpoint indexing easy to get subtly
+    wrong" warning applies. Codex estimate (cumulative with
+    v0.73a): 0.55× → 0.58-0.66× speedup.
+  * **v0.74** — Q8_0 native drafter + N=16 mat-mat fast path.
+    Was previously v0.72.4 in the predeclared sequence; codex
+    correctly demoted because verify is the larger phase.
+    Drafter weight footprint 7.4 GB → 1.85 GB (also unblocks
+    long-prompt memory headroom). Drafter ~250ms → ~100-150ms
+    estimated. Cumulative speedup: ~0.7-0.8×.
+  * **v0.75** — Packed-N target attention v4 (share K/V loads
+    across the N=16 verify queries per attn layer). Long-ctx
+    dominant lever (linear-in-ctx KV reads). Modest at ctx ≤ 4K
+    (~30-50ms saved); major at ctx ≥ 16K (~100-200ms saved).
+    Codex Q3 caution still applies: must exercise multi-partition
+    long-ctx tests (codex's failure-mode call from H5.3 era).
+    Cumulative speedup at code-prompt-class workloads: ~0.85-1.0×
+    (crossover with no-spec). At 16K+: substantially better.
+  * **v0.76+** — ICB / encoder-overhead amortization. Codex's
+    risk-adjusted prediction: "as GPU work shrinks, host /
+    encoder structure becomes visible. ICB looks premature now,
+    may abruptly become the ceiling after v0.73 or v0.74."
+    Watch the wall vs sum-of-phases gap; ICB fires when that
+    gap grows beyond ~20%.
+
+  ### Drafter ctx caching (codex's "next architectural debt")
+
+  Phase 1 ctx_fc + hidden_norm at 21ms/outer step is small at
+  current ctx_len = 5-37 but GROWS LINEARLY with prompt length.
+  At ctx_len = 4K: ~1700ms/outer step from re-projection alone.
+  Solution: persistent `ctx_h` cache (and per-layer K_ctx /
+  V_ctx caches inside drafter attention) — append-only on each
+  outer step. Defer to v0.77+ once long-prompt workloads are
+  in scope; not the current bottleneck.
+
+  ### Compounding realism (codex)
+
+  Conservative cumulative trajectory:
+  v0.72.x: 0.45×  (current)
+  v0.73:  ~0.60-0.66×
+  v0.74:  ~0.70-0.80×
+  v0.75:  ~0.85-1.0× (code prompts; better at long ctx)
+  v0.76+: ~1.0-1.5× depending on what becomes the next bottleneck
+
+  Plan §1.4's 1.5-2× target is reachable but requires the FULL
+  v0.73-v0.76 stack to land. Each individual chunk on its own
+  is sub-2×.
+
+  ### Things explicitly NOT in v0.73+
+
+  * **Q8_0 mat-vec/mat-mat lift** (was v0.72.4): demoted to v0.74
+    because verify > drafter on the current bench. Still mandatory
+    for v0.74; just not the next move.
+  * **Save-checkpoint compute kernel**: profile says blits are
+    1-2% of verify. Defer until v0.73b absorbs the cross-encoder
+    transitions.
+  * **KV-Q8 cache compression**: long-context lever; comes after
+    packed-N attn-v4 amortizes the algorithmic K/V reads.
+  * **Apple tensor-API mat-mat (H5.3b.7)**: still post-ship.
+  * **Acceptance-aware dynamic N policy**: algorithmic; ships
+    when bench infrastructure is ready to A/B different N at
+    different α regimes (post-v0.74).
+  * **Compute-side concat/scatter elimination in drafter phase 3**:
+    cleanup; deferred.
+
+  ### Codex risk-adjusted prediction baked into roadmap
+
+  > "The likely 'wrong phase' risk after v0.72.4 is host/encoder
+  > structure and synchronization, not math kernels."
+
+  We've now had two of these "we've been chasing the wrong phase"
+  pivots in three sessions:
+    * v0.71 surfaced drafter (we'd been optimizing target)
+    * v0.72.3 reframed verify as bigger than drafter (we'd been
+      planning more drafter work)
+
+  v0.73+ predicted pivot: **once GPU work shrinks below ~1.5s/step,
+  command-buffer + host-encode + sync overhead becomes the
+  dominant cost.** ICB / encode-once amortization is the v0.76+
+  catcher. Surface area to watch in v0.73-v0.75 benches:
+  TOTAL_DECODE_WALL vs TOTAL_DRAFTER_GPU + TOTAL_VERIFY_GPU gap.
+  If that gap stays > 30%, host orchestration is the cap.
+
+- **rev 8.** H5.5 end-to-end DFlash decode SHIPPED
   (v0.71). Greedy equivalence with no-spec PASSES on 27B Q4_K_M
   code prompt. Acceptance excellent (alpha_pos1=1.000,
   alpha_chain=5.2 drafts/step, mean_emitted=6.2 tokens/step).

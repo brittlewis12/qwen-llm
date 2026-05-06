@@ -31,9 +31,9 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     encode_add_inplace_f32, encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
-    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rope_neox_f32, encode_silu_mul_f32, BlitEncoder, KernelEncoder, MetalContext,
-    MetalError, MetalTensor,
+    encode_gdn_alpha_chain_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32,
+    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor,
 };
 use crate::metal_forward::{
     encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
@@ -1796,37 +1796,195 @@ pub fn encode_packed_verify_layer_major_inner(
             MetalBlock::Gdn(g) => {
                 let gi = gdn_idx;
                 gdn_idx += 1;
-                for n_idx in 0..n {
-                    // Compute pass: stage row, run mixer, capture row.
+                // v0.73a.1: GDN projection batching eligibility. Mirrors
+                // the FFN dtype dispatch pattern at 2f. We batch
+                // in_proj_qkv, in_proj_z, and out_proj as mat-mat across
+                // N=16 when each is in {Q4_K, Q5_K, Q6_K} (codex review:
+                // mirror FFN's eligibility set, not Q4_K-only). Production
+                // 27B Q4_K_M is Q6_K/Q4_K/Q5_K respectively; F32 oracle
+                // (0.8B) falls back per-token. beta_proj and alpha_proj
+                // stay per-token mat-vec because production stores them
+                // as F32 [hidden, n_v=48] — small, mat-mat dispatch
+                // overhead exceeds BW savings (see docs/H5-DFLASH.md
+                // rev 10).
+                let gdn_mat_mat_eligible = |dtype: GgmlType| {
+                    matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K)
+                };
+                let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
+                    && gdn_mat_mat_eligible(g.in_proj_z.dtype)
+                    && gdn_mat_mat_eligible(g.out_proj.dtype);
+
+                if gdn_batched {
+                    // Step A: two batched front-end projections across all N tokens.
+                    // Reads h_pack [N, H], writes gdn_qkv_pack [N, conv_dim] and
+                    // gdn_z_pack [N, v_dim]. NR1=16 fast path fires automatically
+                    // when N == 16 (current DFlash block size).
+                    let n_k_u = arch.gdn_n_k_heads as usize;
+                    let n_v = arch.gdn_n_v_heads as usize;
+                    let head_dim_u = arch.gdn_head_dim as usize;
+                    let conv_dim = (2 * n_k_u + n_v) * head_dim_u;
+                    let v_dim = n_v * head_dim_u;
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_copy_offset_f32(
+                        encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
+                            &g.in_proj_qkv,
                             &layer_scratch.h_pack,
-                            n_idx * h,
-                            &target_session.h,
+                            &layer_scratch.gdn_qkv_pack,
                             h,
+                            conv_dim,
+                            n,
                         )?;
-                        base.encode_gdn(&enc, g, gi, target_session)?;
-                        encode_scatter_offset_f32(
+                        encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
-                            &target_session.mixer_out,
-                            &layer_scratch.mixer_out_pack,
-                            n_idx * h,
+                            &g.in_proj_z,
+                            &layer_scratch.h_pack,
+                            &layer_scratch.gdn_z_pack,
                             h,
+                            v_dim,
+                            n,
                         )?;
                         enc.end();
                     }
-                    // Blit pass: snapshot post-token-n state into ckpt slots.
+
+                    // Per-token loop (recurrence is inherently sequential).
+                    // Step B: per-token alpha/beta (F32 mat-vec; small) +
+                    // post-projection recurrence body (encode_gdn_tail) +
+                    // checkpoint blit.
+                    let alpha_handle = target_session.gdn_alpha.clone();
+                    let beta_handle = target_session.gdn_beta.clone();
+                    for n_idx in 0..n {
+                        // Compute pass.
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            // Per-row view of h_pack for the F32 beta/alpha mat-vecs.
+                            let h_n = layer_scratch
+                                .h_pack
+                                .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                            // beta_proj (F32) → sigmoid → s.gdn_beta.
+                            encode_mat_vec_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.beta_proj,
+                                &h_n,
+                                &target_session.gdn_b,
+                                h,
+                                n_v,
+                            )?;
+                            encode_sigmoid_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.gdn_b,
+                                &target_session.gdn_beta,
+                            )?;
+                            // alpha_proj (F32) → fused softplus(a+dt_bias)*a_log → s.gdn_alpha.
+                            encode_mat_vec_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.alpha_proj,
+                                &h_n,
+                                &target_session.gdn_a,
+                                h,
+                                n_v,
+                            )?;
+                            encode_gdn_alpha_chain_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.gdn_a,
+                                &g.dt_bias,
+                                &g.a_log,
+                                &target_session.gdn_alpha,
+                            )?;
+                            // Per-row views of the batched pack buffers (zero-copy
+                            // F32 view_subrange — F32 is supported, no super-block
+                            // alignment needed).
+                            let qkv_n = layer_scratch
+                                .gdn_qkv_pack
+                                .view_subrange((n_idx * conv_dim) as u64, vec![conv_dim as u64]);
+                            let z_n = layer_scratch
+                                .gdn_z_pack
+                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                            let normed_n = layer_scratch
+                                .gdn_normed_pack
+                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                            base.encode_gdn_tail(
+                                &enc,
+                                g,
+                                gi,
+                                target_session,
+                                &qkv_n,
+                                &z_n,
+                                &alpha_handle,
+                                &beta_handle,
+                                &normed_n,
+                            )?;
+                            enc.end();
+                        }
+                        // Blit pass: snapshot post-token-n state into ckpt slots.
+                        {
+                            let blit = BlitEncoder::begin(&cmd_buf);
+                            let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
+                            blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
+                            let conv_dst = verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
+                            blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
+                            blit.end();
+                        }
+                    }
+
+                    // Step C: batched out_proj across all N. Reads
+                    // gdn_normed_pack [N, v_dim], writes mixer_out_pack [N, H].
                     {
-                        let blit = BlitEncoder::begin(&cmd_buf);
-                        let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
-                        blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
-                        let conv_dst = verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
-                        blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
-                        blit.end();
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            &g.out_proj,
+                            &layer_scratch.gdn_normed_pack,
+                            &layer_scratch.mixer_out_pack,
+                            v_dim,
+                            h,
+                            n,
+                        )?;
+                        enc.end();
+                    }
+                } else {
+                    // F32 oracle / mixed-dtype fall-through: existing per-token
+                    // encode_gdn pattern, unchanged. Keeps the 0.8B oracle path
+                    // bit-exact.
+                    for n_idx in 0..n {
+                        // Compute pass: stage row, run mixer, capture row.
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &layer_scratch.h_pack,
+                                n_idx * h,
+                                &target_session.h,
+                                h,
+                            )?;
+                            base.encode_gdn(&enc, g, gi, target_session)?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.mixer_out,
+                                &layer_scratch.mixer_out_pack,
+                                n_idx * h,
+                                h,
+                            )?;
+                            enc.end();
+                        }
+                        // Blit pass: snapshot post-token-n state into ckpt slots.
+                        {
+                            let blit = BlitEncoder::begin(&cmd_buf);
+                            let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
+                            blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
+                            let conv_dst = verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
+                            blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
+                            blit.end();
+                        }
                     }
                 }
             }

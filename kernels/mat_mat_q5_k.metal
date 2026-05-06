@@ -8,10 +8,15 @@
 //
 // Used by v0.73a.1 to lift the GDN out_proj weight-traffic out of the
 // per-token mat-vec re-read loop. At Qwen3.6-27B Q4_K_M:
-//   * out_proj (ssm_out.weight) is Q5_K [v_dim=6144, hidden=5120] =
-//     ~30 MiB per layer × 48 GDN layers = ~1.4 GiB of weight bytes per
-//     OUTER STEP at N=16 if each layer's out_proj stays per-token
-//     mat-vec. Mat-mat eliminates the 16x re-read.
+//   * out_proj (ssm_out.weight) is Q5_K [n_in=6144, n_out=5120].
+//     Q5_K block bytes: (n_in/256)*176 = 24*176 = 4224 bytes per row;
+//     × n_out=5120 rows = 21,626,880 bytes ≈ 20.6 MiB per layer.
+//     × 48 GDN layers × 16 tokens (= per-token mat-vec re-reads) =
+//     ~16 GiB of redundant weight traffic per outer step. Mat-mat
+//     amortizes the per-K-step weight load across all N=16 cols, so
+//     the actual reads collapse to ~990 MiB / outer step. (Earlier
+//     "30 MiB per layer" framing was inflated; codex review caught
+//     it. The 3.59× isolated-bench speedup is real and unchanged.)
 //
 // Output layout: same as Q4_K / Q6_K mat-mat — kernel writes
 // `dst[r + c*M]` per llama, which is BIT-IDENTICAL to row-major

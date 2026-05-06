@@ -1116,6 +1116,110 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
+    /// GDN per-token recurrence body, factored out for v0.73a.1 layer-major
+    /// batching. Takes pre-computed inputs as zero-copy F32 views (one
+    /// row of N-shaped pack buffers) and writes the per-head normed
+    /// output to `gdn_normed_out` (also a row view).
+    ///
+    /// Performs in order: ssm_conv1d+silu (mutates `s.gdn_conv[gdn_i]`)
+    /// → l2_norm Q/K → gdn_step (mutates `s.gdn_state[gdn_i]`) →
+    /// rmsnorm_gated. Bit-exact with the corresponding inner part of
+    /// `encode_gdn` when given the same inputs (validated by
+    /// `gdn_tail_matches_inline`).
+    ///
+    /// The `_qkv_in` / `z_in` arguments alias rows of the layer-major
+    /// pack buffers (`gdn_qkv_pack`, `gdn_z_pack`); `alpha_in` /
+    /// `beta_in` come from the per-token session scratch (`s.gdn_alpha`,
+    /// `s.gdn_beta`) populated by per-token alpha/beta mat-vec +
+    /// sigmoid + alpha-chain because production beta_proj/alpha_proj
+    /// are F32 (small, mat-mat dispatch overhead > BW savings; see
+    /// docs/H5-DFLASH.md rev 10).
+    ///
+    /// Caller's responsibility: per-token sequencing of `s.gdn_conv[gdn_i]`
+    /// and `s.gdn_state[gdn_i]` (the recurrence is inherently
+    /// per-token-sequential), and checkpoint blits between calls.
+    pub fn encode_gdn_tail(
+        &self,
+        enc: &KernelEncoder,
+        gb: &MetalGdnBlock,
+        gdn_i: usize,
+        s: &mut MetalSession,
+        qkv_in: &MetalTensor,         // [conv_dim] F32 — one row of gdn_qkv_pack
+        z_in: &MetalTensor,           // [v_dim] F32   — one row of gdn_z_pack
+        alpha_in: &MetalTensor,       // [n_v] F32     — pre-computed alpha (chained)
+        beta_in: &MetalTensor,        // [n_v] F32     — pre-computed sigmoid(beta)
+        gdn_normed_out: &MetalTensor, // [v_dim] F32 — one row of gdn_normed_pack
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let n_v = arch.gdn_n_v_heads as usize;
+        let n_k = arch.gdn_n_k_heads as usize;
+        let head_dim = arch.gdn_head_dim as usize;
+        let conv_dim = (2 * n_k + n_v) * head_dim;
+
+        encode_ssm_conv_silu_f32(
+            self.ctx,
+            enc,
+            qkv_in,
+            &s.gdn_conv[gdn_i],
+            &gb.conv1d,
+            &s.gdn_qkv_conv,
+            conv_dim,
+        )?;
+        let q_view = s
+            .gdn_qkv_conv
+            .view_subrange(0, vec![(n_k * head_dim) as u64]);
+        let k_view = s
+            .gdn_qkv_conv
+            .view_subrange((n_k * head_dim) as u64, vec![(n_k * head_dim) as u64]);
+        let v_view = s
+            .gdn_qkv_conv
+            .view_subrange((2 * n_k * head_dim) as u64, vec![(n_v * head_dim) as u64]);
+        encode_l2_norm_batched_f32(
+            self.ctx,
+            enc,
+            &q_view,
+            &s.gdn_q_norm,
+            n_k,
+            head_dim,
+            RMS_EPS,
+        )?;
+        encode_l2_norm_batched_f32(
+            self.ctx,
+            enc,
+            &k_view,
+            &s.gdn_k_norm,
+            n_k,
+            head_dim,
+            RMS_EPS,
+        )?;
+        encode_gdn_step_f32(
+            self.ctx,
+            enc,
+            &s.gdn_q_norm,
+            &s.gdn_k_norm,
+            &v_view,
+            alpha_in,
+            beta_in,
+            &s.gdn_state[gdn_i],
+            &s.gdn_out,
+            n_v,
+            n_k,
+            head_dim,
+        )?;
+        encode_rmsnorm_gated_f32(
+            self.ctx,
+            enc,
+            &s.gdn_out,
+            &gb.norm,
+            z_in,
+            gdn_normed_out,
+            n_v,
+            head_dim,
+            RMS_EPS,
+        )?;
+        Ok(())
+    }
+
     pub fn encode_attn(
         &self,
         enc: &KernelEncoder,

@@ -1054,7 +1054,15 @@ fn packed_verify_phase_profile_v073a2_27b() {
     let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx_metal, &mm);
 
-    let start_position: u32 = 1024;
+    // ctx is configurable via QWEN_PROFILE_CTX env var (default 1024).
+    // Sweep at v0.73c decision-point: do `for ctx in 1024 4096 16384;
+    //   do QWEN_PROFILE_CTX=$ctx cargo test --release --test
+    //   dflash_correctness packed_verify_phase_profile_v073a2_27b
+    //   -- --ignored --nocapture --test-threads=1; done`.
+    let start_position: u32 = std::env::var("QWEN_PROFILE_CTX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1024);
     const N: u32 = 16;
     let target_layer_ids: Vec<u32> = vec![1, 16, 31, 46, 61];
     let k_target = target_layer_ids.len() as u32;

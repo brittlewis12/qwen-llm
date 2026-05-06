@@ -32,8 +32,9 @@ use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     encode_add_inplace_f32, encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
     encode_gdn_alpha_chain_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_sigmoid_f32, encode_silu_mul_f32,
-    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor,
+    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32, BlitEncoder, KernelEncoder,
+    MetalContext, MetalError, MetalTensor,
 };
 use crate::metal_forward::{
     encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
@@ -1991,31 +1992,267 @@ pub fn encode_packed_verify_layer_major_inner(
             MetalBlock::Attn(a) => {
                 let ai = attn_idx;
                 attn_idx += 1;
-                // Per-token attn (KV append + softmax are sequential).
-                // Same per-row stage/run/capture pattern as GDN, but no
-                // checkpoint blit (KV is slot-indexed, not state-blit-
-                // rolled-back).
-                for n_idx in 0..n {
-                    let enc = KernelEncoder::begin(&cmd_buf);
-                    encode_copy_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &layer_scratch.h_pack,
-                        n_idx * h,
-                        &target_session.h,
-                        h,
-                    )?;
-                    let position_n = start_position + n_idx as u32;
-                    base.encode_attn(&enc, a, ai, position_n, target_session)?;
-                    encode_scatter_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &target_session.mixer_out,
-                        &layer_scratch.mixer_out_pack,
-                        n_idx * h,
-                        h,
-                    )?;
-                    enc.end();
+                // v0.73c.1: attn projection batching, mirrors v0.73a.1 GDN
+                // restructure. Production 27B Q4_K_M attn projections are
+                // ALL Q4_K (q gated, k, v, output). Batch them as mat-mat
+                // across N=16 in step A/C; per-token loop only does
+                // RoPE + KV-scatter + attn-v4 + gate-sigmoid-mul (which
+                // we batch into step C as a flat elementwise pair).
+                let attn_mat_mat_eligible = |dtype: GgmlType| {
+                    matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K)
+                };
+                let attn_batched = attn_mat_mat_eligible(a.q.dtype)
+                    && attn_mat_mat_eligible(a.k.dtype)
+                    && attn_mat_mat_eligible(a.v.dtype)
+                    && attn_mat_mat_eligible(a.o.dtype);
+
+                if attn_batched {
+                    let arch = &base.model.arch;
+                    let head_dim = arch.attn_head_dim as usize;
+                    let n_q = arch.n_q_heads as usize;
+                    let n_kv = arch.n_kv_heads as usize;
+                    let q_dim = n_q * head_dim;
+                    let kv_dim = n_kv * head_dim;
+                    let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+
+                    // Step A: batched front-end Q (gated) / K / V projections,
+                    // batched Q-norm and K-norm. One encoder per layer.
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        // Q gated (Q + gate interleaved per head).
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            &a.q,
+                            &layer_scratch.h_pack,
+                            &layer_scratch.attn_q_full_pack,
+                            h,
+                            2 * q_dim,
+                            n,
+                        )?;
+                        // Split q + gate into separate packs. The
+                        // single-token kernel deinterleaves per-head;
+                        // pass `n_heads = N * n_q` so it processes all
+                        // N rows in one dispatch (per-head layout
+                        // repeats identically across rows).
+                        encode_split_q_gate_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch.attn_q_full_pack,
+                            &layer_scratch.attn_q_pack,
+                            &layer_scratch.attn_gate_pack,
+                            n * n_q,
+                            head_dim,
+                        )?;
+                        // K, V projections.
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            &a.k,
+                            &layer_scratch.h_pack,
+                            &layer_scratch.attn_k_now_pack,
+                            h,
+                            kv_dim,
+                            n,
+                        )?;
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            &a.v,
+                            &layer_scratch.h_pack,
+                            &layer_scratch.attn_v_now_pack,
+                            h,
+                            kv_dim,
+                            n,
+                        )?;
+                        // Q-norm (per-head); n_heads = N * n_q.
+                        encode_rms_norm_batched_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch.attn_q_pack,
+                            &a.q_norm,
+                            &layer_scratch.attn_q_normed_pack,
+                            n * n_q,
+                            head_dim,
+                            RMS_EPS,
+                        )?;
+                        // K-norm (per-head); n_heads = N * n_kv.
+                        encode_rms_norm_batched_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch.attn_k_now_pack,
+                            &a.k_norm,
+                            &layer_scratch.attn_k_normed_pack,
+                            n * n_kv,
+                            head_dim,
+                            RMS_EPS,
+                        )?;
+                        enc.end();
+                    }
+
+                    // Per-token loop (KV append + softmax are inherently
+                    // sequential per token; attn-v4 sees a different
+                    // n_pos for each token and writes to a different
+                    // KV cache slot).
+                    for n_idx in 0..n {
+                        let position_n = start_position + n_idx as u32;
+                        let q_normed_n = layer_scratch
+                            .attn_q_normed_pack
+                            .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                        let k_normed_n = layer_scratch
+                            .attn_k_normed_pack
+                            .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                        let v_now_n = layer_scratch
+                            .attn_v_now_pack
+                            .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                        let attn_o_n = layer_scratch
+                            .attn_o_pack
+                            .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            // RoPE on this row of Q and K.
+                            encode_rope_neox_f32(
+                                base.ctx,
+                                &enc,
+                                &q_normed_n,
+                                n_q,
+                                head_dim,
+                                n_rot,
+                                position_n,
+                                arch.rope_theta,
+                            )?;
+                            encode_rope_neox_f32(
+                                base.ctx,
+                                &enc,
+                                &k_normed_n,
+                                n_kv,
+                                head_dim,
+                                n_rot,
+                                position_n,
+                                arch.rope_theta,
+                            )?;
+                            // KV scatter into F16 cache slot.
+                            encode_scatter_offset_f32_to_f16_kv(
+                                base.ctx,
+                                &enc,
+                                &k_normed_n,
+                                &v_now_n,
+                                &target_session.kv_k[ai],
+                                &target_session.kv_v[ai],
+                                (position_n as usize) * kv_dim,
+                                kv_dim,
+                            )?;
+                            target_session.kv_n_pos[ai] = position_n as usize + 1;
+
+                            // Fused attn-v4 (or naive fallback for non-matching shapes).
+                            const V4_HEAD_DIM: usize = 256;
+                            const V4_GROUP: usize = 6;
+                            let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+                            if use_v4 {
+                                let nwg =
+                                    crate::metal::attn_v4_choose_nwg(target_session.kv_n_pos[ai]);
+                                let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                    target_session.kv_n_pos[ai],
+                                );
+                                let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                    target_session.kv_n_pos[ai],
+                                );
+                                crate::metal::encode_attn_decode_v4_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
+                                    &target_session.kv_k[ai],
+                                    &target_session.kv_v[ai],
+                                    &target_session.attn_v4_o_partial,
+                                    &target_session.attn_v4_ml_partial,
+                                    &attn_o_n,
+                                    n_q,
+                                    n_kv,
+                                    head_dim,
+                                    target_session.kv_n_pos[ai],
+                                    nwg,
+                                    tile_c,
+                                )?;
+                            } else {
+                                crate::metal::encode_attn_decode_f16kv_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
+                                    &target_session.kv_k[ai],
+                                    &target_session.kv_v[ai],
+                                    &attn_o_n,
+                                    n_q,
+                                    n_kv,
+                                    head_dim,
+                                    target_session.kv_n_pos[ai],
+                                )?;
+                            }
+                            enc.end();
+                        }
+                    }
+
+                    // Step C: gate-sigmoid + mul (flat elementwise on N*q_dim)
+                    // followed by batched o_proj mat-mat. One encoder per layer.
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        // attn_gate_pack -> sigmoid into a scratch view of
+                        // attn_q_pack (no longer needed; q_pack is dead after
+                        // attn-v4). Same in-place reuse pattern as the
+                        // single-token encode_attn (line 1399 of metal_forward.rs).
+                        encode_sigmoid_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch.attn_gate_pack,
+                            &layer_scratch.attn_q_pack,
+                        )?;
+                        // attn_o_pack *= sigmoid(gate_pack), elementwise on N*q_dim.
+                        crate::metal::encode_mul_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch.attn_o_pack,
+                            &layer_scratch.attn_q_pack,
+                            &layer_scratch.attn_o_pack,
+                        )?;
+                        // Batched O projection: attn_o_pack [N, q_dim] -> mixer_out_pack [N, H].
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            &a.o,
+                            &layer_scratch.attn_o_pack,
+                            &layer_scratch.mixer_out_pack,
+                            q_dim,
+                            h,
+                            n,
+                        )?;
+                        enc.end();
+                    }
+                } else {
+                    // F32 oracle / mixed-dtype fallback: existing per-token
+                    // encode_attn pattern, unchanged. Keeps the 0.8B oracle
+                    // path bit-exact and any future non-Q4_K attn weight
+                    // working.
+                    for n_idx in 0..n {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch.h_pack,
+                            n_idx * h,
+                            &target_session.h,
+                            h,
+                        )?;
+                        let position_n = start_position + n_idx as u32;
+                        base.encode_attn(&enc, a, ai, position_n, target_session)?;
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.mixer_out,
+                            &layer_scratch.mixer_out_pack,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
+                    }
                 }
             }
         }

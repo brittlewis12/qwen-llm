@@ -2947,6 +2947,99 @@ pub fn encode_mat_vec_q5_k_f32(
     Ok(())
 }
 
+/// Q8_0 mat-vec, same API shape as [`encode_mat_vec_q4_k_f32`].
+///
+/// Q8_0 super-block is QK8_0=32 elements (vs QK_K=256 for Q4_K/Q5_K/Q6_K).
+/// The kernel still requires `n_in % 32 == 0`. Used by v0.73b.0 to
+/// switch the DFlash drafter from F32-dequant to native Q8_0 storage
+/// (drafter weight footprint 7.4 GB → 1.85 GB, eliminates per-token
+/// re-read of the dequant'd F32 weights at hot decode).
+pub fn encode_mat_vec_q8_0_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if n_in % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q8_0",
+            detail: format!("n_in={n_in} not divisible by 32 (Q8_0 super-block)"),
+        });
+    }
+    if weight.dtype != GgmlType::Q8_0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q8_0",
+            detail: format!("weight.dtype = {:?}, expected Q8_0", weight.dtype),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_vec_q8_0_f32")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+
+    // NR0=1, NSG=2 → 2 output rows per threadgroup (matches Q5_K shape).
+    const NR0: usize = 1;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// One-shot Q8_0 mat-vec for tests.
+pub fn mat_vec_q8_0_f32_readback_for_test(
+    ctx: &MetalContext,
+    weight_bytes: &[u8],
+    x: &[f32],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, MetalError> {
+    let w_t = MetalTensor::from_bytes(
+        ctx,
+        weight_bytes,
+        vec![n_in as u64, n_out as u64],
+        GgmlType::Q8_0,
+    )?;
+    let x_t = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(x),
+        vec![n_in as u64],
+        GgmlType::F32,
+    )?;
+    let y_t = MetalTensor::zeros_f32(ctx, vec![n_out as u64])?;
+    one_shot(ctx, |enc| {
+        encode_mat_vec_q8_0_f32(ctx, enc, &w_t, &x_t, &y_t, n_in, n_out)
+    })?;
+    Ok(read_back_f32(&y_t.buffer, n_out))
+}
+
 /// One-shot Q5_K mat-vec for tests.
 pub fn mat_vec_q5_k_f32_readback_for_test(
     ctx: &MetalContext,
@@ -3224,6 +3317,122 @@ pub fn encode_mat_mat_q5_k_f32(
 
     // Q5_K block bytes per row = (n_in / 256) * 176.
     let nb01 = ((n_in / 256) * 176) as u32;
+    let stride_b = n_in as u32;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_query as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+
+    enc.set_threadgroup_memory(0, 8192);
+
+    let nr1 = if n_query == 16 { 16 } else { 32 };
+    let n_tg_x = n_query.div_ceil(nr1);
+    let n_tg_y = n_out.div_ceil(64);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg_x,
+            height: n_tg_y,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Q8_0 mat-mat: same shape contract as [`encode_mat_mat_q4_k_f32`] /
+/// [`encode_mat_mat_q5_k_f32`] / [`encode_mat_mat_q6_k_f32`].
+///
+/// CRITICAL difference: Q8_0 super-block is QK8_0=32 elements (vs
+/// QK_K=256 for K-quants). The kernel still requires `n_in % 32 == 0`,
+/// matching the K-step `NK_MM=32`. The pointer-advance specializes
+/// to `Q8_0_NL=2` (one super-block per K-step per row).
+///
+/// Output is row-major `[n_query, n_out]` (= bit-equivalent to
+/// llama's `[n_out, n_query] col-major` framing).
+///
+/// Used by v0.73b.0 to lift the DFlash drafter Q8_0 mat-mat path
+/// (lm_head, FFN, projections) once the loader switches from
+/// F32-dequant to native Q8_0. Per-row cosine ≥ 0.999 vs N successive
+/// Q8_0 mat-vec is the gate (same threshold as Q4_K/Q5_K/Q6_K mat-mat
+/// — half-staging in lifted kernel).
+pub fn encode_mat_mat_q8_0_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if n_in % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q8_0",
+            detail: format!("n_in={n_in} not divisible by 32 (Q8_0 super-block / NK_MM tile)"),
+        });
+    }
+    if weight.dtype != GgmlType::Q8_0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q8_0",
+            detail: format!("weight.dtype = {:?}, expected Q8_0", weight.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q8_0",
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={}",
+                x.n_elements(),
+                n_query * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_query * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_q8_0",
+            detail: format!(
+                "y.n_elements={} != n_query*n_out={}",
+                y.n_elements(),
+                n_query * n_out
+            ),
+        });
+    }
+
+    // NR1=16 fast-path gate: same specialization as Q4_K/Q5_K/Q6_K mat-mat.
+    // Only fires when n_query == 16 exactly; otherwise generic NR1=32 kernel.
+    let kernel_name = if n_query == 16 {
+        "kernel_mat_mat_q8_0_f32_n16"
+    } else {
+        "kernel_mat_mat_q8_0_f32"
+    };
+    let pso = ctx.pipeline(kernel_name)?;
+    enc.set_pipeline(&pso);
+
+    // Q8_0 block bytes per row = (n_in / 32) * 34.
+    let nb01 = ((n_in / 32) * 34) as u32;
     let stride_b = n_in as u32;
 
     #[repr(C)]
@@ -4118,6 +4327,193 @@ mod tests {
         assert!(max_abs < 1e-2);
     }
 
+    /// v0.73b.0 gate: Q8_0 mat-mat correctness. Uses a real Q8_0
+    /// weight from the spiritbuun DFlash drafter GGUF
+    /// (`blk.0.ffn_down.weight`, shape `[17408, 5120]` — large weight,
+    /// hits both the whole-M-tile and partial-N paths). Same playbook
+    /// as the Q4_K (v0.63), Q6_K (v0.67), Q5_K (v0.73a.0) gates:
+    /// per-row cosine ≥ 0.999 across N_QUERY ∈ {1, 16, 32}, max|Δ| ≤ 1e-2,
+    /// explicit col-major dst layout sanity probe.
+    ///
+    /// Q8_0's structurally-simpler dequant (`int8 * scale`) typically
+    /// produces TIGHTER cosine than Q4_K/Q5_K/Q6_K mat-mat (which lose
+    /// precision in nibble packing + scale folding). Expect cos very
+    /// close to 1.000000.
+    #[test]
+    fn mat_mat_q8_0_matches_cpu_and_mat_vec() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mat_mat_q8_0] skipped — drafter GGUF missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let q8 = g
+            .tensors
+            .iter()
+            .find(|t| {
+                t.name.starts_with("blk.0.")
+                    && t.dtype == GgmlType::Q8_0
+                    && t.shape.len() == 2
+                    && t.shape[0] % 32 == 0
+                    && t.shape[1] % 64 == 0
+            })
+            .expect("no Q8_0 tensor with compatible shape in drafter blk.0");
+        let n_in = q8.shape[0] as usize;
+        let n_out = q8.shape[1] as usize;
+        eprintln!(
+            "[mat_mat_q8_0-test] tensor={} shape=[n_in={n_in}, n_out={n_out}]",
+            q8.name
+        );
+
+        let weight_f32 = crate::codec::dequant_to_f32(q8, g.slice(q8)).expect("dequant");
+        let weight_bytes = g.slice(q8);
+
+        for &n_query in &[1usize, 16, 32] {
+            let mut x = vec![0.0f32; n_query * n_in];
+            for (i, v) in x.iter_mut().enumerate() {
+                *v = ((i % 13) as f32 - 6.0) * 1e-2;
+            }
+
+            let mut cpu_row_major = vec![0.0f32; n_query * n_out];
+            for q in 0..n_query {
+                let row_in = &x[q * n_in..(q + 1) * n_in];
+                let row_out = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, row_in);
+                cpu_row_major[q * n_out..(q + 1) * n_out].copy_from_slice(&row_out);
+            }
+
+            let w_t = MetalTensor::from_bytes(
+                &ctx,
+                weight_bytes,
+                vec![n_in as u64, n_out as u64],
+                GgmlType::Q8_0,
+            )
+            .expect("weight tensor");
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n_query as u64, n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x tensor");
+            let y_t =
+                MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64]).expect("y tensor");
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_q8_0_f32(&ctx, enc, &w_t, &x_t, &y_t, n_in, n_out, n_query)
+            })
+            .expect("mat_mat encode");
+
+            let gpu_flat = read_back_f32(&y_t.buffer, n_out * n_query);
+            let mut gpu_row_major = vec![0.0f32; n_query * n_out];
+            for q in 0..n_query {
+                for o in 0..n_out {
+                    gpu_row_major[q * n_out + o] = gpu_flat[o + q * n_out];
+                }
+            }
+
+            let mut min_cos = f64::INFINITY;
+            let mut max_abs = 0.0f32;
+            for q in 0..n_query {
+                let cpu_row = &cpu_row_major[q * n_out..(q + 1) * n_out];
+                let gpu_row = &gpu_row_major[q * n_out..(q + 1) * n_out];
+                let mut dot = 0.0f64;
+                let mut np = 0.0f64;
+                let mut nc = 0.0f64;
+                for i in 0..n_out {
+                    let p = gpu_row[i] as f64;
+                    let c = cpu_row[i] as f64;
+                    dot += p * c;
+                    np += p * p;
+                    nc += c * c;
+                    let d = (gpu_row[i] - cpu_row[i]).abs();
+                    if d > max_abs {
+                        max_abs = d;
+                    }
+                }
+                let cos = dot / (np.sqrt() * nc.sqrt() + 1e-30);
+                if cos < min_cos {
+                    min_cos = cos;
+                }
+            }
+            eprintln!(
+                "[mat_mat_q8_0 n_query={n_query}] min_cos={min_cos:.6} \
+                 max|Δ|={max_abs:.3e}"
+            );
+            assert!(
+                min_cos >= 0.999,
+                "n_query={n_query}: min cos {min_cos} < 0.999"
+            );
+            assert!(
+                max_abs < 1e-2,
+                "n_query={n_query}: max|Δ| {max_abs} >= 1e-2"
+            );
+
+            // Layout sanity: col-major dst at three corner cells.
+            for &(r, c) in &[
+                (0usize, 0usize),
+                (1usize, n_query / 2),
+                (n_out - 1, n_query - 1),
+            ] {
+                let raw = gpu_flat[r + c * n_out];
+                let row_major_view = gpu_row_major[c * n_out + r];
+                assert_eq!(
+                    raw.to_bits(),
+                    row_major_view.to_bits(),
+                    "layout sanity n_query={n_query}: (r={r}, c={c})"
+                );
+            }
+        }
+    }
+
+    /// v0.73b.0 gate: Q8_0 mat-vec correctness. Uses a real Q8_0 weight
+    /// from the spiritbuun DFlash drafter GGUF (`blk.0.attn_q.weight`,
+    /// shape `[5120, 4096]`). Same threshold as Q4_K/Q5_K/Q6_K mat-vec
+    /// (`max|Δ| < 1e-2`).
+    #[test]
+    fn mat_vec_q8_0_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[q8_0-test] skipped — drafter GGUF missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let q8 = g
+            .tensors
+            .iter()
+            .find(|t| {
+                t.name.starts_with("blk.0.")
+                    && t.dtype == GgmlType::Q8_0
+                    && t.shape.len() == 2
+                    && t.shape[0] % 32 == 0
+            })
+            .expect("no Q8_0 tensor in drafter blk.0");
+        let n_in = q8.shape[0] as usize;
+        let n_out = q8.shape[1] as usize;
+        eprintln!("[q8_0-test] {} shape=[{n_in}, {n_out}]", q8.name);
+
+        let weight_f32 = crate::codec::dequant_to_f32(q8, g.slice(q8)).expect("dequant");
+        let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+        let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
+        let gpu = mat_vec_q8_0_f32_readback_for_test(&ctx, g.slice(q8), &x, n_in, n_out)
+            .expect("metal q8_0");
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[q8_0] max|Δ|={max_abs:.2e}");
+        assert!(max_abs < 1e-2);
+    }
+
     #[test]
     fn mat_vec_q6_k_matches_cpu() {
         let ctx = match MetalContext::new() {
@@ -4229,6 +4625,149 @@ mod tests {
             };
             assert!((sp[i] - exp_sp).abs() < 1e-5);
         }
+    }
+
+    /// v0.73b.0 A-lite GO/NO-GO bench. Compares amortized weight-BW
+    /// of Q8_0 mat-mat (NR1=16 fast path) vs N=16 successive Q8_0
+    /// mat-vec on a production drafter weight shape
+    /// (`blk.0.ffn_down.weight` from the spiritbuun DFlash drafter,
+    /// shape [17408, 5120]). The drafter has 5 layers; use 5 chained
+    /// dispatches per command buffer to mirror the actual hot-path
+    /// usage pattern. Threshold for proceed: GPU ratio ≤ 0.5
+    /// (mat-mat at LEAST 2× faster). Q5_K hit 3.59× at the GDN
+    /// out_proj shape; Q8_0 should hit similar or higher (simpler
+    /// dequant, same tile geometry).
+    ///
+    /// Run: `cargo test --release --lib -p qwen-llm
+    /// q8_0_mat_mat_amortization_vs_n_mat_vec --ignored -- --nocapture`
+    #[test]
+    #[ignore]
+    fn q8_0_mat_mat_amortization_vs_n_mat_vec() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/spiritbuun-dflash/dflash-draft-3.6-q8_0.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[v0.73b.0-gate] skipped — drafter GGUF missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let q8 = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_down.weight" && t.dtype == GgmlType::Q8_0)
+            .expect("blk.0.ffn_down.weight Q8_0 not found");
+        let n_in = q8.shape[0] as usize;
+        let n_out = q8.shape[1] as usize;
+        let n_query = 16usize;
+        let n_layers = 5usize; // drafter has 5 layers
+        let warmup = 5usize;
+        let iters = 30usize;
+
+        eprintln!(
+            "[v0.73b.0-gate] tensor={} shape=[n_in={n_in}, n_out={n_out}] N={n_query} layers={n_layers}",
+            q8.name
+        );
+
+        let w_t = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(q8),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q8_0,
+        )
+        .expect("weight tensor");
+        let x_packed = MetalTensor::zeros_f32(&ctx, vec![(n_query * n_in) as u64]).unwrap();
+        let y_packed = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_query) as u64]).unwrap();
+        let x_single = MetalTensor::zeros_f32(&ctx, vec![n_in as u64]).unwrap();
+        let y_single = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+
+        let bench_mat_mat = || {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..n_layers {
+                encode_mat_mat_q8_0_f32(
+                    &ctx, &enc, &w_t, &x_packed, &y_packed, n_in, n_out, n_query,
+                )
+                .unwrap();
+            }
+            enc.end();
+            let t = Instant::now();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let wall = t.elapsed().as_secs_f64() * 1e3;
+            let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            (wall, gpu)
+        };
+
+        let bench_n_mat_vec = || {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..n_layers {
+                for _ in 0..n_query {
+                    encode_mat_vec_q8_0_f32(&ctx, &enc, &w_t, &x_single, &y_single, n_in, n_out)
+                        .unwrap();
+                }
+            }
+            enc.end();
+            let t = Instant::now();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let wall = t.elapsed().as_secs_f64() * 1e3;
+            let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            (wall, gpu)
+        };
+
+        for _ in 0..warmup {
+            bench_mat_mat();
+            bench_n_mat_vec();
+        }
+
+        let mut sum_mm_wall = 0.0f64;
+        let mut sum_mm_gpu = 0.0f64;
+        let mut sum_mv_wall = 0.0f64;
+        let mut sum_mv_gpu = 0.0f64;
+        for _ in 0..iters {
+            let (w, g) = bench_mat_mat();
+            sum_mm_wall += w;
+            sum_mm_gpu += g;
+        }
+        for _ in 0..iters {
+            let (w, g) = bench_n_mat_vec();
+            sum_mv_wall += w;
+            sum_mv_gpu += g;
+        }
+        let mm_wall = sum_mm_wall / iters as f64;
+        let mm_gpu = sum_mm_gpu / iters as f64;
+        let mv_wall = sum_mv_wall / iters as f64;
+        let mv_gpu = sum_mv_gpu / iters as f64;
+
+        eprintln!("[v0.73b.0-gate] {n_layers} layers × N={n_query} avg over {iters} iters:");
+        eprintln!(
+            "  mat-mat (1 disp/layer):    wall={mm_wall:7.2} ms  gpu={mm_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
+            mm_gpu / n_layers as f64
+        );
+        eprintln!(
+            "  N=16 mat-vec (16/layer):   wall={mv_wall:7.2} ms  gpu={mv_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
+            mv_gpu / n_layers as f64
+        );
+        let ratio_wall = mm_wall / mv_wall;
+        let ratio_gpu = mm_gpu / mv_gpu;
+        let speedup_wall = 1.0 / ratio_wall;
+        let speedup_gpu = 1.0 / ratio_gpu;
+        eprintln!(
+            "  ratio mat-mat / 16×mat-vec: wall={ratio_wall:.3} (= {speedup_wall:.2}× speedup)  gpu={ratio_gpu:.3} (= {speedup_gpu:.2}× speedup)"
+        );
+
+        // GO/NO-GO threshold same as v0.73a.0 (GPU ratio <= 0.5).
+        assert!(
+            ratio_gpu <= 0.5,
+            "v0.73b.0 GO/NO-GO failed: GPU ratio {ratio_gpu:.3} > 0.5 \
+             (mat-mat must beat 16 mat-vec by at least 2×; \
+             reassess before v0.73b.1)"
+        );
     }
 
     /// v0.73a.0 A-lite GO/NO-GO bench. Compares amortized weight-BW of

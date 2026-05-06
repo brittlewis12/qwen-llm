@@ -1505,6 +1505,9 @@ pub fn encode_mat_vec_dispatch(
         GgmlType::Q6_K => Ok(encode_mat_vec_q6_k_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
+        GgmlType::Q8_0 => Ok(crate::metal::encode_mat_vec_q8_0_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
         other => Err(MfError::UnsupportedDtype {
             name: format!("(weight at mat_vec dispatch)"),
             dtype: other,
@@ -1522,6 +1525,7 @@ pub fn encode_mat_vec_dispatch(
 ///   * Q4_K (ffn_gate, ffn_up, attn projections)
 ///   * Q5_K (GDN out_proj — added by v0.73a.0)
 ///   * Q6_K (ffn_down, lm_head)
+///   * Q8_0 (DFlash drafter projections, lm_head — added by v0.73b.0)
 ///
 /// F32 / other dtypes return `UnsupportedDtype`; layer-major
 /// callers fall back to per-token `encode_mat_vec_dispatch` for those.
@@ -1543,6 +1547,9 @@ pub fn encode_mat_mat_dispatch(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         GgmlType::Q6_K => Ok(crate::metal::encode_mat_mat_q6_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::Q8_0 => Ok(crate::metal::encode_mat_mat_q8_0_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         other => Err(MfError::UnsupportedDtype {

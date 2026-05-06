@@ -30,14 +30,14 @@ use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
-    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32, encode_get_rows_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
-    encode_silu_mul_f32,
+    encode_add_inplace_f32, encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
+    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rope_neox_f32, encode_silu_mul_f32, BlitEncoder, KernelEncoder, MetalContext,
+    MetalError, MetalTensor,
 };
 use crate::metal_forward::{
-    MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
-    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native,
+    encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
+    weight_dtype_kept_native, MetalBlock, MetalForward, MetalSession, RMS_EPS,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
@@ -753,6 +753,32 @@ pub struct MetalDFlashLayerMajorScratch {
     /// not touched by the debug variant.
     pub final_logits_pack: MetalTensor,
 
+    // GDN batched-projection scratch (v0.73a). Selectively populated
+    // by the layer-major path's GDN front-end and back-end mat-mat
+    // dispatches when the layer's projections are mat-mat eligible
+    // (`gdn_mat_mat_eligible`). The actual production 27B Q4_K_M GDN
+    // dtype mix is:
+    //
+    //   in_proj_qkv: Q6_K [hidden, conv_dim]   — batched ⇒ gdn_qkv_pack
+    //   in_proj_z:   Q4_K [hidden, v_dim]      — batched ⇒ gdn_z_pack
+    //   beta_proj:   F32  [hidden, n_v]        — stays per-token mat-vec (small, F32)
+    //   alpha_proj:  F32  [hidden, n_v]        — stays per-token mat-vec (small, F32)
+    //   out_proj:    Q5_K [v_dim, hidden]      — batched ⇒ gdn_normed_pack → mixer_out_pack
+    //
+    // beta/alpha are F32 with n_out=48 (1 MB each); mat-mat dispatch
+    // overhead exceeds the BW savings, so they stay per-token. If a
+    // future GGUF quantizes them, the eligibility predicate widens.
+    /// `[N, conv_dim]` F32 — batched in_proj_qkv output. conv_dim =
+    /// (2*n_k + n_v) * head_dim. 27B: [16, 10240] = 640 KiB.
+    pub gdn_qkv_pack: MetalTensor,
+    /// `[N, v_dim]` F32 — batched in_proj_z output. v_dim = n_v * head_dim.
+    /// 27B: [16, 6144] = 384 KiB.
+    pub gdn_z_pack: MetalTensor,
+    /// `[N, v_dim]` F32 — RMSNormGated output across N tokens; consumed by
+    /// the batched out_proj mat-mat after the per-token recurrence loop.
+    /// 27B: [16, 6144] = 384 KiB.
+    pub gdn_normed_pack: MetalTensor,
+
     // Cached dims so callers don't have to re-derive.
     pub n: u32,
     pub hidden_size: u64,
@@ -760,6 +786,14 @@ pub struct MetalDFlashLayerMajorScratch {
     pub q_dim: u64,
     pub kv_dim: u64,
     pub vocab_size: u64,
+    /// GDN conv_dim = (2*n_k + n_v) * head_dim. Cached for layer-major
+    /// GDN batching (v0.73a). Zero on architectures without GDN.
+    pub gdn_conv_dim: u64,
+    /// GDN v_dim = n_v * head_dim. Cached for layer-major GDN batching
+    /// (v0.73a). Zero on architectures without GDN.
+    pub gdn_v_dim: u64,
+    /// GDN n_v_heads. Used to size beta/alpha projections.
+    pub gdn_n_v: u64,
 }
 
 impl MetalDFlashLayerMajorScratch {
@@ -776,6 +810,16 @@ impl MetalDFlashLayerMajorScratch {
         let q_dim = (arch.n_q_heads as u64) * head_dim;
         let kv_dim = (arch.n_kv_heads as u64) * head_dim;
         let v = arch.vocab_size as u64;
+
+        // GDN dims. Sized at 1 element when the arch has no GDN to keep
+        // the buffers allocatable; the GDN layer-major path is gated on
+        // `gdn_mat_mat_eligible` and never reads from these on non-GDN
+        // archs.
+        let gdn_head_dim = arch.gdn_head_dim as u64;
+        let gdn_n_v = arch.gdn_n_v_heads as u64;
+        let gdn_n_k = arch.gdn_n_k_heads as u64;
+        let gdn_v_dim = (gdn_n_v * gdn_head_dim).max(1);
+        let gdn_conv_dim = ((2 * gdn_n_k + gdn_n_v) * gdn_head_dim).max(1);
 
         Ok(Self {
             x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
@@ -794,12 +838,18 @@ impl MetalDFlashLayerMajorScratch {
             ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
             final_logits_pack: MetalTensor::zeros_f32(ctx, vec![n, v])?,
+            gdn_qkv_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
+            gdn_z_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+            gdn_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
             n: block_size,
             hidden_size: h,
             intermediate_size: f,
             vocab_size: v,
             q_dim,
             kv_dim,
+            gdn_conv_dim,
+            gdn_v_dim,
+            gdn_n_v,
         })
     }
 

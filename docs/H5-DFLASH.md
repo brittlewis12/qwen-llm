@@ -1334,7 +1334,110 @@ the failure:
 
 ## Document history
 
-- **rev 9 (current).** v0.72.x drafter Metal-ization SHIPPED;
+- **rev 10 (current).** v0.73a dtype recon + scope split. Before
+  touching control flow, dumped actual GGUF dtypes for production
+  27B-Q4_K_M GDN blocks. Result invalidated rev-9's "all 5 GDN
+  projections are Q4_K-batchable" assumption.
+
+  ### Real GDN projection dtype layout (per-layer, 27B Q4_K_M)
+
+    | GDN projection  | GGUF dtype | Shape           | Per-layer bytes |
+    |-----------------|------------|-----------------|-----------------|
+    | in_proj_qkv     | **Q6_K**   | [5120, 10240]   | ~42 MB          |
+    | in_proj_z       | **Q4_K**   | [5120, 6144]    | ~22 MB          |
+    | beta_proj       | **F32**    | [5120, 48]      | 0.94 MB         |
+    | alpha_proj      | **F32**    | [5120, 48]      | 0.94 MB         |
+    | out_proj        | **Q5_K**   | [6144, 5120]    | ~30 MB          |
+
+  Critical implications for v0.73a as originally scoped:
+    * `encode_mat_mat_dispatch` only supports Q4_K and Q6_K.
+    * **Q5_K mat-mat is NOT lifted** in this codebase (only Q5_K
+      mat-vec exists, in `encode_mat_vec_dispatch`).
+    * out_proj (Q5_K, ~30 MB/layer × 16 tokens × 48 layers = ~23 GB
+      redundant per outer step) is the second-largest projection.
+      Without Q5_K mat-mat, v0.73a-as-scoped would batch only the
+      front-end and leave out_proj per-token, capturing maybe half
+      the codex impact estimate.
+    * beta/alpha at F32 [5120, 48] are tiny; per-token mat-vec
+      dispatch overhead probably exceeds mat-mat BW savings. Stay
+      per-token.
+
+  ### v0.73a SPLIT (codex consult: A-lite go/no-go)
+
+  Codex recommended option A with two clean commits and a bench
+  go/no-go between them:
+
+  * **v0.73a.0** — Lift Q5_K mat-mat (kernel + host wrapper +
+    NR1=16 fast path + isolated per-kernel cosine gate +
+    `encode_mat_mat_dispatch` routing). Mirrors v0.63 (Q4_K) and
+    v0.67 (Q6_K) playbook. Q5_K dequant has high-bit-path complexity
+    not present in Q4_K/Q6_K; honest estimate **half day if it
+    compiles cleanly, full day if dequant/layout bugs surface**.
+    Gate: per-row cos ≥ 0.999 vs N successive Q5_K mat-vec on real
+    `blk.*.ssm_out.weight` at N ∈ {1, 16, 32}; layout sanity check;
+    isolated bench replay of `ssm_out` weight × 48 layers × N=16
+    must beat 16 sequential mat-vecs by a large margin.
+    **HARD GO/NO-GO**: if Q5_K mat-mat doesn't beat 16 mat-vecs
+    materially on the isolated bench, stop and reassess; do NOT
+    proceed to v0.73a.1 (because the GDN restructure would land
+    smaller than estimated and we'd be deceiving ourselves about
+    the leverage point).
+
+  * **v0.73a.1** — GDN projection batching: in_proj_qkv (Q6_K) +
+    in_proj_z (Q4_K) + out_proj (Q5_K) batched as mat-mat across
+    N=16 in the layer-major path. beta/alpha stay per-token F32
+    mat-vec (eligibility predicate `gdn_mat_mat_eligible(g)` returns
+    true iff in_proj_qkv ∈ {Q4_K, Q5_K, Q6_K} AND in_proj_z ∈ same
+    AND out_proj ∈ same; F32 falls through to per-token
+    `encode_gdn`). Codex's restructure refinements baked in:
+      - Step A (front-end batched projections) folded into the
+        existing pre-mixer-norm encoder — no added encoder transitions.
+      - Per-token loop uses `view_subrange` (zero-copy) instead of
+        `copy_offset` for staging row N of pack buffers into the
+        recurrence kernels.
+      - Step C (back-end out_proj mat-mat) folded into the existing
+        residual-#1 encoder.
+    Gate: focused unit test (single-layer batched-GDN vs per-token
+    encode_gdn cos ≥ 0.999); existing 27B layer-major-vs-token-major
+    27B test must STILL pass cos ≥ 0.999 (loosened from the rev-9
+    "expect cos = 1.0" — Q4_K/Q5_K/Q6_K mat-mat half-stages
+    activations and the recurrence amplifies tiny projection
+    deltas, per codex flag); greedy equivalence vs DFlash=off must
+    pass over multiple prompts.
+
+  ### v0.73a.0 / v0.73a.1 leftover scratch already landed (pre-recon)
+
+  Before the dtype recon I had already added some scratch and
+  kernel infrastructure assuming the all-Q4_K case. Kept where
+  still useful, removed where not:
+
+    * `MetalDFlashLayerMajorScratch::gdn_qkv_pack [N, conv_dim]`,
+      `gdn_z_pack [N, v_dim]`, `gdn_normed_pack [N, v_dim]` — KEPT.
+      Required by v0.73a.1 for the three batched projections.
+    * `gdn_b_pack`, `gdn_beta_pack`, `gdn_a_pack`, `gdn_alpha_pack`
+      — REMOVED. Beta/alpha stay per-token F32; no need for pack
+      buffers.
+    * `kernel_gdn_alpha_chain_batched_f32` + host wrapper +
+      bit-exact unit test — KEPT as standalone infrastructure
+      (small, isolated, useful if a future drafter quantizes
+      alpha_proj). NOT used by v0.73a.1.
+    * Q4_K partial-M test for `n_out=48` shape — REMOVED. Beta/alpha
+      stay per-token F32; the partial-M Q4_K path is never exercised
+      at this shape in production.
+
+  ### Why split into two commits despite the "less commit noise"
+  preference
+
+  v0.73a.0 (kernel infrastructure) and v0.73a.1 (orchestration) are
+  genuinely separate units of work with different correctness
+  surfaces. v0.73a.0 has its own gate (the isolated bench), and the
+  GO/NO-GO decision happens AT v0.73a.0's gate. If v0.73a.0 fails
+  its bench, we stop and reassess BEFORE shipping orchestration
+  work that depends on it. Combined commit would entangle two
+  independent failure modes and would force a partial revert if
+  v0.73a.1 surfaced a kernel bug.
+
+- **rev 9.** v0.72.x drafter Metal-ization SHIPPED;
   v0.73 strategy pivoted (codex unbiased recon) from Q8_0 first to
   target packed-GDN first.
 

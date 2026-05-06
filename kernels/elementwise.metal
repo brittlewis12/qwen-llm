@@ -341,6 +341,43 @@ kernel void kernel_gdn_alpha_chain_f32(
     out[tid] = sp * a_log[tid];
 }
 
+// Batched GDN α-chain (v0.73a layer-major batching).
+//
+//   out[r, c] = softplus(a[r, c] + dt_bias[c]) * a_log[c]
+//
+// Same numerics as kernel_gdn_alpha_chain_f32 (bit-identical when N=1)
+// but broadcasts dt_bias and a_log across N rows so it can run once per
+// GDN layer instead of N times. dt_bias and a_log are each `[n_v]`;
+// a and out are each `[N, n_v]` row-major.
+//
+// Dispatch: 1D grid of size N * n_v; each thread handles one (r, c)
+// element. r = tid / n_v ; c = tid % n_v.
+struct gdn_alpha_chain_batched_args {
+    uint n;       // total elements = N * n_v
+    uint n_cols;  // n_v
+};
+
+kernel void kernel_gdn_alpha_chain_batched_f32(
+        constant gdn_alpha_chain_batched_args & args [[buffer(0)]],
+        device const float * a       [[buffer(1)]],
+        device const float * dt_bias [[buffer(2)]],
+        device const float * a_log   [[buffer(3)]],
+        device       float * out     [[buffer(4)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const uint c = tid % args.n_cols;
+    const float v = a[tid] + dt_bias[c];
+    float sp;
+    if (v > 20.0f) {
+        sp = v;
+    } else if (v < -20.0f) {
+        sp = exp(v);
+    } else {
+        sp = log(1.0f + exp(v));
+    }
+    out[tid] = sp * a_log[c];
+}
+
 // =============================================================================
 // kernel_argmax_f32 — GPU-side argmax for one row of length `n`.
 //

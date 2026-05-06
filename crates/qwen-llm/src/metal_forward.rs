@@ -31,14 +31,15 @@
 use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
-    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
-    encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_gdn_alpha_chain_f32,
-    encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
-    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
+    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32,
+    encode_gdn_alpha_chain_f32, encode_gdn_step_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
+    MetalTensor,
 };
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -1415,9 +1416,10 @@ pub fn encode_mat_vec_dispatch(
 ///
 /// Production 27B Q4_K_M reaches three weight dtypes via mat-mat:
 ///   * Q4_K (ffn_gate, ffn_up, attn projections)
+///   * Q5_K (GDN out_proj — added by v0.73a.0)
 ///   * Q6_K (ffn_down, lm_head)
 ///
-/// F32 / Q5_K / other dtypes return `UnsupportedDtype`; layer-major
+/// F32 / other dtypes return `UnsupportedDtype`; layer-major
 /// callers fall back to per-token `encode_mat_vec_dispatch` for those.
 pub fn encode_mat_mat_dispatch(
     ctx: &MetalContext,
@@ -1431,6 +1433,9 @@ pub fn encode_mat_mat_dispatch(
 ) -> Result<(), MfError> {
     match weight.dtype {
         GgmlType::Q4_K => Ok(crate::metal::encode_mat_mat_q4_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::Q5_K => Ok(crate::metal::encode_mat_mat_q5_k_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         GgmlType::Q6_K => Ok(crate::metal::encode_mat_mat_q6_k_f32(
@@ -3862,8 +3867,8 @@ mod tests {
         let initial_x: Vec<f32> = (0..h).map(|i| ((i % 31) as f32 - 15.0) * 0.02).collect();
         let position: u32 = 0;
         let attn_block_idx = 3usize; // first attn block in 0.8B
-        // attn_idx_in_session is the 0-indexed count among ATTN blocks
-        // before this one. block 3 is the first attn block, so 0.
+                                     // attn_idx_in_session is the 0-indexed count among ATTN blocks
+                                     // before this one. block 3 is the first attn block, so 0.
         let attn_idx_in_session = 0usize;
 
         // CPU reference: replicate exactly what forward.rs:attn_step does.

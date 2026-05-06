@@ -220,6 +220,17 @@ pub struct MetalDFlashSession {
     pub ffn_inner_buf: MetalTensor,
     /// `[N * H_drafter]` F32 — FFN final output. Added to `x` in residual #2.
     pub ffn_out_buf: MetalTensor,
+
+    // ---- v0.72.3 lightweight phase timers ----
+    /// When true, `draft_block` reads `cmd.GPUStartTime/EndTime` after
+    /// each commit-wait and accumulates per-phase ms into
+    /// `phase_timings`. Off by default; flip from the bench harness.
+    pub enable_phase_timers: bool,
+    /// Per-phase GPU time (ms), keyed by phase name. Repeated keys
+    /// (e.g. one entry per layer) are summed by the bench reporter.
+    /// Populated when `enable_phase_timers = true`. Cleared by the
+    /// caller between bench runs.
+    pub phase_timings: Vec<(String, f64)>,
 }
 
 impl MetalDFlashSession {
@@ -265,7 +276,39 @@ impl MetalDFlashSession {
             ffn_up_buf: MetalTensor::zeros_f32(ctx, vec![n * (cfg.intermediate_size as u64)])?,
             ffn_inner_buf: MetalTensor::zeros_f32(ctx, vec![n * (cfg.intermediate_size as u64)])?,
             ffn_out_buf: MetalTensor::zeros_f32(ctx, vec![n * h])?,
+            enable_phase_timers: false,
+            phase_timings: Vec::new(),
         })
+    }
+
+    /// Enable v0.72.3 lightweight phase timers; clears any prior
+    /// timing buffer.
+    pub fn enable_phase_timers(&mut self) {
+        self.enable_phase_timers = true;
+        self.phase_timings.clear();
+    }
+
+    /// Take the accumulated timings and reset the buffer.
+    pub fn take_phase_timings(&mut self) -> Vec<(String, f64)> {
+        std::mem::take(&mut self.phase_timings)
+    }
+
+    /// v0.72.3 helper: append `(name, gpu_ms)` to phase_timings if
+    /// timing is enabled. Read AFTER `cmd.waitUntilCompleted()`.
+    /// Pulls GPU time directly from the cmd buffer (not wall time;
+    /// mirrors `single_token_phase_profiled` in metal_forward.rs).
+    pub(crate) fn maybe_record(
+        &mut self,
+        name: &str,
+        cmd: &objc2::rc::Retained<
+            objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>,
+        >,
+    ) {
+        if !self.enable_phase_timers {
+            return;
+        }
+        let gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+        self.phase_timings.push((name.to_string(), gpu_ms));
     }
 
     /// Convenience wrapper: builds its own command buffer and waits.
@@ -2256,6 +2299,7 @@ impl<'a> DFlashDecoder<'a> {
             enc.end();
             cmd.commit();
             cmd.waitUntilCompleted();
+            self.session.maybe_record("phase1_ctx_fc_norm", &cmd);
         }
 
         // ----- Phase 2 (Metal): noise embed + per-layer fwd through
@@ -2277,6 +2321,7 @@ impl<'a> DFlashDecoder<'a> {
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
+        self.session.maybe_record("phase2_embed", &cmd);
 
         // Read pos_ctx once (used by RoPE on K_ctx and SWA mask).
         let mut pos_ctx_cpu = vec![0i32; ctx_len];
@@ -2460,6 +2505,7 @@ impl<'a> DFlashDecoder<'a> {
             enc.end();
             cmd.commit();
             cmd.waitUntilCompleted();
+            self.session.maybe_record("phase2_proj_norm_rope", &cmd);
 
             // ----- Phase 3 (Metal, v0.72.1): attention + O proj + residual #1 +
             //       post-norm + SwiGLU FFN + residual #2. NO CPU readback. -----
@@ -2657,6 +2703,8 @@ impl<'a> DFlashDecoder<'a> {
             enc.end();
             cmd.commit();
             cmd.waitUntilCompleted();
+            self.session
+                .maybe_record("phase3_attn_oproj_ffn_residuals", &cmd);
         }
 
         // ----- Phase 4 (Metal): batched final norm + lm_head + argmax -----
@@ -2729,6 +2777,8 @@ impl<'a> DFlashDecoder<'a> {
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
+        self.session
+            .maybe_record("phase4_tail_norm_lmhead_argmax", &cmd);
 
         // Read back `[N]` i32 argmaxes (64 B, vs the v0.71 per-token
         // `[V]` F32 readback = 16 MB/outer step at V=248320, N=16).

@@ -253,6 +253,13 @@ struct DflashArgs {
     /// is also a correctness gate.
     #[arg(long)]
     skip_equivalence_check: bool,
+    /// **v0.72.3**: enable lightweight per-phase GPU timers in
+    /// draft_block (phase1_ctx_fc_norm, phase2_embed,
+    /// phase2_proj_norm_rope ×n_layer, phase3_attn_oproj_ffn_residuals
+    /// ×n_layer, phase4_tail). Aggregated across all outer steps and
+    /// reported at end. Used to confirm v0.72.4+ leverage map.
+    #[arg(long)]
+    profile: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -856,6 +863,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         eos,
         no_warmup,
         skip_equivalence_check,
+        profile,
     } = args;
 
     let ctx = MetalContext::new().context("init MetalContext")?;
@@ -949,6 +957,9 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut restore_calls: u32 = 0;
 
     let mut decoder = DFlashDecoder::new(&mf, &mhead, dsess);
+    if profile {
+        decoder.session.enable_phase_timers();
+    }
 
     let t_decode = Instant::now();
     'outer: loop {
@@ -1152,6 +1163,44 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             0.0
         };
         eprintln!("[dflash]   position {j:2}: {accepts:>4}/{attempts:>4} = {alpha_j:.3}");
+    }
+
+    if profile {
+        eprintln!();
+        eprintln!("[dflash] === drafter phase profile (v0.72.3) ===");
+        let timings = decoder.session.take_phase_timings();
+        if timings.is_empty() {
+            eprintln!("[dflash]   (no timings — was profile flag enabled?)");
+        } else {
+            // Aggregate same-name phases across all outer steps + layers.
+            use std::collections::BTreeMap;
+            let mut agg: BTreeMap<String, (f64, u32)> = BTreeMap::new();
+            for (name, ms) in &timings {
+                let e = agg.entry(name.clone()).or_insert((0.0, 0));
+                e.0 += ms;
+                e.1 += 1;
+            }
+            let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
+            // Sort by descending sum.
+            let mut sorted: Vec<_> = agg.iter().collect();
+            sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
+            for (name, (sum_ms, count)) in &sorted {
+                let avg = *sum_ms / (*count as f64);
+                let pct = 100.0 * *sum_ms / total_gpu_ms;
+                eprintln!(
+                    "[dflash]   {name:>40}  sum={sum_ms:>8.2} ms  ({pct:>5.1}%)  \
+                     n={count:>4}  avg={avg:>6.2} ms"
+                );
+            }
+            eprintln!(
+                "[dflash]   {:>40}  sum={total_gpu_ms:>8.2} ms  (sum-of-phases drafter GPU time)",
+                "TOTAL_DRAFTER_GPU"
+            );
+            eprintln!(
+                "[dflash]   {:>40}  sum={:>8.2} ms  (drafter wall = phases + per-commit overhead)",
+                "TOTAL_DECODE_WALL", decode_ms
+            );
+        }
     }
 
     if !skip_equivalence_check {

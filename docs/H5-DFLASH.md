@@ -1334,7 +1334,142 @@ the failure:
 
 ## Document history
 
-- **rev 10 (current).** v0.73a dtype recon + scope split. Before
+- **rev 11 (current).** v0.73a.1 SHIPPED (0.452× → 0.548×, +21%
+  speedup). Then v0.73a.2 surgical profile + drafter re-profile
+  invalidated the rev-9/rev-10 locked v0.73b (N-step GDN tail
+  kernel). Pivoting v0.73b to Q8_0 native drafter (was v0.74).
+
+  ### v0.73a.1 results (production 27B Q4_K_M, code prompt, 32 tokens)
+
+    | metric                            | v0.72.4 | v0.73a.1 | Δ        |
+    |-----------------------------------|---------|----------|----------|
+    | Speedup vs no-spec (total wall)   | 0.452×  | 0.548×   | +21%     |
+    | Decode wall                       | 3192 ms | 2600 ms  | -592 ms  |
+    | Layer-major packed_verify wall    | ~339 ms | ~287 ms  | -52 ms   |
+    | Layer-major-vs-token-major        | 1.58×   | 2.36×    | (close to codex 2.5× tripwire) |
+    | Greedy equivalence                | PASS    | PASS     | unchanged|
+    | α_chain                           | 5.2     | 5.2      | unchanged|
+
+  Bit-perfect cos=1.000000 across all 16 verify rows on the
+  layer-major-vs-token-major 27B test. argmax 16/16. v0.73a.1
+  landed in codex's predicted 0.50–0.55× range.
+
+  ### v0.73a.2 surgical profile (NEW post-v0.73a.1, ctx=1024 N=16)
+
+  Per-encoder commit/wait timing of one packed_verify_layer_major
+  call. Reflects the ACTUAL post-v0.73a.1 phase mix (rev-9's profile
+  was for the OLD per-token-mat-vec geometry):
+
+    | phase                           | ms      | %     |
+    |---------------------------------|---------|-------|
+    | **ffn_plus_residual2**          | **128.37** | **41.0%** |
+    | attn_per_token                  |  69.05  | 22.0% |
+    | gdn_per_token_compute           |  49.26  | 15.7% |
+    | gdn_step_a_proj_in_qkv_z        |  31.42  | 10.0% |
+    | gdn_step_c_proj_out             |  19.48  |  6.2% |
+    | gdn_per_token_blit              |   8.31  |  2.7% |
+    | tail (norm+lm_head+argmax)      |   4.92  |  1.6% |
+    | residual1 / norms / capture     |   ~2 ms |  ~1%  |
+    | TOTAL_PHASE_GPU                 | 313.17  |       |
+    | TOTAL_WALL (profiler artifact)  | 804.30  |       |
+    | wall - phase_gpu (artifact)     | 491.13  | 61.1% |
+
+  Critical takeaways:
+  1. **FFN is now the largest GPU phase** (41%). Already mat-mat-
+     batched (Q4_K gate/up + Q6_K down). Lift fused-SwiGLU pattern
+     from single-token path to layer-major could save 10-25ms
+     (codex haircut from my 30-50ms estimate; FFN is weight-traffic-
+     bound, fusion saves intermediate buffer materialization but
+     not weight reads).
+  2. **GDN per-token compute + blit = 57.57 ms TOTAL.** This is
+     the v0.73b ceiling. Codex's earlier 70 ms threshold for "ship
+     N-step GDN tail kernel" is NOT MET. Even removing all of it
+     would land at the upper end of codex's 0.58–0.66× estimate.
+  3. **Wall - phase_gpu = 491 ms is a profiler artifact** (per-
+     phase commit/wait). Production layer-major uses one cmd
+     buffer; real overhead is small (production wall ≤ sum-of-GPU).
+     ICB / encoder amortization (v0.76+) requires production-shaped
+     A/B to measure honestly, not this profiler.
+  4. **Attention at 22% is short-ctx**; long-ctx (16K, 64K) it
+     scales linearly while GDN flat. Pull packed-N attn forward
+     ONLY if long-ctx becomes the product target.
+
+  ### Drafter re-profile (v0.72.3 profiler, post-v0.73a.1)
+
+  Drafter unchanged since v0.72.1; ran the existing profiler again to
+  get the post-v0.73a.1 wall-share:
+
+    | metric                            | value      |
+    |-----------------------------------|------------|
+    | TOTAL_DRAFTER_GPU                 | 1268.54 ms |
+    | TOTAL_DECODE_WALL                 | 2593 ms    |
+    | **drafter share of wall**         | **48.9%**  |
+
+  Drafter is now the **single largest phase** (was 40% pre-v0.73a.1;
+  share grew because verify shrank). Q8_0 native drafter (was v0.74)
+  is now clearly the highest-EV next move. Q8_0 mat-mat lift would
+  shave estimated 100–150 ms per outer step × 5 = 500–750 ms total
+  decode wall; cumulative speedup projection 0.548× → ~0.73–0.77×.
+
+  ### v0.73b PIVOT — Q8_0 native drafter (was v0.74)
+
+  Replaces the rev-9/rev-10 N-step GDN tail kernel (the GDN tail
+  ceiling collapsed below the risk-justification threshold).
+
+  * **v0.73b.0** — Lift Q8_0 mat-mat (kernel + host wrapper +
+    NR1=16 fast path + isolated per-kernel cosine gate +
+    `encode_mat_mat_dispatch` routing). Mirrors v0.63 (Q4_K),
+    v0.67 (Q6_K), v0.73a.0 (Q5_K) lift playbook. Q8_0 has no
+    high-bit path or super-block scale packing — structurally
+    SIMPLER than Q5_K. Honest estimate: ~half day. Gate: per-row
+    cos ≥ 0.999 vs N successive Q8_0 mat-vec on real Q8_0 weight,
+    layout sanity check; isolated bench replay must beat 16 mat-vec
+    by a large margin (A-lite go/no-go pattern).
+
+  * **v0.73b.1** — Switch drafter loader from F32-dequant to
+    native Q8_0 (5 projection types per drafter layer × 5 layers
+    = 25 native Q8_0 projections). Wire Q8_0 into drafter's
+    `encode_mat_vec_dispatch` and `encode_mat_mat_dispatch` paths.
+    Greedy equivalence + H5.1.5 cosine gate must still pass.
+    Drafter weight footprint 7.4 GB → 1.85 GB (also unblocks
+    long-prompt memory headroom).
+
+  * **v0.73b.2** — N=16 mat-mat fast path for drafter
+    `draft_block` tail (lm_head batched lift already shipped in
+    v0.72.0; Q8_0 changes the dispatch but not the orchestration).
+
+  Estimated cumulative: 0.548× → 0.73–0.77×.
+
+  ### v0.73b candidates explicitly NOT chosen (and why)
+
+  * **N-step GDN tail kernel (was v0.73b through rev 10)**: 57.57 ms
+    ceiling; codex flagged risk asymmetry. Defer indefinitely; may
+    revisit at v0.76+ if encoder amortization surfaces it.
+  * **Layer-major fused SwiGLU FFN (NEW idea)**: 10–25 ms ceiling
+    (FFN is weight-traffic-bound; fusion saves materialization of
+    `gate_pack` / `up_pack` intermediates, not weight reads). Real
+    win but smaller than Q8_0; revisit as v0.73c after Q8_0 ships.
+  * **Packed-N attention v4 pulled forward (was v0.75)**: 22% of
+    verify GPU at ctx=1024, but linear-in-ctx. Defer to v0.75 unless
+    long-ctx becomes the product target.
+
+  ### Plan-doc honesty note
+
+  This is the THIRD "wrong-phase" pivot in the v0.7x stretch:
+  - v0.71 surfaced drafter-as-bottleneck (we'd been optimizing
+    target verify)
+  - v0.72.3 reframed verify > drafter (we'd been planning more
+    drafter work)
+  - v0.73a.2 reframed FFN > GDN tail and drafter > everything
+    (we'd locked v0.73b on a stale phase attribution)
+
+  Lesson reinforced: **profile before kernel work** when the
+  surface area shifts substantially. v0.73a.2 cost 1-2 hours; saved
+  an estimated 1+ day on a v0.73b-as-N-step-GDN-tail kernel that
+  would have landed below its codex-projected speedup ceiling and
+  carried higher correctness risk.
+
+- **rev 10.** v0.73a dtype recon + scope split. Before
   touching control flow, dumped actual GGUF dtypes for production
   27B-Q4_K_M GDN blocks. Result invalidated rev-9's "all 5 GDN
   projections are Q4_K-batchable" assumption.

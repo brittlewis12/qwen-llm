@@ -28,19 +28,19 @@
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::forward::{Forward, GdnState, KvCache};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::loader::{Model, open_dflash_drafter};
+use qwen_llm::loader::{open_dflash_drafter, Model};
 use qwen_llm::metal::{
-    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_silu_mul_f32,
+    encode_add_inplace_f32, encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32,
+    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_sigmoid_f32,
+    encode_silu_mul_f32, BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor,
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
     MetalDFlashSession, MetalDFlashVerifyScratch,
 };
 use qwen_llm::metal_forward::{
-    MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
-    encode_mat_vec_dispatch, encode_scatter_offset_f32,
+    encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32, MetalBlock,
+    MetalForward, MetalModel, MetalSession, RMS_EPS,
 };
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
@@ -1000,4 +1000,584 @@ fn packed_verify_phase_profile_27b() {
             "TOTAL_WALL", total_wall_ms
         );
     }
+}
+
+/// **v0.73a.2 phase profiler** — surgical instrumentation of the
+/// post-v0.73a.1 layer-major packed_verify path. Mirrors the v0.70
+/// profiler's per-encoder commit/wait pattern but reflects the
+/// actual encoder structure of the v0.73a.1 GDN restructure:
+///
+/// Per GDN layer (production 27B-Q4_K_M, eligible path):
+///   * `gdn_step_a_proj_in_qkv_z`  (1 encoder/layer, 2 mat-mat)
+///   * `gdn_per_token_compute`     (16 encoders/layer; sums beta/alpha
+///                                  mat-vec + sigmoid + alpha-chain +
+///                                  encode_gdn_tail = conv + 2 l2 +
+///                                  gdn_step + rmsnorm_gated)
+///   * `gdn_per_token_blit`        (16 blits/layer; gdn_state +
+///                                  gdn_conv ckpt copies)
+///   * `gdn_step_c_proj_out`       (1 encoder/layer, 1 mat-mat)
+///
+/// Per attn layer:
+///   * `attn_per_token`            (16 encoders/layer)
+///
+/// Plus the existing batched phases: pre_norm, residual1, hidden_capture
+/// (only fires on target_layer_ids), post_norm, ffn_plus_residual2, tail.
+///
+/// Decision criteria (from codex v0.73b prep):
+///   * gdn_per_token_compute + gdn_per_token_blit ≥ 70-80ms ⇒ v0.73b
+///     (internalized N-step GDN tail kernel) is the right move
+///   * encoder/wall gap > 20-30ms ⇒ encoder amortization first
+///   * tail dispatch dominates but cross-time fusion too risky ⇒
+///     single-step fused tail kernel as v0.73b-lite
+///   * attn ≥ GDN at ctx ⇒ pull packed-N attn forward (v0.75)
+///
+/// Single ctx point (1024) and single packed_verify call to keep
+/// runtime ~30s. KV is synthetic-primed (kernel timing only).
+#[test]
+#[ignore = "slow: ~30-60s on M4 Max for 27B-Q4_K_M; \
+            run explicitly with `cargo test --test dflash_correctness \
+            --release packed_verify_phase_profile_v073a2_27b -- --ignored --nocapture`"]
+fn packed_verify_phase_profile_v073a2_27b() {
+    if !std::path::Path::new(TARGET_GGUF).exists() {
+        eprintln!("[v0.73a.2-profile] skipped — target GGUF missing");
+        return;
+    }
+    let ctx_metal = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[v0.73a.2-profile] loading 27B-Q4_K_M…");
+    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
+    let mf = MetalForward::new(&ctx_metal, &mm);
+
+    let start_position: u32 = 1024;
+    const N: u32 = 16;
+    let target_layer_ids: Vec<u32> = vec![1, 16, 31, 46, 61];
+    let k_target = target_layer_ids.len() as u32;
+
+    let arch = m.arch.clone();
+    let h = arch.hidden_size as usize;
+    let f = arch.intermediate_size as usize;
+    let v = arch.vocab_size as usize;
+    let n_v_gdn = arch.gdn_n_v_heads as usize;
+    let n_k_gdn = arch.gdn_n_k_heads as usize;
+    let head_dim_gdn = arch.gdn_head_dim as usize;
+    let conv_dim_gdn = (2 * n_k_gdn + n_v_gdn) * head_dim_gdn;
+    let v_dim_gdn = n_v_gdn * head_dim_gdn;
+
+    eprintln!(
+        "[v0.73a.2-profile] arch: hidden={h} ffn={f} gdn(conv_dim={conv_dim_gdn} v_dim={v_dim_gdn} n_v={n_v_gdn})"
+    );
+    eprintln!("[v0.73a.2-profile] ctx={start_position} N={N}");
+
+    let kv_capacity = (start_position + N + 32) as usize;
+    let mut sess = MetalSession::fresh(&ctx_metal, &mm, kv_capacity).expect("sess");
+    eprintln!(
+        "[v0.73a.2-profile] synthetic-priming kv_n_pos to {start_position} (kernel timing only)"
+    );
+    for kp in sess.kv_n_pos.iter_mut() {
+        *kp = start_position as usize;
+    }
+
+    let mut verify_scratch =
+        MetalDFlashVerifyScratch::fresh(&ctx_metal, &mm, N, k_target).expect("verify scratch");
+    let mut layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx_metal, &mm, N).expect("layer scratch");
+
+    // Synthetic verify tokens.
+    let verify_tokens: Vec<i32> = (0..N as i32).map(|i| (i + 1) * 13).collect();
+    unsafe {
+        let p = verify_scratch.packed_ids_buf.buffer.contents().as_ptr() as *mut i32;
+        for (i, &t) in verify_tokens.iter().enumerate() {
+            *p.add(i) = t;
+        }
+    }
+
+    let mut phase_ms: Vec<(String, f64)> = Vec::new();
+    let mut accum = |name: &str, ms: f64| {
+        if let Some(slot) = phase_ms.iter_mut().find(|(n, _)| n == name) {
+            slot.1 += ms;
+        } else {
+            phase_ms.push((name.to_string(), ms));
+        }
+    };
+
+    let t_total = std::time::Instant::now();
+
+    // PHASE: embed
+    {
+        let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        encode_get_rows_f32(
+            &ctx_metal,
+            &enc,
+            &mm.token_embd,
+            &verify_scratch.packed_ids_buf,
+            &layer_scratch.x_pack,
+            N as usize,
+            h,
+        )
+        .expect("embed");
+        enc.end();
+        cmd.commit();
+        unsafe { cmd.waitUntilCompleted() };
+        accum("embed", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
+    }
+
+    let mut gdn_idx = 0usize;
+    let mut attn_idx = 0usize;
+    for (il, block) in mm.blocks.iter().enumerate() {
+        // 2a: pre-mixer norm (batched).
+        let attn_norm = match block {
+            MetalBlock::Gdn(g) => &g.attn_norm,
+            MetalBlock::Attn(a) => &a.attn_norm,
+        };
+        {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_rms_norm_batched_f32(
+                &ctx_metal,
+                &enc,
+                &layer_scratch.x_pack,
+                attn_norm,
+                &layer_scratch.h_pack,
+                N as usize,
+                h,
+                RMS_EPS,
+            )
+            .expect("pre-norm");
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            accum("pre_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
+        }
+
+        // 2b: mixer.
+        match block {
+            MetalBlock::Gdn(g) => {
+                let gi = gdn_idx;
+                gdn_idx += 1;
+
+                // Step A: batched front-end projections (1 encoder/layer).
+                {
+                    let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_mat_mat_dispatch(
+                        &ctx_metal,
+                        &enc,
+                        &g.in_proj_qkv,
+                        &layer_scratch.h_pack,
+                        &layer_scratch.gdn_qkv_pack,
+                        h,
+                        conv_dim_gdn,
+                        N as usize,
+                    )
+                    .expect("in_proj_qkv mat-mat");
+                    encode_mat_mat_dispatch(
+                        &ctx_metal,
+                        &enc,
+                        &g.in_proj_z,
+                        &layer_scratch.h_pack,
+                        &layer_scratch.gdn_z_pack,
+                        h,
+                        v_dim_gdn,
+                        N as usize,
+                    )
+                    .expect("in_proj_z mat-mat");
+                    enc.end();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    accum(
+                        "gdn_step_a_proj_in_qkv_z",
+                        (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+                    );
+                }
+
+                // Per-token loop: compute encoder + blit per token.
+                let alpha_handle = sess.gdn_alpha.clone();
+                let beta_handle = sess.gdn_beta.clone();
+                let mut compute_ms = 0.0f64;
+                let mut blit_ms = 0.0f64;
+                for n_idx in 0..N as usize {
+                    {
+                        let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        let h_n = layer_scratch
+                            .h_pack
+                            .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        encode_mat_vec_dispatch(
+                            &ctx_metal,
+                            &enc,
+                            &g.beta_proj,
+                            &h_n,
+                            &sess.gdn_b,
+                            h,
+                            n_v_gdn,
+                        )
+                        .expect("beta mat-vec");
+                        encode_sigmoid_f32(&ctx_metal, &enc, &sess.gdn_b, &sess.gdn_beta)
+                            .expect("sigmoid");
+                        encode_mat_vec_dispatch(
+                            &ctx_metal,
+                            &enc,
+                            &g.alpha_proj,
+                            &h_n,
+                            &sess.gdn_a,
+                            h,
+                            n_v_gdn,
+                        )
+                        .expect("alpha mat-vec");
+                        encode_gdn_alpha_chain_f32(
+                            &ctx_metal,
+                            &enc,
+                            &sess.gdn_a,
+                            &g.dt_bias,
+                            &g.a_log,
+                            &sess.gdn_alpha,
+                        )
+                        .expect("alpha-chain");
+                        let qkv_n = layer_scratch.gdn_qkv_pack.view_subrange(
+                            (n_idx * conv_dim_gdn) as u64,
+                            vec![conv_dim_gdn as u64],
+                        );
+                        let z_n = layer_scratch
+                            .gdn_z_pack
+                            .view_subrange((n_idx * v_dim_gdn) as u64, vec![v_dim_gdn as u64]);
+                        let normed_n = layer_scratch
+                            .gdn_normed_pack
+                            .view_subrange((n_idx * v_dim_gdn) as u64, vec![v_dim_gdn as u64]);
+                        mf.encode_gdn_tail(
+                            &enc,
+                            g,
+                            gi,
+                            &mut sess,
+                            &qkv_n,
+                            &z_n,
+                            &alpha_handle,
+                            &beta_handle,
+                            &normed_n,
+                        )
+                        .expect("gdn_tail");
+                        enc.end();
+                        cmd.commit();
+                        unsafe { cmd.waitUntilCompleted() };
+                        compute_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                    {
+                        let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                        let blit = BlitEncoder::begin(&cmd);
+                        blit.copy_tensor(
+                            &sess.gdn_state[gi],
+                            &verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32),
+                        );
+                        blit.copy_tensor(
+                            &sess.gdn_conv[gi],
+                            &verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32),
+                        );
+                        blit.end();
+                        cmd.commit();
+                        unsafe { cmd.waitUntilCompleted() };
+                        blit_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                }
+                accum("gdn_per_token_compute", compute_ms);
+                accum("gdn_per_token_blit", blit_ms);
+
+                // Step C: batched out_proj (1 encoder/layer).
+                {
+                    let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_mat_mat_dispatch(
+                        &ctx_metal,
+                        &enc,
+                        &g.out_proj,
+                        &layer_scratch.gdn_normed_pack,
+                        &layer_scratch.mixer_out_pack,
+                        v_dim_gdn,
+                        h,
+                        N as usize,
+                    )
+                    .expect("out_proj mat-mat");
+                    enc.end();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    accum(
+                        "gdn_step_c_proj_out",
+                        (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+                    );
+                }
+            }
+            MetalBlock::Attn(a) => {
+                let ai = attn_idx;
+                attn_idx += 1;
+                let mut attn_ms = 0.0f64;
+                for n_idx in 0..N as usize {
+                    let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_copy_offset_f32(
+                        &ctx_metal,
+                        &enc,
+                        &layer_scratch.h_pack,
+                        n_idx * h,
+                        &sess.h,
+                        h,
+                    )
+                    .expect("copy");
+                    let position_n = start_position + n_idx as u32;
+                    mf.encode_attn(&enc, a, ai, position_n, &mut sess)
+                        .expect("attn");
+                    encode_scatter_offset_f32(
+                        &ctx_metal,
+                        &enc,
+                        &sess.mixer_out,
+                        &layer_scratch.mixer_out_pack,
+                        n_idx * h,
+                        h,
+                    )
+                    .expect("scatter");
+                    enc.end();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    attn_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
+                accum("attn_per_token", attn_ms);
+            }
+        }
+
+        // 2c: residual #1.
+        {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_add_inplace_f32(
+                &ctx_metal,
+                &enc,
+                &layer_scratch.x_pack,
+                &layer_scratch.mixer_out_pack,
+            )
+            .expect("residual1");
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            accum("residual1", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
+        }
+
+        // 2d: hidden capture (v0.71 layout: [N, K, H]).
+        for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+            if lid as usize == il {
+                let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                for n_idx in 0..N as usize {
+                    let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
+                        + k_idx as u64)
+                        * verify_scratch.hidden_size;
+                    encode_scatter_offset_f32(
+                        &ctx_metal,
+                        &enc,
+                        &layer_scratch
+                            .x_pack
+                            .view_subrange((n_idx * h) as u64, vec![h as u64]),
+                        &verify_scratch.hidden_capture,
+                        elem_off as usize,
+                        h,
+                    )
+                    .expect("hidden capture");
+                }
+                enc.end();
+                cmd.commit();
+                unsafe { cmd.waitUntilCompleted() };
+                accum(
+                    "hidden_capture",
+                    (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+                );
+            }
+        }
+
+        // 2e: post-mixer norm.
+        let post_norm = match block {
+            MetalBlock::Gdn(g) => &g.post_attn_norm,
+            MetalBlock::Attn(a) => &a.post_attn_norm,
+        };
+        {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_rms_norm_batched_f32(
+                &ctx_metal,
+                &enc,
+                &layer_scratch.x_pack,
+                post_norm,
+                &layer_scratch.h_pack,
+                N as usize,
+                h,
+                RMS_EPS,
+            )
+            .expect("post-norm");
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            accum("post_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
+        }
+
+        // 2f: FFN (Q4_K/Q6_K mat-mat).
+        let (g_w, u_w, d_w) = match block {
+            MetalBlock::Gdn(gg) => (&gg.ffn_gate, &gg.ffn_up, &gg.ffn_down),
+            MetalBlock::Attn(aa) => (&aa.ffn_gate, &aa.ffn_up, &aa.ffn_down),
+        };
+        {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_mat_mat_dispatch(
+                &ctx_metal,
+                &enc,
+                g_w,
+                &layer_scratch.h_pack,
+                &layer_scratch.ffn_gate_pack,
+                h,
+                f,
+                N as usize,
+            )
+            .expect("ffn gate");
+            encode_mat_mat_dispatch(
+                &ctx_metal,
+                &enc,
+                u_w,
+                &layer_scratch.h_pack,
+                &layer_scratch.ffn_up_pack,
+                h,
+                f,
+                N as usize,
+            )
+            .expect("ffn up");
+            encode_silu_mul_f32(
+                &ctx_metal,
+                &enc,
+                &layer_scratch.ffn_gate_pack,
+                &layer_scratch.ffn_up_pack,
+                &layer_scratch.ffn_inner_pack,
+            )
+            .expect("silu_mul");
+            encode_mat_mat_dispatch(
+                &ctx_metal,
+                &enc,
+                d_w,
+                &layer_scratch.ffn_inner_pack,
+                &layer_scratch.ffn_out_pack,
+                f,
+                h,
+                N as usize,
+            )
+            .expect("ffn down");
+            encode_add_inplace_f32(
+                &ctx_metal,
+                &enc,
+                &layer_scratch.x_pack,
+                &layer_scratch.ffn_out_pack,
+            )
+            .expect("residual2");
+            enc.end();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            accum(
+                "ffn_plus_residual2",
+                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+            );
+        }
+    }
+
+    // PHASE: tail.
+    {
+        let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        encode_rms_norm_batched_f32(
+            &ctx_metal,
+            &enc,
+            &layer_scratch.x_pack,
+            &mm.output_norm,
+            &layer_scratch.h_pack,
+            N as usize,
+            h,
+            RMS_EPS,
+        )
+        .expect("final norm");
+        encode_mat_mat_dispatch(
+            &ctx_metal,
+            &enc,
+            &mm.lm_head,
+            &layer_scratch.h_pack,
+            &layer_scratch.final_logits_pack,
+            h,
+            v,
+            N as usize,
+        )
+        .expect("lm_head");
+        encode_argmax_f32(
+            &ctx_metal,
+            &enc,
+            &layer_scratch.final_logits_pack,
+            &verify_scratch.verify_argmax,
+            N as usize,
+            v,
+        )
+        .expect("argmax");
+        enc.end();
+        cmd.commit();
+        unsafe { cmd.waitUntilCompleted() };
+        accum("tail", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
+    }
+
+    let total_wall_ms = t_total.elapsed().as_secs_f64() * 1e3;
+    let total_phase_ms: f64 = phase_ms.iter().map(|(_, m)| *m).sum();
+
+    eprintln!("\n[v0.73a.2-profile ctx={start_position}] phase breakdown:");
+    let mut sorted: Vec<_> = phase_ms.iter().collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    for (name, ms) in &sorted {
+        let pct = 100.0 * *ms / total_phase_ms;
+        eprintln!("[v0.73a.2-profile]   {name:>30}  {ms:>8.2} ms  ({pct:>5.1}%)");
+    }
+    eprintln!(
+        "[v0.73a.2-profile]   {:>30}  {:>8.2} ms  (sum-of-phases GPU time)",
+        "TOTAL_PHASE_GPU", total_phase_ms
+    );
+    eprintln!(
+        "[v0.73a.2-profile]   {:>30}  {:>8.2} ms  (wall, includes per-phase commit overhead)",
+        "TOTAL_WALL", total_wall_ms
+    );
+    eprintln!(
+        "[v0.73a.2-profile]   wall - phase_gpu = {:.2} ms ({:.1}% — encoder/sync overhead)",
+        total_wall_ms - total_phase_ms,
+        100.0 * (total_wall_ms - total_phase_ms) / total_wall_ms,
+    );
+
+    // Decision aid: codex thresholds for v0.73b vs alternatives.
+    let gdn_compute_total = phase_ms
+        .iter()
+        .find(|(n, _)| n == "gdn_per_token_compute")
+        .map(|(_, m)| *m)
+        .unwrap_or(0.0);
+    let gdn_blit_total = phase_ms
+        .iter()
+        .find(|(n, _)| n == "gdn_per_token_blit")
+        .map(|(_, m)| *m)
+        .unwrap_or(0.0);
+    let gdn_tail_dominant = gdn_compute_total + gdn_blit_total;
+    let attn_total = phase_ms
+        .iter()
+        .find(|(n, _)| n == "attn_per_token")
+        .map(|(_, m)| *m)
+        .unwrap_or(0.0);
+    let encoder_overhead = total_wall_ms - total_phase_ms;
+    eprintln!(
+        "\n[v0.73a.2-profile] v0.73b decision criteria:\n  \
+         gdn_per_token_compute + gdn_per_token_blit = {:.2} ms\n  \
+         attn_per_token total                       = {:.2} ms\n  \
+         encoder/sync overhead (wall - phase_gpu)   = {:.2} ms\n  \
+         => v0.73b (N-step GDN tail kernel) if gdn_tail_dominant >= 70 ms\n  \
+         => v0.73c (encoder amortization)        if encoder_overhead > 30 ms\n  \
+         => v0.75 (packed-N attn) if attn_total >= gdn_tail_dominant",
+        gdn_tail_dominant, attn_total, encoder_overhead,
+    );
 }

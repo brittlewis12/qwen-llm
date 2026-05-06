@@ -31,8 +31,9 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_silu_mul_f32,
+    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32, encode_get_rows_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_silu_mul_f32,
 };
 use crate::metal_forward::{
     MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
@@ -195,6 +196,30 @@ pub struct MetalDFlashSession {
     /// did. v0.72.0 codex-recommended port from packed_verify's batched
     /// tail.
     pub draft_argmax: MetalTensor,
+
+    // ---- v0.72.1 Metal phase 3 buffers ----
+    /// `[(ctx_capacity + N) * kv_dim]` F32 — concatenated K (ctx rows
+    /// followed by noise rows). Built per-layer per-outer-step in
+    /// `draft_block` by scatter-copying from `k_ctx_buf` and `k_noise`,
+    /// then passed to `kernel_dflash_attn_f32`. Replaces the v0.71 CPU
+    /// concat that was part of the readback.
+    pub k_full: MetalTensor,
+    /// `[(ctx_capacity + N) * kv_dim]` F32 — same shape as `k_full`, V.
+    pub v_full: MetalTensor,
+    /// `[(ctx_capacity + N)]` i32 — absolute K positions for `k_full`.
+    /// Built on host per outer step and uploaded once.
+    pub pos_k: MetalTensor,
+    /// `[N * (n_q · head_dim)]` F32 — drafter attention output. Replaces
+    /// the v0.71 per-row CPU `attn_out` Vec.
+    pub attn_o_full: MetalTensor,
+    /// `[N * F_drafter]` F32 — FFN gate output. v0.72.1 Metal phase 3.
+    pub ffn_gate_buf: MetalTensor,
+    /// `[N * F_drafter]` F32 — FFN up output.
+    pub ffn_up_buf: MetalTensor,
+    /// `[N * F_drafter]` F32 — silu(gate) * up.
+    pub ffn_inner_buf: MetalTensor,
+    /// `[N * H_drafter]` F32 — FFN final output. Added to `x` in residual #2.
+    pub ffn_out_buf: MetalTensor,
 }
 
 impl MetalDFlashSession {
@@ -231,6 +256,15 @@ impl MetalDFlashSession {
             mixer_out: MetalTensor::zeros_f32(ctx, vec![n * h])?,
             draft_logits: MetalTensor::zeros_f32(ctx, vec![n * vocab])?,
             draft_argmax: MetalTensor::zeros_f32(ctx, vec![n])?,
+            // v0.72.1 phase 3 buffers
+            k_full: MetalTensor::zeros_f32(ctx, vec![(cc + n) * kv_dim])?,
+            v_full: MetalTensor::zeros_f32(ctx, vec![(cc + n) * kv_dim])?,
+            pos_k: MetalTensor::zeros_f32(ctx, vec![cc + n])?,
+            attn_o_full: MetalTensor::zeros_f32(ctx, vec![n * q_dim])?,
+            ffn_gate_buf: MetalTensor::zeros_f32(ctx, vec![n * (cfg.intermediate_size as u64)])?,
+            ffn_up_buf: MetalTensor::zeros_f32(ctx, vec![n * (cfg.intermediate_size as u64)])?,
+            ffn_inner_buf: MetalTensor::zeros_f32(ctx, vec![n * (cfg.intermediate_size as u64)])?,
+            ffn_out_buf: MetalTensor::zeros_f32(ctx, vec![n * h])?,
         })
     }
 
@@ -2427,153 +2461,202 @@ impl<'a> DFlashDecoder<'a> {
             cmd.commit();
             cmd.waitUntilCompleted();
 
-            // ----- Phase 3 (CPU): attention with SWA mask + FFN -----
-            // Read q/k/v back, run scalar attention with mask, run scalar
-            // SwiGLU FFN, write x += attn_proj_residual + ffn_proj_residual
-            // back to GPU.
-            // Activation readbacks (small enough to copy; sizes ≪ weights).
-            let q_full = read_f32_activation(&self.session.q_buf, n * q_dim);
-            let k_noise_cpu = read_f32_activation(&self.session.k_noise, n * kv_dim);
-            let v_noise_cpu = read_f32_activation(&self.session.v_noise, n * kv_dim);
-            let k_ctx_cpu = if ctx_len > 0 {
-                let mut out = vec![0.0f32; ctx_len * kv_dim];
-                unsafe {
-                    let src = self.session.k_ctx_buf.buffer.contents().as_ptr() as *const f32;
-                    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+            // ----- Phase 3 (Metal, v0.72.1): attention + O proj + residual #1 +
+            //       post-norm + SwiGLU FFN + residual #2. NO CPU readback. -----
+            //
+            // The v0.71 path read q/k/v + x back to CPU, ran scalar
+            // attention with the SWA mask, did 4 mat-vecs per row × N
+            // rows × 5 layers on CPU, and wrote x back. Cumulative:
+            // ~12 s per outer step on Qwen3.6-27B-Q4_K_M.
+            //
+            // v0.72.1 replaces this with kernel_dflash_attn_f32
+            // (custom small-N fused attention with per-layer SWA mask)
+            // + per-row O proj + per-row FFN mat-vec on Metal. All in
+            // one command buffer; no readback until the lm_head tail.
+            //
+            // Drafter weights are still F32 (dequant'd at load); v0.72.4
+            // will switch to native Q8_0 mat-vec/mat-mat.
+            let pos_k_uploaded;
+            {
+                // Build pos_k on host: pos_ctx (length ctx_len) ++
+                // [noise_start_pos..noise_start_pos+N] (length N).
+                let n_kv_total = ctx_len + n;
+                pos_k_uploaded = n_kv_total;
+                let mut pos_k_host: Vec<i32> = Vec::with_capacity(n_kv_total);
+                for c in 0..ctx_len {
+                    pos_k_host.push(pos_ctx_cpu[c]);
                 }
-                out
-            } else {
-                Vec::new()
-            };
-            let v_ctx_cpu = if ctx_len > 0 {
-                let mut out = vec![0.0f32; ctx_len * kv_dim];
-                unsafe {
-                    let src = self.session.v_ctx_buf.buffer.contents().as_ptr() as *const f32;
-                    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+                for i in 0..n {
+                    pos_k_host.push((noise_start_pos + i as u32) as i32);
                 }
-                out
-            } else {
-                Vec::new()
-            };
-            // Read x (residual stream).
-            let mut x_cpu = read_f32_activation(&self.session.x, n * h);
-            // Read post-norm h for FFN.
-            // (Will be overwritten by next layer's norm; capture now after attn.)
+                unsafe {
+                    let dst = self.session.pos_k.buffer.contents().as_ptr() as *mut i32;
+                    std::ptr::copy_nonoverlapping(pos_k_host.as_ptr(), dst, n_kv_total);
+                }
+            }
 
-            // Attention.
-            let n_kv_total = ctx_len + n;
-            let mut k_full = vec![0.0f32; n_kv_total * kv_dim];
-            let mut v_full = vec![0.0f32; n_kv_total * kv_dim];
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd phase3");
+            let enc = KernelEncoder::begin(&cmd);
+
+            // (a) Concat K_ctx + K_noise into k_full; same for V.
+            //     k_full[0 .. ctx_len*kv_dim] <- k_ctx_buf[..ctx_len*kv_dim]
+            //     k_full[ctx_len*kv_dim .. (ctx_len+N)*kv_dim] <- k_noise[..]
             if ctx_len > 0 {
-                k_full[..ctx_len * kv_dim].copy_from_slice(&k_ctx_cpu);
-                v_full[..ctx_len * kv_dim].copy_from_slice(&v_ctx_cpu);
+                let src_k_ctx = self
+                    .session
+                    .k_ctx_buf
+                    .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
+                let src_v_ctx = self
+                    .session
+                    .v_ctx_buf
+                    .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
+                encode_scatter_offset_f32(
+                    ctx_metal,
+                    &enc,
+                    &src_k_ctx,
+                    &self.session.k_full,
+                    0,
+                    ctx_len * kv_dim,
+                )?;
+                encode_scatter_offset_f32(
+                    ctx_metal,
+                    &enc,
+                    &src_v_ctx,
+                    &self.session.v_full,
+                    0,
+                    ctx_len * kv_dim,
+                )?;
             }
-            k_full[ctx_len * kv_dim..].copy_from_slice(&k_noise_cpu);
-            v_full[ctx_len * kv_dim..].copy_from_slice(&v_noise_cpu);
-            let kq_scale = 1.0f32 / (head_dim as f32).sqrt();
-            let swa_window = cfg.swa_window;
-            let mut attn_out = vec![0.0f32; n * q_dim];
-            for q_idx in 0..n {
-                let q_pos = noise_start_pos + q_idx as u32;
-                for qh in 0..n_q {
-                    let kvh = qh / group;
-                    let q_off = q_idx * q_dim + qh * head_dim;
-                    let q_slice = &q_full[q_off..q_off + head_dim];
-                    let mut scores = vec![f32::NEG_INFINITY; n_kv_total];
-                    for k_idx in 0..n_kv_total {
-                        let allowed = if k_idx < ctx_len {
-                            let k_pos = pos_ctx_cpu[k_idx] as u32;
-                            if !layer.is_swa {
-                                true
-                            } else {
-                                q_pos.saturating_sub(k_pos) <= swa_window
-                            }
-                        } else {
-                            (k_idx - ctx_len) <= q_idx
-                        };
-                        if !allowed {
-                            continue;
-                        }
-                        let k_off = k_idx * kv_dim + kvh * head_dim;
-                        let k_slice = &k_full[k_off..k_off + head_dim];
-                        let mut s = 0.0f32;
-                        for d in 0..head_dim {
-                            s += q_slice[d] * k_slice[d];
-                        }
-                        scores[k_idx] = s * kq_scale;
-                    }
-                    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    let mut sum = 0.0f32;
-                    for s in scores.iter_mut() {
-                        *s = (*s - max).exp();
-                        sum += *s;
-                    }
-                    let inv = 1.0 / sum;
-                    for s in scores.iter_mut() {
-                        *s *= inv;
-                    }
-                    let out_off = q_idx * q_dim + qh * head_dim;
-                    let out_slice = &mut attn_out[out_off..out_off + head_dim];
-                    for k_idx in 0..n_kv_total {
-                        let w = scores[k_idx];
-                        if !w.is_finite() || w == 0.0 {
-                            continue;
-                        }
-                        let v_off = k_idx * kv_dim + kvh * head_dim;
-                        for d in 0..head_dim {
-                            out_slice[d] += w * v_full[v_off + d];
-                        }
-                    }
-                }
-            }
-            // O proj per row (CPU, since we already have attn_out on CPU).
-            // Weight borrowed (zero-copy view of Metal shared storage).
-            let o_w = borrow_f32_tensor(&layer.o);
+            encode_scatter_offset_f32(
+                ctx_metal,
+                &enc,
+                &self.session.k_noise,
+                &self.session.k_full,
+                ctx_len * kv_dim,
+                n * kv_dim,
+            )?;
+            encode_scatter_offset_f32(
+                ctx_metal,
+                &enc,
+                &self.session.v_noise,
+                &self.session.v_full,
+                ctx_len * kv_dim,
+                n * kv_dim,
+            )?;
+
+            // (b) Slice the live regions of k_full/v_full/pos_k to the
+            //     n_kv_total active rows. The rest is unused this layer.
+            let n_kv_total = ctx_len + n;
+            let k_view = self
+                .session
+                .k_full
+                .view_subrange(0, vec![(n_kv_total * kv_dim) as u64]);
+            let v_view = self
+                .session
+                .v_full
+                .view_subrange(0, vec![(n_kv_total * kv_dim) as u64]);
+            let pos_view = self.session.pos_k.view_subrange(0, vec![n_kv_total as u64]);
+
+            // (c) Fused attention: writes attn_o_full [N, n_q*head_dim].
+            let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
+            encode_dflash_attn_f32(
+                ctx_metal,
+                &enc,
+                &self.session.q_buf,
+                &k_view,
+                &v_view,
+                &pos_view,
+                &self.session.attn_o_full,
+                n,
+                n_q,
+                n_kv,
+                head_dim,
+                n_kv_total,
+                ctx_len,
+                noise_start_pos,
+                swa_window_arg,
+            )?;
+            let _ = pos_k_uploaded;
+
+            // (d) O proj per row (mat-vec). Drafter weights F32 — per-row
+            //     mat-vec is ~OK for v0.72.1; v0.72.4 (native Q8_0)
+            //     will lift to mat-mat for amortized weight loads.
             for i in 0..n {
-                let row_in = &attn_out[i * q_dim..(i + 1) * q_dim];
-                let row_out = mat_vec_cpu(o_w, q_dim, h, row_in);
-                // Residual #1: x += row_out.
-                for d in 0..h {
-                    x_cpu[i * h + d] += row_out[d];
-                }
+                let row_in = self
+                    .session
+                    .attn_o_full
+                    .view_subrange((i * q_dim) as u64, vec![q_dim as u64]);
+                let row_out = self
+                    .session
+                    .ffn_out_buf
+                    .view_subrange((i * h) as u64, vec![h as u64]);
+                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.o, &row_in, &row_out, q_dim, h)?;
             }
 
-            // Pre-FFN RMSNorm on CPU (cheap).
-            let post_w = borrow_f32_tensor(&layer.post_attention_norm);
-            let mut h_post = vec![0.0f32; n * h];
-            for i in 0..n {
-                let s = i * h;
-                let row = &x_cpu[s..s + h];
-                let normed = rms_norm_cpu(row, post_w, RMS_EPS);
-                h_post[s..s + h].copy_from_slice(&normed);
-            }
+            // (e) Residual #1: x += ffn_out_buf (reusing ffn_out_buf as
+            //     a transient holder for the O proj output).
+            encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, &self.session.ffn_out_buf)?;
 
-            // SwiGLU FFN per row. Weights borrowed.
-            let g_w = borrow_f32_tensor(&layer.ffn_gate);
-            let u_w = borrow_f32_tensor(&layer.ffn_up);
-            let d_w = borrow_f32_tensor(&layer.ffn_down);
-            for i in 0..n {
-                let row = &h_post[i * h..(i + 1) * h];
-                let gate = mat_vec_cpu(g_w, h, f, row);
-                let up = mat_vec_cpu(u_w, h, f, row);
-                let mut inner = vec![0.0f32; f];
-                for j in 0..f {
-                    let g = gate[j];
-                    let silu_g = g / (1.0 + (-g).exp());
-                    inner[j] = silu_g * up[j];
-                }
-                let down = mat_vec_cpu(d_w, f, h, &inner);
-                // Residual #2.
-                for d in 0..h {
-                    x_cpu[i * h + d] += down[d];
-                }
-            }
+            // (f) Pre-FFN RMSNorm: x → h_buf (reuse session.h, batched).
+            encode_rms_norm_batched_f32(
+                ctx_metal,
+                &enc,
+                &self.session.x,
+                &layer.post_attention_norm,
+                &self.session.h,
+                n,
+                h,
+                RMS_EPS,
+            )?;
 
-            // Write x_cpu back to GPU for the next layer (or final norm).
-            unsafe {
-                let dst = self.session.x.buffer.contents().as_ptr() as *mut f32;
-                std::ptr::copy_nonoverlapping(x_cpu.as_ptr(), dst, x_cpu.len());
+            // (g) SwiGLU FFN per row.
+            for i in 0..n {
+                let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                let gate_row = self
+                    .session
+                    .ffn_gate_buf
+                    .view_subrange((i * f) as u64, vec![f as u64]);
+                let up_row = self
+                    .session
+                    .ffn_up_buf
+                    .view_subrange((i * f) as u64, vec![f as u64]);
+                encode_mat_vec_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.ffn_gate,
+                    &row_in,
+                    &gate_row,
+                    h,
+                    f,
+                )?;
+                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.ffn_up, &row_in, &up_row, h, f)?;
             }
+            // silu_mul over the entire N*F flat buffer (elementwise).
+            encode_silu_mul_f32(
+                ctx_metal,
+                &enc,
+                &self.session.ffn_gate_buf,
+                &self.session.ffn_up_buf,
+                &self.session.ffn_inner_buf,
+            )?;
+            // ffn_down per row → ffn_out_buf.
+            for i in 0..n {
+                let row_in = self
+                    .session
+                    .ffn_inner_buf
+                    .view_subrange((i * f) as u64, vec![f as u64]);
+                let row_out = self
+                    .session
+                    .ffn_out_buf
+                    .view_subrange((i * h) as u64, vec![h as u64]);
+                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.ffn_down, &row_in, &row_out, f, h)?;
+            }
+            // (h) Residual #2: x += ffn_out_buf.
+            encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, &self.session.ffn_out_buf)?;
+
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
         }
 
         // ----- Phase 4 (Metal): batched final norm + lm_head + argmax -----

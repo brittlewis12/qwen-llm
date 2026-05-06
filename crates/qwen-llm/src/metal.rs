@@ -2162,6 +2162,135 @@ pub fn encode_attn_decode_f32(
     Ok(())
 }
 
+/// **DFlash drafter attention** (v0.72.1) — fused small-N attention
+/// with per-layer SWA mask. Replaces the CPU phase-3 attention in
+/// `draft_block`. See `kernels/dflash_attn.metal` for design.
+///
+/// Threadgroup grid: `(n_q_heads, N)` per drafter layer per outer step.
+/// Threads per TG: 32 (one simdgroup; head_dim/32=4 dims per lane).
+pub fn encode_dflash_attn_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k: &MetalTensor,
+    v: &MetalTensor,
+    pos_k: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_kv_total: usize,
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+) -> Result<(), MetalError> {
+    if head_dim % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn",
+            detail: format!("head_dim={head_dim} not divisible by 32"),
+        });
+    }
+    if n_q_heads % n_kv_heads != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn",
+            detail: format!("n_q_heads={n_q_heads} not divisible by n_kv_heads={n_kv_heads}"),
+        });
+    }
+    if q.n_elements() as usize != n * n_q_heads * head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn.q",
+            detail: format!(
+                "q.n_elements={} != N*n_q*head_dim={}",
+                q.n_elements(),
+                n * n_q_heads * head_dim
+            ),
+        });
+    }
+    let kv_stride = n_kv_heads * head_dim;
+    if k.n_elements() as usize != n_kv_total * kv_stride
+        || v.n_elements() as usize != n_kv_total * kv_stride
+    {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn.kv",
+            detail: format!(
+                "k/v expected n_kv_total*kv_stride = {}*{} = {} elements",
+                n_kv_total,
+                kv_stride,
+                n_kv_total * kv_stride
+            ),
+        });
+    }
+    if pos_k.n_elements() as usize != n_kv_total {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn.pos_k",
+            detail: format!(
+                "pos_k.n_elements={} != n_kv_total={n_kv_total}",
+                pos_k.n_elements()
+            ),
+        });
+    }
+    if o.n_elements() as usize != n * n_q_heads * head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn.o",
+            detail: format!(
+                "o.n_elements={} != N*n_q*head_dim={}",
+                o.n_elements(),
+                n * n_q_heads * head_dim
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_dflash_attn_f32")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_kv_total: u32,
+        ctx_len: u32,
+        noise_start_pos: u32,
+        swa_window: u32,
+        scale: f32,
+    }
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    enc.set_bytes(
+        0,
+        &Args {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_kv_total: n_kv_total as u32,
+            ctx_len: ctx_len as u32,
+            noise_start_pos,
+            swa_window,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k);
+    enc.set_tensor(3, v);
+    enc.set_tensor(4, pos_k);
+    enc.set_tensor(5, o);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_q_heads,
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Per-head L2-norm: `y[h, :] = x[h, :] / max(||x[h, :]||, eps)` for
 /// `h ∈ [0, n_heads)`. One dispatch covers all heads. Used in the GDN
 /// front-end where Q and K are l2-normed per K-head before the

@@ -189,6 +189,12 @@ pub struct MetalDFlashSession {
 
     /// Final logits buffer for the entire noise block: `[N, V_target]`.
     pub draft_logits: MetalTensor,
+    /// `[N]` i32 (in F32 buffer) — drafter argmax destination, written
+    /// by the GPU argmax kernel after the batched lm_head. Avoids the
+    /// per-row CPU readback + scalar-loop argmax that v0.71's draft_block
+    /// did. v0.72.0 codex-recommended port from packed_verify's batched
+    /// tail.
+    pub draft_argmax: MetalTensor,
 }
 
 impl MetalDFlashSession {
@@ -224,6 +230,7 @@ impl MetalDFlashSession {
             attn_o: MetalTensor::zeros_f32(ctx, vec![n * q_dim])?,
             mixer_out: MetalTensor::zeros_f32(ctx, vec![n * h])?,
             draft_logits: MetalTensor::zeros_f32(ctx, vec![n * vocab])?,
+            draft_argmax: MetalTensor::zeros_f32(ctx, vec![n])?,
         })
     }
 
@@ -2569,7 +2576,22 @@ impl<'a> DFlashDecoder<'a> {
             }
         }
 
-        // ----- Phase 4 (Metal): final norm + lm_head per noise row -----
+        // ----- Phase 4 (Metal): batched final norm + lm_head + argmax -----
+        //
+        // v0.72.0 — port the H5.3b.6 batched-tail pattern from
+        // packed_verify into draft_block. Codex Q3 from the v0.72-design
+        // session: drafter shares target's lm_head (Q6_K), so the same
+        // encode_mat_mat_dispatch + encode_argmax_f32 path applies.
+        //
+        // Replaces the per-row mat-vec lm_head loop (16 dispatches +
+        // 16x weight re-read of ~1 GiB Q6_K = ~16 GiB redundant
+        // traffic per outer step) with ONE mat-mat dispatch. Also
+        // replaces the CPU `[N, V] -> argmax` readback (~16 MB
+        // per outer step + scalar loop) with one GPU argmax dispatch
+        // and an `[N]` i32 readback (64 B). Both wins compound.
+        //
+        // Falls back to per-row mat-vec for non-mat-mat-eligible
+        // lm_head dtypes (F32 0.8B oracle path).
         let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
         let enc = KernelEncoder::begin(&cmd);
         encode_rms_norm_batched_f32(
@@ -2582,42 +2604,55 @@ impl<'a> DFlashDecoder<'a> {
             h,
             RMS_EPS,
         )?;
-        for i in 0..n {
-            let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
-            let row_out = self
-                .session
-                .draft_logits
-                .view_subrange((i * v) as u64, vec![v as u64]);
-            encode_mat_vec_dispatch(
+        let lm_dtype = self.base.model.lm_head.dtype;
+        let lm_mat_mat_path = matches!(lm_dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+        if lm_mat_mat_path {
+            encode_mat_mat_dispatch(
                 ctx_metal,
                 &enc,
                 &self.base.model.lm_head,
-                &row_in,
-                &row_out,
+                &self.session.h,
+                &self.session.draft_logits,
                 h,
                 v,
+                n,
             )?;
+        } else {
+            for i in 0..n {
+                let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                let row_out = self
+                    .session
+                    .draft_logits
+                    .view_subrange((i * v) as u64, vec![v as u64]);
+                encode_mat_vec_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &self.base.model.lm_head,
+                    &row_in,
+                    &row_out,
+                    h,
+                    v,
+                )?;
+            }
         }
+        encode_argmax_f32(
+            ctx_metal,
+            &enc,
+            &self.session.draft_logits,
+            &self.session.draft_argmax,
+            n,
+            v,
+        )?;
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
 
-        // Argmax per row (CPU). H5.3 swaps to GPU argmax via top-1 reduction.
-        let mut logits = vec![0.0f32; n * v];
+        // Read back `[N]` i32 argmaxes (64 B, vs the v0.71 per-token
+        // `[V]` F32 readback = 16 MB/outer step at V=248320, N=16).
+        let mut argmaxes = vec![0i32; n];
         unsafe {
-            let src = self.session.draft_logits.buffer.contents().as_ptr() as *const f32;
-            std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
-        }
-        let mut argmaxes = Vec::with_capacity(n);
-        for i in 0..n {
-            let row = &logits[i * v..(i + 1) * v];
-            let argmax = row
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(j, _)| j as i32)
-                .unwrap_or(0);
-            argmaxes.push(argmax);
+            let src = self.session.draft_argmax.buffer.contents().as_ptr() as *const i32;
+            std::ptr::copy_nonoverlapping(src, argmaxes.as_mut_ptr(), n);
         }
         Ok(argmaxes)
     }

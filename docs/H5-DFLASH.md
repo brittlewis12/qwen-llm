@@ -1334,7 +1334,97 @@ the failure:
 
 ## Document history
 
-- **rev 7 (current).** H5.3b SHIPPED (v0.62 → v0.69). Codex
+- **rev 8 (current).** H5.5 end-to-end DFlash decode SHIPPED
+  (v0.71). Greedy equivalence with no-spec PASSES on 27B Q4_K_M
+  code prompt. Acceptance excellent (alpha_pos1=1.000,
+  alpha_chain=5.2 drafts/step, mean_emitted=6.2 tokens/step).
+
+  But end-to-end speedup is 0.024x — DRAFTER consumes ~12.6 s per
+  outer step. Surfaced via the bench as the actual bottleneck;
+  ALL the H5.3b kernel work was attacking the wrong phase.
+
+  ### Root cause
+
+  draft_block has been the H5.1 "HYBRID DEBUG SCAFFOLD" the entire
+  time: Metal projections + RoPE + norms but CPU attention + CPU
+  SwiGLU FFN. CPU phase 3 of draft_block runs full attention with
+  SWA mask + 3 mat-vecs through F=17408-intermediate-dim FFN per
+  layer x 5 layers per outer step. Estimated 99% of wall.
+
+  The H5.1 commit explicitly called this scaffold; the plan said
+  "deferred to H5.3" but H5.3 ended up being the TARGET'S packed
+  verify path. We never came back for the drafter.
+
+  ### v0.72 — Drafter Metal-ization (codex partner session, v0.72-design)
+
+  Codex flipped my proposed sequence on its head:
+  "Q8_0 first optimizes a path you are about to delete, and
+  native Q8_0 actively conflicts with the current CPU fallback."
+
+  Locked sequence:
+
+    1. **v0.72.0** — port batched-tail pattern from packed_verify
+       into draft_block. Currently draft_block's tail still loops
+       per row with mat-vec + CPU argmax. Replace with batched
+       RMSNorm + mat_mat lm_head (Q6_K, shared with target) +
+       batched argmax. Free win, isolates plumbing change.
+    2. **v0.72.1** — Metal SwiGLU FFN for N-row activation on F32
+       weights. Drafter weights stay F32-dequantized at load for
+       now (matches CPU fallback contract). Reuses existing
+       encode_mat_vec_f32 for individual mat-vecs; just batch N
+       rows + remove CPU loop. Validate vs CPU oracle.
+    3. **v0.72.2** — custom small-N fused SWA-masked attention
+       kernel. Codex Q2: NOT multi-pass (would require new batched
+       softmax + new GQA-aware F32 mat-mat for QK and V agg).
+       Real fused kernel: ONE threadgroup per (q_idx, q_head),
+       streaming softmax over ctx + noise, NO materialized scores.
+       Same simdgroup-matrix tile pattern from H5.3b mat-mat plus
+       the streaming-softmax pattern from attn_v4.
+    4. **v0.72.3** — plumb attention + FFN + tail into draft_block;
+       remove CPU phase 3 entirely. End-to-end bench.
+    5. **v0.72.4** — ONLY after the above ships green: lift Q8_0
+       mat-vec + mat-mat, switch drafter loader to native Q8_0,
+       enable Q8_0 routing in mat_vec/mat_mat dispatch helpers.
+       N=16 fast path lifted from H5.3b.5.5 pattern.
+    6. **v0.72.5+** — ctx_h caching across outer steps + K_ctx /
+       V_ctx caching. Asymptotic lever for long ctx; not the
+       current bottleneck. Design attention buffers in v0.72.2
+       so `[layer, ctx, kv]` slot-caching can be added later
+       without reshape.
+
+  ### Codex flags / mitigations baked in
+
+    * **Mask correctness**: defensively require `k_pos <= q_pos`
+      for ctx keys. Current saturating_sub would allow future
+      ctx positions if an invariant slipped. Fused attention
+      kernel asserts both `q_pos - k_pos <= swa_window` AND
+      `k_pos <= q_pos`.
+    * **CPU oracle for SWA boundary positions** mandatory in
+      v0.72.2 tests. The fused attention kernel is exactly where
+      silent acceptance regressions hide.
+    * **Don't pull K_ctx/V_ctx caching forward** to v0.72.2 —
+      bigger structural risk than asymptotic value at current ctx.
+      But design `[layer, ctx, kv]` indexing in the attention
+      kernel so v0.72.5 caching slots in cleanly.
+    * **Skip dedicated dflash-profile subcommand**: diagnosis is
+      already decisive (Phase 3 is ~99% of drafter wall).
+      Lightweight timers in dflash bench only if cheap.
+
+  ### Expected drafter speedup once v0.72.0-.4 ship
+
+  Conservative: 12.6 s -> ~50 ms (250x), bringing end-to-end DFlash
+  speedup from 0.024x to ~0.95x at current verify cost (~423ms),
+  approaching break-even with no-spec at code-prompt alpha levels.
+
+  Aggressive (with N-row mat-mat amortization in projections,
+  ctx_h caching v0.72.5): ~10ms drafter, ~1.5-2x end-to-end DFlash
+  speedup vs no-spec.
+
+  At which point the H5.3b kernel work (packed GDN + packed
+  flash-attn-v4) becomes the next dominant phase and v0.73+
+  fires accordingly.
+
+- **rev 7.** H5.3b SHIPPED (v0.62 → v0.69). Codex
   next-moves partner session staked the v0.70+ sequence.
   Headline H5.3b results:
     * Layer-major packed_verify bit-exact vs token-major oracle on

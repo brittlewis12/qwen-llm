@@ -52,10 +52,15 @@ use crate::tensor::{GgmlType, TensorDesc};
 /// their native form (vs. dequant'ing to F32). Used by both `load_weight`
 /// in `MetalModel::load` and the byte-ledger diagnostic, so they stay
 /// in sync. If you add a new native quant kernel, list its dtype here.
+///
+/// Q8_0 added v0.73b.1 — DFlash drafter switches from F32-dequant
+/// resident (~7.4 GB) to native Q8_0 (~1.85 GB). Q8_0 was the only
+/// non-K-quant in production use; the rest are K-quants from the
+/// 27B-Q4_K_M target.
 pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
     matches!(
         dtype,
-        GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K
+        GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
     )
 }
 use objc2_metal::{

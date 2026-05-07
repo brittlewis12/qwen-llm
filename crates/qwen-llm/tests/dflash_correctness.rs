@@ -32,7 +32,7 @@ use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_get_rows_f32,
-    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_mul_f32, encode_rms_norm_batched_f32, encode_rope_neox_f32,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
     encode_split_q_gate_f32,
 };
@@ -568,7 +568,7 @@ fn packed_verify_phase_profile_27b() {
     let target_layer_ids: Vec<u32> = vec![1, 16, 31, 46, 61];
     let k_target = target_layer_ids.len() as u32;
 
-    let arch = m.arch.clone();
+    let arch = m.arch;
     let h = arch.hidden_size as usize;
     let f = arch.intermediate_size as usize;
     let v = arch.vocab_size as usize;
@@ -611,9 +611,9 @@ fn packed_verify_phase_profile_27b() {
             }
         }
 
-        let mut verify_scratch =
+        let verify_scratch =
             MetalDFlashVerifyScratch::fresh(&ctx_metal, &mm, N, k_target).expect("verify scratch");
-        let mut layer_scratch =
+        let layer_scratch =
             MetalDFlashLayerMajorScratch::fresh(&ctx_metal, &mm, N).expect("layer scratch");
 
         // Synthetic verify tokens.
@@ -654,7 +654,7 @@ fn packed_verify_phase_profile_27b() {
             .expect("embed");
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             accum("embed", ms);
         }
@@ -684,7 +684,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("pre-norm");
                 enc.end();
                 cmd.commit();
-                unsafe { cmd.waitUntilCompleted() };
+                cmd.waitUntilCompleted();
                 accum("pre_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }
 
@@ -724,7 +724,7 @@ fn packed_verify_phase_profile_27b() {
                             .expect("scatter");
                             enc.end();
                             cmd.commit();
-                            unsafe { cmd.waitUntilCompleted() };
+                            cmd.waitUntilCompleted();
                             gdn_compute_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                         // Blit pass.
@@ -741,7 +741,7 @@ fn packed_verify_phase_profile_27b() {
                             );
                             blit.end();
                             cmd.commit();
-                            unsafe { cmd.waitUntilCompleted() };
+                            cmd.waitUntilCompleted();
                             gdn_blit_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                         }
                     }
@@ -778,7 +778,7 @@ fn packed_verify_phase_profile_27b() {
                         .expect("scatter");
                         enc.end();
                         cmd.commit();
-                        unsafe { cmd.waitUntilCompleted() };
+                        cmd.waitUntilCompleted();
                         attn_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     accum("attn_mixer", attn_ms);
@@ -798,7 +798,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("residual1");
                 enc.end();
                 cmd.commit();
-                unsafe { cmd.waitUntilCompleted() };
+                cmd.waitUntilCompleted();
                 accum("residual1", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }
 
@@ -825,7 +825,7 @@ fn packed_verify_phase_profile_27b() {
                     }
                     enc.end();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     accum(
                         "hidden_capture",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -854,7 +854,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("post-norm");
                 enc.end();
                 cmd.commit();
-                unsafe { cmd.waitUntilCompleted() };
+                cmd.waitUntilCompleted();
                 accum("post_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
             }
 
@@ -925,7 +925,7 @@ fn packed_verify_phase_profile_27b() {
                 .expect("residual2");
                 enc.end();
                 cmd.commit();
-                unsafe { cmd.waitUntilCompleted() };
+                cmd.waitUntilCompleted();
                 accum(
                     "ffn_plus_residual2",
                     (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -976,7 +976,7 @@ fn packed_verify_phase_profile_27b() {
             }
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             accum("tail", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1069,7 +1069,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
     let target_layer_ids: Vec<u32> = vec![1, 16, 31, 46, 61];
     let k_target = target_layer_ids.len() as u32;
 
-    let arch = m.arch.clone();
+    let arch = m.arch;
     let h = arch.hidden_size as usize;
     let f = arch.intermediate_size as usize;
     let v = arch.vocab_size as usize;
@@ -1093,9 +1093,9 @@ fn packed_verify_phase_profile_v073a2_27b() {
         *kp = start_position as usize;
     }
 
-    let mut verify_scratch =
+    let verify_scratch =
         MetalDFlashVerifyScratch::fresh(&ctx_metal, &mm, N, k_target).expect("verify scratch");
-    let mut layer_scratch =
+    let layer_scratch =
         MetalDFlashLayerMajorScratch::fresh(&ctx_metal, &mm, N).expect("layer scratch");
 
     // Synthetic verify tokens.
@@ -1134,7 +1134,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
         .expect("embed");
         enc.end();
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
         accum("embed", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
     }
 
@@ -1162,7 +1162,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("pre-norm");
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             accum("pre_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1200,7 +1200,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("in_proj_z mat-mat");
                     enc.end();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     accum(
                         "gdn_step_a_proj_in_qkv_z",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1274,7 +1274,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                         .expect("gdn_tail");
                         enc.end();
                         cmd.commit();
-                        unsafe { cmd.waitUntilCompleted() };
+                        cmd.waitUntilCompleted();
                         compute_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                     {
@@ -1290,7 +1290,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                         );
                         blit.end();
                         cmd.commit();
-                        unsafe { cmd.waitUntilCompleted() };
+                        cmd.waitUntilCompleted();
                         blit_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
                 }
@@ -1314,7 +1314,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("out_proj mat-mat");
                     enc.end();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     accum(
                         "gdn_step_c_proj_out",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1405,7 +1405,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("attn step A: k-norm");
                     enc.end();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     accum(
                         "attn_step_a_proj_split_norm",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1505,7 +1505,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     }
                     enc.end();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     attn_per_tok_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                 }
                 accum("attn_per_token", attn_per_tok_ms);
@@ -1542,7 +1542,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     .expect("attn step C: o_proj mat-mat");
                     enc.end();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     accum(
                         "attn_step_c_gate_oproj",
                         (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1564,7 +1564,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("residual1");
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             accum("residual1", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1591,7 +1591,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
                 }
                 enc.end();
                 cmd.commit();
-                unsafe { cmd.waitUntilCompleted() };
+                cmd.waitUntilCompleted();
                 accum(
                     "hidden_capture",
                     (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1620,7 +1620,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("post-norm");
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             accum("post_norm", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
         }
 
@@ -1682,7 +1682,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
             .expect("residual2");
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             accum(
                 "ffn_plus_residual2",
                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
@@ -1727,7 +1727,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
         .expect("argmax");
         enc.end();
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
         accum("tail", (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
     }
 

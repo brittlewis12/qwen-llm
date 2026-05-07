@@ -750,7 +750,7 @@ impl<'a> SpeculativeDecoder<'a> {
         // buffer from the one h_last_is_a now points to (since we toggled
         // after consumption). Restore the pointer.
         h_last_is_a = !h_last_is_a;
-        let mut hidden_at_proc = if h_last_is_a { &hidden_a } else { &hidden_b };
+        let hidden_at_proc = if h_last_is_a { &hidden_a } else { &hidden_b };
         // sentinel: track which buffer is which without another bool indirection
         let _ = hidden_at_proc;
 

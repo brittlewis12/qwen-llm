@@ -29,7 +29,7 @@
 //! * Fused full-attn block.
 
 use crate::gguf::GgufFile;
-use crate::loader::{AttnBlock, Block, GdnBlock, Model};
+use crate::loader::{Block, Model};
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
     attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
@@ -62,9 +62,13 @@ pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
         GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
     )
 }
-use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState,
-};
+
+/// Return type for [`MetalForward::single_token_phase_profiled`]:
+/// `(logits, wall_with_artifact_ms, per-phase GPU ms map)`. The
+/// per-phase entries are `(phase_name, gpu_ms)`.
+pub type PhaseProfileOutput = (Vec<f32>, f64, Vec<(String, f64)>);
+
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MfError {
@@ -565,8 +569,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        unsafe { cmd_buf.waitUntilCompleted() };
-
+        cmd_buf.waitUntilCompleted();
         let mut logits = vec![0.0f32; arch.vocab_size as usize];
         unsafe {
             let src = session.logits.buffer.contents().as_ptr() as *const f32;
@@ -646,8 +649,7 @@ impl<'a> MetalForward<'a> {
         // commit. If get_rows for token i hasn't run yet, it would
         // read the overwritten id. Defer real async pipelining to
         // v0.75.1 where packed prefill restructures this.
-        unsafe { cmd_buf.waitUntilCompleted() };
-
+        cmd_buf.waitUntilCompleted();
         Ok(())
     }
 
@@ -743,8 +745,7 @@ impl<'a> MetalForward<'a> {
         // SKIP final RMSNorm + lm_head + readback.
         enc.end();
         cmd_buf.commit();
-        unsafe { cmd_buf.waitUntilCompleted() };
-
+        cmd_buf.waitUntilCompleted();
         Ok(())
     }
 
@@ -834,8 +835,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        unsafe { cmd_buf.waitUntilCompleted() };
-
+        cmd_buf.waitUntilCompleted();
         // Read back logits to CPU.
         let mut logits = vec![0.0f32; arch.vocab_size as usize];
         unsafe {
@@ -866,7 +866,7 @@ impl<'a> MetalForward<'a> {
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
-    ) -> Result<(Vec<f32>, f64, Vec<(String, f64)>), MfError> {
+    ) -> Result<PhaseProfileOutput, MfError> {
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -896,7 +896,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push(("embedding".into(), ms));
         }
@@ -923,7 +923,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             match block {
                 MetalBlock::Gdn(_) => {
@@ -953,7 +953,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push(("final norm".into(), ms));
         }
@@ -973,7 +973,7 @@ impl<'a> MetalForward<'a> {
             )?;
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push(("lm head".into(), ms));
         }
@@ -1062,13 +1062,13 @@ impl<'a> MetalForward<'a> {
 
         let t_gpu = std::time::Instant::now();
         cmd_buf.commit();
-        unsafe { cmd_buf.waitUntilCompleted() };
+        cmd_buf.waitUntilCompleted();
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
 
         // GPU-reported wall-clock execution time (CFTimeInterval seconds).
         let gpu_start = cmd_buf.GPUStartTime();
         let gpu_end = cmd_buf.GPUEndTime();
-        let gpu_kernel_ms = ((gpu_end - gpu_start) * 1e3) as f64;
+        let gpu_kernel_ms = (gpu_end - gpu_start) * 1e3;
 
         let mut out = vec![0.0f32; arch.vocab_size as usize];
         unsafe {
@@ -1619,7 +1619,7 @@ pub fn encode_scatter_offset_f32(
     enc.set_tensor(1, src);
     enc.set_tensor(2, dst);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         objc2_metal::MTLSize {
@@ -1686,7 +1686,7 @@ pub fn encode_mat_vec_dispatch(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
         other => Err(MfError::UnsupportedDtype {
-            name: format!("(weight at mat_vec dispatch)"),
+            name: "(weight at mat_vec dispatch)".to_string(),
             dtype: other,
         }),
     }
@@ -1730,7 +1730,7 @@ pub fn encode_mat_mat_dispatch(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         other => Err(MfError::UnsupportedDtype {
-            name: format!("(weight at mat_mat dispatch)"),
+            name: "(weight at mat_mat dispatch)".to_string(),
             dtype: other,
         }),
     }
@@ -1791,8 +1791,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        unsafe { cmd_buf.waitUntilCompleted() };
-
+        cmd_buf.waitUntilCompleted();
         let mut out = vec![0.0f32; h];
         unsafe {
             let src = s.x.buffer.contents().as_ptr() as *const f32;
@@ -1851,8 +1850,7 @@ impl<'a> MetalForward<'a> {
 
         enc.end();
         cmd_buf.commit();
-        unsafe { cmd_buf.waitUntilCompleted() };
-
+        cmd_buf.waitUntilCompleted();
         let mut out = vec![0.0f32; h];
         unsafe {
             let src = s.x.buffer.contents().as_ptr() as *const f32;
@@ -2684,7 +2682,7 @@ mod tests {
             }
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
         }
 
         // Timed replay.
@@ -2699,7 +2697,7 @@ mod tests {
             }
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             gpu_sum_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
         }
         let total_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -2995,7 +2993,7 @@ mod tests {
             cb(&enc)?;
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push((label.into(), ms));
             Ok(())
@@ -3309,7 +3307,7 @@ mod tests {
             cb(&enc)?;
             enc.end();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             phases.push((label.into(), ms));
             Ok(())
@@ -4591,6 +4589,10 @@ mod tests {
     /// Use a private CPU-only path to run forward::Forward's gdn_step on
     /// block 0. We can't call it directly because it's private to
     /// Forward; the test re-implements the same math inline.
+    // CPU GDN inline re-impl: strided 2D state access
+    // `state.ssm[0][s_off + dv * head_dim + dk]`. Iterator rewrite
+    // hides the stride math (the whole point of this reference).
+    #[allow(clippy::needless_range_loop)]
     fn call_gdn_step_directly(
         f: &Forward,
         gb: &crate::loader::GdnBlock,
@@ -4840,10 +4842,8 @@ mod tests {
 
             // ---- 3: Fresh session, prefill only the prefix. ----
             let mut sess_pre = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("session B");
-            for i in 0..prefix_len {
-                let _ = mf
-                    .single_token(ids[i], i as u32, &mut sess_pre)
-                    .expect("pre");
+            for (i, &tid) in ids.iter().take(prefix_len).enumerate() {
+                let _ = mf.single_token(tid, i as u32, &mut sess_pre).expect("pre");
             }
 
             // ---- 4: Snapshot all six per-layer state bytes. ----
@@ -4991,10 +4991,8 @@ mod tests {
             // Build a snapshot via the production API.
             let mut sess_pre = MetalSession::fresh(&ctx, &mm, ids.len() + 4).expect("B");
             let mut last_pre_logits = vec![];
-            for i in 0..prefix_len {
-                last_pre_logits = mf
-                    .single_token(ids[i], i as u32, &mut sess_pre)
-                    .expect("pre");
+            for (i, &tid) in ids.iter().take(prefix_len).enumerate() {
+                last_pre_logits = mf.single_token(tid, i as u32, &mut sess_pre).expect("pre");
             }
             let identity = sess_pre.snapshot_identity(0xDEADBEEF, 0xCAFE);
             let prefix_tokens: Vec<i32> = ids[..prefix_len].to_vec();

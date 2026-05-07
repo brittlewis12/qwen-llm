@@ -382,7 +382,7 @@ impl MetalDFlashSession {
         self.append_target_ctx_column(ctx, &enc, hidden_block, position, n_target_features)?;
         enc.end();
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
         Ok(())
     }
 
@@ -464,7 +464,7 @@ impl MetalDFlashSession {
         }
         enc.end();
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
         Ok(())
     }
 }
@@ -1632,8 +1632,7 @@ fn encode_packed_verify_inner_impl(
     }
 
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
-
+    cmd_buf.waitUntilCompleted();
     // Read back verify_argmax (only N i32 values; trivial).
     let mut out = vec![0i32; n];
     unsafe {
@@ -2245,7 +2244,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             if use_v4 {
                                 let nwg =
                                     crate::metal::attn_v4_choose_nwg(target_session.kv_n_pos[ai]);
-                                let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                let _tile_c = crate::metal::attn_v4_choose_tile_c(
                                     target_session.kv_n_pos[ai],
                                 );
                                 let tile_c = crate::metal::attn_v4_choose_tile_c(
@@ -2659,9 +2658,7 @@ pub fn encode_packed_verify_layer_major_inner(
     }
 
     cmd_buf.commit();
-    unsafe {
-        cmd_buf.waitUntilCompleted();
-    }
+    cmd_buf.waitUntilCompleted();
 
     let mut out = vec![0i32; n];
     unsafe {
@@ -2768,8 +2765,7 @@ pub fn encode_restore_after_partial_accept_inner(
     }
     blit.end();
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
-
+    cmd_buf.waitUntilCompleted();
     // -- Host-side: update kv_n_pos for every attn layer.
     //
     // KV slot bytes at [start_position + n_keep, ...) physically remain
@@ -2791,6 +2787,10 @@ impl<'a> DFlashDecoder<'a> {
     ///
     /// `noise_start_pos` = absolute sequence position of `carry_tok`
     /// (i.e., `processed_pos + 1`).
+    // v0.74.1 phase 2 ctx-cache RoPE delta loop:
+    // `for c in phase2_ctx_start..ctx_len { pos_ctx_cpu[c]; view_subrange(c * kv_dim, ...) }`.
+    // `c` is multi-purpose (positional arg + stride math).
+    #[allow(clippy::needless_range_loop)]
     pub fn draft_block(
         &mut self,
         carry_tok: i32,
@@ -2809,7 +2809,7 @@ impl<'a> DFlashDecoder<'a> {
         let n_kv = cfg.n_kv_heads as usize;
         let q_dim = n_q * head_dim;
         let kv_dim = n_kv * head_dim;
-        let group = n_q / n_kv;
+        let _group = n_q / n_kv;
         let n_rot = head_dim;
         let theta = cfg.rope_theta;
         let ctx_len = self.session.target_ctx_n;
@@ -3109,9 +3109,7 @@ impl<'a> DFlashDecoder<'a> {
                 let n_kv_total = ctx_len + n;
                 pos_k_uploaded = n_kv_total;
                 let mut pos_k_host: Vec<i32> = Vec::with_capacity(n_kv_total);
-                for c in 0..ctx_len {
-                    pos_k_host.push(pos_ctx_cpu[c]);
-                }
+                pos_k_host.extend(pos_ctx_cpu.iter().take(ctx_len).copied());
                 for i in 0..n {
                     pos_k_host.push((noise_start_pos + i as u32) as i32);
                 }
@@ -3489,28 +3487,6 @@ impl<'a> DFlashDecoder<'a> {
         }
         Ok(logits)
     }
-}
-
-fn mat_vec_cpu(w: &[f32], n_in: usize, n_out: usize, x: &[f32]) -> Vec<f32> {
-    let mut y = vec![0.0f32; n_out];
-    for o in 0..n_out {
-        let mut s = 0.0f32;
-        for i in 0..n_in {
-            s += x[i] * w[o * n_in + i];
-        }
-        y[o] = s;
-    }
-    y
-}
-
-fn rms_norm_cpu(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
-    let n = x.len();
-    let mean_sq: f32 = x.iter().map(|&v| v * v).sum::<f32>() / n as f32;
-    let scale = 1.0 / (mean_sq + eps).sqrt();
-    x.iter()
-        .zip(weight.iter())
-        .map(|(&xi, &wi)| xi * scale * wi)
-        .collect()
 }
 
 // H5.1.5 metal_drafter_cosine_vs_cpu moved to tests/dflash_correctness.rs
@@ -4649,6 +4625,10 @@ mod tests {
     ///
     /// 0.8B-F32, M=2 prime + N=4 verify, K=2 layers. ≤ 4 s.
     #[test]
+    // Hidden-capture layout test: `n` is a multi-purpose row index used
+    // for `reference[n][...]`, `(n * K + k) * H + i` stride math, and
+    // failure-message position. Iterator rewrite would lose all three.
+    #[allow(clippy::needless_range_loop)]
     fn dflash_packed_verify_hidden_capture_layout() {
         let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
         if !std::path::Path::new(path).exists() {

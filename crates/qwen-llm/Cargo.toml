@@ -9,6 +9,9 @@ authors.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 objc2.workspace = true
 objc2-foundation.workspace = true

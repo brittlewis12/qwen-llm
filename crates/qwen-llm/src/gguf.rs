@@ -145,7 +145,7 @@ impl GgufFile {
         for t in model.tensors() {
             // gguf-rs stores trailing 1s for unused dims; drop them so
             // `shape.len()` reflects actual rank.
-            let mut shape: Vec<u64> = t.shape.iter().copied().collect();
+            let mut shape: Vec<u64> = t.shape.to_vec();
             while shape.len() > 1 && *shape.last().unwrap() == 1 {
                 shape.pop();
             }
@@ -350,32 +350,6 @@ fn read_u32_at(mmap: &[u8], offset: usize) -> Result<u32, GgufError> {
     ))
 }
 
-/// Locate the byte offset where the tensor-data section starts.
-///
-/// GGUF on-disk layout (v3, LE):
-///
-/// ```text
-///   u32  magic = "GGUF"
-///   u32  version = 3
-///   u64  num_tensors
-///   u64  num_kv
-///   for each kv:
-///     string key
-///     u32    value_type
-///     value (variable)
-///   for each tensor info:
-///     string name
-///     u32    n_dims
-///     u64[n_dims] shape
-///     u32    type
-///     u64    offset (relative to tensor-data start)
-///   <padding to alignment>
-///   <tensor data>
-/// ```
-///
-/// Strings are: `u64 length` + raw bytes (length is `u32` in v1 only).
-///
-/// We replay this layout against the mmap to find the offset of "<padding>".
 // POLICY caps. The proper home for these is `gguf-validator` (see
 // `~/code/gguf-validator/SPEC.md`); this is a defensive subset of its
 // SPEC + POLICY ERROR-severity invariants applied at load time.
@@ -402,6 +376,32 @@ const MAX_DIMENSION: u64 = 1u64 << 30;
 /// TENSOR-09: total element count cap.
 const MAX_ELEMENTS: u64 = 1u64 << 40;
 
+/// Locate the byte offset where the tensor-data section starts.
+///
+/// GGUF on-disk layout (v3, LE):
+///
+/// ```text
+///   u32  magic = "GGUF"
+///   u32  version = 3
+///   u64  num_tensors
+///   u64  num_kv
+///   for each kv:
+///     string key
+///     u32    value_type
+///     value (variable)
+///   for each tensor info:
+///     string name
+///     u32    n_dims
+///     u64[n_dims] shape
+///     u32    type
+///     u64    offset (relative to tensor-data start)
+///   <padding to alignment>
+///   <tensor data>
+/// ```
+///
+/// Strings are: `u64 length` + raw bytes (length is `u32` in v1 only).
+///
+/// We replay this layout against the mmap to find the offset of "<padding>".
 fn locate_tensor_data_start(
     mmap: &[u8],
     model: &GGUFModel,
@@ -575,7 +575,7 @@ fn skip_value(mmap: &[u8], p: &mut usize, value_type: u32, version: u32) -> Resu
             bounds_check(mmap, *p, 2)?;
             *p += 2;
         }
-        4 | 5 | 6 => {
+        4..=6 => {
             // u32 / i32 / f32
             bounds_check(mmap, *p, 4)?;
             *p += 4;
@@ -604,7 +604,7 @@ fn skip_value(mmap: &[u8], p: &mut usize, value_type: u32, version: u32) -> Resu
                 skip_value(mmap, p, item_type, version)?;
             }
         }
-        10 | 11 | 12 => {
+        10..=12 => {
             // u64 / i64 / f64
             bounds_check(mmap, *p, 8)?;
             *p += 8;
@@ -652,7 +652,7 @@ mod tests {
     fn parses_real_gguf() {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");
-        assert!(g.tensors.len() > 0, "tensor table is empty");
+        assert!(!g.tensors.is_empty(), "tensor table is empty");
         assert!(g.tensor_data_start > 0);
         // tensor data start must be aligned.
         assert_eq!(g.tensor_data_start % g.alignment, 0);

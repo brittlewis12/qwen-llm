@@ -70,3 +70,27 @@ debug = "full"
 [workspace.dependencies.criterion]
 version = "0.5"
 features = ["html_reports"]
+
+# Workspace-wide clippy config. Per-crate `[lints] workspace = true` opts in.
+[workspace.lints.clippy]
+# `too_many_arguments`: kernel encode functions in metal.rs and
+# metal_forward.rs deliberately take many args (Metal kernel signatures
+# are FFI-shaped: ctx + encoder + N tensor args + N shape args). Default
+# threshold of 7 fires constantly for ~25 of these and refactoring into
+# a struct hurts readability of every call site without buying anything.
+too_many_arguments = "allow"
+# Doc bullet lists in this crate use intentional column-aligned indent for
+# readable visual tables (see lib.rs, loader.rs prelude). Clippy wants
+# strict 2-space indent which would break those tables. The cost of the
+# `allow` is bounded — documentation indentation, not code logic.
+doc_overindented_list_items = "allow"
+# `needless_range_loop`: kept at default `warn`. We audited every site
+# (May 2026): 2 sites convert cleanly to iterator form (fixed in-place);
+# the remaining 12 sites are CPU oracle / reference math where the loop
+# index is multi-purpose (stride math `[s_off + dv * head_dim + dk]`,
+# co-indexed multi-array dispatch `kv_cache.k(layer, p, head)`,
+# branching/logging on the index) and the iter-rewrite obscures the
+# math. Those 12 carry `#[allow(clippy::needless_range_loop)]` on the
+# enclosing function or scope with a one-line justification each. This
+# preserves the lint's value as a tripwire for genuinely-needless cases
+# while accepting the few legitimate exceptions explicitly.

@@ -669,10 +669,10 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
             emitted.push(drafts[j]);
             if emitted.len() >= tokens || drafts[j] == eos {
                 // Note: we don't `return` here because we still want to
-                // emit() through the outer loop. Set carry to a dummy
-                // and break; the outer-loop `if emitted.len() >= tokens`
-                // check at the top of the next iter handles the exit.
-                carry_tok = eos;
+                // emit() through the outer loop. The outer-loop
+                // `if emitted.len() >= tokens` check at the top of the
+                // next iter handles the exit, so carry_tok doesn't
+                // need to be touched here.
                 break;
             }
             // Process drafts[j] via target to set up next verify step.
@@ -1677,7 +1677,7 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
         // Initialize miss counters / example bins for this category if new.
         for &k in &ks {
             cat_stats.misses.entry(k).or_insert(0);
-            cat_stats.examples.entry(k).or_insert_with(Vec::new);
+            cat_stats.examples.entry(k).or_default();
         }
 
         let ids = tok.encode(prompt, false)?;

@@ -198,7 +198,7 @@ fn load_library(device: &Device, bytes: &[u8]) -> Result<Library, MetalError> {
     let path_str = tmp
         .to_str()
         .ok_or_else(|| MetalError::LoadLibrary("temp path not UTF-8".to_string()))?;
-    let url = unsafe { NSURL::fileURLWithPath(&NSString::from_str(path_str)) };
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
     let lib = device
         .newLibraryWithURL_error(&url)
         .map_err(|e: Retained<NSError>| {
@@ -498,7 +498,7 @@ impl BlitEncoder {
             src.offset,
             &dst.buffer,
             dst.offset,
-            src.n_bytes() as u64,
+            src.n_bytes(),
         );
     }
 }
@@ -562,7 +562,7 @@ pub fn encode_rms_norm_mul_f32(
     enc.set_tensor(2, weight);
     enc.set_tensor(3, y);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
 
@@ -1131,7 +1131,7 @@ fn encode_elementwise_1in_1out(
     enc.set_tensor(1, x);
     enc.set_tensor(2, y);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -1218,7 +1218,7 @@ pub fn encode_gdn_alpha_chain_f32(
     enc.set_tensor(3, a_log);
     enc.set_tensor(4, out);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -1318,7 +1318,7 @@ pub fn encode_gdn_alpha_chain_batched_f32(
     enc.set_tensor(3, a_log);
     enc.set_tensor(4, out);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -1359,7 +1359,7 @@ fn encode_elementwise_2in_1out(
     enc.set_tensor(2, b);
     enc.set_tensor(3, out);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -1431,7 +1431,7 @@ pub fn encode_add_inplace_f32(
     enc.set_tensor(1, x);
     enc.set_tensor(2, y);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -1461,7 +1461,7 @@ pub fn encode_softmax_inplace_f32(
     enc.set_bytes(0, &NArgs { n: n as u32 });
     enc.set_tensor(1, x);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
 
@@ -1531,7 +1531,7 @@ pub fn encode_argmax_f32(
     enc.set_tensor(1, x);
     enc.set_tensor(2, out_idx);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     // Two threadgroup arrays (sh_val: f32, sh_idx: u32) — same width.
     enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
@@ -1580,7 +1580,7 @@ pub fn encode_l2_norm_f32(
     enc.set_tensor(1, x);
     enc.set_tensor(2, y);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
 
@@ -1645,7 +1645,7 @@ pub fn encode_copy_offset_f32(
     enc.set_tensor(1, src);
     enc.set_tensor(2, dst);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n_elements.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -1709,7 +1709,7 @@ pub fn encode_rms_norm_batched_f32(
     enc.set_tensor(2, weight);
     enc.set_tensor(3, y);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
 
@@ -1775,7 +1775,7 @@ pub fn encode_split_q_gate_f32(
     enc.set_tensor(3, gate);
 
     let total = n_heads * head_dim;
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = total.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -1864,7 +1864,7 @@ pub fn encode_attn_decode_f16kv_f32(
     enc.set_tensor(3, v_cache);
     enc.set_tensor(4, out);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     let scores_bytes = n_pos * std::mem::size_of::<f32>();
     let shred_bytes = (n_simdgroups * std::mem::size_of::<f32>()).max(32);
@@ -2176,7 +2176,7 @@ pub fn encode_scatter_offset_f32_to_f16(
     );
     enc.set_tensor(1, src);
     enc.set_tensor(2, dst);
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -2268,7 +2268,7 @@ pub fn encode_scatter_offset_f32_to_f16_kv(
     enc.set_tensor(2, v_src);
     enc.set_tensor(3, k_dst);
     enc.set_tensor(4, v_dst);
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -2352,7 +2352,7 @@ pub fn encode_attn_decode_f32(
     enc.set_tensor(3, v_cache);
     enc.set_tensor(4, out);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     let scores_bytes = n_pos * std::mem::size_of::<f32>();
     let shred_bytes = (n_simdgroups * std::mem::size_of::<f32>()).max(32);
@@ -2568,7 +2568,7 @@ pub fn encode_l2_norm_batched_f32(
     enc.set_tensor(1, x);
     enc.set_tensor(2, y);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
 
@@ -2795,7 +2795,7 @@ pub fn encode_ssm_conv_silu_f32(
     enc.set_tensor(3, conv_w);
     enc.set_tensor(4, out);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = conv_dim.div_ceil(tg_threads);
     enc.dispatch(
         MTLSize {
@@ -2866,7 +2866,7 @@ pub fn encode_rmsnorm_gated_f32(
     enc.set_tensor(3, z);
     enc.set_tensor(4, y);
 
-    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024) as usize;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_simdgroups = tg_threads.div_ceil(32);
     enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
 
@@ -3613,7 +3613,7 @@ where
     encode(&enc)?;
     enc.end();
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
+    cmd_buf.waitUntilCompleted();
     Ok(())
 }
 
@@ -3752,7 +3752,7 @@ pub fn bench_q4_k_chained(
     }
     enc.end();
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
+    cmd_buf.waitUntilCompleted();
     Ok(())
 }
 
@@ -3774,7 +3774,7 @@ pub fn bench_q5_k_chained(
     }
     enc.end();
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
+    cmd_buf.waitUntilCompleted();
     Ok(())
 }
 
@@ -3799,7 +3799,7 @@ pub fn bench_q5_k_mat_mat_chained(
     }
     enc.end();
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
+    cmd_buf.waitUntilCompleted();
     Ok(())
 }
 
@@ -3820,7 +3820,7 @@ pub fn bench_q6_k_chained(
     }
     enc.end();
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
+    cmd_buf.waitUntilCompleted();
     Ok(())
 }
 
@@ -3853,7 +3853,7 @@ pub fn bench_q4_k_mat_mat_chained(
     }
     enc.end();
     cmd_buf.commit();
-    unsafe { cmd_buf.waitUntilCompleted() };
+    cmd_buf.waitUntilCompleted();
     Ok(())
 }
 
@@ -4813,7 +4813,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -4831,7 +4831,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -4969,7 +4969,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -4997,7 +4997,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5137,7 +5137,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5158,7 +5158,7 @@ mod tests {
             enc.end();
             let t = Instant::now();
             cmd.commit();
-            unsafe { cmd.waitUntilCompleted() };
+            cmd.waitUntilCompleted();
             let wall = t.elapsed().as_secs_f64() * 1e3;
             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             (wall, gpu)
@@ -5224,6 +5224,10 @@ mod tests {
     /// within fp32 reorder noise. Uses real Q4_K weights from the 27B
     /// model's first FFN.
     #[test]
+    // `Q4_K` is the GGUF dtype tag; matches the kernel and other
+    // function names (`encode_mat_vec_q4_K`, `kernel_ffn_swiglu_q4_K`).
+    // Lowercasing to `q4_k` would diverge from the rest of the codebase.
+    #[allow(non_snake_case)]
     fn ffn_swiglu_q4_K_matches_unfused() {
         let ctx = match MetalContext::new() {
             Ok(c) => c,
@@ -6079,7 +6083,7 @@ mod tests {
             let qkv_now: Vec<f32> = (0..conv_dim)
                 .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
                 .collect();
-            let mut conv_buf: Vec<f32> = (0..(K - 1) * conv_dim)
+            let conv_buf: Vec<f32> = (0..(K - 1) * conv_dim)
                 .map(|i| ((i % 13) as f32 - 6.0) * 5e-3)
                 .collect();
             let conv_w: Vec<f32> = (0..conv_dim * K)
@@ -6437,7 +6441,7 @@ mod tests {
         }
         enc.end();
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        cmd.waitUntilCompleted();
         let gpu = read_back_f32(&y_t.buffer, n_out);
 
         let max_abs = gpu
@@ -6671,7 +6675,7 @@ mod tests {
                     enc.end();
                     let t = Instant::now();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     let wall = t.elapsed().as_secs_f64() * 1e3;
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
@@ -6717,7 +6721,7 @@ mod tests {
                     enc.end();
                     let t = Instant::now();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     let wall = t.elapsed().as_secs_f64() * 1e3;
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
@@ -6828,7 +6832,7 @@ mod tests {
                     enc.end();
                     let t = Instant::now();
                     cmd.commit();
-                    unsafe { cmd.waitUntilCompleted() };
+                    cmd.waitUntilCompleted();
                     let wall = t.elapsed().as_secs_f64() * 1e3;
                     let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     eprintln!(
@@ -6882,9 +6886,7 @@ mod tests {
             encode_argmax_f32(ctx, &enc, &xt, &ot, n_rows, n).expect("encode argmax");
             enc.end();
             cmd.commit();
-            unsafe {
-                cmd.waitUntilCompleted();
-            }
+            cmd.waitUntilCompleted();
             unsafe {
                 let p = ot.buffer.contents().as_ptr() as *const i32;
                 (0..n_rows).map(|i| *p.add(i)).collect()
@@ -7081,9 +7083,7 @@ mod tests {
             blit.end();
         }
         cmd.commit();
-        unsafe {
-            cmd.waitUntilCompleted();
-        }
+        cmd.waitUntilCompleted();
 
         // Read back via host pointer.
         let got: Vec<f32> = unsafe {
@@ -7115,9 +7115,7 @@ mod tests {
             blit.end();
         }
         cmd2.commit();
-        unsafe {
-            cmd2.waitUntilCompleted();
-        }
+        cmd2.waitUntilCompleted();
         let got2: Vec<f32> = unsafe {
             let p = dst.buffer.contents().as_ptr() as *const f32;
             (0..N).map(|i| *p.add(i)).collect()
@@ -7152,6 +7150,11 @@ mod tests {
     ///   * Noise key: noise_idx <= q_idx.
     ///
     /// Returns o[N, n_q · head_dim] row-major.
+    // CPU dflash-attn reference: `kk` is a multi-purpose KV-position
+    // index — used for `pos_k[kk]`, `kk * kv_stride + ...` strided
+    // K/V offset computation, and `if kk < ctx_len` ctx-vs-noise
+    // branching. Iterator rewrite obscures all three.
+    #[allow(clippy::needless_range_loop)]
     fn dflash_attn_cpu_oracle(
         q: &[f32],
         k: &[f32],
@@ -7381,7 +7384,7 @@ mod tests {
 
         fn pos_recent(ctx_len: usize, noise_start: u32) -> Vec<i32> {
             (0..ctx_len)
-                .map(|c| (noise_start as i32 - ctx_len as i32 + c as i32))
+                .map(|c| noise_start as i32 - ctx_len as i32 + c as i32)
                 .collect()
         }
         fn pos_gapped(ctx_len: usize, noise_start: u32) -> Vec<i32> {

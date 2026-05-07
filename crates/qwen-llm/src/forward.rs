@@ -91,7 +91,7 @@ impl<'a> Forward<'a> {
     /// Same as [`single_token`] but ALSO returns the pre-output_norm
     /// hidden state (the residual stream right before the final RMSNorm
     /// + lm_head). This is the input to the MTP head per `docs/H4-MTP.md`
-    /// §1.2 — `prev_hidden = h_i` for slot i.
+    ///   §1.2 — `prev_hidden = h_i` for slot i.
     pub fn single_token_with_hidden(
         &self,
         token_id: i32,
@@ -371,6 +371,11 @@ impl<'a> Forward<'a> {
     ///
     /// Drafter KV is fully transient — recomputed per call. No state
     /// carried across calls in this method.
+    // CPU drafter reference: loop indices are co-indexed with strided
+    // KV layouts (`c * kv_dim`, `pos_ctx[c]`) and per-head dispatch
+    // (`kv_cache.k(layer, p, head)`). Iterator rewrite obscures the
+    // strided / multi-arg access pattern central to the math.
+    #[allow(clippy::needless_range_loop)]
     pub fn dflash_draft(
         &self,
         head: &crate::loader::DFlashHead<'_>,
@@ -718,6 +723,12 @@ impl<'a> Forward<'a> {
 
     /// Full-attention block step. Single-token decode: appends one (K,V)
     /// to the cache, runs attention against the full prefix.
+    // CPU attn reference: `p` is a position index used both to fetch
+    // `kv_cache.k(layer, p, head)` (multi-arg dispatch, p is one of
+    // three coords) and to write `scores[p]`. The iterator-with-
+    // enumerate rewrite makes `scores` look like the primary
+    // collection when `kv_cache` is the actual data source.
+    #[allow(clippy::needless_range_loop)]
     fn attn_step(
         &self,
         layer_idx: usize,
@@ -820,12 +831,16 @@ impl<'a> Forward<'a> {
 
     /// One step of GDN recurrence. Updates `conv` and `ssm` in place,
     /// returns the layer's output (hidden_size).
+    // CPU GDN reference: strided 2D state access
+    // `state.ssm[s_off + dv * head_dim + dk]` makes the index
+    // arithmetically meaningful. Iterator rewrite hides the stride math.
+    #[allow(clippy::needless_range_loop)]
     fn gdn_step(
         &self,
         gb: &GdnBlock<'a>,
         x: &[f32],
-        conv: &mut Vec<f32>,
-        ssm: &mut Vec<f32>,
+        conv: &mut [f32],
+        ssm: &mut [f32],
     ) -> Result<Vec<f32>, ForwardError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;

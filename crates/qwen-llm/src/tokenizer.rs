@@ -273,11 +273,10 @@ mod tests {
         );
 
         eprintln!(
-            "[tokenizer] n_vocab={} bos={:?} eos={:?} '{}' -> {:?} ({} tokens)",
+            "[tokenizer] n_vocab={} bos={:?} eos={:?} 'Hello, world!' -> {:?} ({} tokens)",
             tok.n_vocab,
             tok.bos,
             tok.eos,
-            "Hello, world!",
             ids,
             ids.len()
         );

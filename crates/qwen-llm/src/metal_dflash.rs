@@ -171,9 +171,52 @@ pub struct MetalDFlashSession {
     pub pos_ctx: MetalTensor,
 
     /// Projected cross-context: `[ctx_capacity, H_drafter]` (row-major over
-    /// columns). Recomputed per `draft_block` call from
-    /// `target_ctx_stacked` via `dflash_fc + hidden_norm`.
+    /// columns). Computed incrementally per `draft_block` call from
+    /// `target_ctx_stacked` via `dflash_fc + hidden_norm`. **v0.74.0**:
+    /// rows `[0, ctx_h_ready_n)` are already projected and remain valid
+    /// across outer steps because `target_ctx_stacked` is append-only;
+    /// `draft_block` re-projects only the new delta `[ctx_h_ready_n,
+    /// target_ctx_n)`. Pre-v0.74.0 path re-projected the entire ctx
+    /// every outer step (linear-in-ctx work, dominant at ctx ≥ 256).
     pub ctx_h: MetalTensor,
+    /// **v0.74.0** Watermark for `ctx_h`: number of cross-context columns
+    /// that have already been passed through `dflash_fc + hidden_norm`.
+    /// `ctx_h[0..ctx_h_ready_n]` is valid, `ctx_h[ctx_h_ready_n..target_ctx_n]`
+    /// is the delta to project this `draft_block` call. Append-only;
+    /// monotonically non-decreasing within a session. Reset to 0 in
+    /// `fresh()` and (defensively) clamped to `target_ctx_n` to
+    /// preserve the "valid prefix" invariant if an external caller
+    /// ever mutates `target_ctx_n` non-monotonically (currently no
+    /// such caller exists; documented for future-proofing).
+    pub ctx_h_ready_n: usize,
+
+    /// **v0.74.1** Per-drafter-layer post-norm post-RoPE K cache for
+    /// the cross-context. One `[ctx_capacity, kv_dim]` F32 tensor per
+    /// drafter layer (5 for Qwen3.6 DFlash). Rows `[0, kv_ctx_ready_n)`
+    /// hold the final (K_proj → K_norm → RoPE) result for the
+    /// corresponding column of `target_ctx_stacked`; phase 3 attn
+    /// reads from these caches instead of the shared `k_ctx_buf`.
+    /// Replaces the linear-in-ctx phase 2 redundant work documented in
+    /// rev 13: at ctx=1455, the per-layer ctx K/V proj + RoPE was
+    /// 115 ms / outer step (5 × ~23 ms / layer); caching reduces
+    /// per-step work to projecting only the appended positions.
+    pub k_ctx_cache: Vec<MetalTensor>,
+    /// **v0.74.1** Per-drafter-layer post-norm V cache. Same shape as
+    /// `k_ctx_cache[i]` but V doesn't get RoPE'd (RoPE is K-only in
+    /// the drafter forward), so this is just `(V_proj)` per row.
+    pub v_ctx_cache: Vec<MetalTensor>,
+    /// **v0.74.1** Watermark for the per-layer K/V caches. Number of
+    /// cross-context positions that have already been projected +
+    /// norm'd + RoPE'd (K only) through ALL drafter layers. Append-
+    /// only; monotonically non-decreasing.
+    ///
+    /// Invariant: `kv_ctx_ready_n <= ctx_h_ready_n <= target_ctx_n`.
+    /// kv_ctx_ready_n can lag ctx_h_ready_n if phase 1 ran but phase 2
+    /// hasn't caught up (it doesn't today — the two phases always run
+    /// in the same `draft_block` call — but the lag is harmless if it
+    /// ever happens; phase 2 just projects `[kv_ctx_ready_n, ctx_len)`
+    /// regardless of what phase 1 did).
+    pub kv_ctx_ready_n: usize,
 
     /// Per-step block input `[N]` i32 in F32 buffer (carry + (N-1) MASK).
     pub noise_ids: MetalTensor,
@@ -256,6 +299,18 @@ impl MetalDFlashSession {
             target_ctx_capacity: ctx_capacity,
             pos_ctx: MetalTensor::zeros_f32(ctx, vec![cc])?,
             ctx_h: MetalTensor::zeros_f32(ctx, vec![h * cc])?,
+            ctx_h_ready_n: 0,
+            // v0.74.1: one K/V cache pair per drafter layer (cfg.n_layer).
+            // Sized for ctx_capacity * kv_dim. Memory cost on M4 Max
+            // 128 GB: 5 layers × ctx_capacity × kv_dim × 2 × 4 B. At
+            // ctx_capacity=8K, kv_dim=1024 → 320 MB. Tractable.
+            k_ctx_cache: (0..cfg.n_layer)
+                .map(|_| MetalTensor::zeros_f32(ctx, vec![cc * kv_dim]))
+                .collect::<Result<Vec<_>, _>>()?,
+            v_ctx_cache: (0..cfg.n_layer)
+                .map(|_| MetalTensor::zeros_f32(ctx, vec![cc * kv_dim]))
+                .collect::<Result<Vec<_>, _>>()?,
+            kv_ctx_ready_n: 0,
             noise_ids: MetalTensor::zeros_f32(ctx, vec![n])?,
             x: MetalTensor::zeros_f32(ctx, vec![n * h])?,
             h: MetalTensor::zeros_f32(ctx, vec![n * h])?,
@@ -2701,12 +2756,27 @@ impl<'a> DFlashDecoder<'a> {
 
         let ctx_metal = self.base.ctx;
 
-        // ----- Phase 1 (Metal): cross-context fc + hidden_norm -----
-        // Per-column mat-vec into ctx_h, then per-column RMSNorm.
-        if ctx_len > 0 {
+        // ----- Phase 1 (Metal, v0.74.0 cached): cross-context fc + hidden_norm -----
+        // Per-column mat-vec into ctx_h, then per-column RMSNorm —
+        // BUT only for the delta `[ctx_h_ready_n, ctx_len)`. The cache
+        // exploits the append-only property of `target_ctx_stacked`:
+        // rows `[0, ctx_h_ready_n)` were projected on a previous outer
+        // step and the projection is a deterministic function of the
+        // stacked input. Pre-v0.74.0 this loop was `0..ctx_len` and
+        // grew linearly with prompt length (~830 ms / outer step at
+        // ctx=1455).
+        //
+        // Defensive: clamp ctx_h_ready_n to ctx_len in case a future
+        // caller ever resets target_ctx_n non-monotonically (no such
+        // caller today; tracked under `ctx_h_ready_n` field doc).
+        if self.session.ctx_h_ready_n > ctx_len {
+            self.session.ctx_h_ready_n = ctx_len;
+        }
+        let phase1_start = self.session.ctx_h_ready_n;
+        if ctx_len > phase1_start {
             let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
-            for c in 0..ctx_len {
+            for c in phase1_start..ctx_len {
                 let src = self.session.target_ctx_stacked.view_subrange(
                     (c * n_target_features) as u64,
                     vec![n_target_features as u64],
@@ -2727,7 +2797,7 @@ impl<'a> DFlashDecoder<'a> {
             }
             // RMSNorm per column. Reads x then writes y in two passes per
             // threadgroup, so x==y aliasing is safe (rms_norm.metal:38-61).
-            for c in 0..ctx_len {
+            for c in phase1_start..ctx_len {
                 let view = self
                     .session
                     .ctx_h
@@ -2745,6 +2815,9 @@ impl<'a> DFlashDecoder<'a> {
             cmd.commit();
             cmd.waitUntilCompleted();
             self.session.maybe_record("phase1_ctx_fc_norm", &cmd);
+            // Cache watermark advances; phase 1 is complete for all
+            // currently-stacked positions.
+            self.session.ctx_h_ready_n = ctx_len;
         }
 
         // ----- Phase 2 (Metal): noise embed + per-layer fwd through
@@ -2810,7 +2883,17 @@ impl<'a> DFlashDecoder<'a> {
             out
         };
 
-        for layer in &self.head.layers {
+        // v0.74.1: clamp the cross-context K/V cache watermark
+        // defensively (mirrors ctx_h_ready_n behavior). The two
+        // watermarks are independent so a future caller can't desync
+        // them via target_ctx_n manipulation.
+        if self.session.kv_ctx_ready_n > ctx_len {
+            self.session.kv_ctx_ready_n = ctx_len;
+        }
+        let phase2_ctx_start = self.session.kv_ctx_ready_n;
+        let phase2_ctx_delta = ctx_len.saturating_sub(phase2_ctx_start);
+
+        for (layer_idx, layer) in self.head.layers.iter().enumerate() {
             // Pre-attn norm: x → h (Metal).
             let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
@@ -2847,19 +2930,18 @@ impl<'a> DFlashDecoder<'a> {
                 encode_mat_vec_dispatch(ctx_metal, &enc, &layer.k, &row_in, &k_row, h, kv_dim)?;
                 encode_mat_vec_dispatch(ctx_metal, &enc, &layer.v, &row_in, &v_row, h, kv_dim)?;
             }
-            // K, V proj on cross-context rows.
-            for c in 0..ctx_len {
+            // v0.74.1: K, V proj on cross-context rows — ONLY the new
+            // delta `[phase2_ctx_start, ctx_len)`. Cached rows
+            // `[0, phase2_ctx_start)` retain their post-norm post-RoPE
+            // values from prior outer steps. Write into per-layer cache.
+            for c in phase2_ctx_start..ctx_len {
                 let row_in = self
                     .session
                     .ctx_h
                     .view_subrange((c * h) as u64, vec![h as u64]);
-                let k_row = self
-                    .session
-                    .k_ctx_buf
+                let k_row = self.session.k_ctx_cache[layer_idx]
                     .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
-                let v_row = self
-                    .session
-                    .v_ctx_buf
+                let v_row = self.session.v_ctx_cache[layer_idx]
                     .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
                 encode_mat_vec_dispatch(ctx_metal, &enc, &layer.k, &row_in, &k_row, h, kv_dim)?;
                 encode_mat_vec_dispatch(ctx_metal, &enc, &layer.v, &row_in, &v_row, h, kv_dim)?;
@@ -2885,21 +2967,21 @@ impl<'a> DFlashDecoder<'a> {
                 head_dim,
                 RMS_EPS,
             )?;
-            if ctx_len > 0 {
-                // Sub-view of just the populated rows (k_ctx_buf is
-                // sized for ctx_capacity, but only first ctx_len * kv_dim
-                // elements are valid this call).
-                let view = self
-                    .session
-                    .k_ctx_buf
-                    .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
+            // v0.74.1: K_ctx norm — only the new delta. Pre-cached rows
+            // were normed on a prior outer step's pass and retain their
+            // post-norm values.
+            if phase2_ctx_delta > 0 {
+                let view = self.session.k_ctx_cache[layer_idx].view_subrange(
+                    (phase2_ctx_start * kv_dim) as u64,
+                    vec![(phase2_ctx_delta * kv_dim) as u64],
+                );
                 encode_rms_norm_batched_f32(
                     ctx_metal,
                     &enc,
                     &view,
                     &layer.k_norm,
                     &view,
-                    ctx_len * n_kv,
+                    phase2_ctx_delta * n_kv,
                     head_dim,
                     RMS_EPS,
                 )?;
@@ -2938,12 +3020,12 @@ impl<'a> DFlashDecoder<'a> {
                     theta,
                 )?;
             }
-            // RoPE K_ctx at pos_ctx[c].
-            for c in 0..ctx_len {
+            // v0.74.1: RoPE K_ctx — only the new delta. Pre-cached
+            // rows were RoPE'd on a prior outer step at their stable
+            // pos_ctx[c] positions; positions don't change.
+            for c in phase2_ctx_start..ctx_len {
                 let pos = pos_ctx_cpu[c] as u32;
-                let row = self
-                    .session
-                    .k_ctx_buf
+                let row = self.session.k_ctx_cache[layer_idx]
                     .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
                 encode_rope_neox_f32(ctx_metal, &enc, &row, n_kv, head_dim, n_rot, pos, theta)?;
             }
@@ -2990,16 +3072,13 @@ impl<'a> DFlashDecoder<'a> {
             let enc = KernelEncoder::begin(&cmd);
 
             // (a) Concat K_ctx + K_noise into k_full; same for V.
-            //     k_full[0 .. ctx_len*kv_dim] <- k_ctx_buf[..ctx_len*kv_dim]
+            //     k_full[0 .. ctx_len*kv_dim] <- k_ctx_cache[layer_idx][..ctx_len*kv_dim]
             //     k_full[ctx_len*kv_dim .. (ctx_len+N)*kv_dim] <- k_noise[..]
+            // v0.74.1: read from per-layer K/V cache (post-norm post-RoPE).
             if ctx_len > 0 {
-                let src_k_ctx = self
-                    .session
-                    .k_ctx_buf
+                let src_k_ctx = self.session.k_ctx_cache[layer_idx]
                     .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
-                let src_v_ctx = self
-                    .session
-                    .v_ctx_buf
+                let src_v_ctx = self.session.v_ctx_cache[layer_idx]
                     .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
                 encode_scatter_offset_f32(
                     ctx_metal,
@@ -3151,6 +3230,11 @@ impl<'a> DFlashDecoder<'a> {
             self.session
                 .maybe_record("phase3_attn_oproj_ffn_residuals", &cmd);
         }
+
+        // v0.74.1: all drafter layers now have post-norm post-RoPE
+        // K/V cached for `[0, ctx_len)`. Advance the watermark so the
+        // next outer step only projects the new appended positions.
+        self.session.kv_ctx_ready_n = ctx_len;
 
         // ----- Phase 4 (Metal): batched final norm + lm_head + argmax -----
         //

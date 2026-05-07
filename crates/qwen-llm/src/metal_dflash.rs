@@ -3148,19 +3148,62 @@ impl<'a> DFlashDecoder<'a> {
             )?;
             let _ = pos_k_uploaded;
 
-            // (d) O proj per row (mat-vec). Drafter weights F32 — per-row
-            //     mat-vec is ~OK for v0.72.1; v0.72.4 (native Q8_0)
-            //     will lift to mat-mat for amortized weight loads.
-            for i in 0..n {
-                let row_in = self
-                    .session
-                    .attn_o_full
-                    .view_subrange((i * q_dim) as u64, vec![q_dim as u64]);
-                let row_out = self
-                    .session
-                    .ffn_out_buf
-                    .view_subrange((i * h) as u64, vec![h as u64]);
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.o, &row_in, &row_out, q_dim, h)?;
+            // (d) O proj — v0.74.2: batched mat-mat across all N noise
+            //     rows when drafter weights are mat-mat eligible (Q8_0
+            //     post-v0.73b.1; pre-v0.73b.1 was F32 dequant'd at load
+            //     and per-row mat-vec was the only path). The reviewer's
+            //     "you already built the kernels, now use them" find:
+            //     `encode_mat_mat_dispatch` routes Q8_0 to the validated
+            //     `kernel_mat_mat_q8_0_f32_n16` (A-lite gate 7.74×); the
+            //     drafter weights have been native Q8_0 since v0.73b.1
+            //     but draft_block phase 3 was still per-row mat-vec,
+            //     dispatching 80 mat-vecs per outer step (5 layers × 16
+            //     noise rows × 4 projections) where 4 mat-mats per layer
+            //     suffice. Same playbook as v0.73a.1 GDN / v0.73c.1 attn:
+            //     LOW correctness risk, reuses validated kernels.
+            //
+            //     Eligibility predicate matches the encode_mat_mat_dispatch
+            //     supported set (Q4_K/Q5_K/Q6_K/Q8_0). F32 fall-through
+            //     preserved for any non-batchable dtype (currently nothing
+            //     in production hits it, but kept for the F32 oracle and
+            //     future drafter quants).
+            let drafter_mat_mat_eligible = |dtype: GgmlType| {
+                matches!(
+                    dtype,
+                    GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+                )
+            };
+            let phase3_batched = drafter_mat_mat_eligible(layer.o.dtype)
+                && drafter_mat_mat_eligible(layer.ffn_gate.dtype)
+                && drafter_mat_mat_eligible(layer.ffn_up.dtype)
+                && drafter_mat_mat_eligible(layer.ffn_down.dtype);
+
+            if phase3_batched {
+                // Batched O proj: attn_o_full [N, q_dim] → ffn_out_buf [N, H].
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.o,
+                    &self.session.attn_o_full,
+                    &self.session.ffn_out_buf,
+                    q_dim,
+                    h,
+                    n,
+                )?;
+            } else {
+                for i in 0..n {
+                    let row_in = self
+                        .session
+                        .attn_o_full
+                        .view_subrange((i * q_dim) as u64, vec![q_dim as u64]);
+                    let row_out = self
+                        .session
+                        .ffn_out_buf
+                        .view_subrange((i * h) as u64, vec![h as u64]);
+                    encode_mat_vec_dispatch(
+                        ctx_metal, &enc, &layer.o, &row_in, &row_out, q_dim, h,
+                    )?;
+                }
             }
 
             // (e) Residual #1: x += ffn_out_buf (reusing ffn_out_buf as
@@ -3179,29 +3222,64 @@ impl<'a> DFlashDecoder<'a> {
                 RMS_EPS,
             )?;
 
-            // (g) SwiGLU FFN per row.
-            for i in 0..n {
-                let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
-                let gate_row = self
-                    .session
-                    .ffn_gate_buf
-                    .view_subrange((i * f) as u64, vec![f as u64]);
-                let up_row = self
-                    .session
-                    .ffn_up_buf
-                    .view_subrange((i * f) as u64, vec![f as u64]);
-                encode_mat_vec_dispatch(
+            // (g) SwiGLU FFN — v0.74.2: batched mat-mat ffn_gate / ffn_up
+            //     / ffn_down when drafter weights are eligible. Same
+            //     fall-through pattern as O-proj.
+            if phase3_batched {
+                encode_mat_mat_dispatch(
                     ctx_metal,
                     &enc,
                     &layer.ffn_gate,
-                    &row_in,
-                    &gate_row,
+                    &self.session.h,
+                    &self.session.ffn_gate_buf,
                     h,
                     f,
+                    n,
                 )?;
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.ffn_up, &row_in, &up_row, h, f)?;
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.ffn_up,
+                    &self.session.h,
+                    &self.session.ffn_up_buf,
+                    h,
+                    f,
+                    n,
+                )?;
+            } else {
+                for i in 0..n {
+                    let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                    let gate_row = self
+                        .session
+                        .ffn_gate_buf
+                        .view_subrange((i * f) as u64, vec![f as u64]);
+                    let up_row = self
+                        .session
+                        .ffn_up_buf
+                        .view_subrange((i * f) as u64, vec![f as u64]);
+                    encode_mat_vec_dispatch(
+                        ctx_metal,
+                        &enc,
+                        &layer.ffn_gate,
+                        &row_in,
+                        &gate_row,
+                        h,
+                        f,
+                    )?;
+                    encode_mat_vec_dispatch(
+                        ctx_metal,
+                        &enc,
+                        &layer.ffn_up,
+                        &row_in,
+                        &up_row,
+                        h,
+                        f,
+                    )?;
+                }
             }
-            // silu_mul over the entire N*F flat buffer (elementwise).
+            // silu_mul over the entire N*F flat buffer (elementwise) —
+            // unchanged whether the gate/up paths were batched or per-row;
+            // the byte layout is bit-identical.
             encode_silu_mul_f32(
                 ctx_metal,
                 &enc,
@@ -3209,17 +3287,38 @@ impl<'a> DFlashDecoder<'a> {
                 &self.session.ffn_up_buf,
                 &self.session.ffn_inner_buf,
             )?;
-            // ffn_down per row → ffn_out_buf.
-            for i in 0..n {
-                let row_in = self
-                    .session
-                    .ffn_inner_buf
-                    .view_subrange((i * f) as u64, vec![f as u64]);
-                let row_out = self
-                    .session
-                    .ffn_out_buf
-                    .view_subrange((i * h) as u64, vec![h as u64]);
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.ffn_down, &row_in, &row_out, f, h)?;
+            // Batched ffn_down: ffn_inner_buf [N, F] → ffn_out_buf [N, H].
+            if phase3_batched {
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.ffn_down,
+                    &self.session.ffn_inner_buf,
+                    &self.session.ffn_out_buf,
+                    f,
+                    h,
+                    n,
+                )?;
+            } else {
+                for i in 0..n {
+                    let row_in = self
+                        .session
+                        .ffn_inner_buf
+                        .view_subrange((i * f) as u64, vec![f as u64]);
+                    let row_out = self
+                        .session
+                        .ffn_out_buf
+                        .view_subrange((i * h) as u64, vec![h as u64]);
+                    encode_mat_vec_dispatch(
+                        ctx_metal,
+                        &enc,
+                        &layer.ffn_down,
+                        &row_in,
+                        &row_out,
+                        f,
+                        h,
+                    )?;
+                }
             }
             // (h) Residual #2: x += ffn_out_buf.
             encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, &self.session.ffn_out_buf)?;

@@ -428,6 +428,45 @@ impl MetalDFlashSession {
         self.target_ctx_n += 1;
         Ok(())
     }
+
+    /// **v0.74.3** Batched-commit version of `append_target_ctx_column_now`:
+    /// runs `columns.len()` appends through ONE command buffer + ONE
+    /// commit + ONE wait, instead of N waits.
+    ///
+    /// Used by the DFlash hot decode loop after greedy accept-prefix
+    /// emits 1..N committed positions per outer step. The single-column
+    /// `_now` variant (still preserved for prefill where we need
+    /// per-token sequencing) creates its own command buffer + waits
+    /// per call, costing N CPU/GPU sync points per outer step. At
+    /// α_chain=5.2 drafts/step typical for code prompts that's ~6
+    /// waits per outer step that this batched helper collapses to 1.
+    ///
+    /// Each `(hidden_block, position)` pair must satisfy the same
+    /// per-call validation as `append_target_ctx_column`. If any
+    /// individual append fails (capacity overflow, shape mismatch),
+    /// no further appends are attempted but the partially-progressed
+    /// session state is left as-is — the failing call returns Err
+    /// and the caller should treat session state as inconsistent
+    /// (which mirrors the per-call `_now` failure semantics).
+    pub fn append_target_ctx_columns_now(
+        &mut self,
+        ctx: &MetalContext,
+        columns: &[(&MetalTensor, u32)],
+        n_target_features: usize,
+    ) -> Result<(), DFlashError> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+        let cmd = ctx.queue.commandBuffer().expect("cmd buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        for &(hidden_block, position) in columns {
+            self.append_target_ctx_column(ctx, &enc, hidden_block, position, n_target_features)?;
+        }
+        enc.end();
+        cmd.commit();
+        unsafe { cmd.waitUntilCompleted() };
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -2850,38 +2889,19 @@ impl<'a> DFlashDecoder<'a> {
             }
         }
 
-        // Borrow weights as F32 slices directly into the Metal shared-
-        // storage buffer (no copy). All drafter weights are F32 post-load
-        // since `MetalDFlashHead::load` dequants Q8_0 at load time. The
-        // returned slice is valid for the lifetime of the draft_block
-        // call (no concurrent writes).
-        //
-        // Codex partner session caught this: a previous version copied
-        // ~1 GB of weights per layer per call into fresh Vecs; with 5
-        // layers per draft and N=16 noise rows, that was ~5 GB of
-        // pointless memcpy per outer step. Borrowing as &[f32] gives
-        // the same data with zero copy.
-        let borrow_f32_tensor = |t: &MetalTensor| -> &[f32] {
-            debug_assert_eq!(
-                t.dtype,
-                GgmlType::F32,
-                "v1 CPU fallback expects F32 weights"
-            );
-            let n_elem = t.n_elements() as usize;
-            unsafe {
-                let ptr = t.buffer.contents().as_ptr() as *const f32;
-                std::slice::from_raw_parts(ptr, n_elem)
-            }
-        };
-        // Activation readbacks (small per-call buffers; copy is fine).
-        let read_f32_activation = |t: &MetalTensor, n_elem: usize| -> Vec<f32> {
-            let mut out = vec![0.0f32; n_elem];
-            unsafe {
-                let src = t.buffer.contents().as_ptr() as *const f32;
-                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n_elem);
-            }
-            out
-        };
+        // v0.74.x notes:
+        //   * Drafter weights have been native Q8_0 since v0.73b.1
+        //     (`weight_dtype_kept_native` accepts Q8_0; the loader
+        //     stops dequant'ing at load and the dispatchers route
+        //     Q8_0 through `kernel_mat_vec_q8_0_f32` /
+        //     `kernel_mat_mat_q8_0_f32`). Old "dequants Q8_0 at load
+        //     time" comments removed; old `borrow_f32_tensor` /
+        //     `read_f32_activation` closures (relics of the v0.71 CPU
+        //     fallback before phase 3 was Metal-ized in v0.72.1)
+        //     deleted as dead code.
+        //   * Phase 1 (ctx_h) and per-layer K/V_ctx caches were added
+        //     in v0.74.0 / v0.74.1; phase 3 lifted to Q8_0 mat-mat in
+        //     v0.74.2.
 
         // v0.74.1: clamp the cross-context K/V cache watermark
         // defensively (mirrors ctx_h_ready_n behavior). The two

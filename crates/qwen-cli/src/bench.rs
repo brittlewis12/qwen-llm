@@ -16,11 +16,11 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use qwen_llm::{
     gguf::GgufFile,
-    loader::{Model, open_dflash_drafter},
+    loader::{open_dflash_drafter, Model},
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -1050,30 +1050,52 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         // drafter_pos..drafter_pos+n_accepted+1. Bonus position
         // (n_accepted+1 in verify) is NOT yet committed; it'll be
         // appended on the NEXT outer iter when bonus becomes carry.
+        //
+        // **v0.74.3** Batched commit: gather all columns into one
+        // command buffer + one commit/wait via
+        // `append_target_ctx_columns_now`. The per-column `_now`
+        // variant created N CPU/GPU sync points per outer step; at
+        // α_chain≈5.2 typical that's ~6 waits collapsed to 1.
+        let mut append_columns: Vec<(qwen_llm::metal::MetalTensor, u32)> =
+            Vec::with_capacity(n_accepted + 1);
         for n_idx in 0..=n_accepted {
             let n_slot = verify_scratch.hidden_capture_n_slot(n_idx as u32);
             let absolute_pos = drafter_pos + n_idx as u32;
-            decoder
-                .session
-                .append_target_ctx_column_now(&ctx, &n_slot, absolute_pos, n_target_features)
-                .context("append packed ctx column")?;
+            append_columns.push((n_slot, absolute_pos));
         }
+        let columns_refs: Vec<(&qwen_llm::metal::MetalTensor, u32)> =
+            append_columns.iter().map(|(t, p)| (t, *p)).collect();
+        decoder
+            .session
+            .append_target_ctx_columns_now(&ctx, &columns_refs, n_target_features)
+            .context("append packed ctx columns")?;
 
         // ---- Restore on partial accept ----
         // n_keep = 1 + n_accepted (carry + accepted drafts; bonus
-        // position not yet committed). On full accept (n_accepted=D),
-        // n_keep = N: rollback is a no-op but we still call it for
-        // symmetry per the H5.3a restore contract (the call MUST be
-        // safe at n_keep=N).
-        qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
-            decoder.base,
-            &verify_scratch,
-            (n_accepted + 1) as u32,
-            drafter_pos,
-            &mut target_session,
-        )
-        .context("restore_after_partial_accept")?;
-        restore_calls += 1;
+        // position not yet committed). On FULL accept (n_accepted=D,
+        // i.e. n_keep == N), rollback is a no-op: we kept all N
+        // verify positions, so there's nothing to roll back. The
+        // restore primitive is safe at n_keep=N (it would just blit
+        // the latest checkpoint slot into itself + write the same
+        // kv_n_pos back) but that's pure overhead — one BlitEncoder
+        // commit + GPU wait + per-GDN-layer ckpt blits worth of work.
+        // **v0.74.3** Skip restore entirely on full accept; reviewer's
+        // round-2 lever item ("skip restore blits on full accept").
+        // High α (which is typical for code prompts: α_pos1=1.000) makes
+        // this fire often.
+        let n_keep = (n_accepted + 1) as u32;
+        let n_full = (verify_scratch.n) as u32;
+        if n_keep < n_full {
+            qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
+                decoder.base,
+                &verify_scratch,
+                n_keep,
+                drafter_pos,
+                &mut target_session,
+            )
+            .context("restore_after_partial_accept")?;
+            restore_calls += 1;
+        }
 
         // ---- Advance cursors ----
         processed_pos += 1 + n_accepted as u32;
@@ -1183,7 +1205,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
             // Sort by descending sum.
             let mut sorted: Vec<_> = agg.iter().collect();
-            sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
+            sorted.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
             for (name, (sum_ms, count)) in &sorted {
                 let avg = *sum_ms / (*count as f64);
                 let pct = 100.0 * *sum_ms / total_gpu_ms;

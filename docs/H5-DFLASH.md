@@ -1334,7 +1334,132 @@ the failure:
 
 ## Document history
 
-- **rev 13 (current).** Long-ctx bench discovery: DFlash decode
+- **rev 14 (current).** v0.74 ctx caching SHIPPED + v0.74.2 drafter
+  phase 3 → Q8_0 mat-mat SHIPPED + v0.74.3 hot-loop sync cleanup
+  SHIPPED. **DFlash now beats no-spec at every measured ctx.**
+  Cumulative since v0.72.4 baseline at default-ctx: **0.452× → 1.008×**
+  (+123%). Reviewer's external code review caught the v0.74.2 lever
+  (drafter phase 3 was still per-row mat-vec despite Q8_0 mat-mat
+  having shipped 5 commits earlier).
+
+  ### Cumulative trajectory (production 27B Q4_K_M, 32-token gen)
+
+    | version    | default ctx (5) | ctx=181 | ctx=363 |
+    |------------|----------------:|--------:|--------:|
+    | v0.72.4    |          0.452× |       — |       — |
+    | v0.73a.1   |          0.548× |       — |       — |
+    | v0.73b.1   |          0.746× |       — |       — |
+    | v0.73c.1   |          0.805× |  0.874× |  0.984× |
+    | v0.74      |       (~0.81×)  |  1.136× |  1.321× |
+    | v0.74.2    |          1.005× |  1.336× |  1.465× |
+    | **v0.74.3**|       **1.008×**|**1.342×**|**1.482×**|
+
+  Total wall (apples-to-apples) at v0.74.3:
+
+    | ctx | decode-only | total wall |
+    |----:|------------:|-----------:|
+    |   5 |       1.008×|     1.005× |
+    | 181 |       1.342×|     1.038× |
+    | 363 |       1.482×|     1.046× |
+
+  Total wall is dominated by prefill (which remains scalar-token
+  replay; reviewer's #1 long-ctx lever). Decode-only beats no-spec
+  on every short-mid ctx; that's the speculative-decode KPI.
+
+  ### What v0.74 (collectively) did
+
+  Shipped over 4 sub-commits (v0.74.0 + v0.74.1 + v0.74.2 + v0.74.3).
+  Combined as the "v0.74" series in this doc because they share one
+  thesis: the drafter was doing more redundant per-step work than the
+  v0.73c profile data made obvious.
+
+    * **v0.74.0**: phase 1 ctx_h cache. Watermark-based append-only.
+      `for c in 0..ctx_len` → `for c in ctx_h_ready_n..ctx_len`.
+      Eliminated re-projection of cached cross-context columns.
+      ~50 LOC, no new kernels.
+
+    * **v0.74.1**: phase 2 per-layer K_ctx/V_ctx cache. Same
+      watermark pattern across all 5 drafter layers. Phase 3 attn
+      reads from per-layer cache instead of shared k_ctx_buf /
+      v_ctx_buf. ~70 LOC, no new kernels. Memory: 5 layers × ctx_capacity
+      × kv_dim × 2 × 4 B (40 KB × ctx_capacity); fits trivially.
+
+    * **v0.74.2**: drafter phase 3 → Q8_0 mat-mat (the reviewer's
+      catch). 80 mat-vec dispatches/outer-step → 5 mat-mat. Drafter
+      total GPU at default ctx: **1268 ms → 150 ms (-88%)**. Phase 3
+      went from 49% of drafter GPU to 12%. Same playbook as v0.73a.1
+      GDN / v0.73c.1 attn (eligibility predicate, batched mat-mat
+      Step A/C, F32 fall-through preserved). LOW correctness risk;
+      reuses validated kernels.
+
+    * **v0.74.3**: hot-loop sync cleanup. Two cheap follow-ons
+      flagged by the reviewer:
+      - `append_target_ctx_columns_now` (batched commit): N waits
+        per outer step → 1 wait. At α_chain≈5.2 typical for code,
+        ~6 sync points collapsed to 1.
+      - Skip `restore_after_partial_accept` when `n_keep == N`
+        (full accept). At ctx=363 with α=16/16, both outer steps
+        skip restore entirely (restore_calls: 2 → 0).
+      Marginal speedup (~0.3-1.7% decode-only) because both target
+      sync overhead, not GPU work. Greedy equivalence preserved.
+
+  ### Reviewer's external code review credit
+
+  External review pointed at three things we'd missed:
+  1. **Drafter phase 3 still per-row mat-vec** despite Q8_0 mat-mat
+     having shipped — biggest single short-ctx win available, and
+     the reviewer was correct that the kernels were already there.
+     "You already built the kernels, now use them." Shipped as v0.74.2
+     for ~25% default-ctx speedup in 2 hours of work.
+  2. **`append_target_ctx_column_now` in hot decode loop** creates a
+     command buffer per call. Cheap fix; shipped as v0.74.3 part 1.
+  3. **Restore is unconditional even on full accept**. Cheap fix;
+     shipped as v0.74.3 part 2.
+
+  The reviewer also noted docs drift (rev 13 still marked current
+  while v0.74 had shipped). This rev 14 closes that gap.
+
+  ### What's left from the reviewer's leverage map
+
+  Still-applicable items, ranked:
+
+    * **`prefill_tokens` API** (no `lm_head`, no readback per token):
+      biggest TTFT lever in the repo. Bench prefill at ctx=8K is
+      365 sec because we replay `single_token` per prompt token,
+      paying full vocab projection + 16 MB CPU copy each time.
+      Skipping the unused tail saves ~5-10× TTFT at ctx≥1K. ~1-2
+      days.
+    * **Stream DFlash ctx-cache during prefill**: predicated on
+      prefill_tokens; eliminates the cold first outer step.
+      ~half day on top of prefill_tokens.
+    * **Save-checkpoint compute kernel** (collapse compute/blit
+      alternation in packed_verify GDN): 5-10% short-ctx; still on
+      the table after v0.74.3.
+    * **Packed-N target attn-v4**: long-ctx lever (47% of verify
+      GPU at ctx=16K); modest at short ctx. Defer until prefill
+      lands and we measure long-ctx end-to-end with cached prefill.
+    * **MTP-N=3 fallback recipe**: zero-download alternate decode
+      path at projected 1.35-1.85× per the codex MTP investigation.
+      ~50 LOC reusing DFlash packed-verify infra.
+
+  ### Stale comments cleaned in v0.74.x
+
+    * "v0.72.4 will lift to mat-mat" comments at the per-row mat-vec
+      call sites — replaced with v0.74.2 batched dispatch.
+    * "Drafter F32 dequant resident" comments — drafter has been
+      native Q8_0 since v0.73b.1.
+
+  ### `target_ctx_n` is append-only
+
+  Rev 13 sketched a "ctx_n decreases on restore" concern that was
+  defensive future-proofing, not an actual code path. Verified: the
+  bench appends only committed accepted-prefix hidden columns
+  (n_accepted+1 per outer step) before calling restore; restore
+  doesn't touch `target_ctx_n`. The watermarks `ctx_h_ready_n` /
+  `kv_ctx_ready_n` therefore don't need clamp logic in practice
+  (kept for future-proofing only).
+
+- **rev 13.** Long-ctx bench discovery: DFlash decode
   collapses with ctx because the drafter re-projects the entire
   cross-context every outer step. **The drafter ctx caching item
   filed in rev 9 as v0.77+ is now the dominant lever. Promoting it

@@ -31,15 +31,14 @@
 use crate::gguf::GgufFile;
 use crate::loader::{AttnBlock, Block, GdnBlock, Model};
 use crate::metal::{
-    attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32,
-    encode_gdn_alpha_chain_f32, encode_gdn_step_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, KernelEncoder, MetalContext, MetalError,
-    MetalTensor,
+    KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
+    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_gdn_alpha_chain_f32,
+    encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
+    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
 };
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -574,6 +573,179 @@ impl<'a> MetalForward<'a> {
             std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
         }
         Ok(logits)
+    }
+
+    /// Skip-tail variant of [`single_token`] for prefill loops.
+    ///
+    /// Encodes embedding + per-block forward into one command buffer,
+    /// commits, waits — but DOES NOT run final RMSNorm, lm_head, or
+    /// readback logits. Returns `Ok(())` on success.
+    ///
+    /// The session state (KV cache, GDN state, position counters) is
+    /// advanced exactly as if [`single_token`] had been called. Only
+    /// `session.h` and `session.logits` are left in an unspecified
+    /// state (downstream consumers must treat them as scratch). Callers
+    /// MUST run a non-no-tail variant for the LAST prompt token to
+    /// produce the bootstrap logits for the decode phase.
+    ///
+    /// v0.75.0: shipped to skip ~2 ms/token of lm_head Q6_K mat-vec +
+    /// readback during prompt prefill. Estimated ~5% TTFT win at
+    /// ctx ≥ 181. Establishes the API shape for v0.75.1's packed
+    /// multi-token prefill (which replaces the body wholesale).
+    pub fn single_token_no_tail(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            self.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position,
+                session,
+            )?;
+        }
+
+        // SKIP final RMSNorm + lm_head + readback (the "tail").
+        enc.end();
+        cmd_buf.commit();
+        // Codex Q3: keep wait. Skipping the wait introduces a
+        // session.ids_buf reuse hazard — the next prefill iteration
+        // CPU-writes ids_buf for the next token, and Metal cmd-buffer
+        // ordering does NOT order CPU writes to shared buffers after
+        // commit. If get_rows for token i hasn't run yet, it would
+        // read the overwritten id. Defer real async pipelining to
+        // v0.75.1 where packed prefill restructures this.
+        unsafe { cmd_buf.waitUntilCompleted() };
+
+        Ok(())
+    }
+
+    /// Skip-tail variant of [`single_token_with_multi_hidden`] for
+    /// DFlash prefill loops. Captures the K layer hiddens into
+    /// `hidden_dst` exactly as [`single_token_with_multi_hidden`] does
+    /// (those go on to feed `target_ctx_stacked` via the bench's
+    /// `append_target_ctx_column_now`), but skips final RMSNorm,
+    /// lm_head, and logits readback.
+    ///
+    /// See [`single_token_no_tail`] for the rationale and constraints.
+    pub fn single_token_with_multi_hidden_no_tail(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        target_layer_ids: &[u32],
+        hidden_dst: &MetalTensor,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let k = target_layer_ids.len();
+        if hidden_dst.n_elements() as usize != k * h {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_with_multi_hidden_no_tail.hidden_dst",
+                detail: format!(
+                    "expected {} elements (K={k} layers × H={h}), got {}",
+                    k * h,
+                    hidden_dst.n_elements()
+                ),
+            }));
+        }
+        for &lid in target_layer_ids {
+            if (lid as usize) >= self.model.blocks.len() {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_with_multi_hidden_no_tail.target_layer_ids",
+                    detail: format!("layer id {lid} >= n_layer {}", self.model.blocks.len()),
+                }));
+            }
+        }
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            self.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position,
+                session,
+            )?;
+            // Capture post-residual-#2 hidden at any matching layer
+            // (matches v0.74.4 capture-point semantics). Runs inside
+            // the same command buffer, before the next block writes
+            // session.x.
+            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                if lid as usize == il {
+                    encode_scatter_offset_f32(
+                        self.ctx,
+                        &enc,
+                        &session.x,
+                        hidden_dst,
+                        k_idx * h,
+                        h,
+                    )?;
+                }
+            }
+        }
+
+        // SKIP final RMSNorm + lm_head + readback.
+        enc.end();
+        cmd_buf.commit();
+        unsafe { cmd_buf.waitUntilCompleted() };
+
+        Ok(())
     }
 
     pub fn single_token_with_hidden(
@@ -3957,6 +4129,173 @@ mod tests {
         assert!(cos > 0.9999, "cos={cos} below threshold");
     }
 
+    /// **v0.75.0 correctness gate**: skip-tail prefill must produce
+    /// bit-identical session state to the full-tail path. Two sessions
+    /// run the same 9-token prompt: session A goes through `single_token`
+    /// for every token, session B goes through `single_token_no_tail`
+    /// for tokens [0..n-1) and `single_token` for the last token. Final
+    /// logits MUST match bit-exactly (same forward path through embed +
+    /// blocks + final norm + lm_head; the no_tail path just skips work
+    /// that doesn't feed back into the next iteration).
+    ///
+    /// Equally critical: the `target_layer_ids` capture path
+    /// (`single_token_with_multi_hidden_no_tail`) must produce
+    /// bit-identical hidden_dst on every prefill step. We accumulate
+    /// the per-token captures across the prompt and compare.
+    #[test]
+    fn no_tail_prefill_matches_full_tail() {
+        let model_path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[no-tail-prefill] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        let n = ids.len();
+        assert!(n >= 2, "need ≥2 tokens to test the skip-tail path");
+
+        // Path A: full-tail every token.
+        let mut s_a = MetalSession::fresh(&ctx, &mm, n + 4).expect("session A");
+        let mut last_a = vec![];
+        for (i, &tid) in ids.iter().enumerate() {
+            last_a = mf.single_token(tid, i as u32, &mut s_a).expect("forward A");
+        }
+
+        // Path B: no_tail for [0..n-1), full tail for the last token.
+        let mut s_b = MetalSession::fresh(&ctx, &mm, n + 4).expect("session B");
+        let mut last_b = vec![];
+        for (i, &tid) in ids.iter().enumerate() {
+            if i + 1 < n {
+                mf.single_token_no_tail(tid, i as u32, &mut s_b)
+                    .expect("forward B no_tail");
+            } else {
+                last_b = mf
+                    .single_token(tid, i as u32, &mut s_b)
+                    .expect("forward B tail");
+            }
+        }
+
+        // Bit-exact match required: same kernels in the same order with
+        // same inputs (no mat-mat half-staging on the no_tail path).
+        assert_eq!(
+            last_a.len(),
+            last_b.len(),
+            "logits length mismatch ({} vs {})",
+            last_a.len(),
+            last_b.len()
+        );
+        let mut max_abs = 0.0f32;
+        for i in 0..last_a.len() {
+            max_abs = max_abs.max((last_a[i] - last_b[i]).abs());
+        }
+        eprintln!("[no-tail-prefill] full-tail vs no-tail final logits max|Δ|={max_abs:.6e}");
+        assert_eq!(
+            max_abs, 0.0,
+            "logits must match BIT-EXACTLY (max|Δ|={max_abs:e})"
+        );
+
+        // Multi-hidden capture must also be bit-exact across all prefill
+        // positions. We accumulate the per-position hidden captures into
+        // a host-side buffer (mirroring the bench's
+        // `append_target_ctx_column_now` pattern) and compare path A vs
+        // path B's accumulations.
+        let arch = &mm.arch;
+        let h = arch.hidden_size as usize;
+        // Pick a few capture layers spanning the network (the H5 drafter
+        // captures K=5; the 0.8B-F32 oracle has 36 blocks so 5 evenly
+        // spaced layers exercises a realistic K).
+        let capture_layers: Vec<u32> = vec![
+            0,
+            (mm.blocks.len() / 4) as u32,
+            (mm.blocks.len() / 2) as u32,
+            (3 * mm.blocks.len() / 4) as u32,
+            (mm.blocks.len() - 1) as u32,
+        ];
+        let k = capture_layers.len();
+
+        let h_dst_a = MetalTensor::zeros_f32(&ctx, vec![(k * h) as u64]).expect("h_dst_a");
+        let h_dst_b = MetalTensor::zeros_f32(&ctx, vec![(k * h) as u64]).expect("h_dst_b");
+
+        // Per-position accumulator: [n, k * h]
+        let mut accum_a = vec![0.0f32; n * k * h];
+        let mut accum_b = vec![0.0f32; n * k * h];
+
+        let mut s2_a = MetalSession::fresh(&ctx, &mm, n + 4).expect("session2 A");
+        for (i, &tid) in ids.iter().enumerate() {
+            mf.single_token_with_multi_hidden(tid, i as u32, &mut s2_a, &capture_layers, &h_dst_a)
+                .expect("multi_hidden A");
+            unsafe {
+                let src = h_dst_a.buffer.contents().as_ptr() as *const f32;
+                std::ptr::copy_nonoverlapping(
+                    src,
+                    accum_a[i * k * h..(i + 1) * k * h].as_mut_ptr(),
+                    k * h,
+                );
+            }
+        }
+
+        let mut s2_b = MetalSession::fresh(&ctx, &mm, n + 4).expect("session2 B");
+        for (i, &tid) in ids.iter().enumerate() {
+            if i + 1 < n {
+                mf.single_token_with_multi_hidden_no_tail(
+                    tid,
+                    i as u32,
+                    &mut s2_b,
+                    &capture_layers,
+                    &h_dst_b,
+                )
+                .expect("multi_hidden B no_tail");
+            } else {
+                mf.single_token_with_multi_hidden(
+                    tid,
+                    i as u32,
+                    &mut s2_b,
+                    &capture_layers,
+                    &h_dst_b,
+                )
+                .expect("multi_hidden B tail");
+            }
+            unsafe {
+                let src = h_dst_b.buffer.contents().as_ptr() as *const f32;
+                std::ptr::copy_nonoverlapping(
+                    src,
+                    accum_b[i * k * h..(i + 1) * k * h].as_mut_ptr(),
+                    k * h,
+                );
+            }
+        }
+
+        let mut max_abs_h = 0.0f32;
+        let mut first_pos = usize::MAX;
+        for i in 0..(n * k * h) {
+            let d = (accum_a[i] - accum_b[i]).abs();
+            if d > max_abs_h {
+                max_abs_h = d;
+                first_pos = i;
+            }
+        }
+        eprintln!(
+            "[no-tail-prefill] accumulated multi-hidden max|Δ|={max_abs_h:.6e} (first nonzero idx={first_pos})"
+        );
+        assert_eq!(
+            max_abs_h, 0.0,
+            "accumulated multi-hidden must match BIT-EXACTLY (max|Δ|={max_abs_h:e})"
+        );
+    }
+
     /// Validate a single full-attention block end-to-end on Metal vs the
     /// CPU oracle. Uses block 3 of Qwen3.5-0.8B-F32 (the first attn block,
     /// n_q=8, n_kv=2, head_dim=256, 4:1 GQA).
@@ -3983,8 +4322,8 @@ mod tests {
         let initial_x: Vec<f32> = (0..h).map(|i| ((i % 31) as f32 - 15.0) * 0.02).collect();
         let position: u32 = 0;
         let attn_block_idx = 3usize; // first attn block in 0.8B
-                                     // attn_idx_in_session is the 0-indexed count among ATTN blocks
-                                     // before this one. block 3 is the first attn block, so 0.
+        // attn_idx_in_session is the 0-indexed count among ATTN blocks
+        // before this one. block 3 is the first attn block, so 0.
         let attn_idx_in_session = 0usize;
 
         // CPU reference: replicate exactly what forward.rs:attn_step does.

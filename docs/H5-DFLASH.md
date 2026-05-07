@@ -1334,7 +1334,56 @@ the failure:
 
 ## Document history
 
-- **rev 14 (current).** v0.74 ctx caching SHIPPED + v0.74.2 drafter
+- **rev 15 (current).** v0.75.0 skip-tail prefill SHIPPED. All-but-last
+  prompt tokens now skip final RMSNorm + lm_head + readback (~5%
+  TTFT win at every measured ctx). Established the prefill API shape
+  for v0.75.1 (packed multi-token prefill) to swap in. Codex pressure-
+  test caught and prevented a `session.ids_buf` reuse hazard that
+  would have shipped as a silent prefill bug if we'd attempted async
+  pipelining (Option 2). Bit-exact correctness gate (final logits +
+  accumulated multi-hidden capture) added to lib loop (77 tests, was
+  76).
+
+  ### v0.75.0 measurements (production 27B Q4_K_M, 32-token gen)
+
+  Apples-to-apples vs v0.74.4 baseline (DFlash prefill ms):
+
+    | ctx | v0.74.4 | v0.75.0 | Δ ms  | Δ %    |
+    |----:|--------:|--------:|------:|-------:|
+    |   9 |     376 |     355 |   −21 | −5.6%  |
+    | 181 |    7502 |    7116 |  −385 | −5.1%  |
+    | 363 |   15278 |   14329 |  −949 | −6.2%  |
+
+  Phase profiler at ctx=181 shows lm_head 2.07 ms / token (5.0% of
+  phase_sum 41.27 ms). 180 skip-tails × 2 ms = 360 ms predicted; we
+  measured 385 ms. Matches kernel-level expectation.
+
+  Decode-only and total-wall ratios unchanged (the change only
+  touches prefill). Greedy equivalence PASSES at every ctx.
+
+  ### Codex pressure-test catches
+
+  Pre-implementation review on /tmp/v0.75.0-codex-prompt.md:
+  - **Q1 reshape**: dropped `Result<Option<Vec<f32>>>` signature in
+    favor of new `_no_tail` methods returning `Result<()>`. Avoids
+    breaking ~20 existing call sites; keeps prefill semantics out of
+    the decode API.
+  - **Q3 trap saved**: I was planning to skip the `waitUntilCompleted`
+    after each no_tail call to chain prefill iterations. Codex
+    flagged that `session.ids_buf` is reused across calls — Metal
+    cmd-buffer ordering does NOT order CPU writes to shared buffers
+    after commit. If get_rows for token i hadn't run yet when CPU
+    overwrote ids_buf for token i+1, get_rows would read the wrong
+    id. Silent prefill corruption. Decision: ship Option 1 (commit +
+    wait), defer real async pipelining to v0.75.1 where packed
+    prefill restructures the loop.
+
+  Post-implementation review on /tmp/v0.75.0-codex-review-prompt.md:
+  no blocking findings. Two non-blocking nits applied: removed
+  `(no_tail=N tail=N)` instrumentation print (now obvious from code +
+  test), `cargo fmt` clean.
+
+- **rev 14.** v0.74 ctx caching SHIPPED + v0.74.2 drafter
   phase 3 → Q8_0 mat-mat SHIPPED + v0.74.3 hot-loop sync cleanup
   SHIPPED. **DFlash now beats no-spec at every measured ctx.**
   Cumulative since v0.72.4 baseline at default-ctx: **0.452× → 1.008×**
@@ -1424,11 +1473,11 @@ the failure:
   Still-applicable items, ranked:
 
     * **`prefill_tokens` API** (no `lm_head`, no readback per token):
-      biggest TTFT lever in the repo. Bench prefill at ctx=8K is
-      365 sec because we replay `single_token` per prompt token,
-      paying full vocab projection + 16 MB CPU copy each time.
-      Skipping the unused tail saves ~5-10× TTFT at ctx≥1K. ~1-2
-      days.
+      biggest TTFT lever in the repo. v0.75.0 SHIPPED the skip-tail
+      half (no `lm_head`, no readback for all-but-last prefill
+      tokens) for ~5% TTFT at ctx ≥ 181. The packed multi-token
+      half — turning per-token mat-vec into per-chunk-of-P mat-mat
+      — is v0.75.1 (~2 days, projected 3-5× TTFT at ctx ≥ 1K).
     * **Stream DFlash ctx-cache during prefill**: predicated on
       prefill_tokens; eliminates the cold first outer step.
       ~half day on top of prefill_tokens.

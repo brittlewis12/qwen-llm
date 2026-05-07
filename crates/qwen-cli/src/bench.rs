@@ -16,11 +16,11 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use qwen_llm::{
     gguf::GgufFile,
-    loader::{open_dflash_drafter, Model},
+    loader::{Model, open_dflash_drafter},
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -356,8 +356,16 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let t_ref_total = Instant::now();
     let mut last_logits = Vec::new();
     let t_ref_prefill = Instant::now();
+    let n_prompt_ref = prompt_ids.len();
     for (i, &tid) in prompt_ids.iter().enumerate() {
-        last_logits = mf.single_token(tid, i as u32, &mut ref_session)?;
+        // v0.75.0: skip lm_head + final norm + readback for all but the
+        // last prompt token. Only the last token's logits seed the
+        // decode phase below.
+        if i + 1 < n_prompt_ref {
+            mf.single_token_no_tail(tid, i as u32, &mut ref_session)?;
+        } else {
+            last_logits = mf.single_token(tid, i as u32, &mut ref_session)?;
+        }
     }
     let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
 
@@ -545,15 +553,29 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     let t_prefill = Instant::now();
     let mut last_logits: Vec<f32> = Vec::new();
     for (i, &tid) in prompt_ids.iter().enumerate() {
-        last_logits = mf
-            .single_token_with_multi_hidden(
+        // v0.75.0: skip-tail for all but the last prompt token. Hidden
+        // capture into multi_hidden_dst still runs, so the per-token
+        // append_target_ctx_column_now below sees valid bytes.
+        if i + 1 < n_prompt {
+            mf.single_token_with_multi_hidden_no_tail(
                 tid,
                 i as u32,
                 &mut target_session,
                 &head.target_layer_ids,
                 &multi_hidden_dst,
             )
-            .context("prefill base step")?;
+            .context("prefill base step (no_tail)")?;
+        } else {
+            last_logits = mf
+                .single_token_with_multi_hidden(
+                    tid,
+                    i as u32,
+                    &mut target_session,
+                    &head.target_layer_ids,
+                    &multi_hidden_dst,
+                )
+                .context("prefill base step")?;
+        }
         // Append captured K hiddens to the drafter's target_ctx.
         dsess
             .append_target_ctx_column_now(&ctx, &multi_hidden_dst, i as u32, n_target_features)
@@ -693,7 +715,13 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     let mut last_logits_ref = Vec::new();
     let t_ref_prefill = Instant::now();
     for (i, &tid) in prompt_ids.iter().enumerate() {
-        last_logits_ref = mf.single_token(tid, i as u32, &mut ref_session)?;
+        // v0.75.0: skip-tail except for the last prompt token (whose
+        // logits seed `next_tok` for the decode phase).
+        if i + 1 < n_prompt {
+            mf.single_token_no_tail(tid, i as u32, &mut ref_session)?;
+        } else {
+            last_logits_ref = mf.single_token(tid, i as u32, &mut ref_session)?;
+        }
     }
     let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
     let mut next_tok = argmax_i32(&last_logits_ref);
@@ -928,15 +956,27 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let t_prefill = Instant::now();
     let mut last_logits: Vec<f32> = Vec::new();
     for (i, &tid) in prompt_ids.iter().enumerate() {
-        last_logits = mf
-            .single_token_with_multi_hidden(
+        // v0.75.0: skip-tail for all but the last prompt token.
+        if i + 1 < n_prompt {
+            mf.single_token_with_multi_hidden_no_tail(
                 tid,
                 i as u32,
                 &mut target_session,
                 &head.target_layer_ids,
                 &multi_hidden_dst,
             )
-            .context("prefill base step")?;
+            .context("prefill base step (no_tail)")?;
+        } else {
+            last_logits = mf
+                .single_token_with_multi_hidden(
+                    tid,
+                    i as u32,
+                    &mut target_session,
+                    &head.target_layer_ids,
+                    &multi_hidden_dst,
+                )
+                .context("prefill base step")?;
+        }
         dsess
             .append_target_ctx_column_now(&ctx, &multi_hidden_dst, i as u32, n_target_features)
             .context("append prefill ctx column")?;
@@ -1114,7 +1154,12 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let t_ref_prefill = Instant::now();
         let mut last_logits_ref = Vec::new();
         for (i, &tid) in prompt_ids.iter().enumerate() {
-            last_logits_ref = mf.single_token(tid, i as u32, &mut ref_session)?;
+            // v0.75.0: skip-tail except for the last prompt token.
+            if i + 1 < n_prompt {
+                mf.single_token_no_tail(tid, i as u32, &mut ref_session)?;
+            } else {
+                last_logits_ref = mf.single_token(tid, i as u32, &mut ref_session)?;
+            }
         }
         let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
         let mut next_tok = argmax_i32(&last_logits_ref);
@@ -1205,7 +1250,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
             // Sort by descending sum.
             let mut sorted: Vec<_> = agg.iter().collect();
-            sorted.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+            sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
             for (name, (sum_ms, count)) in &sorted {
                 let avg = *sum_ms / (*count as f64);
                 let pct = 100.0 * *sum_ms / total_gpu_ms;
@@ -1638,10 +1683,15 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
         let ids = tok.encode(prompt, false)?;
         let mut sess = MetalSession::fresh(&ctx, &mm, ids.len() + tokens + 16)?;
 
-        // Prefill the prompt.
+        // Prefill the prompt. v0.75.0: skip-tail except last token.
         let mut last_logits = vec![];
+        let n_ids = ids.len();
         for (i, &tid) in ids.iter().enumerate() {
-            last_logits = mf.single_token(tid, i as u32, &mut sess)?;
+            if i + 1 < n_ids {
+                mf.single_token_no_tail(tid, i as u32, &mut sess)?;
+            } else {
+                last_logits = mf.single_token(tid, i as u32, &mut sess)?;
+            }
         }
 
         // Decode `tokens` steps; for each, check if the greedy argmax

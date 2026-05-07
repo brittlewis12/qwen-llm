@@ -417,6 +417,7 @@ fn dflash_packed_verify_layer_major_vs_token_major_27b() {
         &mut layer_scratch,
         &mut sess_lm,
         Some(lm_debug),
+        None, // n_eff_override (test always uses full N)
     )
     .expect("layer-major");
     let lm_wall = lm_t.elapsed();

@@ -1202,6 +1202,7 @@ impl<'a> DFlashDecoder<'a> {
             layer_scratch,
             target_session,
             None,
+            None, // n_eff_override
         )
     }
 
@@ -1231,6 +1232,7 @@ impl<'a> DFlashDecoder<'a> {
             layer_scratch,
             target_session,
             Some(debug_logits),
+            None, // n_eff_override (debug variant always uses full N)
         )
     }
 
@@ -1334,6 +1336,7 @@ impl<'a> DFlashDecoder<'a> {
             n_keep,
             start_position,
             target_session,
+            None, // n_eff_override (default; v0.76 adaptive will pass per step)
         )
     }
 }
@@ -1793,18 +1796,38 @@ pub fn encode_packed_verify_layer_major_inner(
     layer_scratch: &mut MetalDFlashLayerMajorScratch,
     target_session: &mut MetalSession,
     debug_logits_dst: Option<&MetalTensor>,
+    n_eff_override: Option<u32>,
 ) -> Result<Vec<i32>, DFlashError> {
     let arch = &base.model.arch;
-    let n = verify_scratch.n as usize;
+    // `n_block` is the scratch allocation size (verify_scratch.n,
+    // layer_scratch.n; both must agree). `n` is the EFFECTIVE chain
+    // length used by THIS call — `n_block` if no override, else
+    // `n_eff_override` for v0.76 adaptive-N back-off. Encoders that
+    // strict-equal-check `n_elements()` against `n * dim` are passed
+    // `view_subrange`-sized scratch views below; ckpt slot indices
+    // `[0, n)` are written, indices `[n, n_block)` remain stale from
+    // any prior call (they are never read by `restore` when called
+    // with the SAME `n_eff_override`).
+    let n_block = verify_scratch.n as usize;
+    let n = n_eff_override.map(|v| v as usize).unwrap_or(n_block);
     let h = arch.hidden_size as usize;
     let f = arch.intermediate_size as usize;
     let v = arch.vocab_size as usize;
 
     // -- guard wall (mirrors token-major; same bug class) --
+    if n == 0 || n > n_block {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major",
+            detail: format!(
+                "n_eff_override={:?} resolves to n={n} which must be in [1, n_block={n_block}]",
+                n_eff_override
+            ),
+        }));
+    }
     if tokens.len() != n {
         return Err(DFlashError::Metal(MetalError::BadShape {
             kernel: "packed_verify_layer_major",
-            detail: format!("tokens.len()={} != verify_scratch.n={n}", tokens.len()),
+            detail: format!("tokens.len()={} != n_eff={n}", tokens.len()),
         }));
     }
     let k_target = target_layer_ids.len();
@@ -1912,6 +1935,54 @@ pub fn encode_packed_verify_layer_major_inner(
     // -- One MTLCommandBuffer for the whole forward. We open and close
     //    compute encoders multiple times (alternating with blit encoders
     //    around the GDN-layer per-token checkpoint writes). --
+
+    // -- v0.76 sized-view bindings for adaptive-N back-off --
+    //
+    // When `n_eff_override` truncates the verify chain below the
+    // scratch allocation size `n_block`, every encoder dispatch
+    // that strict-equals against `n * dim` would fail host-side
+    // validation if we passed the full `[n_block, dim]` scratch
+    // tensors. We size views to exactly `[n, dim]` here and use
+    // them throughout the body. Per-block tensors with dims that
+    // depend on arch (GDN conv_dim/v_dim, attn q_dim/kv_dim) are
+    // sized inside each block's match arm where the dims are
+    // already computed.
+    //
+    // `hidden_capture` ([n_block, K, H]) and `gdn_ckpt`/`conv_ckpt`
+    // ([n_gdn, n_block, ...]) are NOT view-sized: they're written
+    // at absolute slot offsets `(n_idx * K + k_idx) * H` etc., so
+    // any subset of n_idx values writes to disjoint regions.
+    // Slots `[n_eff, n_block)` remain stale (or zero from
+    // construction); they are never read by `restore` or `bench`
+    // when called with the SAME `n_eff_override` for the same
+    // outer step.
+    let x_pack = layer_scratch.x_pack.view_subrange(0, vec![(n * h) as u64]);
+    let h_pack = layer_scratch.h_pack.view_subrange(0, vec![(n * h) as u64]);
+    let mixer_out_pack = layer_scratch
+        .mixer_out_pack
+        .view_subrange(0, vec![(n * h) as u64]);
+    let ffn_gate_pack = layer_scratch
+        .ffn_gate_pack
+        .view_subrange(0, vec![(n * f) as u64]);
+    let ffn_up_pack = layer_scratch
+        .ffn_up_pack
+        .view_subrange(0, vec![(n * f) as u64]);
+    let ffn_inner_pack = layer_scratch
+        .ffn_inner_pack
+        .view_subrange(0, vec![(n * f) as u64]);
+    let ffn_out_pack = layer_scratch
+        .ffn_out_pack
+        .view_subrange(0, vec![(n * h) as u64]);
+    let final_logits_pack = layer_scratch
+        .final_logits_pack
+        .view_subrange(0, vec![(n * v) as u64]);
+    let packed_ids_buf = verify_scratch
+        .packed_ids_buf
+        .view_subrange(0, vec![n as u64]);
+    let verify_argmax_view = verify_scratch
+        .verify_argmax
+        .view_subrange(0, vec![n as u64]);
+
     let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
 
     // === Phase 1: batched embed of all N tokens into x_pack [N, H]. ===
@@ -1921,8 +1992,8 @@ pub fn encode_packed_verify_layer_major_inner(
             base.ctx,
             &enc,
             &base.model.token_embd,
-            &verify_scratch.packed_ids_buf,
-            &layer_scratch.x_pack,
+            &packed_ids_buf,
+            &x_pack,
             n,
             h,
         )?;
@@ -1944,14 +2015,7 @@ pub fn encode_packed_verify_layer_major_inner(
         {
             let enc = KernelEncoder::begin(&cmd_buf);
             encode_rms_norm_batched_f32(
-                base.ctx,
-                &enc,
-                &layer_scratch.x_pack,
-                attn_norm,
-                &layer_scratch.h_pack,
-                n,
-                h,
-                RMS_EPS,
+                base.ctx, &enc, &x_pack, attn_norm, &h_pack, n, h, RMS_EPS,
             )?;
             enc.end();
         }
@@ -1999,14 +2063,24 @@ pub fn encode_packed_verify_layer_major_inner(
                     let head_dim_u = arch.gdn_head_dim as usize;
                     let conv_dim = (2 * n_k_u + n_v) * head_dim_u;
                     let v_dim = n_v * head_dim_u;
+                    // v0.76: sized views for adaptive-N back-off.
+                    let gdn_qkv_pack = layer_scratch
+                        .gdn_qkv_pack
+                        .view_subrange(0, vec![(n * conv_dim) as u64]);
+                    let gdn_z_pack = layer_scratch
+                        .gdn_z_pack
+                        .view_subrange(0, vec![(n * v_dim) as u64]);
+                    let gdn_normed_pack = layer_scratch
+                        .gdn_normed_pack
+                        .view_subrange(0, vec![(n * v_dim) as u64]);
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
                             &g.in_proj_qkv,
-                            &layer_scratch.h_pack,
-                            &layer_scratch.gdn_qkv_pack,
+                            &h_pack,
+                            &gdn_qkv_pack,
                             h,
                             conv_dim,
                             n,
@@ -2015,8 +2089,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             base.ctx,
                             &enc,
                             &g.in_proj_z,
-                            &layer_scratch.h_pack,
-                            &layer_scratch.gdn_z_pack,
+                            &h_pack,
+                            &gdn_z_pack,
                             h,
                             v_dim,
                             n,
@@ -2116,8 +2190,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             base.ctx,
                             &enc,
                             &g.out_proj,
-                            &layer_scratch.gdn_normed_pack,
-                            &layer_scratch.mixer_out_pack,
+                            &gdn_normed_pack,
+                            &mixer_out_pack,
                             v_dim,
                             h,
                             n,
@@ -2135,7 +2209,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             encode_copy_offset_f32(
                                 base.ctx,
                                 &enc,
-                                &layer_scratch.h_pack,
+                                &h_pack,
                                 n_idx * h,
                                 &target_session.h,
                                 h,
@@ -2145,7 +2219,7 @@ pub fn encode_packed_verify_layer_major_inner(
                                 base.ctx,
                                 &enc,
                                 &target_session.mixer_out,
-                                &layer_scratch.mixer_out_pack,
+                                &mixer_out_pack,
                                 n_idx * h,
                                 h,
                             )?;
@@ -2189,6 +2263,32 @@ pub fn encode_packed_verify_layer_major_inner(
                     let kv_dim = n_kv * head_dim;
                     let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
 
+                    // v0.76: sized views for adaptive-N back-off.
+                    let attn_q_full_pack = layer_scratch
+                        .attn_q_full_pack
+                        .view_subrange(0, vec![(n * 2 * q_dim) as u64]);
+                    let attn_q_pack = layer_scratch
+                        .attn_q_pack
+                        .view_subrange(0, vec![(n * q_dim) as u64]);
+                    let attn_gate_pack = layer_scratch
+                        .attn_gate_pack
+                        .view_subrange(0, vec![(n * q_dim) as u64]);
+                    let attn_q_normed_pack = layer_scratch
+                        .attn_q_normed_pack
+                        .view_subrange(0, vec![(n * q_dim) as u64]);
+                    let attn_k_now_pack = layer_scratch
+                        .attn_k_now_pack
+                        .view_subrange(0, vec![(n * kv_dim) as u64]);
+                    let attn_v_now_pack = layer_scratch
+                        .attn_v_now_pack
+                        .view_subrange(0, vec![(n * kv_dim) as u64]);
+                    let attn_k_normed_pack = layer_scratch
+                        .attn_k_normed_pack
+                        .view_subrange(0, vec![(n * kv_dim) as u64]);
+                    let attn_o_pack = layer_scratch
+                        .attn_o_pack
+                        .view_subrange(0, vec![(n * q_dim) as u64]);
+
                     // Step A: batched front-end Q (gated) / K / V projections,
                     // batched Q-norm and K-norm. One encoder per layer.
                     {
@@ -2198,8 +2298,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             base.ctx,
                             &enc,
                             &a.q,
-                            &layer_scratch.h_pack,
-                            &layer_scratch.attn_q_full_pack,
+                            &h_pack,
+                            &attn_q_full_pack,
                             h,
                             2 * q_dim,
                             n,
@@ -2212,9 +2312,9 @@ pub fn encode_packed_verify_layer_major_inner(
                         encode_split_q_gate_f32(
                             base.ctx,
                             &enc,
-                            &layer_scratch.attn_q_full_pack,
-                            &layer_scratch.attn_q_pack,
-                            &layer_scratch.attn_gate_pack,
+                            &attn_q_full_pack,
+                            &attn_q_pack,
+                            &attn_gate_pack,
                             n * n_q,
                             head_dim,
                         )?;
@@ -2223,8 +2323,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             base.ctx,
                             &enc,
                             &a.k,
-                            &layer_scratch.h_pack,
-                            &layer_scratch.attn_k_now_pack,
+                            &h_pack,
+                            &attn_k_now_pack,
                             h,
                             kv_dim,
                             n,
@@ -2233,8 +2333,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             base.ctx,
                             &enc,
                             &a.v,
-                            &layer_scratch.h_pack,
-                            &layer_scratch.attn_v_now_pack,
+                            &h_pack,
+                            &attn_v_now_pack,
                             h,
                             kv_dim,
                             n,
@@ -2243,9 +2343,9 @@ pub fn encode_packed_verify_layer_major_inner(
                         encode_rms_norm_batched_f32(
                             base.ctx,
                             &enc,
-                            &layer_scratch.attn_q_pack,
+                            &attn_q_pack,
                             &a.q_norm,
-                            &layer_scratch.attn_q_normed_pack,
+                            &attn_q_normed_pack,
                             n * n_q,
                             head_dim,
                             RMS_EPS,
@@ -2254,9 +2354,9 @@ pub fn encode_packed_verify_layer_major_inner(
                         encode_rms_norm_batched_f32(
                             base.ctx,
                             &enc,
-                            &layer_scratch.attn_k_now_pack,
+                            &attn_k_now_pack,
                             &a.k_norm,
-                            &layer_scratch.attn_k_normed_pack,
+                            &attn_k_normed_pack,
                             n * n_kv,
                             head_dim,
                             RMS_EPS,
@@ -2373,27 +2473,22 @@ pub fn encode_packed_verify_layer_major_inner(
                         // attn_q_pack (no longer needed; q_pack is dead after
                         // attn-v4). Same in-place reuse pattern as the
                         // single-token encode_attn (line 1399 of metal_forward.rs).
-                        encode_sigmoid_f32(
-                            base.ctx,
-                            &enc,
-                            &layer_scratch.attn_gate_pack,
-                            &layer_scratch.attn_q_pack,
-                        )?;
+                        encode_sigmoid_f32(base.ctx, &enc, &attn_gate_pack, &attn_q_pack)?;
                         // attn_o_pack *= sigmoid(gate_pack), elementwise on N*q_dim.
                         crate::metal::encode_mul_f32(
                             base.ctx,
                             &enc,
-                            &layer_scratch.attn_o_pack,
-                            &layer_scratch.attn_q_pack,
-                            &layer_scratch.attn_o_pack,
+                            &attn_o_pack,
+                            &attn_q_pack,
+                            &attn_o_pack,
                         )?;
                         // Batched O projection: attn_o_pack [N, q_dim] -> mixer_out_pack [N, H].
                         encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
                             &a.o,
-                            &layer_scratch.attn_o_pack,
-                            &layer_scratch.mixer_out_pack,
+                            &attn_o_pack,
+                            &mixer_out_pack,
                             q_dim,
                             h,
                             n,
@@ -2410,7 +2505,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         encode_copy_offset_f32(
                             base.ctx,
                             &enc,
-                            &layer_scratch.h_pack,
+                            &h_pack,
                             n_idx * h,
                             &target_session.h,
                             h,
@@ -2421,7 +2516,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             base.ctx,
                             &enc,
                             &target_session.mixer_out,
-                            &layer_scratch.mixer_out_pack,
+                            &mixer_out_pack,
                             n_idx * h,
                             h,
                         )?;
@@ -2436,12 +2531,7 @@ pub fn encode_packed_verify_layer_major_inner(
         //     N*H element count).
         {
             let enc = KernelEncoder::begin(&cmd_buf);
-            encode_add_inplace_f32(
-                base.ctx,
-                &enc,
-                &layer_scratch.x_pack,
-                &layer_scratch.mixer_out_pack,
-            )?;
+            encode_add_inplace_f32(base.ctx, &enc, &x_pack, &mixer_out_pack)?;
             enc.end();
         }
 
@@ -2481,14 +2571,7 @@ pub fn encode_packed_verify_layer_major_inner(
         {
             let enc = KernelEncoder::begin(&cmd_buf);
             encode_rms_norm_batched_f32(
-                base.ctx,
-                &enc,
-                &layer_scratch.x_pack,
-                post_norm,
-                &layer_scratch.h_pack,
-                n,
-                h,
-                RMS_EPS,
+                base.ctx, &enc, &x_pack, post_norm, &h_pack, n, h, RMS_EPS,
             )?;
             enc.end();
         }
@@ -2525,39 +2608,21 @@ pub fn encode_packed_verify_layer_major_inner(
         {
             let enc = KernelEncoder::begin(&cmd_buf);
             if mat_mat_path {
-                encode_mat_mat_dispatch(
-                    base.ctx,
-                    &enc,
-                    g_w,
-                    &layer_scratch.h_pack,
-                    &layer_scratch.ffn_gate_pack,
-                    h,
-                    f,
-                    n,
-                )?;
-                encode_mat_mat_dispatch(
-                    base.ctx,
-                    &enc,
-                    u_w,
-                    &layer_scratch.h_pack,
-                    &layer_scratch.ffn_up_pack,
-                    h,
-                    f,
-                    n,
-                )?;
+                encode_mat_mat_dispatch(base.ctx, &enc, g_w, &h_pack, &ffn_gate_pack, h, f, n)?;
+                encode_mat_mat_dispatch(base.ctx, &enc, u_w, &h_pack, &ffn_up_pack, h, f, n)?;
                 encode_silu_mul_f32(
                     base.ctx,
                     &enc,
-                    &layer_scratch.ffn_gate_pack,
-                    &layer_scratch.ffn_up_pack,
-                    &layer_scratch.ffn_inner_pack,
+                    &ffn_gate_pack,
+                    &ffn_up_pack,
+                    &ffn_inner_pack,
                 )?;
                 encode_mat_mat_dispatch(
                     base.ctx,
                     &enc,
                     d_w,
-                    &layer_scratch.ffn_inner_pack,
-                    &layer_scratch.ffn_out_pack,
+                    &ffn_inner_pack,
+                    &ffn_out_pack,
                     f,
                     h,
                     n,
@@ -2589,12 +2654,7 @@ pub fn encode_packed_verify_layer_major_inner(
                 }
             }
             // 2g: residual #2 — x_pack += ffn_out_pack.
-            encode_add_inplace_f32(
-                base.ctx,
-                &enc,
-                &layer_scratch.x_pack,
-                &layer_scratch.ffn_out_pack,
-            )?;
+            encode_add_inplace_f32(base.ctx, &enc, &x_pack, &ffn_out_pack)?;
 
             // 2d-fix (v0.74.4): hidden capture AFTER residual #2,
             // matching single_token_capture_layers semantics. Inside
@@ -2656,9 +2716,9 @@ pub fn encode_packed_verify_layer_major_inner(
             encode_rms_norm_batched_f32(
                 base.ctx,
                 &enc,
-                &layer_scratch.x_pack,
+                &x_pack,
                 &base.model.output_norm,
-                &layer_scratch.h_pack,
+                &h_pack,
                 n,
                 h,
                 RMS_EPS,
@@ -2668,41 +2728,27 @@ pub fn encode_packed_verify_layer_major_inner(
             // final_logits_pack.
             let logits_dst = match debug_logits_dst {
                 Some(dst) => dst,
-                None => &layer_scratch.final_logits_pack,
+                None => &final_logits_pack,
             };
             // Batched lm_head mat-mat.
             encode_mat_mat_dispatch(
                 base.ctx,
                 &enc,
                 &base.model.lm_head,
-                &layer_scratch.h_pack,
+                &h_pack,
                 logits_dst,
                 h,
                 v,
                 n,
             )?;
             // Batched argmax across all N rows in ONE dispatch.
-            encode_argmax_f32(
-                base.ctx,
-                &enc,
-                logits_dst,
-                &verify_scratch.verify_argmax,
-                n,
-                v,
-            )?;
+            encode_argmax_f32(base.ctx, &enc, logits_dst, &verify_argmax_view, n, v)?;
         } else {
             // F32 / unsupported lm_head: per-token mat-vec fallback
             // (the original layer-major tail). Layer-major still wins
             // through the batched final norm only.
             for n_idx in 0..n {
-                encode_copy_offset_f32(
-                    base.ctx,
-                    &enc,
-                    &layer_scratch.x_pack,
-                    n_idx * h,
-                    &target_session.x,
-                    h,
-                )?;
+                encode_copy_offset_f32(base.ctx, &enc, &x_pack, n_idx * h, &target_session.x, h)?;
                 encode_rms_norm_mul_f32(
                     base.ctx,
                     &enc,
@@ -3608,14 +3654,32 @@ pub fn encode_restore_after_partial_accept_inner(
     n_keep: u32,
     start_position: u32,
     target_session: &mut MetalSession,
+    n_eff_override: Option<u32>,
 ) -> Result<(), DFlashError> {
     // -- Validation guard wall (same discipline as packed_verify).
-    let n = scratch.n;
+    //
+    // `n_block` is the scratch allocation size. `n` is the EFFECTIVE
+    // chain length used by the most recent packed_verify call (which
+    // wrote ckpt slots [0, n) and advanced kv_n_pos to start_position +
+    // n). `restore` must be passed the SAME `n_eff_override` value as
+    // the packed_verify call it follows — otherwise the bounds checks
+    // and kv_n_pos contract are wrong.
+    let n_block = scratch.n;
+    let n = n_eff_override.unwrap_or(n_block);
+    if n == 0 || n > n_block {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "restore_after_partial_accept",
+            detail: format!(
+                "n_eff_override={:?} resolves to n={n} which must be in [1, n_block={n_block}]",
+                n_eff_override
+            ),
+        }));
+    }
     if n_keep == 0 || n_keep > n {
         return Err(DFlashError::Metal(MetalError::BadShape {
             kernel: "restore_after_partial_accept",
             detail: format!(
-                "n_keep={n_keep} must be in [1, N={n}] (n_keep=0 is impossible \
+                "n_keep={n_keep} must be in [1, n_eff={n}] (n_keep=0 is impossible \
                  by construction — the carry token is always processed; \
                  see DFlashDecoder::restore_after_partial_accept docs)"
             ),
@@ -4851,6 +4915,7 @@ mod tests {
             &mut layer_scratch,
             &mut sess_lm,
             Some(lm_debug),
+            None, // n_eff_override (test always uses full N)
         )
         .expect("layer-major");
 
@@ -4933,6 +4998,188 @@ mod tests {
             sess_tok.kv_n_pos, sess_lm.kv_n_pos,
             "kv_n_pos diverges between token-major and layer-major"
         );
+    }
+
+    /// **v0.76 adaptive-N back-off correctness gate**: confirm that
+    /// `encode_packed_verify_layer_major_inner` with `n_eff_override
+    /// = Some(n_eff)` produces argmaxes EQUAL to a fresh full-N=block
+    /// run on the first `n_eff` tokens, AND advances session state
+    /// (gdn_state, gdn_conv, kv_n_pos for attn layers) consistently
+    /// with running a single_token loop on those `n_eff` tokens.
+    ///
+    /// The greedy-equivalence story for adaptive N hinges on this: the
+    /// verify math doesn't change, we just process fewer tokens. The
+    /// argmax tokens accepted should be identical OVER THE FIRST n_eff
+    /// SLOTS regardless of whether N=16 or N=8 was used.
+    ///
+    /// Uses 0.8B-F32 (lib loop, fast). 27B integration test follows in
+    /// dflash_correctness.rs.
+    #[test]
+    fn dflash_packed_verify_n_eff_override_equiv() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[n_eff-equiv] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        // Two identically-primed sessions: M=2 priming tokens.
+        const M: u32 = 2;
+        const N_BLOCK: u32 = 16;
+        let prime_tokens: [i32; M as usize] = [9419, 1];
+        // 8 verify tokens (we'll run them via n_eff_override=Some(8)).
+        let verify_tokens_8: [i32; 8] = [1234, 7, 999, 42, 11, 22, 33, 44];
+
+        let mut sess_full = MetalSession::fresh(&ctx, &mm, 64).expect("sess full");
+        let mut sess_eff = MetalSession::fresh(&ctx, &mm, 64).expect("sess eff");
+        for (i, &tok) in prime_tokens.iter().enumerate() {
+            mf.single_token(tok, i as u32, &mut sess_full)
+                .expect("prime full");
+            mf.single_token(tok, i as u32, &mut sess_eff)
+                .expect("prime eff");
+        }
+
+        let target_layer_ids: Vec<u32> = vec![5, 15];
+        let k_target = target_layer_ids.len() as u32;
+
+        // Path A: full N=8 scratch, no override (baseline behavior).
+        let mut verify_8 =
+            MetalDFlashVerifyScratch::fresh(&ctx, &mm, 8, k_target).expect("verify_8");
+        let mut layer_8 = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 8).expect("layer_8");
+        let argmax_full_8 = encode_packed_verify_layer_major_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens_8,
+            M,
+            &mut verify_8,
+            &mut layer_8,
+            &mut sess_full,
+            None,
+            None, // no override; verify N=8 from scratch shape
+        )
+        .expect("packed_verify N=8 full");
+
+        // Path B: N=16 scratch, n_eff_override=Some(8), only 8 verify tokens.
+        let mut verify_16 =
+            MetalDFlashVerifyScratch::fresh(&ctx, &mm, N_BLOCK, k_target).expect("verify_16");
+        let mut layer_16 =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, N_BLOCK).expect("layer_16");
+        let argmax_eff_8 = encode_packed_verify_layer_major_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens_8,
+            M,
+            &mut verify_16,
+            &mut layer_16,
+            &mut sess_eff,
+            None,
+            Some(8), // override truncates effective chain to 8
+        )
+        .expect("packed_verify N=16 scratch with n_eff=8 override");
+
+        eprintln!("[n_eff-equiv] argmax_full_8={argmax_full_8:?} argmax_eff_8={argmax_eff_8:?}");
+
+        // Bit-exact argmax — same math, just allocated differently.
+        assert_eq!(
+            argmax_full_8, argmax_eff_8,
+            "n_eff=8 override produces different argmaxes than fresh N=8 scratch"
+        );
+        // Returned vec length matches n_eff, NOT n_block.
+        assert_eq!(argmax_eff_8.len(), 8);
+
+        // Bit-exact session state (GDN state, conv, kv_n_pos).
+        for (i, (a, b)) in sess_full
+            .gdn_state
+            .iter()
+            .zip(sess_eff.gdn_state.iter())
+            .enumerate()
+        {
+            unsafe {
+                let pa = a.buffer.contents().as_ptr() as *const u32;
+                let pb = b.buffer.contents().as_ptr() as *const u32;
+                let n_elems = a.n_elements() as usize;
+                for j in 0..n_elems {
+                    if *pa.add(j) != *pb.add(j) {
+                        panic!("gdn_state[{i}][{j}] diverges between full-N=8 and N=16+override=8");
+                    }
+                }
+            }
+        }
+        for (i, (a, b)) in sess_full
+            .gdn_conv
+            .iter()
+            .zip(sess_eff.gdn_conv.iter())
+            .enumerate()
+        {
+            unsafe {
+                let pa = a.buffer.contents().as_ptr() as *const u32;
+                let pb = b.buffer.contents().as_ptr() as *const u32;
+                let n_elems = a.n_elements() as usize;
+                for j in 0..n_elems {
+                    if *pa.add(j) != *pb.add(j) {
+                        panic!("gdn_conv[{i}][{j}] diverges between full-N=8 and N=16+override=8");
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            sess_full.kv_n_pos, sess_eff.kv_n_pos,
+            "kv_n_pos diverges between full-N=8 and N=16+override=8"
+        );
+
+        // Edge cases on the override itself.
+        // n_eff=0 → error.
+        let err = encode_packed_verify_layer_major_inner(
+            &mf,
+            &target_layer_ids,
+            &[],
+            M + 8, // start_position past the prior call
+            &mut verify_16,
+            &mut layer_16,
+            &mut sess_eff,
+            None,
+            Some(0),
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(
+                    detail.contains("n=0") || detail.contains("[1, n_block"),
+                    "expected n_eff=0 → BadShape with range error: {detail}"
+                );
+            }
+            other => panic!("expected BadShape on n_eff=0, got {other:?}"),
+        }
+
+        // n_eff > n_block → error.
+        let err = encode_packed_verify_layer_major_inner(
+            &mf,
+            &target_layer_ids,
+            &[1i32; 17],
+            M + 8,
+            &mut verify_16,
+            &mut layer_16,
+            &mut sess_eff,
+            None,
+            Some(17), // > N_BLOCK=16
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(
+                    detail.contains("[1, n_block"),
+                    "expected n_eff=17 → BadShape with range error: {detail}"
+                );
+            }
+            other => panic!("expected BadShape on n_eff>n_block, got {other:?}"),
+        }
     }
 
     /// H5.3a guard-wall test (codex failure-mode mitigation): if the
@@ -5293,7 +5540,7 @@ mod tests {
             )
             .expect("packed verify");
 
-            encode_restore_after_partial_accept_inner(&mf, &scratch, n_keep, M, &mut sess_a)
+            encode_restore_after_partial_accept_inner(&mf, &scratch, n_keep, M, &mut sess_a, None)
                 .expect("restore");
 
             let logits_a = mf
@@ -5737,7 +5984,7 @@ mod tests {
         .expect("packed verify");
 
         // (a) n_keep = 0
-        let err = encode_restore_after_partial_accept_inner(&mf, &scratch, 0, 0, &mut sess);
+        let err = encode_restore_after_partial_accept_inner(&mf, &scratch, 0, 0, &mut sess, None);
         match err {
             Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
                 assert!(detail.contains("n_keep=0"), "wrong error: {detail}");
@@ -5746,7 +5993,8 @@ mod tests {
         }
 
         // (b) n_keep > N
-        let err = encode_restore_after_partial_accept_inner(&mf, &scratch, N + 1, 0, &mut sess);
+        let err =
+            encode_restore_after_partial_accept_inner(&mf, &scratch, N + 1, 0, &mut sess, None);
         match err {
             Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
                 assert!(
@@ -5762,7 +6010,8 @@ mod tests {
         // is trivially satisfied. Note in stderr; the contract is
         // exercised on 27B (different test).
         if !sess.kv_n_pos.is_empty() {
-            let err = encode_restore_after_partial_accept_inner(&mf, &scratch, 2, 99, &mut sess);
+            let err =
+                encode_restore_after_partial_accept_inner(&mf, &scratch, 2, 99, &mut sess, None);
             match err {
                 Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
                     assert!(detail.contains("kv_n_pos"), "wrong error: {detail}");

@@ -260,6 +260,14 @@ struct DflashArgs {
     /// reported at end. Used to confirm v0.72.4+ leverage map.
     #[arg(long)]
     profile: bool,
+    /// **v0.76**: verify-chain length policy. One of:
+    /// `adaptive` (default; ctx-keyed schedule with Off-terminal),
+    /// `static-16` / `static-8` / `static-4` (fixed N, no Off ramp),
+    /// `off` (no speculation; single_token decode loop). The static
+    /// modes exist for the calibration sweep + as A/B comparators
+    /// against `adaptive`. `static-16` matches pre-v0.76 behavior.
+    #[arg(long, default_value = "adaptive")]
+    n_policy: String,
 }
 
 #[derive(Parser, Debug)]
@@ -895,7 +903,10 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         no_warmup,
         skip_equivalence_check,
         profile,
+        n_policy,
     } = args;
+    let n_policy =
+        NPolicy::parse(&n_policy).with_context(|| format!("invalid --n-policy={n_policy:?}"))?;
 
     let ctx = MetalContext::new().context("init MetalContext")?;
     eprintln!("[dflash] device: {}", ctx.describe());
@@ -992,6 +1003,15 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut verify_calls: u32 = 0;
     let mut drafter_calls: u32 = 0;
     let mut restore_calls: u32 = 0;
+    // v0.76 adaptive-N counters.
+    let mut spec16_steps: u32 = 0;
+    let mut spec8_steps: u32 = 0;
+    let mut spec4_steps: u32 = 0;
+    let mut off_steps: u32 = 0;
+    // `Off` is terminal once entered (codex Q7: ctx is monotonic
+    // within a generation, so a ctx that earned `Off` will never
+    // cool back to favor `Spec`).
+    let mut spec_disabled = false;
 
     let mut decoder = DFlashDecoder::new(&mf, &mhead, dsess);
     if profile {
@@ -1009,7 +1029,59 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             break;
         }
 
+        // ---- v0.76 adaptive-N: select VerifyMode for THIS step ----
+        //
+        // `processed_pos` here is the absolute KV position of the
+        // carry's predecessor (incremented at the bottom of the loop
+        // by `1 + n_accepted` per Spec step or by `1` per Off step).
+        // The schedule keys on the upcoming verify's start position,
+        // which is `processed_pos + 1`.
+        let mode = if spec_disabled {
+            VerifyMode::Off
+        } else {
+            n_policy.for_ctx((processed_pos + 1) as usize)
+        };
+
+        if matches!(mode, VerifyMode::Off) {
+            // Off branch: no drafter, no packed_verify, no restore.
+            // No drafter ctx update — drafter is permanently disabled
+            // for the remainder of this generation.
+            spec_disabled = true;
+            off_steps += 1;
+            steps += 1;
+            let single_pos = processed_pos + 1;
+            let logits = mf
+                .single_token(carry_tok, single_pos, &mut target_session)
+                .context("off-mode single_token")?;
+            let next_tok = argmax_i32(&logits);
+            // Advance cursors. carry_tok was already emitted at top of
+            // the loop; next iter's carry is `next_tok`.
+            processed_pos = single_pos;
+            carry_tok = next_tok;
+            continue;
+        }
+
+        // ---- Spec branch: existing drafter + packed_verify + restore ----
+        let n_eff = match mode {
+            VerifyMode::Spec { n_eff } => n_eff,
+            VerifyMode::Off => unreachable!("Off handled above"),
+        };
+        match n_eff {
+            16 => spec16_steps += 1,
+            8 => spec8_steps += 1,
+            4 => spec4_steps += 1,
+            _ => {} // unexpected; bench on (we only schedule {16, 8, 4})
+        }
+
         // ---- Drafter ----
+        // The drafter always produces a full N=block_size chain
+        // (block_size is GGUF-fixed metadata; can't change per call).
+        // Adaptive-N truncates the VERIFY chain via `n_eff_override`
+        // — drafter slots [n_eff..N) are computed but unused. This
+        // wastes some drafter work at small n_eff; the alternative
+        // (separate small-block drafters) is out of scope. Drafter
+        // overhead is ~12% of decode wall after v0.74.2, so the
+        // wasted fraction (1 - n_eff/N) of 12% is bounded.
         let drafter_pos = processed_pos + 1; // noise_start_pos
         let argmaxes = decoder
             .draft_block(carry_tok, drafter_pos)
@@ -1019,10 +1091,13 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         debug_assert_eq!(drafts.len(), d);
 
         // ---- Packed verify ----
-        // Input: [carry, drafts[0..D-1]] of length N.
-        let mut verify_input: Vec<i32> = Vec::with_capacity(n_block);
+        // Input: [carry, drafts[0..n_eff-1]] of length n_eff. Truncate
+        // to `n_eff` (≤ d=N-1, so we use drafts[..n_eff-1] to fit
+        // carry + (n_eff-1) drafts = n_eff total tokens).
+        let n_drafts_used = n_eff - 1; // carry + drafts = n_eff
+        let mut verify_input: Vec<i32> = Vec::with_capacity(n_eff);
         verify_input.push(carry_tok);
-        verify_input.extend_from_slice(&drafts[..d]);
+        verify_input.extend_from_slice(&drafts[..n_drafts_used]);
 
         let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
             decoder.base,
@@ -1033,31 +1108,32 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             &mut layer_scratch,
             &mut target_session,
             None,
+            Some(n_eff as u32), // adaptive-N: truncate verify chain to n_eff
         )
         .context("packed_verify")?;
         verify_calls += 1;
-        debug_assert_eq!(verify_argmax.len(), n_block);
+        debug_assert_eq!(verify_argmax.len(), n_eff);
 
         // ---- Greedy accept-prefix ----
         // n_accepted = number of DRAFT tokens accepted (∈ [0, D]).
-        // Position j in drafts corresponds to position j+1 in
-        // verify_input (carry is index 0). target's prediction AT
-        // verify_input[j+1] is verify_argmax[j+1]... wait, need to
-        // re-check. verify_argmax[i] is the argmax of target's
-        // forward AT position drafter_pos+i, given input
-        // verify_input[i]. So verify_argmax[0] is the argmax AFTER
-        // processing carry — this is what target says SHOULD come
-        // next after carry. drafts[0] is what drafter predicted
-        // for that same slot. So the comparison is:
-        //   drafts[0] == verify_argmax[0] ?
-        //   drafts[1] == verify_argmax[1] ?
-        //   ...
-        //   drafts[j] == verify_argmax[j] ?
+        // Indexing invariant:
+        //   verify_input = [carry, drafts[0], drafts[1], ..., drafts[d-1]]
+        //   verify_argmax[i] = argmax of target's forward AT position
+        //     drafter_pos + i, given input verify_input[i].
+        // So verify_argmax[0] is target's prediction AFTER consuming
+        // carry — i.e., what target says SHOULD come next. drafts[0]
+        // is what drafter predicted for that same slot. Greedy
+        // comparison: drafts[j] == verify_argmax[j] for j ∈ [0, d).
         // Stop at first mismatch. n_accepted = j.
-        // Bonus = verify_argmax[n_accepted].
+        // Bonus = verify_argmax[n_accepted] (target's prediction at
+        // the slot where the chain broke, or beyond the last accepted
+        // draft if all were accepted).
         let mut n_accepted = 0usize;
         steps += 1;
-        for j in 0..d {
+        // accept-prefix iterates over the n_drafts_used draft positions
+        // we actually verified (= n_eff - 1). Slots [n_drafts_used..d)
+        // were never compared; their per-slot accept stats stay 0.
+        for j in 0..n_drafts_used {
             attempts_at_pos[j] += 1;
             if drafts[j] != verify_argmax[j] {
                 break;
@@ -1121,7 +1197,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         // High α (which is typical for code prompts: α_pos1=1.000) makes
         // this fire often.
         let n_keep = (n_accepted + 1) as u32;
-        let n_full = (verify_scratch.n) as u32;
+        let n_full = n_eff as u32; // adaptive-N: rollback boundary is n_eff, not n_block
         if n_keep < n_full {
             qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
                 decoder.base,
@@ -1129,6 +1205,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
                 n_keep,
                 drafter_pos,
                 &mut target_session,
+                Some(n_eff as u32), // adaptive-N: same n_eff as the verify call
             )
             .context("restore_after_partial_accept")?;
             restore_calls += 1;
@@ -1211,6 +1288,12 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     eprintln!(
         "[dflash] outer steps={steps}  accepted_drafts={accepted_total}  \
          drafter_calls={drafter_calls}  verify_calls={verify_calls}  restore_calls={restore_calls}"
+    );
+    // v0.76 adaptive-N step distribution.
+    eprintln!(
+        "[dflash] n_policy={n_policy:?}  step distribution: \
+         spec16={spec16_steps} spec8={spec8_steps} spec4={spec4_steps} off={off_steps}  \
+         (spec_disabled={spec_disabled} terminally)"
     );
     eprintln!(
         "[dflash] α_chain = {accepted_total} / {steps} = {alpha_chain:.3} drafts/step (max D={d})"
@@ -1939,6 +2022,137 @@ fn argmax_i32(logits: &[f32]) -> i32 {
         }
     }
     best.0 as i32
+}
+
+/// **v0.76 adaptive-N back-off**: per-outer-step verify-chain mode.
+///
+/// `Spec { n_eff }` runs the existing drafter + packed_verify path with
+/// `n_eff` ∈ {16, 8, 4} (truncating the N=16 drafter's output to the
+/// first `n_eff` tokens via `n_eff_override`). `Off` skips drafter
+/// and packed_verify entirely, running a single `single_token` no-spec
+/// step. Once entered, `Off` is terminal for the remainder of the
+/// generation (codex Q7 rationale: ctx is monotonic within a
+/// generation, so a ctx that earns `Off` will never cool back to
+/// favor `Spec`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerifyMode {
+    Spec { n_eff: usize },
+    Off,
+}
+
+/// **v0.76**: verify-chain length policy as selected by `--n-policy`.
+///
+/// `Adaptive` is the default — ctx-keyed schedule with `Off`-terminal.
+/// The static variants exist for calibration sweeps + manual overrides.
+#[derive(Clone, Copy, Debug)]
+enum NPolicy {
+    Adaptive,
+    Static16,
+    Static8,
+    Static4,
+    OffOnly,
+}
+
+impl NPolicy {
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "adaptive" => Ok(Self::Adaptive),
+            "static-16" => Ok(Self::Static16),
+            "static-8" => Ok(Self::Static8),
+            "static-4" => Ok(Self::Static4),
+            "off" => Ok(Self::OffOnly),
+            other => anyhow::bail!(
+                "unknown n-policy {other:?}; expected adaptive, static-16, \
+                 static-8, static-4, or off"
+            ),
+        }
+    }
+
+    /// Choose `VerifyMode` for an outer step at given `kv_n_pos` (the
+    /// session's current KV position, i.e. the absolute token position
+    /// of the carry token's predecessor). The schedule is calibrated
+    /// against M4 Max + 27B Q4_K_M; re-run the calibration sweep if
+    /// hardware/quant changes (see `qwen-bench dflash --n-policy
+    /// static-{16,8,4,off} --prompt ...` for sweep harness).
+    fn for_ctx(self, kv_n_pos: usize) -> VerifyMode {
+        match self {
+            Self::Static16 => VerifyMode::Spec { n_eff: 16 },
+            Self::Static8 => VerifyMode::Spec { n_eff: 8 },
+            Self::Static4 => VerifyMode::Spec { n_eff: 4 },
+            Self::OffOnly => VerifyMode::Off,
+            Self::Adaptive => {
+                // Calibrated schedule from v0.76 sweep (M4 Max, 27B
+                // Q4_K_M, code prompts, 32-token gen, 2026-05-07).
+                //
+                // Decode tokens/sec by (ctx, mode):
+                //
+                //   ctx    static16  static8  static4   off    best
+                //   ---  --------- -------- -------- ------  ------
+                //     9     20.52    16.42    12.33  25.14    off
+                //   181     32.71    20.08    12.60  24.98  spec16
+                //   363     34.67    21.09    12.88  24.87  spec16
+                //   727     24.89    16.80    11.05  24.58  spec16(tie)
+                //  2055     11.36     9.52     7.11  24.25    off
+                //  8223      3.65     3.34     2.95  22.35    off
+                //
+                // KEY FINDINGS:
+                //  * Spec8 and Spec4 are NEVER the best mode for any
+                //    ctx in {9, 181, 363, 727, 2055, 8223}. The action
+                //    space collapses to {Spec16, Off} — binary choice.
+                //  * Default ctx (~9 tokens) is OFF-favored: drafter +
+                //    verify overhead at tiny ctx exceeds the
+                //    amortization win. Surprising; pre-v0.76 we
+                //    assumed Spec=16 was always best at small ctx.
+                //  * Spec16 wins ctx ∈ [~64, ~1000) by 30-40% over
+                //    off. Long-ctx (>=2K) Off wins by 2-7x.
+                //  * Crossover ctx where Spec16 = Off is around
+                //    ~727; above that, off pulls away fast as KV
+                //    bandwidth scales with ctx and amplifies under
+                //    N=16 verify-pass KV reads.
+                //
+                // SCHEDULE:
+                //   ctx <   768: Spec(16) (the sweet spot for speculative
+                //                gain at meaningful prompt sizes).
+                //   ctx >=  768: Off (long-ctx collapse begins; off
+                //                never loses again as ctx grows).
+                //
+                // The 768 threshold was validated by an additional
+                // post-sweep measurement at ctx=1118 and ctx=1509:
+                //
+                //   ctx   static16  off    winner
+                //  ---  --------- ------  ------
+                //   727    24.89  24.58  spec16 (margin 1.3%)
+                //  1118    18.08  24.72  off (margin 37%)
+                //  1509    15.13  24.18  off (margin 60%)
+                //
+                // Crossover is between 727 and 1118; 768 is a
+                // conservative round-power-of-2 cutoff that still
+                // captures the marginal Spec16 win at ctx=727 and
+                // hands off to Off well before the 1118 cliff. The
+                // initial 1024 guess from interpolating {727, 2055}
+                // was wrong: the long-ctx collapse starts well below
+                // 1024.
+                //
+                // The 9-token-prompt regime where Off marginally beats
+                // Spec(16) (25.14 vs 20.52 t/s) is INTENTIONALLY left
+                // on Spec(16): real-world prompts almost always have
+                // ≥ 100 tokens (system prompt + user input), and
+                // entering Off at small ctx would break the
+                // terminal-Off invariant when ctx grows past the
+                // first crossover. The 18% slowdown on synthetic
+                // tiny prompts is the cost of monotonicity.
+                //
+                // Re-run the sweep when KV-Q lands (v0.78+) — KV-Q
+                // shifts the long-ctx crossover to higher ctx, and
+                // possibly raises Spec's effective amortization range.
+                if kv_n_pos < 768 {
+                    VerifyMode::Spec { n_eff: 16 }
+                } else {
+                    VerifyMode::Off
+                }
+            }
+        }
+    }
 }
 
 fn compare_logits(ours: &[f32], oracle: &[f32]) -> (f64, f32, usize, usize) {

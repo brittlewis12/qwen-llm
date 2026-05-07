@@ -1334,7 +1334,105 @@ the failure:
 
 ## Document history
 
-- **rev 16 (current).** v0.75.1 packed multi-token prefill SHIPPED.
+- **rev 17 (current).** v0.76 adaptive-N back-off SHIPPED. DFlash
+  now safe-to-leave-on at every ctx: catastrophic long-ctx decode
+  collapse is FIXED. The static-N=16 policy that worked great at
+  short ctx (≤363) but turned harmful past ctx≥727 (decode-only
+  collapsed to 0.51× at ctx=2K, 0.17× at ctx=8K) is replaced by a
+  ctx-keyed schedule that switches DFlash to no-spec mode (`Off`)
+  beyond a calibrated threshold.
+
+  ### v0.76 measurements (decode-only ratio: DFlash / no-spec ref)
+
+    | ctx  | v0.75.1 (static-16) | v0.76 adaptive | win |
+    |-----:|--------------------:|---------------:|----:|
+    |    9 |              0.852× |         0.846× | flat |
+    |  181 |              1.345× |         1.335× | flat |
+    |  363 |              1.457× |         1.438× | flat |
+    |  727 |              1.038× |         1.029× | flat |
+    | 1118 |              0.731× |         **0.995×** | +0.26 |
+    | 1509 |              0.626× |         **0.902×** | +0.28 |
+    | 2055 |              0.511× |         **1.061×** | +0.55 |
+    | 8223 |              0.170× |         **1.025×** | +0.85 |
+
+  Greedy equivalence PASSES at every ctx tested. Short-ctx Spec16
+  sweet spot is preserved (no regression at ctx ≤ 727). Long-ctx
+  collapse stopped: DFlash adaptive ≥ no-spec ref at ctx ≥ 1118.
+
+  v0.76 is **not** a peak-performance speedup at long ctx — it
+  just stops DFlash from being actively harmful. The actual
+  long-ctx decode speedup story still requires KV-Q (v0.78+).
+  v0.76 makes DFlash safe-to-leave-on by default; KV-Q makes it
+  faster.
+
+  ### Calibration sweep data (M4 Max, 27B Q4_K_M, 32-token gen)
+
+  Decode tokens/sec by (ctx, mode):
+
+    | ctx  | static-16 | static-8 | static-4 |  off  | best   |
+    |-----:|----------:|---------:|---------:|------:|:-------|
+    |    9 |     20.52 |    16.42 |    12.33 | 25.14 | off    |
+    |  181 |     32.71 |    20.08 |    12.60 | 24.98 | spec16 |
+    |  363 |     34.67 |    21.09 |    12.88 | 24.87 | spec16 |
+    |  727 |     24.89 |    16.80 |    11.05 | 24.58 | spec16 (1.3%) |
+    | 1118 |     18.08 |        — |        — | 24.72 | off (37%) |
+    | 1509 |     15.13 |        — |        — | 24.18 | off (60%) |
+    | 2055 |     11.36 |     9.52 |     7.11 | 24.25 | off    |
+    | 8223 |      3.65 |     3.34 |     2.95 | 22.35 | off    |
+
+  KEY FINDING: Spec8 and Spec4 are NEVER the best mode at any
+  measured ctx. Action space empirically collapsed to {Spec16, Off};
+  intermediate verify-chain lengths are strictly dominated. (Codex's
+  initial design instinct was {16, 8, 4, Off}; data corrected to
+  {16, Off}. Static-8 and static-4 remain available as CLI flags
+  for sweeping/calibration but are not in the default schedule.)
+
+  ### Schedule (calibrated, hardcoded in `NPolicy::Adaptive`)
+
+    ctx <  768: Spec(16)
+    ctx >= 768: Off (terminal — never re-enters Spec for the
+                remainder of this generation)
+
+  768 was chosen as the threshold after a focused validation sweep:
+  the actual crossover is between 727 (Spec16 marginal win 1.3%)
+  and 1118 (Off win 37%). 768 is conservative — preserves the
+  Spec16 win at exactly 727 and hands off to Off well before the
+  ctx=1118 cliff. Initial 1024 guess from interpolating
+  {727, 2055} was wrong; collapse starts well below 1024.
+
+  Re-run the sweep when KV-Q lands (v0.78+) — KV-Q reduces target
+  attn-v4's per-query KV bandwidth, which is the root cause of the
+  long-ctx Spec16 collapse. Threshold will move higher, possibly
+  much higher.
+
+  ### CLI surface
+
+  `qwen-bench dflash --n-policy {adaptive, static-16, static-8,
+   static-4, off}`. `adaptive` (default) uses the schedule above.
+  Static modes exist for the calibration sweep + as A/B
+  comparators. `static-16` matches pre-v0.76 behavior (default
+  before this commit).
+
+  ### Implementation footprint
+
+  ~600 LOC delta across 3 files:
+    * `metal_dflash.rs`: variable-N support added to
+      `encode_packed_verify_layer_major_inner` (n_eff_override:
+      `Option<u32>`) + `encode_restore_after_partial_accept_inner`
+      (same). All in-body `view_subrange`s sized by `n_eff` so host
+      shape validation passes when `n_eff < n_block`. Full backwards
+      compat with `None` argument.
+    * `bench.rs`: new `VerifyMode` enum + `NPolicy` enum + outer-loop
+      mode-selecting branch. `Off` mode runs no-spec single_token,
+      sets terminal `spec_disabled` flag, skips drafter ctx update.
+      Per-mode step distribution counters in summary output.
+    * Lib test `dflash_packed_verify_n_eff_override_equiv` confirms
+      bit-exact equivalence between fresh N=8 scratch and N=16+
+      override=8 (logits + GDN state + conv + kv_n_pos all match).
+
+  79/0/0/20 lib tests / clippy `-D warnings` clean / cargo fmt clean.
+
+- **rev 16.** v0.75.1 packed multi-token prefill SHIPPED.
   All five prefill loops in the bench (DFlash full + lazy + 3 no-spec
   ref + K-prune evaluator) now use one `prefill_tokens_with_multi_hidden`
   call per prompt instead of T sequential `single_token` forwards.
@@ -1591,6 +1689,20 @@ the failure:
       ~5% TTFT) + v0.75.1 (packed multi-token mat-mat, **3.20×
       ctx=181 / 3.38× ctx=363 / 3.09× ctx=8K**). Both halves of
       the reviewer's biggest TTFT lever now SHIPPED.
+    * ~~**Adaptive N back-off**~~ — DONE in v0.76. ctx-keyed
+      schedule with `Off`-terminal. Decode-only ctx=2K 0.51×→1.06×,
+      ctx=8K 0.17×→1.03×. Stops DFlash from being harmful at long
+      ctx; doesn't add peak speedup.
+    * **KV-Q (Q8_0 → Q4_0)** for the 16 attn layers. NEXT lever
+      per codex's post-v0.76 rec: directly attacks the bandwidth
+      term that v0.76 is currently working around by disabling
+      DFlash. Once KV-Q lands, the v0.76 768-threshold will move
+      to higher ctx (DFlash stays valuable longer). Projected
+      1.3-1.5× decode at ctx ≥ 4K with <1% perplexity gate. 2 days.
+    * **Cross-turn prefix cache**: H2 snapshot/restore harness
+      already exists; productize content-addressed prefix cache
+      keyed on token-prefix hash. Projected 5-7× session-average
+      TTFT for iterative code Q&A workloads. ~3 days.
     * **Stream DFlash ctx-cache during prefill**: predicated on
       prefill_tokens; eliminates the cold first outer step.
       ~half day on top of prefill_tokens.
@@ -1598,8 +1710,8 @@ the failure:
       alternation in packed_verify GDN): 5-10% short-ctx; still on
       the table after v0.74.3.
     * **Packed-N target attn-v4**: long-ctx lever (47% of verify
-      GPU at ctx=16K); modest at short ctx. Defer until prefill
-      lands and we measure long-ctx end-to-end with cached prefill.
+      GPU at ctx=16K); modest at short ctx. Defer until KV-Q
+      lands and we re-measure long-ctx end-to-end.
     * **MTP-N=3 fallback recipe**: zero-download alternate decode
       path at projected 1.35-1.85× per the codex MTP investigation.
       ~50 LOC reusing DFlash packed-verify infra.

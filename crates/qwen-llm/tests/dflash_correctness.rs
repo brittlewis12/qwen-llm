@@ -38,7 +38,7 @@ use qwen_llm::metal::{
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
-    MetalDFlashSession, MetalDFlashVerifyScratch,
+    MetalDFlashSession, MetalDFlashVerifyScratch, prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
     MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
@@ -1783,4 +1783,242 @@ fn packed_verify_phase_profile_v073a2_27b() {
          => v0.75 (packed-N attn) if attn_total >= gdn_tail_dominant",
         gdn_tail_dominant, attn_total, encoder_overhead,
     );
+}
+
+/// **v0.75.1 27B integration correctness gate**: exercises the
+/// mat-mat half-staging FFN/Q/K/V/O paths AND the per-token attn-v4
+/// path (16 attn layers in the 27B Q4_K_M model — none in 0.8B-F32).
+///
+/// Oracle: sequential `single_token_with_multi_hidden` over T=24
+/// prompt tokens with K=5 capture layers (mirroring the spiritbuun
+/// drafter). Experimental: one `prefill_tokens_with_multi_hidden`
+/// call with P=16 chunk size, exercising T==P+r (24=16+8).
+///
+/// Cosine equivalence ≥ 0.999 required on:
+///   * final logits (last prompt token's vocab)
+///   * accumulated multi-hidden capture across all 5 layers × 24 tokens
+///   * GDN state (48 layers) and conv tensors after the call
+///   * KV state for every attn layer (16 layers) over [0, T) range
+///   * `kv_n_pos[ai] == T` exact for every attn layer
+///
+/// NOT bit-exact because mat-mat half-staging differs from per-token
+/// mat-vec summation order. The 0.8B lib test gates bit-exact on the
+/// F32 fallback path; this test gates the cosine gate on the Q4_K /
+/// Q5_K / Q6_K mat-mat path.
+///
+/// Wall: ~3-5 min on M4 Max (oracle is 24 single_token forwards =
+/// ~24 * 50 ms = 1.2 s GPU + load ~10 s; experimental is ~0.4 s).
+#[test]
+fn prefill_tokens_matches_single_token_loop_27b() {
+    if !std::path::Path::new(TARGET_GGUF).exists() {
+        eprintln!("[prefill-vs-single-27b] skipped — target GGUF missing");
+        return;
+    }
+    let ctx = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[prefill-vs-single-27b] loading 27B-Q4_K_M (~10s on cold cache)…");
+    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+    let mf = MetalForward::new(&ctx, &mm);
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+
+    // T=24 with P=16 → 2 chunks (T=16 + T=8). Exercises full chunk
+    // AND short tail chunk.
+    let total_n: usize = 24;
+    let p: usize = 16;
+    let token_ids: Vec<i32> = (0..total_n)
+        .map(|i| ((i * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1)
+        .collect();
+
+    // K=5 capture layers (mirrors the spiritbuun drafter).
+    let capture_layers: Vec<u32> = vec![1, 16, 31, 46, 61];
+    let k = capture_layers.len();
+
+    // ---- Oracle path ----
+    eprintln!("[prefill-vs-single-27b] running oracle (T={total_n} sequential single_token)…");
+    let cap = total_n + 16;
+    let mut sess_a = MetalSession::fresh(&ctx, &mm, cap).expect("sess A");
+    let h_dst_a = MetalTensor::zeros_f32(&ctx, vec![(k * h) as u64]).expect("h_dst_a");
+    let mut accum_a = vec![0.0f32; total_n * k * h];
+    let oracle_t = std::time::Instant::now();
+    let mut last_a = Vec::new();
+    for (i, &tid) in token_ids.iter().enumerate() {
+        last_a = mf
+            .single_token_with_multi_hidden(tid, i as u32, &mut sess_a, &capture_layers, &h_dst_a)
+            .expect("oracle forward");
+        unsafe {
+            let src = h_dst_a.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(
+                src,
+                accum_a[i * k * h..(i + 1) * k * h].as_mut_ptr(),
+                k * h,
+            );
+        }
+    }
+    let oracle_ms = oracle_t.elapsed().as_secs_f64() * 1e3;
+    eprintln!("[prefill-vs-single-27b] oracle wall: {oracle_ms:.1} ms");
+
+    // ---- Experimental path ----
+    eprintln!(
+        "[prefill-vs-single-27b] running prefill_tokens (P={p}, chunks={})…",
+        total_n.div_ceil(p)
+    );
+    let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
+    let mut layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+    let h_dst_b = MetalTensor::zeros_f32(&ctx, vec![(total_n * k * h) as u64]).expect("h_dst_b");
+    let exp_t = std::time::Instant::now();
+    let last_b = prefill_tokens_with_multi_hidden(
+        &mf,
+        &token_ids,
+        0,
+        &mut sess_b,
+        &mut layer_scratch,
+        &capture_layers,
+        Some(&h_dst_b),
+    )
+    .expect("prefill");
+    let exp_ms = exp_t.elapsed().as_secs_f64() * 1e3;
+    eprintln!("[prefill-vs-single-27b] prefill wall: {exp_ms:.1} ms");
+    let speedup = oracle_ms / exp_ms;
+    eprintln!("[prefill-vs-single-27b] SPEEDUP: {speedup:.2}× (correctness, not bench)");
+
+    // ---- Compare final logits (cos ≥ 0.999). ----
+    assert_eq!(last_a.len(), last_b.len(), "logits len mismatch");
+    let cos_logits = cosine_27b(&last_a, &last_b);
+    eprintln!("[prefill-vs-single-27b] cos(final logits)={cos_logits:.6}");
+    assert!(
+        cos_logits >= 0.999,
+        "logits cos={cos_logits} < 0.999 (mat-mat half-staging gate)"
+    );
+
+    // ---- Compare accumulated multi-hidden. ----
+    let mut accum_b = vec![0.0f32; total_n * k * h];
+    unsafe {
+        let src = h_dst_b.buffer.contents().as_ptr() as *const f32;
+        std::ptr::copy_nonoverlapping(src, accum_b.as_mut_ptr(), total_n * k * h);
+    }
+    let mut min_cos = f64::INFINITY;
+    let mut worst_pos = (0usize, 0usize);
+    for t in 0..total_n {
+        for k_idx in 0..k {
+            let off = (t * k + k_idx) * h;
+            let c = cosine_27b(&accum_a[off..off + h], &accum_b[off..off + h]);
+            if c < min_cos {
+                min_cos = c;
+                worst_pos = (t, k_idx);
+            }
+        }
+    }
+    eprintln!(
+        "[prefill-vs-single-27b] hidden cos_min={min_cos:.6} (worst at token={}, capture_layer={})",
+        worst_pos.0, worst_pos.1
+    );
+    assert!(
+        min_cos >= 0.999,
+        "hidden capture cos_min={min_cos} < 0.999 (worst at token={}, capture_layer={})",
+        worst_pos.0,
+        worst_pos.1
+    );
+
+    // ---- Compare GDN state + conv per layer (cos ≥ 0.999). ----
+    assert_eq!(sess_a.gdn_state.len(), sess_b.gdn_state.len());
+    let mut gdn_state_min_cos = f64::INFINITY;
+    let mut gdn_conv_min_cos = f64::INFINITY;
+    for gi in 0..sess_a.gdn_state.len() {
+        let a_state = read_tensor_f32_27b(&sess_a.gdn_state[gi]);
+        let b_state = read_tensor_f32_27b(&sess_b.gdn_state[gi]);
+        let cs = cosine_27b(&a_state, &b_state);
+        let a_conv = read_tensor_f32_27b(&sess_a.gdn_conv[gi]);
+        let b_conv = read_tensor_f32_27b(&sess_b.gdn_conv[gi]);
+        let cc = cosine_27b(&a_conv, &b_conv);
+        gdn_state_min_cos = gdn_state_min_cos.min(cs);
+        gdn_conv_min_cos = gdn_conv_min_cos.min(cc);
+    }
+    eprintln!(
+        "[prefill-vs-single-27b] GDN state cos_min={gdn_state_min_cos:.6} \
+         conv cos_min={gdn_conv_min_cos:.6}"
+    );
+    assert!(
+        gdn_state_min_cos >= 0.999,
+        "GDN state cos_min={gdn_state_min_cos} < 0.999"
+    );
+    assert!(
+        gdn_conv_min_cos >= 0.999,
+        "GDN conv cos_min={gdn_conv_min_cos} < 0.999"
+    );
+
+    // ---- KV state cosine (read F16 → F32 via codec). ----
+    assert_eq!(sess_a.kv_n_pos.len(), sess_b.kv_n_pos.len());
+    let mut kv_k_min_cos = f64::INFINITY;
+    let mut kv_v_min_cos = f64::INFINITY;
+    let kv_dim = (arch.n_kv_heads * arch.attn_head_dim) as usize;
+    for ai in 0..sess_a.kv_n_pos.len() {
+        // kv_n_pos must match exactly.
+        assert_eq!(
+            sess_a.kv_n_pos[ai], sess_b.kv_n_pos[ai],
+            "kv_n_pos[{ai}] mismatch ({} vs {})",
+            sess_a.kv_n_pos[ai], sess_b.kv_n_pos[ai]
+        );
+        assert_eq!(
+            sess_a.kv_n_pos[ai], total_n,
+            "expected kv_n_pos[{ai}]={total_n} after T={total_n} prefill, got {}",
+            sess_a.kv_n_pos[ai]
+        );
+        // KV is F16-backed; read first kv_n_pos[ai] * kv_dim half-floats and convert.
+        let a_k = read_kv_prefix_f16_to_f32(&sess_a.kv_k[ai], total_n * kv_dim);
+        let b_k = read_kv_prefix_f16_to_f32(&sess_b.kv_k[ai], total_n * kv_dim);
+        let a_v = read_kv_prefix_f16_to_f32(&sess_a.kv_v[ai], total_n * kv_dim);
+        let b_v = read_kv_prefix_f16_to_f32(&sess_b.kv_v[ai], total_n * kv_dim);
+        kv_k_min_cos = kv_k_min_cos.min(cosine_27b(&a_k, &b_k));
+        kv_v_min_cos = kv_v_min_cos.min(cosine_27b(&a_v, &b_v));
+    }
+    eprintln!(
+        "[prefill-vs-single-27b] KV K cos_min={kv_k_min_cos:.6} V cos_min={kv_v_min_cos:.6} \
+         (over [0, {total_n}) for {} attn layers)",
+        sess_a.kv_n_pos.len()
+    );
+    assert!(kv_k_min_cos >= 0.999, "KV K cos_min={kv_k_min_cos} < 0.999");
+    assert!(kv_v_min_cos >= 0.999, "KV V cos_min={kv_v_min_cos} < 0.999");
+}
+
+fn cosine_27b(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for i in 0..a.len() {
+        dot += a[i] as f64 * b[i] as f64;
+        na += (a[i] as f64).powi(2);
+        nb += (b[i] as f64).powi(2);
+    }
+    dot / (na.sqrt() * nb.sqrt() + 1e-30)
+}
+
+fn read_tensor_f32_27b(t: &MetalTensor) -> Vec<f32> {
+    let n = t.n_elements() as usize;
+    let mut out = vec![0.0f32; n];
+    unsafe {
+        let src = t.buffer.contents().as_ptr() as *const f32;
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+    }
+    out
+}
+
+fn read_kv_prefix_f16_to_f32(t: &MetalTensor, n_f16: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; n_f16];
+    unsafe {
+        let src = t.buffer.contents().as_ptr() as *const u16;
+        for (i, slot) in out.iter_mut().enumerate().take(n_f16) {
+            let bits = *src.add(i);
+            *slot = half::f16::from_bits(bits).to_f32();
+        }
+    }
+    out
 }

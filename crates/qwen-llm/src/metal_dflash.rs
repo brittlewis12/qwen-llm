@@ -429,6 +429,87 @@ impl MetalDFlashSession {
         Ok(())
     }
 
+    /// **v0.75.1** Contiguous-batch append: scatters a flat `[count *
+    /// n_target_features]` F32 source (laid out as `count` consecutive
+    /// `[K · H_target]` rows) into `target_ctx_stacked` at positions
+    /// `[start_pos, start_pos + count)`, using ONE scatter dispatch +
+    /// ONE wait.
+    ///
+    /// This is the data-flow match for `prefill_tokens_with_multi_hidden`:
+    /// the prefill body writes per-token hidden captures into a
+    /// contiguous flat tensor `[T, K · H_target]`, and this helper
+    /// appends them to the drafter's cross-context in one shot. The
+    /// alternative (per-token `append_target_ctx_column_now` in a loop)
+    /// pays T encoder + commit + wait costs which add up at ctx ≥ 1K.
+    ///
+    /// `src` must have at least `count * n_target_features` elements;
+    /// only the first `count * n_target_features` are read. The
+    /// destination must have capacity for `count` more columns; otherwise
+    /// returns `DFlashError::CtxOverflow`.
+    ///
+    /// Positions are stamped sequentially: `pos_ctx[target_ctx_n + i]
+    /// = start_pos + i` for `i in 0..count`.
+    pub fn append_target_ctx_columns_contiguous_now(
+        &mut self,
+        ctx: &MetalContext,
+        src: &MetalTensor,
+        start_pos: u32,
+        count: usize,
+        n_target_features: usize,
+    ) -> Result<(), DFlashError> {
+        if count == 0 {
+            return Ok(());
+        }
+        if self.target_ctx_n + count > self.target_ctx_capacity {
+            return Err(DFlashError::CtxOverflow(
+                self.target_ctx_n + count,
+                self.target_ctx_capacity,
+            ));
+        }
+        let n_elems = count * n_target_features;
+        if (src.n_elements() as usize) < n_elems {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "append_target_ctx_columns_contiguous_now.src",
+                detail: format!(
+                    "expected ≥ {n_elems} elements (count={count} × n_target_features={n_target_features}), got {}",
+                    src.n_elements()
+                ),
+            }));
+        }
+        // The destination layout is contiguous: rows are stored back-to-
+        // back at `target_ctx_n * n_target_features`. So a single
+        // scatter copies the whole [count * n_target_features] slab.
+        // We use a sized view of src to satisfy encode_scatter_offset_f32's
+        // "src.n == n" precondition.
+        let cmd = ctx.queue.commandBuffer().expect("cmd buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        let src_view = src.view_subrange(0, vec![n_elems as u64]);
+        let dst_off = self.target_ctx_n * n_target_features;
+        encode_scatter_offset_f32(
+            ctx,
+            &enc,
+            &src_view,
+            &self.target_ctx_stacked,
+            dst_off,
+            n_elems,
+        )?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        // Stamp positions on the host side (pos_ctx is shared-storage F32
+        // typed buffer holding i32; same convention as
+        // append_target_ctx_column).
+        unsafe {
+            let ptr = self.pos_ctx.buffer.contents().as_ptr() as *mut i32;
+            for i in 0..count {
+                *ptr.add(self.target_ctx_n + i) = (start_pos as i32) + i as i32;
+            }
+        }
+        self.target_ctx_n += count;
+        Ok(())
+    }
+
     /// **v0.74.3** Batched-commit version of `append_target_ctx_column_now`:
     /// runs `columns.len()` appends through ONE command buffer + ONE
     /// commit + ONE wait, instead of N waits.
@@ -2668,6 +2749,859 @@ pub fn encode_packed_verify_layer_major_inner(
     Ok(out)
 }
 
+/// **v0.75.1** Packed multi-token prefill.
+///
+/// Processes `token_ids` through chunks of P (= `layer_scratch.n`)
+/// prompt tokens at a time, batching per-layer projections (Q/K/V,
+/// out_proj, GDN in/out, FFN gate/up/down) as mat-mat across the
+/// chunk while keeping per-token GDN recurrence and per-token
+/// attn-v4 + KV scatter (which are inherently sequential because
+/// each token's K/V cache slot must be written and observed by the
+/// NEXT token's attention dispatch).
+///
+/// # Caller invariant
+///
+/// `target_session.kv_n_pos[ai] == start_position` for every attn
+/// layer index `ai`. (I.e., the session has been advanced through
+/// tokens `[0, start_position)` by some prior path; this prefill
+/// extends KV state by `T = token_ids.len()` more positions, ending
+/// with `kv_n_pos[ai] == start_position + T`.)
+///
+/// # Hidden capture layout
+///
+/// `hidden_dst` is `Some(tensor)` of shape `[T, K, H]` row-major
+/// (`K = target_layer_ids.len()`, `H = arch.hidden_size`) for the
+/// DFlash prefill case (drafter ctx bootstrap), or `None` for the
+/// no-spec reference path (no hidden capture needed). When `Some`,
+/// for token `t` (`0 ≤ t < T`) and capture index `k` (`0 ≤ k < K`),
+/// the slice `hidden_dst[(t * K + k) * H .. (t * K + k + 1) * H]`
+/// receives the post-residual-#2 hidden state at layer
+/// `target_layer_ids[k]`. Matches the `[N, K, H]` layout used by
+/// `packed_verify`'s `verify_scratch.hidden_capture`.
+///
+/// When `hidden_dst` is `None`, `target_layer_ids` MUST be empty.
+///
+/// # Tail
+///
+/// The LAST token (`token_ids[T-1]`) runs the full final RMSNorm,
+/// lm_head, and CPU readback so the caller can seed the decode phase.
+/// All other tokens skip the tail (matching v0.75.0 skip-tail semantics).
+///
+/// # Equivalence
+///
+/// Behaves like calling `single_token_with_multi_hidden` for every
+/// prompt token in sequence, with cosine equivalence ≥ 0.999 on:
+/// final logits, accumulated `hidden_dst`, KV cache prefix
+/// `kv_k[ai] / kv_v[ai]` over `[0, start_position + T)`, GDN state
+/// and conv tensors. NOT bit-exact: mat-mat half-staging differs
+/// from per-token mat-vec summation order.
+///
+/// `kv_n_pos[ai] == start_position + T` exactly on return.
+///
+/// # Chunk sizing
+///
+/// `P = layer_scratch.n` (typically 16). The final chunk may have
+/// fewer tokens (`chunk_p < P`); all encoder dispatches in that
+/// chunk use `view_subrange`-sized tensors to satisfy host shape
+/// validation. The mat-mat kernels handle partial-N via the generic
+/// NR1 path (the NR1=16 fast path only fires when `n_query == 16`,
+/// which is fine — short final chunks pay slight per-N overhead
+/// but still amortize weight reads across the chunk).
+pub fn prefill_tokens_with_multi_hidden(
+    base: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    target_session: &mut MetalSession,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    target_layer_ids: &[u32],
+    hidden_dst: Option<&MetalTensor>,
+) -> Result<Vec<f32>, DFlashError> {
+    let arch = &base.model.arch;
+    let total_n = token_ids.len();
+    let h = arch.hidden_size as usize;
+    let f = arch.intermediate_size as usize;
+    let v = arch.vocab_size as usize;
+    let k_target = target_layer_ids.len();
+    let p_max = layer_scratch.n as usize;
+
+    // ---- Public-entry validation ----
+    if total_n == 0 {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "prefill_tokens_with_multi_hidden",
+            detail: "token_ids is empty".into(),
+        }));
+    }
+    if p_max == 0 {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "prefill_tokens_with_multi_hidden",
+            detail: "layer_scratch.n is 0".into(),
+        }));
+    }
+    if layer_scratch.hidden_size != h as u64 {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "prefill_tokens_with_multi_hidden",
+            detail: format!(
+                "layer_scratch.hidden_size={} != arch.hidden_size={h}",
+                layer_scratch.hidden_size
+            ),
+        }));
+    }
+    let last_pos = (start_position as usize)
+        .checked_add(total_n)
+        .ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "prefill_tokens_with_multi_hidden",
+                detail: format!("start_position={start_position} + T={total_n} overflows usize"),
+            })
+        })?;
+    if last_pos > target_session.kv_capacity {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "prefill_tokens_with_multi_hidden",
+            detail: format!(
+                "start_position + T = {last_pos} > kv_capacity={}",
+                target_session.kv_capacity
+            ),
+        }));
+    }
+    for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
+        if kp != start_position as usize {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "prefill_tokens_with_multi_hidden",
+                detail: format!(
+                    "kv_n_pos[{i}]={kp} != start_position={start_position} \
+                     (caller must advance session through [0, start_position) before prefill)"
+                ),
+            }));
+        }
+    }
+    for &t in token_ids.iter() {
+        if t < 0 || (t as u32) >= arch.vocab_size {
+            return Err(DFlashError::BadToken(t, arch.vocab_size));
+        }
+    }
+    for &lid in target_layer_ids {
+        if (lid as usize) >= base.model.blocks.len() {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "prefill_tokens_with_multi_hidden.target_layer_ids",
+                detail: format!("layer id {lid} >= n_layer {}", base.model.blocks.len()),
+            }));
+        }
+    }
+    match hidden_dst {
+        Some(dst) => {
+            let want_hidden_elems = total_n * k_target * h;
+            if (dst.n_elements() as usize) != want_hidden_elems {
+                return Err(DFlashError::Metal(MetalError::BadShape {
+                    kernel: "prefill_tokens_with_multi_hidden.hidden_dst",
+                    detail: format!(
+                        "expected {want_hidden_elems} elements (T={total_n} × K={k_target} × H={h}), got {}",
+                        dst.n_elements()
+                    ),
+                }));
+            }
+        }
+        None => {
+            if k_target != 0 {
+                return Err(DFlashError::Metal(MetalError::BadShape {
+                    kernel: "prefill_tokens_with_multi_hidden.hidden_dst",
+                    detail: format!(
+                        "hidden_dst=None requires target_layer_ids=[], got K={k_target}"
+                    ),
+                }));
+            }
+        }
+    }
+    let n_gdn_actual = base
+        .model
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, MetalBlock::Gdn(_)))
+        .count();
+    if target_session.gdn_state.len() != n_gdn_actual
+        || target_session.gdn_conv.len() != n_gdn_actual
+    {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "prefill_tokens_with_multi_hidden",
+            detail: format!(
+                "target_session GDN state slots ({}/{}) != model n_gdn ({n_gdn_actual})",
+                target_session.gdn_state.len(),
+                target_session.gdn_conv.len()
+            ),
+        }));
+    }
+
+    // Cache mat-mat-eligible predicates once.
+    let gdn_mat_mat_eligible =
+        |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
+    let attn_mat_mat_eligible =
+        |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
+    let ffn_mat_mat_eligible = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+
+    // Per-call ids buffer. P=16 i32 = 64 bytes; trivial alloc cost.
+    // (Same "F32-typed buffer holding i32" convention as
+    // verify_scratch.packed_ids_buf — see the noise_ids comment in
+    // MetalDFlashSession.)
+    let ids_buf =
+        MetalTensor::zeros_f32(base.ctx, vec![p_max as u64]).map_err(DFlashError::Metal)?;
+
+    let n_chunks = total_n.div_ceil(p_max);
+    for chunk_idx in 0..n_chunks {
+        let chunk_base = chunk_idx * p_max;
+        let chunk_p = (total_n - chunk_base).min(p_max);
+        let chunk_start = start_position + chunk_base as u32;
+        let is_last_chunk = chunk_idx + 1 == n_chunks;
+
+        // Per-chunk internal invariant guard. Catches off-by-ones in
+        // the chunk-driver vs. the per-token attn-v4 advancement of
+        // kv_n_pos — codex's predicted first-symptom-of-bug class.
+        for (ai, &kp) in target_session.kv_n_pos.iter().enumerate() {
+            if kp != chunk_start as usize {
+                return Err(DFlashError::Metal(MetalError::BadShape {
+                    kernel: "prefill_tokens_with_multi_hidden.chunk_invariant",
+                    detail: format!(
+                        "chunk {chunk_idx}: kv_n_pos[{ai}]={kp} != chunk_start={chunk_start} \
+                         (expected {} after {chunk_idx} chunks of size up to {p_max})",
+                        chunk_start
+                    ),
+                }));
+            }
+        }
+
+        // Stage chunk_p token ids.
+        unsafe {
+            let p = ids_buf.buffer.contents().as_ptr() as *mut i32;
+            for (i, &t) in token_ids[chunk_base..chunk_base + chunk_p]
+                .iter()
+                .enumerate()
+            {
+                *p.add(i) = t;
+            }
+        }
+
+        // One MTLCommandBuffer per chunk. We need to commit + wait between
+        // chunks because (a) ids_buf is reused across chunks and CPU writes
+        // before each commit must be ordered behind GPU reads of prior
+        // commits (codex Q3 hazard), and (b) layer_scratch is reused.
+        let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
+
+        // Sized views of layer_scratch sliced to chunk_p. Every encoder
+        // dispatch's host-side n_elements() validation is against the
+        // sized view, NOT the full [p_max] buffer. This is what keeps
+        // chunk_p < p_max correct.
+        let x_pack_p = layer_scratch
+            .x_pack
+            .view_subrange(0, vec![(chunk_p * h) as u64]);
+        let h_pack_p = layer_scratch
+            .h_pack
+            .view_subrange(0, vec![(chunk_p * h) as u64]);
+        let mixer_out_pack_p = layer_scratch
+            .mixer_out_pack
+            .view_subrange(0, vec![(chunk_p * h) as u64]);
+
+        // === Phase 1: batched embed of chunk_p tokens. ===
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            let ids_view = ids_buf.view_subrange(0, vec![chunk_p as u64]);
+            encode_get_rows_f32(
+                base.ctx,
+                &enc,
+                &base.model.token_embd,
+                &ids_view,
+                &x_pack_p,
+                chunk_p,
+                h,
+            )?;
+            enc.end();
+        }
+
+        // === Phase 2: per-layer body. ===
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in base.model.blocks.iter().enumerate() {
+            // 2a: pre-mixer norm batched across chunk_p rows.
+            let attn_norm = match block {
+                MetalBlock::Gdn(g) => &g.attn_norm,
+                MetalBlock::Attn(a) => &a.attn_norm,
+            };
+            {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                encode_rms_norm_batched_f32(
+                    base.ctx, &enc, &x_pack_p, attn_norm, &h_pack_p, chunk_p, h, RMS_EPS,
+                )?;
+                enc.end();
+            }
+
+            // 2b: mixer (GDN or Attn). NO ckpt blits (prefill is
+            // final-commit; no rollback machinery).
+            match block {
+                MetalBlock::Gdn(g) => {
+                    let gi = gdn_idx;
+                    gdn_idx += 1;
+                    let n_k_u = arch.gdn_n_k_heads as usize;
+                    let n_v_u = arch.gdn_n_v_heads as usize;
+                    let head_dim_u = arch.gdn_head_dim as usize;
+                    let conv_dim = (2 * n_k_u + n_v_u) * head_dim_u;
+                    let v_dim = n_v_u * head_dim_u;
+
+                    let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
+                        && gdn_mat_mat_eligible(g.in_proj_z.dtype)
+                        && gdn_mat_mat_eligible(g.out_proj.dtype);
+
+                    if gdn_batched {
+                        // Sized views of GDN pack scratch.
+                        let gdn_qkv_pack_p = layer_scratch
+                            .gdn_qkv_pack
+                            .view_subrange(0, vec![(chunk_p * conv_dim) as u64]);
+                        let gdn_z_pack_p = layer_scratch
+                            .gdn_z_pack
+                            .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
+                        let gdn_normed_pack_p = layer_scratch
+                            .gdn_normed_pack
+                            .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
+
+                        // Step A: batched front-end QKV / Z projections.
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.in_proj_qkv,
+                                &h_pack_p,
+                                &gdn_qkv_pack_p,
+                                h,
+                                conv_dim,
+                                chunk_p,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.in_proj_z,
+                                &h_pack_p,
+                                &gdn_z_pack_p,
+                                h,
+                                v_dim,
+                                chunk_p,
+                            )?;
+                            enc.end();
+                        }
+
+                        // Per-token recurrence (GDN state mutates per token).
+                        // NO ckpt blit — prefill never rolls back.
+                        let alpha_handle = target_session.gdn_alpha.clone();
+                        let beta_handle = target_session.gdn_beta.clone();
+                        for n_idx in 0..chunk_p {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            let h_n = h_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                            encode_mat_vec_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.beta_proj,
+                                &h_n,
+                                &target_session.gdn_b,
+                                h,
+                                n_v_u,
+                            )?;
+                            encode_sigmoid_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.gdn_b,
+                                &target_session.gdn_beta,
+                            )?;
+                            encode_mat_vec_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.alpha_proj,
+                                &h_n,
+                                &target_session.gdn_a,
+                                h,
+                                n_v_u,
+                            )?;
+                            encode_gdn_alpha_chain_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.gdn_a,
+                                &g.dt_bias,
+                                &g.a_log,
+                                &target_session.gdn_alpha,
+                            )?;
+                            let qkv_n = gdn_qkv_pack_p
+                                .view_subrange((n_idx * conv_dim) as u64, vec![conv_dim as u64]);
+                            let z_n = gdn_z_pack_p
+                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                            let normed_n = gdn_normed_pack_p
+                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                            base.encode_gdn_tail(
+                                &enc,
+                                g,
+                                gi,
+                                target_session,
+                                &qkv_n,
+                                &z_n,
+                                &alpha_handle,
+                                &beta_handle,
+                                &normed_n,
+                            )?;
+                            enc.end();
+                        }
+
+                        // Step C: batched out_proj.
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.out_proj,
+                                &gdn_normed_pack_p,
+                                &mixer_out_pack_p,
+                                v_dim,
+                                h,
+                                chunk_p,
+                            )?;
+                            enc.end();
+                        }
+                    } else {
+                        // F32 oracle / mixed-dtype fallback: per-token
+                        // encode_gdn (no ckpt blit).
+                        for n_idx in 0..chunk_p {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &h_pack_p,
+                                n_idx * h,
+                                &target_session.h,
+                                h,
+                            )?;
+                            base.encode_gdn(&enc, g, gi, target_session)?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.mixer_out,
+                                &mixer_out_pack_p,
+                                n_idx * h,
+                                h,
+                            )?;
+                            enc.end();
+                        }
+                    }
+                }
+                MetalBlock::Attn(a) => {
+                    let ai = attn_idx;
+                    attn_idx += 1;
+                    let head_dim = arch.attn_head_dim as usize;
+                    let n_q = arch.n_q_heads as usize;
+                    let n_kv = arch.n_kv_heads as usize;
+                    let q_dim = n_q * head_dim;
+                    let kv_dim = n_kv * head_dim;
+                    let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+
+                    let attn_batched = attn_mat_mat_eligible(a.q.dtype)
+                        && attn_mat_mat_eligible(a.k.dtype)
+                        && attn_mat_mat_eligible(a.v.dtype)
+                        && attn_mat_mat_eligible(a.o.dtype);
+
+                    if attn_batched {
+                        // Sized views of attn pack scratch.
+                        let q_full_pack_p = layer_scratch
+                            .attn_q_full_pack
+                            .view_subrange(0, vec![(chunk_p * 2 * q_dim) as u64]);
+                        let q_pack_p = layer_scratch
+                            .attn_q_pack
+                            .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
+                        let gate_pack_p = layer_scratch
+                            .attn_gate_pack
+                            .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
+                        let q_normed_pack_p = layer_scratch
+                            .attn_q_normed_pack
+                            .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
+                        let k_now_pack_p = layer_scratch
+                            .attn_k_now_pack
+                            .view_subrange(0, vec![(chunk_p * kv_dim) as u64]);
+                        let v_now_pack_p = layer_scratch
+                            .attn_v_now_pack
+                            .view_subrange(0, vec![(chunk_p * kv_dim) as u64]);
+                        let k_normed_pack_p = layer_scratch
+                            .attn_k_normed_pack
+                            .view_subrange(0, vec![(chunk_p * kv_dim) as u64]);
+                        let attn_o_pack_p = layer_scratch
+                            .attn_o_pack
+                            .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
+
+                        // Step A: batched front-end Q gated / K / V projections + Q-norm + K-norm.
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &a.q,
+                                &h_pack_p,
+                                &q_full_pack_p,
+                                h,
+                                2 * q_dim,
+                                chunk_p,
+                            )?;
+                            encode_split_q_gate_f32(
+                                base.ctx,
+                                &enc,
+                                &q_full_pack_p,
+                                &q_pack_p,
+                                &gate_pack_p,
+                                chunk_p * n_q,
+                                head_dim,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &a.k,
+                                &h_pack_p,
+                                &k_now_pack_p,
+                                h,
+                                kv_dim,
+                                chunk_p,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &a.v,
+                                &h_pack_p,
+                                &v_now_pack_p,
+                                h,
+                                kv_dim,
+                                chunk_p,
+                            )?;
+                            encode_rms_norm_batched_f32(
+                                base.ctx,
+                                &enc,
+                                &q_pack_p,
+                                &a.q_norm,
+                                &q_normed_pack_p,
+                                chunk_p * n_q,
+                                head_dim,
+                                RMS_EPS,
+                            )?;
+                            encode_rms_norm_batched_f32(
+                                base.ctx,
+                                &enc,
+                                &k_now_pack_p,
+                                &a.k_norm,
+                                &k_normed_pack_p,
+                                chunk_p * n_kv,
+                                head_dim,
+                                RMS_EPS,
+                            )?;
+                            enc.end();
+                        }
+
+                        // Per-token RoPE + KV scatter + attn-v4. This
+                        // advances target_session.kv_n_pos[ai] from
+                        // chunk_start to chunk_start + chunk_p.
+                        for n_idx in 0..chunk_p {
+                            let position_n = chunk_start + n_idx as u32;
+                            let q_normed_n = q_normed_pack_p
+                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                            let k_normed_n = k_normed_pack_p
+                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                            let v_now_n = v_now_pack_p
+                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                            let attn_o_n = attn_o_pack_p
+                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_rope_neox_f32(
+                                base.ctx,
+                                &enc,
+                                &q_normed_n,
+                                n_q,
+                                head_dim,
+                                n_rot,
+                                position_n,
+                                arch.rope_theta,
+                            )?;
+                            encode_rope_neox_f32(
+                                base.ctx,
+                                &enc,
+                                &k_normed_n,
+                                n_kv,
+                                head_dim,
+                                n_rot,
+                                position_n,
+                                arch.rope_theta,
+                            )?;
+                            encode_scatter_offset_f32_to_f16_kv(
+                                base.ctx,
+                                &enc,
+                                &k_normed_n,
+                                &v_now_n,
+                                &target_session.kv_k[ai],
+                                &target_session.kv_v[ai],
+                                (position_n as usize) * kv_dim,
+                                kv_dim,
+                            )?;
+                            target_session.kv_n_pos[ai] = position_n as usize + 1;
+
+                            const V4_HEAD_DIM: usize = 256;
+                            const V4_GROUP: usize = 6;
+                            let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+                            if use_v4 {
+                                let nwg =
+                                    crate::metal::attn_v4_choose_nwg(target_session.kv_n_pos[ai]);
+                                let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                    target_session.kv_n_pos[ai],
+                                );
+                                crate::metal::encode_attn_decode_v4_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
+                                    &target_session.kv_k[ai],
+                                    &target_session.kv_v[ai],
+                                    &target_session.attn_v4_o_partial,
+                                    &target_session.attn_v4_ml_partial,
+                                    &attn_o_n,
+                                    n_q,
+                                    n_kv,
+                                    head_dim,
+                                    target_session.kv_n_pos[ai],
+                                    nwg,
+                                    tile_c,
+                                )?;
+                            } else {
+                                crate::metal::encode_attn_decode_f16kv_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
+                                    &target_session.kv_k[ai],
+                                    &target_session.kv_v[ai],
+                                    &attn_o_n,
+                                    n_q,
+                                    n_kv,
+                                    head_dim,
+                                    target_session.kv_n_pos[ai],
+                                )?;
+                            }
+                            enc.end();
+                        }
+
+                        // Step C: gate-sigmoid + mul + batched o_proj.
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_sigmoid_f32(base.ctx, &enc, &gate_pack_p, &q_pack_p)?;
+                            crate::metal::encode_mul_f32(
+                                base.ctx,
+                                &enc,
+                                &attn_o_pack_p,
+                                &q_pack_p,
+                                &attn_o_pack_p,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &a.o,
+                                &attn_o_pack_p,
+                                &mixer_out_pack_p,
+                                q_dim,
+                                h,
+                                chunk_p,
+                            )?;
+                            enc.end();
+                        }
+                    } else {
+                        // F32 oracle / fallback: per-token encode_attn.
+                        for n_idx in 0..chunk_p {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &h_pack_p,
+                                n_idx * h,
+                                &target_session.h,
+                                h,
+                            )?;
+                            let position_n = chunk_start + n_idx as u32;
+                            base.encode_attn(&enc, a, ai, position_n, target_session)?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.mixer_out,
+                                &mixer_out_pack_p,
+                                n_idx * h,
+                                h,
+                            )?;
+                            enc.end();
+                        }
+                    }
+                }
+            }
+
+            // 2c: residual #1 — x_pack += mixer_out_pack (batched).
+            {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &mixer_out_pack_p)?;
+                enc.end();
+            }
+
+            // 2e/f/g: post-norm + FFN + residual #2 + hidden_capture.
+            let post_norm = match block {
+                MetalBlock::Gdn(g) => &g.post_attn_norm,
+                MetalBlock::Attn(a) => &a.post_attn_norm,
+            };
+            let (g_w, u_w, d_w) = match block {
+                MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
+                MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
+            };
+            let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
+                && ffn_mat_mat_eligible(u_w.dtype)
+                && ffn_mat_mat_eligible(d_w.dtype);
+
+            // Sized FFN pack views.
+            let ffn_gate_pack_p = layer_scratch
+                .ffn_gate_pack
+                .view_subrange(0, vec![(chunk_p * f) as u64]);
+            let ffn_up_pack_p = layer_scratch
+                .ffn_up_pack
+                .view_subrange(0, vec![(chunk_p * f) as u64]);
+            let ffn_inner_pack_p = layer_scratch
+                .ffn_inner_pack
+                .view_subrange(0, vec![(chunk_p * f) as u64]);
+            let ffn_out_pack_p = layer_scratch
+                .ffn_out_pack
+                .view_subrange(0, vec![(chunk_p * h) as u64]);
+
+            {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                encode_rms_norm_batched_f32(
+                    base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
+                )?;
+                if mat_mat_path {
+                    encode_mat_mat_dispatch(
+                        base.ctx,
+                        &enc,
+                        g_w,
+                        &h_pack_p,
+                        &ffn_gate_pack_p,
+                        h,
+                        f,
+                        chunk_p,
+                    )?;
+                    encode_mat_mat_dispatch(
+                        base.ctx,
+                        &enc,
+                        u_w,
+                        &h_pack_p,
+                        &ffn_up_pack_p,
+                        h,
+                        f,
+                        chunk_p,
+                    )?;
+                    encode_silu_mul_f32(
+                        base.ctx,
+                        &enc,
+                        &ffn_gate_pack_p,
+                        &ffn_up_pack_p,
+                        &ffn_inner_pack_p,
+                    )?;
+                    encode_mat_mat_dispatch(
+                        base.ctx,
+                        &enc,
+                        d_w,
+                        &ffn_inner_pack_p,
+                        &ffn_out_pack_p,
+                        f,
+                        h,
+                        chunk_p,
+                    )?;
+                } else {
+                    // F32 / non-mat-mat fallback: per-token mat-vec.
+                    for n_idx in 0..chunk_p {
+                        let h_n = h_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        let gate_n =
+                            ffn_gate_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                        let up_n = ffn_up_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                        let inner_n =
+                            ffn_inner_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                        let out_n =
+                            ffn_out_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        encode_mat_vec_dispatch(base.ctx, &enc, g_w, &h_n, &gate_n, h, f)?;
+                        encode_mat_vec_dispatch(base.ctx, &enc, u_w, &h_n, &up_n, h, f)?;
+                        encode_silu_mul_f32(base.ctx, &enc, &gate_n, &up_n, &inner_n)?;
+                        encode_mat_vec_dispatch(base.ctx, &enc, d_w, &inner_n, &out_n, f, h)?;
+                    }
+                }
+                // 2g: residual #2 — x_pack += ffn_out_pack (batched).
+                encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
+
+                // 2d-fix (matches v0.74.4 capture point): hidden capture
+                // after residual #2. Writes into the GLOBAL hidden_dst at
+                // offset ((global_idx * K + k_idx) * H), where
+                // global_idx = chunk_base + n_idx. Skipped entirely when
+                // hidden_dst is None (no-spec ref path).
+                if let Some(dst) = hidden_dst {
+                    for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                        if lid as usize == il {
+                            for n_idx in 0..chunk_p {
+                                let global_idx = chunk_base + n_idx;
+                                let elem_off = (global_idx * k_target + k_idx) * h;
+                                let row_view =
+                                    x_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                encode_scatter_offset_f32(
+                                    base.ctx, &enc, &row_view, dst, elem_off, h,
+                                )?;
+                            }
+                        }
+                    }
+                }
+
+                enc.end();
+            }
+        } // end per-layer loop
+
+        // === Phase 3: tail. Only runs on the LAST chunk's LAST token. ===
+        //
+        // We DO NOT batch lm_head over the chunk: only the last prompt
+        // token's logits are needed (to seed decode). Other tokens skip
+        // the tail entirely (extending the v0.75.0 skip-tail lever to
+        // multi-token prefill). Tail uses target_session.x / .h / .logits
+        // (single-token scratch); we copy x_pack[chunk_p-1, :] into
+        // session.h via final norm directly, skipping the session.x copy.
+        if is_last_chunk {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            let x_last = x_pack_p.view_subrange(((chunk_p - 1) * h) as u64, vec![h as u64]);
+            encode_rms_norm_mul_f32(
+                base.ctx,
+                &enc,
+                &x_last,
+                &base.model.output_norm,
+                &target_session.h,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                base.ctx,
+                &enc,
+                &base.model.lm_head,
+                &target_session.h,
+                &target_session.logits,
+                h,
+                v,
+            )?;
+            enc.end();
+            cmd_buf.commit();
+            cmd_buf.waitUntilCompleted();
+            let mut last_logits = vec![0.0f32; v];
+            unsafe {
+                let src = target_session.logits.buffer.contents().as_ptr() as *const f32;
+                std::ptr::copy_nonoverlapping(src, last_logits.as_mut_ptr(), v);
+            }
+            return Ok(last_logits);
+        }
+
+        // Non-last chunk: just commit + wait (no tail).
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+    }
+
+    // unreachable: the last chunk always returns inside the loop. But
+    // satisfy the type checker.
+    unreachable!("prefill loop exits via last-chunk return");
+}
+
 pub fn encode_restore_after_partial_accept_inner(
     base: &MetalForward<'_>,
     scratch: &MetalDFlashVerifyScratch,
@@ -4879,5 +5813,262 @@ mod tests {
         // Verify the wrapped verify scratch is independently usable.
         assert_eq!(dbg.verify.n, n);
         assert_eq!(dbg.verify.k_target_layers, k);
+    }
+
+    /// **v0.75.1 correctness gate** (fast, lib-loop variant on
+    /// Qwen3.5-0.8B-F32). Oracle: a sequential `single_token_with_
+    /// multi_hidden` loop. Experimental: one `prefill_tokens_with_
+    /// multi_hidden` call.
+    ///
+    /// Cosine equivalence ≥ 0.999 required on:
+    ///   * final logits (last prompt token's vocab vector)
+    ///   * accumulated per-token multi-hidden capture
+    ///   * GDN state + conv tensors per layer
+    ///
+    /// 0.8B-F32 has 36 GDN layers and ZERO attn layers, so this gates
+    /// the GDN recurrence, FFN mat-mat (mat-mat-dispatch fall-through
+    /// for F32 weights uses per-token mat-vec, but layer-major batched
+    /// norms still cover their bookkeeping), and tail. Attn-path
+    /// correctness is gated by a separate 27B integration test in
+    /// `tests/dflash_correctness.rs` (slow; not in lib loop).
+    ///
+    /// Edge cases tested via subroutine: T<P, T==P, T==P+r, T==2P.
+    #[test]
+    fn prefill_tokens_matches_single_token_loop_0_8b() {
+        let path = "/Users/tito/models/Qwen3.5-0.8B.F32.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[prefill-tokens-vs-single-token] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        let arch = &mm.arch;
+        let h = arch.hidden_size as usize;
+
+        // K=4 capture layers spanning the network. 0.8B-F32 has 24
+        // layers so we hit GDN at varied depths (all-GDN model).
+        let capture_layers: Vec<u32> = vec![0, 7, 14, 21];
+        let k = capture_layers.len();
+
+        // Run each scenario as a closure so the same comparator covers
+        // T<P, T==P, T==P+r, T==2P, T=P+1 (chunk_p==1), and the
+        // start_position > 0 case (extending an already-advanced session).
+        //
+        // `prefix_len` primes both sessions with `prefix_len` tokens via
+        // sequential `single_token` first; prefill then runs from
+        // `start_position = prefix_len` over `total_n` more tokens. The
+        // total number of tokens forwarded by both paths is
+        // `prefix_len + total_n`. The final logits / hidden capture
+        // comparison is over the LAST `total_n` tokens.
+        let run_scenario = |label: &str, total_n: usize, p: usize, prefix_len: usize| {
+            assert!(total_n >= 1 && p >= 1, "{label}: need n,p ≥ 1");
+
+            // Synthesize a deterministic prefix + suffix sequence.
+            let n_total_with_prefix = prefix_len + total_n;
+            let all_tokens: Vec<i32> = (0..n_total_with_prefix)
+                .map(|i| ((i * 13 + 7) % (arch.vocab_size as usize - 1)) as i32 + 1)
+                .collect();
+            let prefix_tokens = &all_tokens[..prefix_len];
+            let token_ids = &all_tokens[prefix_len..];
+
+            // ---- Oracle path: sequential single_token_with_multi_hidden ----
+            // (prefix uses single_token to advance state, suffix uses
+            // single_token_with_multi_hidden so we capture the same
+            // hidden states the prefill captures.)
+            let cap = n_total_with_prefix + 4;
+            let mut sess_a = MetalSession::fresh(&ctx, &mm, cap).expect("sess A");
+            for (i, &tid) in prefix_tokens.iter().enumerate() {
+                mf.single_token(tid, i as u32, &mut sess_a)
+                    .expect("oracle prefix advance");
+            }
+            let h_dst_a = MetalTensor::zeros_f32(&ctx, vec![(k * h) as u64]).expect("h_dst_a");
+            let mut accum_a = vec![0.0f32; total_n * k * h];
+            let mut last_a = Vec::new();
+            for (i, &tid) in token_ids.iter().enumerate() {
+                last_a = mf
+                    .single_token_with_multi_hidden(
+                        tid,
+                        (prefix_len + i) as u32,
+                        &mut sess_a,
+                        &capture_layers,
+                        &h_dst_a,
+                    )
+                    .expect("oracle forward");
+                unsafe {
+                    let src = h_dst_a.buffer.contents().as_ptr() as *const f32;
+                    std::ptr::copy_nonoverlapping(
+                        src,
+                        accum_a[i * k * h..(i + 1) * k * h].as_mut_ptr(),
+                        k * h,
+                    );
+                }
+            }
+
+            // ---- Experimental path: prefill_tokens_with_multi_hidden ----
+            // Same prefix advance via single_token, then one prefill call
+            // starting at start_position = prefix_len.
+            let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
+            for (i, &tid) in prefix_tokens.iter().enumerate() {
+                mf.single_token(tid, i as u32, &mut sess_b)
+                    .expect("experimental prefix advance");
+            }
+            let mut layer_scratch =
+                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+            let h_dst_b =
+                MetalTensor::zeros_f32(&ctx, vec![(total_n * k * h) as u64]).expect("h_dst_b");
+            let last_b = prefill_tokens_with_multi_hidden(
+                &mf,
+                token_ids,
+                prefix_len as u32,
+                &mut sess_b,
+                &mut layer_scratch,
+                &capture_layers,
+                Some(&h_dst_b),
+            )
+            .expect("prefill");
+
+            // ---- Compare final logits (cos ≥ 0.999). ----
+            assert_eq!(last_a.len(), last_b.len(), "{label}: logits len mismatch");
+            let cos_logits = cosine_f32(&last_a, &last_b);
+            eprintln!(
+                "[prefill-vs-single] {label}: T={total_n} P={p} prefix={prefix_len} chunks={} cos(logits)={cos_logits:.6}",
+                total_n.div_ceil(p)
+            );
+            assert!(
+                cos_logits >= 0.999,
+                "{label}: logits cos={cos_logits} < 0.999"
+            );
+
+            // ---- Compare accumulated multi-hidden (cos per token slot). ----
+            let mut accum_b = vec![0.0f32; total_n * k * h];
+            unsafe {
+                let src = h_dst_b.buffer.contents().as_ptr() as *const f32;
+                std::ptr::copy_nonoverlapping(src, accum_b.as_mut_ptr(), total_n * k * h);
+            }
+            // Compare per-token-per-capture-layer (most diagnostic) AND
+            // overall (compact summary).
+            let mut min_cos = f64::INFINITY;
+            let mut worst_pos = (0usize, 0usize);
+            for t in 0..total_n {
+                for k_idx in 0..k {
+                    let off = (t * k + k_idx) * h;
+                    let a_slice = &accum_a[off..off + h];
+                    let b_slice = &accum_b[off..off + h];
+                    let c = cosine_f32(a_slice, b_slice);
+                    if c < min_cos {
+                        min_cos = c;
+                        worst_pos = (t, k_idx);
+                    }
+                }
+            }
+            eprintln!(
+                "[prefill-vs-single] {label}: hidden cos_min={min_cos:.6} \
+                 (at token={}, capture_layer={})",
+                worst_pos.0, worst_pos.1
+            );
+            assert!(
+                min_cos >= 0.999,
+                "{label}: hidden capture cos_min={min_cos} < 0.999 \
+                 (worst at token={}, capture_layer={})",
+                worst_pos.0,
+                worst_pos.1
+            );
+
+            // ---- Compare GDN state + conv per layer (cos ≥ 0.999). ----
+            assert_eq!(
+                sess_a.gdn_state.len(),
+                sess_b.gdn_state.len(),
+                "GDN state vec length mismatch"
+            );
+            for gi in 0..sess_a.gdn_state.len() {
+                let a_state = read_tensor_f32(&sess_a.gdn_state[gi]);
+                let b_state = read_tensor_f32(&sess_b.gdn_state[gi]);
+                let cs = cosine_f32(&a_state, &b_state);
+                let a_conv = read_tensor_f32(&sess_a.gdn_conv[gi]);
+                let b_conv = read_tensor_f32(&sess_b.gdn_conv[gi]);
+                let cc = cosine_f32(&a_conv, &b_conv);
+                assert!(cs >= 0.999, "{label}: GDN[{gi}] state cos={cs} < 0.999");
+                assert!(cc >= 0.999, "{label}: GDN[{gi}] conv cos={cc} < 0.999");
+            }
+
+            // ---- KV state (only for attn layers; 0.8B has none). ----
+            assert_eq!(sess_a.kv_n_pos.len(), sess_b.kv_n_pos.len());
+            for ai in 0..sess_a.kv_n_pos.len() {
+                assert_eq!(
+                    sess_a.kv_n_pos[ai], sess_b.kv_n_pos[ai],
+                    "{label}: kv_n_pos[{ai}] mismatch ({} vs {})",
+                    sess_a.kv_n_pos[ai], sess_b.kv_n_pos[ai]
+                );
+            }
+        };
+
+        // Edge cases. Format: (label, total_n, p, prefix_len).
+        run_scenario("T<P (T=3,P=8)", 3, 8, 0);
+        run_scenario("T==P (T=8,P=8)", 8, 8, 0);
+        run_scenario("T==P+r (T=11,P=8)", 11, 8, 0);
+        run_scenario("T==2P (T=16,P=8)", 16, 8, 0);
+        // chunk_p == 1 final chunk (codex pre-commit ask): T=9, P=8.
+        run_scenario("T=P+1 chunk_p=1 (T=9,P=8)", 9, 8, 0);
+        // start_position > 0 (codex pre-commit ask): prime with prefix=4
+        // single_tokens, then run prefill at start_position=4 over T=10
+        // suffix tokens. Exercises the "extend an already-advanced
+        // session" public API guarantee that prior tests didn't hit.
+        run_scenario("start_position>0 (prefix=4, T=10,P=8)", 10, 8, 4);
+
+        // ---- T=0 must error. ----
+        let mut sess_e = MetalSession::fresh(&ctx, &mm, 8).expect("sess E");
+        let mut layer_scratch_e =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 4).expect("scratch E");
+        let h_dst_e = MetalTensor::zeros_f32(&ctx, vec![1]).expect("h_dst_e");
+        let err = prefill_tokens_with_multi_hidden(
+            &mf,
+            &[],
+            0,
+            &mut sess_e,
+            &mut layer_scratch_e,
+            &capture_layers,
+            Some(&h_dst_e),
+        );
+        match err {
+            Err(DFlashError::Metal(crate::metal::MetalError::BadShape { detail, .. })) => {
+                assert!(
+                    detail.contains("empty"),
+                    "expected 'empty' in T=0 error: {detail}"
+                );
+            }
+            other => panic!("expected BadShape on T=0, got {other:?}"),
+        }
+    }
+
+    fn cosine_f32(a: &[f32], b: &[f32]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..a.len() {
+            dot += a[i] as f64 * b[i] as f64;
+            na += (a[i] as f64).powi(2);
+            nb += (b[i] as f64).powi(2);
+        }
+        dot / (na.sqrt() * nb.sqrt() + 1e-30)
+    }
+
+    fn read_tensor_f32(t: &MetalTensor) -> Vec<f32> {
+        let n = t.n_elements() as usize;
+        let mut out = vec![0.0f32; n];
+        unsafe {
+            let src = t.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+        }
+        out
     }
 }

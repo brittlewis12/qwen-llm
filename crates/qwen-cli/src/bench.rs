@@ -24,7 +24,7 @@ use qwen_llm::{
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
-        MetalDFlashVerifyScratch,
+        MetalDFlashVerifyScratch, prefill_tokens_with_multi_hidden,
     },
     metal_forward::{MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
@@ -354,19 +354,21 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let mut ref_session = MetalSession::fresh(&ctx, &mm, cap).context("ref session")?;
     let mut ref_tokens = prompt_ids.clone();
     let t_ref_total = Instant::now();
-    let mut last_logits = Vec::new();
     let t_ref_prefill = Instant::now();
-    let n_prompt_ref = prompt_ids.len();
-    for (i, &tid) in prompt_ids.iter().enumerate() {
-        // v0.75.0: skip lm_head + final norm + readback for all but the
-        // last prompt token. Only the last token's logits seed the
-        // decode phase below.
-        if i + 1 < n_prompt_ref {
-            mf.single_token_no_tail(tid, i as u32, &mut ref_session)?;
-        } else {
-            last_logits = mf.single_token(tid, i as u32, &mut ref_session)?;
-        }
-    }
+    // v0.75.1: packed multi-token prefill (no hidden capture needed for
+    // the no-spec ref). Block size 16 matches DFlash convention; chunk
+    // boundaries don't affect ref correctness.
+    let mut ref_layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("ref layer scratch")?;
+    let last_logits = prefill_tokens_with_multi_hidden(
+        &mf,
+        &prompt_ids,
+        0,
+        &mut ref_session,
+        &mut ref_layer_scratch,
+        &[],
+        None,
+    )?;
     let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
 
     let t_ref_decode = Instant::now();
@@ -545,45 +547,44 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     let mut dsess = MetalDFlashSession::fresh(&ctx, &mhead, h_target as u64, v as u64, cap)
         .context("dflash session")?;
 
-    // Per-prompt-token captured hidden buffer ([K · H] each).
+    // Per-prompt-token captured hidden buffer ([K · H] each). Used by
+    // the per-decode-step append (line 652).
     let multi_hidden_dst =
         MetalTensor::zeros_f32(&ctx, vec![n_target_features as u64]).context("multi_hidden_dst")?;
 
+    // v0.75.1: contiguous [T, K*H] hidden capture buffer + dedicated
+    // layer scratch for the packed prefill path. layer_scratch is
+    // local to the prefill phase; the lazy decode loop doesn't reuse it.
+    let prefill_hidden_dst =
+        MetalTensor::zeros_f32(&ctx, vec![(n_prompt * n_target_features) as u64])
+            .context("prefill_hidden_dst")?;
+    let mut prefill_layer_scratch = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, cfg.block_size)
+        .context("prefill layer scratch")?;
+
     // ---------- Prompt prefill ----------
     let t_prefill = Instant::now();
-    let mut last_logits: Vec<f32> = Vec::new();
-    for (i, &tid) in prompt_ids.iter().enumerate() {
-        // v0.75.0: skip-tail for all but the last prompt token. Hidden
-        // capture into multi_hidden_dst still runs, so the per-token
-        // append_target_ctx_column_now below sees valid bytes.
-        if i + 1 < n_prompt {
-            mf.single_token_with_multi_hidden_no_tail(
-                tid,
-                i as u32,
-                &mut target_session,
-                &head.target_layer_ids,
-                &multi_hidden_dst,
-            )
-            .context("prefill base step (no_tail)")?;
-        } else {
-            last_logits = mf
-                .single_token_with_multi_hidden(
-                    tid,
-                    i as u32,
-                    &mut target_session,
-                    &head.target_layer_ids,
-                    &multi_hidden_dst,
-                )
-                .context("prefill base step")?;
-        }
-        // Append captured K hiddens to the drafter's target_ctx.
-        dsess
-            .append_target_ctx_column_now(&ctx, &multi_hidden_dst, i as u32, n_target_features)
-            .context("append prefill ctx column")?;
-    }
+    let last_logits = prefill_tokens_with_multi_hidden(
+        &mf,
+        &prompt_ids,
+        0,
+        &mut target_session,
+        &mut prefill_layer_scratch,
+        &head.target_layer_ids,
+        Some(&prefill_hidden_dst),
+    )
+    .context("prefill_tokens_with_multi_hidden")?;
+    dsess
+        .append_target_ctx_columns_contiguous_now(
+            &ctx,
+            &prefill_hidden_dst,
+            0,
+            n_prompt,
+            n_target_features,
+        )
+        .context("append prefill ctx columns (batched)")?;
     let prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
     eprintln!(
-        "[dflash-lazy] prefill {n_prompt} tokens in {prefill_ms:.1} ms (incl. K-hidden capture + ctx append)"
+        "[dflash-lazy] prefill {n_prompt} tokens in {prefill_ms:.1} ms (packed mat-mat + batched append)"
     );
 
     // Bootstrap: argmax of last prompt logits is the first emit token (carry).
@@ -712,17 +713,19 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     eprintln!("[dflash-lazy] running MTP=off greedy baseline for comparison ...");
     let mut ref_session = MetalSession::fresh(&ctx, &mm, cap).context("ref session")?;
     let t_ref_total = Instant::now();
-    let mut last_logits_ref = Vec::new();
     let t_ref_prefill = Instant::now();
-    for (i, &tid) in prompt_ids.iter().enumerate() {
-        // v0.75.0: skip-tail except for the last prompt token (whose
-        // logits seed `next_tok` for the decode phase).
-        if i + 1 < n_prompt {
-            mf.single_token_no_tail(tid, i as u32, &mut ref_session)?;
-        } else {
-            last_logits_ref = mf.single_token(tid, i as u32, &mut ref_session)?;
-        }
-    }
+    // v0.75.1: packed multi-token prefill (no hidden capture).
+    let mut ref_layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("ref layer scratch")?;
+    let last_logits_ref = prefill_tokens_with_multi_hidden(
+        &mf,
+        &prompt_ids,
+        0,
+        &mut ref_session,
+        &mut ref_layer_scratch,
+        &[],
+        None,
+    )?;
     let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
     let mut next_tok = argmax_i32(&last_logits_ref);
     let mut ref_emitted: Vec<i32> = Vec::with_capacity(tokens);
@@ -940,11 +943,6 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut dsess = MetalDFlashSession::fresh(&ctx, &mhead, h_target as u64, v as u64, cap)
         .context("dflash session")?;
 
-    // Per-prompt-token captured hidden buffer for prefill phase
-    // (single_token_with_multi_hidden writes [K * H] per call).
-    let multi_hidden_dst =
-        MetalTensor::zeros_f32(&ctx, vec![n_target_features as u64]).context("multi_hidden_dst")?;
-
     // Production DFlash scratch buffers.
     let mut verify_scratch =
         MetalDFlashVerifyScratch::fresh(&ctx, &mm, cfg.block_size, k_layers as u32)
@@ -952,35 +950,34 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut layer_scratch =
         MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, cfg.block_size).context("layer scratch")?;
 
+    // v0.75.1: contiguous [T, K*H] hidden capture buffer for the
+    // packed prefill path. One allocation, one prefill call, one
+    // batched append.
+    let prefill_hidden_dst =
+        MetalTensor::zeros_f32(&ctx, vec![(n_prompt * n_target_features) as u64])
+            .context("prefill_hidden_dst")?;
+
     // ---------- Prompt prefill ----------
     let t_prefill = Instant::now();
-    let mut last_logits: Vec<f32> = Vec::new();
-    for (i, &tid) in prompt_ids.iter().enumerate() {
-        // v0.75.0: skip-tail for all but the last prompt token.
-        if i + 1 < n_prompt {
-            mf.single_token_with_multi_hidden_no_tail(
-                tid,
-                i as u32,
-                &mut target_session,
-                &head.target_layer_ids,
-                &multi_hidden_dst,
-            )
-            .context("prefill base step (no_tail)")?;
-        } else {
-            last_logits = mf
-                .single_token_with_multi_hidden(
-                    tid,
-                    i as u32,
-                    &mut target_session,
-                    &head.target_layer_ids,
-                    &multi_hidden_dst,
-                )
-                .context("prefill base step")?;
-        }
-        dsess
-            .append_target_ctx_column_now(&ctx, &multi_hidden_dst, i as u32, n_target_features)
-            .context("append prefill ctx column")?;
-    }
+    let last_logits = prefill_tokens_with_multi_hidden(
+        &mf,
+        &prompt_ids,
+        0,
+        &mut target_session,
+        &mut layer_scratch,
+        &head.target_layer_ids,
+        Some(&prefill_hidden_dst),
+    )
+    .context("prefill_tokens_with_multi_hidden")?;
+    dsess
+        .append_target_ctx_columns_contiguous_now(
+            &ctx,
+            &prefill_hidden_dst,
+            0,
+            n_prompt,
+            n_target_features,
+        )
+        .context("append prefill ctx columns (batched)")?;
     let prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
     eprintln!("[dflash] prefill {n_prompt} tokens in {prefill_ms:.1} ms");
 
@@ -1152,15 +1149,18 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let mut ref_session = MetalSession::fresh(&ctx, &mm, cap).context("ref session")?;
         let t_ref_total = Instant::now();
         let t_ref_prefill = Instant::now();
-        let mut last_logits_ref = Vec::new();
-        for (i, &tid) in prompt_ids.iter().enumerate() {
-            // v0.75.0: skip-tail except for the last prompt token.
-            if i + 1 < n_prompt {
-                mf.single_token_no_tail(tid, i as u32, &mut ref_session)?;
-            } else {
-                last_logits_ref = mf.single_token(tid, i as u32, &mut ref_session)?;
-            }
-        }
+        // v0.75.1: packed multi-token prefill (no hidden capture).
+        let mut ref_layer_scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("ref layer scratch")?;
+        let last_logits_ref = prefill_tokens_with_multi_hidden(
+            &mf,
+            &prompt_ids,
+            0,
+            &mut ref_session,
+            &mut ref_layer_scratch,
+            &[],
+            None,
+        )?;
         let ref_prefill_ms = t_ref_prefill.elapsed().as_secs_f64() * 1e3;
         let mut next_tok = argmax_i32(&last_logits_ref);
         let mut pos = (n_prompt - 1) as u32;
@@ -1671,6 +1671,11 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
         let _ = mf.single_token(corpus[0].1.as_bytes()[0] as i32, 0, &mut s)?;
     }
 
+    // v0.75.1: hoisted layer_scratch (reused across all prompts in
+    // the corpus). Allocation is ~tens of MB; per-prompt re-alloc is
+    // pure waste at corpus sizes ≥ 100.
+    let mut eval_layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("eval layer scratch")?;
     let t_total = Instant::now();
     for (i_prompt, (cat, prompt)) in corpus.iter().enumerate() {
         let cat_stats = by_cat.entry(cat.clone()).or_default();
@@ -1683,16 +1688,17 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
         let ids = tok.encode(prompt, false)?;
         let mut sess = MetalSession::fresh(&ctx, &mm, ids.len() + tokens + 16)?;
 
-        // Prefill the prompt. v0.75.0: skip-tail except last token.
-        let mut last_logits = vec![];
-        let n_ids = ids.len();
-        for (i, &tid) in ids.iter().enumerate() {
-            if i + 1 < n_ids {
-                mf.single_token_no_tail(tid, i as u32, &mut sess)?;
-            } else {
-                last_logits = mf.single_token(tid, i as u32, &mut sess)?;
-            }
-        }
+        // Prefill the prompt. v0.75.1: packed mat-mat prefill (no
+        // hidden capture for this eval mode).
+        let mut last_logits = prefill_tokens_with_multi_hidden(
+            &mf,
+            &ids,
+            0,
+            &mut sess,
+            &mut eval_layer_scratch,
+            &[],
+            None,
+        )?;
 
         // Decode `tokens` steps; for each, check if the greedy argmax
         // token id would still be selected under each K-prune.

@@ -1334,7 +1334,122 @@ the failure:
 
 ## Document history
 
-- **rev 15 (current).** v0.75.0 skip-tail prefill SHIPPED. All-but-last
+- **rev 16 (current).** v0.75.1 packed multi-token prefill SHIPPED.
+  All five prefill loops in the bench (DFlash full + lazy + 3 no-spec
+  ref + K-prune evaluator) now use one `prefill_tokens_with_multi_hidden`
+  call per prompt instead of T sequential `single_token` forwards.
+  Per-chunk-of-P=16 mat-mat batching for projections + FFN; per-token
+  GDN/attn recurrence (sequential by construction). Last token of last
+  chunk runs final norm + lm_head + readback (extends v0.75.0 skip-tail
+  to multi-token).
+
+  ### v0.75.1 measurements (production 27B Q4_K_M, 32-token gen)
+
+  Apples-to-apples vs v0.74.4 baseline (DFlash prefill ms):
+
+    | ctx  | v0.74.4   | v0.75.0   | v0.75.1   | speedup vs v0.74.4 |
+    |-----:|----------:|----------:|----------:|-------------------:|
+    |    9 |    376 ms |    355 ms |  **227 ms** |          **1.66×** |
+    |  181 |   7502 ms |   7116 ms | **2344 ms** |          **3.20×** |
+    |  363 |  15278 ms |  14329 ms | **4526 ms** |          **3.38×** |
+    |  727 |       n/a |       n/a |   8975 ms |              new   |
+    | 2055 |       n/a |       n/a |  25778 ms |              new   |
+    | 8223 | ~365000ms |       n/a |118084 ms |          **3.09×** |
+
+  3-5× design projection HIT at every ctx ≥ 181. Greedy equivalence
+  PASSES at every ctx. Decode-only ratios unchanged (the change only
+  touches prefill).
+
+  ### Cumulative trajectory updated
+
+    | version       | default ctx (5) | ctx=181 | ctx=363 | TTFT speedup vs v0.72.4 (default ctx) |
+    |---------------|----------------:|--------:|--------:|--------------------------------------:|
+    | v0.72.4       |          0.452× |       — |       — |  1.00× (baseline) |
+    | v0.74.3       |          1.008× |  1.342× |  1.482× |  1.00×            |
+    | v0.74.4       |          1.001× |  1.347× |  1.472× |  1.00×            |
+    | **v0.75.1**   |          0.864× |  1.345× |  1.457× |  **1.66×**        |
+
+  v0.75.0 + v0.75.1 don't change decode-only speedup (which is the
+  speculative-decode KPI); they speed up TTFT for both DFlash and
+  no-spec ref symmetrically (because both now use the packed prefill
+  path). Total-wall ratio at ctx=181 went from 1.038× (v0.74.3) to
+  1.102× (v0.75.1) because TTFT savings amortize over a fixed-size
+  decode workload, making total-wall less prefill-dominated.
+
+  ### Correctness gates added (lib loop + 27B integration)
+
+  Lib gate (`prefill_tokens_matches_single_token_loop_0_8b`,
+  Qwen3.5-0.8B-F32, all-GDN): cos = **1.000000** (bit-exact!) across
+  final logits + accumulated hidden capture + GDN state + conv,
+  across SIX edge cases:
+    * T<P (T=3, P=8)
+    * T==P (T=8, P=8)
+    * T==P+r (T=11, P=8)
+    * T==2P (T=16, P=8)
+    * T=P+1 with chunk_p=1 final chunk (T=9, P=8) — codex pre-commit
+    * start_position>0 with prefix=4 (T=10, P=8) — codex pre-commit
+
+  Plus T=0 returns `BadShape` error.
+
+  78/0/0/20 lib tests, ~7s feedback loop preserved.
+
+  27B integration gate (`prefill_tokens_matches_single_token_loop_27b`,
+  T=24, P=16, K=5 capture layers, exercises Q4/Q5/Q6 mat-mat half-staging
+  AND attn-v4 KV scatter across all 16 attn layers + 48 GDN layers):
+    * cos(final logits) = 1.000000
+    * hidden capture cos_min = 0.999999 (worst at token=4, layer=4)
+    * GDN state cos_min = 0.999999, conv cos_min = 0.999999
+    * KV K cos_min = 1.000000, V cos_min = 0.999999 over [0, 24)
+    * kv_n_pos[ai] == 24 exact for every attn layer
+    * Standalone speedup: 2.72× (oracle 1135 ms vs prefill 417 ms)
+
+  Wall: 26 s. Run via
+  `cargo test --test dflash_correctness --release`.
+
+  ### Implementation footprint
+
+  ~600 LOC `prefill_tokens_with_multi_hidden` in `metal_dflash.rs`
+  (forks the layer-major packed_verify body, drops GDN ckpt blits,
+  refactors kv_n_pos guard to per-chunk invariant, batches lm_head
+  → per-token tail on last token). ~75 LOC
+  `append_target_ctx_columns_contiguous_now` helper. Bench wiring
+  net -16 LOC (5 prefill loops swapped, all simpler now).
+
+  Hidden_dst is `Option<&MetalTensor>` so the no-spec ref bench paths
+  reuse the same function with `target_layer_ids=[]` /
+  `hidden_dst=None`. This makes the bench's apples-to-apples
+  comparison meaningful: both DFlash and no-spec ref now use packed
+  prefill, prefill-time savings are symmetric, and decode-only
+  speedup remains the speculative-decode KPI signal.
+
+  ### Codex pressure-test catches
+
+  Pre-implementation review on /tmp/v0.75.1-codex-prompt.md (7
+  sharpenings absorbed):
+  1. Hidden dst as flat `[T, K, H]` (not `&[&MetalTensor]`) —
+     awkward signature avoided.
+  2. **chunk_p views on every dispatch** — the host-side
+     `n_elements()` validation gate would have failed silently if
+     I'd passed full-`[16]` scratch with `chunk_p < 16`. All
+     dispatches now use `view_subrange`-sized tensors.
+  3. KV invariant refactor: public-entry guard `== start_position` +
+     per-chunk internal guard `== chunk_start`. Tripwire for any
+     future chunk-driver/per-token attn-v4 advancement off-by-ones.
+  4. `append_target_ctx_columns_contiguous_now` reuses existing
+     `encode_scatter_offset_f32` (no new kernel) — codex confirmed
+     `target_ctx_stacked` is contiguous so one scatter copies the
+     whole `[T, K*H]` slab.
+  5. Last-token tail via `view_subrange` on x_pack last row + final
+     norm + lm_head mat-vec, NO `single_token*` reuse (which would
+     advance state again).
+
+  Post-implementation review on /tmp/v0.75.1-codex-review-prompt.md:
+  no blocking findings. Two pre-commit asks added:
+  * `chunk_p == 1` final chunk test (T=P+1)
+  * `start_position > 0` test (extending an already-advanced session)
+  Both pass with cos = 1.000000.
+
+- **rev 15.** v0.75.0 skip-tail prefill SHIPPED. All-but-last
   prompt tokens now skip final RMSNorm + lm_head + readback (~5%
   TTFT win at every measured ctx). Established the prefill API shape
   for v0.75.1 (packed multi-token prefill) to swap in. Codex pressure-
@@ -1472,12 +1587,10 @@ the failure:
 
   Still-applicable items, ranked:
 
-    * **`prefill_tokens` API** (no `lm_head`, no readback per token):
-      biggest TTFT lever in the repo. v0.75.0 SHIPPED the skip-tail
-      half (no `lm_head`, no readback for all-but-last prefill
-      tokens) for ~5% TTFT at ctx ≥ 181. The packed multi-token
-      half — turning per-token mat-vec into per-chunk-of-P mat-mat
-      — is v0.75.1 (~2 days, projected 3-5× TTFT at ctx ≥ 1K).
+    * ~~**`prefill_tokens` API**~~ — DONE. v0.75.0 (skip-tail,
+      ~5% TTFT) + v0.75.1 (packed multi-token mat-mat, **3.20×
+      ctx=181 / 3.38× ctx=363 / 3.09× ctx=8K**). Both halves of
+      the reviewer's biggest TTFT lever now SHIPPED.
     * **Stream DFlash ctx-cache during prefill**: predicated on
       prefill_tokens; eliminates the cold first outer step.
       ~half day on top of prefill_tokens.

@@ -971,6 +971,127 @@ pub fn encode_ffn_swiglu_q4_K_f32(
     Ok(())
 }
 
+/// **EXPERIMENTAL — FAILED A-LITE GATE — NOT WIRED INTO PRODUCTION (v0.73c.2)**
+///
+/// Layer-major fused SwiGLU FFN — Q4_K mat-mat × 2 + silu_mul, NR1=16.
+///
+/// Fuses the 3-dispatch sequence (gate_mm + up_mm + silu_mul) into one
+/// kernel per FFN layer. Bit-exact with the unfused reference (cos =
+/// 1.000000, max|Δ| = 0). Lifted from mat_mat_q4_k.metal NR1=16 with
+/// doubled accumulators (mc_gate[4] + mc_up[4]) and shared sb tile.
+///
+/// **Why not in production:** A-lite bench at production 64-layer 27B
+/// shape (n_in=5120, n_out=17408, N=16) measured 1.07× speedup vs
+/// unfused — codex threshold was ≤ 0.7 (i.e. ≥ 30% speedup needed).
+/// The unchanged W_gate + W_up weight reads dominate; fusion only saves
+/// dispatch count and intermediate I/O, both of which Metal already
+/// pipelines well within one command buffer. Codex's optimistic 5-15
+/// ms/call savings estimate was ~30× too high (actual: ~0.5 ms/call).
+///
+/// See `kernels/ffn_fused_swiglu_q4_k_mm.metal` header for the full
+/// negative-result writeup. Preserved as institutional memory; do NOT
+/// plumb without re-running `ffn_fused_swiglu_q4_K_amortization_vs_unfused`
+/// to confirm the regime has changed.
+///
+/// Constraints:
+///   * `n_in % 256 == 0` (Q4_K super-block alignment)
+///   * `n_query == 16` (NR1=16 fast path; host enforces)
+///   * Both weight tensors must be Q4_K (host check)
+///
+/// Threadgroup memory: 16384 B (sa_g 4 KiB + sa_u 4 KiB + sb 1 KiB live)
+#[allow(non_snake_case)]
+pub fn encode_ffn_fused_swiglu_q4_K_mm_n16_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor, // Q4_K [n_in, n_out]
+    w_up: &MetalTensor,   // Q4_K [n_in, n_out]
+    x: &MetalTensor,      // F32 [n_query=16, n_in] row-major
+    inner: &MetalTensor,  // F32 [n_query, n_out] row-major
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm_n16",
+            detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
+        });
+    }
+    if w_gate.dtype != GgmlType::Q4_K || w_up.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm_n16",
+            detail: format!(
+                "w_gate.dtype={:?} w_up.dtype={:?}, both must be Q4_K",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    const N: usize = 16;
+    if x.n_elements() as usize != N * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm_n16",
+            detail: format!("x.n_elements={} != N*n_in={}", x.n_elements(), N * n_in),
+        });
+    }
+    if inner.n_elements() as usize != N * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm_n16",
+            detail: format!(
+                "inner.n_elements={} != N*n_out={}",
+                inner.n_elements(),
+                N * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_ffn_fused_swiglu_q4_K_mm_n16_f32")?;
+    enc.set_pipeline(&pso);
+
+    let nb01 = ((n_in / 256) * 144) as u32;
+    let stride_b = n_in as u32;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: N as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, inner);
+
+    enc.set_threadgroup_memory(0, 16384);
+
+    let n_tg_x = N.div_ceil(16);
+    let n_tg_y = n_out.div_ceil(64);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg_x,
+            height: n_tg_y,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128, // 4 simdgroups × 32 lanes
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 // ----- elementwise + small ops -----
 
 /// Per-element kernel arg used by silu/sigmoid/softplus/add/mul/silu_mul.
@@ -4770,6 +4891,183 @@ mod tests {
         );
     }
 
+    /// v0.73c.2 A-lite GO/NO-GO bench. Compares the fused
+    /// `ffn_swiglu_q4_K_mm_n16` (one dispatch per FFN layer) against
+    /// the unfused `mat_mat_q4_K + mat_mat_q4_K + silu_mul` 3-dispatch
+    /// sequence at production 27B 64-layer FFN shape (n_in=5120,
+    /// n_out=17408, N=16, 64 layers). Codex's threshold for proceed
+    /// is ratio ≤ 0.7 (fused must beat unfused by at least ~30%).
+    ///
+    /// Run: `cargo test --release --lib -p qwen-llm
+    /// ffn_fused_swiglu_q4_K_amortization_vs_unfused --ignored -- --nocapture`
+    #[test]
+    #[ignore]
+    #[allow(non_snake_case)]
+    fn ffn_fused_swiglu_q4_K_amortization_vs_unfused() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[v0.73c.2-gate] skipped — fixture missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let gate = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("ffn_gate Q4_K not found");
+        let up = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("ffn_up Q4_K not found");
+        let n_in = gate.shape[0] as usize;
+        let n_out = gate.shape[1] as usize;
+        const N: usize = 16;
+        let n_layers = 64usize; // 27B has 64 transformer blocks (48 GDN + 16 attn; FFN runs on all)
+        let warmup = 5usize;
+        let iters = 30usize;
+
+        eprintln!("[v0.73c.2-gate] shape=[n_in={n_in}, n_out={n_out}] N={N} layers={n_layers}");
+
+        let w_gate = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(gate),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+        let w_up = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(up),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+        let x_packed = MetalTensor::zeros_f32(&ctx, vec![(N * n_in) as u64]).unwrap();
+        let inner_packed = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        let gate_packed = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+        let up_packed = MetalTensor::zeros_f32(&ctx, vec![(N * n_out) as u64]).unwrap();
+
+        let bench_fused = || {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..n_layers {
+                encode_ffn_fused_swiglu_q4_K_mm_n16_f32(
+                    &ctx,
+                    &enc,
+                    &w_gate,
+                    &w_up,
+                    &x_packed,
+                    &inner_packed,
+                    n_in,
+                    n_out,
+                )
+                .unwrap();
+            }
+            enc.end();
+            let t = Instant::now();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let wall = t.elapsed().as_secs_f64() * 1e3;
+            let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            (wall, gpu)
+        };
+
+        let bench_unfused = || {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..n_layers {
+                encode_mat_mat_q4_k_f32(
+                    &ctx,
+                    &enc,
+                    &w_gate,
+                    &x_packed,
+                    &gate_packed,
+                    n_in,
+                    n_out,
+                    N,
+                )
+                .unwrap();
+                encode_mat_mat_q4_k_f32(&ctx, &enc, &w_up, &x_packed, &up_packed, n_in, n_out, N)
+                    .unwrap();
+                encode_silu_mul_f32(&ctx, &enc, &gate_packed, &up_packed, &inner_packed).unwrap();
+            }
+            enc.end();
+            let t = Instant::now();
+            cmd.commit();
+            unsafe { cmd.waitUntilCompleted() };
+            let wall = t.elapsed().as_secs_f64() * 1e3;
+            let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            (wall, gpu)
+        };
+
+        for _ in 0..warmup {
+            bench_fused();
+            bench_unfused();
+        }
+        let mut sum_f_wall = 0.0f64;
+        let mut sum_f_gpu = 0.0f64;
+        let mut sum_u_wall = 0.0f64;
+        let mut sum_u_gpu = 0.0f64;
+        for _ in 0..iters {
+            let (w, g) = bench_fused();
+            sum_f_wall += w;
+            sum_f_gpu += g;
+        }
+        for _ in 0..iters {
+            let (w, g) = bench_unfused();
+            sum_u_wall += w;
+            sum_u_gpu += g;
+        }
+        let f_wall = sum_f_wall / iters as f64;
+        let f_gpu = sum_f_gpu / iters as f64;
+        let u_wall = sum_u_wall / iters as f64;
+        let u_gpu = sum_u_gpu / iters as f64;
+
+        eprintln!("[v0.73c.2-gate] {n_layers} layers × N={N} avg over {iters} iters:");
+        eprintln!(
+            "  fused (1 disp/layer):       wall={f_wall:7.2} ms  gpu={f_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
+            f_gpu / n_layers as f64
+        );
+        eprintln!(
+            "  unfused (3 disp/layer):     wall={u_wall:7.2} ms  gpu={u_gpu:7.2} ms  per-layer-gpu={:5.3} ms",
+            u_gpu / n_layers as f64
+        );
+        let ratio_wall = f_wall / u_wall;
+        let ratio_gpu = f_gpu / u_gpu;
+        let speedup_wall = 1.0 / ratio_wall;
+        let speedup_gpu = 1.0 / ratio_gpu;
+        eprintln!(
+            "  ratio fused / unfused: wall={ratio_wall:.3} (= {speedup_wall:.2}× speedup)  gpu={ratio_gpu:.3} (= {speedup_gpu:.2}× speedup)"
+        );
+
+        // v0.73c.2 RESULT: failed go/no-go. Measured ratio ≈ 0.94 on
+        // production 27B Q4_K_M FFN shape — fusion only saves ~6%,
+        // codex threshold was ≤ 0.7 (≥ 30% speedup). Kernel is
+        // preserved as experimental institutional memory; the assertion
+        // below allows the bench to run as a re-checkable "regime
+        // still capped?" probe without panicking. If a future change
+        // (e.g. larger N, different shape, different hardware) puts
+        // the ratio under 0.7, this is where to flag it for plumbing.
+        if ratio_gpu <= 0.7 {
+            eprintln!(
+                "[v0.73c.2-gate] REGIME CHANGE: ratio_gpu {ratio_gpu:.3} now ≤ 0.7. \
+                 Reconsider plumbing fused FFN into layer-major path."
+            );
+        } else {
+            eprintln!(
+                "[v0.73c.2-gate] still capped (ratio_gpu {ratio_gpu:.3} > 0.7); \
+                 fusion not worth plumbing. Same negative result as v0.73c.2."
+            );
+        }
+    }
+
     /// v0.73a.0 A-lite GO/NO-GO bench. Compares amortized weight-BW of
     /// Q5_K mat-mat (NR1=16 fast path) vs N=16 successive Q5_K mat-vec
     /// on production GDN out_proj (`blk.*.ssm_out.weight`) shape.
@@ -5038,6 +5336,131 @@ mod tests {
             "fused FFN cos too low: {cos} (max|Δ|={max_abs})"
         );
         assert!(max_abs < 1e-3, "fused FFN diverged: max|Δ|={max_abs}");
+    }
+
+    /// v0.73c.2 gate: layer-major fused SwiGLU FFN at N=16 must match
+    /// the unfused (mat_mat_q4_K + mat_mat_q4_K + silu_mul) reference
+    /// within mat-mat half-staging tolerance. Per-row cosine ≥ 0.999,
+    /// max|Δ| ≤ 1e-2 (mirrors Q4_K mat-mat gate).
+    ///
+    /// Uses real `blk.0.ffn_gate.weight` + `ffn_up.weight` from 27B Q4_K_M.
+    #[test]
+    #[allow(non_snake_case)]
+    fn ffn_fused_swiglu_q4_K_mm_n16_matches_unfused() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[ffn-fused-mm-n16] skipped — fixture missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+
+        let gate = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("no blk.0.ffn_gate.weight Q4_K");
+        let up = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up.weight" && t.dtype == GgmlType::Q4_K)
+            .expect("no blk.0.ffn_up.weight Q4_K");
+        assert_eq!(gate.shape, up.shape, "gate/up shape mismatch");
+        let n_in = gate.shape[0] as usize;
+        let n_out = gate.shape[1] as usize;
+        const N: usize = 16;
+        eprintln!("[ffn-fused-mm-n16] n_in={n_in} n_out={n_out} N={N}");
+
+        let w_gate = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(gate),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+        let w_up = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(up),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q4_K,
+        )
+        .unwrap();
+
+        // Activation: row-major [N, n_in] deterministic fill.
+        let mut x = vec![0.0f32; N * n_in];
+        for (i, v) in x.iter_mut().enumerate() {
+            *v = ((i % 13) as f32 - 6.0) * 1e-2;
+        }
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![N as u64, n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        // --- Unfused reference: gate_mm + up_mm + silu_mul ---
+        let gate_pack = MetalTensor::zeros_f32(&ctx, vec![N as u64 * n_out as u64]).unwrap();
+        let up_pack = MetalTensor::zeros_f32(&ctx, vec![N as u64 * n_out as u64]).unwrap();
+        let inner_ref_t = MetalTensor::zeros_f32(&ctx, vec![N as u64 * n_out as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_mat_mat_q4_k_f32(&ctx, enc, &w_gate, &x_t, &gate_pack, n_in, n_out, N)?;
+            encode_mat_mat_q4_k_f32(&ctx, enc, &w_up, &x_t, &up_pack, n_in, n_out, N)?;
+            encode_silu_mul_f32(&ctx, enc, &gate_pack, &up_pack, &inner_ref_t)
+        })
+        .unwrap();
+        let inner_ref_flat = read_back_f32(&inner_ref_t.buffer, N * n_out);
+
+        // --- Fused: 1 dispatch ---
+        let inner_fused_t = MetalTensor::zeros_f32(&ctx, vec![N as u64 * n_out as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_ffn_fused_swiglu_q4_K_mm_n16_f32(
+                &ctx,
+                enc,
+                &w_gate,
+                &w_up,
+                &x_t,
+                &inner_fused_t,
+                n_in,
+                n_out,
+            )
+        })
+        .unwrap();
+        let inner_fused_flat = read_back_f32(&inner_fused_t.buffer, N * n_out);
+
+        // Both buffers are bit-equivalently row-major [N, n_out] (= col-major [n_out, N]).
+        // Reshape via the same indexing as Q4_K mat-mat tests.
+        let mut min_cos = f64::INFINITY;
+        let mut max_abs = 0.0f32;
+        for q in 0..N {
+            let mut dot = 0.0f64;
+            let mut np = 0.0f64;
+            let mut nc = 0.0f64;
+            for o in 0..n_out {
+                // dst[o + q * n_out] is the cell (m=o, n=q) in col-major
+                // [n_out, N], which equals row-major [N, n_out][q][o].
+                let p = inner_fused_flat[o + q * n_out] as f64;
+                let c = inner_ref_flat[o + q * n_out] as f64;
+                dot += p * c;
+                np += p * p;
+                nc += c * c;
+                let d = (p - c).abs() as f32;
+                if d > max_abs {
+                    max_abs = d;
+                }
+            }
+            let cos = dot / (np.sqrt() * nc.sqrt() + 1e-30);
+            if cos < min_cos {
+                min_cos = cos;
+            }
+        }
+        eprintln!("[ffn-fused-mm-n16] min_cos={min_cos:.6} max|Δ|={max_abs:.3e}");
+        assert!(min_cos >= 0.999, "fused FFN N=16 cos too low: {min_cos}");
+        assert!(max_abs < 1e-2, "fused FFN N=16 diverged: max|Δ|={max_abs}");
     }
 
     /// Fused K+V scatter (one dispatch writes both caches) must produce

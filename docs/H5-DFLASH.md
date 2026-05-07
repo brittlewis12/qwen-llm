@@ -1334,7 +1334,156 @@ the failure:
 
 ## Document history
 
-- **rev 11 (current).** v0.73a.1 SHIPPED (0.452× → 0.548×, +21%
+- **rev 12 (current).** v0.73 stretch consolidation. v0.73a.0
+  through v0.73c.1 SHIPPED. v0.73c.2 (fused-SwiGLU FFN) attempted
+  + bounded as a NEGATIVE RESULT. Codex MTP investigation
+  (subagent) recorded.
+
+  ### Sweep summary (commits cae89ce → 6c15237)
+
+    | commit       | speedup | what                                           |
+    |--------------|---------|------------------------------------------------|
+    | v0.72.4 base | 0.452×  | rev-9 plan checkpoint                          |
+    | v0.73a.0     | —       | Q5_K mat-mat lift + A-lite gate (3.59×)        |
+    | v0.73a.1     | 0.548×  | GDN projection batching                        |
+    | v0.73a.2     | —       | profile pivots v0.73b → Q8_0 drafter           |
+    | v0.73b.0     | —       | Q8_0 mat-vec + mat-mat lift (A-lite 7.74×)     |
+    | v0.73b.1     | 0.746×  | native Q8_0 drafter                            |
+    | v0.73c.1     | 0.805×  | attn projection batching                       |
+    | **v0.73c.2** | —       | **fused-SwiGLU FFN: NEGATIVE RESULT**          |
+
+  Cumulative since v0.72.4 baseline: 0.452× → **0.805× = +78%**.
+  Closing in on break-even (1.0×) on production 27B Q4_K_M code prompt.
+
+  ### v0.73c.2 negative result — fused SwiGLU FFN
+
+  Codex's #2 ranked v0.73c candidate after the post-v0.73c.1 profile
+  showed FFN at 49.3% of verify GPU at ctx=1024. Wrote
+  `kernel_ffn_fused_swiglu_q4_K_mm_n16_f32` (~280 LOC): one fused
+  dispatch per FFN layer instead of (gate_mm + up_mm + silu_mul) ×
+  3 dispatches. Bit-exact correctness vs unfused (cos = 1.000000,
+  max|Δ| = 0).
+
+  **A-lite go/no-go bench at production shape FAILED:**
+    fused:    7.0 ms / 64 layers GPU
+    unfused:  7.5 ms / 64 layers GPU
+    ratio: 0.937 — only 1.07× speedup
+  Codex threshold was ≤ 0.7 (≥ 30% speedup). Saved ~0.5 ms / call ×
+  5 calls = ~2.5 ms total decode wall. Below noise floor.
+
+  Codex's earlier estimate (5–15 ms/call honest, 10–25 ms/call
+  optimistic) was **20–50× too high**. Why:
+    1. Both paths run in ONE command buffer; Metal pipelines the
+       dispatches well; codex's 3–6 ms "dispatch count savings"
+       projection didn't account for pipelining.
+    2. Intermediate I/O elimination (gate_pack + up_pack
+       materialization) was correctly bounded at ~0.6 ms — that's
+       essentially what we measured.
+    3. The big BW cost (W_gate + W_up reads, ~94 MB / layer × 64 =
+       ~6 GB / call) is unchanged — fusion can't avoid the weight
+       reads.
+    4. The unfused path is ALREADY scheduler-friendly inside one
+       cmd buffer.
+
+  **Action taken**: kernel labeled experimental in source comments,
+  `#[ignore]` A-lite bench preserved as re-runnable "regime still
+  capped?" probe (relaxed from panic to log). Kernel + correctness
+  test stay in tree as institutional memory; not plumbed into the
+  layer-major path.
+
+  **Reusable lesson reinforced**: profile noise is real (2× variance
+  run-to-run on the per-phase profiler), and codex-bounded
+  estimates can still be 20–50× too high when the comparison's
+  baseline is already well-pipelined. **A-lite isolated benches
+  before plumbing infrastructure changes saved an estimated 1+ day**
+  of plumbing → measuring → reverting that we'd otherwise burn.
+
+  ### v0.73c.1 — attn projection batching (SHIPPED)
+
+  Mirrors v0.73a.1 GDN restructure for the 16 attn layers. Production
+  27B Q4_K_M attn projections are all Q4_K (Q gated, K, V, output);
+  attn_q is `[5120, 12288]` (gated 2× q_dim), attn_k/v are
+  `[5120, 1024]`, attn_output is `[6144, 5120]`. Eligibility
+  predicate (`attn_mat_mat_eligible`) checks all 4 ∈ {Q4_K, Q5_K,
+  Q6_K}; F32 oracle (0.8B) and any mixed-dtype case fall through
+  to unchanged per-token `encode_attn`.
+
+  Eligible path:
+    Step A (1 enc/layer): mat_mat Q (gated) → split → mat_mat K,V
+                          → batched Q-norm + K-norm
+    Per-token loop (N=16): RoPE Q + RoPE K + KV-scatter F32→F16 +
+                          attn-v4 (per-token: KV append + softmax
+                          are inherently sequential)
+    Step C (1 enc/layer): sigmoid(gate_pack) → mul on attn_o_pack
+                          (flat N*q_dim) → mat_mat o_proj batched
+
+  Net dispatch reduction: 16 per-token × 10 dispatches = 160 →
+  74 (1 head + 64 inner + 1 tail). Reuses encode_split_q_gate_f32
+  (per-head layout repeats across N rows — works as-is with
+  n_heads = N × n_q_per_token).
+
+  End-to-end: 0.746× → 0.805× (+8%); 27B layer-major-vs-token-major
+  speedup 2.36× → 2.45× (essentially clears codex's 2.5× tripwire
+  from H5.3b.6).
+
+  ### Profile data (post-v0.73c.1, ctx sweep)
+
+    | phase                    | ctx=1024 | ctx=4096 | ctx=16384 |
+    |--------------------------|---------:|---------:|----------:|
+    | ffn_plus_residual2       |    49.3% |    44.3% |     28.8% |
+    | attn (Step A + per-tok + Step C) | 13.5% | 22.1% |   47.0% |
+    | gdn aggregate            |    34.7% |    31.9% |     22.7% |
+
+  Crossover at ctx 4K-16K: attn becomes dominant at long-ctx.
+  Profile noise IS REAL (FFN measurements vary 2× run-to-run on
+  the per-phase profiler that uses per-encoder commit/wait). Trust
+  RELATIVE attribution; don't trust ABSOLUTE ms numbers from this
+  profiler.
+
+  ### Codex MTP investigation (informs roadmap, not v0.73c)
+
+  Subagent investigated llama.cpp PR #22673 (MTP for Qwen 3.6 27B,
+  draft as of May 6 2026) after a public claim of 2.5× speedup.
+
+  Findings:
+  - The 2.5× is the upper tail of a 1.35–1.85× distribution
+    (M3 Ultra dense: 1.35×; RTX 5090 Q4_0: 1.66×; 3090 Q6_K: 1.85×).
+    The 2.5× claim bundles MTP-N=3 × KV-Q4_0 × long-ctx × favorable
+    prompt — three orthogonal wins stacked.
+  - Our H4 was correct for what we shipped (N=1 lazy verify,
+    mathematically capped at 0.91×). The PR ships an N=3 AR chain
+    feeding `t_mtp_out` from step k-1 as the hidden for step k —
+    a recurrence variant we never built.
+  - **DFlash structurally beats MTP-N=3:** bigger drafter (1.7B
+    params vs single-layer head), bigger N (16 vs 3), bigger
+    amortization (17 query rows vs 4). DFlash ceiling 1.5–2.5×;
+    MTP-N=3 ceiling 1.5–1.7×.
+  - **Stay the H5 course.** After H5 lands break-even, MTP-N=3
+    bolts onto our DFlash packed-verify infra in ~50 LOC for a
+    zero-download fallback recipe. ~1–2 days work; reuses checkpoint
+    machinery.
+
+  ### v0.73c.3 / v0.74+ candidates (ranked post-v0.73c.2)
+
+  1. **v0.73c.3 = packed-N attn-v4** (the original v0.75 pulled
+     forward). Long-ctx lever: 47% of verify GPU at ctx=16K. Codex:
+     "structurally simpler than fused-SwiGLU" — adds N axis to
+     existing attn-v4 accumulators rather than a new fused kernel
+     design. Short-ctx modest (~20-30 ms/call); long-ctx massive
+     (~100-150 ms/call at 16K+). Multi-partition long-ctx tests
+     mandatory (codex H5.3 era caution).
+  2. **KV-Q4_0 / KV-Q8_0** — flagged in MTP investigation as a
+     10–30% long-ctx independent win. Bigger scope (touches
+     attn-v4 KV read path + new dtype across all 16 attn layers).
+     Defer until after packed-N attn-v4 ships.
+  3. **MTP-N=3 fallback recipe** — reuses DFlash packed-verify
+     infra. Optional ship; helps users who can't/won't download
+     the DFlash drafter GGUF. Defer until H5 hits ≥ 1.0×.
+  4. **N-step GDN tail kernel (was rev-9 v0.73b)** — ceiling 57.6 ms
+     / call at v0.73a.2 profile time; even smaller now post-v0.73a.1.
+     Stays deferred indefinitely.
+
+- **rev 11.** v0.73a.1 SHIPPED (0.452× → 0.548×, +21%
   speedup). Then v0.73a.2 surgical profile + drafter re-profile
   invalidated the rev-9/rev-10 locked v0.73b (N-step GDN tail
   kernel). Pivoting v0.73b to Q8_0 native drafter (was v0.74).

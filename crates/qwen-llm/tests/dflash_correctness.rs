@@ -31,8 +31,10 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::{open_dflash_drafter, Model};
 use qwen_llm::metal::{
     encode_add_inplace_f32, encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32,
-    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_sigmoid_f32,
-    encode_silu_mul_f32, BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor,
+    encode_get_rows_f32, encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, BlitEncoder, KernelEncoder, MetalContext,
+    MetalError, MetalTensor,
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
@@ -1322,37 +1324,230 @@ fn packed_verify_phase_profile_v073a2_27b() {
             MetalBlock::Attn(a) => {
                 let ai = attn_idx;
                 attn_idx += 1;
-                let mut attn_ms = 0.0f64;
-                for n_idx in 0..N as usize {
+                // v0.73c.1: attn restructure mirrors the production
+                // layer-major path. Three sub-phases reported separately
+                // so we can see the new dispatch breakdown.
+                let head_dim = arch.attn_head_dim as usize;
+                let n_q = arch.n_q_heads as usize;
+                let n_kv = arch.n_kv_heads as usize;
+                let q_dim = n_q * head_dim;
+                let kv_dim = n_kv * head_dim;
+                let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+
+                // Step A: batched front-end (Q gated / K / V mat-mat + split + Q-norm + K-norm).
+                {
                     let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
-                    encode_copy_offset_f32(
+                    encode_mat_mat_dispatch(
                         &ctx_metal,
                         &enc,
+                        &a.q,
                         &layer_scratch.h_pack,
-                        n_idx * h,
-                        &sess.h,
+                        &layer_scratch.attn_q_full_pack,
                         h,
+                        2 * q_dim,
+                        N as usize,
                     )
-                    .expect("copy");
-                    let position_n = start_position + n_idx as u32;
-                    mf.encode_attn(&enc, a, ai, position_n, &mut sess)
-                        .expect("attn");
-                    encode_scatter_offset_f32(
+                    .expect("attn step A: q_full mat-mat");
+                    encode_split_q_gate_f32(
                         &ctx_metal,
                         &enc,
-                        &sess.mixer_out,
-                        &layer_scratch.mixer_out_pack,
-                        n_idx * h,
-                        h,
+                        &layer_scratch.attn_q_full_pack,
+                        &layer_scratch.attn_q_pack,
+                        &layer_scratch.attn_gate_pack,
+                        N as usize * n_q,
+                        head_dim,
                     )
-                    .expect("scatter");
+                    .expect("attn step A: split q/gate");
+                    encode_mat_mat_dispatch(
+                        &ctx_metal,
+                        &enc,
+                        &a.k,
+                        &layer_scratch.h_pack,
+                        &layer_scratch.attn_k_now_pack,
+                        h,
+                        kv_dim,
+                        N as usize,
+                    )
+                    .expect("attn step A: k mat-mat");
+                    encode_mat_mat_dispatch(
+                        &ctx_metal,
+                        &enc,
+                        &a.v,
+                        &layer_scratch.h_pack,
+                        &layer_scratch.attn_v_now_pack,
+                        h,
+                        kv_dim,
+                        N as usize,
+                    )
+                    .expect("attn step A: v mat-mat");
+                    encode_rms_norm_batched_f32(
+                        &ctx_metal,
+                        &enc,
+                        &layer_scratch.attn_q_pack,
+                        &a.q_norm,
+                        &layer_scratch.attn_q_normed_pack,
+                        N as usize * n_q,
+                        head_dim,
+                        RMS_EPS,
+                    )
+                    .expect("attn step A: q-norm");
+                    encode_rms_norm_batched_f32(
+                        &ctx_metal,
+                        &enc,
+                        &layer_scratch.attn_k_now_pack,
+                        &a.k_norm,
+                        &layer_scratch.attn_k_normed_pack,
+                        N as usize * n_kv,
+                        head_dim,
+                        RMS_EPS,
+                    )
+                    .expect("attn step A: k-norm");
                     enc.end();
                     cmd.commit();
                     unsafe { cmd.waitUntilCompleted() };
-                    attn_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    accum(
+                        "attn_step_a_proj_split_norm",
+                        (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+                    );
                 }
-                accum("attn_per_token", attn_ms);
+
+                // Per-token loop: RoPE + KV-scatter + attn-v4 (or naive).
+                let mut attn_per_tok_ms = 0.0f64;
+                for n_idx in 0..N as usize {
+                    let position_n = start_position + n_idx as u32;
+                    let q_normed_n = layer_scratch
+                        .attn_q_normed_pack
+                        .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                    let k_normed_n = layer_scratch
+                        .attn_k_normed_pack
+                        .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                    let v_now_n = layer_scratch
+                        .attn_v_now_pack
+                        .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                    let attn_o_n = layer_scratch
+                        .attn_o_pack
+                        .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                    let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_rope_neox_f32(
+                        &ctx_metal,
+                        &enc,
+                        &q_normed_n,
+                        n_q,
+                        head_dim,
+                        n_rot,
+                        position_n,
+                        arch.rope_theta,
+                    )
+                    .expect("RoPE Q");
+                    encode_rope_neox_f32(
+                        &ctx_metal,
+                        &enc,
+                        &k_normed_n,
+                        n_kv,
+                        head_dim,
+                        n_rot,
+                        position_n,
+                        arch.rope_theta,
+                    )
+                    .expect("RoPE K");
+                    encode_scatter_offset_f32_to_f16_kv(
+                        &ctx_metal,
+                        &enc,
+                        &k_normed_n,
+                        &v_now_n,
+                        &sess.kv_k[ai],
+                        &sess.kv_v[ai],
+                        (position_n as usize) * kv_dim,
+                        kv_dim,
+                    )
+                    .expect("KV scatter");
+                    sess.kv_n_pos[ai] = position_n as usize + 1;
+
+                    const V4_HEAD_DIM: usize = 256;
+                    const V4_GROUP: usize = 6;
+                    let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+                    if use_v4 {
+                        let nwg = qwen_llm::metal::attn_v4_choose_nwg(sess.kv_n_pos[ai]);
+                        let tile_c = qwen_llm::metal::attn_v4_choose_tile_c(sess.kv_n_pos[ai]);
+                        qwen_llm::metal::encode_attn_decode_v4_f32(
+                            &ctx_metal,
+                            &enc,
+                            &q_normed_n,
+                            &sess.kv_k[ai],
+                            &sess.kv_v[ai],
+                            &sess.attn_v4_o_partial,
+                            &sess.attn_v4_ml_partial,
+                            &attn_o_n,
+                            n_q,
+                            n_kv,
+                            head_dim,
+                            sess.kv_n_pos[ai],
+                            nwg,
+                            tile_c,
+                        )
+                        .expect("attn-v4");
+                    } else {
+                        qwen_llm::metal::encode_attn_decode_f16kv_f32(
+                            &ctx_metal,
+                            &enc,
+                            &q_normed_n,
+                            &sess.kv_k[ai],
+                            &sess.kv_v[ai],
+                            &attn_o_n,
+                            n_q,
+                            n_kv,
+                            head_dim,
+                            sess.kv_n_pos[ai],
+                        )
+                        .expect("attn naive");
+                    }
+                    enc.end();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    attn_per_tok_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
+                accum("attn_per_token", attn_per_tok_ms);
+
+                // Step C: gate-sigmoid + mul + o_proj mat-mat.
+                {
+                    let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_sigmoid_f32(
+                        &ctx_metal,
+                        &enc,
+                        &layer_scratch.attn_gate_pack,
+                        &layer_scratch.attn_q_pack,
+                    )
+                    .expect("sigmoid gate");
+                    encode_mul_f32(
+                        &ctx_metal,
+                        &enc,
+                        &layer_scratch.attn_o_pack,
+                        &layer_scratch.attn_q_pack,
+                        &layer_scratch.attn_o_pack,
+                    )
+                    .expect("attn_o *= sigmoid(gate)");
+                    encode_mat_mat_dispatch(
+                        &ctx_metal,
+                        &enc,
+                        &a.o,
+                        &layer_scratch.attn_o_pack,
+                        &layer_scratch.mixer_out_pack,
+                        q_dim,
+                        h,
+                        N as usize,
+                    )
+                    .expect("attn step C: o_proj mat-mat");
+                    enc.end();
+                    cmd.commit();
+                    unsafe { cmd.waitUntilCompleted() };
+                    accum(
+                        "attn_step_c_gate_oproj",
+                        (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+                    );
+                }
             }
         }
 

@@ -1334,7 +1334,142 @@ the failure:
 
 ## Document history
 
-- **rev 12 (current).** v0.73 stretch consolidation. v0.73a.0
+- **rev 13 (current).** Long-ctx bench discovery: DFlash decode
+  collapses with ctx because the drafter re-projects the entire
+  cross-context every outer step. **The drafter ctx caching item
+  filed in rev 9 as v0.77+ is now the dominant lever. Promoting it
+  to v0.74.**
+
+  ### Long-ctx end-to-end bench (post-v0.73c.1, prompt = repeated quicksort code)
+
+    | n_prompt | DFlash decode | no-spec decode | DFlash decode/no-spec | n_outer |
+    |---------:|--------------:|---------------:|----------------------:|--------:|
+    |        5 |      2600 ms  |       1334 ms  |              0.515×   |       5 |
+    |      181 |      1546 ms  |       1352 ms  |              0.874×   |       3 |
+    |      256 |      2362 ms  |       1364 ms  |              0.578×   |       4 |
+    |      363 |      1434 ms  |       1412 ms  |              0.984×   |       2 |
+    |      727 |      2215 ms  |       1399 ms  |              0.631×   |       2 |
+    |     1455 |      3751 ms  |       1409 ms  |              0.376×   |       2 |
+    |     2055 |      5045 ms  |       1483 ms  |              0.294×   |       2 |
+    |     8223 |     16904 ms  |       1507 ms  |              0.089×   |       2 |
+
+  No-spec decode wall stays ~1500 ms regardless of ctx (correctly:
+  fixed work per generated token; KV-read scaling is the only
+  ctx-sensitive piece). DFlash decode wall grows ~5×–11× with ctx,
+  blowing past no-spec at ctx ≥ 727. **At ctx = 8K, DFlash is 11×
+  SLOWER than no-spec — completely broken for code-context use.**
+
+  ### Drafter --profile breakdown (per-call avg ms, n_outer 2 or 3)
+
+    | n_prompt | phase1_ctx_fc_norm | phase2_proj_norm_rope | phase3 | TOTAL_DRAFTER |
+    |---------:|-------------------:|----------------------:|-------:|--------------:|
+    |        5 |              21 ms |                  6 ms |  39 ms |       1268 ms |
+    |      181 |             105 ms |                 17 ms |  16 ms |        813 ms |
+    |      363 |             213 ms |                 31 ms |  16 ms |        905 ms |
+    |      727 |             427 ms |                 60 ms |  17 ms |       1637 ms |
+    |     1455 |             830 ms |                115 ms |  21 ms |       3023 ms |
+
+  **Phase 1 doubles exactly when ctx doubles** — confirmed linear-in-ctx.
+  Same for phase 2 (the per-layer K/V ctx projection + RoPE).
+  Phase 3 (attn + ffn) flat in ctx (independent of cross-context size
+  by design — drafter SWA-masks the noise → ctx attention so attn
+  is per-noise-token, ctx_len doesn't grow it).
+
+  ### Root cause (`metal_dflash.rs:2700-2748` + `:2850-2866` + `:2942-2949`)
+
+  `draft_block` re-runs every outer step:
+    1. Phase 1: `for c in 0..ctx_len` → mat-vec dflash_fc per
+       column (n_target_features=25600 → hidden=5120) + per-column
+       RMSNorm. **Re-projects the entire target_ctx_stacked through
+       dflash_fc + hidden_norm**, even though the first `ctx_n` rows
+       are unchanged from the previous outer step.
+    2. Phase 2: per drafter layer (5 layers): `for c in 0..ctx_len`
+       K/V projections, then per-c RoPE. **Re-projects + re-RoPEs
+       the entire ctx through each layer's K/V weights** every step.
+
+  Per outer step:
+    Phase 1 redundant work: ctx_len * (mat-vec + RMSNorm)
+                          ≈ ctx_len * (mat-vec(25600→5120) + 5120 ops)
+    Phase 2 redundant work: 5 layers * ctx_len * (2 mat-vec(5120→1024)
+                          + 2 RoPE(1024 elem))
+
+  At ctx=1455:
+    Phase 1: 1455 * ~0.6 ms = ~830 ms (matches measurement)
+    Phase 2: 5 * 1455 * ~0.016 ms = ~115 ms (matches)
+
+  ### Fix: drafter ctx caching (was v0.77+, NOW v0.74)
+
+  Persist `ctx_h` and per-layer post-norm post-RoPE `K_ctx_cache[L]`
+  / `V_ctx_cache[L]`. On each outer step, only project + norm + RoPE
+  the **newly appended positions** (1..N from the previous outer
+  step's accepted prefix + bonus). Append to the caches.
+
+  Implementation sketch (~150 LOC + new session fields):
+    - Add `K_ctx_cache: Vec<MetalTensor>`, `V_ctx_cache: Vec<MetalTensor>`,
+      `ctx_h_cache: MetalTensor` to `MetalDFlashSession`. Sized for
+      `target_ctx_capacity * kv_dim` / `target_ctx_capacity * h`.
+    - Track `ctx_h_ready_n: usize` (= number of cached positions
+      that are post-fc-norm-rope through ALL layers).
+    - At top of `draft_block`: compute `delta = ctx_n - ctx_h_ready_n`.
+      Run phase 1 + phase 2 ONLY on positions `[ctx_h_ready_n,
+      ctx_n)`, not on the entire `ctx_h`. Set
+      `ctx_h_ready_n = ctx_n` after.
+    - Phase 3 attn reads cached K_ctx/V_ctx of length ctx_len; no
+      change to its core algorithm.
+    - Restore semantics: on partial accept, ctx_n DECREASES (rolls
+      back to processed_pos+1+n_accepted). Cache positions beyond
+      that aren't valid; re-project on next outer step. Simplest
+      correctness rule: `ctx_h_ready_n = min(ctx_h_ready_n, ctx_n)`
+      after every restore.
+
+  ### Projected impact
+
+  At ctx=1455 (per-call savings):
+    phase 1 redundant: ~830 ms per outer step → ~5 ms (only the new
+                       1-N positions get projected)
+    phase 2 redundant: ~115 ms per outer step → ~5 ms
+    Total savings: ~935 ms per outer step
+    × 2 outer steps in this bench = ~1870 ms total decode wall
+    Decode wall: 3751 ms → ~1880 ms. Speedup vs no-spec: 1409/1880 = 0.749×.
+
+  At ctx=8223 (extrapolated):
+    phase 1: ~4700 ms → ~5 ms savings/step ⇒ ~9300 ms total saved
+    phase 2: ~650 ms → ~10 ms ⇒ ~1280 ms total saved
+    Decode wall: 16904 ms → ~6300 ms. Speedup vs no-spec: 1507/6300 = 0.239×.
+    Still bad at 8K because verify-side per-token attn/GDN
+    presumably ALSO scales with ctx (KV read BW), but the
+    cliff is FAR less catastrophic.
+
+  ### v0.74 plan (was Q8_0 drafter + N=16 mat-mat, now SHIPPED early as v0.73b)
+
+  ~~Q8_0 drafter (v0.74) shipped early as v0.73b.~~
+
+  v0.74 = drafter ctx caching. Sequence:
+    * v0.74.0: add `ctx_h_cache` + `ctx_h_ready_n` field, refactor
+      Phase 1 to only project the delta. Cosine gate vs current
+      behavior at ctx=64 (where redundant re-project IS what
+      happens).
+    * v0.74.1: add `K_ctx_cache[L]` + `V_ctx_cache[L]`, refactor
+      Phase 2 same way. cos gate.
+    * v0.74.2: restore-after-partial-accept semantics. Test:
+      a sequence that triggers partial accept must produce
+      identical drafter output regardless of cache state.
+    * v0.74.3: end-to-end bench at ctx ∈ {256, 1024, 4096, 8192}.
+      Speedup must improve monotonically.
+
+  ### Other notes
+
+  - Long-ctx bench used a synthetic-repeated prompt (quicksort code
+    repeated). Real code-context prompts should also exhibit this
+    scaling because phase 1/2 are O(ctx) regardless of content.
+  - Prefill is also LINEAR in ctx (~10 ms/token), which is the
+    expected baseline. The dramatic prefill totals (369 s for 8K)
+    are real but proportional. Not a separate bug.
+  - greedy equivalence STILL PASSES at all measured prompt lengths.
+    The re-projection isn't producing incorrect output — it's just
+    wasteful redundant work.
+
+- **rev 12.** v0.73 stretch consolidation. v0.73a.0
   through v0.73c.1 SHIPPED. v0.73c.2 (fused-SwiGLU FFN) attempted
   + bounded as a NEGATIVE RESULT. Codex MTP investigation
   (subagent) recorded.

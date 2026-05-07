@@ -57,12 +57,28 @@ pub enum TokError {
     InputTooLong(i32),
 }
 
-/// One-time `llama_backend_init`. llama.cpp's docs say this is required
-/// before any vocab call, even though they're often safe without it on
-/// recent versions.
+/// One-time `llama_backend_init` + log silencing. llama.cpp / ggml
+/// otherwise emit a multi-screen stderr banner on every model load
+/// (including vocab-only loads via `Tokenizer::open`).
+///
+/// `llama_log_set(None, ...)` does NOT silence — passing `None` makes
+/// llama.cpp fall back to its default stderr logger. To actually drop
+/// messages we install a no-op callback. Set `QWEN_LLM_LLAMA_LOGS=1`
+/// to keep verbose logging for debugging.
 static BACKEND_INIT: Once = Once::new();
+
+unsafe extern "C" fn void_log(
+    _level: llama_cpp_sys_2::ggml_log_level,
+    _text: *const std::os::raw::c_char,
+    _user_data: *mut std::os::raw::c_void,
+) {
+}
+
 fn ensure_backend() {
     BACKEND_INIT.call_once(|| unsafe {
+        if std::env::var_os("QWEN_LLM_LLAMA_LOGS").is_none() {
+            llama_cpp_sys_2::llama_log_set(Some(void_log), std::ptr::null_mut());
+        }
         llama_cpp_sys_2::llama_backend_init();
     });
 }

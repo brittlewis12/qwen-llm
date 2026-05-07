@@ -2365,31 +2365,33 @@ pub fn encode_packed_verify_layer_major_inner(
             enc.end();
         }
 
-        // 2d: hidden capture (per codex Q4 timing — INLINE, before
-        //     post-norm overwrites the residual stream representation
-        //     downstream consumers see). hidden_capture[n, k_idx, :]
-        //     == x_pack[n, :] AT THIS POINT (v0.71 layout: [N, K, H]).
-        for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
-            if lid as usize == il {
-                let enc = KernelEncoder::begin(&cmd_buf);
-                for n_idx in 0..n {
-                    let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
-                        + k_idx as u64)
-                        * verify_scratch.hidden_size;
-                    encode_scatter_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &layer_scratch
-                            .x_pack
-                            .view_subrange((n_idx * h) as u64, vec![h as u64]),
-                        &verify_scratch.hidden_capture,
-                        elem_off as usize,
-                        h,
-                    )?;
-                }
-                enc.end();
-            }
-        }
+        // **v0.74.4 capture-point fix**: hidden_capture moved from
+        // here (after residual #1, before FFN) to AFTER residual #2
+        // (after FFN), matching:
+        //   * `Forward::single_token_capture_layers` (forward.rs:211),
+        //     the canonical CPU oracle for H5
+        //   * `MetalForward::single_token_with_multi_hidden`
+        //     (metal_forward.rs:534) — used for prefill bootstrap
+        //   * `encode_packed_verify_inner_impl` token-major path
+        //     (metal_dflash.rs:1532)
+        //
+        // The pre-fix layer-major path captured a DIFFERENT residual
+        // stream snapshot than every other path. Hidden_capture feeds
+        // the DFlash drafter's cross-context conditioning via dflash_fc;
+        // the bug was latent because (a) the layer-major-vs-token-major
+        // 27B test only compares LOGITS (which both paths compute from
+        // the LAST layer's full residual #2 regardless of capture
+        // timing), and (b) greedy equivalence vs DFlash=off held even
+        // with mixed capture points in target_ctx_stacked (prefill
+        // columns from the canonical post-FFN snapshot, decode columns
+        // from the buggy pre-FFN snapshot). External code review
+        // (codex pressure-test for v0.75 prefill) caught this. The
+        // alpha measurements at all measured contexts (1.005x default,
+        // 1.342x at 181, 1.482x at 363) are the floor — fix should
+        // make them slightly better since the drafter now sees a
+        // consistent input across prefill and decode.
+        //
+        // Capture inserted AFTER 2g (residual #2). Search 2d-fix below.
 
         // 2e: post-mixer norm BATCHED.
         let post_norm = match block {
@@ -2513,6 +2515,37 @@ pub fn encode_packed_verify_layer_major_inner(
                 &layer_scratch.x_pack,
                 &layer_scratch.ffn_out_pack,
             )?;
+
+            // 2d-fix (v0.74.4): hidden capture AFTER residual #2,
+            // matching single_token_capture_layers semantics. Inside
+            // the same encoder as 2f-FFN + 2g-residual to avoid an
+            // extra encoder transition. x_pack[n, :] is now post-FFN,
+            // post-residual-#2 — bit-equivalent to what
+            // `single_token_with_multi_hidden` writes into hidden_dst
+            // for the same token (modulo mat-mat half-staging noise
+            // when FFN takes the Q4_K mat-mat path; that's the same
+            // noise the layer-major-vs-token-major test already
+            // tolerates at cos≥0.999).
+            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                if lid as usize == il {
+                    for n_idx in 0..n {
+                        let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
+                            + k_idx as u64)
+                            * verify_scratch.hidden_size;
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &layer_scratch
+                                .x_pack
+                                .view_subrange((n_idx * h) as u64, vec![h as u64]),
+                            &verify_scratch.hidden_capture,
+                            elem_off as usize,
+                            h,
+                        )?;
+                    }
+                }
+            }
+
             enc.end();
         }
     }

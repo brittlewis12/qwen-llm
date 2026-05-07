@@ -28,21 +28,21 @@
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::forward::{Forward, GdnState, KvCache};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::loader::{open_dflash_drafter, Model};
+use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
-    encode_add_inplace_f32, encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32,
-    encode_get_rows_f32, encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, BlitEncoder, KernelEncoder, MetalContext,
-    MetalError, MetalTensor,
+    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
+    encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_get_rows_f32,
+    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32,
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
     MetalDFlashSession, MetalDFlashVerifyScratch,
 };
 use qwen_llm::metal_forward::{
-    encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32, MetalBlock,
-    MetalForward, MetalModel, MetalSession, RMS_EPS,
+    MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
+    encode_mat_vec_dispatch, encode_scatter_offset_f32,
 };
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;

@@ -30,15 +30,15 @@ use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
-    encode_add_inplace_f32, encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
-    encode_gdn_alpha_chain_f32, encode_get_rows_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32, BlitEncoder, KernelEncoder,
-    MetalContext, MetalError, MetalTensor,
+    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
+    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32, encode_gdn_alpha_chain_f32,
+    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32,
 };
 use crate::metal_forward::{
-    encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
-    weight_dtype_kept_native, MetalBlock, MetalForward, MetalSession, RMS_EPS,
+    MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
+    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};

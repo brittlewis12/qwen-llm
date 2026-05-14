@@ -1,0 +1,558 @@
+# Performance instrumentation guide
+
+This is the agent-first profiling guide for `qwen-llm` on macOS. It documents
+how to measure throughput, attribute bottlenecks, and choose the right profiling
+tool without sudo, GUI automation, or optimization guesswork.
+
+The working model is:
+
+1. Use `qwen-bench` for model-aware throughput and phase numbers.
+2. Use `hyperfine` for stable command-level before/after comparisons.
+3. Use `xcrun xctrace` for headless Instruments recordings.
+4. Use compact parsers (`ztrace`, repo-local scripts, small table extractors)
+   instead of raw XML.
+5. Use source-built `samply` when off-CPU profiles are useful.
+6. Add repo-native summary scripts where vendor tools are not enough.
+
+## Scope and rules
+
+- This guide is about measurement workflow, not tool provisioning. If tools are
+  missing, report the missing tool or use a fallback; do not install or update
+  tools as part of a profiling session. See `docs/PERF-TOOLS-SETUP.md` for
+  intentional setup work.
+- Keep throughput measurement separate from attribution. Profiler overhead is
+  expected; use profiler traces to explain, not to set regression thresholds.
+- Label the measurement regime every time: cold/tooling, throughput, steady
+  decode attribution, GPU phase attribution, Metal timeline, allocation, or
+  leak check.
+- Keep raw trace exports out of agent context. Export only the table you need,
+  write large exports to files, and summarize them.
+- Prefer unique output names under `target/profiles`; `xctrace` will not
+  overwrite an existing trace bundle unless `--append-run` is used.
+
+## Why this is a document first
+
+Keep this as a project document before turning it into a skill. The commands are
+repo-specific, depend on model paths, and need to evolve with `qwen-bench`.
+A skill can be extracted later as a thin wrapper once the command shapes and
+summary formats are stable.
+
+Good candidates for a later skill:
+
+- `profile-cpu`: record `Time Profiler`, summarize with `ztrace`.
+- `profile-gpu`: record `Metal System Trace`, summarize command buffers and GPU
+  intervals.
+- `profile-memory`: run `Allocations` or `leaks`, summarize allocation churn.
+- `profile-compare`: run `hyperfine` and diff JSON results.
+
+## Preflight
+
+Use non-mutating checks before a profiling session:
+
+```sh
+mkdir -p target/profiles
+: "${MODEL:?set MODEL to a GGUF}"
+test -f "$MODEL"
+xcrun xctrace list templates >/dev/null
+ztrace --help >/dev/null
+hyperfine --version >/dev/null
+```
+
+Optional tools can be checked only when needed:
+
+```sh
+samply record --help >/dev/null
+uniprof --version >/dev/null
+```
+
+If an optional tool is missing, use another path from the decision table instead
+of changing the environment during measurement.
+
+## Quickstart
+
+This path gives a baseline, a model-aware phase view, and a CPU attribution trace:
+
+```sh
+mkdir -p target/profiles
+: "${MODEL:?set MODEL to a GGUF}"
+test -f "$MODEL"
+
+cargo build --release -p qwen-cli --bin qwen-bench
+
+./target/release/qwen-bench decode -m "$MODEL" --tokens 128
+./target/release/qwen-bench phase -m "$MODEL" --ctx 256
+
+TRACE="target/profiles/time-decode-$(date +%Y%m%d-%H%M%S).trace"
+xcrun xctrace record --no-prompt \
+  --template "Time Profiler" \
+  --time-limit 30s \
+  --output "$TRACE" \
+  --target-stdout - \
+  --launch -- ./target/release/qwen-bench decode \
+    -m "$MODEL" --tokens 256 --no-warmup
+
+ztrace summary "$TRACE" --threshold 0.5 --depth 8
+```
+
+Use this as the starting point, then switch tools based on the question below.
+
+## Decision table
+
+| Question | First tool | Why |
+| --- | --- | --- |
+| Did throughput regress? | `qwen-bench`, `hyperfine` | Stable wall-clock and model-aware numbers. |
+| Which model phase dominates? | `qwen-bench phase` | Knows GDN, attention, LM head, DFlash phases. |
+| Is host/FFI/argmax/load CPU expensive? | `xctrace` + `ztrace` | Best headless symbolicated CPU stack summaries. |
+| Is the process blocked on GPU completion? | source-built `samply --presymbolicate` | Shows off-CPU waits and CPU deltas. |
+| Are command buffers/gaps/competing GPU work visible? | `Metal System Trace` | Exposes Metal app and GPU interval tables. |
+| Are hardware GPU counters needed? | `Metal GPU Counters` or `GPU`, validated by export | Useful only if counter tables contain rows. |
+| Are there excess allocations? | `xctrace Allocations`, then repo allocator counters | Instruments finds churn; code counters can enforce steady-state budgets. |
+| Is there a leak? | `leaks --atExit` | Fast no-GUI leak sanity check. |
+| Is a kernel microbench better/worse? | Criterion JSON | Existing bench framework already emits estimates. |
+| Need a general CPU profiler for another runtime? | `uniprof` | Unified agent/MCP-friendly interface. |
+
+## Measurement regimes
+
+Do not compare numbers across regimes without labeling them.
+
+| Regime | Use when | Command shape | Compare? |
+| --- | --- | --- | --- |
+| Cold/tooling trial | Characterizing profiler overhead, load, or first-use costs | `qwen-bench ... --no-warmup` under the profiler | No, use for attribution only. |
+| Throughput comparison | Confirming before/after speed | `qwen-bench` without `--no-warmup`; optionally wrap in `hyperfine --warmup` | Yes, if command, model, prompt, and build are fixed. |
+| Steady decode attribution | Finding CPU work during decode | Longer token counts under `Time Profiler` or `samply` | No, explain a separate throughput result. |
+| GPU phase attribution | Understanding model phase share | `qwen-bench phase` or `qwen-bench dflash --profile` | Compare phase shares within the same harness. |
+| Metal timeline | Finding queue gaps, command-buffer cadence, or competing GPU ownership | `Metal System Trace` | Compare timeline summaries, not raw wall time. |
+| DFlash correctness/perf | Measuring speculative decode safely | `qwen-bench dflash` with equivalence check enabled | Yes, if correctness passes. |
+| Allocation churn | Finding heap/VM categories | `xctrace` `Allocations`; code counters for budgets | Compare normalized counters, not trace size. |
+
+## Trace hygiene
+
+- Create `target/profiles` before recording.
+- Use a unique trace path for each run, or intentionally pass `--append-run`.
+- Keep the profiled command simple and explicit after `--launch --`; do not rely
+  on app lookup.
+- Use `xcrun xctrace export --toc` to discover table names before writing a
+  parser.
+- Export only the table you need with `--xpath`; avoid dumping full XML into an
+  agent session.
+- Run `qwen-bench` or `hyperfine` separately for throughput. Traced runs are for
+  attribution.
+
+## Baseline commands
+
+Build the release binary before profiling:
+
+```sh
+cargo build --release -p qwen-cli --bin qwen-bench
+```
+
+Set `MODEL` explicitly in scripts and recorded commands:
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+test -f "$MODEL"
+
+# Plain decode throughput. Omit --no-warmup for throughput comparisons.
+./target/release/qwen-bench decode -m "$MODEL" --tokens 128
+
+# Cold/tooling smoke run.
+./target/release/qwen-bench decode -m "$MODEL" --tokens 64 --no-warmup
+
+# Context sensitivity.
+./target/release/qwen-bench ctx-sweep -m "$MODEL" --checkpoints 1,16,64 --window 2
+
+# Phase attribution at one context length.
+./target/release/qwen-bench phase -m "$MODEL" --ctx 256
+```
+
+## Speculative and DFlash targets
+
+Plain `decode` is not always the right target. For speculative work, set model
+variables explicitly and keep the prompt and EOS policy consistent across
+comparisons:
+
+```sh
+: "${TARGET_MODEL:?set TARGET_MODEL to target GGUF}"
+: "${DRAFTER_MODEL:?set DRAFTER_MODEL to DFlash drafter GGUF}"
+: "${MTP_MODEL:?set MTP_MODEL to MTP-aware GGUF}"
+test -f "$TARGET_MODEL"
+test -f "$DRAFTER_MODEL"
+test -f "$MTP_MODEL"
+
+# MTP acceptance/speedup surface.
+./target/release/qwen-bench mtp \
+  -m "$MTP_MODEL" --tokens 64 --spec-tokens 1
+
+# DFlash acceptance signal; use --effective-n to see where alpha decays.
+./target/release/qwen-bench dflash-lazy \
+  -m "$TARGET_MODEL" --drafter "$DRAFTER_MODEL" \
+  --tokens 32 --effective-n 0
+
+# Production DFlash path with drafter phase timers and correctness gate.
+./target/release/qwen-bench dflash \
+  -m "$TARGET_MODEL" --drafter "$DRAFTER_MODEL" \
+  --tokens 64 --profile --n-policy adaptive
+```
+
+DFlash rules:
+
+- `dflash` defaults to an equivalence check against DFlash-off. Keep that on for
+  correctness-gated measurements; use `--skip-equivalence-check` only for narrow
+  profiling runs where token equivalence has already been established.
+- Compare `--n-policy adaptive`, `static-16`, `static-8`, `static-4`, and `off`
+  when tuning verify-chain policy.
+- `--profile` reports drafter phase timers; it is not a substitute for a full
+  Metal System Trace when queue gaps, command-buffer cadence, or GPU ownership
+  are the question.
+
+## Headless CPU profiling
+
+Record with Instruments, then summarize with `ztrace`:
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+TRACE="target/profiles/time-decode-$(date +%Y%m%d-%H%M%S).trace"
+
+xcrun xctrace record --no-prompt \
+  --template "Time Profiler" \
+  --time-limit 30s \
+  --output "$TRACE" \
+  --target-stdout - \
+  --launch -- ./target/release/qwen-bench decode \
+    -m "$MODEL" --tokens 256 --no-warmup
+
+ztrace summary "$TRACE" --threshold 0.5 --depth 8
+```
+
+Use this path to inspect host-side costs such as model load, tokenizer/vocab
+work, GGUF reading, Metal host dispatch, CPU sampling/argmax, FFI boundaries,
+and per-token control flow.
+
+Rules:
+
+- Prefer a direct binary path after `--launch --`.
+- `qwen-bench` prints result lines to stderr. `xctrace` supports
+  `--target-stdout -`, but not `--target-stderr`; do not build automation that
+  depends on traced bench output being captured.
+- Export `time-profile` only to a file or parser; do not dump raw XML into agent
+  context.
+- Verify the trace target path in `xcrun xctrace export --toc` if results look
+  strange.
+
+## CPU/off-CPU profiling with samply
+
+Use `samply` when blocked time is the question, especially GPU waits, locks, or
+host-side synchronization:
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+samply record \
+  --save-only --presymbolicate \
+  -o target/profiles/samply-decode.json.gz \
+  ./target/release/qwen-bench decode \
+    -m "$MODEL" --tokens 256 --no-warmup
+```
+
+Notes:
+
+- On macOS, `samply` can profile locally built or unsigned binaries. Attaching
+  to running processes may require setup outside the profiling session.
+- Saved `samply` JSON is less directly readable than `ztrace` output unless a
+  summarizer is used. A future `mcp-samply` or repo-local summarizer would make
+  it more agent-friendly.
+
+## GPU and Metal timeline profiling
+
+Record Metal System Trace when the question involves command buffers, queue
+gaps, GPU interval ownership, resource events, or competing GPU work:
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+TRACE="target/profiles/metal-decode-$(date +%Y%m%d-%H%M%S).trace"
+
+xcrun xctrace record --no-prompt \
+  --template "Metal System Trace" \
+  --time-limit 30s \
+  --output "$TRACE" \
+  --target-stdout - \
+  --launch -- ./target/release/qwen-bench decode \
+    -m "$MODEL" --tokens 64 --no-warmup
+```
+
+Inspect available tables before parsing:
+
+```sh
+xcrun xctrace export --input "$TRACE" --toc
+```
+
+Tables that are usually useful for this workload:
+
+- `metal-application-command-buffer-submissions`
+- `metal-application-encoders-list`
+- `metal-gpu-intervals`
+- `metal-driver-event-intervals`
+- `metal-current-allocated-size`
+- `metal-resource-allocations`
+- `time-profile`
+
+Until a repo-local parser exists, this compact extractor gives a first-pass
+summary of target-process compute intervals and gaps. Treat schema names,
+process names, and timestamp fields as trace-version dependent:
+
+```sh
+uv run python - <<'PY'
+import subprocess, xml.etree.ElementTree as ET, statistics as st, os
+trace = os.environ.get('TRACE', 'target/profiles/metal-decode.trace')
+schema = 'metal-gpu-intervals'
+xml = subprocess.check_output([
+    'xcrun', 'xctrace', 'export', '--input', trace,
+    '--xpath', f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]',
+], stderr=subprocess.DEVNULL)
+root = ET.fromstring(xml)
+refs = {}
+for el in root.iter():
+    if 'id' in el.attrib:
+        refs[el.attrib['id']] = el.attrib.get('fmt') or (el.text.strip() if el.text else '')
+intervals = []
+for row in root.iter('row'):
+    d, raw = {}, {}
+    for child in row:
+        val = refs.get(child.attrib.get('ref')) if 'ref' in child.attrib else None
+        if val is None:
+            val = child.attrib.get('fmt') or (child.text.strip() if child.text else '')
+        d.setdefault(child.tag, val)
+        raw.setdefault(child.tag, child.text.strip() if child.text else '')
+    if d.get('process') == 'qwen-bench' and d.get('gpu-channel-name') == 'Compute':
+        start_ms = int(raw.get('start-time', '0')) / 1e6
+        dur_ms = int(raw.get('duration', '0')) / 1e6
+        intervals.append((start_ms, dur_ms))
+intervals.sort()
+gaps = [max(0, intervals[i][0] - (intervals[i-1][0] + intervals[i-1][1]))
+        for i in range(1, len(intervals))]
+print('target_compute_interval_count', len(intervals))
+if intervals:
+    durs = [d for _, d in intervals]
+    print('compute_total_ms', round(sum(durs), 3), 'compute_median_ms', round(st.median(durs), 3))
+if gaps:
+    print('gap_total_ms', round(sum(gaps), 3), 'gap_median_us', round(st.median(gaps) * 1000, 1))
+if not intervals:
+    print('no qwen-bench Compute intervals matched; inspect --toc and process names')
+PY
+```
+
+### GPU counters and the GPU flag
+
+`xctrace` exposes GPU-related instruments, including `GPU` and
+`Metal GPU Counters`. Use them only for hardware-counter questions such as
+utilization, stalls, or bandwidth, and validate that the exported counter tables
+contain rows before drawing conclusions.
+
+Counter guidance:
+
+- Keep `Metal System Trace` as the primary timeline tool for queue gaps,
+  command-buffer cadence, and GPU ownership.
+- Use `qwen-bench phase` or `qwen-bench dflash --profile` for model-aware phase
+  attribution; raw GPU counters do not know model phases.
+- If adding `--instrument "Metal GPU Counters"` or `--instrument "GPU"`, inspect
+  `--toc` and verify non-empty counter tables such as `gpu-counter-value` or
+  `metal-gpu-counter-intervals` before using the result.
+- Treat empty counter tables as "unsupported or not captured for this run", not
+  as evidence that the GPU did no work.
+- For autonomous GPU efficiency and memory bandwidth, prefer in-process
+  `MTLCounterSampleBuffer` support behind a feature or bench flag once the
+  project needs stable counter data.
+
+`.trace` versus `.gputrace`:
+
+- `xctrace` and Instruments CLI produce `.trace` bundles.
+- `.gputrace` bundles come from Xcode Metal capture or in-process
+  `MTLCaptureManager` code.
+- If an agent needs `.gputrace`, the host project must include capture code; a
+  CLI trace cannot synthesize it after the fact.
+
+## Command-level benchmarking
+
+Use `hyperfine` when comparing builds, feature flags, or external baselines:
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+hyperfine --warmup 1 --runs 5 \
+  --export-json target/profiles/hyperfine-decode.json \
+  "./target/release/qwen-bench decode -m \"$MODEL\" --tokens 128"
+```
+
+Use `hyperfine` for before/after comparisons, not for attribution. Keep the
+command, model, prompt, build profile, and environment fixed across variants.
+
+## Allocation and leak profiling
+
+Record Allocations when the question is heap/VM churn or unexpected allocation
+categories:
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+TRACE="target/profiles/alloc-decode-$(date +%Y%m%d-%H%M%S).trace"
+
+xcrun xctrace record --no-prompt \
+  --template "Allocations" \
+  --time-limit 30s \
+  --output "$TRACE" \
+  --target-stdout - \
+  --launch -- ./target/release/qwen-bench decode \
+    -m "$MODEL" --tokens 64 --no-warmup
+```
+
+Summarize aggregate allocation categories:
+
+```sh
+uv run python - <<'PY'
+import os, subprocess, xml.etree.ElementTree as ET
+trace = os.environ.get('TRACE', 'target/profiles/alloc-decode.trace')
+xp = '/trace-toc/run[@number="1"]/tracks/track[@name="Allocations"]/details/detail[@name="Statistics"]'
+xml = subprocess.check_output(['xcrun', 'xctrace', 'export', '--input', trace, '--xpath', xp])
+root = ET.fromstring(xml)
+rows = []
+for r in root.iter('row'):
+    rows.append({k: int(v) if v.isdigit() else v for k, v in r.attrib.items()})
+for r in sorted(rows, key=lambda x: x.get('total-bytes', 0), reverse=True)[:12]:
+    print(f"{r.get('total-bytes', 0)/1024/1024:9.1f} MiB total | "
+          f"{r.get('transient-bytes', 0)/1024/1024:9.1f} transient | "
+          f"{r.get('persistent-bytes', 0)/1024/1024:7.2f} persistent | "
+          f"events {r.get('count-events', 0):8} | {r.get('category')}")
+PY
+```
+
+Run a leak sanity check:
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+leaks --atExit -- ./target/release/qwen-bench decode \
+  -m "$MODEL" --tokens 4 --no-warmup
+```
+
+Recommended repo-native addition:
+
+- Add a feature-gated global allocation counter or `dhat-rs` mode for
+  steady-state decode. Instruments is good at broad churn, but a code-level
+  counter can enforce explicit per-token allocation budgets in tests/benches.
+
+## Criterion kernel benches
+
+Criterion output is already machine-readable. Parse estimates with:
+
+```sh
+uv run python - <<'PY'
+import json, pathlib
+root = pathlib.Path('target/criterion')
+for p in sorted(root.glob('**/new/estimates.json')):
+    data = json.load(open(p))
+    mean_ns = data['mean']['point_estimate']
+    parts = p.relative_to(root).parts
+    if len(parts) >= 4:
+        print(f"{parts[0]:16} {parts[1]:24} {parts[2]:14} {mean_ns/1e6:9.3f} ms")
+PY
+```
+
+Use this for kernel-level regressions. Do not use it as the only guide for
+end-to-end decode headroom; command-buffer cadence, queue gaps, readback, and
+speculative decode behavior matter.
+
+## Cargo flamegraph
+
+`cargo flamegraph` is useful for human visual inspection, but less
+agent-friendly than `xctrace` plus `ztrace` because the SVG still needs
+secondary parsing.
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+cargo flamegraph --profile release \
+  -p qwen-cli --bin qwen-bench \
+  -o target/profiles/flamegraph-decode.svg -- \
+  decode -m "$MODEL" --tokens 16 --no-warmup
+```
+
+## Symbols and debug info
+
+The release profile uses line tables, which is usually enough for `ztrace` and
+Instruments to show useful Rust frames. If profiles show mostly addresses,
+`<unknown>`, or misleading system-library dominance, fix symbol quality before
+inferring a bottleneck.
+
+Options:
+
+- Build with the bench profile, which is release-like but has full debug info:
+  `cargo build --profile bench -p qwen-cli --bin qwen-bench`.
+- Add frame pointers for deeper native stacks when needed:
+  `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile bench -p qwen-cli --bin qwen-bench`.
+- The built-in `bench` profile still writes the binary under `target/release`;
+  rebuild with the desired profile before launching `target/release/qwen-bench`.
+
+## uniprof
+
+`uniprof` is an optional general-purpose agent interface, especially for
+non-Rust or mixed-runtime tools. It uses Instruments for native macOS binaries.
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+uniprof record --mode host \
+  -o target/profiles/uniprof-decode.json -- \
+  ./target/release/qwen-bench decode \
+    -m "$MODEL" --tokens 64 --no-warmup
+
+uniprof analyze target/profiles/uniprof-decode.json --threshold 0.5
+```
+
+Keep it as a fallback or cross-runtime profiler, not the primary path for this
+repo's Rust/Metal decode workload.
+
+## xctrace troubleshooting
+
+- Create output directories first: `mkdir -p target/profiles`.
+- Use unique trace names or delete old traces; `xctrace` requires
+  `--append-run` for an existing `.trace` bundle.
+- Verify templates with `xcrun xctrace list templates` before recording.
+- If recording/export fails, check Developer Tools permissions, Xcode first-run
+  state, writable temp/cache directories, and available disk space.
+- If a trace has no useful samples, increase token count/duration or ensure the
+  workload runs during the recording window.
+- If a Metal parser returns zero rows, inspect `xcrun xctrace export --toc` and
+  confirm process names; WindowServer and prior runs can also own GPU intervals.
+
+## What to add to the repo next
+
+The strongest autonomous profiling setup would be repo-native:
+
+1. `scripts/profile/trace-cpu` wrapping `xctrace` + `ztrace`.
+2. `scripts/profile/trace-metal.py` for Metal table summaries.
+3. `scripts/profile/trace-alloc.py` for Allocations summaries.
+4. `scripts/profile/bench-compare.py` wrapping `hyperfine` output.
+5. Optional `--profile-metal-counters` using `MTLCounterSampleBuffer`.
+6. Optional feature-gated allocation counter or `dhat-rs` profile.
+7. Optional `MTLCaptureManager` capture flag for `.gputrace` snapshots.
+
+Once (1)-(4) exist and have stable machine-readable summaries, extract a skill
+that simply invokes those scripts and reports concise results.
+
+Suggested script output contracts:
+
+- Use JSON by default for automation and a compact text summary for humans.
+- Include units in field names (`*_ms`, `*_bytes`, `*_count`).
+- Include trace metadata: command, model path, process name, template, Xcode
+  version, OS version, git SHA, and wall-clock duration.
+- Exit nonzero when the trace cannot be parsed or expected tables are absent;
+  warn, but do not fail, when optional tables are missing.
+- Keep thresholds explicit and externally configurable; do not bake local trial
+  numbers into pass/fail gates.
+
+## References
+
+- `agent-scripts` Instruments skill:
+  https://github.com/steipete/agent-scripts/blob/main/skills/instruments-profiling/SKILL.md
+- `xtrace-skill`:
+  https://github.com/Kr1sso/xtrace-skill/blob/main/SKILL.md
+- `uniprof`:
+  https://www.uniprof.sh/
+- `ztrace`:
+  https://github.com/frr149/ztrace
+- `samply`:
+  https://github.com/mstange/samply

@@ -31,7 +31,7 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32, encode_gdn_alpha_chain_f32,
+    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32, encode_gdn_decay_chain_f32,
     encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
     encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
     encode_silu_mul_f32, encode_split_q_gate_f32,
@@ -2128,7 +2128,7 @@ pub fn encode_packed_verify_layer_major_inner(
                                 &target_session.gdn_b,
                                 &target_session.gdn_beta,
                             )?;
-                            // alpha_proj (F32) → fused softplus(a+dt_bias)*a_log → s.gdn_alpha.
+                            // alpha_proj (F32) -> fused exp(softplus(a+dt_bias)*a_log).
                             encode_mat_vec_dispatch(
                                 base.ctx,
                                 &enc,
@@ -2138,7 +2138,7 @@ pub fn encode_packed_verify_layer_major_inner(
                                 h,
                                 n_v,
                             )?;
-                            encode_gdn_alpha_chain_f32(
+                            encode_gdn_decay_chain_f32(
                                 base.ctx,
                                 &enc,
                                 &target_session.gdn_a,
@@ -2420,16 +2420,16 @@ pub fn encode_packed_verify_layer_major_inner(
 
                             // Fused attn-v4 (or naive fallback for non-matching shapes).
                             const V4_HEAD_DIM: usize = 256;
-                            const V4_GROUP: usize = 6;
-                            let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+                            let group = n_q / n_kv;
+                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
                             if use_v4 {
-                                let nwg =
-                                    crate::metal::attn_v4_choose_nwg(target_session.kv_n_pos[ai]);
-                                let _tile_c = crate::metal::attn_v4_choose_tile_c(
+                                let nwg = crate::metal::attn_v4_choose_nwg(
                                     target_session.kv_n_pos[ai],
+                                    group,
                                 );
                                 let tile_c = crate::metal::attn_v4_choose_tile_c(
                                     target_session.kv_n_pos[ai],
+                                    group,
                                 );
                                 crate::metal::encode_attn_decode_v4_f32(
                                     base.ctx,
@@ -3162,7 +3162,7 @@ pub fn prefill_tokens_with_multi_hidden(
                                 h,
                                 n_v_u,
                             )?;
-                            encode_gdn_alpha_chain_f32(
+                            encode_gdn_decay_chain_f32(
                                 base.ctx,
                                 &enc,
                                 &target_session.gdn_a,
@@ -3385,13 +3385,16 @@ pub fn prefill_tokens_with_multi_hidden(
                             target_session.kv_n_pos[ai] = position_n as usize + 1;
 
                             const V4_HEAD_DIM: usize = 256;
-                            const V4_GROUP: usize = 6;
-                            let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+                            let group = n_q / n_kv;
+                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
                             if use_v4 {
-                                let nwg =
-                                    crate::metal::attn_v4_choose_nwg(target_session.kv_n_pos[ai]);
+                                let nwg = crate::metal::attn_v4_choose_nwg(
+                                    target_session.kv_n_pos[ai],
+                                    group,
+                                );
                                 let tile_c = crate::metal::attn_v4_choose_tile_c(
                                     target_session.kv_n_pos[ai],
+                                    group,
                                 );
                                 crate::metal::encode_attn_decode_v4_f32(
                                     base.ctx,

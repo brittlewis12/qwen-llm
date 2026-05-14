@@ -46,7 +46,7 @@
 //! `shape=[in, out]` and applied as `y = x @ W` with `W: [in, out]`.
 
 use crate::gguf::GgufFile;
-use crate::model::{Arch, LayerKind};
+use crate::model::{Arch, ArchKind, LayerKind};
 use crate::tensor::{GgmlType, TensorDesc};
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +99,9 @@ pub struct GdnBlock<'a> {
     pub conv1d: &'a TensorDesc,      // ssm_conv1d.weight
     pub norm: &'a TensorDesc,        // ssm_norm.weight  — RMSNorm before silu(z) gate
     pub out_proj: &'a TensorDesc,    // ssm_out.weight   — back to hidden_size
+    /// Present on qwen35moe variants. When `Some`, `ffn_gate/up/down` refer
+    /// to the shared-expert branch and routed experts live in `ffn_moe`.
+    pub ffn_moe: Option<MoeFfn<'a>>,
 }
 
 /// Per-block weight references for a full-attention layer.
@@ -115,6 +118,24 @@ pub struct AttnBlock<'a> {
     pub o: &'a TensorDesc, // attn_output.weight
     pub q_norm: &'a TensorDesc,
     pub k_norm: &'a TensorDesc,
+    /// Present on qwen35moe variants. When `Some`, `ffn_gate/up/down` refer
+    /// to the shared-expert branch and routed experts live in `ffn_moe`.
+    pub ffn_moe: Option<MoeFfn<'a>>,
+}
+
+/// Routed/shared expert FFN tensors for qwen35moe blocks.
+#[derive(Clone)]
+pub struct MoeFfn<'a> {
+    /// Router logits: `[H, n_expert]`.
+    pub gate_inp: &'a TensorDesc,
+    /// Routed expert gate projection bank: `[H, F_exp, n_expert]`.
+    pub gate_exps: &'a TensorDesc,
+    /// Routed expert up projection bank: `[H, F_exp, n_expert]`.
+    pub up_exps: &'a TensorDesc,
+    /// Routed expert down projection bank: `[F_exp, H, n_expert]`.
+    pub down_exps: &'a TensorDesc,
+    /// Shared-expert scalar gate input. Stored as `[H]` or `[H, 1]`.
+    pub gate_inp_shexp: &'a TensorDesc,
 }
 
 #[derive(Clone)]
@@ -252,11 +273,14 @@ pub struct Model<'a> {
 impl<'a> Model<'a> {
     pub fn from_gguf(g: &'a GgufFile) -> Result<Self, LoadError> {
         let arch_str = g.architecture();
-        if arch_str.as_deref() != Some("qwen35") {
+        let Some(arch_name) = arch_str.as_deref() else {
             return Err(LoadError::UnsupportedArch(arch_str));
+        };
+        if arch_name != "qwen35" && arch_name != "qwen35moe" {
+            return Err(LoadError::UnsupportedArch(Some(arch_name.to_string())));
         }
 
-        let arch = build_arch_from_metadata(g)?;
+        let arch = build_arch_from_metadata(g, arch_name)?;
 
         // Top-level tensors.
         let token_embd = need(g, "token_embd.weight")?;
@@ -281,21 +305,60 @@ impl<'a> Model<'a> {
             check_shape(attn_norm, &[arch.hidden_size as u64])?;
             let post_attention_norm = need(g, &format!("blk.{i}.post_attention_norm.weight"))?;
             check_shape(post_attention_norm, &[arch.hidden_size as u64])?;
-            let ffn_gate = need(g, &format!("blk.{i}.ffn_gate.weight"))?;
-            check_shape(
-                ffn_gate,
-                &[arch.hidden_size as u64, arch.intermediate_size as u64],
-            )?;
-            let ffn_up = need(g, &format!("blk.{i}.ffn_up.weight"))?;
-            check_shape(
-                ffn_up,
-                &[arch.hidden_size as u64, arch.intermediate_size as u64],
-            )?;
-            let ffn_down = need(g, &format!("blk.{i}.ffn_down.weight"))?;
-            check_shape(
-                ffn_down,
-                &[arch.intermediate_size as u64, arch.hidden_size as u64],
-            )?;
+            let (ffn_gate, ffn_up, ffn_down, ffn_moe) = if arch.kind == ArchKind::Dense {
+                let ffn_gate = need(g, &format!("blk.{i}.ffn_gate.weight"))?;
+                check_shape(
+                    ffn_gate,
+                    &[arch.hidden_size as u64, arch.intermediate_size as u64],
+                )?;
+                let ffn_up = need(g, &format!("blk.{i}.ffn_up.weight"))?;
+                check_shape(
+                    ffn_up,
+                    &[arch.hidden_size as u64, arch.intermediate_size as u64],
+                )?;
+                let ffn_down = need(g, &format!("blk.{i}.ffn_down.weight"))?;
+                check_shape(
+                    ffn_down,
+                    &[arch.intermediate_size as u64, arch.hidden_size as u64],
+                )?;
+                (ffn_gate, ffn_up, ffn_down, None)
+            } else {
+                let h = arch.hidden_size as u64;
+                let f_exp = arch.expert_feed_forward_length as u64;
+                let f_shared = arch.expert_shared_feed_forward_length as u64;
+                let n_exp = arch.expert_count as u64;
+
+                let gate_inp = need(g, &format!("blk.{i}.ffn_gate_inp.weight"))?;
+                check_shape(gate_inp, &[h, n_exp])?;
+                let gate_exps = need(g, &format!("blk.{i}.ffn_gate_exps.weight"))?;
+                check_shape(gate_exps, &[h, f_exp, n_exp])?;
+                let up_exps = need(g, &format!("blk.{i}.ffn_up_exps.weight"))?;
+                check_shape(up_exps, &[h, f_exp, n_exp])?;
+                let down_exps = need(g, &format!("blk.{i}.ffn_down_exps.weight"))?;
+                check_shape(down_exps, &[f_exp, h, n_exp])?;
+                let gate_inp_shexp = need(g, &format!("blk.{i}.ffn_gate_inp_shexp.weight"))?;
+                check_shape_one_of(gate_inp_shexp, &[&[h], &[h, 1]])?;
+
+                let ffn_gate = need(g, &format!("blk.{i}.ffn_gate_shexp.weight"))?;
+                check_shape(ffn_gate, &[h, f_shared])?;
+                let ffn_up = need(g, &format!("blk.{i}.ffn_up_shexp.weight"))?;
+                check_shape(ffn_up, &[h, f_shared])?;
+                let ffn_down = need(g, &format!("blk.{i}.ffn_down_shexp.weight"))?;
+                check_shape(ffn_down, &[f_shared, h])?;
+
+                (
+                    ffn_gate,
+                    ffn_up,
+                    ffn_down,
+                    Some(MoeFfn {
+                        gate_inp,
+                        gate_exps,
+                        up_exps,
+                        down_exps,
+                        gate_inp_shexp,
+                    }),
+                )
+            };
 
             let block = match arch.layer_kind(i) {
                 LayerKind::GatedDeltaNet => {
@@ -356,6 +419,7 @@ impl<'a> Model<'a> {
                         conv1d,
                         norm,
                         out_proj,
+                        ffn_moe: ffn_moe.clone(),
                     })
                 }
                 LayerKind::GatedAttention => {
@@ -388,6 +452,7 @@ impl<'a> Model<'a> {
                         o,
                         q_norm,
                         k_norm,
+                        ffn_moe,
                     })
                 }
             };
@@ -399,7 +464,11 @@ impl<'a> Model<'a> {
         // located at block index `arch.n_layer` (one past the last base
         // layer). All MTP-aware GGUFs from the patched mtp-converter put
         // it there; older GGUFs (pre-converter-patch) don't have it.
-        let mtp = bind_mtp_head(g, &arch)?;
+        let mtp = if arch.kind == ArchKind::Dense {
+            bind_mtp_head(g, &arch)?
+        } else {
+            None
+        };
 
         Ok(Self {
             arch,
@@ -497,6 +566,7 @@ fn bind_mtp_head<'a>(g: &'a GgufFile, arch: &Arch) -> Result<Option<MtpHead<'a>>
             o,
             q_norm,
             k_norm,
+            ffn_moe: None,
         },
         eh_proj,
         enorm,
@@ -704,9 +774,27 @@ fn check_shape(t: &TensorDesc, expected: &[u64]) -> Result<(), LoadError> {
     Ok(())
 }
 
+fn check_shape_one_of(t: &TensorDesc, expected_any: &[&[u64]]) -> Result<(), LoadError> {
+    if expected_any.iter().any(|shape| t.shape == *shape) {
+        Ok(())
+    } else {
+        Err(LoadError::Shape {
+            name: t.name.clone(),
+            expected: expected_any.first().copied().unwrap_or(&[]).to_vec(),
+            got: t.shape.clone(),
+        })
+    }
+}
+
 /// Build an [`Arch`] from the GGUF's `qwen35.*` metadata keys. Cross-checks
 /// against the known constants in [`crate::model`] are the caller's job.
-fn build_arch_from_metadata(g: &GgufFile) -> Result<Arch, LoadError> {
+fn build_arch_from_metadata(g: &GgufFile, arch_name: &str) -> Result<Arch, LoadError> {
+    let kind = match arch_name {
+        "qwen35" => ArchKind::Dense,
+        "qwen35moe" => ArchKind::Moe,
+        _ => return Err(LoadError::UnsupportedArch(Some(arch_name.to_string()))),
+    };
+    let p = arch_name;
     // GGUF's `block_count` includes any trailing MTP/NEXTN predict layers
     // (per the patched converter that preserves them). The main forward
     // path iterates only the base layers, so subtract any MTP layers from
@@ -714,25 +802,31 @@ fn build_arch_from_metadata(g: &GgufFile) -> Result<Arch, LoadError> {
     // nextn_predict_layers key, in which case we default to 0 and the
     // subtraction is a no-op (preserving the prior behavior).
     let block_count = g
-        .get_u64("qwen35.block_count")
+        .get_u64(&format!("{p}.block_count"))
         .ok_or(LoadError::BadMetadata("qwen35.block_count"))? as u32;
-    let mtp_n_hidden_layers = g.get_u64("qwen35.nextn_predict_layers").unwrap_or(0) as u32;
+    let mtp_n_hidden_layers = g.get_u64(&format!("{p}.nextn_predict_layers")).unwrap_or(0) as u32;
     let n_layer = block_count.saturating_sub(mtp_n_hidden_layers);
     let hidden_size = g
-        .get_u64("qwen35.embedding_length")
+        .get_u64(&format!("{p}.embedding_length"))
         .ok_or(LoadError::BadMetadata("qwen35.embedding_length"))? as u32;
-    let intermediate_size =
-        g.get_u64("qwen35.feed_forward_length")
-            .ok_or(LoadError::BadMetadata("qwen35.feed_forward_length"))? as u32;
+    let intermediate_size = if kind == ArchKind::Dense {
+        g.get_u64(&format!("{p}.feed_forward_length"))
+            .ok_or(LoadError::BadMetadata("qwen35.feed_forward_length"))? as u32
+    } else {
+        0
+    };
     let n_q_heads = g
-        .get_u64("qwen35.attention.head_count")
+        .get_u64(&format!("{p}.attention.head_count"))
         .ok_or(LoadError::BadMetadata("qwen35.attention.head_count"))? as u32;
     let n_kv_heads =
-        g.get_u64("qwen35.attention.head_count_kv")
+        g.get_u64(&format!("{p}.attention.head_count_kv"))
             .ok_or(LoadError::BadMetadata("qwen35.attention.head_count_kv"))? as u32;
     let attn_head_dim =
-        g.get_u64("qwen35.attention.key_length")
+        g.get_u64(&format!("{p}.attention.key_length"))
             .ok_or(LoadError::BadMetadata("qwen35.attention.key_length"))? as u32;
+    let full_attention_interval = g
+        .get_u64(&format!("{p}.full_attention_interval"))
+        .unwrap_or(4) as u32;
 
     // GDN dims.
     // ssm.inner_size = num_v_heads * head_dim
@@ -741,17 +835,46 @@ fn build_arch_from_metadata(g: &GgufFile) -> Result<Arch, LoadError> {
     // ssm.group_count = num_k_heads
     // ssm.conv_kernel = conv kernel size
     let ssm_state_size = g
-        .get_u64("qwen35.ssm.state_size")
+        .get_u64(&format!("{p}.ssm.state_size"))
         .ok_or(LoadError::BadMetadata("qwen35.ssm.state_size"))? as u32;
     let ssm_time_step_rank =
-        g.get_u64("qwen35.ssm.time_step_rank")
+        g.get_u64(&format!("{p}.ssm.time_step_rank"))
             .ok_or(LoadError::BadMetadata("qwen35.ssm.time_step_rank"))? as u32;
     let ssm_group_count = g
-        .get_u64("qwen35.ssm.group_count")
+        .get_u64(&format!("{p}.ssm.group_count"))
         .ok_or(LoadError::BadMetadata("qwen35.ssm.group_count"))? as u32;
     let ssm_conv_kernel = g
-        .get_u64("qwen35.ssm.conv_kernel")
+        .get_u64(&format!("{p}.ssm.conv_kernel"))
         .ok_or(LoadError::BadMetadata("qwen35.ssm.conv_kernel"))? as u32;
+
+    let expert_count = if kind == ArchKind::Moe {
+        g.get_u64(&format!("{p}.expert_count"))
+            .ok_or(LoadError::BadMetadata("qwen35moe.expert_count"))? as u32
+    } else {
+        0
+    };
+    let expert_used_count = if kind == ArchKind::Moe {
+        g.get_u64(&format!("{p}.expert_used_count"))
+            .ok_or(LoadError::BadMetadata("qwen35moe.expert_used_count"))? as u32
+    } else {
+        0
+    };
+    let expert_feed_forward_length = if kind == ArchKind::Moe {
+        g.get_u64(&format!("{p}.expert_feed_forward_length"))
+            .ok_or(LoadError::BadMetadata(
+                "qwen35moe.expert_feed_forward_length",
+            ))? as u32
+    } else {
+        0
+    };
+    let expert_shared_feed_forward_length = if kind == ArchKind::Moe {
+        g.get_u64(&format!("{p}.expert_shared_feed_forward_length"))
+            .ok_or(LoadError::BadMetadata(
+                "qwen35moe.expert_shared_feed_forward_length",
+            ))? as u32
+    } else {
+        0
+    };
 
     // Vocab: derive from token_embd shape since metadata `vocab_size` may be
     // missing on some converters.
@@ -764,16 +887,18 @@ fn build_arch_from_metadata(g: &GgufFile) -> Result<Arch, LoadError> {
     let rope_theta = g
         .model
         .metadata()
-        .get("qwen35.rope.freq_base")
+        .get(&format!("{p}.rope.freq_base"))
         .and_then(|v| v.as_f64())
         .map(|f| f as f32)
         .unwrap_or(10_000_000.0);
 
     Ok(Arch {
+        kind,
         n_layer,
         hidden_size,
         intermediate_size,
         vocab_size,
+        full_attention_interval,
         n_q_heads,
         n_kv_heads,
         attn_head_dim,
@@ -783,6 +908,10 @@ fn build_arch_from_metadata(g: &GgufFile) -> Result<Arch, LoadError> {
         gdn_n_k_heads: ssm_group_count,
         gdn_head_dim: ssm_state_size,
         gdn_conv_kernel: ssm_conv_kernel,
+        expert_count,
+        expert_used_count,
+        expert_feed_forward_length,
+        expert_shared_feed_forward_length,
         mtp_n_hidden_layers,
     })
 }
@@ -816,11 +945,16 @@ pub fn summary(model: &Model<'_>) -> String {
     let token_embd_dtype = model.token_embd.dtype;
     let lm_head_dtype = model.lm_head.dtype;
     format!(
-        "Qwen3.5 family: {} layers ({n_gdn} GDN + {n_attn} full-attn), \
-         hidden={} ffn={} vocab={} | embed={} lm_head={}{}",
+        "Qwen3.5 family {:?}: {} layers ({n_gdn} GDN + {n_attn} full-attn), \
+         hidden={} ffn={} moe=(experts:{} topk:{} routed:{} shared:{}) vocab={} | embed={} lm_head={}{}",
+        model.arch.kind,
         model.arch.n_layer,
         model.arch.hidden_size,
         model.arch.intermediate_size,
+        model.arch.expert_count,
+        model.arch.expert_used_count,
+        model.arch.expert_feed_forward_length,
+        model.arch.expert_shared_feed_forward_length,
         model.arch.vocab_size,
         token_embd_dtype,
         lm_head_dtype,
@@ -950,6 +1084,44 @@ mod tests {
         // Pre-MTP-converter Q4_K_M; no MTP head. The MTP-aware variant lives
         // at brittlewis12/Qwen3.6-27B-MTP-GGUF (see loads_27b_mtp_q4_k_m).
         assert!(m.mtp.is_none(), "non-MTP 27B GGUF should have no MTP head");
+    }
+
+    #[test]
+    fn loads_35b_a3b_q4_k_m() {
+        let path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load model");
+        eprintln!("[loader-moe] {}", summary(&m));
+        assert_eq!(m.arch.kind, ArchKind::Moe);
+        assert_eq!(m.arch.n_layer, 40);
+        assert_eq!(m.arch.hidden_size, 2048);
+        assert_eq!(m.arch.full_attention_interval, 4);
+        assert_eq!(m.arch.expert_count, 256);
+        assert_eq!(m.arch.expert_used_count, 8);
+        assert_eq!(m.arch.expert_feed_forward_length, 512);
+        assert_eq!(m.arch.expert_shared_feed_forward_length, 512);
+        let gdn = m
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Gdn(_)))
+            .count();
+        let attn = m
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Attn(_)))
+            .count();
+        assert_eq!(gdn, 30);
+        assert_eq!(attn, 10);
+        for block in &m.blocks {
+            match block {
+                Block::Gdn(b) => assert!(b.ffn_moe.is_some()),
+                Block::Attn(b) => assert!(b.ffn_moe.is_some()),
+            }
+        }
+        assert!(m.mtp.is_none(), "MoE MTP binding is intentionally deferred");
     }
 
     /// H5.0 smoke test: load the spiritbuun DFlash drafter alongside

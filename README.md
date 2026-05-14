@@ -8,10 +8,11 @@ Architecture decisions live in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Status
 
-v0 — project skeleton. Numerical-oracle target: byte-for-byte logits match
-vs `llama-cli` on `~/models/Qwen3.5-0.8B.F32.gguf`. Throughput target: beat
-llama.cpp on `Qwen3.6-27B-Q4_K_M.gguf` (current baseline: 196.75 t/s pp512,
-11.13 t/s tg128 on M4 Max).
+v0 — active bring-up. Numerical-oracle target: byte-for-byte logits match vs
+`llama-cli` on `~/models/Qwen3.5-0.8B.F32.gguf`. Throughput target: beat the
+clean-box `llama.cpp` baseline on `Qwen3.6-27B-Q4_K_M.gguf` on M4 Max; the
+maintained benchmark table lives in `docs/PLAN.md`, and adaptive DFlash notes
+live in `docs/H5-DFLASH.md`.
 
 ## Layout
 

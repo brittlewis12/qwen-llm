@@ -121,3 +121,68 @@ kernel void kernel_gdn_step_f32(
         s_row[dk_base + j] = s_reg[j];
     }
 }
+
+kernel void kernel_gdn_step_decay_f32(
+        constant gdn_step_args & args    [[buffer(0)]],
+        device const float     * q       [[buffer(1)]], // [n_k_heads, head_dim]
+        device const float     * k       [[buffer(2)]], // [n_k_heads, head_dim]
+        device const float     * v       [[buffer(3)]], // [n_v_heads, head_dim]
+        device const float     * decay   [[buffer(4)]], // [n_v_heads] exp(g)
+        device const float     * beta    [[buffer(5)]], // [n_v_heads]
+        device       float     * state   [[buffer(6)]], // [n_v_heads, head_dim, head_dim]
+        device       float     * out     [[buffer(7)]], // [n_v_heads, head_dim]
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint dv = tgpig.x;
+    const uint hi = tgpig.y;
+    if (hi >= args.n_v_heads || dv >= HEAD_DIM) return;
+
+    const uint hk = hi % args.n_k_heads;
+    device float * s_row = state + (ulong)hi * HEAD_DIM * HEAD_DIM
+                                  + (ulong)dv * HEAD_DIM;
+
+    device const float * q_h = q + (ulong)hk * HEAD_DIM;
+    device const float * k_h = k + (ulong)hk * HEAD_DIM;
+    const float v_dv = v[(ulong)hi * HEAD_DIM + dv];
+    const float g_exp = decay[hi];
+    const float beta_h = beta[hi];
+
+    float s_reg[DKS_PER_LANE];
+    float k_reg[DKS_PER_LANE];
+    float q_reg[DKS_PER_LANE];
+
+    const ushort dk_base = tiisg * DKS_PER_LANE;
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        s_reg[j] = s_row[dk_base + j];
+        k_reg[j] = k_h[dk_base + j];
+        q_reg[j] = q_h[dk_base + j];
+    }
+
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        s_reg[j] *= g_exp;
+    }
+
+    float sk_partial = 0.0f;
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        sk_partial += s_reg[j] * k_reg[j];
+    }
+    const float sk = simd_sum(sk_partial);
+
+    const float delta = (v_dv - sk) * beta_h;
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        s_reg[j] += delta * k_reg[j];
+    }
+
+    float o_partial = 0.0f;
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        o_partial += s_reg[j] * q_reg[j];
+    }
+    const float o = simd_sum(o_partial);
+
+    if (tiisg == 0) {
+        out[(ulong)hi * HEAD_DIM + dv] = o * (1.0f / sqrt((float)HEAD_DIM));
+    }
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        s_row[dk_base + j] = s_reg[j];
+    }
+}

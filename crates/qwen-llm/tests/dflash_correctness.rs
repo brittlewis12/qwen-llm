@@ -1467,11 +1467,12 @@ fn packed_verify_phase_profile_v073a2_27b() {
                     sess.kv_n_pos[ai] = position_n as usize + 1;
 
                     const V4_HEAD_DIM: usize = 256;
-                    const V4_GROUP: usize = 6;
-                    let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+                    let group = n_q / n_kv;
+                    let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
                     if use_v4 {
-                        let nwg = qwen_llm::metal::attn_v4_choose_nwg(sess.kv_n_pos[ai]);
-                        let tile_c = qwen_llm::metal::attn_v4_choose_tile_c(sess.kv_n_pos[ai]);
+                        let nwg = qwen_llm::metal::attn_v4_choose_nwg(sess.kv_n_pos[ai], group);
+                        let tile_c =
+                            qwen_llm::metal::attn_v4_choose_tile_c(sess.kv_n_pos[ai], group);
                         qwen_llm::metal::encode_attn_decode_v4_f32(
                             &ctx_metal,
                             &enc,

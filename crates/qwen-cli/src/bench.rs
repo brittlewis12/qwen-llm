@@ -28,6 +28,7 @@ use qwen_llm::{
     },
     metal_forward::{MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
+    prefix_cache::PrefixCache,
     tokenizer::Tokenizer,
 };
 use std::path::PathBuf;
@@ -46,7 +47,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Decode N tokens after a prompt; report per-token timings.
+    /// Decode N tokens after a prompt using the plain no-spec path.
+    ///
+    /// Note: this path keeps the simple sequential prompt-prefill loop.
+    /// The DFlash benches use the packed-prefill path for apples-to-apples
+    /// speculative-vs-no-spec comparisons.
     Decode(DecodeArgs),
     /// Sweep context length (ramp + measure window).
     CtxSweep(CtxSweepArgs),
@@ -178,6 +183,22 @@ struct MtpArgs {
         default_value = "The quick brown fox jumps over the lazy dog"
     )]
     prompt: String,
+    /// Render the prompt through a Qwen chat template instead of treating
+    /// `--prompt` as raw text. Useful for realistic thinking-mode evals.
+    #[arg(long)]
+    qwen_chat: bool,
+    /// Optional system prompt for `--qwen-chat` rendering.
+    #[arg(long)]
+    system: Option<String>,
+    /// For `--qwen-chat`, render the assistant generation prompt with an
+    /// empty `<think>...</think>` block instead of an open thinking block.
+    #[arg(long)]
+    disable_thinking: bool,
+    /// Experimental speculative depth. `1` is the original H4 lazy-verify
+    /// path. `2` and `3` use a bench-only MTP-N prototype that chains MTP
+    /// drafts recursively and verifies them with the packed base path.
+    #[arg(long, default_value = "1")]
+    spec_tokens: usize,
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
@@ -188,6 +209,30 @@ struct MtpArgs {
     /// Skip the warmup pass.
     #[arg(long)]
     no_warmup: bool,
+}
+
+fn render_qwen_single_turn_prompt(
+    user_prompt: &str,
+    system_prompt: Option<&str>,
+    enable_thinking: bool,
+) -> String {
+    let mut out = String::new();
+    if let Some(system) = system_prompt {
+        if !system.is_empty() {
+            out.push_str("<|im_start|>system\n");
+            out.push_str(system);
+            out.push_str("<|im_end|>\n");
+        }
+    }
+    out.push_str("<|im_start|>user\n");
+    out.push_str(user_prompt);
+    out.push_str("<|im_end|>\n<|im_start|>assistant\n");
+    if enable_thinking {
+        out.push_str("<think>\n");
+    } else {
+        out.push_str("<think>\n\n</think>\n\n");
+    }
+    out
 }
 
 #[derive(Parser, Debug)]
@@ -266,6 +311,8 @@ struct DflashArgs {
     /// `off` (no speculation; single_token decode loop). The static
     /// modes exist for the calibration sweep + as A/B comparators
     /// against `adaptive`. `static-16` matches pre-v0.76 behavior.
+    /// Current `adaptive` tuning is calibrated on M4 Max + 27B Q4_K_M
+    /// code-prompt sweeps; treat it as a heuristic outside that regime.
     #[arg(long, default_value = "adaptive")]
     n_policy: String,
 }
@@ -320,6 +367,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let MtpArgs {
         model,
         prompt,
+        qwen_chat,
+        system,
+        disable_thinking,
+        spec_tokens,
         tokens,
         eos,
         no_warmup,
@@ -327,6 +378,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
 
     let ctx = MetalContext::new().context("init MetalContext")?;
     eprintln!("[mtp-bench] device: {}", ctx.describe());
+    if spec_tokens == 0 || spec_tokens > 3 {
+        anyhow::bail!("`--spec-tokens` must be in 1..=3 for now");
+    }
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model arch")?;
@@ -341,11 +395,30 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let mtp_head = MetalMtpHead::load(&ctx, &g, mtp_view).context("metal-load MTP head")?;
     let tok = Tokenizer::open(&model).context("open tokenizer")?;
 
-    let prompt_ids = tok.encode(&prompt, false).context("tokenize prompt")?;
+    if !qwen_chat && (system.is_some() || disable_thinking) {
+        anyhow::bail!("`--system` and `--disable-thinking` require `--qwen-chat`");
+    }
+    let rendered_prompt = if qwen_chat {
+        render_qwen_single_turn_prompt(&prompt, system.as_deref(), !disable_thinking)
+    } else {
+        prompt.clone()
+    };
+    let prompt_ids = tok
+        .encode(&rendered_prompt, false)
+        .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} ({} tokens) gen={} eos={eos}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} ({} tokens) gen={} eos={eos}",
         model.display(),
         prompt,
+        if qwen_chat { "qwen-chat" } else { "raw" },
+        if qwen_chat && !disable_thinking {
+            "on"
+        } else if qwen_chat {
+            "off"
+        } else {
+            "n/a"
+        },
+        spec_tokens,
         prompt_ids.len(),
         tokens,
     );
@@ -402,9 +475,27 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
     let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
     let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
-    let result = spec
-        .decode(&prompt_ids, tokens, eos, &mut spec_session)
-        .context("spec decode")?;
+    let result = if spec_tokens == 1 {
+        spec.decode(&prompt_ids, tokens, eos, &mut spec_session)
+            .context("spec decode")?
+    } else {
+        let mut verify_scratch =
+            MetalDFlashVerifyScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32, 1)
+                .context("mtp packed verify scratch")?;
+        let mut layer_scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32)
+                .context("mtp packed layer scratch")?;
+        spec.decode_packed_n(
+            &prompt_ids,
+            tokens,
+            eos,
+            &mut spec_session,
+            spec_tokens,
+            &mut verify_scratch,
+            &mut layer_scratch,
+        )
+        .context("spec decode packed-n")?
+    };
     let spec_emitted = result.tokens.len() - prompt_ids.len();
     let spec_total_ms = result.stats.wall_ms;
     let spec_decode_tps = spec_emitted as f64 / (spec_total_ms / 1000.0);
@@ -1434,6 +1525,8 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
 
     let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
     let mut per_token_ms: Vec<f64> = Vec::with_capacity(ids.len() + tokens);
+    let mut per_token_prof: Vec<qwen_llm::metal_forward::TokenProfile> =
+        Vec::with_capacity(ids.len() + tokens);
     let mut last_logits: Vec<f32> = Vec::new();
 
     let t0 = Instant::now();
@@ -1442,7 +1535,13 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     // don't have batched prefill yet — that's a future product).
     for (i, &tid) in ids.iter().enumerate() {
         let tt = Instant::now();
-        last_logits = mf.single_token(tid, i as u32, &mut s)?;
+        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+            let (logits, prof) = mf.single_token_profiled(tid, i as u32, &mut s)?;
+            last_logits = logits;
+            per_token_prof.push(prof);
+        } else {
+            last_logits = mf.single_token(tid, i as u32, &mut s)?;
+        }
         per_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
     }
     let prefill_wall = t0.elapsed().as_secs_f64() * 1e3;
@@ -1457,7 +1556,13 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         let next = argmax_i32(&last_logits);
         gen_ids.push(next);
         let tt = Instant::now();
-        last_logits = mf.single_token(next, pos as u32, &mut s)?;
+        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+            let (logits, prof) = mf.single_token_profiled(next, pos as u32, &mut s)?;
+            last_logits = logits;
+            per_token_prof.push(prof);
+        } else {
+            last_logits = mf.single_token(next, pos as u32, &mut s)?;
+        }
         per_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
     }
     let decode_wall = t1.elapsed().as_secs_f64() * 1e3;
@@ -1501,6 +1606,27 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         eprintln!(
             "[bench] per-token (last  {n_show}): {:?}",
             &per_token_ms[m - n_show..]
+        );
+    }
+
+    if m.arch.kind == qwen_llm::model::ArchKind::Moe && !per_token_prof.is_empty() {
+        let avg = |f: fn(&qwen_llm::metal_forward::TokenProfile) -> f64| {
+            per_token_prof.iter().map(f).sum::<f64>() / per_token_prof.len() as f64
+        };
+        let avg_total = avg(|p| p.total_ms);
+        let avg_enc = avg(|p| p.cpu_encode_ms);
+        let avg_gpu = avg(|p| p.gpu_kernel_ms);
+        let avg_wait = avg(|p| p.cpu_to_gpu_complete_ms);
+        let avg_route = avg(|p| p.moe_cpu_route_ms);
+        let avg_cmds = avg(|p| p.moe_cmd_count as f64);
+        eprintln!();
+        eprintln!("[bench] === moe profile ===");
+        eprintln!(
+            "[bench] avg/token: total {avg_total:.2} ms | cpu_encode {avg_enc:.2} ms | gpu_kernel {avg_gpu:.2} ms | commit+wait {avg_wait:.2} ms | cpu_route {avg_route:.2} ms | cmd_bufs {avg_cmds:.1}"
+        );
+        eprintln!(
+            "[bench] sync overhead/token: {:.2} ms (= commit+wait - gpu_kernel)",
+            avg_wait - avg_gpu
         );
     }
 
@@ -2272,18 +2398,29 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     }
     let identity = sess_pre.snapshot_identity(0xAA, 0xBB);
     let snap_t = Instant::now();
-    let snap = sess_pre.snapshot(identity, prefix_ids.clone(), Some(last_pre_logits));
+    let snap = sess_pre.snapshot(identity.clone(), prefix_ids.clone(), Some(last_pre_logits));
     let snap_create_ms = snap_t.elapsed().as_secs_f64() * 1e3;
+    let snap_bytes = snap.n_bytes();
+    let mut cache = PrefixCache::new();
+    cache.insert(snap);
+    let full_request: Vec<i32> = prefix_ids
+        .iter()
+        .chain(suffix_ids.iter())
+        .copied()
+        .collect();
+    let hit = cache
+        .lookup_longest(&identity, &full_request)
+        .ok_or_else(|| anyhow!("prefix cache lookup missed a freshly inserted prefix"))?;
     eprintln!(
         "[prefix-cache] (snapshot built: {:.1} MB in {snap_create_ms:.1} ms)",
-        snap.n_bytes() as f64 / 1e6
+        snap_bytes as f64 / 1e6
     );
 
     // Now simulate request 2 starting fresh and finding the cached prefix.
     let warm_t0 = Instant::now();
     let mut sess_warm = MetalSession::fresh(&ctx, &mm, cap)?;
     let restore_t = Instant::now();
-    sess_warm.restore_from(&snap)?;
+    sess_warm.restore_from(hit.snapshot)?;
     let restore_ms = restore_t.elapsed().as_secs_f64() * 1e3;
 
     let mut last_warm_logits = vec![];

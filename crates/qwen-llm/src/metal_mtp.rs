@@ -30,11 +30,15 @@ use crate::gguf::GgufFile;
 use crate::loader::MtpHead;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
-    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
+    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
     encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_get_rows_f32, encode_mul_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
     encode_split_q_gate_f32,
+};
+use crate::metal_dflash::{
+    MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, encode_packed_verify_layer_major_inner,
+    encode_restore_after_partial_accept_inner,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_vec_dispatch,
@@ -51,6 +55,8 @@ pub enum MtpError {
     MetalForward(#[from] crate::metal_forward::MfError),
     #[error("codec: {0}")]
     Codec(#[from] crate::codec::CodecError),
+    #[error("dflash: {0}")]
+    DFlash(#[from] crate::metal_dflash::DFlashError),
     #[error("model has no MTP head")]
     NoMtpHead,
     #[error("token {0} out of vocab range {1}")]
@@ -117,6 +123,7 @@ impl MetalMtpHead {
                 o: load_weight(mtp.attn.o)?,
                 q_norm: load_f32(mtp.attn.q_norm)?,
                 k_norm: load_f32(mtp.attn.k_norm)?,
+                ffn_moe: None,
             },
             eh_proj: load_weight(mtp.eh_proj)?,
             enorm: load_f32(mtp.enorm)?,
@@ -167,8 +174,9 @@ pub struct MetalMtpSession {
 
     // Output (shared with base — but kept separate to allow concurrent
     // dispatch in a future ICB world).
-    pub logits: MetalTensor,  // [V]
-    pub ids_buf: MetalTensor, // i32 token id (in F32 buffer)
+    pub logits: MetalTensor,       // [V]
+    pub draft_argmax: MetalTensor, // [1] i32 in F32 buffer
+    pub ids_buf: MetalTensor,      // i32 token id (in F32 buffer)
 }
 
 impl MetalMtpSession {
@@ -222,9 +230,50 @@ impl MetalMtpSession {
                 vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * 2],
             )?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
+            draft_argmax: MetalTensor::zeros_f32(ctx, vec![1])?,
             ids_buf: MetalTensor::zeros_f32(ctx, vec![1])?,
         })
     }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftReadback {
+    None,
+    ArgmaxOnly,
+    FullLogits,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+struct DraftResult {
+    logits: Option<Vec<f32>>,
+    argmax: Option<i32>,
+}
+
+fn copy_f32_tensor(src: &MetalTensor, dst: &MetalTensor) -> Result<(), MtpError> {
+    if src.dtype != GgmlType::F32 || dst.dtype != GgmlType::F32 {
+        return Err(MtpError::Metal(MetalError::BadShape {
+            kernel: "copy_f32_tensor",
+            detail: format!("expected F32/F32, got {:?}/{:?}", src.dtype, dst.dtype),
+        }));
+    }
+    if src.n_elements() != dst.n_elements() {
+        return Err(MtpError::Metal(MetalError::BadShape {
+            kernel: "copy_f32_tensor",
+            detail: format!(
+                "element mismatch: src={} dst={}",
+                src.n_elements(),
+                dst.n_elements()
+            ),
+        }));
+    }
+    let n_bytes = (src.n_elements() as usize) * std::mem::size_of::<f32>();
+    unsafe {
+        let src_ptr = (src.buffer.contents().as_ptr() as *const u8).add(src.offset as usize);
+        let dst_ptr = (dst.buffer.contents().as_ptr() as *mut u8).add(dst.offset as usize);
+        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, n_bytes);
+    }
+    Ok(())
 }
 
 /// Top-level speculative-decode driver. Owns nothing the base path needs;
@@ -266,16 +315,9 @@ impl<'a> SpeculativeDecoder<'a> {
         prev_hidden: &MetalTensor,
         position: u32,
     ) -> Result<i32, MtpError> {
-        let logits =
-            self.draft_inner(next_tok, prev_hidden, position, /*want_logits=*/ true)?;
-        // Greedy argmax.
-        let argmax = logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap()
-            .0 as i32;
-        Ok(argmax)
+        let result =
+            self.draft_inner(next_tok, prev_hidden, position, DraftReadback::ArgmaxOnly)?;
+        Ok(result.argmax.expect("draft argmax missing"))
     }
 
     /// Same as `draft` but discards logits. Used by the inline accept-branch
@@ -287,7 +329,7 @@ impl<'a> SpeculativeDecoder<'a> {
         prev_hidden: &MetalTensor,
         position: u32,
     ) -> Result<(), MtpError> {
-        let _ = self.draft_inner(next_tok, prev_hidden, position, /*want_logits=*/ false)?;
+        let _ = self.draft_inner(next_tok, prev_hidden, position, DraftReadback::None)?;
         Ok(())
     }
 
@@ -297,8 +339,8 @@ impl<'a> SpeculativeDecoder<'a> {
         next_tok: i32,
         prev_hidden: &MetalTensor,
         position: u32,
-        want_logits: bool,
-    ) -> Result<Vec<f32>, MtpError> {
+        readback: DraftReadback,
+    ) -> Result<DraftResult, MtpError> {
         let arch = &self.base.model.arch;
         if next_tok < 0 || (next_tok as u32) >= arch.vocab_size {
             return Err(MtpError::BadToken(next_tok, arch.vocab_size));
@@ -407,6 +449,19 @@ impl<'a> SpeculativeDecoder<'a> {
         )?;
 
         // (6) Attn block (standard gated-attn, indexes our dedicated MTP KV).
+        // KV-only path for draft_kv_only: append MTP KV for this slot but skip
+        // the expensive attention decode / FFN / lm_head tail entirely.
+        if matches!(readback, DraftReadback::None) {
+            self.encode_mtp_kv_only(&enc, position)?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            self.mtp_session.kv_n_pos = position as usize + 1;
+            return Ok(DraftResult {
+                logits: None,
+                argmax: None,
+            });
+        }
         self.encode_mtp_attn(&enc, position)?;
 
         // (7) Residual #1: x += mixer_out.
@@ -501,6 +556,17 @@ impl<'a> SpeculativeDecoder<'a> {
             arch.vocab_size as usize,
         )?;
 
+        if !matches!(readback, DraftReadback::None) {
+            encode_argmax_f32(
+                ctx,
+                &enc,
+                &self.mtp_session.logits,
+                &self.mtp_session.draft_argmax,
+                1,
+                arch.vocab_size as usize,
+            )?;
+        }
+
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
@@ -508,16 +574,83 @@ impl<'a> SpeculativeDecoder<'a> {
         // KV side-effect was committed by encode_mtp_attn; bump our counter.
         self.mtp_session.kv_n_pos = position as usize + 1;
 
-        if want_logits {
+        let argmax = if matches!(
+            readback,
+            DraftReadback::ArgmaxOnly | DraftReadback::FullLogits
+        ) {
+            unsafe {
+                let src = self.mtp_session.draft_argmax.buffer.contents().as_ptr() as *const i32;
+                Some(*src)
+            }
+        } else {
+            None
+        };
+
+        if matches!(readback, DraftReadback::FullLogits) {
             let mut out = vec![0.0f32; arch.vocab_size as usize];
             unsafe {
                 let src = self.mtp_session.logits.buffer.contents().as_ptr() as *const f32;
                 std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
             }
-            Ok(out)
+            Ok(DraftResult {
+                logits: Some(out),
+                argmax,
+            })
         } else {
-            Ok(Vec::new())
+            Ok(DraftResult {
+                logits: None,
+                argmax,
+            })
         }
+    }
+
+    /// MTP-specific attn step. Mirrors `MetalForward::encode_attn` but
+    /// indexes the dedicated MTP KV ring (single layer) instead of
+    /// `MetalSession::kv_*[attn_idx]`.
+    fn encode_mtp_kv_only(&mut self, enc: &KernelEncoder, position: u32) -> Result<(), MtpError> {
+        let arch = &self.base.model.arch;
+        let ctx = self.base.ctx;
+        let h = arch.hidden_size as usize;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_kv = arch.n_kv_heads as usize;
+        let kv_dim = n_kv * head_dim;
+        let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+        let ab = &self.mtp_head.attn;
+        let s = &mut self.mtp_session;
+
+        encode_mat_vec_dispatch(ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
+        encode_mat_vec_dispatch(ctx, enc, &ab.v, &s.h, &s.attn_v_now, h, kv_dim)?;
+        encode_rms_norm_batched_f32(
+            ctx,
+            enc,
+            &s.attn_k_now,
+            &ab.k_norm,
+            &s.attn_k_normed,
+            n_kv,
+            head_dim,
+            RMS_EPS,
+        )?;
+        encode_rope_neox_f32(
+            ctx,
+            enc,
+            &s.attn_k_normed,
+            n_kv,
+            head_dim,
+            n_rot,
+            position,
+            arch.rope_theta,
+        )?;
+        encode_scatter_offset_f32_to_f16_kv(
+            ctx,
+            enc,
+            &s.attn_k_normed,
+            &s.attn_v_now,
+            &s.kv_k,
+            &s.kv_v,
+            (position as usize) * kv_dim,
+            kv_dim,
+        )?;
+        Ok(())
     }
 
     /// MTP-specific attn step. Mirrors `MetalForward::encode_attn` but
@@ -622,8 +755,8 @@ impl<'a> SpeculativeDecoder<'a> {
         const V4_GROUP: usize = 6;
         let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
         if use_v4 {
-            let nwg = attn_v4_choose_nwg(n_pos);
-            let tile_c = attn_v4_choose_tile_c(n_pos);
+            let nwg = attn_v4_choose_nwg(n_pos, V4_GROUP);
+            let tile_c = attn_v4_choose_tile_c(n_pos, V4_GROUP);
             encode_attn_decode_v4_f32(
                 ctx,
                 enc,
@@ -721,16 +854,17 @@ impl<'a> SpeculativeDecoder<'a> {
         // Per §1.5: stream MTP-KV prefill during base prompt forward.
         // For i in 0..n: run base on prompt[i] → h_i (in hidden_a or hidden_b
         // depending on parity). For i in 0..n-1: also run MTP draft_kv_only
-        // with (prompt[i+1], h_i, i). Logits are computed every iteration
-        // but only the last set is used for bootstrap argmax.
+        // with (prompt[i+1], h_i, i). We read back only argmax tokens,
+        // not full logits, since the speculative path needs just the
+        // bootstrap next-token id.
         let n_prompt = prompt_ids.len();
-        let mut last_logits: Vec<f32> = Vec::new();
+        let mut next_bootstrap_tok: i32 = 0;
         let mut h_last_is_a = true; // which buffer holds the most recent hidden
         for (i, &tid) in prompt_ids.iter().enumerate() {
             let dst = if h_last_is_a { &hidden_a } else { &hidden_b };
-            last_logits = self
-                .base
-                .single_token_with_hidden(tid, i as u32, base_session, dst)?;
+            next_bootstrap_tok =
+                self.base
+                    .single_token_argmax_with_hidden(tid, i as u32, base_session, dst)?;
             stats.base_forward_calls += 1;
 
             if i + 1 < n_prompt {
@@ -755,7 +889,7 @@ impl<'a> SpeculativeDecoder<'a> {
         let _ = hidden_at_proc;
 
         // Bootstrap: argmax(last_logits) is the first token to emit.
-        let mut emit_tok = argmax_i32(&last_logits);
+        let mut emit_tok = next_bootstrap_tok;
         let mut processed_pos = (n_prompt - 1) as u32;
         // mtp_processed_pos is implicitly tracked by self.mtp_session.kv_n_pos.
         // After prefill it should be n - 1 (slots 0..n-2 = n-1 entries).
@@ -785,16 +919,16 @@ impl<'a> SpeculativeDecoder<'a> {
             let hidden_at_proc_ref = if h_last_is_a { &hidden_a } else { &hidden_b };
             let d_tok = self.draft(p_tok, hidden_at_proc_ref, processed_pos)?;
             stats.mtp_calls += 1;
+            stats.drafts_attempted += 1;
 
             // C. Base forward on P_tok at p_pos. Writes new hidden into
             // the OTHER buffer so we can keep hidden_at_proc alive for
             // the inline bridge. After: that other buffer holds h_{p_pos}.
             let dst_for_p = if h_last_is_a { &hidden_b } else { &hidden_a };
-            let logits_p =
+            let target_next =
                 self.base
-                    .single_token_with_hidden(p_tok, p_pos, base_session, dst_for_p)?;
+                    .single_token_argmax_with_hidden(p_tok, p_pos, base_session, dst_for_p)?;
             stats.base_forward_calls += 1;
-            let target_next = argmax_i32(&logits_p);
 
             // D. Lazy sequential verify.
             if d_tok == target_next {
@@ -821,11 +955,13 @@ impl<'a> SpeculativeDecoder<'a> {
                 // buffer we just freed up (the one that previously held
                 // hidden_at_proc — which has now been consumed by step B).
                 let dst_for_d = if h_last_is_a { &hidden_a } else { &hidden_b };
-                let logits_d =
-                    self.base
-                        .single_token_with_hidden(d_tok, d_pos, base_session, dst_for_d)?;
+                let next_emit = self.base.single_token_argmax_with_hidden(
+                    d_tok,
+                    d_pos,
+                    base_session,
+                    dst_for_d,
+                )?;
                 stats.base_forward_calls += 1;
-                let next_emit = argmax_i32(&logits_d);
 
                 // Update for next iter. The buffer holding the latest
                 // hidden has now flipped: previously hidden_at_proc was
@@ -864,6 +1000,210 @@ impl<'a> SpeculativeDecoder<'a> {
             stats: stats.into_finalized(t_start),
         })
     }
+
+    /// Experimental MTP-N path. Drafts `spec_tokens` proposals by recursively
+    /// feeding the MTP head, then verifies `[carry, drafts...]` in one packed
+    /// base-model forward using the DFlash packed-verify machinery.
+    ///
+    /// This is bench-only for now: recursive draft slots beyond the first use
+    /// the previous MTP hidden (`mtp_session.x`) as a surrogate for the exact
+    /// base hidden. Correctness is still preserved because the target packed
+    /// verify remains authoritative and we rebuild canonical MTP KV for the
+    /// accepted prefix from captured base hiddens before continuing.
+    pub fn decode_packed_n(
+        &mut self,
+        prompt_ids: &[i32],
+        max_new_tokens: usize,
+        eos_id: i32,
+        base_session: &mut MetalSession,
+        spec_tokens: usize,
+        verify_scratch: &mut MetalDFlashVerifyScratch,
+        layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    ) -> Result<DecodeOutput, MtpError> {
+        if spec_tokens < 2 || spec_tokens > 3 {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n",
+                detail: format!("spec_tokens={spec_tokens} must be in [2, 3]"),
+            }));
+        }
+
+        let arch = &self.base.model.arch;
+        let h = arch.hidden_size as usize;
+        let t_start = std::time::Instant::now();
+        let mut stats = SpecStats::default();
+        let mut tokens: Vec<i32> = Vec::with_capacity(prompt_ids.len() + max_new_tokens);
+        tokens.extend_from_slice(prompt_ids);
+
+        if prompt_ids.is_empty() {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n",
+                detail: "prompt_ids must be non-empty".into(),
+            }));
+        }
+        if max_new_tokens == 0 {
+            return Ok(DecodeOutput {
+                tokens,
+                stats: stats.into_finalized(t_start),
+            });
+        }
+
+        let verify_n = spec_tokens + 1;
+        if verify_scratch.n as usize != verify_n {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n.verify_scratch",
+                detail: format!(
+                    "verify_scratch.n={} != verify_n={verify_n}",
+                    verify_scratch.n
+                ),
+            }));
+        }
+        if verify_scratch.k_target_layers != 1 {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n.verify_scratch",
+                detail: format!(
+                    "verify_scratch.k_target_layers={} != 1",
+                    verify_scratch.k_target_layers
+                ),
+            }));
+        }
+        if layer_scratch.n as usize != verify_n {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n.layer_scratch",
+                detail: format!("layer_scratch.n={} != verify_n={verify_n}", layer_scratch.n),
+            }));
+        }
+
+        let hidden_cur = MetalTensor::zeros_f32(self.base.ctx, vec![h as u64])?;
+        let recursive_hidden = MetalTensor::zeros_f32(self.base.ctx, vec![h as u64])?;
+        let n_prompt = prompt_ids.len();
+        let mut next_bootstrap_tok: i32 = 0;
+
+        // Prompt prefill: identical streaming contract as H4, but only argmax
+        // readback from the base path.
+        for (i, &tid) in prompt_ids.iter().enumerate() {
+            next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
+                tid,
+                i as u32,
+                base_session,
+                &hidden_cur,
+            )?;
+            stats.base_forward_calls += 1;
+
+            if i + 1 < n_prompt {
+                self.draft_kv_only(prompt_ids[i + 1], &hidden_cur, i as u32)?;
+                stats.mtp_calls += 1;
+            }
+        }
+
+        debug_assert_eq!(
+            self.mtp_session.kv_n_pos as u32,
+            (n_prompt - 1) as u32,
+            "after prefill: mtp_kv should have n-1 entries"
+        );
+
+        let last_layer = [(self.base.model.blocks.len() - 1) as u32];
+        let mut emit_tok = next_bootstrap_tok;
+        let mut processed_pos = (n_prompt - 1) as u32;
+        let mut emitted_count: usize = 0;
+
+        'outer: loop {
+            tokens.push(emit_tok);
+            emitted_count += 1;
+            if emit_tok == eos_id || emitted_count >= max_new_tokens {
+                break;
+            }
+
+            let carry_tok = emit_tok;
+            let start_position = processed_pos + 1;
+
+            // Draft chain. First slot uses exact base hidden. Subsequent slots
+            // recursively consume the previous MTP hidden as an approximation.
+            let mut drafts: Vec<i32> = Vec::with_capacity(spec_tokens);
+            let first = self.draft(carry_tok, &hidden_cur, processed_pos)?;
+            drafts.push(first);
+            stats.mtp_calls += 1;
+            stats.drafts_attempted += 1;
+            copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+            for j in 1..spec_tokens {
+                let d = self.draft(drafts[j - 1], &recursive_hidden, processed_pos + j as u32)?;
+                drafts.push(d);
+                stats.mtp_calls += 1;
+                stats.drafts_attempted += 1;
+                copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+            }
+
+            let mut verify_input: Vec<i32> = Vec::with_capacity(verify_n);
+            verify_input.push(carry_tok);
+            verify_input.extend_from_slice(&drafts);
+
+            let verify_argmax = encode_packed_verify_layer_major_inner(
+                self.base,
+                &last_layer,
+                &verify_input,
+                start_position,
+                verify_scratch,
+                layer_scratch,
+                base_session,
+                None,
+                None,
+            )?;
+            stats.base_forward_calls += 1;
+
+            let mut n_accepted = 0usize;
+            let mut stop_now = false;
+            for (j, &draft_tok) in drafts.iter().enumerate() {
+                if draft_tok != verify_argmax[j] {
+                    break;
+                }
+                stats.accepted += 1;
+                n_accepted += 1;
+                tokens.push(draft_tok);
+                emitted_count += 1;
+                if draft_tok == eos_id || emitted_count >= max_new_tokens {
+                    stop_now = true;
+                    break;
+                }
+            }
+
+            let n_keep = (1 + n_accepted) as u32;
+            if n_keep < verify_n as u32 {
+                encode_restore_after_partial_accept_inner(
+                    self.base,
+                    verify_scratch,
+                    n_keep,
+                    start_position,
+                    base_session,
+                    None,
+                )?;
+            }
+
+            // Recursive draft slots beyond the first are approximate. Rebuild the
+            // canonical MTP KV for the accepted prefix from captured base hiddens.
+            self.mtp_session.kv_n_pos = processed_pos as usize + 1;
+            for j in 0..n_accepted {
+                let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
+                let bridge_position = processed_pos + 1 + j as u32;
+                self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                stats.mtp_calls += 1;
+            }
+
+            let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
+            copy_f32_tensor(&next_hidden, &hidden_cur)?;
+
+            processed_pos += 1 + n_accepted as u32;
+            emit_tok = verify_argmax[n_accepted];
+            stats.steps += 1;
+
+            if stop_now {
+                break 'outer;
+            }
+        }
+
+        Ok(DecodeOutput {
+            tokens,
+            stats: stats.into_finalized(t_start),
+        })
+    }
 }
 
 /// Result of [`SpeculativeDecoder::decode`].
@@ -880,6 +1220,10 @@ pub struct SpecStats {
     pub steps: u32,
     /// Drafts that matched target's argmax.
     pub accepted: u32,
+    /// Total drafted tokens proposed for acceptance. For MTP-1 this equals
+    /// `steps`; for experimental MTP-N it is `steps * N` minus any terminal
+    /// short-circuit on the last outer step.
+    pub drafts_attempted: u32,
     /// Total base forward calls (prompt prefill + decode loop).
     pub base_forward_calls: u32,
     /// Total MTP draft / draft_kv_only calls (prefill + decode + bridges).
@@ -896,14 +1240,20 @@ impl SpecStats {
 
     /// Acceptance rate α = accepted / steps. Returns 0.0 if no steps ran.
     pub fn acceptance_rate(&self) -> f64 {
-        if self.steps == 0 {
+        let denom = if self.drafts_attempted > 0 {
+            self.drafts_attempted
+        } else {
+            self.steps
+        };
+        if denom == 0 {
             0.0
         } else {
-            self.accepted as f64 / self.steps as f64
+            self.accepted as f64 / denom as f64
         }
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[inline]
 fn argmax_i32(logits: &[f32]) -> i32 {
     logits
@@ -1015,8 +1365,15 @@ mod tests {
             )
             .expect("upload prev_hidden");
             let metal_logits = spec
-                .draft_inner(next_tok, &prev_hidden_metal, position, true)
-                .expect("metal mtp draft");
+                .draft_inner(
+                    next_tok,
+                    &prev_hidden_metal,
+                    position,
+                    DraftReadback::FullLogits,
+                )
+                .expect("metal mtp draft")
+                .logits
+                .expect("full logits");
             assert_eq!(metal_logits.len(), cpu_logits.len());
 
             let mut max_abs = 0.0f32;

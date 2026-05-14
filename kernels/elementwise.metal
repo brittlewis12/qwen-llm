@@ -88,6 +88,72 @@ kernel void kernel_mul_f32(
     out[tid] = a[tid] * b[tid];
 }
 
+struct axpy_args {
+    uint n;
+    float alpha;
+};
+
+// accum[i] += alpha * x[i]
+kernel void kernel_axpy_f32(
+        constant axpy_args & args [[buffer(0)]],
+        device const float * x    [[buffer(1)]],
+        device       float * accum [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    accum[tid] += args.alpha * x[tid];
+}
+
+struct topk_args {
+    uint n;
+    uint k;
+};
+
+// Naive single-thread top-k over one probability vector. n is small (<=256)
+// and k is tiny (<=16), so this is adequate for the first MoE routing pass.
+kernel void kernel_topk_select_f32(
+        constant topk_args & args [[buffer(0)]],
+        device const float * probs    [[buffer(1)]],
+        device       int   * out_idx  [[buffer(2)]],
+        device       float * out_w    [[buffer(3)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid != 0) return;
+    const uint MAX_K = 16;
+    if (args.k == 0 || args.k > MAX_K) return;
+
+    int top_idx[MAX_K];
+    float top_val[MAX_K];
+    for (uint i = 0; i < args.k; ++i) {
+        top_idx[i] = -1;
+        top_val[i] = -INFINITY;
+    }
+
+    for (uint i = 0; i < args.n; ++i) {
+        const float v = probs[i];
+        for (uint j = 0; j < args.k; ++j) {
+            const bool better = (v > top_val[j]) || (v == top_val[j] && (top_idx[j] < 0 || int(i) < top_idx[j]));
+            if (better) {
+                for (uint m = args.k - 1; m > j; --m) {
+                    top_val[m] = top_val[m - 1];
+                    top_idx[m] = top_idx[m - 1];
+                }
+                top_val[j] = v;
+                top_idx[j] = int(i);
+                break;
+            }
+        }
+    }
+
+    float sum = 0.0f;
+    for (uint i = 0; i < args.k; ++i) {
+        if (top_idx[i] >= 0) sum += max(top_val[i], 0.0f);
+    }
+    sum = max(sum, 6.103515625e-5f);
+    for (uint i = 0; i < args.k; ++i) {
+        out_idx[i] = max(top_idx[i], 0);
+        out_w[i] = top_idx[i] >= 0 ? max(top_val[i], 0.0f) / sum : 0.0f;
+    }
+}
+
 // SwiGLU FFN inner: ffn[i] = silu(gate[i]) * up[i].
 // Two-input fused op, saves a separate silu kernel + intermediate buffer
 // in the FFN path. (down(silu(gate(x)) * up(x)) is the full SwiGLU; this
@@ -339,6 +405,30 @@ kernel void kernel_gdn_alpha_chain_f32(
         sp = log(1.0f + exp(v));
     }
     out[tid] = sp * a_log[tid];
+}
+
+// Same as kernel_gdn_alpha_chain_f32, but stores exp(g) directly:
+//   out[i] = exp(softplus(a[i] + dt_bias[i]) * a_log[i])
+// GDN step uses this per-head decay for every state row, so precomputing it
+// avoids repeating the same exp() head_dim times per head.
+kernel void kernel_gdn_decay_chain_f32(
+        constant n_args & args   [[buffer(0)]],
+        device const float * a       [[buffer(1)]],
+        device const float * dt_bias [[buffer(2)]],
+        device const float * a_log   [[buffer(3)]],
+        device       float * out     [[buffer(4)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const float v = a[tid] + dt_bias[tid];
+    float sp;
+    if (v > 20.0f) {
+        sp = v;
+    } else if (v < -20.0f) {
+        sp = exp(v);
+    } else {
+        sp = log(1.0f + exp(v));
+    }
+    out[tid] = exp(sp * a_log[tid]);
 }
 
 // Batched GDN α-chain (v0.73a layer-major batching).

@@ -22,16 +22,26 @@
 //!   (`in_proj_qkv`, `in_proj_z`, `in_proj_b`, `in_proj_a`), NOT fused
 //!   like Qwen3-Next-80B.
 
-/// Static architecture description for a Qwen3.5/3.6 dense variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchKind {
+    Dense,
+    Moe,
+}
+
+/// Static architecture description for a Qwen3.5/3.6 variant.
 ///
 /// Smaller siblings (0.8B / 2B / 4B / 9B) have identical kernel ops modulo
-/// these counts; 27B is the headline target.
+/// these counts; 27B is the headline target. MoE models share the same
+/// hybrid GDN/full-attention backbone but replace the dense FFN with a
+/// routed-expert FFN plus a gated shared-expert branch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Arch {
+    pub kind: ArchKind,
     pub n_layer: u32,
     pub hidden_size: u32,
     pub intermediate_size: u32,
     pub vocab_size: u32,
+    pub full_attention_interval: u32,
 
     // attention layers
     pub n_q_heads: u32,
@@ -45,6 +55,12 @@ pub struct Arch {
     pub gdn_n_k_heads: u32,
     pub gdn_head_dim: u32,
     pub gdn_conv_kernel: u32,
+
+    // MoE FFN (0 / unused on dense models)
+    pub expert_count: u32,
+    pub expert_used_count: u32,
+    pub expert_feed_forward_length: u32,
+    pub expert_shared_feed_forward_length: u32,
 
     // MTP
     pub mtp_n_hidden_layers: u32,
@@ -62,7 +78,8 @@ impl Arch {
     /// 3, 7, 11, …
     #[inline]
     pub fn layer_kind(&self, idx: u32) -> LayerKind {
-        if idx % 4 == 3 {
+        let interval = self.full_attention_interval.max(1);
+        if idx % interval == interval - 1 {
             LayerKind::GatedAttention
         } else {
             LayerKind::GatedDeltaNet
@@ -72,10 +89,12 @@ impl Arch {
 
 /// Qwen3.5-27B / Qwen3.6-27B (dense flagship, hybrid GDN + GQA).
 pub const QWEN3_27B: Arch = Arch {
+    kind: ArchKind::Dense,
     n_layer: 64,
     hidden_size: 5120,
     intermediate_size: 17408,
     vocab_size: 248_320,
+    full_attention_interval: 4,
     n_q_heads: 24,
     n_kv_heads: 4,
     attn_head_dim: 256,
@@ -85,6 +104,10 @@ pub const QWEN3_27B: Arch = Arch {
     gdn_n_k_heads: 16,
     gdn_head_dim: 128,
     gdn_conv_kernel: 4,
+    expert_count: 0,
+    expert_used_count: 0,
+    expert_feed_forward_length: 0,
+    expert_shared_feed_forward_length: 0,
     mtp_n_hidden_layers: 1,
 };
 
@@ -96,10 +119,12 @@ pub const QWEN3_27B: Arch = Arch {
 /// ssm.inner_size=2048, ssm.state_size=128, ssm.time_step_rank=16,
 /// ssm.group_count=16. (`time_step_rank` = num_v_heads.)
 pub const QWEN3_0_8B: Arch = Arch {
+    kind: ArchKind::Dense,
     n_layer: 24,
     hidden_size: 1024,
     intermediate_size: 3584,
     vocab_size: 248_320,
+    full_attention_interval: 4,
     n_q_heads: 8,
     n_kv_heads: 2,
     attn_head_dim: 256,
@@ -109,6 +134,10 @@ pub const QWEN3_0_8B: Arch = Arch {
     gdn_n_k_heads: 16,
     gdn_head_dim: 128,
     gdn_conv_kernel: 4,
+    expert_count: 0,
+    expert_used_count: 0,
+    expert_feed_forward_length: 0,
+    expert_shared_feed_forward_length: 0,
     mtp_n_hidden_layers: 1,
 };
 

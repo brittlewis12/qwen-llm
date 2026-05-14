@@ -13,7 +13,7 @@
 
 use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
-use crate::loader::{AttnBlock, Block, GdnBlock, Model};
+use crate::loader::{AttnBlock, Block, GdnBlock, Model, MoeFfn};
 use crate::tensor::TensorDesc;
 
 #[derive(Debug, thiserror::Error)]
@@ -686,6 +686,32 @@ impl<'a> Forward<'a> {
         Ok(dequant_to_f32(t, bytes)?)
     }
 
+    fn dequant_expert_matrix(
+        &self,
+        t: &TensorDesc,
+        expert_idx: usize,
+    ) -> Result<Vec<f32>, ForwardError> {
+        debug_assert!(
+            t.shape.len() >= 3,
+            "expert tensor must be rank-3: {}",
+            t.name
+        );
+        let n_expert = t.shape[2] as usize;
+        debug_assert!(expert_idx < n_expert, "expert_idx OOB for {}", t.name);
+        let per_expert_bytes = (t.n_bytes as usize) / n_expert;
+        let bytes = self.gguf.slice(t);
+        let start = expert_idx * per_expert_bytes;
+        let end = start + per_expert_bytes;
+        let subdesc = TensorDesc {
+            name: format!("{}[expert={expert_idx}]", t.name),
+            shape: vec![t.shape[0], t.shape[1]],
+            dtype: t.dtype,
+            data_offset: 0,
+            n_bytes: per_expert_bytes as u64,
+        };
+        Ok(dequant_to_f32(&subdesc, &bytes[start..end])?)
+    }
+
     fn block_attn_norm<'b>(&self, b: &'b Block<'a>) -> &'b TensorDesc {
         match b {
             Block::Gdn(gb) => gb.attn_norm,
@@ -701,10 +727,13 @@ impl<'a> Forward<'a> {
 
     /// SwiGLU FFN: `down(silu(gate(x)) * up(x))`.
     fn ffn(&self, block: &Block<'a>, x: &[f32]) -> Result<Vec<f32>, ForwardError> {
-        let (g, u, d) = match block {
-            Block::Gdn(b) => (b.ffn_gate, b.ffn_up, b.ffn_down),
-            Block::Attn(b) => (b.ffn_gate, b.ffn_up, b.ffn_down),
+        let (g, u, d, moe) = match block {
+            Block::Gdn(b) => (b.ffn_gate, b.ffn_up, b.ffn_down, b.ffn_moe.as_ref()),
+            Block::Attn(b) => (b.ffn_gate, b.ffn_up, b.ffn_down, b.ffn_moe.as_ref()),
         };
+        if let Some(moe) = moe {
+            return self.ffn_moe(g, u, d, moe, x);
+        }
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
         let f = arch.intermediate_size as usize;
@@ -719,6 +748,81 @@ impl<'a> Forward<'a> {
             hidden[i] = silu(gated[i]) * upped[i];
         }
         Ok(mat_vec(&down_w, f, h, &hidden))
+    }
+
+    fn ffn_moe(
+        &self,
+        shared_gate: &TensorDesc,
+        shared_up: &TensorDesc,
+        shared_down: &TensorDesc,
+        moe: &MoeFfn<'a>,
+        x: &[f32],
+    ) -> Result<Vec<f32>, ForwardError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let n_expert = arch.expert_count as usize;
+        let n_expert_used = arch.expert_used_count.min(arch.expert_count) as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let f_shared = arch.expert_shared_feed_forward_length as usize;
+
+        let gate_inp_w = self.dequant(moe.gate_inp)?;
+        let mut probs = mat_vec(&gate_inp_w, h, n_expert, x);
+        softmax_in_place(&mut probs);
+
+        let mut ranked: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        ranked.truncate(n_expert_used);
+
+        let weight_sum: f32 = ranked
+            .iter()
+            .map(|(_, p)| *p)
+            .sum::<f32>()
+            .max(6.103515625e-5);
+        let mut out = vec![0.0f32; h];
+        for (expert_idx, prob) in ranked {
+            let weight = prob / weight_sum;
+            let gate_w = self.dequant_expert_matrix(moe.gate_exps, expert_idx)?;
+            let up_w = self.dequant_expert_matrix(moe.up_exps, expert_idx)?;
+            let down_w = self.dequant_expert_matrix(moe.down_exps, expert_idx)?;
+
+            let gated = mat_vec(&gate_w, h, f_exp, x);
+            let upped = mat_vec(&up_w, h, f_exp, x);
+            let mut hidden = vec![0.0f32; f_exp];
+            for i in 0..f_exp {
+                hidden[i] = silu(gated[i]) * upped[i];
+            }
+            let expert_out = mat_vec(&down_w, f_exp, h, &hidden);
+            for (oi, ei) in out.iter_mut().zip(expert_out.iter()) {
+                *oi += weight * *ei;
+            }
+        }
+
+        let shared_gate_w = self.dequant(moe.gate_inp_shexp)?;
+        let shared_gate_scalar = sigmoid(
+            x.iter()
+                .zip(shared_gate_w.iter())
+                .map(|(&xi, &wi)| xi * wi)
+                .sum::<f32>(),
+        );
+        let shared_gate_w = self.dequant(shared_gate)?;
+        let shared_up_w = self.dequant(shared_up)?;
+        let shared_down_w = self.dequant(shared_down)?;
+        let shared_gated = mat_vec(&shared_gate_w, h, f_shared, x);
+        let shared_upped = mat_vec(&shared_up_w, h, f_shared, x);
+        let mut shared_hidden = vec![0.0f32; f_shared];
+        for i in 0..f_shared {
+            shared_hidden[i] = silu(shared_gated[i]) * shared_upped[i];
+        }
+        let shared_out = mat_vec(&shared_down_w, f_shared, h, &shared_hidden);
+        for (oi, si) in out.iter_mut().zip(shared_out.iter()) {
+            *oi += shared_gate_scalar * *si;
+        }
+
+        Ok(out)
     }
 
     /// Full-attention block step. Single-token decode: appends one (K,V)
@@ -1347,6 +1451,40 @@ mod tests {
             .0;
         eprintln!(
             "[forward] vocab={} argmax={} top_logit={:.4}",
+            logits.len(),
+            argmax,
+            logits[argmax]
+        );
+        assert!(logits[argmax].is_finite());
+    }
+
+    #[test]
+    fn forward_runs_one_token_35b_a3b_moe() {
+        let path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert_eq!(m.arch.kind, crate::model::ArchKind::Moe);
+        let f = Forward::new(&g, &m);
+        let mut state = GdnState::fresh(&m);
+        let mut kv = KvCache::with_capacity(&m, 8);
+
+        let tok = crate::tokenizer::Tokenizer::open(path).expect("tok");
+        let ids = tok.encode("Hello", false).expect("tokenize");
+        let logits = f
+            .single_token(ids[0], 0, &mut state, &mut kv)
+            .expect("forward moe");
+        assert_eq!(logits.len(), m.arch.vocab_size as usize);
+        let argmax = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        eprintln!(
+            "[forward-moe] vocab={} argmax={} top_logit={:.4}",
             logits.len(),
             argmax,
             logits[argmax]

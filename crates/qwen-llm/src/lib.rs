@@ -33,6 +33,7 @@ pub mod metal_dflash;
 pub mod metal_forward;
 pub mod metal_mtp;
 pub mod model;
+pub mod prefix_cache;
 pub mod tensor;
 pub mod tokenizer;
 

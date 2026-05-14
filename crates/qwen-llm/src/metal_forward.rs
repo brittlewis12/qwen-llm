@@ -29,22 +29,27 @@
 //! * Fused full-attn block.
 
 use crate::gguf::GgufFile;
-use crate::loader::{Block, Model};
+use crate::loader::{Block, Model, MoeFfn};
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
-    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_f16kv_f32,
-    encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_gdn_alpha_chain_f32,
-    encode_gdn_step_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
-    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_v4_f32, encode_axpy_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
+    encode_ffn_swiglu_q4_K_f32, encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_q5_K_f32,
+    encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32,
+    encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
+    encode_topk_logits_softmax_f32,
 };
+use crate::model::ArchKind;
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
 /// `attn_v4_choose_nwg` for the selection heuristic.
-pub const ATTN_V4_MAX_NWG: usize = 32;
+pub const ATTN_V4_MAX_NWG: usize = 64;
 use crate::tensor::{GgmlType, TensorDesc};
 
 /// Single source of truth for which weight dtypes the loader keeps in
@@ -78,6 +83,8 @@ pub enum MfError {
     Codec(#[from] crate::codec::CodecError),
     #[error("token {0} out of vocab range {1}")]
     BadToken(i32, u32),
+    #[error("qwen35moe Metal path not implemented yet")]
+    UnsupportedMoe,
     #[error("v1 driver requires F32 weights; tensor {name} is {dtype:?}")]
     UnsupportedDtype { name: String, dtype: GgmlType },
 }
@@ -120,6 +127,7 @@ pub struct MetalGdnBlock {
     pub conv1d: MetalTensor,
     pub norm: MetalTensor,
     pub out_proj: MetalTensor,
+    pub ffn_moe: Option<MetalMoeFfn>,
 }
 
 pub struct MetalAttnBlock {
@@ -134,6 +142,29 @@ pub struct MetalAttnBlock {
     pub o: MetalTensor,
     pub q_norm: MetalTensor,
     pub k_norm: MetalTensor,
+    pub ffn_moe: Option<MetalMoeFfn>,
+}
+
+pub struct MetalMoeFfn {
+    pub gate_inp: MetalTensor,
+    pub gate_exps: MetalTensor,
+    pub up_exps: MetalTensor,
+    pub down_exps: MetalTensor,
+    pub gate_inp_shexp: MetalTensor,
+    pub gate_inp_cpu: Vec<f32>,
+    pub gate_inp_shexp_cpu: Vec<f32>,
+}
+
+#[derive(Clone, Copy)]
+enum MixerSlot {
+    Gdn(usize),
+    Attn(usize),
+}
+
+#[allow(dead_code)]
+struct MoeRouteDecision {
+    ranked: Vec<(usize, f32)>,
+    shared_gate_scalar: f32,
 }
 
 impl MetalModel {
@@ -186,6 +217,21 @@ impl MetalModel {
         let output_norm = load_f32(model.output_norm)?;
         let lm_head = load_weight(model.lm_head)?;
 
+        let load_moe = |moe: &MoeFfn<'_>| -> Result<MetalMoeFfn, MfError> {
+            Ok(MetalMoeFfn {
+                gate_inp: load_f32(moe.gate_inp)?,
+                gate_exps: load_weight(moe.gate_exps)?,
+                up_exps: load_weight(moe.up_exps)?,
+                down_exps: load_weight(moe.down_exps)?,
+                gate_inp_shexp: load_f32(moe.gate_inp_shexp)?,
+                gate_inp_cpu: crate::codec::dequant_to_f32(moe.gate_inp, gguf.slice(moe.gate_inp))?,
+                gate_inp_shexp_cpu: crate::codec::dequant_to_f32(
+                    moe.gate_inp_shexp,
+                    gguf.slice(moe.gate_inp_shexp),
+                )?,
+            })
+        };
+
         let mut blocks = Vec::with_capacity(model.blocks.len());
         for b in &model.blocks {
             match b {
@@ -205,6 +251,7 @@ impl MetalModel {
                         conv1d: load_f32(g.conv1d)?,
                         norm: load_f32(g.norm)?,
                         out_proj: load_weight(g.out_proj)?,
+                        ffn_moe: g.ffn_moe.as_ref().map(&load_moe).transpose()?,
                     }));
                 }
                 Block::Attn(a) => {
@@ -220,6 +267,7 @@ impl MetalModel {
                         o: load_weight(a.o)?,
                         q_norm: load_f32(a.q_norm)?,
                         k_norm: load_f32(a.k_norm)?,
+                        ffn_moe: a.ffn_moe.as_ref().map(&load_moe).transpose()?,
                     }));
                 }
             }
@@ -266,7 +314,7 @@ pub struct MetalSession {
     pub gdn_b: MetalTensor,        // n_v   (β source, pre-sigmoid)
     pub gdn_beta: MetalTensor,     // n_v   (post-sigmoid)
     pub gdn_a: MetalTensor,        // n_v   (α source, pre-softplus)
-    pub gdn_alpha: MetalTensor,    // n_v   (post-softplus * a_log)
+    pub gdn_alpha: MetalTensor,    // n_v   (per-head decay exp(g))
     // gdn_q/k/v removed in v0.31: q/k/v are now zero-copy views into
     // gdn_qkv_conv via MetalTensor::view_subrange; no scratch buffers needed.
     pub gdn_q_norm: MetalTensor, // n_k * head_dim — l2-normed
@@ -291,7 +339,14 @@ pub struct MetalSession {
     pub attn_v4_o_partial: MetalTensor, // n_kv * NWG_max * GROUP * head_dim
     pub attn_v4_ml_partial: MetalTensor, // n_kv * NWG_max * GROUP * 2
 
-    pub logits: MetalTensor,  // vocab_size
+    pub logits: MetalTensor,           // vocab_size
+    pub argmax_tok: MetalTensor,       // [1] i32 in F32 buffer
+    pub moe_router_probs: MetalTensor, // [n_expert] F32 (or [1] on dense models)
+    pub moe_topk_idx: MetalTensor,     // [top_k] i32 in F32 buffer (or [1] on dense models)
+    pub moe_topk_weight: MetalTensor,  // [top_k] F32 (or [1] on dense models)
+    pub moe_shared_gate: MetalTensor,  // [1] F32
+    pub moe_inner: MetalTensor,        // [top_k, expert_ffn] F32 (or [1] on dense models)
+    pub moe_expert_out: MetalTensor,   // [top_k, hidden] F32 (or [1] on dense models)
     pub ids_buf: MetalTensor, // 1-element scratch for the input token id (i32 in an F32 buf)
 }
 
@@ -303,12 +358,38 @@ impl MetalSession {
     ) -> Result<Self, MetalError> {
         let arch = &model.arch;
         let h = arch.hidden_size as u64;
-        let f = arch.intermediate_size as u64;
+        let f = if arch.kind == ArchKind::Moe {
+            arch.expert_shared_feed_forward_length
+                .max(arch.expert_count)
+                .max(arch.expert_feed_forward_length) as u64
+        } else {
+            arch.intermediate_size as u64
+        };
         let head_dim = arch.attn_head_dim as u64;
         let n_q = arch.n_q_heads as u64;
         let n_kv = arch.n_kv_heads as u64;
         let q_dim = n_q * head_dim;
         let kv_dim = n_kv * head_dim;
+        let moe_router_n = if arch.kind == ArchKind::Moe {
+            arch.expert_count.max(1) as u64
+        } else {
+            1
+        };
+        let moe_topk_n = if arch.kind == ArchKind::Moe {
+            arch.expert_used_count.max(1).min(arch.expert_count.max(1)) as u64
+        } else {
+            1
+        };
+        let moe_inner_n = if arch.kind == ArchKind::Moe {
+            moe_topk_n * arch.expert_feed_forward_length.max(1) as u64
+        } else {
+            1
+        };
+        let moe_expert_out_n = if arch.kind == ArchKind::Moe {
+            moe_topk_n * h
+        } else {
+            1
+        };
         let vh = arch.gdn_head_dim as u64;
         let n_v = arch.gdn_n_v_heads as u64;
         let n_k = arch.gdn_n_k_heads as u64;
@@ -397,6 +478,13 @@ impl MetalSession {
                 vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * 2],
             )?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
+            argmax_tok: MetalTensor::zeros_f32(ctx, vec![1])?,
+            moe_router_probs: MetalTensor::zeros_f32(ctx, vec![moe_router_n])?,
+            moe_topk_idx: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
+            moe_topk_weight: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
+            moe_shared_gate: MetalTensor::zeros_f32(ctx, vec![1])?,
+            moe_inner: MetalTensor::zeros_f32(ctx, vec![moe_inner_n])?,
+            moe_expert_out: MetalTensor::zeros_f32(ctx, vec![moe_expert_out_n])?,
             ids_buf: MetalTensor::zeros_f32(ctx, vec![1])?,
         })
     }
@@ -413,6 +501,535 @@ impl<'a> MetalForward<'a> {
         Self { ctx, model }
     }
 
+    #[allow(dead_code)]
+    fn route_moe_block(&self, h_tensor: &MetalTensor, moe: &MetalMoeFfn) -> MoeRouteDecision {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let n_expert = arch.expert_count as usize;
+        let n_expert_used = arch.expert_used_count.min(arch.expert_count) as usize;
+        let h_cpu = unsafe {
+            std::slice::from_raw_parts(
+                (h_tensor.buffer.contents().as_ptr() as *const f32)
+                    .add((h_tensor.offset / 4) as usize),
+                h,
+            )
+        };
+        let mut probs = crate::forward::mat_vec_pub(&moe.gate_inp_cpu, h, n_expert, h_cpu);
+        let max = probs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for v in &mut probs {
+            *v = (*v - max).exp();
+            sum += *v;
+        }
+        let inv = 1.0 / sum.max(1e-20);
+        for v in &mut probs {
+            *v *= inv;
+        }
+        let mut ranked: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        ranked.truncate(n_expert_used);
+
+        let shared_gate_scalar = {
+            let mut s = 0.0f32;
+            for i in 0..h {
+                s += h_cpu[i] * moe.gate_inp_shexp_cpu[i];
+            }
+            1.0 / (1.0 + (-s).exp())
+        };
+        MoeRouteDecision {
+            ranked,
+            shared_gate_scalar,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn read_moe_route_result(&self, session: &MetalSession, topk: usize) -> MoeRouteDecision {
+        let mut ranked = Vec::with_capacity(topk);
+        unsafe {
+            let idx_ptr = (session.moe_topk_idx.buffer.contents().as_ptr() as *const i32)
+                .add((session.moe_topk_idx.offset / 4) as usize);
+            let w_ptr = (session.moe_topk_weight.buffer.contents().as_ptr() as *const f32)
+                .add((session.moe_topk_weight.offset / 4) as usize);
+            for i in 0..topk {
+                ranked.push((*idx_ptr.add(i) as usize, *w_ptr.add(i)));
+            }
+            let shared_gate_scalar = *((session.moe_shared_gate.buffer.contents().as_ptr()
+                as *const f32)
+                .add((session.moe_shared_gate.offset / 4) as usize));
+            MoeRouteDecision {
+                ranked,
+                shared_gate_scalar,
+            }
+        }
+    }
+
+    fn encode_moe_route_prepare(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        self.encode_moe_router_logits(enc, session, moe)?;
+        self.encode_moe_topk_and_shared_from_logits(enc, session, moe)?;
+        Ok(())
+    }
+
+    fn encode_moe_router_logits(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let n_expert = arch.expert_count as usize;
+
+        let router_probs = session
+            .moe_router_probs
+            .view_subrange(0, vec![n_expert as u64]);
+
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            &moe.gate_inp,
+            &session.h,
+            &router_probs,
+            h,
+            n_expert,
+        )?;
+        Ok(())
+    }
+
+    fn encode_moe_topk_from_logits(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+
+        let router_probs = session
+            .moe_router_probs
+            .view_subrange(0, vec![n_expert as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+        let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        encode_topk_logits_softmax_f32(
+            self.ctx,
+            enc,
+            &router_probs,
+            &topk_idx,
+            &topk_w,
+            n_expert,
+            topk,
+        )?;
+        Ok(())
+    }
+
+    fn encode_moe_topk_and_shared_from_logits(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+
+        if n_expert > 256 || topk > 16 {
+            self.encode_moe_topk_from_logits(enc, session)?;
+            self.encode_moe_shared_gate(enc, session, moe)?;
+            return Ok(());
+        }
+
+        let router_probs = session
+            .moe_router_probs
+            .view_subrange(0, vec![n_expert as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+        let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        encode_topk_logits_softmax_dot_sigmoid_f32(
+            self.ctx,
+            enc,
+            &router_probs,
+            &moe.gate_inp_shexp,
+            &session.h,
+            &topk_idx,
+            &topk_w,
+            &session.moe_shared_gate,
+            n_expert,
+            topk,
+            h,
+        )?;
+        Ok(())
+    }
+
+    fn encode_moe_shared_gate(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+
+        encode_dot_sigmoid_f32(
+            self.ctx,
+            enc,
+            &moe.gate_inp_shexp,
+            &session.h,
+            &session.moe_shared_gate,
+            h,
+        )?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn encode_moe_ffn_apply(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+        moe: &MetalMoeFfn,
+        route: &MoeRouteDecision,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let f_shared = arch.expert_shared_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+
+        let weight_sum = route
+            .ranked
+            .iter()
+            .map(|(_, p)| *p)
+            .sum::<f32>()
+            .max(6.103515625e-5);
+
+        unsafe {
+            let dst = (session.mixer_out.buffer.contents().as_ptr() as *mut u8)
+                .add(session.mixer_out.offset as usize);
+            std::ptr::write_bytes(dst, 0, h * std::mem::size_of::<f32>());
+        }
+
+        let gate_tmp = session.ffn_gate.view_subrange(0, vec![f_exp as u64]);
+        let up_tmp = session.ffn_up.view_subrange(0, vec![f_exp as u64]);
+        let inner_tmp = session.ffn_inner.view_subrange(0, vec![f_exp as u64]);
+        let out_tmp = session.ffn_out.view_subrange(0, vec![h as u64]);
+        let shared_gate_tmp = session.ffn_gate.view_subrange(0, vec![f_shared as u64]);
+        let shared_up_tmp = session.ffn_up.view_subrange(0, vec![f_shared as u64]);
+        let shared_inner_tmp = session.ffn_inner.view_subrange(0, vec![f_shared as u64]);
+
+        let per_gate_bytes = moe.gate_exps.n_bytes() / n_expert as u64;
+        let per_up_bytes = moe.up_exps.n_bytes() / n_expert as u64;
+        let per_down_bytes = moe.down_exps.n_bytes() / n_expert as u64;
+        let routed_fused =
+            moe.gate_exps.dtype == GgmlType::Q4_K && moe.up_exps.dtype == GgmlType::Q4_K;
+        for (expert_idx, prob) in route.ranked.iter().copied() {
+            let weight = prob / weight_sum;
+            let gate_w = moe.gate_exps.view_bytes(
+                per_gate_bytes * expert_idx as u64,
+                vec![h as u64, f_exp as u64],
+            );
+            let up_w = moe.up_exps.view_bytes(
+                per_up_bytes * expert_idx as u64,
+                vec![h as u64, f_exp as u64],
+            );
+            let down_w = moe.down_exps.view_bytes(
+                per_down_bytes * expert_idx as u64,
+                vec![f_exp as u64, h as u64],
+            );
+            if routed_fused {
+                encode_ffn_swiglu_q4_K_f32(
+                    self.ctx, enc, &gate_w, &up_w, &session.h, &inner_tmp, h, f_exp,
+                )?;
+            } else {
+                encode_mat_vec_dispatch(self.ctx, enc, &gate_w, &session.h, &gate_tmp, h, f_exp)?;
+                encode_mat_vec_dispatch(self.ctx, enc, &up_w, &session.h, &up_tmp, h, f_exp)?;
+                encode_silu_mul_f32(self.ctx, enc, &gate_tmp, &up_tmp, &inner_tmp)?;
+            }
+            encode_mat_vec_dispatch(self.ctx, enc, &down_w, &inner_tmp, &out_tmp, f_exp, h)?;
+            encode_axpy_f32(self.ctx, enc, &out_tmp, &session.mixer_out, weight)?;
+        }
+
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            ffn_gate,
+            &session.h,
+            &shared_gate_tmp,
+            h,
+            f_shared,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            ffn_up,
+            &session.h,
+            &shared_up_tmp,
+            h,
+            f_shared,
+        )?;
+        encode_silu_mul_f32(
+            self.ctx,
+            enc,
+            &shared_gate_tmp,
+            &shared_up_tmp,
+            &shared_inner_tmp,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            ffn_down,
+            &shared_inner_tmp,
+            &out_tmp,
+            f_shared,
+            h,
+        )?;
+        encode_axpy_f32(
+            self.ctx,
+            enc,
+            &out_tmp,
+            &session.mixer_out,
+            route.shared_gate_scalar,
+        )?;
+        encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
+        Ok(())
+    }
+
+    fn encode_moe_ffn_apply_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let f_shared = arch.expert_shared_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+
+        if !matches!(moe.gate_exps.dtype, GgmlType::Q4_K | GgmlType::Q5_K)
+            || moe.gate_exps.dtype != moe.up_exps.dtype
+        {
+            return Err(MfError::UnsupportedDtype {
+                name: "MoE routed gate/up expert banks".into(),
+                dtype: moe.gate_exps.dtype,
+            });
+        }
+        if !matches!(moe.down_exps.dtype, GgmlType::Q5_K | GgmlType::Q6_K) {
+            return Err(MfError::UnsupportedDtype {
+                name: "MoE routed down expert bank".into(),
+                dtype: moe.down_exps.dtype,
+            });
+        }
+
+        let moe_inner = session
+            .moe_inner
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let moe_expert_out = session
+            .moe_expert_out
+            .view_subrange(0, vec![(topk * h) as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+        let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        match moe.gate_exps.dtype {
+            GgmlType::Q4_K => encode_moe_swiglu_q4_K_f32(
+                self.ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &session.h,
+                &topk_idx,
+                &moe_inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+            )?,
+            GgmlType::Q5_K => {
+                let gate_pack = session
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = session
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                encode_moe_mat_vec_q5_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &session.h,
+                    &topk_idx,
+                    &gate_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_mat_vec_q5_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.up_exps,
+                    &session.h,
+                    &topk_idx,
+                    &up_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+            }
+            _ => unreachable!(),
+        }
+        match moe.down_exps.dtype {
+            GgmlType::Q5_K => {
+                encode_moe_down_q5_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_weighted_sum_f32(
+                    self.ctx,
+                    enc,
+                    &moe_expert_out,
+                    &topk_w,
+                    &session.mixer_out,
+                    h,
+                    topk,
+                )?;
+            }
+            GgmlType::Q6_K => encode_moe_down_weighted_sum_q6_K_f32(
+                self.ctx,
+                enc,
+                &moe.down_exps,
+                &moe_inner,
+                &topk_idx,
+                &topk_w,
+                &session.mixer_out,
+                f_exp,
+                h,
+                n_expert,
+                topk,
+            )?,
+            _ => unreachable!(),
+        }
+
+        let shared_gate_tmp = session.ffn_gate.view_subrange(0, vec![f_shared as u64]);
+        let shared_up_tmp = session.ffn_up.view_subrange(0, vec![f_shared as u64]);
+        let shared_inner_tmp = session.ffn_inner.view_subrange(0, vec![f_shared as u64]);
+        let shared_out_tmp = session.ffn_out.view_subrange(0, vec![h as u64]);
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            ffn_gate,
+            &session.h,
+            &shared_gate_tmp,
+            h,
+            f_shared,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            ffn_up,
+            &session.h,
+            &shared_up_tmp,
+            h,
+            f_shared,
+        )?;
+        encode_silu_mul_f32(
+            self.ctx,
+            enc,
+            &shared_gate_tmp,
+            &shared_up_tmp,
+            &shared_inner_tmp,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            ffn_down,
+            &shared_inner_tmp,
+            &shared_out_tmp,
+            f_shared,
+            h,
+        )?;
+        encode_axpy_scalar_f32(
+            self.ctx,
+            enc,
+            &shared_out_tmp,
+            &session.moe_shared_gate,
+            &session.mixer_out,
+        )?;
+        encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
+        Ok(())
+    }
+
+    fn encode_moe_block_gpu(
+        &self,
+        enc: &KernelEncoder,
+        block: &MetalBlock,
+        mixer_slot: MixerSlot,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        self.encode_moe_mixer_prep(enc, block, mixer_slot, position, session)?;
+        let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+            MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+            MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+        };
+        let moe = moe.ok_or(MfError::UnsupportedMoe)?;
+        self.encode_moe_route_prepare(enc, session, moe)?;
+        self.encode_moe_ffn_apply_gpu(enc, session, ffn_gate, ffn_up, ffn_down, moe)
+    }
+
+    fn encode_moe_mixer_prep(
+        &self,
+        enc: &KernelEncoder,
+        block: &MetalBlock,
+        mixer_slot: MixerSlot,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let (attn_norm, post_norm) = match block {
+            MetalBlock::Gdn(b) => (&b.attn_norm, &b.post_attn_norm),
+            MetalBlock::Attn(b) => (&b.attn_norm, &b.post_attn_norm),
+        };
+        encode_rms_norm_mul_f32(self.ctx, enc, &session.x, attn_norm, &session.h, RMS_EPS)?;
+        match (block, mixer_slot) {
+            (MetalBlock::Gdn(g), MixerSlot::Gdn(idx)) => self.encode_gdn(enc, g, idx, session)?,
+            (MetalBlock::Attn(a), MixerSlot::Attn(idx)) => {
+                self.encode_attn(enc, a, idx, position, session)?
+            }
+            _ => {
+                return Err(MfError::Metal(MetalError::BadShape {
+                    kernel: "single_token_moe",
+                    detail: "mixer slot type did not match block kind".into(),
+                }));
+            }
+        }
+        encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
+        encode_rms_norm_mul_f32(self.ctx, enc, &session.x, post_norm, &session.h, RMS_EPS)?;
+        Ok(())
+    }
+
     /// Run a single token through the model. Encodes all kernels into
     /// one command buffer, commits, waits, reads back logits.
     ///
@@ -424,8 +1041,116 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<Vec<f32>, MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return self.single_token_moe(token_id, position, session);
+        }
         let (logits, _) = self.single_token_profiled(token_id, position, session)?;
         Ok(logits)
+    }
+
+    fn single_token_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<Vec<f32>, MfError> {
+        let (logits, _) = self.single_token_profiled_moe(token_id, position, session)?;
+        Ok(logits)
+    }
+
+    fn single_token_profiled_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            let slot = match block {
+                MetalBlock::Gdn(_) => {
+                    let s = MixerSlot::Gdn(gdn_idx);
+                    gdn_idx += 1;
+                    s
+                }
+                MetalBlock::Attn(_) => {
+                    let s = MixerSlot::Attn(attn_idx);
+                    attn_idx += 1;
+                    s
+                }
+            };
+            self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+        }
+
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            &enc,
+            &session.x,
+            &self.model.output_norm,
+            &session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            &enc,
+            &self.model.lm_head,
+            &session.h,
+            &session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+        enc.end();
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let mut logits = vec![0.0f32; arch.vocab_size as usize];
+        unsafe {
+            let src = session.logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
+        }
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            logits,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+        ))
     }
 
     /// Same as [`single_token`] but ALSO copies the pre-output_norm hidden
@@ -470,6 +1195,9 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         hidden_dst: &MetalTensor,
     ) -> Result<Vec<f32>, MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -601,6 +1329,9 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(), MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -669,6 +1400,9 @@ impl<'a> MetalForward<'a> {
         target_layer_ids: &[u32],
         hidden_dst: &MetalTensor,
     ) -> Result<(), MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -756,6 +1490,9 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
         hidden_dst: &MetalTensor,
     ) -> Result<Vec<f32>, MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -845,6 +1582,102 @@ impl<'a> MetalForward<'a> {
         Ok(logits)
     }
 
+    /// Same forward as [`single_token_with_hidden`] but reads back only the
+    /// argmax token id instead of the full logits row. Used by the MTP
+    /// speculative path, which needs the greedy next token and the hidden
+    /// carry but never consumes full-vocab logits on CPU.
+    pub fn single_token_argmax_with_hidden(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        hidden_dst: &MetalTensor,
+    ) -> Result<i32, MfError> {
+        let arch = &self.model.arch;
+        if arch.kind == ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        if hidden_dst.n_elements() as usize != h {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "single_token_argmax_with_hidden.hidden_dst",
+                detail: format!("expected {h} elements, got {}", hidden_dst.n_elements()),
+            }));
+        }
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            self.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position,
+                session,
+            )?;
+        }
+
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            &enc,
+            &session.x,
+            &self.model.output_norm,
+            &session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            &enc,
+            &self.model.lm_head,
+            &session.h,
+            &session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+        encode_scatter_offset_f32(self.ctx, &enc, &session.x, hidden_dst, 0, h)?;
+        encode_argmax_f32(
+            self.ctx,
+            &enc,
+            &session.logits,
+            &session.argmax_tok,
+            1,
+            arch.vocab_size as usize,
+        )?;
+
+        enc.end();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+
+        let argmax = unsafe {
+            let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
+            *src
+        };
+        Ok(argmax)
+    }
+
     /// Phase-resolved profiling: splits the per-token forward across
     /// MANY command buffers (one per block, plus embedding and lm_head)
     /// so we can attribute GPU time to logical phases. ★ ARTIFACT WARNING:
@@ -867,6 +1700,9 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<PhaseProfileOutput, MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return self.single_token_phase_profiled_moe(token_id, position, session);
+        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -987,12 +1823,171 @@ impl<'a> MetalForward<'a> {
         Ok((out, total_ms, phases))
     }
 
+    fn single_token_phase_profiled_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<PhaseProfileOutput, MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let t_total = std::time::Instant::now();
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let mut phases: Vec<(String, f64)> = Vec::new();
+        {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_get_rows_f32(
+                self.ctx,
+                &enc,
+                &self.model.token_embd,
+                &session.ids_buf,
+                &session.x,
+                1,
+                h,
+            )?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            phases.push((
+                "embedding".into(),
+                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+            ));
+        }
+
+        let mut gdn_mixer_total_ms = 0.0f64;
+        let mut attn_mixer_total_ms = 0.0f64;
+        let mut route_total_ms = 0.0f64;
+        let mut ffn_total_ms = 0.0f64;
+        let mut gdn_count = 0usize;
+        let mut attn_count = 0usize;
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            let slot = match block {
+                MetalBlock::Gdn(_) => {
+                    let s = MixerSlot::Gdn(gdn_idx);
+                    gdn_idx += 1;
+                    gdn_count += 1;
+                    s
+                }
+                MetalBlock::Attn(_) => {
+                    let s = MixerSlot::Attn(attn_idx);
+                    attn_idx += 1;
+                    attn_count += 1;
+                    s
+                }
+            };
+            let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+                MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+                MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+            };
+            let moe = moe.ok_or(MfError::UnsupportedMoe)?;
+
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                match block {
+                    MetalBlock::Gdn(_) => gdn_mixer_total_ms += ms,
+                    MetalBlock::Attn(_) => attn_mixer_total_ms += ms,
+                }
+            }
+
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                self.encode_moe_route_prepare(&enc, session, moe)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                route_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            }
+
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                ffn_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            }
+        }
+        phases.push((format!("gdn mixer (x{gdn_count})"), gdn_mixer_total_ms));
+        phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
+        phases.push(("moe route".into(), route_total_ms));
+        phases.push(("moe ffn".into(), ffn_total_ms));
+
+        {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            phases.push((
+                "final norm".into(),
+                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+            ));
+        }
+        {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            phases.push((
+                "lm head".into(),
+                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+            ));
+        }
+
+        let mut out = vec![0.0f32; arch.vocab_size as usize];
+        unsafe {
+            let src = session.logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+        }
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((out, total_ms, phases))
+    }
+
     pub fn single_token_profiled(
         &self,
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return self.single_token_profiled_moe(token_id, position, session);
+        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -1084,6 +2079,8 @@ impl<'a> MetalForward<'a> {
                 cpu_to_gpu_complete_ms,
                 gpu_kernel_ms,
                 total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
             },
         ))
     }
@@ -1189,12 +2186,10 @@ impl<'a> MetalForward<'a> {
         encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
         // α source projection.
         encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
-        // α-chain fusion: gdn_alpha = softplus(gdn_a + dt_bias) * a_log.
-        // Replaces 3 dispatches (add_inplace + softplus + mul) with 1 fused
-        // kernel. Bit-exact vs the unfused sequence (validated by
-        // gdn_alpha_chain_matches_unfused). Saves 64 dispatches/token across
-        // 32 GDN layers.
-        encode_gdn_alpha_chain_f32(
+        // Decay-chain fusion: gdn_alpha stores exp(softplus(gdn_a + dt_bias) * a_log).
+        // Replaces add_inplace + softplus + mul + per-row exp with one
+        // per-head fused kernel.
+        encode_gdn_decay_chain_f32(
             self.ctx,
             enc,
             &s.gdn_a,
@@ -1202,7 +2197,7 @@ impl<'a> MetalForward<'a> {
             &gb.a_log,
             &s.gdn_alpha,
         )?;
-        // Now `gdn_alpha` is the per-head g (scalar log-decay).
+        // Now `gdn_alpha` is the per-head decay exp(g), reused by every state row.
 
         // Conv1d step + SiLU. Mutates the conv buffer in place.
         encode_ssm_conv_silu_f32(
@@ -1252,7 +2247,7 @@ impl<'a> MetalForward<'a> {
         )?;
 
         // Recurrence step (kernel does the head-repeat internally).
-        encode_gdn_step_f32(
+        encode_gdn_step_decay_f32(
             self.ctx,
             enc,
             &s.gdn_q_norm,
@@ -1308,7 +2303,7 @@ impl<'a> MetalForward<'a> {
     /// pack buffers (`gdn_qkv_pack`, `gdn_z_pack`); `alpha_in` /
     /// `beta_in` come from the per-token session scratch (`s.gdn_alpha`,
     /// `s.gdn_beta`) populated by per-token alpha/beta mat-vec +
-    /// sigmoid + alpha-chain because production beta_proj/alpha_proj
+    /// sigmoid + decay-chain because production beta_proj/alpha_proj
     /// are F32 (small, mat-mat dispatch overhead > BW savings; see
     /// docs/H5-DFLASH.md rev 10).
     ///
@@ -1323,7 +2318,7 @@ impl<'a> MetalForward<'a> {
         s: &mut MetalSession,
         qkv_in: &MetalTensor,         // [conv_dim] F32 — one row of gdn_qkv_pack
         z_in: &MetalTensor,           // [v_dim] F32   — one row of gdn_z_pack
-        alpha_in: &MetalTensor,       // [n_v] F32     — pre-computed alpha (chained)
+        alpha_in: &MetalTensor,       // [n_v] F32     — pre-computed decay exp(g)
         beta_in: &MetalTensor,        // [n_v] F32     — pre-computed sigmoid(beta)
         gdn_normed_out: &MetalTensor, // [v_dim] F32 — one row of gdn_normed_pack
     ) -> Result<(), MfError> {
@@ -1369,7 +2364,7 @@ impl<'a> MetalForward<'a> {
             head_dim,
             RMS_EPS,
         )?;
-        encode_gdn_step_f32(
+        encode_gdn_step_decay_f32(
             self.ctx,
             enc,
             &s.gdn_q_norm,
@@ -1527,11 +2522,11 @@ impl<'a> MetalForward<'a> {
         // the n_pos ≤ ~7000 correctness cliff (naive's threadgroup-mem
         // scores buffer caps out around there).
         const V4_HEAD_DIM: usize = 256;
-        const V4_GROUP: usize = 6;
-        let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
+        let group = n_q / n_kv;
+        let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
         if use_v4 {
-            let nwg = attn_v4_choose_nwg(s.kv_n_pos[attn_i]);
-            let tile_c = attn_v4_choose_tile_c(s.kv_n_pos[attn_i]);
+            let nwg = attn_v4_choose_nwg(s.kv_n_pos[attn_i], group);
+            let tile_c = attn_v4_choose_tile_c(s.kv_n_pos[attn_i], group);
             encode_attn_decode_v4_f32(
                 self.ctx,
                 enc,
@@ -1655,6 +2650,8 @@ pub struct TokenProfile {
     pub cpu_to_gpu_complete_ms: f64,
     pub gpu_kernel_ms: f64,
     pub total_ms: f64,
+    pub moe_cpu_route_ms: f64,
+    pub moe_cmd_count: u32,
 }
 
 pub const RMS_EPS: f32 = 1e-6;
@@ -1899,7 +2896,7 @@ impl<'a> MetalForward<'a> {
 /// metadata + tensor descriptor table). `layout_version` is a manual
 /// counter bumped whenever the `MetalSession` field layout changes
 /// in a way that would invalidate prior snapshots.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SnapshotIdentity {
     pub model_id: u64,
     pub tokenizer_id: u64,
@@ -1918,7 +2915,7 @@ pub const SNAPSHOT_LAYOUT_VERSION: u32 = 1;
 /// fresh session. Restoring into a fresh session and running additional
 /// tokens is bit-equivalent to cold prefill of the full sequence
 /// (validated by `h2_prefix_cache_correctness_spike`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SessionSnapshot {
     pub identity: SnapshotIdentity,
     /// Tokens consumed up to the snapshot boundary. Used as cache key.
@@ -2305,6 +3302,71 @@ mod tests {
         assert_eq!(argmax_ours, argmax_oracle, "argmax disagreement");
         assert!(cos > 0.9999, "cos={cos} below threshold");
         assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
+    }
+
+    #[test]
+    fn metal_35b_a3b_moe_matches_cpu_smoke() {
+        let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[metal-moe-a3b] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert_eq!(m.arch.kind, ArchKind::Moe);
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok.encode("Hello", false).expect("tokenize");
+        assert_eq!(ids.len(), 1);
+
+        let f = Forward::new(&g, &m);
+        let mut cpu_state = crate::forward::GdnState::fresh(&m);
+        let mut cpu_kv = crate::forward::KvCache::with_capacity(&m, 8);
+        let cpu = f
+            .single_token(ids[0], 0, &mut cpu_state, &mut cpu_kv)
+            .expect("cpu forward");
+
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let mut s = MetalSession::fresh(&ctx, &mm, 8).expect("session");
+        let (metal, prof) = mf
+            .single_token_profiled(ids[0], 0, &mut s)
+            .expect("metal forward");
+
+        let mut argmax_cpu = 0usize;
+        let mut argmax_metal = 0usize;
+        let mut max_cpu = f32::NEG_INFINITY;
+        let mut max_metal = f32::NEG_INFINITY;
+        let mut max_abs = 0.0f32;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for i in 0..cpu.len() {
+            let d = (metal[i] - cpu[i]).abs();
+            max_abs = max_abs.max(d);
+            if cpu[i] > max_cpu {
+                max_cpu = cpu[i];
+                argmax_cpu = i;
+            }
+            if metal[i] > max_metal {
+                max_metal = metal[i];
+                argmax_metal = i;
+            }
+            dot += metal[i] as f64 * cpu[i] as f64;
+            na += (metal[i] as f64).powi(2);
+            nb += (cpu[i] as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        eprintln!(
+            "[metal-moe-a3b] total={:.2}ms gpu={:.2}ms cmd_bufs={} argmax metal={argmax_metal}({max_metal:.4}) cpu={argmax_cpu}({max_cpu:.4}) max|Δ|={max_abs:.4} cos={cos:.6}",
+            prof.total_ms, prof.gpu_kernel_ms, prof.moe_cmd_count
+        );
+        assert_eq!(argmax_metal, argmax_cpu, "argmax disagreement");
+        assert!(cos > 0.995, "cos={cos} below threshold");
     }
 
     /// **H5.2** — Metal multi-layer hidden capture matches CPU oracle.
@@ -3133,26 +4195,76 @@ mod tests {
             &mut phases,
         )?;
         s.kv_n_pos[attn_idx_in_session] = position as usize + 1;
-        // Attn decode.
-        timed(
-            "attn_decode_f16kv",
-            &|enc| {
-                encode_attn_decode_f16kv_f32(
-                    mf.ctx,
-                    enc,
-                    &s.attn_q_normed,
-                    &s.kv_k[attn_idx_in_session],
-                    &s.kv_v[attn_idx_in_session],
-                    &s.attn_o,
-                    n_q,
-                    n_kv,
-                    head_dim,
-                    s.kv_n_pos[attn_idx_in_session],
-                )
-                .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
+        // Attn decode: mirror the production dispatcher so the profiler
+        // tracks the kernel path we actually ship.
+        const V4_HEAD_DIM: usize = 256;
+        let group = n_q / n_kv;
+        let n_pos = s.kv_n_pos[attn_idx_in_session];
+        let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
+        if use_v4 {
+            let nwg = attn_v4_choose_nwg(n_pos, group);
+            let tile_c = attn_v4_choose_tile_c(n_pos, group);
+            timed(
+                "attn_decode_v4_main",
+                &|enc| {
+                    crate::metal::encode_attn_decode_v4_main_only_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_q_normed,
+                        &s.kv_k[attn_idx_in_session],
+                        &s.kv_v[attn_idx_in_session],
+                        &s.attn_v4_o_partial,
+                        &s.attn_v4_ml_partial,
+                        n_q,
+                        n_kv,
+                        head_dim,
+                        n_pos,
+                        nwg,
+                        tile_c,
+                    )
+                    .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+            timed(
+                "attn_decode_v4_reduce",
+                &|enc| {
+                    crate::metal::encode_attn_decode_v4_reduce_only_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_v4_o_partial,
+                        &s.attn_v4_ml_partial,
+                        &s.attn_o,
+                        n_q,
+                        n_kv,
+                        head_dim,
+                        nwg,
+                    )
+                    .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+        } else {
+            timed(
+                "attn_decode_f16kv",
+                &|enc| {
+                    encode_attn_decode_f16kv_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_q_normed,
+                        &s.kv_k[attn_idx_in_session],
+                        &s.kv_v[attn_idx_in_session],
+                        &s.attn_o,
+                        n_q,
+                        n_kv,
+                        head_dim,
+                        n_pos,
+                    )
+                    .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+        }
         // Sigmoid + mul (gated-attn).
         timed(
             "gate sigmoid + mul",
@@ -3346,12 +4458,12 @@ mod tests {
             },
             &mut phases,
         )?;
-        // alpha proj + α-chain (fused: add_dt + softplus + mul).
+        // alpha proj + decay-chain, matching production.
         timed(
-            "alpha_proj+alpha_chain",
+            "alpha_proj+decay_chain",
             &|enc| {
                 encode_mat_vec_dispatch(mf.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
-                encode_gdn_alpha_chain_f32(
+                encode_gdn_decay_chain_f32(
                     mf.ctx,
                     enc,
                     &s.gdn_a,
@@ -3416,11 +4528,11 @@ mod tests {
             },
             &mut phases,
         )?;
-        // gdn_step (the recurrence kernel — likely dominant).
+        // gdn_step_decay: production recurrence with precomputed decay.
         timed(
-            "gdn_step (recurrence)",
+            "gdn_step_decay (recurrence)",
             &|enc| {
-                encode_gdn_step_f32(
+                encode_gdn_step_decay_f32(
                     mf.ctx,
                     enc,
                     &s.gdn_q_norm,
@@ -3569,6 +4681,296 @@ mod tests {
             &|enc| encode_add_inplace_f32(mf.ctx, enc, &s.x, &s.ffn_out).map_err(MfError::from),
             &mut phases,
         )?;
+        Ok(phases)
+    }
+
+    /// Split one MoE block into mixer, route, routed expert FFN, shared FFN,
+    /// and residual pieces. This is profiler-only; production keeps these in a
+    /// single command buffer for normal decode.
+    fn moe_intra_profile_single_block(
+        mf: &MetalForward,
+        block_idx: usize,
+        mixer_slot: MixerSlot,
+        position: u32,
+        s: &mut MetalSession,
+    ) -> Result<Vec<(String, f64)>, MfError> {
+        let block = &mf.model.blocks[block_idx];
+        let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+            MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+            MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+        };
+        let moe = moe.ok_or(MfError::UnsupportedMoe)?;
+        let arch = &mf.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let f_shared = arch.expert_shared_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+
+        let mut phases: Vec<(String, f64)> = Vec::new();
+        let timed = |label: &str,
+                     cb: &dyn Fn(&KernelEncoder) -> Result<(), MfError>,
+                     phases: &mut Vec<(String, f64)>|
+         -> Result<(), MfError> {
+            let cmd = mf.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            cb(&enc)?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push((label.into(), ms));
+            Ok(())
+        };
+        let timed_mut = |label: &str,
+                         cb: &mut dyn FnMut(&KernelEncoder) -> Result<(), MfError>,
+                         phases: &mut Vec<(String, f64)>|
+         -> Result<(), MfError> {
+            let cmd = mf.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            cb(&enc)?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push((label.into(), ms));
+            Ok(())
+        };
+
+        timed_mut(
+            "mixer_prep (norm+mixer+resid+postnorm)",
+            &mut |enc| mf.encode_moe_mixer_prep(enc, block, mixer_slot, position, s),
+            &mut phases,
+        )?;
+        timed_mut(
+            "route_prepare (router+topk+shared_gate)",
+            &mut |enc| mf.encode_moe_route_prepare(enc, s, moe),
+            &mut phases,
+        )?;
+
+        let moe_inner = s.moe_inner.view_subrange(0, vec![(topk * f_exp) as u64]);
+        let moe_expert_out = s.moe_expert_out.view_subrange(0, vec![(topk * h) as u64]);
+        let topk_idx = s.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+        let topk_w = s.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        match moe.gate_exps.dtype {
+            GgmlType::Q4_K => {
+                timed(
+                    "routed_gate_up_swiglu_q4_K",
+                    &|enc| {
+                        encode_moe_swiglu_q4_K_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.gate_exps,
+                            &moe.up_exps,
+                            &s.h,
+                            &topk_idx,
+                            &moe_inner,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
+            GgmlType::Q5_K => {
+                let gate_pack = s
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = s
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                timed(
+                    "routed_gate_q5_K",
+                    &|enc| {
+                        encode_moe_mat_vec_q5_K_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.gate_exps,
+                            &s.h,
+                            &topk_idx,
+                            &gate_pack,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_up_q5_K",
+                    &|enc| {
+                        encode_moe_mat_vec_q5_K_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.up_exps,
+                            &s.h,
+                            &topk_idx,
+                            &up_pack,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_silu_mul",
+                    &|enc| {
+                        encode_silu_mul_f32(mf.ctx, enc, &gate_pack, &up_pack, &moe_inner)
+                            .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
+            dtype => {
+                return Err(MfError::UnsupportedDtype {
+                    name: "MoE routed gate/up expert banks".into(),
+                    dtype,
+                });
+            }
+        }
+
+        match moe.down_exps.dtype {
+            GgmlType::Q5_K => {
+                timed(
+                    "routed_down_q5_K",
+                    &|enc| {
+                        encode_moe_down_q5_K_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &moe_expert_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_weighted_sum",
+                    &|enc| {
+                        encode_moe_weighted_sum_f32(
+                            mf.ctx,
+                            enc,
+                            &moe_expert_out,
+                            &topk_w,
+                            &s.mixer_out,
+                            h,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
+            GgmlType::Q6_K => {
+                timed(
+                    "routed_down_weighted_sum_q6_K",
+                    &|enc| {
+                        encode_moe_down_weighted_sum_q6_K_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &topk_w,
+                            &s.mixer_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
+            dtype => {
+                return Err(MfError::UnsupportedDtype {
+                    name: "MoE routed down expert bank".into(),
+                    dtype,
+                });
+            }
+        }
+
+        let shared_gate_tmp = s.ffn_gate.view_subrange(0, vec![f_shared as u64]);
+        let shared_up_tmp = s.ffn_up.view_subrange(0, vec![f_shared as u64]);
+        let shared_inner_tmp = s.ffn_inner.view_subrange(0, vec![f_shared as u64]);
+        let shared_out_tmp = s.ffn_out.view_subrange(0, vec![h as u64]);
+        timed(
+            "shared_gate (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(mf.ctx, enc, ffn_gate, &s.h, &shared_gate_tmp, h, f_shared)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "shared_up (mat_vec)",
+            &|enc| encode_mat_vec_dispatch(mf.ctx, enc, ffn_up, &s.h, &shared_up_tmp, h, f_shared),
+            &mut phases,
+        )?;
+        timed(
+            "shared_silu_mul",
+            &|enc| {
+                encode_silu_mul_f32(
+                    mf.ctx,
+                    enc,
+                    &shared_gate_tmp,
+                    &shared_up_tmp,
+                    &shared_inner_tmp,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "shared_down (mat_vec)",
+            &|enc| {
+                encode_mat_vec_dispatch(
+                    mf.ctx,
+                    enc,
+                    ffn_down,
+                    &shared_inner_tmp,
+                    &shared_out_tmp,
+                    f_shared,
+                    h,
+                )
+            },
+            &mut phases,
+        )?;
+        timed(
+            "shared_axpy_scalar",
+            &|enc| {
+                encode_axpy_scalar_f32(
+                    mf.ctx,
+                    enc,
+                    &shared_out_tmp,
+                    &s.moe_shared_gate,
+                    &s.mixer_out,
+                )
+                .map_err(MfError::from)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "residual_add #2",
+            &|enc| encode_add_inplace_f32(mf.ctx, enc, &s.x, &s.mixer_out).map_err(MfError::from),
+            &mut phases,
+        )?;
+
         Ok(phases)
     }
 
@@ -3754,6 +5156,128 @@ mod tests {
         eprintln!(
             "[gdn-intra] extrapolated to 48 layers: {:.2} ms",
             total * 48.0
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_gdn_intra_profile() {
+        let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("session");
+        for i in 0..3 {
+            let _ = mf.single_token(0, i as u32, &mut s).expect("warmup");
+        }
+
+        let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("session");
+        let _ = mf.single_token(0, 0, &mut s).expect("p0");
+
+        let n_runs = 8usize;
+        let mut agg: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for run in 0..n_runs {
+            let phases = gdn_intra_profile_single_block(&mf, 0, 0, &mut s).expect("intra");
+            for (name, ms) in phases {
+                if run == 0 {
+                    order.push(name.clone());
+                }
+                *agg.entry(name).or_default() += ms;
+            }
+        }
+        let total: f64 = agg.values().sum::<f64>() / n_runs as f64;
+        eprintln!("[gdn-intra-a3b] === per-sub-phase breakdown (avg of {n_runs} runs) ===");
+        eprintln!("[gdn-intra-a3b] one GDN layer total: {total:.3} ms");
+        for name in &order {
+            let avg_ms = agg[name] / n_runs as f64;
+            let pct = avg_ms / total * 100.0;
+            eprintln!("[gdn-intra-a3b]   {name:35} {avg_ms:6.3} ms  ({pct:5.1}%)");
+        }
+        eprintln!(
+            "[gdn-intra-a3b] extrapolated to 30 layers: {:.2} ms",
+            total * 30.0
+        );
+    }
+
+    fn run_moe_intra_profile(model_path: &str, label: &str, n_runs: usize) {
+        if !std::path::Path::new(model_path).exists() {
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+
+        let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("session");
+        for i in 0..3 {
+            let _ = mf.single_token(0, i as u32, &mut s).expect("warmup");
+        }
+
+        let mut s = MetalSession::fresh(&ctx, &mm, 32).expect("session");
+        let _ = mf.single_token(0, 0, &mut s).expect("p0");
+        let slot = match &mf.model.blocks[0] {
+            MetalBlock::Gdn(_) => MixerSlot::Gdn(0),
+            MetalBlock::Attn(_) => MixerSlot::Attn(0),
+        };
+
+        let mut agg: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for run in 0..n_runs {
+            let phases = moe_intra_profile_single_block(&mf, 0, slot, run as u32, &mut s)
+                .expect("moe-intra");
+            for (name, ms) in phases {
+                if run == 0 {
+                    order.push(name.clone());
+                }
+                *agg.entry(name).or_default() += ms;
+            }
+        }
+        let total: f64 = agg.values().sum::<f64>() / n_runs as f64;
+        eprintln!("[moe-intra-{label}] === per-sub-phase breakdown (avg of {n_runs} runs) ===");
+        eprintln!("[moe-intra-{label}] one MoE block total: {total:.3} ms");
+        for name in &order {
+            let avg_ms = agg[name] / n_runs as f64;
+            let pct = avg_ms / total * 100.0;
+            eprintln!("[moe-intra-{label}]   {name:42} {avg_ms:6.3} ms  ({pct:5.1}%)");
+        }
+        eprintln!(
+            "[moe-intra-{label}] extrapolated to {} blocks: {:.2} ms",
+            mf.model.blocks.len(),
+            total * mf.model.blocks.len() as f64
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_moe_intra_profile() {
+        run_moe_intra_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b",
+            6,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_moe_intra_profile() {
+        run_moe_intra_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b",
+            4,
         );
     }
 

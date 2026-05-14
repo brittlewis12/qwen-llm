@@ -17,7 +17,7 @@
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
@@ -49,9 +49,8 @@ struct Args {
 enum Cmd {
     /// Decode N tokens after a prompt using the plain no-spec path.
     ///
-    /// Note: this path keeps the simple sequential prompt-prefill loop.
-    /// The DFlash benches use the packed-prefill path for apples-to-apples
-    /// speculative-vs-no-spec comparisons.
+    /// Packed prefill is the default no-spec path. `--sequential-prefill`
+    /// keeps the legacy token-by-token prompt replay loop for A/B work.
     Decode(DecodeArgs),
     /// Sweep context length (ramp + measure window).
     CtxSweep(CtxSweepArgs),
@@ -116,10 +115,31 @@ struct DecodeArgs {
     /// llama.cpp/llm `--snapshot`). If provided, compares cos.
     #[arg(long)]
     oracle: Option<PathBuf>,
+    /// Which logits row the oracle should validate.
+    #[arg(long, value_enum, default_value = "final")]
+    oracle_phase: OraclePhase,
     /// Skip the warmup pass (default is to do one warmup, then re-init
     /// the session for the timed run, exactly like the ignored tests).
     #[arg(long)]
     no_warmup: bool,
+    /// Force the legacy sequential prompt replay loop. Useful for A/B timing
+    /// against the dense packed prefill path.
+    #[arg(long)]
+    sequential_prefill: bool,
+    /// Packed prefill chunk size for the layer-major path. If omitted, decode
+    /// chooses a model-aware default (currently dense=256, MoE=16).
+    #[arg(long)]
+    prefill_chunk: Option<usize>,
+    /// Force decode to read back full logits on every generated token instead
+    /// of using the GPU argmax fast path.
+    #[arg(long)]
+    full_logits_decode: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum OraclePhase {
+    Prefill,
+    Final,
 }
 
 #[derive(Parser, Debug)]
@@ -1492,7 +1512,11 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         prompt,
         tokens,
         oracle,
+        oracle_phase,
         no_warmup,
+        sequential_prefill,
+        prefill_chunk,
+        full_logits_decode,
     } = args;
     let prompt =
         prompt.unwrap_or_else(|| "The quick brown fox jumps over the lazy dog".to_string());
@@ -1506,6 +1530,24 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     let tok = Tokenizer::open(&model).context("open tokenizer")?;
 
     let ids = tok.encode(&prompt, false).context("tokenize prompt")?;
+    if ids.is_empty() {
+        return Err(anyhow!("prompt tokenized to an empty sequence"));
+    }
+    let prefill_chunk = prefill_chunk.unwrap_or_else(|| {
+        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+            16
+        } else {
+            256
+        }
+    });
+    if prefill_chunk == 0 {
+        return Err(anyhow!("--prefill-chunk must be >= 1"));
+    }
+    if tokens == 0 && oracle.is_some() && oracle_phase == OraclePhase::Final {
+        return Err(anyhow!(
+            "--oracle-phase final requires at least one decode token; use --oracle-phase prefill for prompt-only validation"
+        ));
+    }
     eprintln!(
         "[bench] model={} prompt={:?} ({} tokens), gen={} tokens",
         model.display(),
@@ -1516,97 +1558,207 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
 
     let mf = MetalForward::new(&ctx, &mm);
     let cap = ids.len() + tokens + 16;
+    let use_packed_prefill = !sequential_prefill;
+    let use_gpu_argmax_decode = !full_logits_decode;
 
     if !no_warmup {
         // One warmup pass to compile pipeline state objects + warm caches.
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
-        let _ = mf.single_token(ids[0], 0, &mut s)?;
+        let warmup_last_logits = if use_packed_prefill {
+            let mut scratch = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, prefill_chunk as u32)
+                .context("packed prefill warmup scratch")?;
+            prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
+                .context("packed prefill warmup")?
+        } else {
+            let mut logits = Vec::new();
+            for (i, &tid) in ids.iter().enumerate() {
+                logits = mf.single_token(tid, i as u32, &mut s)?;
+            }
+            logits
+        };
+
+        if tokens > 0 {
+            let warmup_next = argmax_i32(&warmup_last_logits);
+            let warmup_pos = ids.len() as u32;
+            if use_gpu_argmax_decode {
+                if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+                    let _ = mf.single_token_argmax_profiled(warmup_next, warmup_pos, &mut s)?;
+                } else {
+                    let _ = mf.single_token_argmax(warmup_next, warmup_pos, &mut s)?;
+                }
+            } else if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+                let _ = mf.single_token_profiled(warmup_next, warmup_pos, &mut s)?;
+            } else {
+                let _ = mf.single_token(warmup_next, warmup_pos, &mut s)?;
+            }
+        }
     }
 
     let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
-    let mut per_token_ms: Vec<f64> = Vec::with_capacity(ids.len() + tokens);
+    let mut prefill_token_ms: Vec<f64> = Vec::with_capacity(ids.len());
+    let mut decode_token_ms: Vec<f64> = Vec::with_capacity(tokens);
     let mut per_token_prof: Vec<qwen_llm::metal_forward::TokenProfile> =
         Vec::with_capacity(ids.len() + tokens);
     let mut last_logits: Vec<f32> = Vec::new();
+    let want_prefill_oracle = oracle.is_some() && oracle_phase == OraclePhase::Prefill;
+    let mut prefill_logits_for_oracle: Option<Vec<f32>> = None;
 
     let t0 = Instant::now();
 
-    // Prefill: feed all prompt tokens through (sequential single_token; we
-    // don't have batched prefill yet — that's a future product).
-    for (i, &tid) in ids.iter().enumerate() {
-        let tt = Instant::now();
-        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
-            let (logits, prof) = mf.single_token_profiled(tid, i as u32, &mut s)?;
-            last_logits = logits;
-            per_token_prof.push(prof);
-        } else {
-            last_logits = mf.single_token(tid, i as u32, &mut s)?;
+    if use_packed_prefill {
+        let mut scratch = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, prefill_chunk as u32)
+            .context("packed prefill scratch")?;
+        last_logits =
+            prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
+                .context("packed prefill")?;
+        if want_prefill_oracle {
+            prefill_logits_for_oracle = Some(last_logits.clone());
         }
-        per_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
+    } else {
+        for (i, &tid) in ids.iter().enumerate() {
+            let tt = Instant::now();
+            if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+                let (logits, prof) = mf.single_token_profiled(tid, i as u32, &mut s)?;
+                last_logits = logits;
+                per_token_prof.push(prof);
+            } else {
+                last_logits = mf.single_token(tid, i as u32, &mut s)?;
+            }
+            prefill_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
+        }
+        if want_prefill_oracle {
+            prefill_logits_for_oracle = Some(last_logits.clone());
+        }
     }
     let prefill_wall = t0.elapsed().as_secs_f64() * 1e3;
     let prefill_avg = prefill_wall / ids.len() as f64;
 
-    // Decode loop: greedy argmax sampling on the CPU side. (A backend
-    // sampler kernel is on the roadmap; this is the trivial CPU baseline.)
+    // Decode loop: default greedy path uses GPU argmax so we don't read back a
+    // full vocab row on every generated token. `--full-logits-decode` forces
+    // the legacy path for A/B and debugging.
     let mut gen_ids: Vec<i32> = Vec::with_capacity(tokens);
     let t1 = Instant::now();
+    let need_final_logits = oracle.is_some() && oracle_phase == OraclePhase::Final && tokens > 0;
+    let mut next_tok = argmax_i32(&last_logits);
     for k in 0..tokens {
         let pos = ids.len() + k;
-        let next = argmax_i32(&last_logits);
-        gen_ids.push(next);
+        let input_tok = next_tok;
+        gen_ids.push(input_tok);
         let tt = Instant::now();
-        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
-            let (logits, prof) = mf.single_token_profiled(next, pos as u32, &mut s)?;
+        let need_logits_this_step =
+            !use_gpu_argmax_decode || (need_final_logits && k + 1 == tokens);
+        if need_logits_this_step && m.arch.kind == qwen_llm::model::ArchKind::Moe {
+            let (logits, prof) = mf.single_token_profiled(input_tok, pos as u32, &mut s)?;
+            next_tok = argmax_i32(&logits);
             last_logits = logits;
             per_token_prof.push(prof);
+        } else if need_logits_this_step {
+            last_logits = mf.single_token(input_tok, pos as u32, &mut s)?;
+            next_tok = argmax_i32(&last_logits);
+        } else if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+            let (argmax, prof) = mf.single_token_argmax_profiled(input_tok, pos as u32, &mut s)?;
+            next_tok = argmax;
+            per_token_prof.push(prof);
         } else {
-            last_logits = mf.single_token(next, pos as u32, &mut s)?;
+            next_tok = mf.single_token_argmax(input_tok, pos as u32, &mut s)?;
         }
-        per_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
+        let step_ms = tt.elapsed().as_secs_f64() * 1e3;
+        decode_token_ms.push(step_ms);
     }
     let decode_wall = t1.elapsed().as_secs_f64() * 1e3;
 
     let total_wall = t0.elapsed().as_secs_f64() * 1e3;
 
+    let decode_avg_ms = if tokens > 0 {
+        Some(decode_wall / tokens as f64)
+    } else {
+        None
+    };
     // Decode-only steady-state: skip the very first decode (cache-cold for
     // some downstream PSO + heavily warm-up sensitive).
-    let decode_steady_ms: f64 = if tokens > 1 {
-        per_token_ms[ids.len() + 1..].iter().sum::<f64>() / (tokens - 1) as f64
+    let decode_steady_ms = if decode_token_ms.len() > 1 {
+        Some(decode_token_ms[1..].iter().sum::<f64>() / (decode_token_ms.len() - 1) as f64)
+    } else if decode_token_ms.len() == 1 {
+        Some(decode_wall)
     } else {
-        decode_wall
+        None
     };
 
     eprintln!();
     eprintln!("[bench] === results ===");
+    let decode_mode_label = if use_gpu_argmax_decode && need_final_logits {
+        "gpu-argmax + final-logits-oracle"
+    } else if use_gpu_argmax_decode {
+        "gpu-argmax"
+    } else {
+        "full-logits"
+    };
+    eprintln!("[bench] decode mode: {}", decode_mode_label);
+    eprintln!(
+        "[bench] prefill mode: {}",
+        if use_packed_prefill {
+            "packed layer-major"
+        } else if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+            "sequential MoE"
+        } else {
+            "sequential dense"
+        }
+    );
+    if use_packed_prefill {
+        eprintln!("[bench] prefill chunk: {prefill_chunk}");
+    }
     eprintln!(
         "[bench] prefill: {} tokens in {prefill_wall:.1} ms = {prefill_avg:.2} ms/token = {:.1} t/s",
         ids.len(),
         1000.0 / prefill_avg
     );
-    eprintln!(
-        "[bench] decode:  {tokens} tokens in {decode_wall:.1} ms = {:.2} ms/token (avg) = {:.1} t/s",
-        decode_wall / tokens as f64,
-        1000.0 * tokens as f64 / decode_wall
-    );
-    eprintln!(
-        "[bench] steady:  {decode_steady_ms:.2} ms/token (excl. first decode) = {:.2} t/s",
-        1000.0 / decode_steady_ms
-    );
+    if let Some(avg_ms) = decode_avg_ms {
+        eprintln!(
+            "[bench] decode:  {tokens} tokens in {decode_wall:.1} ms = {avg_ms:.2} ms/token (avg) = {:.1} t/s",
+            1000.0 * tokens as f64 / decode_wall
+        );
+    } else {
+        eprintln!("[bench] decode:  0 tokens requested (no decode loop)");
+    }
+    if let Some(steady_ms) = decode_steady_ms {
+        eprintln!(
+            "[bench] steady:  {steady_ms:.2} ms/token (excl. first decode) = {:.2} t/s",
+            1000.0 / steady_ms
+        );
+    } else {
+        eprintln!("[bench] steady:  N/A (no decode tokens)");
+    }
     eprintln!("[bench] total:   {total_wall:.1} ms wall");
 
-    // Print first/last few per-token times for spot-checking.
-    let n_show = 5usize.min(per_token_ms.len());
-    eprintln!(
-        "[bench] per-token (first {n_show}): {:?}",
-        &per_token_ms[..n_show]
-    );
-    if per_token_ms.len() > 2 * n_show {
-        let m = per_token_ms.len();
+    if use_packed_prefill {
+        eprintln!("[bench] prefill per-token: packed mode (no sequential replay series)");
+    } else if !prefill_token_ms.is_empty() {
+        let n_show = 5usize.min(prefill_token_ms.len());
         eprintln!(
-            "[bench] per-token (last  {n_show}): {:?}",
-            &per_token_ms[m - n_show..]
+            "[bench] prefill per-token (first {n_show}): {:?}",
+            &prefill_token_ms[..n_show]
         );
+        if prefill_token_ms.len() > 2 * n_show {
+            let n = prefill_token_ms.len();
+            eprintln!(
+                "[bench] prefill per-token (last  {n_show}): {:?}",
+                &prefill_token_ms[n - n_show..]
+            );
+        }
+    }
+    if !decode_token_ms.is_empty() {
+        let n_show = 5usize.min(decode_token_ms.len());
+        eprintln!(
+            "[bench] decode per-token (first {n_show}): {:?}",
+            &decode_token_ms[..n_show]
+        );
+        if decode_token_ms.len() > 2 * n_show {
+            let n = decode_token_ms.len();
+            eprintln!(
+                "[bench] decode per-token (last  {n_show}): {:?}",
+                &decode_token_ms[n - n_show..]
+            );
+        }
     }
 
     if m.arch.kind == qwen_llm::model::ArchKind::Moe && !per_token_prof.is_empty() {
@@ -1633,21 +1785,26 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     if let Some(oracle_path) = oracle {
         let bytes = std::fs::read(&oracle_path)
             .with_context(|| format!("read oracle {}", oracle_path.display()))?;
-        if bytes.len() % 4 != 0 || bytes.len() / 4 != last_logits.len() {
+        let oracle_logits: &[f32] = match oracle_phase {
+            OraclePhase::Prefill => prefill_logits_for_oracle.as_deref().unwrap_or(&last_logits),
+            OraclePhase::Final => &last_logits,
+        };
+        if bytes.len() % 4 != 0 || bytes.len() / 4 != oracle_logits.len() {
             return Err(anyhow!(
                 "oracle size {} bytes ({} f32) != logits len {}",
                 bytes.len(),
                 bytes.len() / 4,
-                last_logits.len()
+                oracle_logits.len()
             ));
         }
         let oracle: Vec<f32> = bytes
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
-        let (cos, max_abs, argmax_ours, argmax_oracle) = compare_logits(&last_logits, &oracle);
+        let (cos, max_abs, argmax_ours, argmax_oracle) = compare_logits(oracle_logits, &oracle);
         eprintln!(
-            "[bench] oracle:  cos={cos:.6}  max|Δ|={max_abs:.4}  argmax: ours={argmax_ours} oracle={argmax_oracle} {}",
+            "[bench] oracle ({:?}):  cos={cos:.6}  max|Δ|={max_abs:.4}  argmax: ours={argmax_ours} oracle={argmax_oracle} {}",
+            oracle_phase,
             if argmax_ours == argmax_oracle {
                 "✓"
             } else {

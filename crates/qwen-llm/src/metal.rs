@@ -299,6 +299,25 @@ impl MetalTensor {
         })
     }
 
+    /// Allocate a Q8_0 tensor. Used for experimental KV-Q8 cache storage.
+    /// Logical shape is still expressed in ELEMENTS; byte size follows ggml's
+    /// Q8_0 block layout via `n_bytes()`.
+    pub fn zeros_q8_0(ctx: &MetalContext, shape: Vec<u64>) -> Result<Self, MetalError> {
+        let probe = Self {
+            buffer: ctx.buffer_uninit(1)?,
+            offset: 0,
+            shape: shape.clone(),
+            dtype: GgmlType::Q8_0,
+        };
+        let buffer = ctx.buffer_uninit(probe.n_bytes() as usize)?;
+        Ok(Self {
+            buffer,
+            offset: 0,
+            shape,
+            dtype: GgmlType::Q8_0,
+        })
+    }
+
     /// Build a zero-copy sub-view of this tensor: same underlying MTLBuffer,
     /// shifted by `elem_offset` elements (of the tensor's dtype), with a
     /// new logical `shape`. The resulting view shares storage and aliases
@@ -1069,6 +1088,103 @@ pub fn encode_moe_swiglu_q4_K_f32(
         MTLSize {
             width: n_out.div_ceil(NR0 * NSG),
             height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q4_K_f32_packed_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    topk_idx_pack: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_packed_slots",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::Q4_K || w_up.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_packed_slots",
+            detail: format!(
+                "expected Q4_K expert gate/up, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    let n_slots = n_tokens * topk;
+    if x_pack.n_elements() as usize != n_tokens * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_packed_slots",
+            detail: format!(
+                "x_pack.n_elements={} != n_tokens*n_in={}",
+                x_pack.n_elements(),
+                n_tokens * n_in
+            ),
+        });
+    }
+    if topk_idx_pack.n_elements() as usize != n_slots
+        || inner.n_elements() as usize != n_slots * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_packed_slots",
+            detail: format!(
+                "slot/inner mismatch: idx={} inner={} expected idx={n_slots} inner={}",
+                topk_idx_pack.n_elements(),
+                inner.n_elements(),
+                n_slots * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_q4_K_f32_packed_slots")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x_pack);
+    enc.set_tensor(4, topk_idx_pack);
+    enc.set_tensor(5, inner);
+
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: n_slots,
             depth: 1,
         },
         MTLSize {
@@ -2956,11 +3072,11 @@ pub fn encode_attn_decode_v4_f32(
             detail: format!("group={group} unsupported; expected one of {{6, 8, 16}}"),
         });
     }
-    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+    if k_cache.dtype != v_cache.dtype || !matches!(k_cache.dtype, GgmlType::F16 | GgmlType::Q8_0) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4",
             detail: format!(
-                "k/v expected F16 dtype, got {:?}/{:?}",
+                "k/v expected matching F16 or Q8_0 dtypes, got {:?}/{:?}",
                 k_cache.dtype, v_cache.dtype
             ),
         });
@@ -3031,19 +3147,31 @@ pub fn encode_attn_decode_v4_f32(
         scale: f32,
     }
     let pipeline_name = if group_tile == group {
-        match (group, tile_c) {
-            (6, 16) => "kernel_attn_decode_v4_c16_f32",
-            (6, 32) => "kernel_attn_decode_v4_f32",
-            (6, 64) => "kernel_attn_decode_v4_c64_f32",
-            (6, 128) => "kernel_attn_decode_v4_c128_f32",
-            (8, 16) => "kernel_attn_decode_v4_g8_c16_f32",
-            (8, 32) => "kernel_attn_decode_v4_g8_f32",
-            (8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
-            (8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
-            (16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
-            (16, 32) => "kernel_attn_decode_v4_g16_f32",
-            (16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
-            (16, 128) => "kernel_attn_decode_v4_g16_c128_f32",
+        match (k_cache.dtype, group, tile_c) {
+            (GgmlType::Q8_0, 6, 16) => "kernel_attn_decode_v4_q8_c16_f32",
+            (GgmlType::Q8_0, 6, 32) => "kernel_attn_decode_v4_q8_f32",
+            (GgmlType::Q8_0, 6, 64) => "kernel_attn_decode_v4_q8_c64_f32",
+            (GgmlType::Q8_0, 6, 128) => "kernel_attn_decode_v4_q8_c128_f32",
+            (GgmlType::F16, 6, 16) => "kernel_attn_decode_v4_c16_f32",
+            (GgmlType::F16, 6, 32) => "kernel_attn_decode_v4_f32",
+            (GgmlType::F16, 6, 64) => "kernel_attn_decode_v4_c64_f32",
+            (GgmlType::F16, 6, 128) => "kernel_attn_decode_v4_c128_f32",
+            (GgmlType::F16, 8, 16) => "kernel_attn_decode_v4_g8_c16_f32",
+            (GgmlType::F16, 8, 32) => "kernel_attn_decode_v4_g8_f32",
+            (GgmlType::F16, 8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
+            (GgmlType::F16, 8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
+            (GgmlType::F16, 16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
+            (GgmlType::F16, 16, 32) => "kernel_attn_decode_v4_g16_f32",
+            (GgmlType::F16, 16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
+            (GgmlType::F16, 16, 128) => "kernel_attn_decode_v4_g16_c128_f32",
+            (GgmlType::Q8_0, _, _) => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4",
+                    detail: format!(
+                        "Q8_0 KV currently supports only group=6 main kernels; got group={group}, tile_c={tile_c}"
+                    ),
+                });
+            }
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4",
@@ -3054,15 +3182,23 @@ pub fn encode_attn_decode_v4_f32(
             }
         }
     } else {
-        match (group, group_tile, tile_c) {
-            (16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
-            (16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
-            (16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
-            (16, 8, 128) => "kernel_attn_decode_v4_g16_t8_c128_f32",
-            (16, 4, 16) => "kernel_attn_decode_v4_g16_t4_c16_f32",
-            (16, 4, 32) => "kernel_attn_decode_v4_g16_t4_f32",
-            (16, 4, 64) => "kernel_attn_decode_v4_g16_t4_c64_f32",
-            (16, 4, 128) => "kernel_attn_decode_v4_g16_t4_c128_f32",
+        match (k_cache.dtype, group, group_tile, tile_c) {
+            (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
+            (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
+            (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
+            (GgmlType::F16, 16, 8, 128) => "kernel_attn_decode_v4_g16_t8_c128_f32",
+            (GgmlType::F16, 16, 4, 16) => "kernel_attn_decode_v4_g16_t4_c16_f32",
+            (GgmlType::F16, 16, 4, 32) => "kernel_attn_decode_v4_g16_t4_f32",
+            (GgmlType::F16, 16, 4, 64) => "kernel_attn_decode_v4_g16_t4_c64_f32",
+            (GgmlType::F16, 16, 4, 128) => "kernel_attn_decode_v4_g16_t4_c128_f32",
+            (GgmlType::Q8_0, _, _, _) => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4",
+                    detail: format!(
+                        "Q8_0 KV does not yet support subgroup kernels (group={group}, group_tile={group_tile}, tile_c={tile_c})"
+                    ),
+                });
+            }
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4",
@@ -3202,11 +3338,11 @@ pub fn encode_attn_decode_v4_main_only_f32(
             detail: format!("group={group} unsupported; expected one of {{6, 8, 16}}"),
         });
     }
-    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+    if k_cache.dtype != v_cache.dtype || !matches!(k_cache.dtype, GgmlType::F16 | GgmlType::Q8_0) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main",
             detail: format!(
-                "k/v expected F16 dtype, got {:?}/{:?}",
+                "k/v expected matching F16 or Q8_0 dtypes, got {:?}/{:?}",
                 k_cache.dtype, v_cache.dtype
             ),
         });
@@ -3267,19 +3403,31 @@ pub fn encode_attn_decode_v4_main_only_f32(
         scale: f32,
     }
     let pipeline_name = if group_tile == group {
-        match (group, tile_c) {
-            (6, 16) => "kernel_attn_decode_v4_c16_f32",
-            (6, 32) => "kernel_attn_decode_v4_f32",
-            (6, 64) => "kernel_attn_decode_v4_c64_f32",
-            (6, 128) => "kernel_attn_decode_v4_c128_f32",
-            (8, 16) => "kernel_attn_decode_v4_g8_c16_f32",
-            (8, 32) => "kernel_attn_decode_v4_g8_f32",
-            (8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
-            (8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
-            (16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
-            (16, 32) => "kernel_attn_decode_v4_g16_f32",
-            (16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
-            (16, 128) => "kernel_attn_decode_v4_g16_c128_f32",
+        match (k_cache.dtype, group, tile_c) {
+            (GgmlType::Q8_0, 6, 16) => "kernel_attn_decode_v4_q8_c16_f32",
+            (GgmlType::Q8_0, 6, 32) => "kernel_attn_decode_v4_q8_f32",
+            (GgmlType::Q8_0, 6, 64) => "kernel_attn_decode_v4_q8_c64_f32",
+            (GgmlType::Q8_0, 6, 128) => "kernel_attn_decode_v4_q8_c128_f32",
+            (GgmlType::F16, 6, 16) => "kernel_attn_decode_v4_c16_f32",
+            (GgmlType::F16, 6, 32) => "kernel_attn_decode_v4_f32",
+            (GgmlType::F16, 6, 64) => "kernel_attn_decode_v4_c64_f32",
+            (GgmlType::F16, 6, 128) => "kernel_attn_decode_v4_c128_f32",
+            (GgmlType::F16, 8, 16) => "kernel_attn_decode_v4_g8_c16_f32",
+            (GgmlType::F16, 8, 32) => "kernel_attn_decode_v4_g8_f32",
+            (GgmlType::F16, 8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
+            (GgmlType::F16, 8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
+            (GgmlType::F16, 16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
+            (GgmlType::F16, 16, 32) => "kernel_attn_decode_v4_g16_f32",
+            (GgmlType::F16, 16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
+            (GgmlType::F16, 16, 128) => "kernel_attn_decode_v4_g16_c128_f32",
+            (GgmlType::Q8_0, _, _) => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4_main",
+                    detail: format!(
+                        "Q8_0 KV currently supports only group=6 main kernels; got group={group}, tile_c={tile_c}"
+                    ),
+                });
+            }
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4_main",
@@ -3290,15 +3438,23 @@ pub fn encode_attn_decode_v4_main_only_f32(
             }
         }
     } else {
-        match (group, group_tile, tile_c) {
-            (16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
-            (16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
-            (16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
-            (16, 8, 128) => "kernel_attn_decode_v4_g16_t8_c128_f32",
-            (16, 4, 16) => "kernel_attn_decode_v4_g16_t4_c16_f32",
-            (16, 4, 32) => "kernel_attn_decode_v4_g16_t4_f32",
-            (16, 4, 64) => "kernel_attn_decode_v4_g16_t4_c64_f32",
-            (16, 4, 128) => "kernel_attn_decode_v4_g16_t4_c128_f32",
+        match (k_cache.dtype, group, group_tile, tile_c) {
+            (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
+            (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
+            (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
+            (GgmlType::F16, 16, 8, 128) => "kernel_attn_decode_v4_g16_t8_c128_f32",
+            (GgmlType::F16, 16, 4, 16) => "kernel_attn_decode_v4_g16_t4_c16_f32",
+            (GgmlType::F16, 16, 4, 32) => "kernel_attn_decode_v4_g16_t4_f32",
+            (GgmlType::F16, 16, 4, 64) => "kernel_attn_decode_v4_g16_t4_c64_f32",
+            (GgmlType::F16, 16, 4, 128) => "kernel_attn_decode_v4_g16_t4_c128_f32",
+            (GgmlType::Q8_0, _, _, _) => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4_main",
+                    detail: format!(
+                        "Q8_0 KV does not yet support subgroup kernels (group={group}, group_tile={group_tile}, tile_c={tile_c})"
+                    ),
+                });
+            }
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4_main",
@@ -3601,6 +3757,101 @@ pub fn encode_scatter_offset_f32_to_f16_kv(
         },
         MTLSize {
             width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Fused K+V scatter into Q8_0 caches. Quantizes each 32-element block with
+/// ggml's reference rule: `d = amax / 127`, `qs[j] = round(x[j] / d)`.
+///
+/// Constraints: `dst_off` and `n` must both be multiples of 32 so the append
+/// lands on Q8_0 block boundaries.
+pub fn encode_scatter_offset_f32_to_q8_0_kv(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    k_src: &MetalTensor,
+    v_src: &MetalTensor,
+    k_dst: &MetalTensor,
+    v_dst: &MetalTensor,
+    dst_off: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    const QK8_0: usize = 32;
+    if k_src.dtype != GgmlType::F32 || v_src.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_q8_0_kv",
+            detail: format!(
+                "expected F32 sources, got k={:?} v={:?}",
+                k_src.dtype, v_src.dtype
+            ),
+        });
+    }
+    if k_dst.dtype != GgmlType::Q8_0 || v_dst.dtype != GgmlType::Q8_0 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_q8_0_kv",
+            detail: format!(
+                "expected Q8_0 dests, got k={:?} v={:?}",
+                k_dst.dtype, v_dst.dtype
+            ),
+        });
+    }
+    if k_src.n_elements() as usize != n || v_src.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_q8_0_kv",
+            detail: format!(
+                "src lengths k={} v={} != n={n}",
+                k_src.n_elements(),
+                v_src.n_elements()
+            ),
+        });
+    }
+    if dst_off % QK8_0 != 0 || n % QK8_0 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_q8_0_kv",
+            detail: format!("dst_off={dst_off} and n={n} must both be multiples of {QK8_0}"),
+        });
+    }
+    if (dst_off + n) as u64 > k_dst.n_elements() || (dst_off + n) as u64 > v_dst.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_q8_0_kv",
+            detail: format!(
+                "dst_off+n={} exceeds k.n={} or v.n={}",
+                dst_off + n,
+                k_dst.n_elements(),
+                v_dst.n_elements()
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_blocks: u32,
+        dst_block_off: u32,
+    }
+    let pso = ctx.pipeline("kernel_scatter_offset_f32_to_q8_0_kv")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_blocks: (n / QK8_0) as u32,
+            dst_block_off: (dst_off / QK8_0) as u32,
+        },
+    );
+    enc.set_tensor(1, k_src);
+    enc.set_tensor(2, v_src);
+    enc.set_tensor(3, k_dst);
+    enc.set_tensor(4, v_dst);
+    enc.dispatch(
+        MTLSize {
+            width: (n / QK8_0) as usize,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
             height: 1,
             depth: 1,
         },
@@ -6964,6 +7215,244 @@ mod tests {
             );
             eprintln!("[scatter_kv_fused slot={dst_off_slot}] byte-identical to unfused");
         }
+    }
+
+    #[test]
+    fn scatter_kv_q8_matches_ref_quant() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let kv_dim = 4 * 256usize;
+        let cap = 8usize;
+        let k_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.03125)
+            .collect();
+        let v_src: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.046875)
+            .collect();
+        let k_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&k_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let v_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&v_src),
+            vec![kv_dim as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+
+        for &dst_off_slot in &[0usize, 3, 7] {
+            let dst_off = dst_off_slot * kv_dim;
+            let k_q8 = MetalTensor::zeros_q8_0(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_q8 = MetalTensor::zeros_q8_0(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_q8_0_kv(
+                    &ctx, enc, &k_src_t, &v_src_t, &k_q8, &v_q8, dst_off, kv_dim,
+                )
+            })
+            .unwrap();
+
+            let q8_block_bytes = 34usize;
+            let blocks_per_row = kv_dim / 32;
+            let total_bytes = cap * blocks_per_row * q8_block_bytes;
+            let k_gpu: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    k_q8.buffer.contents().as_ptr() as *const u8,
+                    total_bytes,
+                )
+            };
+            let v_gpu: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    v_q8.buffer.contents().as_ptr() as *const u8,
+                    total_bytes,
+                )
+            };
+
+            let mut k_ref = vec![0u8; total_bytes];
+            let mut v_ref = vec![0u8; total_bytes];
+            let block_base = dst_off / 32;
+            for (src, dst) in [(&k_src, &mut k_ref), (&v_src, &mut v_ref)] {
+                for blk in 0..blocks_per_row {
+                    let src_blk = &src[blk * 32..(blk + 1) * 32];
+                    let amax = src_blk.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+                    let d = amax / 127.0f32;
+                    let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+                    let dst_blk = (block_base + blk) * q8_block_bytes;
+                    let dh = half::f16::from_f32(d).to_bits().to_le_bytes();
+                    dst[dst_blk..dst_blk + 2].copy_from_slice(&dh);
+                    for j in 0..32 {
+                        dst[dst_blk + 2 + j] = ((src_blk[j] * id).round() as i8) as u8;
+                    }
+                }
+            }
+
+            assert_eq!(
+                k_gpu,
+                k_ref.as_slice(),
+                "Q8 K mismatch at slot={dst_off_slot}"
+            );
+            assert_eq!(
+                v_gpu,
+                v_ref.as_slice(),
+                "Q8 V mismatch at slot={dst_off_slot}"
+            );
+            eprintln!("[scatter_kv_q8 slot={dst_off_slot}] byte-identical to ref quantization");
+        }
+    }
+
+    #[test]
+    fn attn_v4_q8_kv_close_to_f16_kv() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n_q = 24usize;
+        let n_kv = 4usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+        let n_pos = 4096usize;
+        let nwg = 64usize;
+        let tile_c = 32usize;
+
+        let q: Vec<f32> = (0..n_q * hd)
+            .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+            .collect();
+        let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+            .collect();
+        let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+            .collect();
+
+        let q_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&q),
+            vec![(n_q * hd) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let k_f16 = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+        let v_f16 = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+        let k_q8 = MetalTensor::zeros_q8_0(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+        let v_q8 = MetalTensor::zeros_q8_0(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+
+        let k_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&k_f32),
+            vec![k_f32.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let v_src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&v_f32),
+            vec![v_f32.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_scatter_offset_f32_to_f16_kv(
+                &ctx,
+                enc,
+                &k_src_t,
+                &v_src_t,
+                &k_f16,
+                &v_f16,
+                0,
+                k_f32.len(),
+            )?;
+            encode_scatter_offset_f32_to_q8_0_kv(
+                &ctx,
+                enc,
+                &k_src_t,
+                &v_src_t,
+                &k_q8,
+                &v_q8,
+                0,
+                k_f32.len(),
+            )
+        })
+        .unwrap();
+
+        let o_partial_f16 =
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * hd) as u64]).unwrap();
+        let ml_partial_f16 =
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * 2) as u64]).unwrap();
+        let out_f16 = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+        let o_partial_q8 =
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * hd) as u64]).unwrap();
+        let ml_partial_q8 =
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * 2) as u64]).unwrap();
+        let out_q8 = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+        one_shot(&ctx, |enc| {
+            encode_attn_decode_v4_f32(
+                &ctx,
+                enc,
+                &q_t,
+                &k_f16,
+                &v_f16,
+                &o_partial_f16,
+                &ml_partial_f16,
+                &out_f16,
+                n_q,
+                n_kv,
+                hd,
+                n_pos,
+                nwg,
+                tile_c,
+            )
+        })
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_attn_decode_v4_f32(
+                &ctx,
+                enc,
+                &q_t,
+                &k_q8,
+                &v_q8,
+                &o_partial_q8,
+                &ml_partial_q8,
+                &out_q8,
+                n_q,
+                n_kv,
+                hd,
+                n_pos,
+                nwg,
+                tile_c,
+            )
+        })
+        .unwrap();
+
+        let y_f16 = read_back_f32(&out_f16.buffer, n_q * hd);
+        let y_q8 = read_back_f32(&out_q8.buffer, n_q * hd);
+        let max_abs = y_f16
+            .iter()
+            .zip(y_q8.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = y_f16
+            .iter()
+            .zip(y_q8.iter())
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum();
+        let na: f64 = y_f16
+            .iter()
+            .map(|x| (*x as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let nb: f64 = y_q8.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        let cos = dot / (na * nb + 1e-30);
+        eprintln!("[attn_v4_q8_kv] cos={cos:.6} max|Δ|={max_abs:.4}");
+        assert!(cos > 0.999, "q8 kv cos too low: {cos}");
+        assert!(max_abs < 0.05, "q8 kv max|Δ| too high: {max_abs}");
     }
 
     /// GDN α-chain fusion vs the 3-dispatch reference (add_inplace +

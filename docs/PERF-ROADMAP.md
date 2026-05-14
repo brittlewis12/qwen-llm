@@ -40,6 +40,20 @@ M4 Max, release `qwen-bench`, sequential runs.
 
 Recent confirmed wins:
 
+- Dense packed prefill chunk tuning was a major win: on the same 321-token 27B
+  prompt, moving from inherited `P=16` to dense default `P=256` improved prompt
+  throughput from ~77.9 t/s to ~140.7 t/s with decode unchanged.
+- Dense packed prefill is now the default no-spec path in `qwen-bench decode`
+  for dense models; on a 321-token 27B prompt it improved prefill from 24.3 t/s
+  to 78.1 t/s (~3.22x) with decode unchanged.
+- MoE packed prefill stage 1 is now live in `qwen-bench decode`; on a 321-token
+  prompt it improves prefill from 74.8 -> 91.3 t/s on 35B A3B and 32.1 -> 36.6
+  t/s on 122B A10B, with decode essentially unchanged.
+- No-spec GPU argmax decode path landed. Dense decode is neutral within noise;
+  MoE decode improves modestly by avoiding full logits readback (~1.1-1.5% on
+  A3B / 122B in current 64-token runs).
+- Dense KV-Q8 prototype is currently a negative result on M4 for the existing
+  v4 main-kernel structure; attention gets slower, not faster.
 - Group16 attention tile4 default for 122B long context.
 - Group6 dense attention `NWG=64` at `n_pos >= 4096`.
 - `QWEN_ATTN_V4_NWG`, `QWEN_ATTN_V4_TILE_C`, and `QWEN_ATTN_V4_G16_TILE` A/B knobs.
@@ -48,86 +62,76 @@ Recent confirmed wins:
 
 ## Force-Ranked Next Bets
 
-### 1. Wire Dense Packed Prefill Into Normal No-Spec Decode
+### 1. Grouped Routed-Expert Execution For MoE Packed Prefill
 
-Optimizes: prompt processing, TTFT, `pp512`, total wall.
+Optimizes: MoE prompt processing, TTFT, `pp512` for 35B A3B and 122B A10B.
 
-Why it is first:
+Why it is first now:
 
-- `qwen-bench decode` still sequentially replays prompt tokens through
-  `single_token`.
-- Packed dense prefill already exists in the DFlash path via
-  `prefill_tokens_with_multi_hidden` and has measured ~2.7-3.4x prompt speedups.
-- This is the most direct path to improving plain no-spec benchmark parity
-  against llama.cpp prompt processing.
+- MoE packed prefill stage 1 already landed and is a real win.
+- The remaining structural waste is still token-by-token routed expert execution.
+- Grouping tokens by selected expert is the next step that can unlock another
+  meaningful chunk of MoE prompt throughput.
+- Packed-MoE tail attribution now confirms this directly: routed FFN is ~47% of
+  the A3B tail and ~57% of the 122B tail.
 
-Expected payoff: large for prefill/TTFT; no direct decode-token speedup.
+Expected payoff: medium-to-large additional MoE prefill gain; no direct
+decode-token speedup.
 
 Risks and constraints:
 
-- Dense-only until MoE semantics are implemented.
-- Do not route MoE through dense FFN packed prefill.
-- Preserve last-token tail semantics: final norm + lm_head + bootstrap logits.
+- Dynamic top-k routing can destroy batching if grouped naively.
+- Must preserve router softmax/top-k tie semantics and shared expert gate.
+- First packed-slot routed execution attempt failed the hard correctness gate;
+  keep future attempts behind the existing tests until they are green.
 
 Acceptance gates:
 
-- Dense 27B packed-prefill logits/session state match sequential loop.
-- `qwen-bench decode` uses packed prefill for dense by default.
-- Compare `pp512`/TTFT against llama.cpp and old sequential path.
+- Packed-MoE profiler identifies routed expert execution as the remaining large
+  bucket.
+- Grouped execution preserves logits / state equivalence on A3B production gates.
 
-### 2. Add No-Spec GPU Argmax / Avoid Full Logits Readback
+### 2. MoE Packed Prefill Hardening
 
-Optimizes: decode throughput, all greedy paths, readback overhead.
+Optimizes: correctness confidence and trustworthy iteration speed.
 
 Why it is second:
 
-- Plain decode still copies the full vocab logits row to CPU and argmaxes there.
-- GPU argmax already exists and is used by MTP/DFlash paths.
-- Low-risk, broad cleanup before heavier command-system work.
-
-Expected payoff: small but cross-model; likely low single-digit percent, with
-larger relative benefit on fast MoE decode.
-
-Risks and constraints:
-
-- Greedy argmax is not a full sampling implementation.
-- Keep a full-logits/debug path for validation and API users that need logits.
-- Tie-breaking must match existing CPU argmax tests.
+- Codex-wrap found no major blocker, but the MoE hidden-capture path still lacks
+  a dedicated packed-vs-oracle gate.
+- We also want packed-MoE phase timing so the grouped-expert follow-up targets
+  the actual remaining cost, not our guesses.
 
 Acceptance gates:
 
-- Greedy generated token stream matches full-logits CPU argmax path.
-- Readback bytes/token drop for no-spec greedy decode.
-- Dense 27B, 35B A3B, and 122B A10B decode guardrails do not regress.
+- Add a MoE packed hidden-capture / chunk-boundary correctness gate.
+- Add packed-MoE phase timing or equivalent attribution for prompt processing.
 
-### 3. KV-Q8 / Quantized KV Cache For Long Context
+Status:
 
-Optimizes: long-context decode, DFlash usefulness at long context, memory.
+- The hidden-capture / chunk-boundary gate is now in place for 35B A3B.
+- Packed-MoE tail attribution is now available and points at routed expert
+  execution as the dominant bucket.
 
-Why it is third:
+### 3. Dense Prompt Attribution Beyond Chunk Size
 
-- After attention NWG64, attention remains the main context-scaling term.
-- Dense 27B attention is ~14.3 ms at 16K and ~19.3 ms at 32K.
-- Halving KV bandwidth should compound with attention v4 improvements and push
-  speculative decode thresholds higher.
+Optimizes: dense prompt processing and TTFT.
 
-Expected payoff: several ms/token on dense 27B at 16K-32K; smaller but still
-meaningful on 122B because attention is a smaller share.
+Why it is now the next dense question:
 
-Risks and constraints:
-
-- Higher correctness and quality burden than prefill/readback work.
-- Requires KV append conversion, new attention-v4 read path, and cache restore /
-  prefix-cache compatibility.
-- Needs quality/perplexity or long-context oracle checks, not just cosine smoke.
+- We found a huge non-kernel win just by tuning packed prefill chunk size.
+- Dense prompt throughput is now ~140.7 t/s on the same prompt where llama.cpp
+  reports ~186.8 t/s, so the gap is much smaller but still real.
+- The next dense move should be attribution-driven: determine whether the
+  residual prompt gap is mostly prompt-attention, GDN recurrence, or mat-mat.
 
 Acceptance gates:
 
-- F16-KV and Q8-KV logits stay within agreed tolerance on dense and MoE shapes.
-- Long-context ctx sweeps improve at 16K/32K without short-context regression.
-- Prefix cache / restore tests cover the new KV dtype.
+- Add dense packed-prefill attribution on the production prompt path.
+- Use it to decide whether to crib llama.cpp prompt flash attention or mat-mat
+  path ideas next.
 
-### 4. MoE Packed Routed-Expert Prefill
+### 4. Measure Command Overhead, Then Decide ICB / MTL4
 
 Optimizes: MoE prompt processing, TTFT, `pp512` for 35B A3B and 122B A10B.
 
@@ -154,7 +158,7 @@ Acceptance gates:
   router decisions for small and production models.
 - A3B and 122B `pp512` improve materially against sequential baseline.
 
-### 5. Measure Command Overhead, Then Decide ICB / MTL4
+### 5. Prefill Mat-Mat Quality
 
 Optimizes: decode throughput, all models if host/driver overhead is real.
 
@@ -179,7 +183,60 @@ Acceptance gates:
   evidence that justifies the work.
 - Prototype must improve total wall, not only encode time.
 
-### 6. Prefill Mat-Mat Quality
+### 6. KV-Q8 / Quantized KV Cache For Long Context
+
+Optimizes: long-context decode, DFlash usefulness at long context, memory.
+
+Current read:
+
+- The first dense KV-Q8 prototype is a negative result on M4: despite exact
+  append quantization and good output similarity, the current Q8 v4 main path
+  makes attention slower than the tuned F16 path.
+- Codex-wrap review says the likely cause is structural: scalar Q8 dequant/load
+  overhead is overpowering stored-byte savings against an already-strong F16
+  vectorized path.
+
+Expected payoff: still potentially large in theory, but only if a materially
+different reader structure wins. Do not spend more blind sweep time on the
+current implementation.
+
+Risks and constraints:
+
+- Easy time sink.
+- Needs a fundamentally better Q8 read path or a different compression format to
+  be worth revisiting.
+
+Acceptance gates:
+
+- Revisit only with a concrete new kernel structure and a fast feedback plan.
+- Cut again quickly if attention does not beat F16 at 32K or 64K.
+
+### 7. Dense GDN / FFN Decode Surgery
+
+Optimizes: decode throughput, all models if host/driver overhead is real.
+
+Why it is not higher:
+
+- Current production path already uses one command buffer per token.
+- Recent sweeps show CPU encode around ~0.15-0.25 ms/token, while GPU kernels
+  dominate the measured wall.
+- ICB/MTL4 has high plumbing cost and API churn risk.
+
+Expected payoff: uncertain; could matter most for smaller dense models and MoE
+tiny-kernel-heavy paths.
+
+Risks and constraints:
+
+- Easy to spend a lot of time for sub-5% if GPU time dominates.
+- Dynamic scalar args and per-session buffers must stay correct.
+
+Acceptance gates:
+
+- Before implementation, produce production-shaped CPU encode / GPU / wall gap
+  evidence that justifies the work.
+- Prototype must improve total wall, not only encode time.
+
+### 8. Keep GPU Argmax / Full-Logits Decode Honest
 
 Optimizes: prompt processing after packed prefill is wired everywhere.
 
@@ -201,7 +258,37 @@ Acceptance gates:
 - Same-harness pp comparison identifies mat-mat as the remaining bottleneck.
 - Kernel changes improve dense and/or MoE packed prefill end-to-end.
 
-### 7. Dense GDN / FFN Decode Surgery
+### 9. Dense-Specific Long-Context Compression Revisit
+
+Optimizes: future dense long-context decode if a better compression path exists.
+
+Why it stays on the horizon:
+
+- The negative result applies to the current Q8 main-body structure, not to all
+  possible KV compression ideas forever.
+- If future evidence suggests F16 is saturating memory harder at very high ctx,
+  revisit with a better vectorized or block-shared design, not the current one.
+
+Optimizes: benchmark integrity and small decode wins, especially on MoE.
+
+Why it remains tracked:
+
+- Current data says dense is neutral within noise while A3B / 122B gain
+  modestly.
+- Keep the `--full-logits-decode` A/B path and targeted regression tests so
+  future decode or sampling work stays measurable and exact.
+
+Expected payoff: small; mostly a measurement and architecture hygiene item.
+
+Risks and constraints:
+
+- Do not overstate the gain on dense before more repeated measurements.
+- Preserve exact-token equivalence and oracle semantics.
+
+Acceptance gates:
+
+- Dense + MoE argmax wrapper tests stay green.
+- CLI continues to support direct full-logits A/B when needed.
 
 Optimizes: dense decode throughput.
 
@@ -244,6 +331,8 @@ section:
 3. Record accepted wins in "Recent confirmed wins".
 4. Record failed experiments in "Deprioritized" or in the relevant bet's risks.
 5. Keep benchmark notes sequential and reproducible; do not mix parallel runs.
+6. At each improved checkpoint, make the diff tell one optimization story:
+   short `v0.xx:` subject, detailed wrapped body with measurement + validation.
 
 Useful pattern for future entries:
 

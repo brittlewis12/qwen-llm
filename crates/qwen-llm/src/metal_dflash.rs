@@ -910,6 +910,17 @@ pub struct MetalDFlashLayerMajorScratch {
     /// `[N, H]` F32 — FFN final.
     pub ffn_out_pack: MetalTensor,
 
+    /// `[N * topk]` i32-in-F32 buffer — packed routed expert ids per token.
+    pub moe_topk_idx_pack: MetalTensor,
+    /// `[N * topk]` F32 — packed routed expert weights per token.
+    pub moe_topk_weight_pack: MetalTensor,
+    /// `[N]` F32 — packed shared expert gate per token.
+    pub moe_shared_gate_pack: MetalTensor,
+    /// `[N * topk, F_exp]` F32 — packed routed expert inner activations.
+    pub moe_inner_pack: MetalTensor,
+    /// `[N * topk, H]` F32 — packed routed expert outputs before tokenwise reduction.
+    pub moe_expert_out_pack: MetalTensor,
+
     /// `[N, V]` F32 — batched lm_head output (final logits across all N
     /// tokens). H5.3b.6: lifts lm_head out of the per-token mat-vec
     /// re-read loop. Allocation is ~16 MB at vocab=248320, N=16.
@@ -986,6 +997,8 @@ impl MetalDFlashLayerMajorScratch {
         let q_dim = (arch.n_q_heads as u64) * head_dim;
         let kv_dim = (arch.n_kv_heads as u64) * head_dim;
         let v = arch.vocab_size as u64;
+        let moe_topk = arch.expert_used_count.min(arch.expert_count).max(1) as u64;
+        let moe_f_exp = arch.expert_feed_forward_length.max(1) as u64;
 
         // GDN dims. Sized at 1 element when the arch has no GDN to keep
         // the buffers allocatable; the GDN layer-major path is gated on
@@ -1013,6 +1026,11 @@ impl MetalDFlashLayerMajorScratch {
             ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
+            moe_topk_idx_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk])?,
+            moe_topk_weight_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk])?,
+            moe_shared_gate_pack: MetalTensor::zeros_f32(ctx, vec![n])?,
+            moe_inner_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk * moe_f_exp])?,
+            moe_expert_out_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk * h])?,
             final_logits_pack: MetalTensor::zeros_f32(ctx, vec![n, v])?,
             gdn_qkv_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
             gdn_z_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
@@ -3487,18 +3505,15 @@ pub fn prefill_tokens_with_multi_hidden(
                 enc.end();
             }
 
-            // 2e/f/g: post-norm + FFN + residual #2 + hidden_capture.
+            // 2e/f/g: post-norm + FFN/MoE tail + residual #2 + hidden_capture.
             let post_norm = match block {
                 MetalBlock::Gdn(g) => &g.post_attn_norm,
                 MetalBlock::Attn(a) => &a.post_attn_norm,
             };
-            let (g_w, u_w, d_w) = match block {
-                MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
-                MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
+            let (g_w, u_w, d_w, moe) = match block {
+                MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down, g.ffn_moe.as_ref()),
+                MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down, a.ffn_moe.as_ref()),
             };
-            let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
-                && ffn_mat_mat_eligible(u_w.dtype)
-                && ffn_mat_mat_eligible(d_w.dtype);
 
             // Sized FFN pack views.
             let ffn_gate_pack_p = layer_scratch
@@ -3514,7 +3529,68 @@ pub fn prefill_tokens_with_multi_hidden(
                 .ffn_out_pack
                 .view_subrange(0, vec![(chunk_p * h) as u64]);
 
-            {
+            if let Some(moe) = moe {
+                {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_rms_norm_batched_f32(
+                        base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
+                    )?;
+                    enc.end();
+                }
+
+                for n_idx in 0..chunk_p {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &x_pack_p,
+                        n_idx * h,
+                        &target_session.x,
+                        h,
+                    )?;
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &h_pack_p,
+                        n_idx * h,
+                        &target_session.h,
+                        h,
+                    )?;
+                    base.encode_moe_route_prepare(&enc, target_session, moe)?;
+                    base.encode_moe_ffn_apply_gpu(&enc, target_session, g_w, u_w, d_w, moe)?;
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.x,
+                        &x_pack_p,
+                        n_idx * h,
+                        h,
+                    )?;
+                    enc.end();
+                }
+
+                if let Some(dst) = hidden_dst {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                        if lid as usize == il {
+                            for n_idx in 0..chunk_p {
+                                let global_idx = chunk_base + n_idx;
+                                let elem_off = (global_idx * k_target + k_idx) * h;
+                                let row_view =
+                                    x_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                encode_scatter_offset_f32(
+                                    base.ctx, &enc, &row_view, dst, elem_off, h,
+                                )?;
+                            }
+                        }
+                    }
+                    enc.end();
+                }
+            } else {
+                let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
+                    && ffn_mat_mat_eligible(u_w.dtype)
+                    && ffn_mat_mat_eligible(d_w.dtype);
+
                 let enc = KernelEncoder::begin(&cmd_buf);
                 encode_rms_norm_batched_f32(
                     base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
@@ -4501,6 +4577,227 @@ mod tests {
     use crate::loader::Model;
     use crate::metal::MetalContext;
     use crate::metal_forward::{MetalModel, MetalSession};
+    use std::time::Instant;
+
+    fn write_tensor_f32(t: &MetalTensor, data: &[f32]) {
+        assert_eq!(t.dtype, GgmlType::F32);
+        assert_eq!(t.n_elements() as usize, data.len());
+        unsafe {
+            let dst = (t.buffer.contents().as_ptr() as *mut f32).add((t.offset / 4) as usize);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+        }
+    }
+
+    fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_runs: usize) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[packed-moe-tail-{label}] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let arch = &mm.arch;
+        assert_eq!(arch.kind, crate::model::ArchKind::Moe);
+        let h = arch.hidden_size as usize;
+
+        let block = &mf.model.blocks[0];
+        let (post_norm, g_w, u_w, d_w, moe) = match block {
+            crate::metal_forward::MetalBlock::Gdn(g) => (
+                &g.post_attn_norm,
+                &g.ffn_gate,
+                &g.ffn_up,
+                &g.ffn_down,
+                g.ffn_moe.as_ref().expect("moe block"),
+            ),
+            crate::metal_forward::MetalBlock::Attn(a) => (
+                &a.post_attn_norm,
+                &a.ffn_gate,
+                &a.ffn_up,
+                &a.ffn_down,
+                a.ffn_moe.as_ref().expect("moe block"),
+            ),
+        };
+
+        let mut session = MetalSession::fresh(&ctx, &mm, chunk_p + 16).expect("session");
+        let scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, chunk_p as u32).expect("scratch");
+        let x_pack = scratch.x_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+        let h_pack = scratch.h_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+        let x_init: Vec<f32> = (0..chunk_p * h)
+            .map(|i| ((i % 37) as f32 - 18.0) * 1e-2)
+            .collect();
+
+        // Warmup pipeline cache.
+        write_tensor_f32(&x_pack, &x_init);
+        {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_rms_norm_batched_f32(
+                &ctx,
+                &enc,
+                &x_pack,
+                post_norm,
+                &h_pack,
+                chunk_p,
+                h,
+                crate::metal_forward::RMS_EPS,
+            )
+            .expect("warmup postnorm");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+        }
+        for n_idx in 0..chunk_p.min(2) {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_copy_offset_f32(&ctx, &enc, &x_pack, n_idx * h, &session.x, h).expect("copy x");
+            encode_copy_offset_f32(&ctx, &enc, &h_pack, n_idx * h, &session.h, h).expect("copy h");
+            mf.encode_moe_route_prepare(&enc, &mut session, moe)
+                .expect("route");
+            mf.encode_moe_routed_ffn_gpu(&enc, &mut session, moe)
+                .expect("routed");
+            mf.encode_moe_shared_ffn_gpu(&enc, &mut session, g_w, u_w, d_w)
+                .expect("shared");
+            encode_add_inplace_f32(&ctx, &enc, &session.x, &session.mixer_out).expect("resid");
+            encode_scatter_offset_f32(&ctx, &enc, &session.x, &x_pack, n_idx * h, h)
+                .expect("scatter");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+        }
+
+        let mut postnorm_ms = 0.0f64;
+        let mut route_ms = 0.0f64;
+        let mut routed_ms = 0.0f64;
+        let mut resid_scatter_ms = 0.0f64;
+        let mut total_wall_ms = 0.0f64;
+
+        for _ in 0..n_runs {
+            write_tensor_f32(&x_pack, &x_init);
+
+            let wall = Instant::now();
+            {
+                let cmd = ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                encode_rms_norm_batched_f32(
+                    &ctx,
+                    &enc,
+                    &x_pack,
+                    post_norm,
+                    &h_pack,
+                    chunk_p,
+                    h,
+                    crate::metal_forward::RMS_EPS,
+                )
+                .expect("postnorm");
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                postnorm_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            }
+            for n_idx in 0..chunk_p {
+                {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_copy_offset_f32(&ctx, &enc, &x_pack, n_idx * h, &session.x, h)
+                        .expect("copy x");
+                    encode_copy_offset_f32(&ctx, &enc, &h_pack, n_idx * h, &session.h, h)
+                        .expect("copy h");
+                    mf.encode_moe_route_prepare(&enc, &mut session, moe)
+                        .expect("route");
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    route_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
+                {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    mf.encode_moe_routed_ffn_gpu(&enc, &mut session, moe)
+                        .expect("routed");
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    routed_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
+                {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    mf.encode_moe_shared_ffn_gpu(&enc, &mut session, g_w, u_w, d_w)
+                        .expect("shared");
+                    encode_add_inplace_f32(&ctx, &enc, &session.x, &session.mixer_out)
+                        .expect("resid");
+                    encode_scatter_offset_f32(&ctx, &enc, &session.x, &x_pack, n_idx * h, h)
+                        .expect("scatter");
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    resid_scatter_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
+            }
+            total_wall_ms += wall.elapsed().as_secs_f64() * 1e3;
+        }
+
+        let denom = n_runs as f64;
+        let postnorm_ms = postnorm_ms / denom;
+        let route_ms = route_ms / denom;
+        let routed_ms = routed_ms / denom;
+        let resid_scatter_ms = resid_scatter_ms / denom;
+        let total_gpu = postnorm_ms + route_ms + routed_ms + resid_scatter_ms;
+        eprintln!(
+            "[packed-moe-tail-{label}] chunk_p={chunk_p} avg wall={:.2} ms",
+            total_wall_ms / denom
+        );
+        eprintln!(
+            "[packed-moe-tail-{label}]   postnorm          {:6.2} ms ({:5.1}%)",
+            postnorm_ms,
+            postnorm_ms / total_gpu * 100.0
+        );
+        eprintln!(
+            "[packed-moe-tail-{label}]   route+copy        {:6.2} ms ({:5.1}%)",
+            route_ms,
+            route_ms / total_gpu * 100.0
+        );
+        eprintln!(
+            "[packed-moe-tail-{label}]   routed_ffn        {:6.2} ms ({:5.1}%)",
+            routed_ms,
+            routed_ms / total_gpu * 100.0
+        );
+        eprintln!(
+            "[packed-moe-tail-{label}]   shared+resid+copy {:6.2} ms ({:5.1}%)",
+            resid_scatter_ms,
+            resid_scatter_ms / total_gpu * 100.0
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_packed_moe_tail_profile() {
+        run_packed_moe_tail_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b",
+            8,
+            4,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_packed_moe_tail_profile() {
+        run_packed_moe_tail_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b",
+            8,
+            3,
+        );
+    }
 
     /// H5.3a foundation: verify `MetalDFlashVerifyScratch` allocates
     /// correctly-sized buffers, and that `slot_view` helpers land at

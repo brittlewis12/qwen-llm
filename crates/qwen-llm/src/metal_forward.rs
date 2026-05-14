@@ -40,11 +40,12 @@ use crate::metal::{
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32,
     encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
     encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
+use std::sync::OnceLock;
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
@@ -66,6 +67,22 @@ pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
         dtype,
         GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
     )
+}
+
+fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
+    static KV_Q8: OnceLock<bool> = OnceLock::new();
+    let enabled = *KV_Q8.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_KV_Q8").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    });
+    let group = (arch.n_q_heads / arch.n_kv_heads.max(1)) as usize;
+    if enabled && arch.kind == ArchKind::Dense && arch.attn_head_dim == 256 && group == 6 {
+        GgmlType::Q8_0
+    } else {
+        GgmlType::F16
+    }
 }
 
 /// Return type for [`MetalForward::single_token_phase_profiled`]:
@@ -410,25 +427,27 @@ impl MetalSession {
             }
         }
 
-        // KV cache uses F16 storage (matches llama.cpp's default
-        // --cache-type-k f16). At long context this halves K/V bandwidth
-        // — at 4K positions on 27B that's 4 GB/token saved. The scatter
-        // path converts F32→F16 on append; the attn_decode_f16kv kernel
-        // reads F16 and casts to F32 in the dot product. Precision impact
-        // is below the noise floor of K-quant weights (cos > 0.999).
+        // KV cache defaults to F16 storage (matches llama.cpp's default
+        // --cache-type-k f16). Experimental dense long-context path can
+        // switch to Q8_0 via `QWEN_KV_Q8=1`; this is currently limited to the
+        // dense group6 / head_dim=256 shape.
+        let kv_dtype = kv_cache_dtype_for_arch(arch);
         let mut kv_k = Vec::new();
         let mut kv_v = Vec::new();
         let mut kv_n_pos = Vec::new();
         for b in &model.blocks {
             if matches!(b, MetalBlock::Attn(_)) {
-                kv_k.push(MetalTensor::zeros_f16(
-                    ctx,
-                    vec![kv_capacity as u64 * kv_dim],
-                )?);
-                kv_v.push(MetalTensor::zeros_f16(
-                    ctx,
-                    vec![kv_capacity as u64 * kv_dim],
-                )?);
+                let shape = vec![kv_capacity as u64 * kv_dim];
+                kv_k.push(match kv_dtype {
+                    GgmlType::F16 => MetalTensor::zeros_f16(ctx, shape.clone())?,
+                    GgmlType::Q8_0 => MetalTensor::zeros_q8_0(ctx, shape.clone())?,
+                    _ => unreachable!(),
+                });
+                kv_v.push(match kv_dtype {
+                    GgmlType::F16 => MetalTensor::zeros_f16(ctx, shape.clone())?,
+                    GgmlType::Q8_0 => MetalTensor::zeros_q8_0(ctx, shape.clone())?,
+                    _ => unreachable!(),
+                });
                 kv_n_pos.push(0);
             }
         }
@@ -567,7 +586,7 @@ impl<'a> MetalForward<'a> {
         }
     }
 
-    fn encode_moe_route_prepare(
+    pub(crate) fn encode_moe_route_prepare(
         &self,
         enc: &KernelEncoder,
         session: &mut MetalSession,
@@ -804,19 +823,15 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    fn encode_moe_ffn_apply_gpu(
+    pub(crate) fn encode_moe_routed_ffn_gpu(
         &self,
         enc: &KernelEncoder,
         session: &mut MetalSession,
-        ffn_gate: &MetalTensor,
-        ffn_up: &MetalTensor,
-        ffn_down: &MetalTensor,
         moe: &MetalMoeFfn,
     ) -> Result<(), MfError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
         let f_exp = arch.expert_feed_forward_length as usize;
-        let f_shared = arch.expert_shared_feed_forward_length as usize;
         let n_expert = arch.expert_count as usize;
         let topk = arch.expert_used_count.min(arch.expert_count) as usize;
 
@@ -932,6 +947,20 @@ impl<'a> MetalForward<'a> {
             )?,
             _ => unreachable!(),
         }
+        Ok(())
+    }
+
+    pub(crate) fn encode_moe_shared_ffn_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_shared = arch.expert_shared_feed_forward_length as usize;
 
         let shared_gate_tmp = session.ffn_gate.view_subrange(0, vec![f_shared as u64]);
         let shared_up_tmp = session.ffn_up.view_subrange(0, vec![f_shared as u64]);
@@ -978,6 +1007,20 @@ impl<'a> MetalForward<'a> {
             &session.moe_shared_gate,
             &session.mixer_out,
         )?;
+        Ok(())
+    }
+
+    pub(crate) fn encode_moe_ffn_apply_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        self.encode_moe_routed_ffn_gpu(enc, session, moe)?;
+        self.encode_moe_shared_ffn_gpu(enc, session, ffn_gate, ffn_up, ffn_down)?;
         encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
         Ok(())
     }
@@ -1056,6 +1099,117 @@ impl<'a> MetalForward<'a> {
     ) -> Result<Vec<f32>, MfError> {
         let (logits, _) = self.single_token_profiled_moe(token_id, position, session)?;
         Ok(logits)
+    }
+
+    pub fn single_token_argmax(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<i32, MfError> {
+        let (argmax, _) = self.single_token_argmax_profiled(token_id, position, session)?;
+        Ok(argmax)
+    }
+
+    pub fn single_token_argmax_profiled(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(i32, TokenProfile), MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return self.single_token_argmax_profiled_moe(token_id, position, session);
+        }
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+
+        let t_total = std::time::Instant::now();
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            arch.hidden_size as usize,
+        )?;
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (il, block) in self.model.blocks.iter().enumerate() {
+            self.encode_block(
+                &enc,
+                il,
+                block,
+                &mut gdn_idx,
+                &mut attn_idx,
+                position,
+                session,
+            )?;
+        }
+
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            &enc,
+            &session.x,
+            &self.model.output_norm,
+            &session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            &enc,
+            &self.model.lm_head,
+            &session.h,
+            &session.logits,
+            arch.hidden_size as usize,
+            arch.vocab_size as usize,
+        )?;
+        encode_argmax_f32(
+            self.ctx,
+            &enc,
+            &session.logits,
+            &session.argmax_tok,
+            1,
+            arch.vocab_size as usize,
+        )?;
+
+        enc.end();
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let argmax = unsafe {
+            let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
+            *src
+        };
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            argmax,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+        ))
     }
 
     fn single_token_profiled_moe(
@@ -1142,6 +1296,108 @@ impl<'a> MetalForward<'a> {
         let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
         Ok((
             logits,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+        ))
+    }
+
+    fn single_token_argmax_profiled_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(i32, TokenProfile), MfError> {
+        let arch = &self.model.arch;
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd_buf);
+
+        encode_get_rows_f32(
+            self.ctx,
+            &enc,
+            &self.model.token_embd,
+            &session.ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            let slot = match block {
+                MetalBlock::Gdn(_) => {
+                    let s = MixerSlot::Gdn(gdn_idx);
+                    gdn_idx += 1;
+                    s
+                }
+                MetalBlock::Attn(_) => {
+                    let s = MixerSlot::Attn(attn_idx);
+                    attn_idx += 1;
+                    s
+                }
+            };
+            self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+        }
+
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            &enc,
+            &session.x,
+            &self.model.output_norm,
+            &session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            &enc,
+            &self.model.lm_head,
+            &session.h,
+            &session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+        encode_argmax_f32(
+            self.ctx,
+            &enc,
+            &session.logits,
+            &session.argmax_tok,
+            1,
+            arch.vocab_size as usize,
+        )?;
+        enc.end();
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let argmax = unsafe {
+            let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
+            *src
+        };
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            argmax,
             TokenProfile {
                 cpu_encode_ms,
                 cpu_to_gpu_complete_ms,
@@ -2499,16 +2755,34 @@ impl<'a> MetalForward<'a> {
         // KV cache append: F32 source → F16 destination (cache is F16 to
         // halve attention bandwidth at long context). Fused K+V scatter
         // (Bulk-API principle): one dispatch writes both, saving 16 dispatches/token.
-        encode_scatter_offset_f32_to_f16_kv(
-            self.ctx,
-            enc,
-            &s.attn_k_normed,
-            &s.attn_v_now,
-            &s.kv_k[attn_i],
-            &s.kv_v[attn_i],
-            (position as usize) * kv_dim,
-            kv_dim,
-        )?;
+        match s.kv_k[attn_i].dtype {
+            GgmlType::F16 => encode_scatter_offset_f32_to_f16_kv(
+                self.ctx,
+                enc,
+                &s.attn_k_normed,
+                &s.attn_v_now,
+                &s.kv_k[attn_i],
+                &s.kv_v[attn_i],
+                (position as usize) * kv_dim,
+                kv_dim,
+            )?,
+            GgmlType::Q8_0 => encode_scatter_offset_f32_to_q8_0_kv(
+                self.ctx,
+                enc,
+                &s.attn_k_normed,
+                &s.attn_v_now,
+                &s.kv_k[attn_i],
+                &s.kv_v[attn_i],
+                (position as usize) * kv_dim,
+                kv_dim,
+            )?,
+            other => {
+                return Err(MfError::UnsupportedDtype {
+                    name: "attention KV cache".into(),
+                    dtype: other,
+                });
+            }
+        }
         s.kv_n_pos[attn_i] = position as usize + 1;
 
         // (8) Fused attention decode: scoring + softmax + V-aggregate.
@@ -2904,12 +3178,13 @@ pub struct SnapshotIdentity {
     pub n_attn_layers: u32,
     pub n_gdn_layers: u32,
     pub kv_dim_elements: u32,
+    pub kv_bytes_per_token: u32,
     pub gdn_state_elements_per_layer: u32,
     pub gdn_conv_elements_per_layer: u32,
 }
 
 /// Bump this when MetalSession's per-layer state shape changes.
-pub const SNAPSHOT_LAYOUT_VERSION: u32 = 1;
+pub const SNAPSHOT_LAYOUT_VERSION: u32 = 2;
 
 /// Captured state at the end of prefilling `prefix_tokens` through a
 /// fresh session. Restoring into a fresh session and running additional
@@ -2923,9 +3198,9 @@ pub struct SessionSnapshot {
     /// `kv_n_pos[attn_layer]` after prefill. Same value across layers
     /// for our forward pass (single-stream); kept per-layer for safety.
     pub kv_n_pos: Vec<usize>,
-    /// Packed K cache slice: `n_attn × prefix_len × kv_dim_elements × 2 bytes` (F16).
-    /// Sized exactly to the prefix; doesn't carry the unused tail of
-    /// the session's full-capacity KV buffer.
+    /// Packed K cache slice: `n_attn × prefix_len × kv_bytes_per_token` bytes.
+    /// Sized exactly to the prefix; doesn't carry the unused tail of the
+    /// session's full-capacity KV buffer.
     pub kv_k_arena: Vec<u8>,
     /// Packed V cache slice (same shape).
     pub kv_v_arena: Vec<u8>,
@@ -3005,6 +3280,11 @@ impl MetalSession {
             n_gdn_layers: self.gdn_state.len() as u32,
             kv_dim_elements: (self.kv_k.first().map(|t| t.n_elements()).unwrap_or(0)
                 / self.kv_capacity as u64) as u32,
+            kv_bytes_per_token: self
+                .kv_k
+                .first()
+                .map(|t| t.n_bytes() / self.kv_capacity as u64)
+                .unwrap_or(0) as u32,
             gdn_state_elements_per_layer: self
                 .gdn_state
                 .first()
@@ -3037,10 +3317,8 @@ impl MetalSession {
         let prefix_len = prefix_tokens.len();
         let n_attn = self.kv_k.len();
         let n_gdn = self.gdn_state.len();
-        let kv_dim = identity.kv_dim_elements as usize;
-
-        // KV: per-layer slice is exactly prefix_len * kv_dim F16 elements.
-        let kv_slice_bytes = prefix_len * kv_dim * 2;
+        // KV: per-layer slice is exactly prefix_len rows of the active KV dtype.
+        let kv_slice_bytes = prefix_len * identity.kv_bytes_per_token as usize;
         let kv_arena_bytes = n_attn * kv_slice_bytes;
 
         // Allocate each arena UNINITIALIZED (no zero-init), then memcpy
@@ -3122,8 +3400,7 @@ impl MetalSession {
         let n_attn = self.kv_k.len();
         let n_gdn = self.gdn_state.len();
         let prefix_len = snap.prefix_len();
-        let kv_dim = snap.identity.kv_dim_elements as usize;
-        let kv_slice_bytes = prefix_len * kv_dim * 2;
+        let kv_slice_bytes = prefix_len * snap.identity.kv_bytes_per_token as usize;
 
         for i in 0..n_attn {
             let off = i * kv_slice_bytes;
@@ -3156,6 +3433,88 @@ mod tests {
     use crate::forward::Forward;
     use crate::gguf::GgufFile;
     use crate::loader::Model;
+
+    fn argmax_i32_local(xs: &[f32]) -> i32 {
+        xs.iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i as i32)
+            .unwrap_or(0)
+    }
+
+    fn run_argmax_chain_equivalence(model_path: &str, label: &str, cos_floor: f64) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[argmax-chain-{label}] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let mut ids = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        ids.truncate(ids.len().min(4));
+        assert!(!ids.is_empty(), "tokenizer returned empty prompt");
+
+        let mf = MetalForward::new(&ctx, &mm);
+        let cap = ids.len() + 8;
+        let mut s_full = MetalSession::fresh(&ctx, &mm, cap).expect("full session");
+        let mut s_arg = MetalSession::fresh(&ctx, &mm, cap).expect("arg session");
+        let mut last_full = Vec::new();
+
+        for (i, &tid) in ids.iter().enumerate() {
+            last_full = mf
+                .single_token(tid, i as u32, &mut s_full)
+                .expect("full forward");
+            let arg = mf
+                .single_token_argmax(tid, i as u32, &mut s_arg)
+                .expect("argmax forward");
+            assert_eq!(
+                arg,
+                argmax_i32_local(&last_full),
+                "[argmax-chain-{label}] prompt-step argmax mismatch at position {i}"
+            );
+        }
+
+        let next_tok = argmax_i32_local(&last_full);
+        let logits_full = mf
+            .single_token(next_tok, ids.len() as u32, &mut s_full)
+            .expect("full follow-up");
+        let logits_arg = mf
+            .single_token(next_tok, ids.len() as u32, &mut s_arg)
+            .expect("argmax follow-up");
+
+        let mut max_abs = 0.0f32;
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for (a, b) in logits_full.iter().zip(logits_arg.iter()) {
+            max_abs = max_abs.max((a - b).abs());
+            dot += (*a as f64) * (*b as f64);
+            na += (*a as f64).powi(2);
+            nb += (*b as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+        let arg_full = argmax_i32_local(&logits_full);
+        let arg_arg = argmax_i32_local(&logits_arg);
+        eprintln!(
+            "[argmax-chain-{label}] cos={cos:.6} max|Δ|={max_abs:.4} argmax full={arg_full} argmax-path={arg_arg}"
+        );
+        assert_eq!(
+            arg_full, arg_arg,
+            "[argmax-chain-{label}] follow-up argmax mismatch"
+        );
+        assert!(
+            cos > cos_floor,
+            "[argmax-chain-{label}] cos={cos} below floor {cos_floor}"
+        );
+    }
 
     /// Validate a single GDN block end-to-end on Metal vs the CPU oracle.
     /// Uses block 0 of Qwen3.5-0.8B-F32 (the first GDN block, n_v=n_k=16).
@@ -3367,6 +3726,24 @@ mod tests {
         );
         assert_eq!(argmax_metal, argmax_cpu, "argmax disagreement");
         assert!(cos > 0.995, "cos={cos} below threshold");
+    }
+
+    #[test]
+    fn metal_argmax_chain_matches_full_logits_dense() {
+        run_argmax_chain_equivalence(
+            "/Users/tito/models/Qwen3.5-0.8B.F32.gguf",
+            "dense-0p8b",
+            0.9999,
+        );
+    }
+
+    #[test]
+    fn metal_argmax_chain_matches_full_logits_moe() {
+        run_argmax_chain_equivalence(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "moe-a3b",
+            0.995,
+        );
     }
 
     /// **H5.2** — Metal multi-layer hidden capture matches CPU oracle.
@@ -6601,6 +6978,7 @@ mod tests {
                 n_attn_layers: 0,
                 n_gdn_layers: 0,
                 kv_dim_elements: 0,
+                kv_bytes_per_token: 0,
                 gdn_state_elements_per_layer: 0,
                 gdn_conv_elements_per_layer: 0,
             };

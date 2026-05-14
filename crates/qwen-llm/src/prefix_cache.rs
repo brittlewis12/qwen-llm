@@ -124,6 +124,7 @@ mod tests {
             n_attn_layers: 2,
             n_gdn_layers: 3,
             kv_dim_elements: 4,
+            kv_bytes_per_token: 8,
             gdn_state_elements_per_layer: 5,
             gdn_conv_elements_per_layer: 6,
         }

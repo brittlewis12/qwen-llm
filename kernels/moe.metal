@@ -349,6 +349,140 @@ kernel void kernel_moe_swiglu_q4_K_f32(
     }
 }
 
+kernel void kernel_moe_swiglu_q4_K_f32_packed_slots(
+        constant moe_q4k_args & args    [[buffer(0)]],
+        device const uchar    * w_gate  [[buffer(1)]],
+        device const uchar    * w_up    [[buffer(2)]],
+        device const float    * x_pack  [[buffer(3)]],
+        device const int      * top_idx [[buffer(4)]],
+        device       float    * inner   [[buffer(5)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    constexpr uint16_t kmask1 = 0x3f3f;
+    constexpr uint16_t kmask2 = 0x0f0f;
+    constexpr uint16_t kmask3 = 0xc0c0;
+
+    const ushort ix = tiisg / 8;
+    const ushort it = tiisg % 8;
+    const ushort iq = it / 4;
+    const ushort ir = it % 4;
+
+    const uint nb = args.n_in / QK_K;
+    const uint first_row = (tgpig.x * NSG_Q4K + sgitg) * NR0_Q4K;
+    if (first_row >= args.n_out) return;
+
+    const ulong row_stride_bytes = (ulong)nb * Q4K_BYTES;
+    const ulong expert_stride_bytes = (ulong)args.n_out * row_stride_bytes;
+    device const uchar * expert_gate = w_gate + (ulong)expert_i * expert_stride_bytes;
+    device const uchar * expert_up   = w_up   + (ulong)expert_i * expert_stride_bytes;
+
+    device const uchar * row0_g = expert_gate + (ulong)first_row * row_stride_bytes;
+    device const uchar * row0_u = expert_up   + (ulong)first_row * row_stride_bytes;
+    const uint token = slot / args.topk;
+    device const float * y4 = x_pack + (ulong)token * args.n_in + ix * QK_K + 64u * iq + 8u * ir;
+
+    float yl[16];
+    float yh[16];
+    float sumf_g[NR0_Q4K] = {0.f, 0.f};
+    float sumf_u[NR0_Q4K] = {0.f, 0.f};
+
+    uint16_t sc16[4];
+    thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        float4 sumy = {0.f, 0.f, 0.f, 0.f};
+        for (short i = 0; i < 8; ++i) {
+            yl[i+0] = y4[i+  0]; sumy[0] += yl[i+0];
+            yl[i+8] = y4[i+ 32]; sumy[1] += yl[i+8];
+            yh[i+0] = y4[i+128]; sumy[2] += yh[i+0];
+            yh[i+8] = y4[i+160]; sumy[3] += yh[i+8];
+        }
+
+        for (short row = 0; row < NR0_Q4K; ++row) {
+            device const uchar * qg = row0_g + (ulong)row * row_stride_bytes + (ulong)ib * Q4K_BYTES;
+            device const uchar * qu = row0_u + (ulong)row * row_stride_bytes + (ulong)ib * Q4K_BYTES;
+            device const half  * dh_g = (device const half *)qg;
+            device const half  * dh_u = (device const half *)qu;
+            device const uint16_t * qs_g = (device const uint16_t *)(qg + 2);
+            device const uint16_t * qs_u = (device const uint16_t *)(qu + 2);
+            device const uint16_t * qh_g = (device const uint16_t *)(qg + 66);
+            device const uint16_t * qh_u = (device const uint16_t *)(qu + 66);
+            device const uint16_t * scales_g = (device const uint16_t *)(qg + 18);
+            device const uint16_t * scales_u = (device const uint16_t *)(qu + 18);
+
+            for (int l = 0; l < 2; ++l) {
+                const uint16_t sc = scales_g[iq + l * 2];
+                sc16[l] = sc;
+            }
+            float4 acc1 = {0.f, 0.f, 0.f, 0.f};
+            float4 acc2 = {0.f, 0.f, 0.f, 0.f};
+            for (int i = 0; i < 8; ++i) {
+                const uint16_t q1 = qs_g[iq + i * 2];
+                const uint16_t q2 = qh_g[iq + i] & kmask1;
+                acc1[0] += yl[2*i + 0] * (q1 & 0x000F);
+                acc1[1] += yl[2*i + 1] * (q1 & 0x0F00);
+                acc1[2] += yl[2*i + 8] * (q1 & 0x00F0);
+                acc1[3] += yl[2*i + 9] * (q1 & 0xF000);
+                acc2[0] += yh[2*i + 0] * (q2 & 0x000F);
+                acc2[1] += yh[2*i + 1] * (q2 & 0x0F00);
+                acc2[2] += yh[2*i + 8] * (q2 & 0x00F0);
+                acc2[3] += yh[2*i + 9] * (q2 & 0xF000);
+            }
+            sumf_g[row] += (float)dh_g[0] * (
+                  (acc1[0] + 1.f/256.f * acc1[1]) * sc8[0]
+                + (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f
+                + (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4]
+                + (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f
+            ) - (float)dh_g[1] * (
+                  sumy[0] * sc8[2] + sumy[1] * sc8[3]
+                + sumy[2] * sc8[6] + sumy[3] * sc8[7]
+            );
+
+            for (int l = 0; l < 2; ++l) {
+                const uint16_t sc = scales_u[iq + l * 2];
+                sc16[l] = sc;
+            }
+            acc1 = {0.f, 0.f, 0.f, 0.f};
+            acc2 = {0.f, 0.f, 0.f, 0.f};
+            for (int i = 0; i < 8; ++i) {
+                const uint16_t q1 = qs_u[iq + i * 2];
+                const uint16_t q2 = qh_u[iq + i] & kmask1;
+                acc1[0] += yl[2*i + 0] * (q1 & 0x000F);
+                acc1[1] += yl[2*i + 1] * (q1 & 0x0F00);
+                acc1[2] += yl[2*i + 8] * (q1 & 0x00F0);
+                acc1[3] += yl[2*i + 9] * (q1 & 0xF000);
+                acc2[0] += yh[2*i + 0] * (q2 & 0x000F);
+                acc2[1] += yh[2*i + 1] * (q2 & 0x0F00);
+                acc2[2] += yh[2*i + 8] * (q2 & 0x00F0);
+                acc2[3] += yh[2*i + 9] * (q2 & 0xF000);
+            }
+            sumf_u[row] += (float)dh_u[0] * (
+                  (acc1[0] + 1.f/256.f * acc1[1]) * sc8[0]
+                + (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f
+                + (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4]
+                + (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f
+            ) - (float)dh_u[1] * (
+                  sumy[0] * sc8[2] + sumy[1] * sc8[3]
+                + sumy[2] * sc8[6] + sumy[3] * sc8[7]
+            );
+        }
+        y4 += 4 * QK_K;
+    }
+
+    for (short row = 0; row < NR0_Q4K; row++) {
+        float total_g = simd_sum(sumf_g[row]);
+        float total_u = simd_sum(sumf_u[row]);
+        if (tiisg == 0 && first_row + row < args.n_out) {
+            inner[(ulong)slot * args.n_out + first_row + row] = moe_silu_f(total_g) * total_u;
+        }
+    }
+}
+
 kernel void kernel_moe_down_q5_K_f32(
         constant moe_q5k_args & args    [[buffer(0)]],
         device const uchar    * weight  [[buffer(1)]],

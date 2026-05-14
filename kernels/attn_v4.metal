@@ -46,6 +46,10 @@ constant constexpr ushort DK4 = DK / 4;
 constant constexpr ushort DV4 = DV / 4;
 constant constexpr ushort DK4_PER_LANE = DK4 / NW;   // = 2 for DK=256
 constant constexpr ushort DV4_PER_LANE = DV4 / NW;   // = 2 for DV=256
+constant constexpr ushort QK8_0 = 32;
+constant constexpr ushort Q8_0_BYTES = 34;
+constant constexpr ushort DK_Q8_BLOCKS = DK / QK8_0;
+constant constexpr ushort DV_Q8_BLOCKS = DV / QK8_0;
 
 struct attn_v4_args {
     uint  n_q_heads;
@@ -243,6 +247,174 @@ inline void attn_v4_main_body(
         for (ushort g = 0; g < GROUP; ++g) {
             for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
                 o_out_base[g * DV4 + ii * NW + tiisg] = o_acc[g][ii];
+            }
+        }
+    }
+    if (tiisg == 0) {
+        device float * ml_base = ml_partial
+            + ((ulong)kvh * args.n_partitions + iwg) * GROUP * 2;
+        for (ushort g = 0; g < GROUP; ++g) {
+            ml_base[g * 2 + 0] = m_state[g];
+            ml_base[g * 2 + 1] = l_state[g];
+        }
+    }
+}
+
+template <ushort GROUP, ushort C>
+inline void attn_v4_main_body_q8(
+        constant attn_v4_args & args,
+        device const float    * q,
+        device const uchar    * k_cache,
+        device const uchar    * v_cache,
+        device       float    * o_partial,
+        device       float    * ml_partial,
+        threadgroup  half     * sq,
+        threadgroup  float    * ss,
+        uint3  tgpig,
+        ushort tiisg) {
+    const uint kvh = tgpig.x;
+    const uint iwg = tgpig.z;
+    if (kvh >= args.n_kv_heads || iwg >= args.n_partitions) return;
+
+    const uint p_start = iwg * args.rows_per_partition;
+    const uint p_end_raw = p_start + args.rows_per_partition;
+    const uint p_end = p_end_raw < args.n_pos ? p_end_raw : args.n_pos;
+
+    {
+        device const float4 * q4_base =
+            (device const float4 *)(q + (ulong)kvh * GROUP * DK);
+        threadgroup half4 * sq4 = (threadgroup half4 *)sq;
+        for (ushort g = 0; g < GROUP; ++g) {
+            for (ushort ii = 0; ii < DK4_PER_LANE; ++ii) {
+                const ushort idx = g * DK4 + ii * NW + tiisg;
+                float4 qv = q4_base[idx];
+                sq4[idx] = half4(qv * args.scale);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float m_state[GROUP];
+    float l_state[GROUP];
+    float o_acc[GROUP][DV_Q8_BLOCKS];
+    for (ushort g = 0; g < GROUP; ++g) {
+        m_state[g] = -INFINITY;
+        l_state[g] = 0.0f;
+        for (ushort ii = 0; ii < DV_Q8_BLOCKS; ++ii) {
+            o_acc[g][ii] = 0.0f;
+        }
+    }
+
+    if (p_start >= p_end) {
+        device float * o_out_base =
+            o_partial + ((ulong)kvh * args.n_partitions + iwg) * GROUP * DV;
+        for (ushort g = 0; g < GROUP; ++g) {
+            for (ushort ii = 0; ii < DV_Q8_BLOCKS; ++ii) {
+                o_out_base[g * DV + ii * QK8_0 + tiisg] = 0.0f;
+            }
+        }
+        if (tiisg == 0) {
+            device float * ml_base = ml_partial
+                + ((ulong)kvh * args.n_partitions + iwg) * GROUP * 2;
+            for (ushort g = 0; g < GROUP; ++g) {
+                ml_base[g * 2 + 0] = -INFINITY;
+                ml_base[g * 2 + 1] = 0.0f;
+            }
+        }
+        return;
+    }
+
+    for (uint tile_start = p_start; tile_start < p_end; tile_start += C) {
+        const uint tile_end_raw = tile_start + C;
+        const uint tile_end = tile_end_raw < p_end ? tile_end_raw : p_end;
+        const ushort tile_count = (ushort)(tile_end - tile_start);
+
+        for (ushort cc = 0; cc < C; ++cc) {
+            float partial[GROUP];
+            for (ushort g = 0; g < GROUP; ++g) partial[g] = 0.0f;
+
+            if (cc < tile_count) {
+                const ulong elem_base = (ulong)(tile_start + cc) * args.kv_stride
+                                      + (ulong)kvh * DK;
+                const ulong blk_base = elem_base / QK8_0;
+                for (ushort ii = 0; ii < DK_Q8_BLOCKS; ++ii) {
+                    device const uchar * blk = k_cache + (blk_base + ii) * Q8_0_BYTES;
+                    const float d = (float)((device const half *)blk)[0];
+                    const float kf = d * (float)((device const int8_t *)(blk + 2))[tiisg];
+                    const ushort q_off = ii * QK8_0 + tiisg;
+                    for (ushort g = 0; g < GROUP; ++g) {
+                        partial[g] += kf * (float)sq[g * DK + q_off];
+                    }
+                }
+            }
+            for (ushort g = 0; g < GROUP; ++g) {
+                const float qk = simd_sum(partial[g]);
+                if (tiisg == 0) {
+                    ss[g * C + cc] = (cc < tile_count) ? qk : -INFINITY;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (ushort g = 0; g < GROUP; ++g) {
+            float scores[(C + NW - 1) / NW];
+            float weights[(C + NW - 1) / NW];
+            float per_lane_max = -INFINITY;
+            float per_lane_sum = 0.0f;
+
+            for (ushort k = 0; k < (C + NW - 1) / NW; ++k) {
+                const ushort col = k * NW + tiisg;
+                scores[k] = (col < C) ? ss[g * C + col] : -INFINITY;
+                per_lane_max = max(per_lane_max, scores[k]);
+            }
+
+            const float tile_max = simd_max(per_lane_max);
+            const float new_m = max(m_state[g], tile_max);
+            const float factor = (m_state[g] == -INFINITY) ? 0.0f
+                                                            : exp2(m_state[g] - new_m);
+
+            for (ushort k = 0; k < (C + NW - 1) / NW; ++k) {
+                weights[k] = (scores[k] == -INFINITY) ? 0.0f : exp2(scores[k] - new_m);
+                per_lane_sum += weights[k];
+            }
+            const float tile_l = simd_sum(per_lane_sum);
+
+            for (ushort ii = 0; ii < DV_Q8_BLOCKS; ++ii) {
+                o_acc[g][ii] *= factor;
+            }
+            for (ushort k = 0; k < (C + NW - 1) / NW; ++k) {
+                const ushort col = k * NW + tiisg;
+                if (col < C) {
+                    ss[g * C + col] = weights[k];
+                }
+            }
+
+            l_state[g] = l_state[g] * factor + tile_l;
+            m_state[g] = new_m;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (ushort cc = 0; cc < tile_count; ++cc) {
+            const ulong elem_base = (ulong)(tile_start + cc) * args.kv_stride
+                                  + (ulong)kvh * DV;
+            const ulong blk_base = elem_base / QK8_0;
+            for (ushort ii = 0; ii < DV_Q8_BLOCKS; ++ii) {
+                device const uchar * blk = v_cache + (blk_base + ii) * Q8_0_BYTES;
+                const float d = (float)((device const half *)blk)[0];
+                const float vf = d * (float)((device const int8_t *)(blk + 2))[tiisg];
+                for (ushort g = 0; g < GROUP; ++g) {
+                    o_acc[g][ii] += ss[g * C + cc] * vf;
+                }
+            }
+        }
+    }
+
+    {
+        device float * o_out_base =
+            o_partial + ((ulong)kvh * args.n_partitions + iwg) * GROUP * DV;
+        for (ushort g = 0; g < GROUP; ++g) {
+            for (ushort ii = 0; ii < DV_Q8_BLOCKS; ++ii) {
+                o_out_base[g * DV + ii * QK8_0 + tiisg] = o_acc[g][ii];
             }
         }
     }
@@ -460,6 +632,27 @@ ATTN_V4_KERNEL(kernel_attn_decode_v4_c16_f32, 16)
 ATTN_V4_KERNEL(kernel_attn_decode_v4_f32,     32)  // default name (GROUP=6, C=32 backward-compat)
 ATTN_V4_KERNEL(kernel_attn_decode_v4_c64_f32, 64)
 ATTN_V4_KERNEL(kernel_attn_decode_v4_c128_f32, 128)
+
+#define ATTN_V4_Q8_KERNEL(NAME, C_VAL) \
+kernel void NAME( \
+        constant attn_v4_args & args      [[buffer(0)]], \
+        device const float    * q          [[buffer(1)]], \
+        device const uchar    * k_cache    [[buffer(2)]], \
+        device const uchar    * v_cache    [[buffer(3)]], \
+        device       float    * o_partial  [[buffer(4)]], \
+        device       float    * ml_partial [[buffer(5)]], \
+        threadgroup  half     * sq         [[threadgroup(0)]], \
+        threadgroup  float    * ss         [[threadgroup(1)]], \
+        uint3  tgpig [[threadgroup_position_in_grid]], \
+        ushort tiisg [[thread_index_in_simdgroup]]) { \
+    attn_v4_main_body_q8<6, C_VAL>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+                                   sq, ss, tgpig, tiisg); \
+}
+
+ATTN_V4_Q8_KERNEL(kernel_attn_decode_v4_q8_c16_f32, 16)
+ATTN_V4_Q8_KERNEL(kernel_attn_decode_v4_q8_f32,     32)
+ATTN_V4_Q8_KERNEL(kernel_attn_decode_v4_q8_c64_f32, 64)
+ATTN_V4_Q8_KERNEL(kernel_attn_decode_v4_q8_c128_f32, 128)
 
 kernel void kernel_attn_decode_v4_g8_c16_f32(
         constant attn_v4_args & args      [[buffer(0)]],

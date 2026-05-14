@@ -311,6 +311,11 @@ struct scatter_offset_args {
     uint n;
     uint dst_off;
 };
+
+struct scatter_q8_args {
+    uint n_blocks;
+    uint dst_block_off;
+};
 kernel void kernel_scatter_offset_f32(
         constant scatter_offset_args & args [[buffer(0)]],
         device const float * x [[buffer(1)]],
@@ -351,6 +356,51 @@ kernel void kernel_scatter_offset_f32_to_f16_kv(
     const uint i = args.dst_off + tid;
     k_dst[i] = (half)k_src[tid];
     v_dst[i] = (half)v_src[tid];
+}
+
+// Fused K+V scatter into Q8_0 caches. Exact ggml reference quantization per
+// 32-element block:
+//   d = amax / 127
+//   qs[j] = round(src[j] / d)
+// One simdgroup handles one Q8_0 block for K and V together.
+kernel void kernel_scatter_offset_f32_to_q8_0_kv(
+        constant scatter_q8_args & args [[buffer(0)]],
+        device const float * k_src [[buffer(1)]],
+        device const float * v_src [[buffer(2)]],
+        device uchar * k_dst [[buffer(3)]],
+        device uchar * v_dst [[buffer(4)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr ushort QK8_0 = 32;
+    constexpr ushort Q8_0_BYTES = 34;
+    const uint blk = tgpig;
+    if (blk >= args.n_blocks) return;
+
+    const uint src_base = blk * QK8_0;
+    const uint dst_blk = args.dst_block_off + blk;
+    const float k_val = k_src[src_base + tiisg];
+    const float v_val = v_src[src_base + tiisg];
+
+    const float k_abs = fabs(k_val);
+    const float v_abs = fabs(v_val);
+    const float k_amax = simd_max(k_abs);
+    const float v_amax = simd_max(v_abs);
+
+    const float k_d = k_amax / 127.0f;
+    const float v_d = v_amax / 127.0f;
+    const float k_id = (k_d != 0.0f) ? (1.0f / k_d) : 0.0f;
+    const float v_id = (v_d != 0.0f) ? (1.0f / v_d) : 0.0f;
+
+    device uchar * k_blk = k_dst + (ulong)dst_blk * Q8_0_BYTES;
+    device uchar * v_blk = v_dst + (ulong)dst_blk * Q8_0_BYTES;
+    if (tiisg == 0) {
+        ((device half *)k_blk)[0] = (half)k_d;
+        ((device half *)v_blk)[0] = (half)v_d;
+    }
+    threadgroup_barrier(mem_flags::mem_none);
+
+    ((device int8_t *)(k_blk + 2))[tiisg] = (int8_t)round(k_val * k_id);
+    ((device int8_t *)(v_blk + 2))[tiisg] = (int8_t)round(v_val * v_id);
 }
 
 // get_rows: y[r * n_cols + i] = embed[ids[r] * n_cols + i].

@@ -43,6 +43,8 @@ Recent confirmed wins:
 - Dense packed GDN `alpha/beta` batching was a major prompt win: same-prompt 27B
   prefill rose from ~141.9 t/s plateau to ~165.0 t/s plateau, with decode
   unchanged.
+- Dense packed-prefill GDN-tail attribution is now in place and points at the
+  true `step_decay` recurrence as the sharpest next dense tail target.
 - Dense packed prefill chunk tuning was a major win: on the same 321-token 27B
   prompt, moving from inherited `P=16` to dense default `P=256` improved prompt
   throughput from ~77.9 t/s to ~140.7 t/s with decode unchanged; one-chunk
@@ -144,11 +146,14 @@ Status:
   - `gdn_tail`: ~17.8%
   - `gdn_front`: ~14.5%
   - `attn_decode`: ~7.4%
+- Representative one-layer GDN tail split shows `step_decay` as the largest true
+  tail sub-bucket once `out_proj` is excluded to `gdn_back`.
 - A quick same-prompt llama.cpp tensor on/off falsification on M4 Max showed no
   meaningful prompt-rate delta, so a broad Metal tensor port is not the first
   assumption to chase.
-- Next dense attack is the GDN tail bucket, with mat-mat still the largest broad
-  bucket if a later bandwidth indictment justifies more backend work.
+- Next dense attack is a bounded packed `gdn_step_decay` time-loop falsification
+  checkpoint. If that does not buy a meaningful end-to-end reduction, mat-mat /
+  FFN backend work becomes the next broad lever.
 
 ### 4. Measure Command Overhead, Then Decide ICB / MTL4
 

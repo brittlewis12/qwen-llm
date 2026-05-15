@@ -4593,7 +4593,10 @@ mod tests {
     use super::*;
     use crate::gguf::GgufFile;
     use crate::loader::Model;
-    use crate::metal::MetalContext;
+    use crate::metal::{
+        MetalContext, encode_gdn_step_decay_f32, encode_l2_norm_batched_f32,
+        encode_rmsnorm_gated_f32, encode_ssm_conv_silu_f32,
+    };
     use crate::metal_forward::{MetalModel, MetalSession};
     use std::time::Instant;
 
@@ -5511,6 +5514,302 @@ mod tests {
             "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
             &prompt,
             321,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_27b_packed_gdn_tail_profile() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[packed-gdn-tail] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok
+            .encode(
+                &"The quick brown fox jumps over the lazy dog. ".repeat(32),
+                false,
+            )
+            .expect("tokenize");
+        let total_n = ids.len();
+        let arch = &mm.arch;
+        let h = arch.hidden_size as usize;
+        let n_k = arch.gdn_n_k_heads as usize;
+        let n_v = arch.gdn_n_v_heads as usize;
+        let head_dim = arch.gdn_head_dim as usize;
+        let conv_dim = (2 * n_k + n_v) * head_dim;
+        let v_dim = n_v * head_dim;
+        let g = match &mf.model.blocks[0] {
+            crate::metal_forward::MetalBlock::Gdn(g) => g,
+            _ => panic!("expected block 0 gdn"),
+        };
+
+        let mut sess = MetalSession::fresh(&ctx, &mm, total_n + 16).expect("session");
+        let scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, total_n as u32).expect("scratch");
+        let ids_buf = MetalTensor::zeros_f32(&ctx, vec![total_n as u64]).expect("ids buf");
+        unsafe {
+            let p = ids_buf.buffer.contents().as_ptr() as *mut i32;
+            for (i, &t) in ids.iter().enumerate() {
+                *p.add(i) = t;
+            }
+        }
+
+        let x_pack = scratch.x_pack.view_subrange(0, vec![(total_n * h) as u64]);
+        let h_pack = scratch.h_pack.view_subrange(0, vec![(total_n * h) as u64]);
+        let gdn_qkv_pack = scratch
+            .gdn_qkv_pack
+            .view_subrange(0, vec![(total_n * conv_dim) as u64]);
+        let gdn_z_pack = scratch
+            .gdn_z_pack
+            .view_subrange(0, vec![(total_n * v_dim) as u64]);
+        let gdn_beta_pack = scratch
+            .gdn_beta_pack
+            .view_subrange(0, vec![(total_n * n_v) as u64]);
+        let gdn_alpha_pack = scratch
+            .gdn_alpha_pack
+            .view_subrange(0, vec![(total_n * n_v) as u64]);
+        let gdn_normed_pack = scratch
+            .gdn_normed_pack
+            .view_subrange(0, vec![(total_n * v_dim) as u64]);
+
+        let timed =
+            |label: &str,
+             cb: &mut dyn FnMut(&KernelEncoder) -> Result<(), crate::metal_forward::MfError>|
+             -> f64 {
+                let cmd = ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                cb(&enc).expect(label);
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3
+            };
+
+        // Stage packed inputs for one representative GDN block.
+        let _ = timed("warm_embed", &mut |enc| {
+            let ids_view = ids_buf.view_subrange(0, vec![total_n as u64]);
+            encode_get_rows_f32(
+                &ctx,
+                enc,
+                &mf.model.token_embd,
+                &ids_view,
+                &x_pack,
+                total_n,
+                h,
+            )
+            .map_err(crate::metal_forward::MfError::from)
+        });
+        let _ = timed("warm_norm", &mut |enc| {
+            encode_rms_norm_batched_f32(
+                &ctx,
+                enc,
+                &x_pack,
+                &g.attn_norm,
+                &h_pack,
+                total_n,
+                h,
+                crate::metal_forward::RMS_EPS,
+            )
+            .map_err(crate::metal_forward::MfError::from)
+        });
+        let _ = timed("warm_front", &mut |enc| {
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &g.in_proj_qkv,
+                &h_pack,
+                &gdn_qkv_pack,
+                h,
+                conv_dim,
+                total_n,
+            )?;
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &g.in_proj_z,
+                &h_pack,
+                &gdn_z_pack,
+                h,
+                v_dim,
+                total_n,
+            )?;
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &g.beta_proj,
+                &h_pack,
+                &gdn_beta_pack,
+                h,
+                n_v,
+                total_n,
+            )?;
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &g.alpha_proj,
+                &h_pack,
+                &gdn_alpha_pack,
+                h,
+                n_v,
+                total_n,
+            )
+        });
+        let _ = timed("warm_alpha_beta", &mut |enc| {
+            encode_sigmoid_f32(&ctx, enc, &gdn_beta_pack, &gdn_beta_pack)?;
+            encode_gdn_decay_chain_batched_f32(
+                &ctx,
+                enc,
+                &gdn_alpha_pack,
+                &g.dt_bias,
+                &g.a_log,
+                &gdn_alpha_pack,
+                total_n,
+                n_v,
+            )
+            .map_err(crate::metal_forward::MfError::from)
+        });
+
+        let mut conv_ms = 0.0f64;
+        let mut l2_ms = 0.0f64;
+        let mut step_ms = 0.0f64;
+        let mut rms_ms = 0.0f64;
+        let mut out_ms = 0.0f64;
+        for n_idx in 0..total_n {
+            let qkv_n =
+                gdn_qkv_pack.view_subrange((n_idx * conv_dim) as u64, vec![conv_dim as u64]);
+            let z_n = gdn_z_pack.view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+            let beta_n = gdn_beta_pack.view_subrange((n_idx * n_v) as u64, vec![n_v as u64]);
+            let alpha_n = gdn_alpha_pack.view_subrange((n_idx * n_v) as u64, vec![n_v as u64]);
+            let normed_n =
+                gdn_normed_pack.view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+
+            conv_ms += timed("conv", &mut |enc| {
+                encode_ssm_conv_silu_f32(
+                    &ctx,
+                    enc,
+                    &qkv_n,
+                    &sess.gdn_conv[0],
+                    &g.conv1d,
+                    &sess.gdn_qkv_conv,
+                    conv_dim,
+                )
+                .map_err(crate::metal_forward::MfError::from)
+            });
+            let q_view = sess
+                .gdn_qkv_conv
+                .view_subrange(0, vec![(n_k * head_dim) as u64]);
+            let k_view = sess
+                .gdn_qkv_conv
+                .view_subrange((n_k * head_dim) as u64, vec![(n_k * head_dim) as u64]);
+            let v_view = sess
+                .gdn_qkv_conv
+                .view_subrange((2 * n_k * head_dim) as u64, vec![(n_v * head_dim) as u64]);
+            l2_ms += timed("l2", &mut |enc| {
+                encode_l2_norm_batched_f32(
+                    &ctx,
+                    enc,
+                    &q_view,
+                    &sess.gdn_q_norm,
+                    n_k,
+                    head_dim,
+                    crate::metal_forward::RMS_EPS,
+                )?;
+                encode_l2_norm_batched_f32(
+                    &ctx,
+                    enc,
+                    &k_view,
+                    &sess.gdn_k_norm,
+                    n_k,
+                    head_dim,
+                    crate::metal_forward::RMS_EPS,
+                )
+                .map_err(crate::metal_forward::MfError::from)
+            });
+            step_ms += timed("step", &mut |enc| {
+                encode_gdn_step_decay_f32(
+                    &ctx,
+                    enc,
+                    &sess.gdn_q_norm,
+                    &sess.gdn_k_norm,
+                    &v_view,
+                    &alpha_n,
+                    &beta_n,
+                    &sess.gdn_state[0],
+                    &sess.gdn_out,
+                    n_v,
+                    n_k,
+                    head_dim,
+                )
+                .map_err(crate::metal_forward::MfError::from)
+            });
+            rms_ms += timed("rmsnorm_gated", &mut |enc| {
+                encode_rmsnorm_gated_f32(
+                    &ctx,
+                    enc,
+                    &sess.gdn_out,
+                    &g.norm,
+                    &z_n,
+                    &normed_n,
+                    n_v,
+                    head_dim,
+                    crate::metal_forward::RMS_EPS,
+                )
+                .map_err(crate::metal_forward::MfError::from)
+            });
+            out_ms += timed("out_proj", &mut |enc| {
+                crate::metal_forward::encode_mat_vec_dispatch(
+                    &ctx,
+                    enc,
+                    &g.out_proj,
+                    &normed_n,
+                    &sess.mixer_out,
+                    v_dim,
+                    h,
+                )
+            });
+        }
+
+        let total = conv_ms + l2_ms + step_ms + rms_ms + out_ms;
+        eprintln!(
+            "[packed-gdn-tail] prompt_tokens={} one-layer total={total:.2} ms",
+            total_n
+        );
+        eprintln!(
+            "[packed-gdn-tail]   conv           {:7.2} ms ({:5.1}%)",
+            conv_ms,
+            conv_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-gdn-tail]   l2             {:7.2} ms ({:5.1}%)",
+            l2_ms,
+            l2_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-gdn-tail]   step_decay     {:7.2} ms ({:5.1}%)",
+            step_ms,
+            step_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-gdn-tail]   rmsnorm_gated  {:7.2} ms ({:5.1}%)",
+            rms_ms,
+            rms_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-gdn-tail]   out_proj       {:7.2} ms ({:5.1}%)",
+            out_ms,
+            out_ms / total * 100.0
         );
     }
 

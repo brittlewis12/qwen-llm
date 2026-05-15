@@ -502,6 +502,45 @@ v0.83: batch dense GDN alpha and beta prompt path
 
 ### Follow-on State (same checkpoint arc)
 
+- Added a denser packed-prefill profiler for the real 27B prompt and a
+  representative one-layer GDN tail subprofile.
+
+Updated dense packed-prefill attribution (`P=321`):
+
+- total: `2016.30 ms`
+- `ffn`: `1008.40 ms` (`50.0%`)
+- `gdn_front`: `291.92 ms` (`14.5%`)
+- `gdn_tail`: `359.69 ms` (`17.8%`)
+- `gdn_back`: `100.05 ms` (`5.0%`)
+- `attn_decode`: `148.82 ms` (`7.4%`)
+
+Representative one-layer GDN tail split over the same 321-token prompt:
+
+- total: `42.63 ms`
+- `conv`: `1.56 ms`
+- `l2`: `2.10 ms`
+- `step_decay`: `6.16 ms`
+- `rmsnorm_gated`: `1.67 ms`
+- `out_proj`: `31.13 ms`
+
+Interpretation:
+
+- In the full dense prompt profile, `out_proj` already belongs to `gdn_back`, so
+  the true `gdn_tail` bucket is the sum of `conv + l2 + step_decay + rmsnorm`.
+- Within that true tail, `step_decay` is the largest sub-bucket.
+- `cx` review says the sharpest next checkpoint is a bounded packed
+  `gdn_step_decay` time-loop falsification kernel over prompt tokens; if it does
+  not buy roughly `80-100 ms` end-to-end, pivot back toward broader FFN/backend
+  work.
+
+### Suggested Checkpoint Commit
+
+```text
+v0.84: profile dense GDN tail prompt bucket
+```
+
+### Follow-on State (same checkpoint arc)
+
 - MoE packed prefill chunk sweep on the same 321-token prompt (`--tokens 0`):
   - 35B A3B: `P=8 85.9`, `16 87.0`, `32 89.8`, `64 92.1`, `128 94.9`,
     `256 95.0`, `321 95.2` t/s

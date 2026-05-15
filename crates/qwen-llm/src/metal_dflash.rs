@@ -31,10 +31,11 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32, encode_gdn_decay_chain_f32,
-    encode_get_rows_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32,
+    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
+    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32,
 };
 use crate::metal_forward::{
     MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
@@ -961,6 +962,10 @@ pub struct MetalDFlashLayerMajorScratch {
     /// `[N, v_dim]` F32 — batched in_proj_z output. v_dim = n_v * head_dim.
     /// 27B: [16, 6144] = 384 KiB.
     pub gdn_z_pack: MetalTensor,
+    /// `[N, n_v]` F32 — batched beta projection after sigmoid.
+    pub gdn_beta_pack: MetalTensor,
+    /// `[N, n_v]` F32 — batched alpha decay exp(g).
+    pub gdn_alpha_pack: MetalTensor,
     /// `[N, v_dim]` F32 — RMSNormGated output across N tokens; consumed by
     /// the batched out_proj mat-mat after the per-token recurrence loop.
     /// 27B: [16, 6144] = 384 KiB.
@@ -1034,6 +1039,8 @@ impl MetalDFlashLayerMajorScratch {
             final_logits_pack: MetalTensor::zeros_f32(ctx, vec![n, v])?,
             gdn_qkv_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
             gdn_z_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+            gdn_beta_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
+            gdn_alpha_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
             gdn_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
             n: block_size,
             hidden_size: h,
@@ -3119,6 +3126,12 @@ pub fn prefill_tokens_with_multi_hidden(
                         let gdn_z_pack_p = layer_scratch
                             .gdn_z_pack
                             .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
+                        let gdn_beta_pack_p = layer_scratch
+                            .gdn_beta_pack
+                            .view_subrange(0, vec![(chunk_p * n_v_u) as u64]);
+                        let gdn_alpha_pack_p = layer_scratch
+                            .gdn_alpha_pack
+                            .view_subrange(0, vec![(chunk_p * n_v_u) as u64]);
                         let gdn_normed_pack_p = layer_scratch
                             .gdn_normed_pack
                             .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
@@ -3146,52 +3159,57 @@ pub fn prefill_tokens_with_multi_hidden(
                                 v_dim,
                                 chunk_p,
                             )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.beta_proj,
+                                &h_pack_p,
+                                &gdn_beta_pack_p,
+                                h,
+                                n_v_u,
+                                chunk_p,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                &g.alpha_proj,
+                                &h_pack_p,
+                                &gdn_alpha_pack_p,
+                                h,
+                                n_v_u,
+                                chunk_p,
+                            )?;
+                            enc.end();
+                        }
+
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_sigmoid_f32(base.ctx, &enc, &gdn_beta_pack_p, &gdn_beta_pack_p)?;
+                            encode_gdn_decay_chain_batched_f32(
+                                base.ctx,
+                                &enc,
+                                &gdn_alpha_pack_p,
+                                &g.dt_bias,
+                                &g.a_log,
+                                &gdn_alpha_pack_p,
+                                chunk_p,
+                                n_v_u,
+                            )?;
                             enc.end();
                         }
 
                         // Per-token recurrence (GDN state mutates per token).
                         // NO ckpt blit — prefill never rolls back.
-                        let alpha_handle = target_session.gdn_alpha.clone();
-                        let beta_handle = target_session.gdn_beta.clone();
                         for n_idx in 0..chunk_p {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            let h_n = h_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                            encode_mat_vec_dispatch(
-                                base.ctx,
-                                &enc,
-                                &g.beta_proj,
-                                &h_n,
-                                &target_session.gdn_b,
-                                h,
-                                n_v_u,
-                            )?;
-                            encode_sigmoid_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.gdn_b,
-                                &target_session.gdn_beta,
-                            )?;
-                            encode_mat_vec_dispatch(
-                                base.ctx,
-                                &enc,
-                                &g.alpha_proj,
-                                &h_n,
-                                &target_session.gdn_a,
-                                h,
-                                n_v_u,
-                            )?;
-                            encode_gdn_decay_chain_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.gdn_a,
-                                &g.dt_bias,
-                                &g.a_log,
-                                &target_session.gdn_alpha,
-                            )?;
                             let qkv_n = gdn_qkv_pack_p
                                 .view_subrange((n_idx * conv_dim) as u64, vec![conv_dim as u64]);
                             let z_n = gdn_z_pack_p
                                 .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                            let beta_n = gdn_beta_pack_p
+                                .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
+                            let alpha_n = gdn_alpha_pack_p
+                                .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
                             let normed_n = gdn_normed_pack_p
                                 .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
                             base.encode_gdn_tail(
@@ -3201,8 +3219,8 @@ pub fn prefill_tokens_with_multi_hidden(
                                 target_session,
                                 &qkv_n,
                                 &z_n,
-                                &alpha_handle,
-                                &beta_handle,
+                                &alpha_n,
+                                &beta_n,
                                 &normed_n,
                             )?;
                             enc.end();
@@ -4796,6 +4814,703 @@ mod tests {
             "122b",
             8,
             3,
+        );
+    }
+
+    fn run_packed_dense_prefill_phase_profile(model_path: &str, prompt: &str, chunk_p: usize) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[packed-prefill-phase] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert_eq!(m.arch.kind, crate::model::ArchKind::Dense);
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let ids = tok.encode(prompt, false).expect("tokenize");
+        let total_n = ids.len();
+        let arch = &mm.arch;
+        let h = arch.hidden_size as usize;
+        let f = arch.intermediate_size as usize;
+        let cap = total_n + 16;
+        let mut sess = MetalSession::fresh(&ctx, &mm, cap).expect("session");
+        let scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, chunk_p as u32).expect("scratch");
+
+        let ids_buf = MetalTensor::zeros_f32(&ctx, vec![chunk_p as u64]).expect("ids buf");
+        unsafe {
+            let p = ids_buf.buffer.contents().as_ptr() as *mut i32;
+            for (i, &t) in ids.iter().enumerate() {
+                *p.add(i) = t;
+            }
+        }
+
+        let x_pack_p = scratch.x_pack.view_subrange(0, vec![(total_n * h) as u64]);
+        let h_pack_p = scratch.h_pack.view_subrange(0, vec![(total_n * h) as u64]);
+        let mixer_out_pack_p = scratch
+            .mixer_out_pack
+            .view_subrange(0, vec![(total_n * h) as u64]);
+
+        let mut timed =
+            |label: &str,
+             cb: &mut dyn FnMut(&KernelEncoder) -> Result<(), crate::metal_forward::MfError>|
+             -> f64 {
+                let cmd = ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                cb(&enc).expect(label);
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3
+            };
+
+        let mut embed_ms = 0.0f64;
+        let mut gdn_front_ms = 0.0f64;
+        let mut gdn_alpha_beta_ms = 0.0f64;
+        let mut gdn_tail_ms = 0.0f64;
+        let mut gdn_back_ms = 0.0f64;
+        let mut attn_front_ms = 0.0f64;
+        let mut attn_decode_ms = 0.0f64;
+        let mut attn_back_ms = 0.0f64;
+        let mut ffn_ms = 0.0f64;
+        let mut tail_ms = 0.0f64;
+
+        embed_ms += timed("embed", &mut |enc| {
+            let ids_view = ids_buf.view_subrange(0, vec![total_n as u64]);
+            crate::metal::encode_get_rows_f32(
+                &ctx,
+                enc,
+                &mf.model.token_embd,
+                &ids_view,
+                &x_pack_p,
+                total_n,
+                h,
+            )
+            .map_err(crate::metal_forward::MfError::from)
+        });
+
+        let gdn_mat_mat_eligible =
+            |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
+        let attn_mat_mat_eligible =
+            |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
+        let ffn_mat_mat_eligible =
+            |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &mf.model.blocks {
+            let attn_norm = match block {
+                crate::metal_forward::MetalBlock::Gdn(g) => &g.attn_norm,
+                crate::metal_forward::MetalBlock::Attn(a) => &a.attn_norm,
+            };
+            let post_norm = match block {
+                crate::metal_forward::MetalBlock::Gdn(g) => &g.post_attn_norm,
+                crate::metal_forward::MetalBlock::Attn(a) => &a.post_attn_norm,
+            };
+            let (g_w, u_w, d_w) = match block {
+                crate::metal_forward::MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
+                crate::metal_forward::MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
+            };
+
+            timed("pre_mixer_norm", &mut |enc| {
+                crate::metal::encode_rms_norm_batched_f32(
+                    &ctx,
+                    enc,
+                    &x_pack_p,
+                    attn_norm,
+                    &h_pack_p,
+                    total_n,
+                    h,
+                    crate::metal_forward::RMS_EPS,
+                )
+                .map_err(crate::metal_forward::MfError::from)
+            });
+
+            match block {
+                crate::metal_forward::MetalBlock::Gdn(g) => {
+                    let gi = gdn_idx;
+                    gdn_idx += 1;
+                    let n_k_u = arch.gdn_n_k_heads as usize;
+                    let n_v_u = arch.gdn_n_v_heads as usize;
+                    let head_dim_u = arch.gdn_head_dim as usize;
+                    let conv_dim = (2 * n_k_u + n_v_u) * head_dim_u;
+                    let v_dim = n_v_u * head_dim_u;
+                    let gdn_qkv_pack_p = scratch
+                        .gdn_qkv_pack
+                        .view_subrange(0, vec![(total_n * conv_dim) as u64]);
+                    let gdn_z_pack_p = scratch
+                        .gdn_z_pack
+                        .view_subrange(0, vec![(total_n * v_dim) as u64]);
+                    let gdn_beta_pack_p = scratch
+                        .gdn_beta_pack
+                        .view_subrange(0, vec![(total_n * n_v_u) as u64]);
+                    let gdn_alpha_pack_p = scratch
+                        .gdn_alpha_pack
+                        .view_subrange(0, vec![(total_n * n_v_u) as u64]);
+                    let gdn_normed_pack_p = scratch
+                        .gdn_normed_pack
+                        .view_subrange(0, vec![(total_n * v_dim) as u64]);
+                    let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
+                        && gdn_mat_mat_eligible(g.in_proj_z.dtype)
+                        && gdn_mat_mat_eligible(g.out_proj.dtype);
+                    if gdn_batched {
+                        gdn_front_ms += timed("gdn_front", &mut |enc| {
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &g.in_proj_qkv,
+                                &h_pack_p,
+                                &gdn_qkv_pack_p,
+                                h,
+                                conv_dim,
+                                total_n,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &g.in_proj_z,
+                                &h_pack_p,
+                                &gdn_z_pack_p,
+                                h,
+                                v_dim,
+                                total_n,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &g.beta_proj,
+                                &h_pack_p,
+                                &gdn_beta_pack_p,
+                                h,
+                                n_v_u,
+                                total_n,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &g.alpha_proj,
+                                &h_pack_p,
+                                &gdn_alpha_pack_p,
+                                h,
+                                n_v_u,
+                                total_n,
+                            )
+                        });
+                        gdn_alpha_beta_ms += timed("gdn_alpha_beta", &mut |enc| {
+                            crate::metal::encode_sigmoid_f32(
+                                &ctx,
+                                enc,
+                                &gdn_beta_pack_p,
+                                &gdn_beta_pack_p,
+                            )?;
+                            encode_gdn_decay_chain_batched_f32(
+                                &ctx,
+                                enc,
+                                &gdn_alpha_pack_p,
+                                &g.dt_bias,
+                                &g.a_log,
+                                &gdn_alpha_pack_p,
+                                total_n,
+                                n_v_u,
+                            )
+                            .map_err(crate::metal_forward::MfError::from)
+                        });
+                        gdn_tail_ms += timed("gdn_tail", &mut |enc| {
+                            for n_idx in 0..total_n {
+                                let qkv_n = gdn_qkv_pack_p.view_subrange(
+                                    (n_idx * conv_dim) as u64,
+                                    vec![conv_dim as u64],
+                                );
+                                let z_n = gdn_z_pack_p
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                let beta_n = gdn_beta_pack_p
+                                    .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
+                                let alpha_n = gdn_alpha_pack_p
+                                    .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
+                                let normed_n = gdn_normed_pack_p
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                mf.encode_gdn_tail(
+                                    enc, g, gi, &mut sess, &qkv_n, &z_n, &alpha_n, &beta_n,
+                                    &normed_n,
+                                )?;
+                            }
+                            Ok(())
+                        });
+                        gdn_back_ms += timed("gdn_back", &mut |enc| {
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &g.out_proj,
+                                &gdn_normed_pack_p,
+                                &mixer_out_pack_p,
+                                v_dim,
+                                h,
+                                total_n,
+                            )?;
+                            crate::metal::encode_add_inplace_f32(
+                                &ctx,
+                                enc,
+                                &x_pack_p,
+                                &mixer_out_pack_p,
+                            )
+                            .map_err(crate::metal_forward::MfError::from)
+                        });
+                    } else {
+                        gdn_tail_ms += timed("gdn_fallback", &mut |enc| {
+                            for n_idx in 0..total_n {
+                                encode_copy_offset_f32(
+                                    &ctx,
+                                    enc,
+                                    &h_pack_p,
+                                    n_idx * h,
+                                    &sess.h,
+                                    h,
+                                )?;
+                                mf.encode_gdn(enc, g, gi, &mut sess)?;
+                                crate::metal_forward::encode_scatter_offset_f32(
+                                    &ctx,
+                                    enc,
+                                    &sess.mixer_out,
+                                    &mixer_out_pack_p,
+                                    n_idx * h,
+                                    h,
+                                )?;
+                            }
+                            Ok(())
+                        });
+                        gdn_back_ms += timed("gdn_resid", &mut |enc| {
+                            crate::metal::encode_add_inplace_f32(
+                                &ctx,
+                                enc,
+                                &x_pack_p,
+                                &mixer_out_pack_p,
+                            )
+                            .map_err(crate::metal_forward::MfError::from)
+                        });
+                    }
+                }
+                crate::metal_forward::MetalBlock::Attn(a) => {
+                    let ai = attn_idx;
+                    attn_idx += 1;
+                    let head_dim = arch.attn_head_dim as usize;
+                    let n_q = arch.n_q_heads as usize;
+                    let n_kv = arch.n_kv_heads as usize;
+                    let q_dim = n_q * head_dim;
+                    let kv_dim = n_kv * head_dim;
+                    let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+                    let q_full_pack_p = scratch
+                        .attn_q_full_pack
+                        .view_subrange(0, vec![(total_n * 2 * q_dim) as u64]);
+                    let q_pack_p = scratch
+                        .attn_q_pack
+                        .view_subrange(0, vec![(total_n * q_dim) as u64]);
+                    let gate_pack_p = scratch
+                        .attn_gate_pack
+                        .view_subrange(0, vec![(total_n * q_dim) as u64]);
+                    let q_normed_pack_p = scratch
+                        .attn_q_normed_pack
+                        .view_subrange(0, vec![(total_n * q_dim) as u64]);
+                    let k_now_pack_p = scratch
+                        .attn_k_now_pack
+                        .view_subrange(0, vec![(total_n * kv_dim) as u64]);
+                    let v_now_pack_p = scratch
+                        .attn_v_now_pack
+                        .view_subrange(0, vec![(total_n * kv_dim) as u64]);
+                    let k_normed_pack_p = scratch
+                        .attn_k_normed_pack
+                        .view_subrange(0, vec![(total_n * kv_dim) as u64]);
+                    let attn_o_pack_p = scratch
+                        .attn_o_pack
+                        .view_subrange(0, vec![(total_n * q_dim) as u64]);
+                    let attn_batched = attn_mat_mat_eligible(a.q.dtype)
+                        && attn_mat_mat_eligible(a.k.dtype)
+                        && attn_mat_mat_eligible(a.v.dtype)
+                        && attn_mat_mat_eligible(a.o.dtype);
+                    if attn_batched {
+                        attn_front_ms += timed("attn_front", &mut |enc| {
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &a.q,
+                                &h_pack_p,
+                                &q_full_pack_p,
+                                h,
+                                2 * q_dim,
+                                total_n,
+                            )?;
+                            crate::metal::encode_split_q_gate_f32(
+                                &ctx,
+                                enc,
+                                &q_full_pack_p,
+                                &q_pack_p,
+                                &gate_pack_p,
+                                total_n * n_q,
+                                head_dim,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &a.k,
+                                &h_pack_p,
+                                &k_now_pack_p,
+                                h,
+                                kv_dim,
+                                total_n,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &a.v,
+                                &h_pack_p,
+                                &v_now_pack_p,
+                                h,
+                                kv_dim,
+                                total_n,
+                            )?;
+                            crate::metal::encode_rms_norm_batched_f32(
+                                &ctx,
+                                enc,
+                                &q_pack_p,
+                                &a.q_norm,
+                                &q_normed_pack_p,
+                                total_n * n_q,
+                                head_dim,
+                                crate::metal_forward::RMS_EPS,
+                            )?;
+                            crate::metal::encode_rms_norm_batched_f32(
+                                &ctx,
+                                enc,
+                                &k_now_pack_p,
+                                &a.k_norm,
+                                &k_normed_pack_p,
+                                total_n * n_kv,
+                                head_dim,
+                                crate::metal_forward::RMS_EPS,
+                            )
+                            .map_err(crate::metal_forward::MfError::from)
+                        });
+                        attn_decode_ms += timed("attn_decode", &mut |enc| {
+                            for n_idx in 0..total_n {
+                                let position_n = n_idx as u32;
+                                let q_normed_n = q_normed_pack_p
+                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                let k_normed_n = k_normed_pack_p
+                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                                let v_now_n = v_now_pack_p
+                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                                let attn_o_n = attn_o_pack_p
+                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                crate::metal::encode_rope_neox_f32(
+                                    &ctx,
+                                    enc,
+                                    &q_normed_n,
+                                    n_q,
+                                    head_dim,
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
+                                )?;
+                                crate::metal::encode_rope_neox_f32(
+                                    &ctx,
+                                    enc,
+                                    &k_normed_n,
+                                    n_kv,
+                                    head_dim,
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
+                                )?;
+                                crate::metal::encode_scatter_offset_f32_to_f16_kv(
+                                    &ctx,
+                                    enc,
+                                    &k_normed_n,
+                                    &v_now_n,
+                                    &sess.kv_k[ai],
+                                    &sess.kv_v[ai],
+                                    n_idx * kv_dim,
+                                    kv_dim,
+                                )?;
+                                sess.kv_n_pos[ai] = n_idx + 1;
+                                let group = n_q / n_kv;
+                                let nwg =
+                                    crate::metal::attn_v4_choose_nwg(sess.kv_n_pos[ai], group);
+                                let tile_c =
+                                    crate::metal::attn_v4_choose_tile_c(sess.kv_n_pos[ai], group);
+                                crate::metal::encode_attn_decode_v4_f32(
+                                    &ctx,
+                                    enc,
+                                    &q_normed_n,
+                                    &sess.kv_k[ai],
+                                    &sess.kv_v[ai],
+                                    &sess.attn_v4_o_partial,
+                                    &sess.attn_v4_ml_partial,
+                                    &attn_o_n,
+                                    n_q,
+                                    n_kv,
+                                    head_dim,
+                                    sess.kv_n_pos[ai],
+                                    nwg,
+                                    tile_c,
+                                )?;
+                            }
+                            Ok(())
+                        });
+                        attn_back_ms += timed("attn_back", &mut |enc| {
+                            crate::metal::encode_sigmoid_f32(&ctx, enc, &gate_pack_p, &q_pack_p)?;
+                            crate::metal::encode_mul_f32(
+                                &ctx,
+                                enc,
+                                &attn_o_pack_p,
+                                &q_pack_p,
+                                &attn_o_pack_p,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                &ctx,
+                                enc,
+                                &a.o,
+                                &attn_o_pack_p,
+                                &mixer_out_pack_p,
+                                q_dim,
+                                h,
+                                total_n,
+                            )?;
+                            crate::metal::encode_add_inplace_f32(
+                                &ctx,
+                                enc,
+                                &x_pack_p,
+                                &mixer_out_pack_p,
+                            )
+                            .map_err(crate::metal_forward::MfError::from)
+                        });
+                    } else {
+                        attn_decode_ms += timed("attn_fallback", &mut |enc| {
+                            for n_idx in 0..total_n {
+                                encode_copy_offset_f32(
+                                    &ctx,
+                                    enc,
+                                    &h_pack_p,
+                                    n_idx * h,
+                                    &sess.h,
+                                    h,
+                                )?;
+                                mf.encode_attn(enc, a, ai, n_idx as u32, &mut sess)?;
+                                crate::metal_forward::encode_scatter_offset_f32(
+                                    &ctx,
+                                    enc,
+                                    &sess.mixer_out,
+                                    &mixer_out_pack_p,
+                                    n_idx * h,
+                                    h,
+                                )?;
+                            }
+                            Ok(())
+                        });
+                        attn_back_ms += timed("attn_resid", &mut |enc| {
+                            crate::metal::encode_add_inplace_f32(
+                                &ctx,
+                                enc,
+                                &x_pack_p,
+                                &mixer_out_pack_p,
+                            )
+                            .map_err(crate::metal_forward::MfError::from)
+                        });
+                    }
+                }
+            }
+
+            let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
+                && ffn_mat_mat_eligible(u_w.dtype)
+                && ffn_mat_mat_eligible(d_w.dtype);
+            let ffn_gate_pack_p = scratch
+                .ffn_gate_pack
+                .view_subrange(0, vec![(total_n * f) as u64]);
+            let ffn_up_pack_p = scratch
+                .ffn_up_pack
+                .view_subrange(0, vec![(total_n * f) as u64]);
+            let ffn_inner_pack_p = scratch
+                .ffn_inner_pack
+                .view_subrange(0, vec![(total_n * f) as u64]);
+            let ffn_out_pack_p = scratch
+                .ffn_out_pack
+                .view_subrange(0, vec![(total_n * h) as u64]);
+            ffn_ms += timed("ffn", &mut |enc| {
+                crate::metal::encode_rms_norm_batched_f32(
+                    &ctx,
+                    enc,
+                    &x_pack_p,
+                    post_norm,
+                    &h_pack_p,
+                    total_n,
+                    h,
+                    crate::metal_forward::RMS_EPS,
+                )?;
+                if mat_mat_path {
+                    encode_mat_mat_dispatch(
+                        &ctx,
+                        enc,
+                        g_w,
+                        &h_pack_p,
+                        &ffn_gate_pack_p,
+                        h,
+                        f,
+                        total_n,
+                    )?;
+                    encode_mat_mat_dispatch(
+                        &ctx,
+                        enc,
+                        u_w,
+                        &h_pack_p,
+                        &ffn_up_pack_p,
+                        h,
+                        f,
+                        total_n,
+                    )?;
+                    crate::metal::encode_silu_mul_f32(
+                        &ctx,
+                        enc,
+                        &ffn_gate_pack_p,
+                        &ffn_up_pack_p,
+                        &ffn_inner_pack_p,
+                    )?;
+                    encode_mat_mat_dispatch(
+                        &ctx,
+                        enc,
+                        d_w,
+                        &ffn_inner_pack_p,
+                        &ffn_out_pack_p,
+                        f,
+                        h,
+                        total_n,
+                    )?;
+                } else {
+                    for n_idx in 0..total_n {
+                        let h_n = h_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        let gate_n =
+                            ffn_gate_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                        let up_n = ffn_up_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                        let inner_n =
+                            ffn_inner_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                        let out_n =
+                            ffn_out_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        crate::metal_forward::encode_mat_vec_dispatch(
+                            &ctx, enc, g_w, &h_n, &gate_n, h, f,
+                        )?;
+                        crate::metal_forward::encode_mat_vec_dispatch(
+                            &ctx, enc, u_w, &h_n, &up_n, h, f,
+                        )?;
+                        crate::metal::encode_silu_mul_f32(&ctx, enc, &gate_n, &up_n, &inner_n)?;
+                        crate::metal_forward::encode_mat_vec_dispatch(
+                            &ctx, enc, d_w, &inner_n, &out_n, f, h,
+                        )?;
+                    }
+                }
+                crate::metal::encode_add_inplace_f32(&ctx, enc, &x_pack_p, &ffn_out_pack_p)
+                    .map_err(crate::metal_forward::MfError::from)
+            });
+        }
+
+        tail_ms += timed("tail", &mut |enc| {
+            let x_last = x_pack_p.view_subrange(((total_n - 1) * h) as u64, vec![h as u64]);
+            crate::metal::encode_rms_norm_mul_f32(
+                &ctx,
+                enc,
+                &x_last,
+                &mf.model.output_norm,
+                &sess.h,
+                crate::metal_forward::RMS_EPS,
+            )?;
+            crate::metal_forward::encode_mat_vec_dispatch(
+                &ctx,
+                enc,
+                &mf.model.lm_head,
+                &sess.h,
+                &sess.logits,
+                h,
+                arch.vocab_size as usize,
+            )
+        });
+
+        let total = embed_ms
+            + gdn_front_ms
+            + gdn_alpha_beta_ms
+            + gdn_tail_ms
+            + gdn_back_ms
+            + attn_front_ms
+            + attn_decode_ms
+            + attn_back_ms
+            + ffn_ms
+            + tail_ms;
+        eprintln!(
+            "[packed-prefill-phase] prompt_tokens={} chunk_p={chunk_p} phase_sum={total:.2} ms",
+            total_n
+        );
+        eprintln!(
+            "[packed-prefill-phase]   embed         {:7.2} ms ({:5.1}%)",
+            embed_ms,
+            embed_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   gdn_front     {:7.2} ms ({:5.1}%)",
+            gdn_front_ms,
+            gdn_front_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   gdn_alpha_beta{:7.2} ms ({:5.1}%)",
+            gdn_alpha_beta_ms,
+            gdn_alpha_beta_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   gdn_tail      {:7.2} ms ({:5.1}%)",
+            gdn_tail_ms,
+            gdn_tail_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   gdn_back      {:7.2} ms ({:5.1}%)",
+            gdn_back_ms,
+            gdn_back_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   attn_front    {:7.2} ms ({:5.1}%)",
+            attn_front_ms,
+            attn_front_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   attn_decode   {:7.2} ms ({:5.1}%)",
+            attn_decode_ms,
+            attn_decode_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   attn_back     {:7.2} ms ({:5.1}%)",
+            attn_back_ms,
+            attn_back_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   ffn           {:7.2} ms ({:5.1}%)",
+            ffn_ms,
+            ffn_ms / total * 100.0
+        );
+        eprintln!(
+            "[packed-prefill-phase]   tail          {:7.2} ms ({:5.1}%)",
+            tail_ms,
+            tail_ms / total * 100.0
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_27b_packed_prefill_phase_profile() {
+        let prompt = "The quick brown fox jumps over the lazy dog. ".repeat(32);
+        run_packed_dense_prefill_phase_profile(
+            "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            &prompt,
+            321,
         );
     }
 

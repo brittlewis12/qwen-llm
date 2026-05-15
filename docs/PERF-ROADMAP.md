@@ -40,6 +40,9 @@ M4 Max, release `qwen-bench`, sequential runs.
 
 Recent confirmed wins:
 
+- Dense packed GDN `alpha/beta` batching was a major prompt win: same-prompt 27B
+  prefill rose from ~141.9 t/s plateau to ~165.0 t/s plateau, with decode
+  unchanged.
 - Dense packed prefill chunk tuning was a major win: on the same 321-token 27B
   prompt, moving from inherited `P=16` to dense default `P=256` improved prompt
   throughput from ~77.9 t/s to ~140.7 t/s with decode unchanged; one-chunk
@@ -120,19 +123,32 @@ Status:
 
 Optimizes: dense prompt processing and TTFT.
 
-Why it is now the next dense question:
+Why it changed:
 
-- We found a huge non-kernel win just by tuning packed prefill chunk size.
-- Dense prompt throughput is now ~140.7 t/s on the same prompt where llama.cpp
-  reports ~186.8 t/s, so the gap is much smaller but still real.
-- The next dense move should be attribution-driven: determine whether the
-  residual prompt gap is mostly prompt-attention, GDN recurrence, or mat-mat.
+- We found the chunk-size win and then removed the batched `alpha/beta` blind
+  spot.
+- Dense prompt throughput is now ~165.0 t/s on the same prompt where llama.cpp
+  reports ~186.8 t/s, so the remaining gap is much smaller.
+- Packed-prefill attribution now says the remaining dense gap is dominated by
+  FFN mat-mat and the true GDN tail, not prompt-attention.
 
 Acceptance gates:
 
-- Add dense packed-prefill attribution on the production prompt path.
-- Use it to decide whether to crib llama.cpp prompt flash attention or mat-mat
-  path ideas next.
+- Keep dense prompt attribution current after each major packed-prefill change.
+- Use it to choose between GDN-tail work and any broader mat-mat backend work.
+
+Status:
+
+- Dense packed-prefill phase profile (`P=321`) now shows:
+  - `ffn`: ~50.0%
+  - `gdn_tail`: ~17.8%
+  - `gdn_front`: ~14.5%
+  - `attn_decode`: ~7.4%
+- A quick same-prompt llama.cpp tensor on/off falsification on M4 Max showed no
+  meaningful prompt-rate delta, so a broad Metal tensor port is not the first
+  assumption to chase.
+- Next dense attack is the GDN tail bucket, with mat-mat still the largest broad
+  bucket if a later bandwidth indictment justifies more backend work.
 
 ### 4. Measure Command Overhead, Then Decide ICB / MTL4
 

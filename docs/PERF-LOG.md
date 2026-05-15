@@ -424,6 +424,82 @@ This does not close the full prompt gap, but it narrows it substantially.
 v0.81: tune dense packed prefill chunk size
 ```
 
+## 2026-05-15 — Batched Dense GDN Alpha/Beta Prompt Path
+
+Status: improved checkpoint reached, not yet committed in git.
+
+### What Changed
+
+- Added F32 packed mat-mat support for prompt-style `[N, H] x [H, n_out]` in the
+  narrow form we need for small output widths.
+- Dense packed prefill now batches GDN `beta_proj` and `alpha_proj` across the
+  whole packed chunk instead of re-running them token-by-token.
+- Added a batched GDN decay-chain kernel so `[N, n_v]` alpha activations can be
+  turned into per-token decay values in one pass.
+
+### Dense Prompt Result
+
+Same repeated 321-token 27B prompt:
+
+- before this change: prompt plateau ~`141.9 t/s`
+- after this change: prompt plateau ~`165.0 t/s`
+
+Product-shaped run (`64` decode tokens):
+
+- packed prefill with dense default `P=512`: `1947.4 ms` = `164.8 t/s`
+- decode unchanged: `41.04 ms/token` = `24.4 t/s`
+
+This moves the same-prompt dense prompt gap versus llama.cpp from roughly
+`186.8 / 141.9 = 1.32x` behind to about `186.8 / 165.0 = 1.13x` behind.
+
+### Updated Dense Packed-Prefill Attribution (`P=321`)
+
+- total: `2016.30 ms`
+- `ffn`: `1008.40 ms` (`50.0%`)
+- `gdn_front`: `291.92 ms` (`14.5%`)
+- `gdn_alpha_beta`: `0.26 ms` (effectively gone)
+- `gdn_tail`: `359.69 ms` (`17.8%`)
+- `gdn_back`: `100.05 ms` (`5.0%`)
+- `attn_front`: `72.89 ms` (`3.6%`)
+- `attn_decode`: `148.82 ms` (`7.4%`)
+- `attn_back`: `31.73 ms` (`1.6%`)
+
+Interpretation:
+
+- The old dense prompt bottleneck from `alpha/beta` projections is no longer
+  relevant.
+- Dense prompt time is now dominated by FFN mat-mat and the true GDN tail.
+
+### Supporting Fast-Feedback Probe
+
+Exact production-shape prompt probes at `N=321` still show mat-mat strongly
+beating repeated mat-vec on the real 27B weights:
+
+- `ffn_gate` Q4_K: `34.45 ms` vec321 vs `5.32 ms` mat-mat (`6.47x`)
+- `ffn_up` Q4_K: `32.24 ms` vec321 vs `5.27 ms` mat-mat (`6.12x`)
+- `ffn_down` Q6_K: `51.59 ms` vec321 vs `5.68 ms` mat-mat (`9.08x`)
+- `attn_qkv` Q6_K: `27.26 ms` vec321 vs `3.21 ms` mat-mat (`8.50x`)
+
+No-code falsification check from `cx` recommendation:
+
+- llama.cpp same-prompt run with Metal tensor path forced on/off on M4 Max
+  showed no meaningful delta (`~207.0` vs `~207.2 t/s` prompt in the
+  one-token probe), so the Metal tensor path is not obviously the missing trick
+  on this hardware.
+
+### Current Next Step
+
+Per `cx`, the sharpest next dense attack is now the GDN tail bucket, not a
+broad mat-mat backend port. The best fast-feedback next step is to split the
+`gdn_tail` bucket further and/or prototype a packed `gdn_step_decay` time-loop
+kernel before attempting a larger rewrite.
+
+### Suggested Checkpoint Commit
+
+```text
+v0.83: batch dense GDN alpha and beta prompt path
+```
+
 ### Follow-on State (same checkpoint arc)
 
 - MoE packed prefill chunk sweep on the same 321-token prompt (`--tokens 0`):

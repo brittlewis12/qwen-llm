@@ -1537,7 +1537,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         if m.arch.kind == qwen_llm::model::ArchKind::Moe {
             128
         } else {
-            256
+            512
         }
     });
     if prefill_chunk == 0 {

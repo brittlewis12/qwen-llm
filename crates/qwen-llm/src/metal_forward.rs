@@ -2991,6 +2991,9 @@ pub fn encode_mat_mat_dispatch(
         GgmlType::Q4_K => Ok(crate::metal::encode_mat_mat_q4_k_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
+        GgmlType::F32 => Ok(crate::metal::encode_mat_mat_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
         GgmlType::Q5_K => Ok(crate::metal::encode_mat_mat_q5_k_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),

@@ -28,6 +28,12 @@ struct mat_vec_args {
     uint n_out;
 };
 
+struct mat_mat_args {
+    uint n_in;
+    uint n_out;
+    uint n_query;
+};
+
 // Vec4 path. Requires n_in % 4 == 0 (true for our hidden / FFN dims).
 // One simdgroup per output row. Multiple rows per threadgroup.
 #ifndef MAT_VEC_ROWS_PER_TG
@@ -65,5 +71,44 @@ kernel void kernel_mat_vec_f32_f32(
     sum = simd_sum(sum);
     if (tiisg == 0) {
         y[row] = sum;
+    }
+}
+
+// F32 mat-mat specialized for small n_out / prompt-time reuse of one weight row
+// across many query rows. Output layout matches the quant mat-mat path:
+// column-major [n_out, n_query], so element (q, o) writes to y[o + q*n_out].
+kernel void kernel_mat_mat_f32_f32(
+        constant mat_mat_args & args [[buffer(0)]],
+        device const float   * weight [[buffer(1)]], // [n_in, n_out]
+        device const float   * x      [[buffer(2)]], // [n_query, n_in] row-major
+        device       float   * y      [[buffer(3)]], // [n_out, n_query] col-major
+        threadgroup  float   * wtile  [[threadgroup(0)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint row = tgpig.x;
+    const uint q = tgpig.y * 32u + tiisg;
+    if (row >= args.n_out) return;
+
+    float acc = 0.0f;
+    device const float * w_row = weight + row * args.n_in;
+    for (uint ib = 0; ib < args.n_in; ib += 32) {
+        if (ib + tiisg < args.n_in) {
+            wtile[tiisg] = w_row[ib + tiisg];
+        } else {
+            wtile[tiisg] = 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (q < args.n_query) {
+            device const float * x_row = x + q * args.n_in + ib;
+            const uint limit = min(32u, args.n_in - ib);
+            for (uint j = 0; j < limit; ++j) {
+                acc += x_row[j] * wtile[j];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (q < args.n_query) {
+        y[row + q * args.n_out] = acc;
     }
 }

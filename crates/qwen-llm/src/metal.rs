@@ -697,6 +697,84 @@ pub fn encode_mat_vec_f32(
     Ok(())
 }
 
+pub fn encode_mat_mat_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32",
+            detail: format!("weight.dtype = {:?}, expected F32", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32",
+            detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32",
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={}",
+                x.n_elements(),
+                n_query * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_out * n_query {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32",
+            detail: format!(
+                "y.n_elements={} != n_out*n_query={}",
+                y.n_elements(),
+                n_out * n_query
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_mat_f32_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_query: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_query: n_query as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, 32 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_out,
+            height: n_query.div_ceil(32),
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Q4_K mat-vec on raw `block_q4_K` bytes. Same shape semantics as
 /// [`encode_mat_vec_f32`]; `weight.dtype` must be `Q4_K`.
 pub fn encode_mat_vec_q4_k_f32(
@@ -2232,6 +2310,90 @@ pub fn encode_gdn_alpha_chain_batched_f32(
         });
     }
     let pso = ctx.pipeline("kernel_gdn_alpha_chain_batched_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        n_cols: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            n_cols: n_cols as u32,
+        },
+    );
+    enc.set_tensor(1, a);
+    enc.set_tensor(2, dt_bias);
+    enc.set_tensor(3, a_log);
+    enc.set_tensor(4, out);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_gdn_decay_chain_batched_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: &MetalTensor,
+    dt_bias: &MetalTensor,
+    a_log: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    let n = n_rows * n_cols;
+    if a.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_decay_chain_batched",
+            detail: format!(
+                "a expected {n_rows}*{n_cols}={n} elements, got {}",
+                a.n_elements()
+            ),
+        });
+    }
+    if out.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_decay_chain_batched",
+            detail: format!(
+                "out expected {n_rows}*{n_cols}={n} elements, got {}",
+                out.n_elements()
+            ),
+        });
+    }
+    if dt_bias.n_elements() as usize != n_cols {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_decay_chain_batched",
+            detail: format!(
+                "dt_bias expected {n_cols} elements, got {}",
+                dt_bias.n_elements()
+            ),
+        });
+    }
+    if a_log.n_elements() as usize != n_cols {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_decay_chain_batched",
+            detail: format!(
+                "a_log expected {n_cols} elements, got {}",
+                a_log.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_gdn_decay_chain_batched_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -5497,6 +5659,28 @@ pub fn bench_q6_k_chained(
     Ok(())
 }
 
+/// Same chained bench harness as `bench_q4_k_mat_mat_chained`, for Q6_K.
+pub fn bench_q6_k_mat_mat_chained(
+    ctx: &MetalContext,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    n_dispatches: usize,
+) -> Result<(), MetalError> {
+    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = KernelEncoder::begin(&cmd_buf);
+    for _ in 0..n_dispatches {
+        encode_mat_mat_q6_k_f32(ctx, &enc, weight, x, y, n_in, n_out, n_query)?;
+    }
+    enc.end();
+    cmd_buf.commit();
+    cmd_buf.waitUntilCompleted();
+    Ok(())
+}
+
 /// Chain `n_dispatches` Q4_K **mat-mat** (with N_QUERY columns) into one
 /// command buffer. Used to bench the lifted llama mat-mat tile against
 /// theoretical peak BW and against `n_dispatches × n_query` mat-vec
@@ -6414,6 +6598,142 @@ mod tests {
                 (1.0 + v.exp()).ln()
             };
             assert!((sp[i] - exp_sp).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn prompt_mat_mat_production_shapes() {
+        use std::time::Instant;
+
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[prompt-matmat] skipped — fixture missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        const N_QUERY: usize = 321;
+        let cases = [
+            "blk.0.ffn_gate.weight",
+            "blk.0.ffn_up.weight",
+            "blk.0.ffn_down.weight",
+            "blk.0.out_proj.weight",
+            "blk.0.attn_qkv.weight",
+        ];
+
+        eprintln!("[prompt-matmat] {}", ctx.describe());
+        for name in cases {
+            let Some(t) = g.find(name) else {
+                eprintln!("[prompt-matmat] skip missing {name}");
+                continue;
+            };
+            if t.shape.len() != 2 {
+                continue;
+            }
+            let n_in = t.shape[0] as usize;
+            let n_out = t.shape[1] as usize;
+            let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("w");
+            let x_vec: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+            let x_vec_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x_vec),
+                vec![n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x_vec");
+            let y_vec_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y_vec");
+            let x_mat: Vec<f32> = (0..N_QUERY * n_in)
+                .map(|i| (i as f32 * 1e-3).sin())
+                .collect();
+            let x_mat_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x_mat),
+                vec![N_QUERY as u64, n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x_mat");
+            let y_mat_t =
+                MetalTensor::zeros_f32(&ctx, vec![n_out as u64, N_QUERY as u64]).expect("y_mat");
+
+            match t.dtype {
+                GgmlType::Q4_K => {
+                    bench_q4_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("warm vec");
+                    bench_q4_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 1,
+                    )
+                    .expect("warm mm");
+                    let t0 = Instant::now();
+                    bench_q4_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("vec");
+                    let vec_ms = t0.elapsed().as_secs_f64() * 1e3;
+                    let t1 = Instant::now();
+                    bench_q4_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 1,
+                    )
+                    .expect("mm");
+                    let mm_ms = t1.elapsed().as_secs_f64() * 1e3;
+                    eprintln!(
+                        "[prompt-matmat] {name:24} dtype={:?} n_in={n_in:>5} n_out={n_out:>6} N={N_QUERY:>3} vec321={vec_ms:>8.2} ms mm={mm_ms:>8.2} ms speedup={:>5.2}x",
+                        t.dtype,
+                        vec_ms / mm_ms.max(1e-9)
+                    );
+                }
+                GgmlType::Q5_K => {
+                    bench_q5_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("warm vec");
+                    bench_q5_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 1,
+                    )
+                    .expect("warm mm");
+                    let t0 = Instant::now();
+                    bench_q5_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("vec");
+                    let vec_ms = t0.elapsed().as_secs_f64() * 1e3;
+                    let t1 = Instant::now();
+                    bench_q5_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 1,
+                    )
+                    .expect("mm");
+                    let mm_ms = t1.elapsed().as_secs_f64() * 1e3;
+                    eprintln!(
+                        "[prompt-matmat] {name:24} dtype={:?} n_in={n_in:>5} n_out={n_out:>6} N={N_QUERY:>3} vec321={vec_ms:>8.2} ms mm={mm_ms:>8.2} ms speedup={:>5.2}x",
+                        t.dtype,
+                        vec_ms / mm_ms.max(1e-9)
+                    );
+                }
+                GgmlType::Q6_K => {
+                    bench_q6_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("warm vec");
+                    bench_q6_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 1,
+                    )
+                    .expect("warm mm");
+                    let t0 = Instant::now();
+                    bench_q6_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("vec");
+                    let vec_ms = t0.elapsed().as_secs_f64() * 1e3;
+                    let t1 = Instant::now();
+                    bench_q6_k_mat_mat_chained(
+                        &ctx, &w_t, &x_mat_t, &y_mat_t, n_in, n_out, N_QUERY, 1,
+                    )
+                    .expect("mm");
+                    let mm_ms = t1.elapsed().as_secs_f64() * 1e3;
+                    eprintln!(
+                        "[prompt-matmat] {name:24} dtype={:?} n_in={n_in:>5} n_out={n_out:>6} N={N_QUERY:>3} vec321={vec_ms:>8.2} ms mm={mm_ms:>8.2} ms speedup={:>5.2}x",
+                        t.dtype,
+                        vec_ms / mm_ms.max(1e-9)
+                    );
+                }
+                _ => {
+                    eprintln!("[prompt-matmat] skip {name} dtype={:?}", t.dtype);
+                }
+            }
         }
     }
 

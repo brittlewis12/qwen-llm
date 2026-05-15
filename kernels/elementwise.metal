@@ -518,6 +518,27 @@ kernel void kernel_gdn_alpha_chain_batched_f32(
     out[tid] = sp * a_log[c];
 }
 
+kernel void kernel_gdn_decay_chain_batched_f32(
+        constant gdn_alpha_chain_batched_args & args [[buffer(0)]],
+        device const float * a       [[buffer(1)]],
+        device const float * dt_bias [[buffer(2)]],
+        device const float * a_log   [[buffer(3)]],
+        device       float * out     [[buffer(4)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const uint c = tid % args.n_cols;
+    const float v = a[tid] + dt_bias[c];
+    float sp;
+    if (v > 20.0f) {
+        sp = v;
+    } else if (v < -20.0f) {
+        sp = exp(v);
+    } else {
+        sp = log(1.0f + exp(v));
+    }
+    out[tid] = exp(sp * a_log[c]);
+}
+
 // =============================================================================
 // kernel_argmax_f32 — GPU-side argmax for one row of length `n`.
 //

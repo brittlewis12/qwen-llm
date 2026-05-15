@@ -919,29 +919,6 @@ pub fn encode_mat_mat_q4_k_f32(
         });
     }
 
-    // H5.3b.5.5 fast-path gate (codex retune review): when n_query
-    // is exactly 16 (the DFlash N_QUERY case), dispatch the
-    // NR1=16-specialized kernel — no half-fill, smaller shmem,
-    // higher occupancy. For any other n_query, fall back to the
-    // generic NR1=32 kernel (which handles partial N internally).
-    //
-    // Codex's predicted failure mode: "host routing still calls the
-    // retuned kernel for N != 16 somewhere — silently drops columns
-    // or OOB-writes." This branch is the mitigation: NR1=16 kernel
-    // ONLY fires when n_query == 16 exactly.
-    let kernel_name = if n_query == 16 {
-        "kernel_mat_mat_q4_K_f32_n16"
-    } else {
-        "kernel_mat_mat_q4_K_f32"
-    };
-    let pso = ctx.pipeline(kernel_name)?;
-    enc.set_pipeline(&pso);
-
-    // Q4_K block bytes per row = (n_in / 256) * 144.
-    let nb01 = ((n_in / 256) * 144) as u32;
-    // Activation row stride in F32 elements.
-    let stride_b = n_in as u32;
-
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -951,6 +928,16 @@ pub fn encode_mat_mat_q4_k_f32(
         nb01: u32,
         stride_b: u32,
     }
+    let nb01 = ((n_in / 256) * 144) as u32;
+    let stride_b = n_in as u32;
+
+    let kernel_name = if n_query == 16 {
+        "kernel_mat_mat_q4_K_f32_n16"
+    } else {
+        "kernel_mat_mat_q4_K_f32"
+    };
+    let pso = ctx.pipeline(kernel_name)?;
+    enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
         &Args {
@@ -964,17 +951,7 @@ pub fn encode_mat_mat_q4_k_f32(
     enc.set_tensor(1, weight);
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
-
-    // Threadgroup memory: 8192 bytes for both kernels.
-    // Generic NR1=32: 4 KiB sa + 4 KiB sb (uses up to 8 KiB depending
-    //   on partial-output staging — sb size 2 KiB live, partial-tile
-    //   temp_str up to 8 KiB but reuses same shmem).
-    // NR1=16:        4 KiB sa + 1 KiB sb live; we still allocate 8 KiB
-    //   to allow the M-partial fallback path to use the front of shmem
-    //   as temp_str. Same allocation = same pipeline state object cost.
     enc.set_threadgroup_memory(0, 8192);
-
-    // Grid: ceil(n_query / NR1) × ceil(n_out / 64) threadgroups.
     let nr1 = if n_query == 16 { 16 } else { 32 };
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
@@ -985,7 +962,7 @@ pub fn encode_mat_mat_q4_k_f32(
             depth: 1,
         },
         MTLSize {
-            width: 128, // 4 simdgroups × 32 lanes (both kernels use 128)
+            width: 128,
             height: 1,
             depth: 1,
         },
@@ -6836,6 +6813,171 @@ mod tests {
                 }
                 _ => {
                     eprintln!("[prompt-matmat] skip {name} dtype={:?}", t.dtype);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn prompt_mat_mat_production_shapes_chained64() {
+        use std::time::Instant;
+
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[prompt-matmat-chained] skipped — fixture missing");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        const N_QUERY: usize = 321;
+        const N_DISPATCHES: usize = 64;
+        let cases = [
+            "blk.0.ffn_gate.weight",
+            "blk.0.ffn_up.weight",
+            "blk.0.ffn_down.weight",
+            "blk.0.attn_qkv.weight",
+        ];
+
+        eprintln!("[prompt-matmat-chained] {}", ctx.describe());
+        for name in cases {
+            let Some(t) = g.find(name) else {
+                eprintln!("[prompt-matmat-chained] skip missing {name}");
+                continue;
+            };
+            let n_in = t.shape[0] as usize;
+            let n_out = t.shape[1] as usize;
+            let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("w");
+            let x_vec: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+            let x_vec_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x_vec),
+                vec![n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x_vec");
+            let y_vec_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y_vec");
+            let x_mat: Vec<f32> = (0..N_QUERY * n_in)
+                .map(|i| (i as f32 * 1e-3).sin())
+                .collect();
+            let x_mat_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x_mat),
+                vec![N_QUERY as u64, n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x_mat");
+            let y_mat_t =
+                MetalTensor::zeros_f32(&ctx, vec![n_out as u64, N_QUERY as u64]).expect("y_mat");
+
+            match t.dtype {
+                GgmlType::Q4_K => {
+                    bench_q4_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
+                        .expect("warm vec");
+                    bench_q4_k_mat_mat_chained(
+                        &ctx,
+                        &w_t,
+                        &x_mat_t,
+                        &y_mat_t,
+                        n_in,
+                        n_out,
+                        N_QUERY,
+                        N_DISPATCHES,
+                    )
+                    .expect("warm mm");
+                    let t0 = Instant::now();
+                    bench_q4_k_mat_mat_chained(
+                        &ctx,
+                        &w_t,
+                        &x_mat_t,
+                        &y_mat_t,
+                        n_in,
+                        n_out,
+                        N_QUERY,
+                        N_DISPATCHES,
+                    )
+                    .expect("mm");
+                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / N_DISPATCHES as f64;
+                    let weight_gib =
+                        (t.n_bytes * N_DISPATCHES as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let gib_s = weight_gib / (t0.elapsed().as_secs_f64());
+                    eprintln!(
+                        "[prompt-matmat-chained] {name:24} dtype={:?} N={N_QUERY:>3} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
+                        t.dtype
+                    );
+                }
+                GgmlType::Q5_K => {
+                    bench_q5_k_mat_mat_chained(
+                        &ctx,
+                        &w_t,
+                        &x_mat_t,
+                        &y_mat_t,
+                        n_in,
+                        n_out,
+                        N_QUERY,
+                        N_DISPATCHES,
+                    )
+                    .expect("warm mm");
+                    let t0 = Instant::now();
+                    bench_q5_k_mat_mat_chained(
+                        &ctx,
+                        &w_t,
+                        &x_mat_t,
+                        &y_mat_t,
+                        n_in,
+                        n_out,
+                        N_QUERY,
+                        N_DISPATCHES,
+                    )
+                    .expect("mm");
+                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / N_DISPATCHES as f64;
+                    let weight_gib =
+                        (t.n_bytes * N_DISPATCHES as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let gib_s = weight_gib / (t0.elapsed().as_secs_f64());
+                    eprintln!(
+                        "[prompt-matmat-chained] {name:24} dtype={:?} N={N_QUERY:>3} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
+                        t.dtype
+                    );
+                }
+                GgmlType::Q6_K => {
+                    bench_q6_k_mat_mat_chained(
+                        &ctx,
+                        &w_t,
+                        &x_mat_t,
+                        &y_mat_t,
+                        n_in,
+                        n_out,
+                        N_QUERY,
+                        N_DISPATCHES,
+                    )
+                    .expect("warm mm");
+                    let t0 = Instant::now();
+                    bench_q6_k_mat_mat_chained(
+                        &ctx,
+                        &w_t,
+                        &x_mat_t,
+                        &y_mat_t,
+                        n_in,
+                        n_out,
+                        N_QUERY,
+                        N_DISPATCHES,
+                    )
+                    .expect("mm");
+                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / N_DISPATCHES as f64;
+                    let weight_gib =
+                        (t.n_bytes * N_DISPATCHES as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let gib_s = weight_gib / (t0.elapsed().as_secs_f64());
+                    eprintln!(
+                        "[prompt-matmat-chained] {name:24} dtype={:?} N={N_QUERY:>3} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
+                        t.dtype
+                    );
+                }
+                _ => {
+                    eprintln!("[prompt-matmat-chained] skip {name} dtype={:?}", t.dtype);
                 }
             }
         }

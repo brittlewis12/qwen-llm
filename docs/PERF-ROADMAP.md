@@ -161,8 +161,45 @@ Status:
   active dense prompt path.
 - The next dense attack is therefore the broad FFN / projection mat-mat surface
   unless a sharper bandwidth indictment changes that conclusion.
+- Exact-shape chained prompt mat-mat audit at `N=321` now provides that
+  indictment: current FFN / projection mat-mats are only around `9–13 GiB/s`
+  weight throughput on the real 27B prompt shapes.
+- First easy Q4 large-`N` tile experiment (`NR1=64`) was a negative result and
+  was reverted immediately; dense backend work from here should be more
+  deliberate than another casual tile tweak.
 
-### 4. Measure Command Overhead, Then Decide ICB / MTL4
+### 4. Speculative Path: Attack Repeated Long-Context Attention Cost
+
+Optimizes: DFlash / MTP viability at realistic context lengths.
+
+Priority rule:
+
+- Keep this behind the current dense/MoE prompt push.
+- When returning to speculative work, do not lead with policy/schedule tuning;
+  lead with kernel work that removes repeated long-context attention cost.
+
+What the latest analysis says:
+
+- Current MTP shape is structurally weak at long context because lazy verify does
+  not amortize enough base work and MTP has its own growing KV attention cost.
+- Current DFlash is made safe by adaptive verify `N`, but not fast, because the
+  drafter and target still pay too much long-context attention work.
+
+Highest-EV speculative kernel targets:
+
+1. Target packed-verify multi-query attention so consecutive verify queries share
+   KV reads.
+2. DFlash two-range attention reading ctx-cache and noise directly, without
+   `k_full` / `v_full` materialization.
+3. Adaptive draft compute width, not only adaptive verify width.
+
+Deprioritize inside speculative lane:
+
+- policy-only tuning before kernel work
+- speculative ideas for prefill
+- small decode fusions before the large repeated-attention costs are addressed
+
+### 5. Measure Command Overhead, Then Decide ICB / MTL4
 
 Optimizes: MoE prompt processing, TTFT, `pp512` for 35B A3B and 122B A10B.
 
@@ -189,7 +226,7 @@ Acceptance gates:
   router decisions for small and production models.
 - A3B and 122B `pp512` improve materially against sequential baseline.
 
-### 5. Prefill Mat-Mat Quality
+### 6. Prefill Mat-Mat Quality
 
 Optimizes: decode throughput, all models if host/driver overhead is real.
 
@@ -214,7 +251,7 @@ Acceptance gates:
   evidence that justifies the work.
 - Prototype must improve total wall, not only encode time.
 
-### 6. KV-Q8 / Quantized KV Cache For Long Context
+### 7. KV-Q8 / Quantized KV Cache For Long Context
 
 Optimizes: long-context decode, DFlash usefulness at long context, memory.
 
@@ -242,7 +279,7 @@ Acceptance gates:
 - Revisit only with a concrete new kernel structure and a fast feedback plan.
 - Cut again quickly if attention does not beat F16 at 32K or 64K.
 
-### 7. Dense GDN / FFN Decode Surgery
+### 8. Dense GDN / FFN Decode Surgery
 
 Optimizes: decode throughput, all models if host/driver overhead is real.
 
@@ -267,7 +304,7 @@ Acceptance gates:
   evidence that justifies the work.
 - Prototype must improve total wall, not only encode time.
 
-### 8. Keep GPU Argmax / Full-Logits Decode Honest
+### 9. Keep GPU Argmax / Full-Logits Decode Honest
 
 Optimizes: prompt processing after packed prefill is wired everywhere.
 
@@ -289,7 +326,7 @@ Acceptance gates:
 - Same-harness pp comparison identifies mat-mat as the remaining bottleneck.
 - Kernel changes improve dense and/or MoE packed prefill end-to-end.
 
-### 9. Dense-Specific Long-Context Compression Revisit
+### 10. Dense-Specific Long-Context Compression Revisit
 
 Optimizes: future dense long-context decode if a better compression path exists.
 

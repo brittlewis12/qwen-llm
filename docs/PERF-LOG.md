@@ -651,6 +651,56 @@ Interpretation:
 v0.86: drop unused prompt logits scratch
 ```
 
+## 2026-05-15 — Dense Prompt Mat-Mat Audit + Direction Check
+
+Status: measurement checkpoint reached, no production fast path changed.
+
+### What Changed
+
+- Added an exact-shape chained prompt mat-mat audit for real 27B production
+  surfaces at `N=321`.
+- Tried a Q4 large-`N` (`NR1=64`) prompt mat-mat specialization and measured it.
+- It got worse, so it was reverted immediately.
+
+### Exact-Shape Prompt Mat-Mat Audit
+
+Chained prompt-shape numbers (`N=321`, `64` chained dispatches) on real 27B
+weights:
+
+- `blk.0.ffn_gate.weight` Q4_K:
+  - `~5.09 ms / dispatch`
+  - `~9.2 GiB/s` weight throughput
+- `blk.0.ffn_up.weight` Q4_K:
+  - `~5.09 ms / dispatch`
+  - `~9.2 GiB/s` weight throughput
+- `blk.0.ffn_down.weight` Q6_K:
+  - `~5.45 ms / dispatch`
+  - `~12.5 GiB/s` weight throughput
+- `blk.0.attn_qkv.weight` Q6_K:
+  - `~3.03 ms / dispatch`
+  - `~13.2 GiB/s` weight throughput
+
+Interpretation:
+
+- Prompt mat-mat is already the right algorithmic shape, but backend quality is
+  still very low versus the hardware envelope and versus our decode mat-vecs.
+- The broad dense FFN / projection mat-mat surface is still a legitimate next
+  dense lever, but the first easy Q4 large-`N` specialization was not the win.
+
+### Direction Check
+
+- `cx` review says the highest-EV branch overall is still grouped routed-expert
+  execution for MoE packed prefill.
+- For dense, the next checkpoint should be chosen carefully: either a sharper
+  backend-quality experiment or a more principled mat-mat rewrite, not another
+  casual tile tweak.
+
+### Suggested Checkpoint Commit
+
+```text
+v0.87: audit dense prompt mat-mat backend
+```
+
 ### Follow-on State (same checkpoint arc)
 
 - MoE packed prefill chunk sweep on the same 321-token prompt (`--tokens 0`):

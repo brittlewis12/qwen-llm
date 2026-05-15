@@ -4838,6 +4838,110 @@ pub fn encode_gdn_step_decay_f32(
     Ok(())
 }
 
+pub fn encode_gdn_step_decay_packed_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    decay_pack: &MetalTensor,
+    beta_pack: &MetalTensor,
+    state: &MetalTensor,
+    out_pack: &MetalTensor,
+    n_tokens: usize,
+    n_v_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    if head_dim != 128 {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!("head_dim={head_dim} but kernel hardcodes 128"),
+        });
+    }
+    if n_v_heads % n_k_heads != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!("n_v_heads={n_v_heads} not multiple of n_k_heads={n_k_heads}"),
+        });
+    }
+    let qk_per_token = n_k_heads * head_dim;
+    let v_per_token = n_v_heads * head_dim;
+    if q_pack.n_elements() as usize != n_tokens * qk_per_token
+        || k_pack.n_elements() as usize != n_tokens * qk_per_token
+    {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!("q/k expected {} elements per pack", n_tokens * qk_per_token),
+        });
+    }
+    if v_pack.n_elements() as usize != n_tokens * v_per_token {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!("v expected {} elements", n_tokens * v_per_token),
+        });
+    }
+    if decay_pack.n_elements() as usize != n_tokens * n_v_heads
+        || beta_pack.n_elements() as usize != n_tokens * n_v_heads
+    {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!("decay/beta expected {} elements", n_tokens * n_v_heads),
+        });
+    }
+    let want_state = n_v_heads * head_dim * head_dim;
+    if state.n_elements() as usize != want_state {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!("state expected {want_state} elements"),
+        });
+    }
+    if out_pack.n_elements() as usize != n_tokens * v_per_token {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_step_decay_packed",
+            detail: format!("out expected {} elements", n_tokens * v_per_token),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_tokens: u32,
+        n_v_heads: u32,
+        n_k_heads: u32,
+    }
+    let pso = ctx.pipeline("kernel_gdn_step_decay_packed_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_tokens: n_tokens as u32,
+            n_v_heads: n_v_heads as u32,
+            n_k_heads: n_k_heads as u32,
+        },
+    );
+    enc.set_tensor(1, q_pack);
+    enc.set_tensor(2, k_pack);
+    enc.set_tensor(3, v_pack);
+    enc.set_tensor(4, decay_pack);
+    enc.set_tensor(5, beta_pack);
+    enc.set_tensor(6, state);
+    enc.set_tensor(7, out_pack);
+    enc.dispatch(
+        MTLSize {
+            width: head_dim,
+            height: n_v_heads,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Q5_K mat-vec, same API shape as [`encode_mat_vec_q4_k_f32`].
 /// Block size 176 bytes / 256 elements.
 pub fn encode_mat_vec_q5_k_f32(

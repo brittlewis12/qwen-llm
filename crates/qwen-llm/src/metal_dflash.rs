@@ -32,10 +32,11 @@ use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
-    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32,
+    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_step_decay_packed_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
 };
 use crate::metal_forward::{
     MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
@@ -43,6 +44,17 @@ use crate::metal_forward::{
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
+use std::sync::OnceLock;
+
+fn dense_packed_gdn_step_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DENSE_GDN_STEP_PACKED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DFlashError {
@@ -966,6 +978,14 @@ pub struct MetalDFlashLayerMajorScratch {
     pub gdn_beta_pack: MetalTensor,
     /// `[N, n_v]` F32 — batched alpha decay exp(g).
     pub gdn_alpha_pack: MetalTensor,
+    /// `[N, n_k * head_dim]` F32 — packed l2-normed Q rows for step packing.
+    pub gdn_q_norm_pack: MetalTensor,
+    /// `[N, n_k * head_dim]` F32 — packed l2-normed K rows for step packing.
+    pub gdn_k_norm_pack: MetalTensor,
+    /// `[N, v_dim]` F32 — packed V rows for step packing.
+    pub gdn_v_pack: MetalTensor,
+    /// `[N, v_dim]` F32 — packed recurrence outputs before rmsnorm_gated.
+    pub gdn_out_pack: MetalTensor,
     /// `[N, v_dim]` F32 — RMSNormGated output across N tokens; consumed by
     /// the batched out_proj mat-mat after the per-token recurrence loop.
     /// 27B: [16, 6144] = 384 KiB.
@@ -1014,6 +1034,7 @@ impl MetalDFlashLayerMajorScratch {
         let gdn_n_k = arch.gdn_n_k_heads as u64;
         let gdn_v_dim = (gdn_n_v * gdn_head_dim).max(1);
         let gdn_conv_dim = ((2 * gdn_n_k + gdn_n_v) * gdn_head_dim).max(1);
+        let gdn_k_dim = (gdn_n_k * gdn_head_dim).max(1);
 
         Ok(Self {
             x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
@@ -1041,6 +1062,10 @@ impl MetalDFlashLayerMajorScratch {
             gdn_z_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
             gdn_beta_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
             gdn_alpha_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
+            gdn_q_norm_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
+            gdn_k_norm_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
+            gdn_v_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+            gdn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
             gdn_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
             n: block_size,
             hidden_size: h,
@@ -3132,6 +3157,18 @@ pub fn prefill_tokens_with_multi_hidden(
                         let gdn_alpha_pack_p = layer_scratch
                             .gdn_alpha_pack
                             .view_subrange(0, vec![(chunk_p * n_v_u) as u64]);
+                        let gdn_q_norm_pack_p = layer_scratch
+                            .gdn_q_norm_pack
+                            .view_subrange(0, vec![(chunk_p * n_k_u * head_dim_u) as u64]);
+                        let gdn_k_norm_pack_p = layer_scratch
+                            .gdn_k_norm_pack
+                            .view_subrange(0, vec![(chunk_p * n_k_u * head_dim_u) as u64]);
+                        let gdn_v_pack_p = layer_scratch
+                            .gdn_v_pack
+                            .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
+                        let gdn_out_pack_p = layer_scratch
+                            .gdn_out_pack
+                            .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
                         let gdn_normed_pack_p = layer_scratch
                             .gdn_normed_pack
                             .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
@@ -3198,32 +3235,142 @@ pub fn prefill_tokens_with_multi_hidden(
                             enc.end();
                         }
 
-                        // Per-token recurrence (GDN state mutates per token).
-                        // NO ckpt blit — prefill never rolls back.
-                        for n_idx in 0..chunk_p {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            let qkv_n = gdn_qkv_pack_p
-                                .view_subrange((n_idx * conv_dim) as u64, vec![conv_dim as u64]);
-                            let z_n = gdn_z_pack_p
-                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                            let beta_n = gdn_beta_pack_p
-                                .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
-                            let alpha_n = gdn_alpha_pack_p
-                                .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
-                            let normed_n = gdn_normed_pack_p
-                                .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                            base.encode_gdn_tail(
-                                &enc,
-                                g,
-                                gi,
-                                target_session,
-                                &qkv_n,
-                                &z_n,
-                                &alpha_n,
-                                &beta_n,
-                                &normed_n,
-                            )?;
-                            enc.end();
+                        if dense_packed_gdn_step_enabled() {
+                            for n_idx in 0..chunk_p {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                let qkv_n = gdn_qkv_pack_p.view_subrange(
+                                    (n_idx * conv_dim) as u64,
+                                    vec![conv_dim as u64],
+                                );
+                                encode_ssm_conv_silu_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &qkv_n,
+                                    &target_session.gdn_conv[gi],
+                                    &g.conv1d,
+                                    &target_session.gdn_qkv_conv,
+                                    conv_dim,
+                                )?;
+                                let q_view = target_session
+                                    .gdn_qkv_conv
+                                    .view_subrange(0, vec![(n_k_u * head_dim_u) as u64]);
+                                let k_view = target_session.gdn_qkv_conv.view_subrange(
+                                    (n_k_u * head_dim_u) as u64,
+                                    vec![(n_k_u * head_dim_u) as u64],
+                                );
+                                let v_view = target_session.gdn_qkv_conv.view_subrange(
+                                    (2 * n_k_u * head_dim_u) as u64,
+                                    vec![v_dim as u64],
+                                );
+                                encode_l2_norm_batched_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_view,
+                                    &target_session.gdn_q_norm,
+                                    n_k_u,
+                                    head_dim_u,
+                                    RMS_EPS,
+                                )?;
+                                encode_l2_norm_batched_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &k_view,
+                                    &target_session.gdn_k_norm,
+                                    n_k_u,
+                                    head_dim_u,
+                                    RMS_EPS,
+                                )?;
+                                encode_scatter_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.gdn_q_norm,
+                                    &gdn_q_norm_pack_p,
+                                    n_idx * n_k_u * head_dim_u,
+                                    n_k_u * head_dim_u,
+                                )?;
+                                encode_scatter_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.gdn_k_norm,
+                                    &gdn_k_norm_pack_p,
+                                    n_idx * n_k_u * head_dim_u,
+                                    n_k_u * head_dim_u,
+                                )?;
+                                encode_scatter_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &v_view,
+                                    &gdn_v_pack_p,
+                                    n_idx * v_dim,
+                                    v_dim,
+                                )?;
+                                enc.end();
+                            }
+
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_gdn_step_decay_packed_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &gdn_q_norm_pack_p,
+                                    &gdn_k_norm_pack_p,
+                                    &gdn_v_pack_p,
+                                    &gdn_alpha_pack_p,
+                                    &gdn_beta_pack_p,
+                                    &target_session.gdn_state[gi],
+                                    &gdn_out_pack_p,
+                                    chunk_p,
+                                    n_v_u,
+                                    n_k_u,
+                                    head_dim_u,
+                                )?;
+                                enc.end();
+                            }
+
+                            for n_idx in 0..chunk_p {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                let out_n = gdn_out_pack_p
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                let z_n = gdn_z_pack_p
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                let normed_n = gdn_normed_pack_p
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                encode_rmsnorm_gated_f32(
+                                    base.ctx, &enc, &out_n, &g.norm, &z_n, &normed_n, n_v_u,
+                                    head_dim_u, RMS_EPS,
+                                )?;
+                                enc.end();
+                            }
+                        } else {
+                            // Per-token recurrence (GDN state mutates per token).
+                            // NO ckpt blit — prefill never rolls back.
+                            for n_idx in 0..chunk_p {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                let qkv_n = gdn_qkv_pack_p.view_subrange(
+                                    (n_idx * conv_dim) as u64,
+                                    vec![conv_dim as u64],
+                                );
+                                let z_n = gdn_z_pack_p
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                let beta_n = gdn_beta_pack_p
+                                    .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
+                                let alpha_n = gdn_alpha_pack_p
+                                    .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
+                                let normed_n = gdn_normed_pack_p
+                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                base.encode_gdn_tail(
+                                    &enc,
+                                    g,
+                                    gi,
+                                    target_session,
+                                    &qkv_n,
+                                    &z_n,
+                                    &alpha_n,
+                                    &beta_n,
+                                    &normed_n,
+                                )?;
+                                enc.end();
+                            }
                         }
 
                         // Step C: batched out_proj.
@@ -4957,6 +5104,18 @@ mod tests {
                     let gdn_alpha_pack_p = scratch
                         .gdn_alpha_pack
                         .view_subrange(0, vec![(total_n * n_v_u) as u64]);
+                    let gdn_q_norm_pack_p = scratch
+                        .gdn_q_norm_pack
+                        .view_subrange(0, vec![(total_n * n_k_u * head_dim_u) as u64]);
+                    let gdn_k_norm_pack_p = scratch
+                        .gdn_k_norm_pack
+                        .view_subrange(0, vec![(total_n * n_k_u * head_dim_u) as u64]);
+                    let gdn_v_pack_p = scratch
+                        .gdn_v_pack
+                        .view_subrange(0, vec![(total_n * v_dim) as u64]);
+                    let gdn_out_pack_p = scratch
+                        .gdn_out_pack
+                        .view_subrange(0, vec![(total_n * v_dim) as u64]);
                     let gdn_normed_pack_p = scratch
                         .gdn_normed_pack
                         .view_subrange(0, vec![(total_n * v_dim) as u64]);
@@ -5025,27 +5184,145 @@ mod tests {
                             )
                             .map_err(crate::metal_forward::MfError::from)
                         });
-                        gdn_tail_ms += timed("gdn_tail", &mut |enc| {
-                            for n_idx in 0..total_n {
-                                let qkv_n = gdn_qkv_pack_p.view_subrange(
-                                    (n_idx * conv_dim) as u64,
-                                    vec![conv_dim as u64],
-                                );
-                                let z_n = gdn_z_pack_p
-                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                                let beta_n = gdn_beta_pack_p
-                                    .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
-                                let alpha_n = gdn_alpha_pack_p
-                                    .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
-                                let normed_n = gdn_normed_pack_p
-                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                                mf.encode_gdn_tail(
-                                    enc, g, gi, &mut sess, &qkv_n, &z_n, &alpha_n, &beta_n,
-                                    &normed_n,
-                                )?;
-                            }
-                            Ok(())
-                        });
+                        if dense_packed_gdn_step_enabled() {
+                            let mut conv_stage_ms = 0.0f64;
+                            let mut step_stage_ms = 0.0f64;
+                            let mut rms_stage_ms = 0.0f64;
+                            conv_stage_ms += timed("gdn_tail_pre_step", &mut |enc| {
+                                for n_idx in 0..total_n {
+                                    let qkv_n = gdn_qkv_pack_p.view_subrange(
+                                        (n_idx * conv_dim) as u64,
+                                        vec![conv_dim as u64],
+                                    );
+                                    encode_ssm_conv_silu_f32(
+                                        &ctx,
+                                        enc,
+                                        &qkv_n,
+                                        &sess.gdn_conv[gi],
+                                        &g.conv1d,
+                                        &sess.gdn_qkv_conv,
+                                        conv_dim,
+                                    )?;
+                                    let q_view = sess
+                                        .gdn_qkv_conv
+                                        .view_subrange(0, vec![(n_k_u * head_dim_u) as u64]);
+                                    let k_view = sess.gdn_qkv_conv.view_subrange(
+                                        (n_k_u * head_dim_u) as u64,
+                                        vec![(n_k_u * head_dim_u) as u64],
+                                    );
+                                    let v_view = sess.gdn_qkv_conv.view_subrange(
+                                        (2 * n_k_u * head_dim_u) as u64,
+                                        vec![v_dim as u64],
+                                    );
+                                    encode_l2_norm_batched_f32(
+                                        &ctx,
+                                        enc,
+                                        &q_view,
+                                        &sess.gdn_q_norm,
+                                        n_k_u,
+                                        head_dim_u,
+                                        crate::metal_forward::RMS_EPS,
+                                    )?;
+                                    encode_l2_norm_batched_f32(
+                                        &ctx,
+                                        enc,
+                                        &k_view,
+                                        &sess.gdn_k_norm,
+                                        n_k_u,
+                                        head_dim_u,
+                                        crate::metal_forward::RMS_EPS,
+                                    )?;
+                                    encode_scatter_offset_f32(
+                                        &ctx,
+                                        enc,
+                                        &sess.gdn_q_norm,
+                                        &gdn_q_norm_pack_p,
+                                        n_idx * n_k_u * head_dim_u,
+                                        n_k_u * head_dim_u,
+                                    )?;
+                                    encode_scatter_offset_f32(
+                                        &ctx,
+                                        enc,
+                                        &sess.gdn_k_norm,
+                                        &gdn_k_norm_pack_p,
+                                        n_idx * n_k_u * head_dim_u,
+                                        n_k_u * head_dim_u,
+                                    )?;
+                                    encode_scatter_offset_f32(
+                                        &ctx,
+                                        enc,
+                                        &v_view,
+                                        &gdn_v_pack_p,
+                                        n_idx * v_dim,
+                                        v_dim,
+                                    )?;
+                                }
+                                Ok(())
+                            });
+                            step_stage_ms += timed("gdn_tail_step", &mut |enc| {
+                                encode_gdn_step_decay_packed_f32(
+                                    &ctx,
+                                    enc,
+                                    &gdn_q_norm_pack_p,
+                                    &gdn_k_norm_pack_p,
+                                    &gdn_v_pack_p,
+                                    &gdn_alpha_pack_p,
+                                    &gdn_beta_pack_p,
+                                    &sess.gdn_state[gi],
+                                    &gdn_out_pack_p,
+                                    total_n,
+                                    n_v_u,
+                                    n_k_u,
+                                    head_dim_u,
+                                )
+                                .map_err(crate::metal_forward::MfError::from)
+                            });
+                            rms_stage_ms += timed("gdn_tail_post_step", &mut |enc| {
+                                for n_idx in 0..total_n {
+                                    let out_n = gdn_out_pack_p
+                                        .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                    let z_n = gdn_z_pack_p
+                                        .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                    let normed_n = gdn_normed_pack_p
+                                        .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                    encode_rmsnorm_gated_f32(
+                                        &ctx,
+                                        enc,
+                                        &out_n,
+                                        &g.norm,
+                                        &z_n,
+                                        &normed_n,
+                                        n_v_u,
+                                        head_dim_u,
+                                        crate::metal_forward::RMS_EPS,
+                                    )?;
+                                }
+                                Ok(())
+                            });
+                            gdn_tail_ms += conv_stage_ms + step_stage_ms + rms_stage_ms;
+                        } else {
+                            gdn_tail_ms += timed("gdn_tail", &mut |enc| {
+                                for n_idx in 0..total_n {
+                                    let qkv_n = gdn_qkv_pack_p.view_subrange(
+                                        (n_idx * conv_dim) as u64,
+                                        vec![conv_dim as u64],
+                                    );
+                                    let z_n = gdn_z_pack_p
+                                        .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                    let beta_n = gdn_beta_pack_p
+                                        .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
+                                    let alpha_n = gdn_alpha_pack_p
+                                        .view_subrange((n_idx * n_v_u) as u64, vec![n_v_u as u64]);
+                                    let normed_n = gdn_normed_pack_p
+                                        .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
+                                    mf.encode_gdn_tail(
+                                        enc, g, gi, &mut sess, &qkv_n, &z_n, &alpha_n, &beta_n,
+                                        &normed_n,
+                                    )?;
+                                }
+                                Ok(())
+                            });
+                        }
                         gdn_back_ms += timed("gdn_back", &mut |enc| {
                             encode_mat_mat_dispatch(
                                 &ctx,

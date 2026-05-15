@@ -41,6 +41,12 @@ struct gdn_step_args {
     uint n_k_heads;  // q/k have this many heads; we map V-head hi -> K-head (hi % n_k_heads)
 };
 
+struct gdn_step_packed_args {
+    uint n_tokens;
+    uint n_v_heads;
+    uint n_k_heads;
+};
+
 kernel void kernel_gdn_step_f32(
         constant gdn_step_args & args  [[buffer(0)]],
         device const float     * q     [[buffer(1)]], // [n_k_heads, head_dim]
@@ -182,6 +188,76 @@ kernel void kernel_gdn_step_decay_f32(
     if (tiisg == 0) {
         out[(ulong)hi * HEAD_DIM + dv] = o * (1.0f / sqrt((float)HEAD_DIM));
     }
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        s_row[dk_base + j] = s_reg[j];
+    }
+}
+
+kernel void kernel_gdn_step_decay_packed_f32(
+        constant gdn_step_packed_args & args [[buffer(0)]],
+        device const float * q_pack   [[buffer(1)]], // [n_tokens, n_k_heads, head_dim]
+        device const float * k_pack   [[buffer(2)]], // [n_tokens, n_k_heads, head_dim]
+        device const float * v_pack   [[buffer(3)]], // [n_tokens, n_v_heads, head_dim]
+        device const float * decay    [[buffer(4)]], // [n_tokens, n_v_heads]
+        device const float * beta     [[buffer(5)]], // [n_tokens, n_v_heads]
+        device float       * state    [[buffer(6)]], // [n_v_heads, head_dim, head_dim]
+        device float       * out_pack [[buffer(7)]], // [n_tokens, n_v_heads, head_dim]
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint dv = tgpig.x;
+    const uint hi = tgpig.y;
+    if (hi >= args.n_v_heads || dv >= HEAD_DIM) return;
+
+    const uint hk = hi % args.n_k_heads;
+    device float * s_row = state + (ulong)hi * HEAD_DIM * HEAD_DIM + (ulong)dv * HEAD_DIM;
+
+    float s_reg[DKS_PER_LANE];
+    const ushort dk_base = tiisg * DKS_PER_LANE;
+    for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+        s_reg[j] = s_row[dk_base + j];
+    }
+
+    const ulong qk_stride = (ulong)args.n_k_heads * HEAD_DIM;
+    const ulong v_stride = (ulong)args.n_v_heads * HEAD_DIM;
+    const ulong hv_off = (ulong)hi * HEAD_DIM + dv;
+    const float scale = 1.0f / sqrt((float)HEAD_DIM);
+
+    for (uint t = 0; t < args.n_tokens; ++t) {
+        device const float * q_h = q_pack + (ulong)t * qk_stride + (ulong)hk * HEAD_DIM;
+        device const float * k_h = k_pack + (ulong)t * qk_stride + (ulong)hk * HEAD_DIM;
+        const float v_dv = v_pack[(ulong)t * v_stride + hv_off];
+        const float g_exp = decay[(ulong)t * args.n_v_heads + hi];
+        const float beta_h = beta[(ulong)t * args.n_v_heads + hi];
+
+        float k_reg[DKS_PER_LANE];
+        float q_reg[DKS_PER_LANE];
+        for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+            k_reg[j] = k_h[dk_base + j];
+            q_reg[j] = q_h[dk_base + j];
+            s_reg[j] *= g_exp;
+        }
+
+        float sk_partial = 0.0f;
+        for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+            sk_partial += s_reg[j] * k_reg[j];
+        }
+        const float sk = simd_sum(sk_partial);
+
+        const float delta = (v_dv - sk) * beta_h;
+        for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+            s_reg[j] += delta * k_reg[j];
+        }
+
+        float o_partial = 0.0f;
+        for (ushort j = 0; j < DKS_PER_LANE; ++j) {
+            o_partial += s_reg[j] * q_reg[j];
+        }
+        const float o = simd_sum(o_partial);
+        if (tiisg == 0) {
+            out_pack[(ulong)t * v_stride + hv_off] = o * scale;
+        }
+    }
+
     for (ushort j = 0; j < DKS_PER_LANE; ++j) {
         s_row[dk_base + j] = s_reg[j];
     }

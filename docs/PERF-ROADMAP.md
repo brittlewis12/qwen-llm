@@ -40,6 +40,9 @@ M4 Max, release `qwen-bench`, sequential runs.
 
 Recent confirmed wins:
 
+- Packed dense `gdn_step_decay` over prompt tokens is now live and materially
+  improves dense prompt processing: the same-prompt 27B plateau rises from
+  ~165.0 t/s to ~172.9 t/s while decode stays unchanged.
 - Dense packed GDN `alpha/beta` batching was a major prompt win: same-prompt 27B
   prefill rose from ~141.9 t/s plateau to ~165.0 t/s plateau, with decode
   unchanged.
@@ -142,18 +145,19 @@ Acceptance gates:
 Status:
 
 - Dense packed-prefill phase profile (`P=321`) now shows:
-  - `ffn`: ~50.0%
-  - `gdn_tail`: ~17.8%
-  - `gdn_front`: ~14.5%
-  - `attn_decode`: ~7.4%
+  - `ffn`: ~53.2%
+  - `gdn_front`: ~15.6%
+  - `gdn_tail`: ~12.5%
+  - `attn_decode`: ~7.8%
 - Representative one-layer GDN tail split shows `step_decay` as the largest true
   tail sub-bucket once `out_proj` is excluded to `gdn_back`.
 - A quick same-prompt llama.cpp tensor on/off falsification on M4 Max showed no
   meaningful prompt-rate delta, so a broad Metal tensor port is not the first
   assumption to chase.
-- Next dense attack is a bounded packed `gdn_step_decay` time-loop falsification
-  checkpoint. If that does not buy a meaningful end-to-end reduction, mat-mat /
-  FFN backend work becomes the next broad lever.
+- Packed `gdn_step_decay` did buy a real end-to-end reduction, and it is now the
+  active dense prompt path.
+- The next dense attack is therefore the broad FFN / projection mat-mat surface
+  unless a sharper bandwidth indictment changes that conclusion.
 
 ### 4. Measure Command Overhead, Then Decide ICB / MTL4
 

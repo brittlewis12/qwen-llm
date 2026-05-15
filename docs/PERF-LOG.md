@@ -539,6 +539,72 @@ Interpretation:
 v0.84: profile dense GDN tail prompt bucket
 ```
 
+## 2026-05-15 — Packed Dense GDN Step Time-Loop
+
+Status: improved checkpoint reached, not yet committed in git.
+
+### What Changed
+
+- Added an experimental packed `gdn_step_decay` kernel that loops over prompt
+  tokens inside the kernel while keeping each GDN state row resident across the
+  whole packed chunk.
+- Dense packed prefill now uses this packed step path by default; the old path is
+  still available as a kill switch via `QWEN_DENSE_GDN_STEP_PACKED=0`.
+- Updated the dense packed-prefill profiler so its phase numbers reflect the new
+  active path.
+
+### Validation
+
+- `prefill_tokens_matches_single_token_loop_27b` passes on the default path:
+  - `cos(final logits)=1.000000`
+  - `hidden cos_min=0.999999`
+  - `GDN state cos_min=0.999999`
+  - `KV K/V cos_min=1.000000`
+
+### Dense Prompt Result
+
+Same repeated 321-token 27B prompt:
+
+- before this change: prompt plateau ~`165.0 t/s`
+- after this change: prompt plateau ~`172.9 t/s`
+
+Product-shaped run (`64` decode tokens):
+
+- packed prefill with dense default `P=512`: `1861.1 ms` = `172.5 t/s`
+- decode unchanged: `41.12 ms/token` = `24.3 t/s`
+
+This closes the same-prompt dense prompt gap vs the earlier llama.cpp reading
+(`186.8 t/s`) to roughly `1.08x`.
+
+### Updated Dense Packed-Prefill Attribution (`P=321`)
+
+- total: `1896.62 ms`
+- `ffn`: `1008.61 ms` (`53.2%`)
+- `gdn_front`: `295.71 ms` (`15.6%`)
+- `gdn_tail`: `236.87 ms` (`12.5%`)
+- `gdn_back`: `100.12 ms` (`5.3%`)
+- `attn_front`: `72.86 ms` (`3.8%`)
+- `attn_decode`: `148.16 ms` (`7.8%`)
+- `attn_back`: `31.73 ms` (`1.7%`)
+
+Interpretation:
+
+- Packed `gdn_step_decay` reduced the true dense `gdn_tail` bucket from roughly
+  `359.69 ms` to `236.87 ms` in the same profiler.
+- Dense prompt time is now even more dominated by the FFN mat-mat surface.
+
+### Current Next Step
+
+- The next dense lever is likely the broad FFN / projection mat-mat surface,
+  unless a sharper bandwidth indictment says otherwise.
+- MoE still wants grouped routed-expert execution as the next structural win.
+
+### Suggested Checkpoint Commit
+
+```text
+v0.85: pack dense gdn step over prompt tokens
+```
+
 ### Follow-on State (same checkpoint arc)
 
 - MoE packed prefill chunk sweep on the same 321-token prompt (`--tokens 0`):

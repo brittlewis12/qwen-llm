@@ -900,3 +900,31 @@ Interpretation:
   candidate, but not a miracle lever.
 - Heavier encoder/fence restructuring should wait for more context-shape traces
   or a stronger kernel-side reason.
+
+### Bench-Only Pipelined Decode Follow-Up
+
+After settling the 4K decode question, I added a dense-only bench harness path:
+
+- `qwen-bench decode-window --pipelined`
+
+This ping-pongs only `ids_buf` and `argmax_tok`, pre-encodes the next token's
+command buffer while the current token is running, and keeps it bench-only.
+
+Measured result so far:
+
+- 27B dense at `ctx=4096`, `window=128`
+  - serial: `avg_total=43.08 ms`, `med_gpu=42.73 ms`
+  - pipelined: `avg_total=42.54 ms`, `med_gpu=42.27 ms`
+  - effect: about `0.54 ms/token` on the first A/B, but only `~0.14-0.16 ms`
+    (`~0.3%`) across alternating repeats
+- 27B dense at `ctx=32768`, `window=64`
+  - serial: `avg_total=51.42 ms`, `med_gpu=50.97 ms`
+  - pipelined: `avg_total=51.26 ms`, `med_gpu=50.96 ms`
+  - effect: again about `~0.16 ms` (`~0.3%`)
+
+Interpretation:
+
+- The branch is real but tiny, exactly in line with the small completion -> next
+  submit gap we saw in the trace.
+- It is worth keeping behind the bench-only flag for future context checks, but
+  it is not a production checkpoint on its own.

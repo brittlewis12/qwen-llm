@@ -18,6 +18,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
@@ -190,6 +191,10 @@ struct DecodeWindowArgs {
     /// File whose existence releases the process to run the decode window.
     #[arg(long)]
     go_file: PathBuf,
+    /// Use a bench-only pipelined dense decode loop that overlaps CPU encoding of
+    /// token N+1 with GPU execution of token N.
+    #[arg(long)]
+    pipelined: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -2331,6 +2336,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         window,
         ready_file,
         go_file,
+        pipelined,
     } = args;
     let ctx = MetalContext::new()?;
     eprintln!("[decode-window] device: {}", ctx.describe());
@@ -2374,15 +2380,6 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         window
     );
 
-    let mut samples = Vec::with_capacity(window);
-    let mut prev_tok = 0i32;
-    for i in 0..window {
-        let pos = target_ctx as u32 + i as u32;
-        let (logits, p) = mf.single_token_profiled(prev_tok, pos, &mut s)?;
-        samples.push(p);
-        prev_tok = argmax_i32(&logits);
-    }
-
     fn median(values: &[f64]) -> f64 {
         let mut v = values.to_vec();
         v.sort_by(|a, b| a.total_cmp(b));
@@ -2399,6 +2396,128 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         v.sort_by(|a, b| a.total_cmp(b));
         let idx = ((v.len() - 1) as f64 * 0.95).round() as usize;
         v[idx]
+    }
+
+    if pipelined {
+        if mm.arch.kind != qwen_llm::model::ArchKind::Dense {
+            return Err(anyhow!("--pipelined decode-window is currently dense-only"));
+        }
+        let ids_ping = [
+            MetalTensor::zeros_f32(&ctx, vec![1])?,
+            MetalTensor::zeros_f32(&ctx, vec![1])?,
+        ];
+        let argmax_ping = [
+            MetalTensor::zeros_f32(&ctx, vec![1])?,
+            MetalTensor::zeros_f32(&ctx, vec![1])?,
+        ];
+
+        let mut encode_ms = Vec::with_capacity(window);
+        let mut wait_ms = Vec::with_capacity(window);
+        let mut gpu_ms = Vec::with_capacity(window);
+        let total_t = Instant::now();
+        let mut next_tok = 0i32;
+        let mut pos = target_ctx as u32;
+
+        unsafe {
+            let ptr = ids_ping[0].buffer.contents().as_ptr() as *mut i32;
+            *ptr = next_tok;
+        }
+        let first_cmd = ctx.queue.commandBuffer().expect("command buffer");
+        let first_encode_t = Instant::now();
+        let first_enc = qwen_llm::metal::KernelEncoder::begin(&first_cmd);
+        mf.encode_single_token_argmax_dense(
+            &first_enc,
+            pos,
+            &mut s,
+            &ids_ping[0],
+            &argmax_ping[0],
+        )?;
+        first_enc.end();
+        encode_ms.push(first_encode_t.elapsed().as_secs_f64() * 1e3);
+        first_cmd.commit();
+        let mut pending_cmd = first_cmd;
+        let mut pending_slot = 0usize;
+        pos += 1;
+
+        for _step in 1..window {
+            let next_slot = pending_slot ^ 1;
+            let next_cmd = ctx.queue.commandBuffer().expect("command buffer");
+            let next_encode_t = Instant::now();
+            let next_enc = qwen_llm::metal::KernelEncoder::begin(&next_cmd);
+            mf.encode_single_token_argmax_dense(
+                &next_enc,
+                pos,
+                &mut s,
+                &ids_ping[next_slot],
+                &argmax_ping[next_slot],
+            )?;
+            next_enc.end();
+            encode_ms.push(next_encode_t.elapsed().as_secs_f64() * 1e3);
+
+            let wait_t = Instant::now();
+            pending_cmd.waitUntilCompleted();
+            wait_ms.push(wait_t.elapsed().as_secs_f64() * 1e3);
+            gpu_ms.push((pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3);
+            next_tok = unsafe {
+                let src = argmax_ping[pending_slot].buffer.contents().as_ptr() as *const i32;
+                *src
+            };
+            unsafe {
+                let ptr = ids_ping[next_slot].buffer.contents().as_ptr() as *mut i32;
+                *ptr = next_tok;
+            }
+            next_cmd.commit();
+            pending_cmd = next_cmd;
+            pending_slot = next_slot;
+            pos += 1;
+        }
+
+        let wait_t = Instant::now();
+        pending_cmd.waitUntilCompleted();
+        wait_ms.push(wait_t.elapsed().as_secs_f64() * 1e3);
+        gpu_ms.push((pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3);
+
+        let total_ms = total_t.elapsed().as_secs_f64() * 1e3;
+        let avg_total = total_ms / window as f64;
+        let avg_gpu = gpu_ms.iter().sum::<f64>() / window as f64;
+        let avg_enc = encode_ms.iter().sum::<f64>() / window as f64;
+        let avg_wait = wait_ms.iter().sum::<f64>() / window as f64;
+        let med_gpu = median(&gpu_ms);
+        let med_enc = median(&encode_ms);
+        let med_wait = median(&wait_ms);
+        let p95_gpu = p95(&gpu_ms);
+        let p95_enc = p95(&encode_ms);
+        let p95_wait = p95(&wait_ms);
+        eprintln!(
+            "[decode-window] ctx={} window={} pipelined avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
+            target_ctx,
+            window,
+            avg_total,
+            avg_gpu,
+            avg_enc,
+            1000.0 / avg_total
+        );
+        eprintln!(
+            "[decode-window] pipelined med_gpu={:.2} ms med_cpu_enc={:.2} ms med_wait={:.2} ms gpu/total(avg)={:.1}%",
+            med_gpu,
+            med_enc,
+            med_wait,
+            100.0 * avg_gpu / avg_total
+        );
+        eprintln!(
+            "[decode-window] pipelined p95_gpu={:.2} ms p95_cpu_enc={:.2} ms p95_wait={:.2} ms",
+            p95_gpu, p95_enc, p95_wait,
+        );
+        return Ok(());
+    }
+
+    let mut samples = Vec::with_capacity(window);
+    let mut prev_tok = 0i32;
+    for i in 0..window {
+        let pos = target_ctx as u32 + i as u32;
+        let (logits, p) = mf.single_token_profiled(prev_tok, pos, &mut s)?;
+        samples.push(p);
+        prev_tok = argmax_i32(&logits);
     }
 
     let avg_total = samples.iter().map(|p| p.total_ms).sum::<f64>() / window as f64;

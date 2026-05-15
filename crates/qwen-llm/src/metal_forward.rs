@@ -1130,16 +1130,57 @@ impl<'a> MetalForward<'a> {
             let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
             *ptr = token_id;
         }
+        let ids_buf = session.ids_buf.clone();
+        let argmax_tok = session.argmax_tok.clone();
 
         let t_encode = std::time::Instant::now();
         let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
         let enc = KernelEncoder::begin(&cmd_buf);
 
+        self.encode_single_token_argmax_dense(&enc, position, session, &ids_buf, &argmax_tok)?;
+
+        enc.end();
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let argmax = unsafe {
+            let src = argmax_tok.buffer.contents().as_ptr() as *const i32;
+            *src
+        };
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            argmax,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+        ))
+    }
+
+    pub fn encode_single_token_argmax_dense(
+        &self,
+        enc: &KernelEncoder,
+        position: u32,
+        session: &mut MetalSession,
+        ids_buf: &MetalTensor,
+        argmax_tok: &MetalTensor,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+
         encode_get_rows_f32(
             self.ctx,
             &enc,
             &self.model.token_embd,
-            &session.ids_buf,
+            ids_buf,
             &session.x,
             1,
             arch.hidden_size as usize,
@@ -1180,36 +1221,11 @@ impl<'a> MetalForward<'a> {
             self.ctx,
             &enc,
             &session.logits,
-            &session.argmax_tok,
+            argmax_tok,
             1,
             arch.vocab_size as usize,
         )?;
-
-        enc.end();
-        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
-
-        let t_gpu = std::time::Instant::now();
-        cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
-        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
-        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
-
-        let argmax = unsafe {
-            let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
-            *src
-        };
-        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
-        Ok((
-            argmax,
-            TokenProfile {
-                cpu_encode_ms,
-                cpu_to_gpu_complete_ms,
-                gpu_kernel_ms,
-                total_ms,
-                moe_cpu_route_ms: 0.0,
-                moe_cmd_count: 1,
-            },
-        ))
+        Ok(())
     }
 
     fn single_token_profiled_moe(

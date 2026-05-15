@@ -917,6 +917,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "objc2-metal",
  "qwen-llm",
  "tracing",
  "tracing-subscriber",

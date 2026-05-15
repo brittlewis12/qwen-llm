@@ -154,6 +154,15 @@ Acceptance gates:
 - Reduce completion -> next-submit gap and total 27B decode ms/token at 4K.
 - Keep exact-token behavior and current correctness gates intact.
 
+Status:
+
+- A dense-only bench path now exists at `qwen-bench decode-window --pipelined`.
+- Measured at 27B dense:
+  - `ctx=4096`: about `~0.3%` over alternating repeats
+  - `ctx=32768`: about `~0.3%`
+- Keep it as an experimental harness, not a production checkpoint, unless a
+  future shape/context shows a materially larger win.
+
 ### 3. Read-Only Weight Residency And Scratch Storage Cleanup
 
 Optimizes: decode and prompt wall via cheaper Metal bookkeeping and cleaner GPU

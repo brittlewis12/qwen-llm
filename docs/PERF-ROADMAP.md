@@ -167,9 +167,11 @@ Status:
 - At 27B dense `ctx=4096`, `window=64`, it improves decode from
   `43.87 -> 42.14 ms/token` (`22.8 -> 23.7 t/s`), with the gain showing up in
   GPU time rather than CPU encode.
+- At 27B dense `ctx=16384`, `window=64`, it also improves decode from
+  `47.67 -> 46.51 ms/token` (`21.0 -> 21.5 t/s`).
 - This is the first command-model branch that has cleared the “real enough to
-  checkpoint” bar; next bounded check is 27B `16K` before considering any
-  broader rollout.
+  checkpoint” bar; the gain survives 4K and 16K, though it narrows somewhat as
+  attention grows.
 
 ### 3. Read-Only Weight Residency And Scratch Storage Cleanup
 

@@ -973,5 +973,13 @@ Interpretation:
 ### Current Next Step
 
 - Keep this as a checkpoint-worthy experimental branch.
-- Next bounded measurement is 27B dense at `16K` to see whether the gain holds as
-  attention cost grows.
+- 27B dense at `16K` now confirms the gain survives as attention cost grows:
+  - serial: `47.67 ms/token`, `47.04 ms` GPU, `21.0 t/s`
+  - concurrent GDN projections: `46.51 ms/token`, `45.94 ms` GPU, `21.5 t/s`
+  - effect: about `1.16 ms/token`, roughly `2.5%`
+
+Interpretation:
+
+- The concurrent-GDN branch is not just a 4K-local artifact.
+- The gain compresses somewhat as attention grows, but still holds at realistic
+  longer context.

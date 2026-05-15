@@ -1535,7 +1535,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     }
     let prefill_chunk = prefill_chunk.unwrap_or_else(|| {
         if m.arch.kind == qwen_llm::model::ArchKind::Moe {
-            16
+            128
         } else {
             256
         }

@@ -42,13 +42,16 @@ Recent confirmed wins:
 
 - Dense packed prefill chunk tuning was a major win: on the same 321-token 27B
   prompt, moving from inherited `P=16` to dense default `P=256` improved prompt
-  throughput from ~77.9 t/s to ~140.7 t/s with decode unchanged.
+  throughput from ~77.9 t/s to ~140.7 t/s with decode unchanged; one-chunk
+  saturation is ~141.9 t/s once `P >= 321`.
 - Dense packed prefill is now the default no-spec path in `qwen-bench decode`
   for dense models; on a 321-token 27B prompt it improved prefill from 24.3 t/s
   to 78.1 t/s (~3.22x) with decode unchanged.
 - MoE packed prefill stage 1 is now live in `qwen-bench decode`; on a 321-token
   prompt it improves prefill from 74.8 -> 91.3 t/s on 35B A3B and 32.1 -> 36.6
   t/s on 122B A10B, with decode essentially unchanged.
+- MoE packed prefill chunk tuning also matters: tuned default `P=128` lifts the
+  same prompt to ~95.3 t/s on 35B A3B and ~37.6 t/s on 122B A10B.
 - No-spec GPU argmax decode path landed. Dense decode is neutral within noise;
   MoE decode improves modestly by avoiding full logits readback (~1.1-1.5% on
   A3B / 122B in current 64-token runs).

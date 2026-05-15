@@ -383,8 +383,13 @@ any dense prompt-time evidence.
 - `P=64`: `127.2 t/s`
 - `P=128`: `136.1 t/s`
 - `P=256`: `139.9 t/s`
+- `P=321`: `141.8 t/s`
+- `P=384`: `141.9 t/s`
+- `P=512`: `141.7 t/s`
 
-Best measured point so far is `P=256`.
+Dense prefill effectively saturates once the whole 321-token prompt fits in a
+single packed chunk. We keep the dense default at `256` as a conservative
+near-optimal point with materially smaller scratch than `512`.
 
 ### Product-Shaped Dense 27B Result (same prompt, 64 decode tokens)
 
@@ -411,7 +416,7 @@ This does not close the full prompt gap, but it narrows it substantially.
   size, not just by deep kernel limitations.
 - Dense prefill remains the biggest remaining dense gap vs llama.cpp, but the
   gap is now materially smaller.
-- MoE stays on a conservative default chunk size until it gets its own sweep.
+- MoE chunk-size sweep is next; do not assume the dense result transfers.
 
 ### Suggested Checkpoint Commit
 
@@ -420,6 +425,16 @@ v0.81: tune dense packed prefill chunk size
 ```
 
 ### Follow-on State (same checkpoint arc)
+
+- MoE packed prefill chunk sweep on the same 321-token prompt (`--tokens 0`):
+  - 35B A3B: `P=8 85.9`, `16 87.0`, `32 89.8`, `64 92.1`, `128 94.9`,
+    `256 95.0`, `321 95.2` t/s
+  - 122B A10B: `P=8 35.8`, `16 36.2`, `32 37.2`, `64 37.7`, `128 37.7`,
+    `256 37.8`, `321 37.7` t/s
+- Decision: move the default MoE packed prefill chunk from `16` to `128`.
+- Product-shaped check with new default (`64` decode tokens):
+  - 35B A3B prefill: `95.3 t/s`
+  - 122B A10B prefill: `37.6 t/s`
 
 - Added a MoE hidden-capture/chunk-boundary gate using a `P=1` packed oracle
   against `P=8` packed prefill; it passes with `cos(final logits)=1.0` and

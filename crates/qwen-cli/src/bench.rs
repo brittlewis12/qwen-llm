@@ -460,7 +460,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     // the no-spec ref). Block size 16 matches DFlash convention; chunk
     // boundaries don't affect ref correctness.
     let mut ref_layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("ref layer scratch")?;
+        MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16).context("ref layer scratch")?;
     let last_logits = prefill_tokens_with_multi_hidden(
         &mf,
         &prompt_ids,
@@ -677,8 +677,9 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     let prefill_hidden_dst =
         MetalTensor::zeros_f32(&ctx, vec![(n_prompt * n_target_features) as u64])
             .context("prefill_hidden_dst")?;
-    let mut prefill_layer_scratch = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, cfg.block_size)
-        .context("prefill layer scratch")?;
+    let mut prefill_layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, cfg.block_size)
+            .context("prefill layer scratch")?;
 
     // ---------- Prompt prefill ----------
     let t_prefill = Instant::now();
@@ -835,7 +836,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     let t_ref_prefill = Instant::now();
     // v0.75.1: packed multi-token prefill (no hidden capture).
     let mut ref_layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("ref layer scratch")?;
+        MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16).context("ref layer scratch")?;
     let last_logits_ref = prefill_tokens_with_multi_hidden(
         &mf,
         &prompt_ids,
@@ -1069,8 +1070,8 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut verify_scratch =
         MetalDFlashVerifyScratch::fresh(&ctx, &mm, cfg.block_size, k_layers as u32)
             .context("verify scratch")?;
-    let mut layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, cfg.block_size).context("layer scratch")?;
+    let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, cfg.block_size)
+        .context("layer scratch")?;
 
     // v0.75.1: contiguous [T, K*H] hidden capture buffer for the
     // packed prefill path. One allocation, one prefill call, one
@@ -1338,8 +1339,8 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let t_ref_total = Instant::now();
         let t_ref_prefill = Instant::now();
         // v0.75.1: packed multi-token prefill (no hidden capture).
-        let mut ref_layer_scratch =
-            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("ref layer scratch")?;
+        let mut ref_layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16)
+            .context("ref layer scratch")?;
         let last_logits_ref = prefill_tokens_with_multi_hidden(
             &mf,
             &prompt_ids,
@@ -1565,8 +1566,9 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         // One warmup pass to compile pipeline state objects + warm caches.
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
         let warmup_last_logits = if use_packed_prefill {
-            let mut scratch = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, prefill_chunk as u32)
-                .context("packed prefill warmup scratch")?;
+            let mut scratch =
+                MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
+                    .context("packed prefill warmup scratch")?;
             prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
                 .context("packed prefill warmup")?
         } else {
@@ -1606,8 +1608,9 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     let t0 = Instant::now();
 
     if use_packed_prefill {
-        let mut scratch = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, prefill_chunk as u32)
-            .context("packed prefill scratch")?;
+        let mut scratch =
+            MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
+                .context("packed prefill scratch")?;
         last_logits =
             prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
                 .context("packed prefill")?;
@@ -2041,7 +2044,7 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
     // the corpus). Allocation is ~tens of MB; per-prompt re-alloc is
     // pure waste at corpus sizes ≥ 100.
     let mut eval_layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 16).context("eval layer scratch")?;
+        MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16).context("eval layer scratch")?;
     let t_total = Instant::now();
     for (i_prompt, (cat, prompt)) in corpus.iter().enumerate() {
         let cat_stats = by_cat.entry(cat.clone()).or_default();

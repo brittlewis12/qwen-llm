@@ -1009,10 +1009,11 @@ pub struct MetalDFlashLayerMajorScratch {
 }
 
 impl MetalDFlashLayerMajorScratch {
-    pub fn fresh(
+    fn fresh_inner(
         ctx: &MetalContext,
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
+        include_final_logits_pack: bool,
     ) -> Result<Self, MetalError> {
         let arch = &target_model.arch;
         let n = block_size as u64;
@@ -1035,6 +1036,11 @@ impl MetalDFlashLayerMajorScratch {
         let gdn_v_dim = (gdn_n_v * gdn_head_dim).max(1);
         let gdn_conv_dim = ((2 * gdn_n_k + gdn_n_v) * gdn_head_dim).max(1);
         let gdn_k_dim = (gdn_n_k * gdn_head_dim).max(1);
+        let final_logits_shape = if include_final_logits_pack {
+            vec![n, v]
+        } else {
+            vec![1]
+        };
 
         Ok(Self {
             x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
@@ -1057,7 +1063,7 @@ impl MetalDFlashLayerMajorScratch {
             moe_shared_gate_pack: MetalTensor::zeros_f32(ctx, vec![n])?,
             moe_inner_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk * moe_f_exp])?,
             moe_expert_out_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk * h])?,
-            final_logits_pack: MetalTensor::zeros_f32(ctx, vec![n, v])?,
+            final_logits_pack: MetalTensor::zeros_f32(ctx, final_logits_shape)?,
             gdn_qkv_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
             gdn_z_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
             gdn_beta_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
@@ -1077,6 +1083,22 @@ impl MetalDFlashLayerMajorScratch {
             gdn_v_dim,
             gdn_n_v,
         })
+    }
+
+    pub fn fresh(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+    ) -> Result<Self, MetalError> {
+        Self::fresh_inner(ctx, target_model, block_size, true)
+    }
+
+    pub fn fresh_prefill(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+    ) -> Result<Self, MetalError> {
+        Self::fresh_inner(ctx, target_model, block_size, false)
     }
 
     /// Zero-copy view of row n of `x_pack` ([H] elements).

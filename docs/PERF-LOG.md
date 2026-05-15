@@ -605,6 +605,52 @@ Interpretation:
 v0.85: pack dense gdn step over prompt tokens
 ```
 
+## 2026-05-15 — Drop Unused Prompt Logits Scratch
+
+Status: improved checkpoint reached, not yet committed in git.
+
+### What Changed
+
+- Added a lighter `MetalDFlashLayerMajorScratch::fresh_prefill` constructor that
+  skips the huge `[P, V]` `final_logits_pack` allocation when the caller only
+  needs `prefill_tokens_with_multi_hidden`.
+- Switched packed prompt-prefill call sites in `qwen-bench decode` and related
+  no-spec prompt paths to use the lighter scratch.
+
+Rationale:
+
+- With dense `P=512`, the old scratch shape allocated a very large unused
+  `[P, V]` buffer during timed prompt prefill. That was both unnecessary memory
+  pressure and unnecessary timed wall.
+
+### Measured Impact
+
+Same repeated 321-token prompt, product-shaped runs:
+
+- Dense 27B (`P=512`, packed step path already on):
+  - before: `172.5 t/s` prefill
+  - after: `173.3 t/s` prefill
+  - decode unchanged / slightly better within noise (`~24.5 t/s`)
+- 35B A3B (`P=128` default): `95.1 t/s` prefill, no regression.
+- 122B A10B (`P=128` default): `37.6 t/s` prefill, no regression.
+
+Interpretation:
+
+- This is a small but real cleanup checkpoint, not a giant algorithmic leap.
+- It removes a bad allocation pattern from the hot prompt path and shaves a bit
+  more prompt wall on the dense target while keeping the MoE path clean.
+
+### Current Dense Prompt State
+
+- Same-prompt dense 27B prompt throughput is now about `173.3 t/s`.
+- That is very close to the earlier same-prompt llama.cpp reading of `186.8 t/s`.
+
+### Suggested Checkpoint Commit
+
+```text
+v0.86: drop unused prompt logits scratch
+```
+
 ### Follow-on State (same checkpoint arc)
 
 - MoE packed prefill chunk sweep on the same 321-token prompt (`--tokens 0`):

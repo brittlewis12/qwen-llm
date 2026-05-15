@@ -40,6 +40,9 @@ M4 Max, release `qwen-bench`, sequential runs.
 
 Recent confirmed wins:
 
+- Prompt-prefill scratch now skips the unused `[P, V]` logits pack on no-spec
+  prompt paths, removing a large dead allocation from timed prefill and nudging
+  dense 27B prompt throughput to ~173.3 t/s.
 - Packed dense `gdn_step_decay` over prompt tokens is now live and materially
   improves dense prompt processing: the same-prompt 27B plateau rises from
   ~165.0 t/s to ~172.9 t/s while decode stays unchanged.

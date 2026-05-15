@@ -119,7 +119,8 @@ Start by reading:
 
 1. `docs/PERF-LOG.md`
 2. `docs/PERF-ROADMAP.md`
-3. `git status --short`
+3. `docs/INFERENCE-GRAPH.md`
+4. `git status --short`
 
 Then continue with the ranked item #1 unless fresh measurements or user
 direction change priority.

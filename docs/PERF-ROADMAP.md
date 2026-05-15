@@ -401,6 +401,9 @@ section:
 5. Keep benchmark notes sequential and reproducible; do not mix parallel runs.
 6. At each improved checkpoint, make the diff tell one optimization story:
    short `v0.xx:` subject, detailed wrapped body with measurement + validation.
+7. When a win changes the broader lowering or bottleneck picture, update
+   `docs/INFERENCE-GRAPH.md` alongside this file so the semantic map stays in
+   sync with the engine and the current performance story.
 
 Useful pattern for future entries:
 

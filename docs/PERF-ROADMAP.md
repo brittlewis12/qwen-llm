@@ -72,97 +72,136 @@ Recent confirmed wins:
   (0.8B / 2B / 4B / 9B) as real long-context canaries instead of failing back to
   the old threadgroup-memory-limited attention path. The local 9B sweep now runs
   cleanly through 32K: `64.0 t/s` at 4K, `59.5 t/s` at 16K, `53.8 t/s` at 32K.
+- Attach-mode decode tracing is now practical via `qwen-bench decode-window`, and
+  `scripts/profile/trace-metal.py` gives a compact Metal timeline summary
+  without hand-written one-off parsers.
 - Group16 attention tile4 default for 122B long context.
 - Group6 dense attention `NWG=64` at `n_pos >= 4096`.
 - `QWEN_ATTN_V4_NWG`, `QWEN_ATTN_V4_TILE_C`, and `QWEN_ATTN_V4_G16_TILE` A/B knobs.
 - Production-style `NWG=64` correctness coverage for attention v4.
 - MoE intra-block profiler: 122B block ~0.594 ms, with mixer prep largest.
 
+Recent measured negatives:
+
+- Generic grouped expert-major MoE routed FFN via CPU ledger + gather/scatter +
+  generic per-expert mat-mat is strongly negative on both A3B and 122B.
+- Shared-expert batched stage-2 rewrite is semantically correct but slower
+  end-to-end on A3B packed prefill.
+- F16 routed-inner traffic reduction on the live Q5-down MoE path is a wash to
+  slight loser end-to-end.
+- Dense paired `gate+up` prompt fusion is exact-correct but only `~1.04x` in the
+  exact-shape 27B microbench at `N=321`, below the go gate.
+- Forcing single Q4 prompt mat-mat to `NR1=16` is worse than the current `NR1=32`
+  path at `N=321`, so easy tile narrowing is not the answer.
+
 ## Force-Ranked Next Bets
 
-### 1. Grouped Expert-Major MoE Packed Prefill
+### 1. Dense Prompt: Less-Staged Q4 Mat-Mat Traversal
 
-Optimizes: MoE prompt throughput, TTFT, `pp512` for 35B A3B and 122B A10B.
+Optimizes: dense prompt throughput and TTFT on 27B, with fast falsification on 9B.
 
-Why it stays first:
+Why it moves to the top:
 
-- MoE packed prefill stage 1 already landed and is a real win.
-- Packed-MoE tail attribution still says routed FFN is the dominant remaining
-  bucket: about `47%` of the A3B tail and `57%` of the 122B tail.
-- The `ds4` close read reinforces the same conclusion: expert-major grouped work
-  is the real MoE prefill play, not more per-token tail gardening.
+- Dense 27B prompt is still behind the earlier same-prompt llama.cpp reading
+  (`~173.3 t/s` vs `~186.8 t/s`).
+- Exact-shape chained prompt mat-mat audit still shows Q4 gate/up only around
+  `5.09 ms` / `~9.2 GiB/s` at `N=321`.
+- Dense paired same-input fusion was directionally positive but too small, and
+  the simple `NR1=16` tile follow-up was worse. That shifts the diagnosis away
+  from easy fusion/tile tweaks and toward traversal / staging / locality.
 
 Current design rule:
 
-- Do not optimize "packed slots" first.
-- Build an explicit ledger of `(token_idx, topk_rank, expert_id, weight)`.
-- Gather by expert, run grouped routed FFN, then scatter/reduce back in fixed
-  top-k order.
-- Treat F16 routed-mid storage as a follow-on once the grouped F32 path is green.
+- Prefer compact changes that keep the proven kernel shape mostly intact.
+- Attack repeated activation staging / traversal before another broad fusion pass.
+- Use exact-shape `N=321` microbenches as the gate before touching packed prefill.
 
 Acceptance gates:
 
-- A bench-only grouped path with frozen router outputs beats the current per-token
-  routed FFN by at least `10-15%` on both A3B and 122B once gather/scatter cost
-  is included.
-- Production grouped path preserves logits, hidden capture, KV, and GDN state on
-  the existing A3B hard gates before it becomes default.
+- Microbench must beat the current `5.09 ms` Q4 gate/up exact-shape baseline by
+  enough to plausibly yield `>= 3%` end-to-end on packed prefill.
+- End-to-end dense packed prefill must actually move on 27B before any new kernel
+  becomes default.
 
-### 2. Fast-Path Validation On One Production Path
+### 2. Decode Command-Model Overlap
 
-Optimizes: iteration speed, correctness confidence, and willingness to take
-larger performance swings without wasting days on silent divergence.
+Optimizes: apples-to-apples dense decode latency, especially 27B at 4K and up.
 
 Why it moves up:
 
-- The first grouped-MoE packed-slot attempt failed a hard correctness gate and
-  had to be rolled back.
-- `ds4`'s "one production path, diagnostics validate it" philosophy is worth
-  stealing whole here.
-- `cx` agrees this is performance leverage now, not paperwork.
+- Real 27B 4K attach-mode Metal trace now exists.
+- It shows `128` command buffers for `128` decode tokens, `128` compute encoders,
+  encoder duration median `~0.699 ms`, and previous completion -> next submit
+  median `~0.538 ms`.
+- The direct decode-window profiler at 4K is the decisive result:
+  `med_total ~42.69 ms`, `med_gpu ~42.14 ms`, `med_cpu_enc ~0.20 ms`, so decode
+  is about `98.7%` GPU-busy on the 27B dense guardrail at 4K.
+- The token loop is fully serialized today. The trace does NOT show a giant
+  hidden bubble, but it does show a real low-single-digit command-model gap.
+- Process-scoped compute intervals split into a small short-gap population and a
+  large token-cadence population; the short intra-CB gaps total only about
+  `~1.2 ms/token` at 4K, which keeps this as a real but bounded lever.
 
 Immediate focus:
 
-- Keep candidate fast paths behind the production dispatch surface, not in a
-  permanent fork.
-- Add differential harnesses that can compare current vs candidate paths on the
-  same routed decisions and fail at the first divergent layer/subphase.
+- Double-buffered / pipelined decode submission first.
+- Use the new attach-mode trace helper and parser to validate any overlap claim.
+- Only escalate to heavier encoder restructuring if post-overlap traces still
+  show meaningful serialized slack.
 
 Acceptance gates:
 
-- Grouped-MoE experiments can localize divergence faster than full end-to-end
-  cosine hunting.
-- New packed fast paths clear logits + hidden + KV + GDN state gates before they
-  are allowed to influence benchmark defaults.
+- Reduce completion -> next-submit gap and total 27B decode ms/token at 4K.
+- Keep exact-token behavior and current correctness gates intact.
 
-### 3. Dense Prompt: Paired Same-Input Projection Fusion First
+### 3. Read-Only Weight Residency And Scratch Storage Cleanup
 
-Optimizes: dense prompt throughput and TTFT on 27B, with fast iteration on 9B.
+Optimizes: decode and prompt wall via cheaper Metal bookkeeping and cleaner GPU
+memory behavior.
 
-Why it refines the dense branch:
+Why it belongs near the top now:
 
-- Dense packed-prefill attribution now says prompt time is mostly FFN / projection
-  work: `ffn ~53.2%`, `gdn_front ~15.6%`, `gdn_tail ~12.5%`, `attn_decode ~7.8%`.
-- Exact-shape chained prompt mat-mat audit at `N=321` shows the current backend is
-  only around `9-13 GiB/s` on the real 27B FFN / projection surfaces.
-- The first easy large-`N` Q4 tile tweak was a loser, so another broad tile sweep
-  is lower-signal than stealing `ds4`'s paired same-input fusion pattern.
+- The command-model trace says there is not a giant host bubble, so the cheap
+  structural wins become more attractive than speculative scheduler work.
+- The external review's `hazardTrackingMode: untracked` + residency-set idea is
+  orthogonal to no-copy GGUF views and should help regardless of mmap strategy.
+- Scratch is still `StorageModeShared` everywhere today, which is convenient but
+  not obviously ideal for GPU-only hot tensors.
 
 Immediate target order:
 
-1. Prototype fused packed `gate_proj + up_proj` on the same activation stream.
-2. If it wins end-to-end, revisit other paired front-end projections where the
-   same activation stream and layout line up cleanly.
-3. Only then return to broader mat-mat backend gardening.
+1. Mark read-only weights as untracked and managed by a residency set.
+2. Move GPU-only scratch arenas toward `StorageModePrivate` where the CPU never
+   reads them.
+3. Measure decode/prefill again before bundling this with larger graph changes.
 
 Acceptance gates:
 
-- A fused dense `gate+up` prototype improves 27B packed prefill by at least
-  `3-5%` end-to-end, not only in a microbench.
-- Correctness matches the current FFN path on the existing dense packed-prefill
-  gates.
+- Any change must preserve correctness and avoid regressing steady-state decode.
+- Keep these as cheap structural cleanup unless traces show a larger-than-expected
+  wall effect.
 
-### 4. Use 9B As The Fast Dense Long-Context Canary
+### 4. MoE Next: Token-Major Cleanup Or Custom Persistent Kernel Research
+
+Optimizes: MoE prompt throughput on A3B / 122B after the generic grouped path was
+falsified.
+
+Why it moves down:
+
+- The obvious grouped-expert version is now a measured negative result.
+- Shared-stage batching and F16 routed-inner traffic reduction also failed to
+  beat the current packed stage-1 MoE path end-to-end.
+- The remaining MoE upside likely requires either smaller token-major cleanup or a
+  genuinely custom persistent grouped kernel, not another generic gather/scatter
+  experiment.
+
+Acceptance gates:
+
+- Any new MoE branch must explain why it avoids the generic grouped-GEMM failure
+  mode before it gets implementation time.
+- Keep MoE correctness gates and packed-MoE tail attribution in the loop.
+
+### 5. Use 9B As The Fast Dense Long-Context Canary
 
 Optimizes: experiment throughput and long-context turnaround while preserving the
 27B guardrail.
@@ -184,7 +223,7 @@ Acceptance gates:
 - Long-context experiments should be reproducible first on 9B, then confirmed on
   27B before the roadmap moves.
 
-### 5. No-Copy GGUF Views And Residency Warmup
+### 6. No-Copy GGUF Views And Residency Warmup
 
 Optimizes: TTFT, cold-start variance, load-time memory pressure, and possible VM
 object overhead.
@@ -208,7 +247,7 @@ Acceptance gates:
 - Prototype shows materially better load time, first measured token stability, or
   memory / VM-object behavior without regressing steady-state throughput.
 
-### 6. Frontier Benchmark Harness With Snapshot / Restore
+### 7. Frontier Benchmark Harness With Snapshot / Restore
 
 Optimizes: benchmark quality and long-context decision speed.
 
@@ -224,23 +263,6 @@ Acceptance gates:
 - Add exact frontier prompt/decode probes that can restore from snapshots and
   measure a fixed local window.
 - Use it to compare qwen vs llama phase-for-phase, not on blended totals.
-
-### 7. Mid-Graph Flush / Overlap Before ICB / MTL4
-
-Optimizes: decode and prompt wall only if CPU encode / driver gaps are real.
-
-Why it stays behind the others:
-
-- Recent data still says GPU time dominates and CPU encode is only about
-  `0.15-0.25 ms/token` on the current hot paths.
-- `ds4`'s mid-graph flush is a cheaper falsification path than full ICB / MTL4,
-  but it still needs evidence of queue gaps first.
-
-Acceptance gates:
-
-- `xctrace` / Metal timeline shows enough idle gap or CPU encode overlap headroom
-  to justify the plumbing.
-- Prototype improves total wall, not only encode time.
 
 ### 8. Speculative Path: Attack Repeated Long-Context Attention Cost
 
@@ -267,7 +289,22 @@ Highest-EV speculative kernel targets:
    `k_full` / `v_full` materialization.
 3. Adaptive draft compute width, not only adaptive verify width.
 
-### 9. KV-Q8 / Quantized KV Cache For Long Context
+### 9. Mid-Graph Flush / Overlap Before ICB / MTL4
+
+Optimizes: decode and prompt wall only if later traces show more cadence slack at
+other contexts or shapes.
+
+Why it stays behind the others:
+
+- The new 27B 4K trace shows a real but modest command-model gap, not a giant one.
+- Cheaper overlap and residency work comes before heavier command-graph surgery.
+
+Acceptance gates:
+
+- Only pursue after double-buffered decode and structural cleanup are measured.
+- Require trace evidence of additional idle gap before escalating further.
+
+### 10. KV-Q8 / Quantized KV Cache For Long Context
 
 Optimizes: long-context decode, DFlash usefulness at long context, memory.
 

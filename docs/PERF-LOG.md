@@ -799,3 +799,104 @@ Interpretation:
 - `ds4` also surfaces two later but promising structural ideas to keep on deck:
   no-copy GGUF-backed Metal views with residency warmup, and a frontier
   snapshot/restore benchmark harness.
+
+## 2026-05-15 — MoE Follow-On Falsifications + 27B 4K Trace Harness
+
+Status: no new performance checkpoint; several important branches were cleanly
+falsified and the command-model picture is now sharper.
+
+### MoE Follow-On Results
+
+Grouped expert-major routed FFN, implemented as CPU ledger + gather/scatter +
+generic per-expert mat-mat, was semantically correct but strongly negative:
+
+- 35B A3B:
+  - `chunk=8`: `0.50 ms -> 8.64 ms` (`0.06x`)
+  - `chunk=128`: `7.42 ms -> 20.13 ms` (`0.37x`)
+- 122B A10B:
+  - `chunk=8`: `0.99 ms -> 8.93 ms` (`0.11x`)
+  - `chunk=128`: `15.19 ms -> 26.59 ms` (`0.57x`)
+
+Interpretation:
+
+- Generic grouped GEMM is the wrong organization here.
+- Average expert groups are too small, and gather/scatter overhead dominates.
+
+Two more MoE follow-ons also failed to earn a checkpoint:
+
+- Batched shared-expert stage-2 rewrite: correct, but slower end-to-end on A3B.
+- F16 routed-inner traffic reduction on the live Q5-down path: correct, but a
+  wash-to-slight loser end-to-end.
+
+Current MoE read after the falsifications:
+
+- Stage-1 packed MoE prefill remains the live baseline.
+- Further MoE upside likely needs either smaller token-major cleanup or a truly
+  custom persistent grouped kernel, not another generic grouped experiment.
+
+### Dense Prompt Follow-On Results
+
+Dense paired prompt fusion was also pushed to a real go/no-go point and failed
+to clear the bar:
+
+- Shared-X paired `gate+up` Q4 prompt kernel at exact-shape 27B `N=321`:
+  - `1.04x` microbench speedup over two separate mat-mats (`64` FFN layers)
+  - exact-correct numerically
+- Narrower `NR1=16` paired kernel: worse (`0.86x`)
+- Forcing single Q4 prompt mat-mat itself to `NR1=16` at `N=321` also regressed:
+  - `5.09 ms -> 6.37 ms` per dispatch
+
+Interpretation:
+
+- The easy paired-fusion / narrower-tile branch is mostly tapped out.
+- Dense prompt should pivot toward less-staged Q4 mat-mat traversal/locality,
+  not another fusion-first attempt.
+
+### New Trace Tooling
+
+- Added `qwen-bench decode-window`, an attach-friendly helper that warms to a
+  target context, writes a ready file, waits for a go file, then runs a fixed
+  decode window.
+- Added `scripts/profile/trace-metal.py`, a repo-local Metal System Trace
+  summarizer that reports command-buffer cadence and related stats without raw
+  XML spelunking.
+
+These exist specifically to keep Metal timeline work aligned with
+`docs/PERF-TOOLS.md` instead of ad hoc one-off commands.
+
+### 27B 4K Decode Trace
+
+Using the new helper and parser, a real 27B decode window at `ctx=4096` now has
+command-model evidence instead of guesswork:
+
+- direct decode-window `TokenProfile` run (`128` tokens at `ctx=4096`):
+  - `avg_total=42.61 ms`, `avg_gpu=42.08 ms`, `avg_cpu_enc=0.24 ms`
+  - `med_total=42.69 ms`, `med_gpu=42.14 ms`, `med_cpu_enc=0.20 ms`
+  - `p95_total=43.13 ms`, `p95_gpu=42.64 ms`, `p95_cpu_enc=0.27 ms`
+  - GPU / total ratio: `~98.7-98.8%`
+- Metal trace summary:
+  - `128` decode tokens -> `128` command buffers -> `128` encoders
+  - encoder duration median: `0.699 ms`, p95 `1.553 ms`
+  - submission cadence median: `43.883 ms`, p95 `45.501 ms`
+  - previous completion -> next submit median: `0.538 ms`, p95 `0.754 ms`
+  - process-scoped compute intervals: `201`
+  - process compute total: `2377.224 ms`, process gap total: `4696.175 ms`
+  - process gap split:
+    - `<= 10 ms`: `76` gaps, `158.166 ms` total
+    - `> 10 ms`: `124` gaps, `4538.009 ms` total
+  - compute-intervals-per-CB histogram: `1:75, 2:36, 3:15, 4:1, 5:1`
+
+Interpretation:
+
+- Decode is fully serialized token-by-token today.
+- The model's own per-token profiler is the decisive source here: dense 27B 4K
+  decode is overwhelmingly GPU-busy, not a giant hidden CPU/driver bubble.
+- There is still a real but modest host/command-model gap at 4K, not a giant
+  hidden bubble.
+- The alarming raw process-gap median was a mixed population. Most of the large
+  gaps are simply token-to-token cadence; the short intra-CB gaps total only
+  about `158 ms / 128 tokens ≈ 1.2 ms/token` at 4K.
+- Double-buffered decode submission remains a legitimate low-single-digit decode
+  candidate, but not a miracle lever.
+- Heavier encoder/fence restructuring should wait for more context-shape traces
+  or a stronger kernel-side reason.

@@ -32,7 +32,7 @@ use qwen_llm::{
     tokenizer::Tokenizer,
 };
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,6 +57,10 @@ enum Cmd {
     /// Phase-resolved profile at one context length (uses the
     /// `phase_sum` GPU time, NOT the per-phase-cmdbuf wall artifact).
     Phase(PhaseArgs),
+    /// Warm to a target context, then wait for an external go signal before
+    /// running a fixed decode window. Intended for attach-mode tracing so the
+    /// recorder can skip the long ramp.
+    DecodeWindow(DecodeWindowArgs),
     /// **H2 falsification**: compare cold prefill TTFT vs snapshot-restore
     /// TTFT for two requests sharing a token prefix.
     PrefixCache(PrefixCacheArgs),
@@ -167,6 +171,25 @@ struct PhaseArgs {
     /// Context length to profile at.
     #[arg(long, default_value = "4096")]
     ctx: usize,
+}
+
+#[derive(Parser, Debug)]
+struct DecodeWindowArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Context length to ramp to before waiting.
+    #[arg(long)]
+    target_ctx: usize,
+    /// Number of decode tokens to execute after the go signal.
+    #[arg(long, default_value = "128")]
+    window: usize,
+    /// File created when the process has reached `target_ctx` and is waiting.
+    #[arg(long)]
+    ready_file: PathBuf,
+    /// File whose existence releases the process to run the decode window.
+    #[arg(long)]
+    go_file: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -377,6 +400,7 @@ fn main() -> Result<()> {
         Cmd::Decode(a) => run_decode(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
+        Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
         Cmd::Dflash(a) => run_dflash(a),
@@ -2297,6 +2321,132 @@ fn run_phase(args: PhaseArgs) -> Result<()> {
         let pct = ms / phase_sum * 100.0;
         println!("[phase ctx={target}]   {name:25} {ms:7.2} ms  ({pct:5.1}%)");
     }
+    Ok(())
+}
+
+fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
+    let DecodeWindowArgs {
+        model,
+        target_ctx,
+        window,
+        ready_file,
+        go_file,
+    } = args;
+    let ctx = MetalContext::new()?;
+    eprintln!("[decode-window] device: {}", ctx.describe());
+    let g = GgufFile::open(&model)?;
+    let m = Model::from_gguf(&g)?;
+    let mm = MetalModel::load(&ctx, &g, &m)?;
+    let mut s = MetalSession::fresh(&ctx, &mm, target_ctx + window + 16)?;
+    let mf = MetalForward::new(&ctx, &mm);
+
+    for i in 0..3 {
+        let _ = mf.single_token(0, i as u32, &mut s)?;
+    }
+    let mut s = MetalSession::fresh(&ctx, &mm, target_ctx + window + 16)?;
+    let _ = mf.single_token(0, 0, &mut s)?;
+    for p in 1..(target_ctx as u32) {
+        let _ = mf.single_token(0, p, &mut s)?;
+    }
+
+    if let Some(parent) = ready_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = go_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if go_file.exists() {
+        std::fs::remove_file(&go_file)?;
+    }
+    std::fs::write(
+        &ready_file,
+        format!("ready ctx={} window={}\n", target_ctx, window),
+    )?;
+    eprintln!(
+        "[decode-window] ready at ctx={} waiting for {:?}",
+        target_ctx, go_file
+    );
+    while !go_file.exists() {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    eprintln!(
+        "[decode-window] go signal received; running {} decode tokens",
+        window
+    );
+
+    let mut samples = Vec::with_capacity(window);
+    let mut prev_tok = 0i32;
+    for i in 0..window {
+        let pos = target_ctx as u32 + i as u32;
+        let (logits, p) = mf.single_token_profiled(prev_tok, pos, &mut s)?;
+        samples.push(p);
+        prev_tok = argmax_i32(&logits);
+    }
+
+    fn median(values: &[f64]) -> f64 {
+        let mut v = values.to_vec();
+        v.sort_by(|a, b| a.total_cmp(b));
+        let n = v.len();
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) * 0.5
+        }
+    }
+
+    fn p95(values: &[f64]) -> f64 {
+        let mut v = values.to_vec();
+        v.sort_by(|a, b| a.total_cmp(b));
+        let idx = ((v.len() - 1) as f64 * 0.95).round() as usize;
+        v[idx]
+    }
+
+    let avg_total = samples.iter().map(|p| p.total_ms).sum::<f64>() / window as f64;
+    let avg_gpu = samples.iter().map(|p| p.gpu_kernel_ms).sum::<f64>() / window as f64;
+    let avg_enc = samples.iter().map(|p| p.cpu_encode_ms).sum::<f64>() / window as f64;
+    let avg_wait = samples
+        .iter()
+        .map(|p| p.cpu_to_gpu_complete_ms)
+        .sum::<f64>()
+        / window as f64;
+    let totals: Vec<f64> = samples.iter().map(|p| p.total_ms).collect();
+    let gpus: Vec<f64> = samples.iter().map(|p| p.gpu_kernel_ms).collect();
+    let encs: Vec<f64> = samples.iter().map(|p| p.cpu_encode_ms).collect();
+    let waits: Vec<f64> = samples.iter().map(|p| p.cpu_to_gpu_complete_ms).collect();
+    let med_total = median(&totals);
+    let med_gpu = median(&gpus);
+    let med_enc = median(&encs);
+    let med_wait = median(&waits);
+    let p95_total = p95(&totals);
+    let p95_gpu = p95(&gpus);
+    let p95_enc = p95(&encs);
+    let p95_wait = p95(&waits);
+    eprintln!(
+        "[decode-window] ctx={} window={} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
+        target_ctx,
+        window,
+        avg_total,
+        avg_gpu,
+        avg_enc,
+        1000.0 / avg_total
+    );
+    eprintln!(
+        "[decode-window] med_total={:.2} ms med_gpu={:.2} ms med_cpu_enc={:.2} ms med_wait={:.2} ms gpu/total={:.1}%",
+        med_total,
+        med_gpu,
+        med_enc,
+        med_wait,
+        100.0 * med_gpu / med_total
+    );
+    eprintln!(
+        "[decode-window] p95_total={:.2} ms p95_gpu={:.2} ms p95_cpu_enc={:.2} ms p95_wait={:.2} ms",
+        p95_total, p95_gpu, p95_enc, p95_wait,
+    );
+    eprintln!(
+        "[decode-window] avg_wait={:.2} ms gpu/total(avg)={:.1}%",
+        avg_wait,
+        100.0 * avg_gpu / avg_total
+    );
     Ok(())
 }
 

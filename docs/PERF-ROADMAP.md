@@ -68,6 +68,10 @@ Recent confirmed wins:
   A3B / 122B in current 64-token runs).
 - Dense KV-Q8 prototype is currently a negative result on M4 for the existing
   v4 main-kernel structure; attention gets slower, not faster.
+- Attention v4 now supports `group=4`, unlocking the small dense family
+  (0.8B / 2B / 4B / 9B) as real long-context canaries instead of failing back to
+  the old threadgroup-memory-limited attention path. The local 9B sweep now runs
+  cleanly through 32K: `64.0 t/s` at 4K, `59.5 t/s` at 16K, `53.8 t/s` at 32K.
 - Group16 attention tile4 default for 122B long context.
 - Group6 dense attention `NWG=64` at `n_pos >= 4096`.
 - `QWEN_ATTN_V4_NWG`, `QWEN_ATTN_V4_TILE_C`, and `QWEN_ATTN_V4_G16_TILE` A/B knobs.
@@ -76,99 +80,169 @@ Recent confirmed wins:
 
 ## Force-Ranked Next Bets
 
-### 1. Grouped Routed-Expert Execution For MoE Packed Prefill
+### 1. Grouped Expert-Major MoE Packed Prefill
 
-Optimizes: MoE prompt processing, TTFT, `pp512` for 35B A3B and 122B A10B.
+Optimizes: MoE prompt throughput, TTFT, `pp512` for 35B A3B and 122B A10B.
 
-Why it is first now:
+Why it stays first:
 
 - MoE packed prefill stage 1 already landed and is a real win.
-- The remaining structural waste is still token-by-token routed expert execution.
-- Grouping tokens by selected expert is the next step that can unlock another
-  meaningful chunk of MoE prompt throughput.
-- Packed-MoE tail attribution now confirms this directly: routed FFN is ~47% of
-  the A3B tail and ~57% of the 122B tail.
+- Packed-MoE tail attribution still says routed FFN is the dominant remaining
+  bucket: about `47%` of the A3B tail and `57%` of the 122B tail.
+- The `ds4` close read reinforces the same conclusion: expert-major grouped work
+  is the real MoE prefill play, not more per-token tail gardening.
 
-Expected payoff: medium-to-large additional MoE prefill gain; no direct
-decode-token speedup.
+Current design rule:
 
-Risks and constraints:
-
-- Dynamic top-k routing can destroy batching if grouped naively.
-- Must preserve router softmax/top-k tie semantics and shared expert gate.
-- First packed-slot routed execution attempt failed the hard correctness gate;
-  keep future attempts behind the existing tests until they are green.
+- Do not optimize "packed slots" first.
+- Build an explicit ledger of `(token_idx, topk_rank, expert_id, weight)`.
+- Gather by expert, run grouped routed FFN, then scatter/reduce back in fixed
+  top-k order.
+- Treat F16 routed-mid storage as a follow-on once the grouped F32 path is green.
 
 Acceptance gates:
 
-- Packed-MoE profiler identifies routed expert execution as the remaining large
-  bucket.
-- Grouped execution preserves logits / state equivalence on A3B production gates.
+- A bench-only grouped path with frozen router outputs beats the current per-token
+  routed FFN by at least `10-15%` on both A3B and 122B once gather/scatter cost
+  is included.
+- Production grouped path preserves logits, hidden capture, KV, and GDN state on
+  the existing A3B hard gates before it becomes default.
 
-### 2. MoE Packed Prefill Hardening
+### 2. Fast-Path Validation On One Production Path
 
-Optimizes: correctness confidence and trustworthy iteration speed.
+Optimizes: iteration speed, correctness confidence, and willingness to take
+larger performance swings without wasting days on silent divergence.
 
-Why it is second:
+Why it moves up:
 
-- Codex-wrap found no major blocker, but the MoE hidden-capture path still lacks
-  a dedicated packed-vs-oracle gate.
-- We also want packed-MoE phase timing so the grouped-expert follow-up targets
-  the actual remaining cost, not our guesses.
+- The first grouped-MoE packed-slot attempt failed a hard correctness gate and
+  had to be rolled back.
+- `ds4`'s "one production path, diagnostics validate it" philosophy is worth
+  stealing whole here.
+- `cx` agrees this is performance leverage now, not paperwork.
 
-Acceptance gates:
+Immediate focus:
 
-- Add a MoE packed hidden-capture / chunk-boundary correctness gate.
-- Add packed-MoE phase timing or equivalent attribution for prompt processing.
-
-Status:
-
-- The hidden-capture / chunk-boundary gate is now in place for 35B A3B.
-- Packed-MoE tail attribution is now available and points at routed expert
-  execution as the dominant bucket.
-
-### 3. Dense Prompt Attribution Beyond Chunk Size
-
-Optimizes: dense prompt processing and TTFT.
-
-Why it changed:
-
-- We found the chunk-size win and then removed the batched `alpha/beta` blind
-  spot.
-- Dense prompt throughput is now ~165.0 t/s on the same prompt where llama.cpp
-  reports ~186.8 t/s, so the remaining gap is much smaller.
-- Packed-prefill attribution now says the remaining dense gap is dominated by
-  FFN mat-mat and the true GDN tail, not prompt-attention.
+- Keep candidate fast paths behind the production dispatch surface, not in a
+  permanent fork.
+- Add differential harnesses that can compare current vs candidate paths on the
+  same routed decisions and fail at the first divergent layer/subphase.
 
 Acceptance gates:
 
-- Keep dense prompt attribution current after each major packed-prefill change.
-- Use it to choose between GDN-tail work and any broader mat-mat backend work.
+- Grouped-MoE experiments can localize divergence faster than full end-to-end
+  cosine hunting.
+- New packed fast paths clear logits + hidden + KV + GDN state gates before they
+  are allowed to influence benchmark defaults.
 
-Status:
+### 3. Dense Prompt: Paired Same-Input Projection Fusion First
 
-- Dense packed-prefill phase profile (`P=321`) now shows:
-  - `ffn`: ~53.2%
-  - `gdn_front`: ~15.6%
-  - `gdn_tail`: ~12.5%
-  - `attn_decode`: ~7.8%
-- Representative one-layer GDN tail split shows `step_decay` as the largest true
-  tail sub-bucket once `out_proj` is excluded to `gdn_back`.
-- A quick same-prompt llama.cpp tensor on/off falsification on M4 Max showed no
-  meaningful prompt-rate delta, so a broad Metal tensor port is not the first
-  assumption to chase.
-- Packed `gdn_step_decay` did buy a real end-to-end reduction, and it is now the
-  active dense prompt path.
-- The next dense attack is therefore the broad FFN / projection mat-mat surface
-  unless a sharper bandwidth indictment changes that conclusion.
-- Exact-shape chained prompt mat-mat audit at `N=321` now provides that
-  indictment: current FFN / projection mat-mats are only around `9–13 GiB/s`
-  weight throughput on the real 27B prompt shapes.
-- First easy Q4 large-`N` tile experiment (`NR1=64`) was a negative result and
-  was reverted immediately; dense backend work from here should be more
-  deliberate than another casual tile tweak.
+Optimizes: dense prompt throughput and TTFT on 27B, with fast iteration on 9B.
 
-### 4. Speculative Path: Attack Repeated Long-Context Attention Cost
+Why it refines the dense branch:
+
+- Dense packed-prefill attribution now says prompt time is mostly FFN / projection
+  work: `ffn ~53.2%`, `gdn_front ~15.6%`, `gdn_tail ~12.5%`, `attn_decode ~7.8%`.
+- Exact-shape chained prompt mat-mat audit at `N=321` shows the current backend is
+  only around `9-13 GiB/s` on the real 27B FFN / projection surfaces.
+- The first easy large-`N` Q4 tile tweak was a loser, so another broad tile sweep
+  is lower-signal than stealing `ds4`'s paired same-input fusion pattern.
+
+Immediate target order:
+
+1. Prototype fused packed `gate_proj + up_proj` on the same activation stream.
+2. If it wins end-to-end, revisit other paired front-end projections where the
+   same activation stream and layout line up cleanly.
+3. Only then return to broader mat-mat backend gardening.
+
+Acceptance gates:
+
+- A fused dense `gate+up` prototype improves 27B packed prefill by at least
+  `3-5%` end-to-end, not only in a microbench.
+- Correctness matches the current FFN path on the existing dense packed-prefill
+  gates.
+
+### 4. Use 9B As The Fast Dense Long-Context Canary
+
+Optimizes: experiment throughput and long-context turnaround while preserving the
+27B guardrail.
+
+Why it is now active:
+
+- `group=4` attention v4 is now enabled, which unlocks the whole small dense line
+  (0.8B / 2B / 4B / 9B) for realistic long-context decode.
+- Local 9B now reaches 32K cleanly and is dramatically faster to iterate on than
+  27B: `64.0 t/s` at 4K, `59.5 t/s` at 16K, `53.8 t/s` at 32K.
+
+Usage rule:
+
+- Use 9B for fast falsification of long-context attention / dense prompt ideas.
+- Keep 27B in the analysis loop before claiming a real win.
+
+Acceptance gates:
+
+- Long-context experiments should be reproducible first on 9B, then confirmed on
+  27B before the roadmap moves.
+
+### 5. No-Copy GGUF Views And Residency Warmup
+
+Optimizes: TTFT, cold-start variance, load-time memory pressure, and possible VM
+object overhead.
+
+Why it enters the roadmap now:
+
+- The `ds4` close read makes this the strongest non-kernel structural crib.
+- Current `qwen-llm` still copies weights tensor-by-tensor into fresh shared
+  buffers; `ds4` instead wraps a few large GGUF-backed no-copy Metal views and
+  warms residency up front.
+
+Why it is not above the current prompt work:
+
+- This is more likely a load / first-token / memory-cleanliness lever than the
+  next steady-state prompt-throughput unlock.
+- It still looks high-EV enough to prototype once the current MoE and dense
+  prompt branches have a stable checkpoint.
+
+Acceptance gates:
+
+- Prototype shows materially better load time, first measured token stability, or
+  memory / VM-object behavior without regressing steady-state throughput.
+
+### 6. Frontier Benchmark Harness With Snapshot / Restore
+
+Optimizes: benchmark quality and long-context decision speed.
+
+Why it matters:
+
+- `ds4-bench`'s frontier measurement style is a better mental model for prompt vs
+  decode frontiers than one blended tokens/sec number.
+- This would sharpen long-context dense/MoE comparisons and future speculative
+  work without changing model semantics.
+
+Acceptance gates:
+
+- Add exact frontier prompt/decode probes that can restore from snapshots and
+  measure a fixed local window.
+- Use it to compare qwen vs llama phase-for-phase, not on blended totals.
+
+### 7. Mid-Graph Flush / Overlap Before ICB / MTL4
+
+Optimizes: decode and prompt wall only if CPU encode / driver gaps are real.
+
+Why it stays behind the others:
+
+- Recent data still says GPU time dominates and CPU encode is only about
+  `0.15-0.25 ms/token` on the current hot paths.
+- `ds4`'s mid-graph flush is a cheaper falsification path than full ICB / MTL4,
+  but it still needs evidence of queue gaps first.
+
+Acceptance gates:
+
+- `xctrace` / Metal timeline shows enough idle gap or CPU encode overlap headroom
+  to justify the plumbing.
+- Prototype improves total wall, not only encode time.
+
+### 8. Speculative Path: Attack Repeated Long-Context Attention Cost
 
 Optimizes: DFlash / MTP viability at realistic context lengths.
 
@@ -193,65 +267,7 @@ Highest-EV speculative kernel targets:
    `k_full` / `v_full` materialization.
 3. Adaptive draft compute width, not only adaptive verify width.
 
-Deprioritize inside speculative lane:
-
-- policy-only tuning before kernel work
-- speculative ideas for prefill
-- small decode fusions before the large repeated-attention costs are addressed
-
-### 5. Measure Command Overhead, Then Decide ICB / MTL4
-
-Optimizes: MoE prompt processing, TTFT, `pp512` for 35B A3B and 122B A10B.
-
-Why it matters:
-
-- MoE decode is already strong; prompt replay is the likely structural gap.
-- Current packed/no-tail helpers reject MoE.
-- Real MoE prefill needs routing P tokens, grouping selected experts, mat-mat by
-  expert, scatter/sum, and shared expert handling.
-
-Expected payoff: potentially very large for MoE prefill; no direct decode-token
-speedup.
-
-Risks and constraints:
-
-- Much harder than dense packed prefill.
-- Naive per-token routed kernels do not amortize enough; expert grouping is the
-  point.
-- Must preserve router softmax/top-k tie semantics and shared expert gate.
-
-Acceptance gates:
-
-- MoE packed prefill matches sequential MoE loop on logits, KV, GDN state, and
-  router decisions for small and production models.
-- A3B and 122B `pp512` improve materially against sequential baseline.
-
-### 6. Prefill Mat-Mat Quality
-
-Optimizes: decode throughput, all models if host/driver overhead is real.
-
-Why it is not higher:
-
-- Current production path already uses one command buffer per token.
-- Recent sweeps show CPU encode around ~0.15-0.25 ms/token, while GPU kernels
-  dominate the measured wall.
-- ICB/MTL4 has high plumbing cost and API churn risk.
-
-Expected payoff: uncertain; could matter most for smaller dense models and MoE
-tiny-kernel-heavy paths.
-
-Risks and constraints:
-
-- Easy to spend a lot of time for sub-5% if GPU time dominates.
-- Dynamic scalar args and per-session buffers must stay correct.
-
-Acceptance gates:
-
-- Before implementation, produce production-shaped CPU encode / GPU / wall gap
-  evidence that justifies the work.
-- Prototype must improve total wall, not only encode time.
-
-### 7. KV-Q8 / Quantized KV Cache For Long Context
+### 9. KV-Q8 / Quantized KV Cache For Long Context
 
 Optimizes: long-context decode, DFlash usefulness at long context, memory.
 
@@ -279,105 +295,25 @@ Acceptance gates:
 - Revisit only with a concrete new kernel structure and a fast feedback plan.
 - Cut again quickly if attention does not beat F16 at 32K or 64K.
 
-### 8. Dense GDN / FFN Decode Surgery
+### 10. Dense Decode Surgery And Small Decode Hygiene
 
-Optimizes: decode throughput, all models if host/driver overhead is real.
+Optimizes: dense decode throughput and measurement integrity.
 
-Why it is not higher:
+Why it stays late:
 
-- Current production path already uses one command buffer per token.
-- Recent sweeps show CPU encode around ~0.15-0.25 ms/token, while GPU kernels
-  dominate the measured wall.
-- ICB/MTL4 has high plumbing cost and API churn risk.
-
-Expected payoff: uncertain; could matter most for smaller dense models and MoE
-tiny-kernel-heavy paths.
-
-Risks and constraints:
-
-- Easy to spend a lot of time for sub-5% if GPU time dominates.
-- Dynamic scalar args and per-session buffers must stay correct.
+- Dense decode is already competitive enough that prompt work dominates the
+  scoreboard.
+- Prior FFN mega-fusion had weak payoff and GDN recurrence semantics are
+  correctness-sensitive.
+- GPU argmax is already landed; dense gain is neutral within noise and MoE gain
+  is modest but real.
 
 Acceptance gates:
 
-- Before implementation, produce production-shaped CPU encode / GPU / wall gap
-  evidence that justifies the work.
-- Prototype must improve total wall, not only encode time.
-
-### 9. Keep GPU Argmax / Full-Logits Decode Honest
-
-Optimizes: prompt processing after packed prefill is wired everywhere.
-
-Why it waits:
-
-- First we need the packed prefill path in the main benchmark/product path.
-- If `pp512` still trails llama.cpp afterward, mat-mat quality becomes the next
-  obvious kernel-side target.
-
-Expected payoff: medium to large for prefill, dependent on post-wiring pp data.
-
-Risks and constraints:
-
-- Kernel complexity and maintainability.
-- Tune against end-to-end pp, not isolated synthetic mat-mat alone.
-
-Acceptance gates:
-
-- Same-harness pp comparison identifies mat-mat as the remaining bottleneck.
-- Kernel changes improve dense and/or MoE packed prefill end-to-end.
-
-### 10. Dense-Specific Long-Context Compression Revisit
-
-Optimizes: future dense long-context decode if a better compression path exists.
-
-Why it stays on the horizon:
-
-- The negative result applies to the current Q8 main-body structure, not to all
-  possible KV compression ideas forever.
-- If future evidence suggests F16 is saturating memory harder at very high ctx,
-  revisit with a better vectorized or block-shared design, not the current one.
-
-Optimizes: benchmark integrity and small decode wins, especially on MoE.
-
-Why it remains tracked:
-
-- Current data says dense is neutral within noise while A3B / 122B gain
-  modestly.
-- Keep the `--full-logits-decode` A/B path and targeted regression tests so
-  future decode or sampling work stays measurable and exact.
-
-Expected payoff: small; mostly a measurement and architecture hygiene item.
-
-Risks and constraints:
-
-- Do not overstate the gain on dense before more repeated measurements.
-- Preserve exact-token equivalence and oracle semantics.
-
-Acceptance gates:
-
-- Dense + MoE argmax wrapper tests stay green.
-- CLI continues to support direct full-logits A/B when needed.
-
-Optimizes: dense decode throughput.
-
-Why it is deferred:
-
-- The bucket is large (~29-31 ms on 27B), but prior FFN mega-fusion had weak
-  end-to-end payoff and GDN recurrence semantics are correctness-sensitive.
-- Narrow, measured surgery is better than a broad rewrite.
-
-Expected payoff: possible low-to-mid single-digit ms if a concrete waste pocket
-is identified; high uncertainty.
-
-Risks and constraints:
-
-- Do not lower GDN state precision or reorder recurrence semantics.
-- Avoid another large FFN mega-fusion without a new profile showing it will pay.
-
-Acceptance gates:
-
-- Fresh intra-profile identifies a specific dominant subphase and mechanism.
-- Correctness gates cover dense 27B and small F32 oracle models.
+- Any decode surgery must be driven by a fresh dense phase profile identifying a
+  specific waste pocket.
+- Exact-token A/B paths (`--full-logits-decode`) and argmax regression tests stay
+  green while decode work proceeds.
 
 ## Deprioritized For Now
 

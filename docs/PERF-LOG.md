@@ -928,3 +928,50 @@ Interpretation:
   submit gap we saw in the trace.
 - It is worth keeping behind the bench-only flag for future context checks, but
   it is not a production checkpoint on its own.
+
+## 2026-05-15 — Concurrent GDN Front Projections At 4K
+
+Status: improved checkpoint reached, bench-only / opt-in branch.
+
+### What Changed
+
+- Added a dense-only bench path that splits each GDN block across multiple
+  encoders and runs the four independent front projections (`qkv`, `z`, `beta`,
+  `alpha`) in a concurrent compute encoder.
+- Left attention and the rest of the dense block logic unchanged.
+- Exposed the branch through `qwen-bench ctx-sweep --concurrent-gdn-proj`.
+
+### Validation
+
+- Added a dense correctness gate on `Qwen3.5-0.8B.F32.gguf` comparing the new
+  path against the serial path:
+  - argmax identical
+  - `cos = 1.000000`
+
+### 27B 4K Result
+
+Same harness, same context, same window (`ctx-sweep --checkpoints 4096 --window 64`):
+
+- serial:
+  - `43.87 ms/token` total
+  - `43.23 ms/token` GPU
+  - `0.31 ms/token` CPU encode
+  - `22.8 t/s`
+- concurrent GDN projections:
+  - `42.14 ms/token` total
+  - `41.53 ms/token` GPU
+  - `0.38 ms/token` CPU encode
+  - `23.7 t/s`
+
+Interpretation:
+
+- This is a real GPU-side decode win, not a CPU noise artifact.
+- The branch improves total decode by about `1.73 ms/token` at 4K, about `4%`
+  throughput.
+- CPU encode rises slightly, which is fine because the gain is in GPU time.
+
+### Current Next Step
+
+- Keep this as a checkpoint-worthy experimental branch.
+- Next bounded measurement is 27B dense at `16K` to see whether the gain holds as
+  attention cost grows.

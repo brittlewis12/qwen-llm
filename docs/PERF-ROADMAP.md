@@ -162,6 +162,14 @@ Status:
   - `ctx=32768`: about `~0.3%`
 - Keep it as an experimental harness, not a production checkpoint, unless a
   future shape/context shows a materially larger win.
+- A second bench-only dense decode branch now exists at
+  `qwen-bench ctx-sweep --concurrent-gdn-proj`.
+- At 27B dense `ctx=4096`, `window=64`, it improves decode from
+  `43.87 -> 42.14 ms/token` (`22.8 -> 23.7 t/s`), with the gain showing up in
+  GPU time rather than CPU encode.
+- This is the first command-model branch that has cleared the “real enough to
+  checkpoint” bar; next bounded check is 27B `16K` before considering any
+  broader rollout.
 
 ### 3. Read-Only Weight Residency And Scratch Storage Cleanup
 

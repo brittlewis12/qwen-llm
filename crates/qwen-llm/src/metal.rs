@@ -34,7 +34,7 @@ use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLLibrary, MTLResourceOptions, MTLSize,
+    MTLDispatchType, MTLFence, MTLLibrary, MTLResourceOptions, MTLSize,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -72,6 +72,7 @@ type Pipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
 /// Owned Metal buffer wrapper, the public type for buffer-style values.
 pub type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+pub type Fence = Retained<ProtocolObject<dyn MTLFence>>;
 
 // ===========================================================================
 // MetalContext
@@ -399,6 +400,13 @@ impl KernelEncoder {
         Self { raw }
     }
 
+    pub fn begin_concurrent(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
+        let raw = cmd
+            .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
+            .expect("concurrent compute encoder");
+        Self { raw }
+    }
+
     pub fn end(self) {
         self.raw.endEncoding();
     }
@@ -443,6 +451,14 @@ impl KernelEncoder {
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
         self.raw
             .dispatchThreadgroups_threadsPerThreadgroup(grid, threads);
+    }
+
+    pub fn update_fence(&self, fence: &Fence) {
+        self.raw.updateFence(fence);
+    }
+
+    pub fn wait_for_fence(&self, fence: &Fence) {
+        self.raw.waitForFence(fence);
     }
 }
 

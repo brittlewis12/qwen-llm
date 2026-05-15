@@ -16,16 +16,16 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::{
     gguf::GgufFile,
-    loader::{Model, open_dflash_drafter},
+    loader::{open_dflash_drafter, Model},
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
-        DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
-        MetalDFlashVerifyScratch, prefill_tokens_with_multi_hidden,
+        prefill_tokens_with_multi_hidden, DFlashDecoder, MetalDFlashHead,
+        MetalDFlashLayerMajorScratch, MetalDFlashSession, MetalDFlashVerifyScratch,
     },
     metal_forward::{MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
@@ -162,6 +162,10 @@ struct CtxSweepArgs {
     /// How many tokens to time at each checkpoint.
     #[arg(long, default_value = "5")]
     window: usize,
+    /// Use the bench-only dense path that splits GDN blocks across encoders and
+    /// runs the four front projections in a concurrent compute encoder.
+    #[arg(long)]
+    concurrent_gdn_proj: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -195,6 +199,11 @@ struct DecodeWindowArgs {
     /// token N+1 with GPU execution of token N.
     #[arg(long)]
     pipelined: bool,
+    /// Use a bench-only dense decode path that splits GDN blocks across multiple
+    /// encoders and runs the four front projections in a concurrent compute
+    /// encoder.
+    #[arg(long)]
+    concurrent_gdn_proj: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1474,7 +1483,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
             // Sort by descending sum.
             let mut sorted: Vec<_> = agg.iter().collect();
-            sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
+            sorted.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
             for (name, (sum_ms, count)) in &sorted {
                 let avg = *sum_ms / (*count as f64);
                 let pct = 100.0 * *sum_ms / total_gpu_ms;
@@ -2246,6 +2255,7 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
         model,
         checkpoints,
         window,
+        concurrent_gdn_proj,
     } = args;
     let ctx = MetalContext::new()?;
     eprintln!("[bench] device: {}", ctx.describe());
@@ -2281,7 +2291,11 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
         let mut samples = Vec::with_capacity(window);
         for i in 0..window {
             let pos = prev_pos + i as u32;
-            let (_, p) = mf.single_token_profiled(0, pos, &mut s)?;
+            let (_, p) = if concurrent_gdn_proj {
+                mf.single_token_profiled_concurrent_gdn_dense(0, pos, &mut s)?
+            } else {
+                mf.single_token_profiled(0, pos, &mut s)?
+            };
             samples.push(p);
         }
         prev_pos += window as u32;
@@ -2337,6 +2351,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         ready_file,
         go_file,
         pipelined,
+        concurrent_gdn_proj,
     } = args;
     let ctx = MetalContext::new()?;
     eprintln!("[decode-window] device: {}", ctx.describe());
@@ -2379,6 +2394,12 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         "[decode-window] go signal received; running {} decode tokens",
         window
     );
+
+    if pipelined && concurrent_gdn_proj {
+        return Err(anyhow!(
+            "--pipelined and --concurrent-gdn-proj are separate bench-only experiments; use one at a time"
+        ));
+    }
 
     fn median(values: &[f64]) -> f64 {
         let mut v = values.to_vec();
@@ -2515,7 +2536,11 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     let mut prev_tok = 0i32;
     for i in 0..window {
         let pos = target_ctx as u32 + i as u32;
-        let (logits, p) = mf.single_token_profiled(prev_tok, pos, &mut s)?;
+        let (logits, p) = if concurrent_gdn_proj {
+            mf.single_token_profiled_concurrent_gdn_dense(prev_tok, pos, &mut s)?
+        } else {
+            mf.single_token_profiled(prev_tok, pos, &mut s)?
+        };
         samples.push(p);
         prev_tok = argmax_i32(&logits);
     }
@@ -2541,9 +2566,10 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     let p95_enc = p95(&encs);
     let p95_wait = p95(&waits);
     eprintln!(
-        "[decode-window] ctx={} window={} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
+        "[decode-window] ctx={} window={}{} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
         target_ctx,
         window,
+        if concurrent_gdn_proj { " concurrent_gdn" } else { "" },
         avg_total,
         avg_gpu,
         avg_enc,

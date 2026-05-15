@@ -746,3 +746,56 @@ Attempted next step:
   implementation.
 - Result: keep the profiler/test scaffolding, but do not keep a broken fast path
   live in the tree.
+
+## 2026-05-15 — Group-4 Attention v4 And 9B Long-Context Canary
+
+Status: enablement checkpoint reached; small dense family can now use the v4
+long-context attention path.
+
+### What Changed
+
+- Added `attn_v4` F16 kernels for `group=4` in `kernels/attn_v4.metal`, including
+  the reduce path.
+- Wired host dispatch selection through `crates/qwen-llm/src/metal.rs`,
+  `crates/qwen-llm/src/metal_forward.rs`, `crates/qwen-llm/src/metal_dflash.rs`,
+  and the packed correctness plumbing so `group=4` shapes stop falling back to
+  the old threadgroup-memory-limited `attn_decode_f16kv` path.
+- Extended the v4-vs-naive correctness test to cover the small dense shape
+  (`n_q=8`, `n_kv=2`, `group=4`).
+
+### Validation
+
+- `cargo check -p qwen-llm`
+- `cargo test --release -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture`
+  passes with exact-style agreement for the new `group=4` shape across
+  `n_pos ∈ {1, 32, 64, 256, 1024, 4096}`, `NWG ∈ {1, 2, 4, 8, 16, 64}` where
+  applicable, and `C ∈ {16, 32, 64, 128}`.
+
+### 9B Long-Context Canary Result
+
+Model: `/Users/tito/models/Qwen3.5-9B-Q4_K_M.gguf`
+
+`qwen-bench ctx-sweep --checkpoints 1,4096,8192,16384,32768 --window 2`:
+
+- `1`: `14.75 ms` / `67.8 t/s`
+- `4096`: `15.63 ms` / `64.0 t/s`
+- `8192`: `15.95 ms` / `62.7 t/s`
+- `16384`: `16.82 ms` / `59.5 t/s`
+- `32768`: `18.57 ms` / `53.8 t/s`
+
+Interpretation:
+
+- The 9B no longer hits the old `~7K` long-context cliff.
+- Group `4` is the one immediate unlock for the whole small dense family
+  (`0.8B / 2B / 4B / 9B`), so we now have a much faster dense long-context
+  canary without giving up the 27B guardrail.
+
+### Direction Check
+
+- The new `cx` review on the `ds4` close read reinforces the current ordering:
+  grouped expert-major MoE prefill remains first, fast-path validation moves up
+  beside it, and the dense branch should try paired same-input projection fusion
+  before broader mat-mat gardening.
+- `ds4` also surfaces two later but promising structural ideas to keep on deck:
+  no-copy GGUF-backed Metal views with residency warmup, and a frontier
+  snapshot/restore benchmark harness.

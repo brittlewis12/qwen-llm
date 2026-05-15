@@ -3076,7 +3076,7 @@ pub fn encode_attn_decode_f16kv_f32(
 
 // =============================================================================
 // Flash-attention v4: GQA-dedup + online softmax + split-K. Specializations
-// currently cover head_dim=256 with GROUP in {6, 8, 16} and F16 KV cache.
+// currently cover head_dim=256 with GROUP in {4, 6, 8, 16} and F16 KV cache.
 //
 // Caller is responsible for owning per-call partial buffers:
 //   o_partial : F32, n_kv_heads * NWG * GROUP * head_dim elements
@@ -3108,7 +3108,7 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
         return nwg;
     }
 
-    if matches!(group, 6 | 8 | 16) && n_pos >= 4096 {
+    if matches!(group, 4 | 6 | 8 | 16) && n_pos >= 4096 {
         64
     } else if n_pos < 256 {
         16
@@ -3170,7 +3170,7 @@ pub fn attn_v4_choose_group_tile(n_pos: usize, group: usize) -> usize {
 
 /// Encode v4 main kernel + reduce kernel in sequence.
 /// Hardcoded constants (must match `kernels/attn_v4.metal`):
-///   DK = DV = 256, lanes = 32, GROUP in {6, 8, 16}.
+///   DK = DV = 256, lanes = 32, GROUP in {4, 6, 8, 16}.
 /// Tile size `tile_c ∈ {16, 32, 64, 128}` selects the kernel variant.
 /// Use `attn_v4_choose_tile_c(n_pos, group)` for the empirically-tuned choice
 /// or pass 32 (default; backward-compat) if unsure.
@@ -3205,10 +3205,10 @@ pub fn encode_attn_decode_v4_f32(
             detail: format!("head_dim={head_dim} but kernel hardcodes {DK}"),
         });
     }
-    if !matches!(group, 6 | 8 | 16) {
+    if !matches!(group, 4 | 6 | 8 | 16) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4",
-            detail: format!("group={group} unsupported; expected one of {{6, 8, 16}}"),
+            detail: format!("group={group} unsupported; expected one of {{4, 6, 8, 16}}"),
         });
     }
     if k_cache.dtype != v_cache.dtype || !matches!(k_cache.dtype, GgmlType::F16 | GgmlType::Q8_0) {
@@ -3287,6 +3287,10 @@ pub fn encode_attn_decode_v4_f32(
     }
     let pipeline_name = if group_tile == group {
         match (k_cache.dtype, group, tile_c) {
+            (GgmlType::F16, 4, 16) => "kernel_attn_decode_v4_g4_c16_f32",
+            (GgmlType::F16, 4, 32) => "kernel_attn_decode_v4_g4_f32",
+            (GgmlType::F16, 4, 64) => "kernel_attn_decode_v4_g4_c64_f32",
+            (GgmlType::F16, 4, 128) => "kernel_attn_decode_v4_g4_c128_f32",
             (GgmlType::Q8_0, 6, 16) => "kernel_attn_decode_v4_q8_c16_f32",
             (GgmlType::Q8_0, 6, 32) => "kernel_attn_decode_v4_q8_f32",
             (GgmlType::Q8_0, 6, 64) => "kernel_attn_decode_v4_q8_c64_f32",
@@ -3400,6 +3404,7 @@ pub fn encode_attn_decode_v4_f32(
         n_partitions: u32,
     }
     let red_pipeline_name = match group {
+        4 => "kernel_attn_decode_v4_reduce_g4_f32",
         6 => "kernel_attn_decode_v4_reduce_f32",
         8 => "kernel_attn_decode_v4_reduce_g8_f32",
         16 => "kernel_attn_decode_v4_reduce_g16_f32",
@@ -3471,10 +3476,10 @@ pub fn encode_attn_decode_v4_main_only_f32(
             detail: format!("head_dim={head_dim} but kernel hardcodes {DK}"),
         });
     }
-    if !matches!(group, 6 | 8 | 16) {
+    if !matches!(group, 4 | 6 | 8 | 16) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main",
-            detail: format!("group={group} unsupported; expected one of {{6, 8, 16}}"),
+            detail: format!("group={group} unsupported; expected one of {{4, 6, 8, 16}}"),
         });
     }
     if k_cache.dtype != v_cache.dtype || !matches!(k_cache.dtype, GgmlType::F16 | GgmlType::Q8_0) {
@@ -3543,6 +3548,10 @@ pub fn encode_attn_decode_v4_main_only_f32(
     }
     let pipeline_name = if group_tile == group {
         match (k_cache.dtype, group, tile_c) {
+            (GgmlType::F16, 4, 16) => "kernel_attn_decode_v4_g4_c16_f32",
+            (GgmlType::F16, 4, 32) => "kernel_attn_decode_v4_g4_f32",
+            (GgmlType::F16, 4, 64) => "kernel_attn_decode_v4_g4_c64_f32",
+            (GgmlType::F16, 4, 128) => "kernel_attn_decode_v4_g4_c128_f32",
             (GgmlType::Q8_0, 6, 16) => "kernel_attn_decode_v4_q8_c16_f32",
             (GgmlType::Q8_0, 6, 32) => "kernel_attn_decode_v4_q8_f32",
             (GgmlType::Q8_0, 6, 64) => "kernel_attn_decode_v4_q8_c64_f32",
@@ -3670,10 +3679,10 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
             detail: format!("head_dim={head_dim} but kernel hardcodes {DK}"),
         });
     }
-    if !matches!(group, 6 | 8 | 16) {
+    if !matches!(group, 4 | 6 | 8 | 16) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_reduce",
-            detail: format!("group={group} unsupported; expected one of {{6, 8, 16}}"),
+            detail: format!("group={group} unsupported; expected one of {{4, 6, 8, 16}}"),
         });
     }
     let want_q = (n_q_heads * head_dim) as u64;
@@ -3711,6 +3720,7 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
         n_partitions: u32,
     }
     let red_pipeline_name = match group {
+        4 => "kernel_attn_decode_v4_reduce_g4_f32",
         6 => "kernel_attn_decode_v4_reduce_f32",
         8 => "kernel_attn_decode_v4_reduce_g8_f32",
         16 => "kernel_attn_decode_v4_reduce_g16_f32",
@@ -8946,8 +8956,9 @@ mod tests {
         };
         let hd = 256usize;
         // Cover the currently-supported specializations:
-        // 27B dense  (GROUP=6), 35B A3B (GROUP=8), 122B A10B (GROUP=16).
-        let shapes: &[(usize, usize)] = &[(24, 4), (16, 2), (32, 2)];
+        // small dense (GROUP=4), 27B dense (GROUP=6), 35B A3B (GROUP=8),
+        // 122B A10B (GROUP=16).
+        let shapes: &[(usize, usize)] = &[(8, 2), (24, 4), (16, 2), (32, 2)];
 
         for &(n_q, n_kv) in shapes {
             let group = n_q / n_kv;

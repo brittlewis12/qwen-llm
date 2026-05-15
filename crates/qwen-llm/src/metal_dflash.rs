@@ -2493,7 +2493,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             // Fused attn-v4 (or naive fallback for non-matching shapes).
                             const V4_HEAD_DIM: usize = 256;
                             let group = n_q / n_kv;
-                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
+                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
                             if use_v4 {
                                 let nwg = crate::metal::attn_v4_choose_nwg(
                                     target_session.kv_n_pos[ai],
@@ -3591,7 +3591,7 @@ pub fn prefill_tokens_with_multi_hidden(
 
                             const V4_HEAD_DIM: usize = 256;
                             let group = n_q / n_kv;
-                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
+                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
                             if use_v4 {
                                 let nwg = crate::metal::attn_v4_choose_nwg(
                                     target_session.kv_n_pos[ai],

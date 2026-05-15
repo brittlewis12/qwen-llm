@@ -612,7 +612,7 @@ inline void attn_v4_main_subgroup_body(
 // Concrete kernel entry points (one per C variant)
 // =============================================================================
 
-#define ATTN_V4_KERNEL(NAME, C_VAL) \
+#define ATTN_V4_KERNEL_G(NAME, GROUP_VAL, C_VAL) \
 kernel void NAME( \
         constant attn_v4_args & args      [[buffer(0)]], \
         device const float    * q          [[buffer(1)]], \
@@ -624,14 +624,19 @@ kernel void NAME( \
         threadgroup  float    * ss         [[threadgroup(1)]], \
         uint3  tgpig [[threadgroup_position_in_grid]], \
         ushort tiisg [[thread_index_in_simdgroup]]) { \
-    attn_v4_main_body<6, C_VAL>(args, q, k_cache, v_cache, o_partial, ml_partial, \
-                              sq, ss, tgpig, tiisg); \
+    attn_v4_main_body<GROUP_VAL, C_VAL>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+                               sq, ss, tgpig, tiisg); \
 }
 
-ATTN_V4_KERNEL(kernel_attn_decode_v4_c16_f32, 16)
-ATTN_V4_KERNEL(kernel_attn_decode_v4_f32,     32)  // default name (GROUP=6, C=32 backward-compat)
-ATTN_V4_KERNEL(kernel_attn_decode_v4_c64_f32, 64)
-ATTN_V4_KERNEL(kernel_attn_decode_v4_c128_f32, 128)
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_g4_c16_f32, 4, 16)
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_g4_f32,     4, 32)
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_g4_c64_f32, 4, 64)
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_g4_c128_f32, 4, 128)
+
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_c16_f32, 6, 16)
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_f32,     6, 32)  // default name (GROUP=6, C=32 backward-compat)
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_c64_f32, 6, 64)
+ATTN_V4_KERNEL_G(kernel_attn_decode_v4_c128_f32, 6, 128)
 
 #define ATTN_V4_Q8_KERNEL(NAME, C_VAL) \
 kernel void NAME( \
@@ -887,6 +892,19 @@ kernel void kernel_attn_decode_v4_reduce_f32(
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]]) {
     attn_v4_reduce_body<6>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
+}
+
+kernel void kernel_attn_decode_v4_reduce_g4_f32(
+        constant attn_v4_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_reduce_body<4>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
 kernel void kernel_attn_decode_v4_reduce_g8_f32(

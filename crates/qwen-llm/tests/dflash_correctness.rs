@@ -1468,7 +1468,7 @@ fn packed_verify_phase_profile_v073a2_27b() {
 
                     const V4_HEAD_DIM: usize = 256;
                     let group = n_q / n_kv;
-                    let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
+                    let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
                     if use_v4 {
                         let nwg = qwen_llm::metal::attn_v4_choose_nwg(sess.kv_n_pos[ai], group);
                         let tile_c =

@@ -272,7 +272,7 @@ Concrete sizes for the dense 27B shape:
 | GDN recurrence | `kernel_gdn_step_decay_f32` mutates state; dense prompt now uses `kernel_gdn_step_decay_packed_f32` to keep each state row resident across P tokens | `kernel_gated_delta_net_f32_{1,2,4}` loops over `ne22` timesteps and returns output + new state through ggml dst | Packed step is now a confirmed dense prompt win; llama's multi-token GDN shape remains a useful reference for the remaining tail work. |
 | GDN alpha/beta | Dense prompt batches the small F32 `beta_proj`/`alpha_proj` surfaces and the decay chain across `[P, n_v]`; decode still uses per-token fused decay chain | Generic graph: matmul, add, softplus, mul, reshape, then GDN op | This was a confirmed prefill win; alpha/beta is no longer a dense prompt bottleneck. |
 | SSM conv | `ssm_conv_silu` fused in our GDN tail | `SSM_CONV` then `SILU`, with batched variants for prefill | Potential fusion/scheduling lever remains small compared to FFN and GDN step. |
-| Full attention decode | `attn_v4` groups sibling Q heads per KV head and reads K/V once per GQA group; split-K over context | Generic attention path through ggml ops / flash-attn kernels | Our GQA-dedup attention is a concrete long-context advantage. |
+| Full attention decode | `attn_v4` groups sibling Q heads per KV head and reads K/V once per GQA group; split-K over context; now live for dense `group=4`, dense `group=6`, MoE `group=8`, and MoE `group=16` | Generic attention path through ggml ops / flash-attn kernels | Our GQA-dedup attention is a concrete long-context advantage and now unlocks the whole small dense line as a fast canary. |
 | KV append | Fused K+V scatter to F16; optional Q8 experiment | `SET_ROWS`/cache helpers, configurable cache types | Our Q8 experiment lost on M4 for the current reader; F16 is still best. |
 | Dense FFN decode | Fused Q4 gate/up SwiGLU plus down mat-vec | `build_ffn` through generic matmul/GLU ops | This is a direct decode win surface. |
 | MoE decode | GPU route prep, top-k + shared gate fusion, expert-bank kernels for routed/shared paths | `build_moe_ffn` with generic MoE graph and `MUL_MAT_ID` style execution | Decode is strong; packed prefill needs grouped routed experts. |
@@ -300,7 +300,8 @@ Concrete sizes for the dense 27B shape:
   and lets us fuse exact hot patterns.
 - Attention v4: GQA-dedup reads K/V once per KV head group and shares across all
   sibling Q heads, which the local kernel comments call out as absent from the
-  reference engines.
+  reference engines. It now covers `group in {4,6,8,16}`, so the 0.8B / 2B / 4B /
+  9B dense family joins 27B / A3B / 122B on the same long-context path.
 - Dense FFN decode: fused Q4 gate/up SwiGLU shares input loads and removes gate/up
   materialization.
 - Prompt prefill: layer-major chunks, skip-tail prefill, tuned chunk sizes,

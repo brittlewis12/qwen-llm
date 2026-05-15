@@ -2788,16 +2788,15 @@ impl<'a> MetalForward<'a> {
         // (8) Fused attention decode: scoring + softmax + V-aggregate.
         //
         // Selection: v4 (GQA-dedup + online softmax + split-K) when the
-        // shape matches its hardcoded constants (head_dim=256, GROUP=6 →
-        // 27B). Falls back to f16kv naive kernel for other shapes
-        // (e.g. 0.8B has GROUP=4).
+        // shape matches its hardcoded constants (head_dim=256, GROUP in
+        // {4,6,8,16}). Falls back to f16kv naive kernel for other shapes.
         //
         // v4 gives 2-8× speedup over naive on the 27B shape AND removes
         // the n_pos ≤ ~7000 correctness cliff (naive's threadgroup-mem
         // scores buffer caps out around there).
         const V4_HEAD_DIM: usize = 256;
         let group = n_q / n_kv;
-        let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
+        let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
         if use_v4 {
             let nwg = attn_v4_choose_nwg(s.kv_n_pos[attn_i], group);
             let tile_c = attn_v4_choose_tile_c(s.kv_n_pos[attn_i], group);
@@ -4580,7 +4579,7 @@ mod tests {
         const V4_HEAD_DIM: usize = 256;
         let group = n_q / n_kv;
         let n_pos = s.kv_n_pos[attn_idx_in_session];
-        let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 6 | 8 | 16);
+        let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
         if use_v4 {
             let nwg = attn_v4_choose_nwg(n_pos, group);
             let tile_c = attn_v4_choose_tile_c(n_pos, group);

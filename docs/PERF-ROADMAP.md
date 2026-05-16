@@ -38,8 +38,27 @@ M4 Max, release `qwen-bench`, sequential runs.
 | 122B A10B | 16K | 33.47 | 29.9 | group16 tile4 + NWG64 |
 | 122B A10B | 32K | 35.14 | 28.5 | group16 tile4 + NWG64 |
 
+Prompt-only anchor, same repeated 320-token prompt:
+
+- `qwen-llm` 27B dense packed prefill: `~186.2-186.5 t/s`
+- current `llama.cpp` baseline: `212.44 t/s`
+
 Recent confirmed wins:
 
+- Production-shape packed-prefill profiling is now live in `qwen-bench decode`:
+  prompt-only runs report total prefill GPU ms, and profiling no-op flags can
+  remove dense FFN, GDN body, or attention body inside the real packed prefill
+  graph.
+- Packed dense GDN `rmsnorm_gated` is now batched over the whole prompt chunk
+  instead of one dispatch per token. On the repeated 320-token 27B prompt, this
+  moves packed prefill from ~183.1 t/s to ~186.2-186.5 t/s and trims GPU total
+  from ~1717 ms to ~1690 ms.
+- Latest same-prompt dense read is now `~186.3 t/s` on 27B, which narrows but
+  does not erase the fresh `llama.cpp` prompt baseline of `212.44 t/s`.
+- Production-shape dense prompt no-op profiling says the remaining packed-prefill
+  cost is real GPU work and currently partitions roughly as: FFN ~`924 ms`, GDN
+  body ~`285 ms`, attention body ~`157 ms` on the repeated 320-token 27B prompt.
+  That exonerates isolated FFN mat-mat kernels as the hidden prompt mystery.
 - Prompt-prefill scratch now skips the unused `[P, V]` logits pack on no-spec
   prompt paths, removing a large dead allocation from timed prefill and nudging
   dense 27B prompt throughput to ~173.3 t/s.
@@ -96,34 +115,59 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Dense Prompt: Less-Staged Q4 Mat-Mat Traversal
+### 1. Dense Prompt: Packed GDN Body Cleanup
 
 Optimizes: dense prompt throughput and TTFT on 27B, with fast falsification on 9B.
 
 Why it moves to the top:
 
-- Dense 27B prompt is still behind the earlier same-prompt llama.cpp reading
-  (`~173.3 t/s` vs `~186.8 t/s`).
-- Exact-shape chained prompt mat-mat audit still shows Q4 gate/up only around
-  `5.09 ms` / `~9.2 GiB/s` at `N=321`.
-- Dense paired same-input fusion was directionally positive but too small, and
-  the simple `NR1=16` tile follow-up was worse. That shifts the diagnosis away
-  from easy fusion/tile tweaks and toward traversal / staging / locality.
+- Latest packed dense prompt is still behind fresh `llama.cpp`
+  (`~186.3 t/s` vs `212.44 t/s`).
+- Production-shape no-op profiling says the largest non-FFN removable bucket is
+  now the packed GDN body at roughly `~285 ms` on the repeated 320-token prompt.
+- The easiest live sub-bucket was the per-token packed `rmsnorm_gated` tail, and
+  batching it already delivered a real prompt win. That strengthens the case for
+  continuing through the remaining GDN body staging rather than reopening blind
+  FFN mat-mat rewrites.
 
 Current design rule:
 
-- Prefer compact changes that keep the proven kernel shape mostly intact.
-- Attack repeated activation staging / traversal before another broad fusion pass.
-- Use exact-shape `N=321` microbenches as the gate before touching packed prefill.
+- Keep the existing packed recurrence kernel unless a narrower probe convicts it.
+- Attack the per-token prep/tail staging around it first: packed SSM conv prep,
+  packed Q/K norm + V pack, and any remaining one-dispatch-per-token glue.
+- Prefer production-shape prompt deltas over isolated microbenches when ranking
+  these changes.
 
 Acceptance gates:
 
-- Microbench must beat the current `5.09 ms` Q4 gate/up exact-shape baseline by
-  enough to plausibly yield `>= 3%` end-to-end on packed prefill.
-- End-to-end dense packed prefill must actually move on 27B before any new kernel
-  becomes default.
+- End-to-end dense packed prefill must move on 27B against the repeated prompt.
+- Correctness must stay green on `prefill_tokens_matches_single_token_loop_27b`.
 
-### 2. Decode Command-Model Overlap
+### 2. Dense Prompt: Attention Body Cleanup
+
+Optimizes: dense prompt throughput on the full-attention layers after GDN.
+
+Why it moves up:
+
+- Production-shape no-op profiling says attention body still costs about
+  `~157 ms` on the repeated 320-token prompt.
+- Full-attention prefill is still decode-shaped in the middle: per-token RoPE,
+  KV append, and decode attention inside the chunk.
+- This is a smaller lever than GDN body, but it is the next-largest prompt-only
+  bucket that does not rely on speculative or decode-only changes.
+
+Current design rule:
+
+- Start with bounded cleanup around the existing attention math: batched
+  consecutive-position RoPE and chunk-wise KV scatter / glue removal.
+- Defer truly packed causal prefill attention until these cheaper cleanups are
+  falsified.
+
+Acceptance gates:
+
+- End-to-end dense packed prefill must move on 27B without regressing decode.
+
+### 3. Decode Command-Model Overlap
 
 Optimizes: apples-to-apples dense decode latency, especially 27B at 4K and up.
 
@@ -182,7 +226,7 @@ Status:
 - The combined branch is not additive with GDN-only overlap, but it remains the
   strongest decode-focused command-model variant measured so far.
 
-### 3. Read-Only Weight Residency And Scratch Storage Cleanup
+### 4. Read-Only Weight Residency And Scratch Storage Cleanup
 
 Optimizes: decode and prompt wall via cheaper Metal bookkeeping and cleaner GPU
 memory behavior.
@@ -209,7 +253,7 @@ Acceptance gates:
 - Keep these as cheap structural cleanup unless traces show a larger-than-expected
   wall effect.
 
-### 4. MoE Next: Token-Major Cleanup Or Custom Persistent Kernel Research
+### 5. MoE Next: Token-Major Cleanup Or Custom Persistent Kernel Research
 
 Optimizes: MoE prompt throughput on A3B / 122B after the generic grouped path was
 falsified.
@@ -229,7 +273,7 @@ Acceptance gates:
   mode before it gets implementation time.
 - Keep MoE correctness gates and packed-MoE tail attribution in the loop.
 
-### 5. Use 9B As The Fast Dense Long-Context Canary
+### 6. Use 9B As The Fast Dense Long-Context Canary
 
 Optimizes: experiment throughput and long-context turnaround while preserving the
 27B guardrail.
@@ -251,7 +295,7 @@ Acceptance gates:
 - Long-context experiments should be reproducible first on 9B, then confirmed on
   27B before the roadmap moves.
 
-### 6. No-Copy GGUF Views And Residency Warmup
+### 7. No-Copy GGUF Views And Residency Warmup
 
 Optimizes: TTFT, cold-start variance, load-time memory pressure, and possible VM
 object overhead.
@@ -275,7 +319,7 @@ Acceptance gates:
 - Prototype shows materially better load time, first measured token stability, or
   memory / VM-object behavior without regressing steady-state throughput.
 
-### 7. Frontier Benchmark Harness With Snapshot / Restore
+### 8. Frontier Benchmark Harness With Snapshot / Restore
 
 Optimizes: benchmark quality and long-context decision speed.
 
@@ -292,7 +336,7 @@ Acceptance gates:
   measure a fixed local window.
 - Use it to compare qwen vs llama phase-for-phase, not on blended totals.
 
-### 8. Speculative Path: Attack Repeated Long-Context Attention Cost
+### 9. Speculative Path: Attack Repeated Long-Context Attention Cost
 
 Optimizes: DFlash / MTP viability at realistic context lengths.
 
@@ -317,7 +361,7 @@ Highest-EV speculative kernel targets:
    `k_full` / `v_full` materialization.
 3. Adaptive draft compute width, not only adaptive verify width.
 
-### 9. Mid-Graph Flush / Overlap Before ICB / MTL4
+### 10. Mid-Graph Flush / Overlap Before ICB / MTL4
 
 Optimizes: decode and prompt wall only if later traces show more cadence slack at
 other contexts or shapes.
@@ -332,7 +376,7 @@ Acceptance gates:
 - Only pursue after double-buffered decode and structural cleanup are measured.
 - Require trace evidence of additional idle gap before escalating further.
 
-### 10. KV-Q8 / Quantized KV Cache For Long Context
+### 11. KV-Q8 / Quantized KV Cache For Long Context
 
 Optimizes: long-context decode, DFlash usefulness at long context, memory.
 
@@ -360,7 +404,7 @@ Acceptance gates:
 - Revisit only with a concrete new kernel structure and a fast feedback plan.
 - Cut again quickly if attention does not beat F16 at 32K or 64K.
 
-### 10. Dense Decode Surgery And Small Decode Hygiene
+### 12. Dense Decode Surgery And Small Decode Hygiene
 
 Optimizes: dense decode throughput and measurement integrity.
 

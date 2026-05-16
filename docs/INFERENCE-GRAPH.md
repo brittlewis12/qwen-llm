@@ -164,8 +164,9 @@ What this buys:
 - Dense defaults now use a large chunk (`P=512`) and saturate once the whole
   prompt fits in one chunk on the common same-prompt benchmark.
 - Dense GDN prompt work now also batches the small F32 `alpha`/`beta`
-  projections and runs `gdn_step_decay` across prompt tokens inside one packed
-  kernel, so the remaining dense prompt gap is no longer mostly recurrent glue.
+  projections, runs `gdn_step_decay` across prompt tokens inside one packed
+  kernel, and batches `rmsnorm_gated` across the full prompt chunk, so the
+  remaining dense prompt gap is no longer mostly recurrent glue.
 - MoE packed prefill is currently stage 1: mixer prep and post-norm batch over
   `P`, while routed expert execution is still token-by-token for exact routing.
   MoE defaults use a tuned conservative chunk (`P=128`) because grouped routed
@@ -305,8 +306,9 @@ Concrete sizes for the dense 27B shape:
 - Dense FFN decode: fused Q4 gate/up SwiGLU shares input loads and removes gate/up
   materialization.
 - Prompt prefill: layer-major chunks, skip-tail prefill, tuned chunk sizes,
-  batched GDN alpha/beta, packed GDN step, and lighter no-spec scratch materially
-  moved dense prompt throughput and narrowed the same-prompt gap to llama.cpp.
+  batched GDN alpha/beta, packed GDN step, batched packed `rmsnorm_gated`, and
+  lighter no-spec scratch materially moved dense prompt throughput and narrowed
+  the same-prompt gap to llama.cpp.
 - Greedy decode readback: GPU argmax avoids pulling the full vocab row for the
   common no-sampling path.
 - MoE single-token path: GPU router/top-k/shared-gate and expert-bank kernels keep
@@ -314,14 +316,13 @@ Concrete sizes for the dense 27B shape:
 
 ## 10. Where llama.cpp Still Teaches Us
 
-- Prefill FFN/projection mat-mat quality: dense prompt attribution now points at
-  FFN / projection mat-mat as the largest dense bucket, and exact-shape prompt
-  audits show our current chained prompt mat-mat throughput is still low for the
-  real 27B prompt surfaces. This is the main dense place where llama.cpp still
-  teaches us.
-- Multi-token GDN recurrence: our packed step is a win, but llama.cpp's fused
-  GDN op is still a useful reference for long prompt timesteps and function
-  constant specialization.
+- Prompt-body structure: latest production-shape no-op profiling says the live
+  dense prompt gap is no longer a mysterious FFN kernel problem. FFN is simply
+  the largest accounted-for bucket, while the next clear opportunities are GDN
+  body staging and the decode-shaped attention body inside packed prefill.
+- Multi-token GDN body: our packed step and batched gated norm are wins, but
+  llama.cpp's fused GDN op is still a useful reference for longer prompt
+  timesteps and tighter packed prep/tail structure.
 - MoE prompt execution: llama.cpp's generic MoE machinery is not the end state
   for us, but it is still the best correctness/shape reference while building
   grouped routed expert execution.
@@ -340,8 +341,9 @@ flowchart TD
     Goal --> MoEPrefill[MoE prefill]
     Goal --> Decode[decode]
 
-    DensePrefill --> FFNMM[FFN/projection mat-mat quality]
-    DensePrefill --> GDNTail[remaining GDN front/tail buckets]
+    DensePrefill --> GDNBody[packed GDN body cleanup]
+    DensePrefill --> AttnBody[packed attention body cleanup]
+    DensePrefill --> FFNMM[FFN/projection mat-mat quality only if re-convicted]
     DensePrefill --> TailSkip[tail/logits minimization complete]
 
     MoEPrefill --> GroupExperts[group tokens by expert]
@@ -352,7 +354,9 @@ flowchart TD
     Decode --> Fusions[small dense/MoE fusions]
     Decode --> EncodeOverhead[measure command encode vs GPU wall]
 
-    FFNMM --> CurrentGap[current dense pp gap]
+    GDNBody --> CurrentGap[current dense pp gap]
+    AttnBody --> CurrentGap
+    FFNMM --> CurrentGap
     GroupExperts --> CurrentGap
     EncodeOverhead --> ICB[ICB/MTL4 only if evidence says CPU encode matters]
 ```

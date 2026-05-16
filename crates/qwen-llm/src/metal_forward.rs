@@ -31,19 +31,18 @@
 use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
 use crate::metal::{
-    attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
-    encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32,
-    encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
+    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_v4_f32, encode_axpy_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
+    encode_ffn_swiglu_q4_K_f32, encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
     encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32,
     encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
     encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32,
     encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32, KernelEncoder,
-    MetalContext, MetalError, MetalTensor,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
 use std::sync::OnceLock;
@@ -7030,8 +7029,8 @@ mod tests {
         let initial_x: Vec<f32> = (0..h).map(|i| ((i % 31) as f32 - 15.0) * 0.02).collect();
         let position: u32 = 0;
         let attn_block_idx = 3usize; // first attn block in 0.8B
-                                     // attn_idx_in_session is the 0-indexed count among ATTN blocks
-                                     // before this one. block 3 is the first attn block, so 0.
+        // attn_idx_in_session is the 0-indexed count among ATTN blocks
+        // before this one. block 3 is the first attn block, so 0.
         let attn_idx_in_session = 0usize;
 
         // CPU reference: replicate exactly what forward.rs:attn_step does.

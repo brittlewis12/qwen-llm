@@ -6,6 +6,85 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-16 — Packed Prompt Differential Profiling + Batched GDN Gating
+
+Status: improved checkpoint reached, not yet committed in git.
+
+### What Changed
+
+- `qwen-bench decode` now reports total packed-prefill GPU time via
+  `prefill_tokens_with_multi_hidden_profiled`.
+- Added dense prompt differential profiling flags on the real packed prefill
+  graph:
+  - `QWEN_PREFILL_NOOP_FFN=1`
+  - `QWEN_PREFILL_NOOP_GDN_BODY=1`
+  - `QWEN_PREFILL_NOOP_ATTN_BODY=1`
+- Batched packed GDN `rmsnorm_gated` over the whole prompt chunk instead of one
+  dispatch per token.
+
+### Fresh Dense Prompt Read
+
+Repeated 320-token quick-brown-fox prompt, 27B dense, packed prefill chunk 512,
+release build, sequential runs:
+
+- Latest packed prefill plateau after batched GDN gating: `~1718 ms` wall,
+  `~1691 ms` GPU, `~186.2 t/s`.
+- Fresh current `llama.cpp` prompt baseline on the same machine/model family:
+  `212.44 t/s`.
+- Prompt remains behind, but the gap is now about `~14%`, not the earlier
+  `~16%` pre-win read.
+
+### Production-Shape Differential Prompt Deltas
+
+Representative no-op runs after the new batching change:
+
+- `QWEN_PREFILL_NOOP_FFN=1`: `793.0 ms` wall, `766.2 ms` GPU.
+- `QWEN_PREFILL_NOOP_GDN_BODY=1`: `1432.1 ms` wall, `1422.2 ms` GPU.
+- `QWEN_PREFILL_NOOP_ATTN_BODY=1`: `1557.8 ms` wall, `1535.7 ms` GPU.
+
+Against the new `~1718 ms` / `~1691 ms` baseline, that says the live packed
+prompt graph is approximately:
+
+- FFN: `~925 ms`
+- GDN body: `~286 ms` wall, `~269 ms` GPU
+- attention body: `~160 ms` wall, `~155 ms` GPU
+
+Interpretation:
+
+- Prompt is still overwhelmingly real GPU work (`~98.3%` GPU / wall), not outer
+  orchestration.
+- The old "FFN is the hidden prompt mystery" theory is now dead: direct
+  production-shape FFN delta matches the broad bucket story, and isolated exact
+  shape FFN mat-mat refs already match or beat exported llama.cpp prompt ops.
+- The highest-EV remaining dense prompt work is now the non-FFN prompt path:
+  first packed GDN body staging, then attention body cleanup.
+
+### Measured Win
+
+- Before batched packed `rmsnorm_gated`: `~1747.5 ms`, `183.1 t/s`,
+  `~1717.1 ms` GPU.
+- After batching it over the full chunk: `~1715-1720 ms`, `186.0-186.5 t/s`,
+  `~1687-1693 ms` GPU.
+- Net: about `1.7-1.9%` faster prompt prefill on the repeated 27B prompt.
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
+
+Correctness stayed green:
+
+- `cos(final logits)=1.000000`
+- hidden / GDN state / conv / KV cache gates all remained effectively exact.
+
+### Current Next Step
+
+1. Packed GDN body cleanup: attack SSM-conv prep and Q/K norm + V-pack staging
+   around the existing packed recurrence.
+2. Packed attention body cleanup: batched consecutive-position RoPE and chunk-wise
+   KV scatter / glue removal before considering a more invasive packed attention
+   rewrite.
+
 ## 2026-05-14 — Attention Parity Push + Roadmap Reset
 
 Status: improved checkpoint reached, not yet committed in git.

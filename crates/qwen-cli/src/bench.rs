@@ -16,16 +16,17 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::{
     gguf::GgufFile,
-    loader::{open_dflash_drafter, Model},
+    loader::{Model, open_dflash_drafter},
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
-        prefill_tokens_with_multi_hidden, DFlashDecoder, MetalDFlashHead,
-        MetalDFlashLayerMajorScratch, MetalDFlashSession, MetalDFlashVerifyScratch,
+        DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
+        MetalDFlashVerifyScratch, prefill_tokens_with_multi_hidden,
+        prefill_tokens_with_multi_hidden_profiled,
     },
     metal_forward::{MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
@@ -1493,7 +1494,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
             // Sort by descending sum.
             let mut sorted: Vec<_> = agg.iter().collect();
-            sorted.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+            sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
             for (name, (sum_ms, count)) in &sorted {
                 let avg = *sum_ms / (*count as f64);
                 let pct = 100.0 * *sum_ms / total_gpu_ms;
@@ -1650,6 +1651,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     let mut per_token_prof: Vec<qwen_llm::metal_forward::TokenProfile> =
         Vec::with_capacity(ids.len() + tokens);
     let mut last_logits: Vec<f32> = Vec::new();
+    let mut prefill_gpu_total_ms: Option<f64> = None;
     let want_prefill_oracle = oracle.is_some() && oracle_phase == OraclePhase::Prefill;
     let mut prefill_logits_for_oracle: Option<Vec<f32>> = None;
 
@@ -1659,9 +1661,18 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         let mut scratch =
             MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
                 .context("packed prefill scratch")?;
-        last_logits =
-            prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
-                .context("packed prefill")?;
+        let (logits, gpu_total_ms) = prefill_tokens_with_multi_hidden_profiled(
+            &mf,
+            &ids,
+            0,
+            &mut s,
+            &mut scratch,
+            &[],
+            None,
+        )
+        .context("packed prefill")?;
+        last_logits = logits;
+        prefill_gpu_total_ms = Some(gpu_total_ms);
         if want_prefill_oracle {
             prefill_logits_for_oracle = Some(last_logits.clone());
         }
@@ -1763,6 +1774,13 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         ids.len(),
         1000.0 / prefill_avg
     );
+    if let Some(prefill_gpu_total_ms) = prefill_gpu_total_ms {
+        eprintln!(
+            "[bench] prefill gpu: {prefill_gpu_total_ms:.1} ms total = {:.2} ms/token = {:.1}% of prefill wall",
+            prefill_gpu_total_ms / ids.len() as f64,
+            100.0 * prefill_gpu_total_ms / prefill_wall.max(1e-9)
+        );
+    }
     if let Some(avg_ms) = decode_avg_ms {
         eprintln!(
             "[bench] decode:  {tokens} tokens in {decode_wall:.1} ms = {avg_ms:.2} ms/token (avg) = {:.1} t/s",
@@ -2589,9 +2607,21 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         "[decode-window] ctx={} window={}{}{}{} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
         target_ctx,
         window,
-        if concurrent_gdn_proj { " concurrent_gdn" } else { "" },
-        if concurrent_attn_proj { " concurrent_attn" } else { "" },
-        if concurrent_gdn_proj && concurrent_attn_proj { "_both" } else { "" },
+        if concurrent_gdn_proj {
+            " concurrent_gdn"
+        } else {
+            ""
+        },
+        if concurrent_attn_proj {
+            " concurrent_attn"
+        } else {
+            ""
+        },
+        if concurrent_gdn_proj && concurrent_attn_proj {
+            "_both"
+        } else {
+            ""
+        },
         avg_total,
         avg_gpu,
         avg_enc,

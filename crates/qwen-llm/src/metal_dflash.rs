@@ -46,6 +46,13 @@ use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use std::sync::OnceLock;
 
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
 fn dense_packed_gdn_step_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -54,6 +61,21 @@ fn dense_packed_gdn_step_enabled() -> bool {
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
+}
+
+fn prefill_noop_ffn_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_FFN"))
+}
+
+fn prefill_noop_gdn_body_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_GDN_BODY"))
+}
+
+fn prefill_noop_attn_body_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_ATTN_BODY"))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2934,6 +2956,27 @@ pub fn prefill_tokens_with_multi_hidden(
     target_layer_ids: &[u32],
     hidden_dst: Option<&MetalTensor>,
 ) -> Result<Vec<f32>, DFlashError> {
+    let (logits, _) = prefill_tokens_with_multi_hidden_profiled(
+        base,
+        token_ids,
+        start_position,
+        target_session,
+        layer_scratch,
+        target_layer_ids,
+        hidden_dst,
+    )?;
+    Ok(logits)
+}
+
+pub fn prefill_tokens_with_multi_hidden_profiled(
+    base: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    target_session: &mut MetalSession,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    target_layer_ids: &[u32],
+    hidden_dst: Option<&MetalTensor>,
+) -> Result<(Vec<f32>, f64), DFlashError> {
     let arch = &base.model.arch;
     let total_n = token_ids.len();
     let h = arch.hidden_size as usize;
@@ -3063,6 +3106,7 @@ pub fn prefill_tokens_with_multi_hidden(
         MetalTensor::zeros_f32(base.ctx, vec![p_max as u64]).map_err(DFlashError::Metal)?;
 
     let n_chunks = total_n.div_ceil(p_max);
+    let mut prefill_gpu_total_ms = 0.0f64;
     for chunk_idx in 0..n_chunks {
         let chunk_base = chunk_idx * p_max;
         let chunk_p = (total_n - chunk_base).min(p_max);
@@ -3136,6 +3180,7 @@ pub fn prefill_tokens_with_multi_hidden(
         let mut gdn_idx = 0usize;
         let mut attn_idx = 0usize;
         for (il, block) in base.model.blocks.iter().enumerate() {
+            let mut apply_mixer_residual = true;
             // 2a: pre-mixer norm batched across chunk_p rows.
             let attn_norm = match block {
                 MetalBlock::Gdn(g) => &g.attn_norm,
@@ -3257,7 +3302,9 @@ pub fn prefill_tokens_with_multi_hidden(
                             enc.end();
                         }
 
-                        if dense_packed_gdn_step_enabled() {
+                        if prefill_noop_gdn_body_enabled() {
+                            apply_mixer_residual = false;
+                        } else if dense_packed_gdn_step_enabled() {
                             for n_idx in 0..chunk_p {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 let qkv_n = gdn_qkv_pack_p.view_subrange(
@@ -3349,17 +3396,18 @@ pub fn prefill_tokens_with_multi_hidden(
                                 enc.end();
                             }
 
-                            for n_idx in 0..chunk_p {
+                            {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                let out_n = gdn_out_pack_p
-                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                                let z_n = gdn_z_pack_p
-                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
-                                let normed_n = gdn_normed_pack_p
-                                    .view_subrange((n_idx * v_dim) as u64, vec![v_dim as u64]);
                                 encode_rmsnorm_gated_f32(
-                                    base.ctx, &enc, &out_n, &g.norm, &z_n, &normed_n, n_v_u,
-                                    head_dim_u, RMS_EPS,
+                                    base.ctx,
+                                    &enc,
+                                    &gdn_out_pack_p,
+                                    &g.norm,
+                                    &gdn_z_pack_p,
+                                    &gdn_normed_pack_p,
+                                    chunk_p * n_v_u,
+                                    head_dim_u,
+                                    RMS_EPS,
                                 )?;
                                 enc.end();
                             }
@@ -3395,8 +3443,7 @@ pub fn prefill_tokens_with_multi_hidden(
                             }
                         }
 
-                        // Step C: batched out_proj.
-                        {
+                        if apply_mixer_residual {
                             let enc = KernelEncoder::begin(&cmd_buf);
                             encode_mat_mat_dispatch(
                                 base.ctx,
@@ -3413,26 +3460,30 @@ pub fn prefill_tokens_with_multi_hidden(
                     } else {
                         // F32 oracle / mixed-dtype fallback: per-token
                         // encode_gdn (no ckpt blit).
-                        for n_idx in 0..chunk_p {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_copy_offset_f32(
-                                base.ctx,
-                                &enc,
-                                &h_pack_p,
-                                n_idx * h,
-                                &target_session.h,
-                                h,
-                            )?;
-                            base.encode_gdn(&enc, g, gi, target_session)?;
-                            encode_scatter_offset_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.mixer_out,
-                                &mixer_out_pack_p,
-                                n_idx * h,
-                                h,
-                            )?;
-                            enc.end();
+                        if prefill_noop_gdn_body_enabled() {
+                            apply_mixer_residual = false;
+                        } else {
+                            for n_idx in 0..chunk_p {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_copy_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &h_pack_p,
+                                    n_idx * h,
+                                    &target_session.h,
+                                    h,
+                                )?;
+                                base.encode_gdn(&enc, g, gi, target_session)?;
+                                encode_scatter_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.mixer_out,
+                                    &mixer_out_pack_p,
+                                    n_idx * h,
+                                    h,
+                                )?;
+                                enc.end();
+                            }
                         }
                     }
                 }
@@ -3543,99 +3594,98 @@ pub fn prefill_tokens_with_multi_hidden(
                             enc.end();
                         }
 
-                        // Per-token RoPE + KV scatter + attn-v4. This
-                        // advances target_session.kv_n_pos[ai] from
-                        // chunk_start to chunk_start + chunk_p.
-                        for n_idx in 0..chunk_p {
-                            let position_n = chunk_start + n_idx as u32;
-                            let q_normed_n = q_normed_pack_p
-                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                            let k_normed_n = k_normed_pack_p
-                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                            let v_now_n = v_now_pack_p
-                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                            let attn_o_n = attn_o_pack_p
-                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_rope_neox_f32(
-                                base.ctx,
-                                &enc,
-                                &q_normed_n,
-                                n_q,
-                                head_dim,
-                                n_rot,
-                                position_n,
-                                arch.rope_theta,
-                            )?;
-                            encode_rope_neox_f32(
-                                base.ctx,
-                                &enc,
-                                &k_normed_n,
-                                n_kv,
-                                head_dim,
-                                n_rot,
-                                position_n,
-                                arch.rope_theta,
-                            )?;
-                            encode_scatter_offset_f32_to_f16_kv(
-                                base.ctx,
-                                &enc,
-                                &k_normed_n,
-                                &v_now_n,
-                                &target_session.kv_k[ai],
-                                &target_session.kv_v[ai],
-                                (position_n as usize) * kv_dim,
-                                kv_dim,
-                            )?;
-                            target_session.kv_n_pos[ai] = position_n as usize + 1;
+                        if prefill_noop_attn_body_enabled() {
+                            apply_mixer_residual = false;
+                        } else {
+                            for n_idx in 0..chunk_p {
+                                let position_n = chunk_start + n_idx as u32;
+                                let q_normed_n = q_normed_pack_p
+                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                let k_normed_n = k_normed_pack_p
+                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                                let v_now_n = v_now_pack_p
+                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                                let attn_o_n = attn_o_pack_p
+                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_rope_neox_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
+                                    n_q,
+                                    head_dim,
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
+                                )?;
+                                encode_rope_neox_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &k_normed_n,
+                                    n_kv,
+                                    head_dim,
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
+                                )?;
+                                encode_scatter_offset_f32_to_f16_kv(
+                                    base.ctx,
+                                    &enc,
+                                    &k_normed_n,
+                                    &v_now_n,
+                                    &target_session.kv_k[ai],
+                                    &target_session.kv_v[ai],
+                                    (position_n as usize) * kv_dim,
+                                    kv_dim,
+                                )?;
+                                target_session.kv_n_pos[ai] = position_n as usize + 1;
 
-                            const V4_HEAD_DIM: usize = 256;
-                            let group = n_q / n_kv;
-                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
-                            if use_v4 {
-                                let nwg = crate::metal::attn_v4_choose_nwg(
-                                    target_session.kv_n_pos[ai],
-                                    group,
-                                );
-                                let tile_c = crate::metal::attn_v4_choose_tile_c(
-                                    target_session.kv_n_pos[ai],
-                                    group,
-                                );
-                                crate::metal::encode_attn_decode_v4_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &q_normed_n,
-                                    &target_session.kv_k[ai],
-                                    &target_session.kv_v[ai],
-                                    &target_session.attn_v4_o_partial,
-                                    &target_session.attn_v4_ml_partial,
-                                    &attn_o_n,
-                                    n_q,
-                                    n_kv,
-                                    head_dim,
-                                    target_session.kv_n_pos[ai],
-                                    nwg,
-                                    tile_c,
-                                )?;
-                            } else {
-                                crate::metal::encode_attn_decode_f16kv_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &q_normed_n,
-                                    &target_session.kv_k[ai],
-                                    &target_session.kv_v[ai],
-                                    &attn_o_n,
-                                    n_q,
-                                    n_kv,
-                                    head_dim,
-                                    target_session.kv_n_pos[ai],
-                                )?;
+                                const V4_HEAD_DIM: usize = 256;
+                                let group = n_q / n_kv;
+                                let use_v4 =
+                                    head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
+                                if use_v4 {
+                                    let nwg = crate::metal::attn_v4_choose_nwg(
+                                        target_session.kv_n_pos[ai],
+                                        group,
+                                    );
+                                    let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                        target_session.kv_n_pos[ai],
+                                        group,
+                                    );
+                                    crate::metal::encode_attn_decode_v4_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_n,
+                                        &target_session.kv_k[ai],
+                                        &target_session.kv_v[ai],
+                                        &target_session.attn_v4_o_partial,
+                                        &target_session.attn_v4_ml_partial,
+                                        &attn_o_n,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
+                                        target_session.kv_n_pos[ai],
+                                        nwg,
+                                        tile_c,
+                                    )?;
+                                } else {
+                                    crate::metal::encode_attn_decode_f16kv_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_n,
+                                        &target_session.kv_k[ai],
+                                        &target_session.kv_v[ai],
+                                        &attn_o_n,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
+                                        target_session.kv_n_pos[ai],
+                                    )?;
+                                }
+                                enc.end();
                             }
-                            enc.end();
-                        }
 
-                        // Step C: gate-sigmoid + mul + batched o_proj.
-                        {
                             let enc = KernelEncoder::begin(&cmd_buf);
                             encode_sigmoid_f32(base.ctx, &enc, &gate_pack_p, &q_pack_p)?;
                             crate::metal::encode_mul_f32(
@@ -3659,34 +3709,38 @@ pub fn prefill_tokens_with_multi_hidden(
                         }
                     } else {
                         // F32 oracle / fallback: per-token encode_attn.
-                        for n_idx in 0..chunk_p {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_copy_offset_f32(
-                                base.ctx,
-                                &enc,
-                                &h_pack_p,
-                                n_idx * h,
-                                &target_session.h,
-                                h,
-                            )?;
-                            let position_n = chunk_start + n_idx as u32;
-                            base.encode_attn(&enc, a, ai, position_n, target_session)?;
-                            encode_scatter_offset_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.mixer_out,
-                                &mixer_out_pack_p,
-                                n_idx * h,
-                                h,
-                            )?;
-                            enc.end();
+                        if prefill_noop_attn_body_enabled() {
+                            apply_mixer_residual = false;
+                        } else {
+                            for n_idx in 0..chunk_p {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_copy_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &h_pack_p,
+                                    n_idx * h,
+                                    &target_session.h,
+                                    h,
+                                )?;
+                                let position_n = chunk_start + n_idx as u32;
+                                base.encode_attn(&enc, a, ai, position_n, target_session)?;
+                                encode_scatter_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.mixer_out,
+                                    &mixer_out_pack_p,
+                                    n_idx * h,
+                                    h,
+                                )?;
+                                enc.end();
+                            }
                         }
                     }
                 }
             }
 
             // 2c: residual #1 — x_pack += mixer_out_pack (batched).
-            {
+            if apply_mixer_residual {
                 let enc = KernelEncoder::begin(&cmd_buf);
                 encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &mixer_out_pack_p)?;
                 enc.end();
@@ -3777,12 +3831,16 @@ pub fn prefill_tokens_with_multi_hidden(
                 let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
                     && ffn_mat_mat_eligible(u_w.dtype)
                     && ffn_mat_mat_eligible(d_w.dtype);
+                let skip_dense_ffn = prefill_noop_ffn_enabled();
 
                 let enc = KernelEncoder::begin(&cmd_buf);
                 encode_rms_norm_batched_f32(
                     base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
                 )?;
-                if mat_mat_path {
+                if skip_dense_ffn {
+                    // profiling only: leave x_pack unchanged after post-norm so a
+                    // production-shape run can report the direct FFN wall delta.
+                } else if mat_mat_path {
                     encode_mat_mat_dispatch(
                         base.ctx,
                         &enc,
@@ -3820,6 +3878,7 @@ pub fn prefill_tokens_with_multi_hidden(
                         h,
                         chunk_p,
                     )?;
+                    encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
                 } else {
                     // F32 / non-mat-mat fallback: per-token mat-vec.
                     for n_idx in 0..chunk_p {
@@ -3836,9 +3895,8 @@ pub fn prefill_tokens_with_multi_hidden(
                         encode_silu_mul_f32(base.ctx, &enc, &gate_n, &up_n, &inner_n)?;
                         encode_mat_vec_dispatch(base.ctx, &enc, d_w, &inner_n, &out_n, f, h)?;
                     }
+                    encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
                 }
-                // 2g: residual #2 — x_pack += ffn_out_pack (batched).
-                encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
 
                 // 2d-fix (matches v0.74.4 capture point): hidden capture
                 // after residual #2. Writes into the GLOBAL hidden_dst at
@@ -3896,17 +3954,19 @@ pub fn prefill_tokens_with_multi_hidden(
             enc.end();
             cmd_buf.commit();
             cmd_buf.waitUntilCompleted();
+            prefill_gpu_total_ms += (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
             let mut last_logits = vec![0.0f32; v];
             unsafe {
                 let src = target_session.logits.buffer.contents().as_ptr() as *const f32;
                 std::ptr::copy_nonoverlapping(src, last_logits.as_mut_ptr(), v);
             }
-            return Ok(last_logits);
+            return Ok((last_logits, prefill_gpu_total_ms));
         }
 
         // Non-last chunk: just commit + wait (no tail).
         cmd_buf.commit();
         cmd_buf.waitUntilCompleted();
+        prefill_gpu_total_ms += (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     }
 
     // unreachable: the last chunk always returns inside the loop. But

@@ -6,6 +6,87 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-16 — Packed GDN Prep Over Prompt Tokens
+
+Status: improved checkpoint reached, not yet committed in git.
+
+### What Changed
+
+- Used `cx` to adversarially review the post-v0.93 dense prompt plan before the
+  next implementation step.
+- Added `QWEN_PREFILL_GDN_SPLIT={skip_all,out_only,prep_out,prep_step_out}` on
+  the real packed-prefill graph to split packed GDN body cost without falling
+  back to a cloned profiler path.
+- Replaced the old packed GDN prep train in `crates/qwen-llm/src/metal_dflash.rs`
+  with a new packed kernel in `kernels/ssm_conv.metal` plus two in-place batched
+  L2 norms:
+  - old shape: `P` launches of `ssm_conv_silu`, two L2 norms, and three scatters
+    before the packed recurrence
+  - new shape: one `kernel_gdn_prep_packed_f32` over the chunk, then two batched
+    in-place L2 norms
+
+### Why This Was The Right Move
+
+The split ladder on the repeated 320-token 27B prompt, before the rewrite:
+
+- baseline: `1718.3 ms` wall, `1691.5 ms` GPU
+- `skip_all`: `1425.6 ms` wall, `1415.5 ms` GPU
+- `out_only`: `1518.3 ms` wall, `1506.6 ms` GPU
+- `prep_out`: `1664.4 ms` wall, `1637.2 ms` GPU
+- `prep_step_out`: `1708.4 ms` wall, `1679.7 ms` GPU
+
+That implies the old packed GDN prep loop was the largest GDN sub-bucket:
+
+- out-proj tail: `~92.7 ms` wall / `~91.1 ms` GPU
+- prep loop: `~146.1 ms` wall / `~130.6 ms` GPU
+- packed recurrence: `~44.0 ms` wall / `~42.5 ms` GPU
+
+So the prep loop, not the recurrence kernel itself, was the sharpest next dense
+prompt target.
+
+### Measured Impact
+
+Repeated 320-token quick-brown-fox prompt, 27B dense, packed prefill chunk 512,
+release build, sequential runs:
+
+- Before packed prep rewrite: `~1715-1720 ms`, `186.0-186.5 t/s`,
+  `~1687-1693 ms` GPU
+- After packed prep rewrite: `~1582-1588 ms`, `201.5-202.3 t/s`,
+  `~1570-1576 ms` GPU
+
+Net:
+
+- about `7.8-8.2%` faster prompt prefill on the repeated 27B prompt
+- dense same-prompt gap versus current `llama.cpp` (`212.44 t/s`) is now down to
+  roughly five percent
+
+Fresh current dense prompt read after the rewrite:
+
+- baseline: `1581.8 ms` wall, `1570.6 ms` GPU, `202.3 t/s`
+- `QWEN_PREFILL_NOOP_ATTN_BODY=1`: `1420.0 ms` wall, `1414.3 ms` GPU,
+  `225.3 t/s`
+
+That makes packed attention body the next largest non-FFN dense prompt bucket at
+about `~162 ms` wall / `~156 ms` GPU.
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
+
+Correctness stayed green:
+
+- `cos(final logits)=1.000000`
+- hidden / GDN state / conv / KV cache gates all remained effectively exact.
+
+### Current Next Step
+
+1. Packed attention body cleanup: batched consecutive-position RoPE and chunk-wise
+   KV scatter / glue removal before considering a more invasive packed attention
+   rewrite.
+2. Then return to the remaining GDN out-proj / recurrence tail only if attention
+   cleanup does not move the prompt enough.
+
 ## 2026-05-16 — Packed Prompt Differential Profiling + Batched GDN Gating
 
 Status: improved checkpoint reached, not yet committed in git.

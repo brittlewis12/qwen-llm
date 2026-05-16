@@ -32,11 +32,11 @@ use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
-    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32,
     encode_gdn_step_decay_packed_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32,
 };
 use crate::metal_forward::{
     MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
@@ -76,6 +76,59 @@ fn prefill_noop_gdn_body_enabled() -> bool {
 fn prefill_noop_attn_body_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_ATTN_BODY"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefillGdnSplitMode {
+    None,
+    SkipAll,
+    OutOnly,
+    PrepOut,
+    PrepStepOut,
+}
+
+impl PrefillGdnSplitMode {
+    fn from_env() -> Self {
+        if prefill_noop_gdn_body_enabled() {
+            return Self::SkipAll;
+        }
+        match std::env::var("QWEN_PREFILL_GDN_SPLIT").as_deref() {
+            Ok("skip_all") => Self::SkipAll,
+            Ok("out_only") => Self::OutOnly,
+            Ok("prep_out") => Self::PrepOut,
+            Ok("prep_step_out") => Self::PrepStepOut,
+            _ => Self::None,
+        }
+    }
+
+    fn run_prep(self) -> bool {
+        matches!(self, Self::None | Self::PrepOut | Self::PrepStepOut)
+    }
+
+    fn run_step(self) -> bool {
+        matches!(self, Self::None | Self::PrepStepOut)
+    }
+
+    fn run_gated(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    fn needs_zero_normed(self) -> bool {
+        matches!(self, Self::OutOnly | Self::PrepOut | Self::PrepStepOut)
+    }
+}
+
+fn prefill_gdn_split_mode() -> PrefillGdnSplitMode {
+    static MODE: OnceLock<PrefillGdnSplitMode> = OnceLock::new();
+    *MODE.get_or_init(PrefillGdnSplitMode::from_env)
+}
+
+fn zero_f32_tensor(t: &MetalTensor) {
+    debug_assert_eq!(t.dtype, GgmlType::F32);
+    unsafe {
+        let ptr = (t.buffer.contents().as_ptr() as *mut u8).add(t.offset as usize);
+        std::ptr::write_bytes(ptr, 0, t.n_bytes() as usize);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3209,6 +3262,7 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                     let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
                         && gdn_mat_mat_eligible(g.in_proj_z.dtype)
                         && gdn_mat_mat_eligible(g.out_proj.dtype);
+                    let gdn_split = prefill_gdn_split_mode();
 
                     if gdn_batched {
                         // Sized views of GDN pack scratch.
@@ -3302,81 +3356,47 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                             enc.end();
                         }
 
-                        if prefill_noop_gdn_body_enabled() {
+                        if matches!(gdn_split, PrefillGdnSplitMode::SkipAll) {
                             apply_mixer_residual = false;
                         } else if dense_packed_gdn_step_enabled() {
-                            for n_idx in 0..chunk_p {
+                            if gdn_split.run_prep() {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                let qkv_n = gdn_qkv_pack_p.view_subrange(
-                                    (n_idx * conv_dim) as u64,
-                                    vec![conv_dim as u64],
-                                );
-                                encode_ssm_conv_silu_f32(
+                                encode_gdn_prep_packed_f32(
                                     base.ctx,
                                     &enc,
-                                    &qkv_n,
+                                    &gdn_qkv_pack_p,
                                     &target_session.gdn_conv[gi],
                                     &g.conv1d,
-                                    &target_session.gdn_qkv_conv,
-                                    conv_dim,
-                                )?;
-                                let q_view = target_session
-                                    .gdn_qkv_conv
-                                    .view_subrange(0, vec![(n_k_u * head_dim_u) as u64]);
-                                let k_view = target_session.gdn_qkv_conv.view_subrange(
-                                    (n_k_u * head_dim_u) as u64,
-                                    vec![(n_k_u * head_dim_u) as u64],
-                                );
-                                let v_view = target_session.gdn_qkv_conv.view_subrange(
-                                    (2 * n_k_u * head_dim_u) as u64,
-                                    vec![v_dim as u64],
-                                );
-                                encode_l2_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &q_view,
-                                    &target_session.gdn_q_norm,
-                                    n_k_u,
-                                    head_dim_u,
-                                    RMS_EPS,
-                                )?;
-                                encode_l2_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &k_view,
-                                    &target_session.gdn_k_norm,
-                                    n_k_u,
-                                    head_dim_u,
-                                    RMS_EPS,
-                                )?;
-                                encode_scatter_offset_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &target_session.gdn_q_norm,
                                     &gdn_q_norm_pack_p,
-                                    n_idx * n_k_u * head_dim_u,
-                                    n_k_u * head_dim_u,
-                                )?;
-                                encode_scatter_offset_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &target_session.gdn_k_norm,
                                     &gdn_k_norm_pack_p,
-                                    n_idx * n_k_u * head_dim_u,
-                                    n_k_u * head_dim_u,
+                                    &gdn_v_pack_p,
+                                    chunk_p,
+                                    n_k_u,
+                                    n_v_u,
+                                    head_dim_u,
                                 )?;
-                                encode_scatter_offset_f32(
+                                encode_l2_norm_batched_f32(
                                     base.ctx,
                                     &enc,
-                                    &v_view,
-                                    &gdn_v_pack_p,
-                                    n_idx * v_dim,
-                                    v_dim,
+                                    &gdn_q_norm_pack_p,
+                                    &gdn_q_norm_pack_p,
+                                    chunk_p * n_k_u,
+                                    head_dim_u,
+                                    RMS_EPS,
+                                )?;
+                                encode_l2_norm_batched_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &gdn_k_norm_pack_p,
+                                    &gdn_k_norm_pack_p,
+                                    chunk_p * n_k_u,
+                                    head_dim_u,
+                                    RMS_EPS,
                                 )?;
                                 enc.end();
                             }
 
-                            {
+                            if gdn_split.run_step() {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_gdn_step_decay_packed_f32(
                                     base.ctx,
@@ -3396,7 +3416,7 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                                 enc.end();
                             }
 
-                            {
+                            if gdn_split.run_gated() {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_rmsnorm_gated_f32(
                                     base.ctx,
@@ -3410,6 +3430,8 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                                     RMS_EPS,
                                 )?;
                                 enc.end();
+                            } else if gdn_split.needs_zero_normed() {
+                                zero_f32_tensor(&gdn_normed_pack_p);
                             }
                         } else {
                             // Per-token recurrence (GDN state mutates per token).

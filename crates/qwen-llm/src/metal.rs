@@ -4551,6 +4551,101 @@ pub fn encode_ssm_conv_silu_f32(
     Ok(())
 }
 
+pub fn encode_gdn_prep_packed_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    qkv_pack: &MetalTensor,
+    conv_buf: &MetalTensor,
+    conv_w: &MetalTensor,
+    q_pack: &MetalTensor,
+    k_pack: &MetalTensor,
+    v_pack: &MetalTensor,
+    n_tokens: usize,
+    n_k_heads: usize,
+    n_v_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    let qk_dim = n_k_heads * head_dim;
+    let v_dim = n_v_heads * head_dim;
+    let conv_dim = (2 * n_k_heads + n_v_heads) * head_dim;
+    if qkv_pack.n_elements() as usize != n_tokens * conv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_prep_packed",
+            detail: format!("qkv_pack expected {} elements", n_tokens * conv_dim),
+        });
+    }
+    if conv_buf.n_elements() as usize != 3 * conv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_prep_packed",
+            detail: format!("conv_buf expected {} elements", 3 * conv_dim),
+        });
+    }
+    if conv_w.n_elements() as usize != 4 * conv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_prep_packed",
+            detail: format!("conv_w expected {} elements", 4 * conv_dim),
+        });
+    }
+    if q_pack.n_elements() as usize != n_tokens * qk_dim
+        || k_pack.n_elements() as usize != n_tokens * qk_dim
+    {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_prep_packed",
+            detail: format!("q/k pack expected {} elements", n_tokens * qk_dim),
+        });
+    }
+    if v_pack.n_elements() as usize != n_tokens * v_dim {
+        return Err(MetalError::BadShape {
+            kernel: "gdn_prep_packed",
+            detail: format!("v_pack expected {} elements", n_tokens * v_dim),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_tokens: u32,
+        n_k_heads: u32,
+        n_v_heads: u32,
+        head_dim: u32,
+        conv_dim: u32,
+    }
+    let pso = ctx.pipeline("kernel_gdn_prep_packed_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_tokens: n_tokens as u32,
+            n_k_heads: n_k_heads as u32,
+            n_v_heads: n_v_heads as u32,
+            head_dim: head_dim as u32,
+            conv_dim: conv_dim as u32,
+        },
+    );
+    enc.set_tensor(1, qkv_pack);
+    enc.set_tensor(2, conv_buf);
+    enc.set_tensor(3, conv_w);
+    enc.set_tensor(4, q_pack);
+    enc.set_tensor(5, k_pack);
+    enc.set_tensor(6, v_pack);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_tg = conv_dim.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// RMSNormGated: per-head RMSNorm of `o` with weight, multiplied by
 /// silu(z). Used immediately after the GDN recurrence, before out_proj.
 ///

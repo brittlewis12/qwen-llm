@@ -164,9 +164,10 @@ What this buys:
 - Dense defaults now use a large chunk (`P=512`) and saturate once the whole
   prompt fits in one chunk on the common same-prompt benchmark.
 - Dense GDN prompt work now also batches the small F32 `alpha`/`beta`
-  projections, runs `gdn_step_decay` across prompt tokens inside one packed
-  kernel, and batches `rmsnorm_gated` across the full prompt chunk, so the
-  remaining dense prompt gap is no longer mostly recurrent glue.
+  projections, runs SSM-conv prep over the full prompt chunk, runs
+  `gdn_step_decay` across prompt tokens inside one packed kernel, and batches
+  `rmsnorm_gated` across the full prompt chunk, so the remaining dense prompt
+  gap is no longer mostly recurrent glue.
 - MoE packed prefill is currently stage 1: mixer prep and post-norm batch over
   `P`, while routed expert execution is still token-by-token for exact routing.
   MoE defaults use a tuned conservative chunk (`P=128`) because grouped routed
@@ -318,11 +319,12 @@ Concrete sizes for the dense 27B shape:
 
 - Prompt-body structure: latest production-shape no-op profiling says the live
   dense prompt gap is no longer a mysterious FFN kernel problem. FFN is simply
-  the largest accounted-for bucket, while the next clear opportunities are GDN
-  body staging and the decode-shaped attention body inside packed prefill.
+  the largest accounted-for bucket, while the next clear opportunities are the
+  decode-shaped attention body inside packed prefill and the smaller remaining
+  GDN out-proj / recurrence tail.
 - Multi-token GDN body: our packed step and batched gated norm are wins, but
-  llama.cpp's fused GDN op is still a useful reference for longer prompt
-  timesteps and tighter packed prep/tail structure.
+  llama.cpp's fused GDN op is still a useful reference for the remaining prompt
+  tail and any future recurrence specialization.
 - MoE prompt execution: llama.cpp's generic MoE machinery is not the end state
   for us, but it is still the best correctness/shape reference while building
   grouped routed expert execution.
@@ -341,8 +343,8 @@ flowchart TD
     Goal --> MoEPrefill[MoE prefill]
     Goal --> Decode[decode]
 
-    DensePrefill --> GDNBody[packed GDN body cleanup]
     DensePrefill --> AttnBody[packed attention body cleanup]
+    DensePrefill --> GDNBody[remaining packed GDN tail]
     DensePrefill --> FFNMM[FFN/projection mat-mat quality only if re-convicted]
     DensePrefill --> TailSkip[tail/logits minimization complete]
 

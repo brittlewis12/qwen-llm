@@ -166,6 +166,11 @@ struct CtxSweepArgs {
     /// runs the four front projections in a concurrent compute encoder.
     #[arg(long)]
     concurrent_gdn_proj: bool,
+    /// Use the bench-only dense path that splits attention blocks across
+    /// encoders and runs the q/k/v front projections in a concurrent compute
+    /// encoder.
+    #[arg(long)]
+    concurrent_attn_proj: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -204,6 +209,11 @@ struct DecodeWindowArgs {
     /// encoder.
     #[arg(long)]
     concurrent_gdn_proj: bool,
+    /// Use a bench-only dense decode path that splits attention blocks across
+    /// encoders and runs q/k/v front projections in a concurrent compute
+    /// encoder.
+    #[arg(long)]
+    concurrent_attn_proj: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -2256,6 +2266,7 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
         checkpoints,
         window,
         concurrent_gdn_proj,
+        concurrent_attn_proj,
     } = args;
     let ctx = MetalContext::new()?;
     eprintln!("[bench] device: {}", ctx.describe());
@@ -2291,8 +2302,12 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
         let mut samples = Vec::with_capacity(window);
         for i in 0..window {
             let pos = prev_pos + i as u32;
-            let (_, p) = if concurrent_gdn_proj {
+            let (_, p) = if concurrent_gdn_proj && concurrent_attn_proj {
+                mf.single_token_profiled_concurrent_gdn_attn_dense(0, pos, &mut s)?
+            } else if concurrent_gdn_proj {
                 mf.single_token_profiled_concurrent_gdn_dense(0, pos, &mut s)?
+            } else if concurrent_attn_proj {
+                mf.single_token_profiled_concurrent_attn_dense(0, pos, &mut s)?
             } else {
                 mf.single_token_profiled(0, pos, &mut s)?
             };
@@ -2352,6 +2367,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         go_file,
         pipelined,
         concurrent_gdn_proj,
+        concurrent_attn_proj,
     } = args;
     let ctx = MetalContext::new()?;
     eprintln!("[decode-window] device: {}", ctx.describe());
@@ -2395,9 +2411,9 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         window
     );
 
-    if pipelined && concurrent_gdn_proj {
+    if pipelined && (concurrent_gdn_proj || concurrent_attn_proj) {
         return Err(anyhow!(
-            "--pipelined and --concurrent-gdn-proj are separate bench-only experiments; use one at a time"
+            "--pipelined is separate from the concurrent projection experiments; use one mode at a time"
         ));
     }
 
@@ -2536,8 +2552,12 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     let mut prev_tok = 0i32;
     for i in 0..window {
         let pos = target_ctx as u32 + i as u32;
-        let (logits, p) = if concurrent_gdn_proj {
+        let (logits, p) = if concurrent_gdn_proj && concurrent_attn_proj {
+            mf.single_token_profiled_concurrent_gdn_attn_dense(prev_tok, pos, &mut s)?
+        } else if concurrent_gdn_proj {
             mf.single_token_profiled_concurrent_gdn_dense(prev_tok, pos, &mut s)?
+        } else if concurrent_attn_proj {
+            mf.single_token_profiled_concurrent_attn_dense(prev_tok, pos, &mut s)?
         } else {
             mf.single_token_profiled(prev_tok, pos, &mut s)?
         };
@@ -2566,10 +2586,12 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     let p95_enc = p95(&encs);
     let p95_wait = p95(&waits);
     eprintln!(
-        "[decode-window] ctx={} window={}{} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
+        "[decode-window] ctx={} window={}{}{}{} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
         target_ctx,
         window,
         if concurrent_gdn_proj { " concurrent_gdn" } else { "" },
+        if concurrent_attn_proj { " concurrent_attn" } else { "" },
+        if concurrent_gdn_proj && concurrent_attn_proj { "_both" } else { "" },
         avg_total,
         avg_gpu,
         avg_enc,

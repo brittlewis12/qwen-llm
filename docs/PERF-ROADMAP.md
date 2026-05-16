@@ -172,6 +172,15 @@ Status:
 - This is the first command-model branch that has cleared the “real enough to
   checkpoint” bar; the gain survives 4K and 16K, though it narrows somewhat as
   attention grows.
+- Attention-only overlap is smaller:
+  - `ctx=4096`: `43.89 -> 43.33 ms/token`
+  - `ctx=16384`: effectively flat (`47.26 -> 47.22 ms/token`)
+- Running both projection-overlap branches together is still positive and
+  checkpoint-worthy:
+  - `ctx=4096`: `43.64 -> 42.31 ms/token`
+  - `ctx=16384`: `47.23 -> 46.14 ms/token`
+- The combined branch is not additive with GDN-only overlap, but it remains the
+  strongest decode-focused command-model variant measured so far.
 
 ### 3. Read-Only Weight Residency And Scratch Storage Cleanup
 

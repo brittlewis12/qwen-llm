@@ -983,3 +983,48 @@ Interpretation:
 - The concurrent-GDN branch is not just a 4K-local artifact.
 - The gain compresses somewhat as attention grows, but still holds at realistic
   longer context.
+
+## 2026-05-15 — Concurrent GDN + Attention Front Projections
+
+Status: improved checkpoint reached, still bench-only / opt-in.
+
+### What Changed
+
+- Added a second dense-only branch that applies the same concurrent compute
+  encoder pattern to attention front projections (`q`, `k`, `v`).
+- Exposed it through `qwen-bench ctx-sweep --concurrent-attn-proj`.
+- Added support for running both projection-overlap branches together via
+  `--concurrent-gdn-proj --concurrent-attn-proj`.
+
+### Validation
+
+- Added dense correctness gates on `Qwen3.5-0.8B.F32.gguf`:
+  - concurrent attention vs serial: argmax matches, `cos = 1.000000`
+  - concurrent GDN + attention vs serial: argmax matches, `cos = 1.000000`
+
+### Bounded A/B Results
+
+27B dense, `ctx=4096`, `window=64`, same `ctx-sweep` harness:
+
+- serial: `43.64 ms/token`, `43.08 ms` GPU, `22.9 t/s`
+- both branches on: `42.31 ms/token`, `41.77 ms` GPU, `23.6 t/s`
+- effect: about `1.33 ms/token`, roughly `3.1%`
+
+27B dense, `ctx=16384`, `window=64`, same harness:
+
+- serial: `47.23 ms/token`, `46.65 ms` GPU, `21.2 t/s`
+- both branches on: `46.14 ms/token`, `45.61 ms` GPU, `21.7 t/s`
+- effect: about `1.09 ms/token`, roughly `2.3%`
+
+Attention-only by itself was smaller:
+
+- `ctx=4096`: `43.89 -> 43.33 ms/token` (`~1.3%`)
+- `ctx=16384`: `47.26 -> 47.22 ms/token` (effectively flat)
+
+Interpretation:
+
+- The combined branch is real and positive at both 4K and 16K.
+- It is not additive with GDN-only overlap; attention overlap helps at 4K, but
+  contributes little by 16K.
+- The combined branch is still a stronger overall decode checkpoint than either
+  attention-only or pipelined submission.

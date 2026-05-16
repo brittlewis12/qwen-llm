@@ -821,7 +821,7 @@ impl<'a> SpeculativeDecoder<'a> {
         &mut self,
         prompt_ids: &[i32],
         max_new_tokens: usize,
-        eos_id: i32,
+        stop_tokens: &[i32],
         base_session: &mut MetalSession,
     ) -> Result<DecodeOutput, MtpError> {
         let arch = &self.base.model.arch;
@@ -905,7 +905,7 @@ impl<'a> SpeculativeDecoder<'a> {
             // A. Emit the carried token. Stop if EOS / limit.
             tokens.push(emit_tok);
             emitted_count += 1;
-            if emit_tok == eos_id || emitted_count >= max_new_tokens {
+            if stop_tokens.contains(&emit_tok) || emitted_count >= max_new_tokens {
                 break;
             }
 
@@ -936,7 +936,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 stats.accepted += 1;
                 tokens.push(d_tok);
                 emitted_count += 1;
-                if d_tok == eos_id || emitted_count >= max_new_tokens {
+                if stop_tokens.contains(&d_tok) || emitted_count >= max_new_tokens {
                     // Terminal return: state inconsistent (no bridge, no
                     // step F). Per the H4-MTP §1.4 contract.
                     break;
@@ -1014,7 +1014,7 @@ impl<'a> SpeculativeDecoder<'a> {
         &mut self,
         prompt_ids: &[i32],
         max_new_tokens: usize,
-        eos_id: i32,
+        stop_tokens: &[i32],
         base_session: &mut MetalSession,
         spec_tokens: usize,
         verify_scratch: &mut MetalDFlashVerifyScratch,
@@ -1109,7 +1109,7 @@ impl<'a> SpeculativeDecoder<'a> {
         'outer: loop {
             tokens.push(emit_tok);
             emitted_count += 1;
-            if emit_tok == eos_id || emitted_count >= max_new_tokens {
+            if stop_tokens.contains(&emit_tok) || emitted_count >= max_new_tokens {
                 break;
             }
 
@@ -1159,7 +1159,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 n_accepted += 1;
                 tokens.push(draft_tok);
                 emitted_count += 1;
-                if draft_tok == eos_id || emitted_count >= max_new_tokens {
+                if stop_tokens.contains(&draft_tok) || emitted_count >= max_new_tokens {
                     stop_now = true;
                     break;
                 }
@@ -1456,7 +1456,11 @@ mod tests {
             .encode("The quick brown fox jumps over the lazy dog", false)
             .expect("tok");
         let max_new_tokens = 16usize;
-        let eos_id = 248046_i32; // <|im_end|> per the 0.8B vocab
+        // Source the stop set from the GGUF itself (single source of
+        // truth). For the 0.8B instruct fixture this resolves to
+        // [248046] (`<|im_end|>`).
+        let stop_tokens = g.stop_token_ids().expect("declared stop tokens");
+        assert_eq!(stop_tokens, vec![248046], "0.8B instruct stop set");
 
         // ---------- Reference: MTP=off greedy generation ----------
         // Run base alone, capturing the last logits each iter so we can
@@ -1474,7 +1478,7 @@ mod tests {
         let mut pos = (prompt_ids.len() - 1) as u32;
         for _ in 0..max_new_tokens {
             ref_tokens.push(next_tok);
-            if next_tok == eos_id {
+            if stop_tokens.contains(&next_tok) {
                 break;
             }
             pos += 1;
@@ -1502,7 +1506,7 @@ mod tests {
             MetalSession::fresh(&ctx, &mm, prompt_ids.len() + max_new_tokens + 8).expect("session");
         let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
         let result = spec
-            .decode(&prompt_ids, max_new_tokens, eos_id, &mut spec_session)
+            .decode(&prompt_ids, max_new_tokens, &stop_tokens, &mut spec_session)
             .expect("spec decode");
         let mtp_generated = &result.tokens[prompt_ids.len()..];
         eprintln!(

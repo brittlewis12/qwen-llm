@@ -384,6 +384,67 @@ hyperfine --warmup 1 --runs 5 \
 Use `hyperfine` for before/after comparisons, not for attribution. Keep the
 command, model, prompt, build profile, and environment fixed across variants.
 
+### qwen-bench pp prompt sweeps
+
+Use `qwen-bench pp` for repo-native prompt-only measurements that line up with
+`llama-bench pp<N>` semantics. It times the prompt prefill path only, keeps
+session/scratch allocation outside the timed interval, and can skip the final
+norm / `lm_head` / logits tail.
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+./target/release/qwen-bench pp \
+  -m "$MODEL" \
+  -p 320 \
+  --prefill-chunk 320 \
+  --runs 5
+```
+
+Rules for pp sweeps:
+
+- Do not run pp benchmarks in parallel with any other repo build/bench workload.
+- Prefer synthetic token ids for parity with `llama-bench`; use `--prompt` only
+  when the question is tokenizer/template dependent.
+- Keep `--with-tail` off for pure `llama-bench pp<N>` comparison; use it only to
+  price final-logits overhead.
+- Record the lowering summary (`gdn_batched`, `attn_batched`, `dense_ffn_batched`,
+  `moe_gpu_token_loop`) with any result.
+- Treat experimental MoE flags such as `QWEN_PREFILL_MOE_PACKED_ROUTED` as part of
+  the benchmark identity and report them explicitly.
+
+### llama.cpp baselines
+
+For apples-to-apples external baselines, keep two rules straight:
+
+- Use `llama-bench` for pure prompt/decode phase numbers.
+- Use `llama-cli` for user-facing prompt+generate checks, but force single-turn
+  exit with `-st` / `--single-turn`.
+
+Important:
+
+- `llama-cli` is interactive by default even when `-p` is provided.
+- Do not rely on `-no-cnv` / `--no-conversation` with `llama-cli`; current builds
+  reject it and tell you to use `llama-completion` instead.
+- The bounded `llama-cli` shape for this repo is:
+
+```sh
+PROMPT="$(python - <<'PY'
+print(('The quick brown fox jumps over the lazy dog. ' * 32).strip())
+PY
+)"
+
+~/code/llama.cpp/build/bin/llama-cli \
+  -m "$MODEL" \
+  -st \
+  --temp 0 \
+  --no-warmup \
+  --no-display-prompt \
+  -n 64 \
+  -p "$PROMPT"
+```
+
+This prints the prompt / generation throughput summary and then exits.
+
 ## Allocation and leak profiling
 
 Record Allocations when the question is heap/VM churn or unexpected allocation

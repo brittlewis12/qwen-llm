@@ -1351,6 +1351,97 @@ pub fn encode_moe_down_q5_K_f32(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    topk_w: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_weighted_sum_q5_K_packed_slots",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::Q5_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_weighted_sum_q5_K_packed_slots",
+            detail: format!("expected Q5_K expert down, got {:?}", weight.dtype),
+        });
+    }
+    let n_slots = n_tokens * topk;
+    if inner.n_elements() as usize != n_slots * n_in
+        || topk_idx.n_elements() as usize != n_slots
+        || topk_w.n_elements() as usize != n_slots
+        || out.n_elements() as usize != n_tokens * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_weighted_sum_q5_K_packed_slots",
+            detail: format!(
+                "shape mismatch: inner={} idx={} w={} out={} expected inner={} idx={} w={} out={}",
+                inner.n_elements(),
+                topk_idx.n_elements(),
+                topk_w.n_elements(),
+                out.n_elements(),
+                n_slots * n_in,
+                n_slots,
+                n_slots,
+                n_tokens * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_weighted_sum_q5_K_f32_packed_slots")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, topk_w);
+    enc.set_tensor(5, out);
+
+    const NR0: usize = 1;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: n_tokens,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_mat_vec_q5_K_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1911,6 +2002,110 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
         MTLSize {
             width: 1,
             height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    shared_weight: &MetalTensor,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    shared_out: &MetalTensor,
+    n_expert: usize,
+    topk: usize,
+    hidden: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if logits.dtype != GgmlType::F32
+        || shared_weight.dtype != GgmlType::F32
+        || x.dtype != GgmlType::F32
+        || out_w.dtype != GgmlType::F32
+        || shared_out.dtype != GgmlType::F32
+    {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax_dot_sigmoid_packed",
+            detail: format!(
+                "expected F32 logits/shared_weight/x/out_w/shared_out, got {:?}/{:?}/{:?}/{:?}/{:?}",
+                logits.dtype, shared_weight.dtype, x.dtype, out_w.dtype, shared_out.dtype
+            ),
+        });
+    }
+    if n_expert == 0 || n_expert > 256 || topk == 0 || topk > 16 || topk > n_expert {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax_dot_sigmoid_packed",
+            detail: format!(
+                "expected 1 <= topk <= n_expert <= 256 and topk <= 16, got n_expert={n_expert} topk={topk}"
+            ),
+        });
+    }
+    if logits.n_elements() as usize != n_tokens * n_expert
+        || out_idx.n_elements() as usize != n_tokens * topk
+        || out_w.n_elements() as usize != n_tokens * topk
+        || shared_weight.n_elements() as usize != hidden
+        || x.n_elements() as usize != n_tokens * hidden
+        || shared_out.n_elements() as usize != n_tokens
+    {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax_dot_sigmoid_packed",
+            detail: format!(
+                "shape mismatch logits={} idx={} w={} shared_weight={} x={} shared_out={} expected {}/{}/{}/{hidden}/{}/{}",
+                logits.n_elements(),
+                out_idx.n_elements(),
+                out_w.n_elements(),
+                shared_weight.n_elements(),
+                x.n_elements(),
+                shared_out.n_elements(),
+                n_tokens * n_expert,
+                n_tokens * topk,
+                n_tokens * topk,
+                n_tokens * hidden,
+                n_tokens
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_topk_logits_softmax_dot_sigmoid_packed_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_expert: u32,
+        topk: u32,
+        hidden: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+            hidden: hidden as u32,
+        },
+    );
+    enc.set_tensor(1, logits);
+    enc.set_tensor(2, shared_weight);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, out_idx);
+    enc.set_tensor(5, out_w);
+    enc.set_tensor(6, shared_out);
+    const THREADS: usize = 256;
+    enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, THREADS * std::mem::size_of::<i32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: n_tokens,
             depth: 1,
         },
         MTLSize {
@@ -6579,8 +6774,8 @@ mod tests {
     /// (`blk.0.ffn_down.weight`, shape `[17408, 5120]` — large weight,
     /// hits both the whole-M-tile and partial-N paths). Same playbook
     /// as the Q4_K (v0.63), Q6_K (v0.67), Q5_K (v0.73a.0) gates:
-    /// per-row cosine ≥ 0.999 across N_QUERY ∈ {1, 16, 32}, max|Δ| ≤ 1e-2,
-    /// explicit col-major dst layout sanity probe.
+    /// per-row cosine ≥ 0.999 across N_QUERY ∈ {1, 16, 32, 64, 128},
+    /// max|Δ| ≤ 1e-2, explicit col-major dst layout sanity probe.
     ///
     /// Q8_0's structurally-simpler dequant (`int8 * scale`) typically
     /// produces TIGHTER cosine than Q4_K/Q5_K/Q6_K mat-mat (which lose
@@ -6620,7 +6815,7 @@ mod tests {
         let weight_f32 = crate::codec::dequant_to_f32(q8, g.slice(q8)).expect("dequant");
         let weight_bytes = g.slice(q8);
 
-        for &n_query in &[1usize, 16, 32] {
+        for &n_query in &[1usize, 16, 32, 64, 128] {
             let mut x = vec![0.0f32; n_query * n_in];
             for (i, v) in x.iter_mut().enumerate() {
                 *v = ((i % 13) as f32 - 6.0) * 1e-2;

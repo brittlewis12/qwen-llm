@@ -208,6 +208,88 @@ kernel void kernel_topk_logits_softmax_dot_sigmoid_f32(
     }
 }
 
+kernel void kernel_topk_logits_softmax_dot_sigmoid_packed_f32(
+        constant topk_dot_sigmoid_args & args          [[buffer(0)]],
+        device const float             * logits        [[buffer(1)]],
+        device const float             * shared_weight [[buffer(2)]],
+        device const float             * x             [[buffer(3)]],
+        device       int               * out_idx       [[buffer(4)]],
+        device       float             * out_w         [[buffer(5)]],
+        device       float             * shared_out    [[buffer(6)]],
+        threadgroup  float             * sh_score      [[threadgroup(0)]],
+        threadgroup  float             * red_val       [[threadgroup(1)]],
+        threadgroup  int               * red_idx       [[threadgroup(2)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        uint2 tid2 [[thread_position_in_threadgroup]],
+        uint2 ntg2 [[threads_per_threadgroup]]) {
+    const uint token = tgpig.y;
+    const uint tid = tid2.x;
+    const uint ntg = ntg2.x;
+    const uint MAX_K = 16;
+    if (args.n_expert > ntg || args.topk == 0 || args.topk > MAX_K) return;
+
+    device const float * logits_t = logits + (ulong)token * args.n_expert;
+    device const float * x_t = x + (ulong)token * args.hidden;
+    device int * out_idx_t = out_idx + (ulong)token * args.topk;
+    device float * out_w_t = out_w + (ulong)token * args.topk;
+
+    float shared_sum = 0.0f;
+    for (uint i = tid; i < args.hidden; i += ntg) {
+        shared_sum += shared_weight[i] * x_t[i];
+    }
+    red_val[tid] = shared_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = ntg >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) red_val[tid] += red_val[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) shared_out[token] = 1.0f / (1.0f + exp(-red_val[0]));
+
+    sh_score[tid] = tid < args.n_expert ? logits_t[tid] : -INFINITY;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint slot = 0; slot < args.topk; ++slot) {
+        red_val[tid] = sh_score[tid];
+        red_idx[tid] = tid < args.n_expert ? int(tid) : -1;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint stride = ntg >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                const float cand_v = red_val[tid + stride];
+                const int cand_i = red_idx[tid + stride];
+                if (moe_better_pair(cand_v, cand_i, red_val[tid], red_idx[tid])) {
+                    red_val[tid] = cand_v;
+                    red_idx[tid] = cand_i;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (tid == 0) {
+            out_idx_t[slot] = max(red_idx[0], 0);
+            out_w_t[slot] = red_val[0];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        const float max_top = out_w_t[0];
+        float sum = 0.0f;
+        float exp_val[MAX_K];
+        for (uint i = 0; i < args.topk; ++i) {
+            exp_val[i] = exp(out_w_t[i] - max_top);
+            sum += exp_val[i];
+        }
+        sum = max(sum, 6.103515625e-5f);
+        for (uint i = 0; i < args.topk; ++i) {
+            out_w_t[i] = exp_val[i] / sum;
+        }
+    }
+}
+
 kernel void kernel_moe_swiglu_q4_K_f32(
         constant moe_q4k_args & args    [[buffer(0)]],
         device const uchar    * w_gate  [[buffer(1)]],
@@ -588,6 +670,123 @@ kernel void kernel_moe_down_q5_K_f32(
     const float tot = simd_sum(sumf);
     if (tiisg == 0 && first_row < args.n_out) {
         out[(ulong)slot * args.n_out + first_row] = tot;
+    }
+}
+
+kernel void kernel_moe_down_weighted_sum_q5_K_f32_packed_slots(
+        constant moe_q5k_args & args    [[buffer(0)]],
+        device const uchar    * weight  [[buffer(1)]],
+        device const float    * inner   [[buffer(2)]],
+        device const int      * top_idx [[buffer(3)]],
+        device const float    * top_w   [[buffer(4)]],
+        device       float    * out     [[buffer(5)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint token = tgpig.y;
+
+    constexpr uint16_t kmask1 = 0x3f3f;
+    constexpr uint16_t kmask2 = 0x0f0f;
+    constexpr uint16_t kmask3 = 0xc0c0;
+
+    const ushort tid = tiisg / 4;
+    const ushort ix  = tiisg % 4;
+    const ushort iq  = tid / 4;
+    const ushort ir  = tid % 4;
+
+    const ushort l0 = 8u * ir;
+    const ushort q_offset = 32u * iq + l0;
+    const ushort y_offset = 64u * iq + l0;
+
+    const uchar hm1 = 1u << (2u * iq);
+    const uchar hm2 = hm1 << 1;
+    const uchar hm3 = hm1 << 4;
+    const uchar hm4 = hm2 << 4;
+
+    const uint nb = args.n_in / QK_K;
+    const uint first_row = (tgpig.x * NSG_Q5K + sgitg) * NR0_Q5K;
+    if (first_row >= args.n_out) return;
+
+    const ulong row_stride_bytes = (ulong)nb * Q5K_BYTES;
+    const ulong expert_stride_bytes = (ulong)args.n_out * row_stride_bytes;
+    const ulong base_slot = (ulong)token * args.topk;
+
+    float acc = 0.0f;
+    float yl[16];
+    float yh[16];
+
+    uint16_t sc16[4];
+    thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
+
+    for (uint slot_k = 0; slot_k < args.topk; ++slot_k) {
+        const ulong slot = base_slot + slot_k;
+        const int expert_i = top_idx[slot];
+        if (expert_i < 0 || expert_i >= int(args.n_expert)) continue;
+
+        device const uchar * expert_w = weight + (ulong)expert_i * expert_stride_bytes;
+        device const float * x = inner + slot * args.n_in;
+        device const float * y1 = x + ix * QK_K + y_offset;
+        float sumf = 0.0f;
+
+        for (uint i = ix; i < nb; i += 4) {
+            device const float * y2 = y1 + 128;
+            float4 sumy = {0.f, 0.f, 0.f, 0.f};
+            for (short l = 0; l < 8; ++l) {
+                yl[l+0] = y1[l+ 0]; sumy[0] += yl[l+0];
+                yl[l+8] = y1[l+32]; sumy[1] += yl[l+8];
+                yh[l+0] = y2[l+ 0]; sumy[2] += yh[l+0];
+                yh[l+8] = y2[l+32]; sumy[3] += yh[l+8];
+            }
+
+            device const uchar * blk = expert_w + (ulong)first_row * row_stride_bytes + (ulong)i * Q5K_BYTES;
+            device const half     * dh = (device const half *) blk;
+            device const uint16_t * a  = (device const uint16_t *)(blk + 4) + iq;
+            device const uchar    * qh = (blk + 4 + 12) + l0;
+            device const uchar    * q1 = (blk + 4 + 12 + 32) + q_offset;
+            device const uchar    * q2 = q1 + 64;
+
+            sc16[0] =  a[0]                & kmask1;
+            sc16[1] =  a[2]                & kmask1;
+            sc16[2] = ((a[4] >> 0) & kmask2) | ((a[0] & kmask3) >> 2);
+            sc16[3] = ((a[4] >> 4) & kmask2) | ((a[2] & kmask3) >> 2);
+
+            float4 acc1 = {0.f, 0.f, 0.f, 0.f};
+            float4 acc2 = {0.f, 0.f, 0.f, 0.f};
+            for (short l = 0; l < 8; ++l) {
+                const uchar h = qh[l];
+                acc1[0] += yl[l+0] * (q1[l] & 0x0F);
+                acc1[1] += yl[l+8] * (q1[l] & 0xF0);
+                acc1[2] += yh[l+0] * (q2[l] & 0x0F);
+                acc1[3] += yh[l+8] * (q2[l] & 0xF0);
+                acc2[0] += (h & hm1) ? yl[l+0] : 0.f;
+                acc2[1] += (h & hm2) ? yl[l+8] : 0.f;
+                acc2[2] += (h & hm3) ? yh[l+0] : 0.f;
+                acc2[3] += (h & hm4) ? yh[l+8] : 0.f;
+            }
+
+            sumf += (float)dh[0] * (
+                  sc8[0] * (acc1[0]        + 16.f * acc2[0])
+                + sc8[1] * (acc1[1] / 16.f + 16.f * acc2[1])
+                + sc8[4] * (acc1[2]        + 16.f * acc2[2])
+                + sc8[5] * (acc1[3] / 16.f + 16.f * acc2[3])
+            ) - (float)dh[1] * (
+                  sumy[0] * sc8[2]
+                + sumy[1] * sc8[3]
+                + sumy[2] * sc8[6]
+                + sumy[3] * sc8[7]
+            );
+
+            y1 += 4 * QK_K;
+        }
+
+        const float total = simd_sum(sumf);
+        if (tiisg == 0) {
+            acc += top_w[slot] * total;
+        }
+    }
+
+    if (tiisg == 0) {
+        out[(ulong)token * args.n_out + first_row] = acc;
     }
 }
 

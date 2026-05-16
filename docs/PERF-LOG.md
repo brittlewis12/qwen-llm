@@ -6,6 +6,359 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-16 — Checkpoint: MoE Packed-Routed Probe Did Not Clear Gate
+
+Status: checkpointing a mixed worktree. The Q8 mixer fix remains a real keeper;
+the newer packed-routed MoE branch is correctness-positive on A3B but
+performance-neutral and should be treated as experimental until it is either
+default-off or removed.
+
+### What Changed Since The Q8 Mixer Entry
+
+- Added an experimental token-major packed routed MoE prefill path behind
+  `QWEN_PREFILL_MOE_PACKED_ROUTED`:
+  - packed router logits via mat-mat over `[P, H] -> [P, E]` where eligible,
+  - packed top-k/shared-gate selection into `moe_topk_idx_pack`,
+    `moe_topk_weight_pack`, and `moe_shared_gate_pack`,
+  - existing packed Q4_K routed gate/up SwiGLU over `[P, topk, F]`,
+  - new packed Q5_K down + weighted-sum kernel writing `[P, H]`,
+  - shared expert/residual still falls back to the existing per-token path.
+- Added `moe_router_probs_pack` scratch and Metal/Rust wrappers for the packed
+  top-k/shared-gate and packed Q5 down+sum kernels.
+- Kept the kill switch because this path has not met the perf gate.
+
+### Clean-Room Process Check
+
+Before rerunning the latest pp sweep, checked active processes with `ps` + `rg`;
+only the probe itself matched. No other repo benchmark/build process was alive.
+
+### Latest Measurements
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic `pp320`, chunk `320`,
+tail skipped, sequential.
+
+| Model | Latest packed-routed worktree | Q8 mixer baseline | Gate | Result |
+| --- | ---: | ---: | ---: | --- |
+| 35B A3B Q4_K_M | `197.41 +/- 0.12 t/s` | `~197 t/s` | `>=208 t/s` | no material movement |
+| 122B A10B Q4_K_XL | `85.16 +/- 0.75 t/s` | `~85.1 t/s` | `>=89 t/s` | no material movement |
+
+Earlier A/Bs inside the same attack showed the same shape:
+
+- Packed Q5 down+sum without packed route: A3B `196.91 +/- 0.24 t/s`, A10B
+  `84.97 +/- 0.91 t/s`.
+- A3B fallback with `QWEN_PREFILL_MOE_PACKED_ROUTED=0`: `197.04 +/- 0.40 t/s`.
+
+### Validation State
+
+Passed after the packed route/down changes:
+
+- `cargo fmt --all`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_35b_a3b_moe -- --nocapture`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b -- --nocapture`
+
+Not yet re-run after the final packed-route variant:
+
+- A10B MoE correctness gate.
+- Dense 9B/27B pp guardrails.
+- Full stop-token / EOS test suite from the commingled worktree changes.
+
+### Interpretation
+
+- The Q8 mixer fix remains the validated MoE prompt win: A3B `~96 -> ~197 t/s`,
+  A10B `~37.6 -> ~85.1 t/s`.
+- The packed-routed branch does not earn production status. It likely removes too
+  little of the live surface and may trade slot-level parallelism for longer
+  per-row threadgroup lifetime in the Q5 down+sum kernel.
+- The next MoE attack should not stack more generic packing onto this branch. If
+  this code is separated later, either default it off or delete it unless a stage
+  profile shows a clear local win and end-to-end pp320 clears the gate.
+- Future MoE work should start from measured phase A/B at `P={8,16,64,128,320}`
+  and only escalate to a custom persistent routed kernel if expert reuse/locality
+  evidence supports it.
+
+## 2026-05-16 — Phase-Matched PP Harness + MoE Q8 Packed Mixer
+
+Status: major MoE prompt win reached, not yet committed in git.
+
+### What Changed
+
+- Added `qwen-bench pp` as a prompt-only frontier harness aligned with
+  `llama-bench pp<N>` semantics: synthetic token ids, explicit repetitions,
+  optional real prompt text, no decode loop, and optional tail skip so final
+  norm / `lm_head` / logits readback are not charged to pure prompt throughput.
+- Added packed-prefill lowering summaries to the pp harness so dense/MoE runs
+  report whether GDN, attention, dense FFN, and MoE token-loop paths are active.
+- Enabled `Q8_0` packed mat-mat eligibility for GDN and attention projections in
+  prompt prefill and DFlash packed verify. `encode_mat_mat_dispatch` already had
+  a `Q8_0` backend; MoE Q8 mixer weights were simply falling through to the
+  decode-shaped per-token path.
+- Extended `QWEN_PREFILL_NOOP_FFN=1` to MoE prompt prefill so mixer work can be
+  isolated from the remaining routed/shared expert token loop.
+- Expanded the Q8 mat-mat correctness gate to cover `N={1,16,32,64,128}`.
+
+### Fresh Prompt-Only Baselines
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic `pp320`, sequential.
+
+| Model | qwen pp320 | llama-bench pp320 | qwen / llama | Notes |
+| --- | ---: | ---: | ---: | --- |
+| 9B dense Q4_K_M | `~710.0 t/s` | `~824.0 t/s` | `~86%` | dense lowering already fully packed |
+| 27B dense Q4_K_M | `~211.9 t/s` | `~240.9 t/s` | `~88%` | dense unchanged by Q8 eligibility |
+| 35B A3B Q4_K_M | `~193.7-197.7 t/s` | `~1222.4 t/s` | `~16%` | `Q8_0` mixer packing landed |
+| 122B A10B Q4_K_XL | `~85.1 t/s` | `~393.3 t/s` | `~22%` | `Q8_0` mixer packing landed |
+
+### Measured Impact
+
+- 35B A3B pp320 moved from `~96 t/s` to `~194-198 t/s` after lowering flipped
+  from `gdn_batched=0/30 attn_batched=0/10` to `30/30` and `10/10`.
+- 122B A10B pp320 moved from `~37.6 t/s` to `~85.1 t/s` after lowering flipped
+  from `gdn_batched=0/36 attn_batched=0/12` to `36/36` and `12/12`.
+- Dense guardrails stayed flat within noise:
+  - 9B dense pp320: `~710.0 t/s`
+  - 27B dense pp320: `~211.9 t/s`
+- MoE no-FFN probes now show the remaining gap is dominated by the token-loop
+  routed/shared expert path, not the mixer front end:
+  - A3B `QWEN_PREFILL_NOOP_FFN=1`: `~1722 t/s`
+  - A10B `QWEN_PREFILL_NOOP_FFN=1`: `~662 t/s`
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test --release -p qwen-llm mat_mat_q8_0_matches_cpu_and_mat_vec -- --nocapture`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_35b_a3b_moe -- --nocapture`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b -- --nocapture`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
+
+### Current Read
+
+- The largest MoE prefill hypothesis was real: Q8 mixer projections were not
+  using the packed mat-mat path.
+- The next MoE gap is now clearly the per-token MoE FFN path. Existing packed MoE
+  tail profiling at `P=8` splits one block roughly into route/copy `~14-20%`,
+  routed FFN `~47-58%`, and shared/residual/copy `~28-32%`.
+- Dense remains a separate prompt-quality problem: the new pp harness confirms a
+  stable `~12-14%` prompt-only gap on 9B/27B even with fully packed dense lowering.
+
+## 2026-05-16 — llama.cpp BLAS Hot-Path Audit
+
+Status: investigation-only, no code changes.
+
+### Hypothesis
+
+`llama-bench` reports `backend = MTL,BLAS` for our `pp320` baseline. Before
+chasing more prompt structure, we wanted to know exactly what BLAS is doing
+on the hot path on this Apple build, so the `pp320` scoreboard target isn't
+quietly biased by a fast CPU sgemm path that we don't have, and so that we
+don't over-attribute the gap to GPU work.
+
+### What "BLAS" actually means in this build
+
+- `~/code/llama.cpp/build/bin/libggml-blas.0.12.0.dylib` is built with
+  `GGML_BLAS_USE_ACCELERATE`. `otool -L` confirms it links
+  `/System/Library/Frameworks/Accelerate.framework`. The backend's
+  `get_description` returns `"Accelerate"` but its `get_name` returns
+  `"BLAS"`, which is what llama-bench prints in the `backend` column.
+  See `ggml/src/ggml-blas/ggml-blas.cpp:328-340` and the device-name
+  function at `ggml/src/ggml-blas/ggml-blas.cpp:213-217`.
+- The BLAS backend is registered as a `GGML_BACKEND_DEVICE_TYPE_ACCEL`
+  device (`ggml-blas.cpp:353`). `llama_context::init` adds every ACCEL
+  device to the backend list right after the GPU devices and before the
+  CPU backend (`src/llama-context.cpp:250-260`). `llama-bench`'s
+  `test::get_backend()` then joins every non-CPU registered backend into
+  the printed string (`tools/llama-bench/llama-bench.cpp:1481-1500`), so
+  `MTL,BLAS` means "MTL plus BLAS were both registered", not "the
+  scheduler is splitting work between them".
+
+### What the BLAS backend will compute
+
+`ggml_backend_blas_graph_compute` only handles two ops
+(`ggml-blas.cpp:235-253`):
+
+- `GGML_OP_MUL_MAT`
+- `GGML_OP_OUT_PROD`
+
+Plus the no-op view family (`NONE/RESHAPE/VIEW/PERMUTE/TRANSPOSE`). The
+backend's `supports_op` has hard guards
+(`ggml-blas.cpp:404-432`):
+
+- both srcs contiguous
+- `src1->type == F32`
+- `ne0 >= 32 && ne1 >= 32 && ne10 >= 32` (so vector-like shapes never
+  reach BLAS)
+- `src0` must be F32 or have a `to_float` converter
+
+If `src0` is quantized, the backend dequantizes it to F32 in
+`work_data` (parallelized via OpenMP, `ggml-blas.cpp:67-116`) and then
+calls `cblas_sgemm` with `m=ne1, n=ne01, k=ne10` for every `(i12,i13)`
+slice (`ggml-blas.cpp:128-147`). So in principle BLAS can serve any
+non-batched quant mat-mat with a long enough N-dimension, after a full
+F32 dequant.
+
+### Where the scheduler actually sends ops
+
+In ggml-backend's sched the priority order is the backend list order
+(`ggml-backend.cpp:836-842`). With both Metal and BLAS present, an op
+is assigned to whichever backend currently holds its weight buffer
+(`ggml-backend.cpp:908-929`). The only chance for BLAS to steal an op
+from Metal is the `offload_op` upgrade path, but Metal's own
+`offload_op` returns true for `MUL_MAT/MUL_MAT_ID` with batch >= 32
+(`ggml-metal.cpp:746-763`, default `op_offload_min_batch_size = 32`,
+`ggml-metal-device.m:798`), so as long as the weights are on `MTL0`,
+Metal wins ties.
+
+The crucial constraint: Metal's buffer types report `is_host() = false`
+for the shared, private, and mapped variants
+(`ggml-metal.cpp:275-279`, `351-355`, `427-431`). The sched-side
+upgrade only fires when the source buffer is on the CPU and is host
+memory (`ggml-backend.cpp:919`: `ggml_backend_buffer_is_host(src->buffer)`).
+Weights mapped through Metal's mapped buffer type therefore can't be
+hijacked by BLAS even though sgemm could in principle run on them.
+
+### Empirical confirmation on the 27B `pp320` baseline
+
+Ran `GGML_SCHED_DEBUG=2 llama-bench -m Qwen3.6-27B-Q4_K_M.gguf -n 0 -p 320`
+and tallied the per-node backend assignments printed by the sched
+debug dump (stderr, 15420 lines covering all reservation graphs plus
+the live run):
+
+```text
+[ MTL0 ]   37980
+[ NULL ]    1656   (views / placeholders)
+[ BLAS ]       6
+```
+
+Every single `BLAS`-tagged node is `token_embd.weight` showing up as
+the source of the very first `GET_ROWS` node, six times (once per
+reservation graph + the live run). The actual `GET_ROWS` runs on
+`CPU`; the embedding table is just labeled with the BLAS buffer type
+because of how llama.cpp's CPU buft list orders ACCEL ahead of CPU
+(`src/llama-model.cpp:816-830`). There are zero `MUL_MAT` or
+`OUT_PROD` nodes routed to BLAS in any reservation or live graph at
+`pp320`. The `pp320 = 241.x t/s` baseline is therefore an entirely
+GPU+CPU result, with no sgemm calls in the hot path.
+
+This also matches the CPU buffer accounting at the end of the run:
+`CPU compute buffer size = 1.53 MiB`, which is dominated by tokenizer
+/ embedding-input bookkeeping, not by any FFN/attention intermediate.
+
+### Where Accelerate _is_ still hot
+
+The BLAS backend isn't doing the work, but Accelerate is still linked
+into the CPU backend through `GGML_USE_ACCELERATE`. Grepping
+`ggml/src/ggml-cpu/` for vDSP / Accelerate references shows:
+
+- `ggml-cpu/binary-ops.cpp` dispatches `vDSP_vadd / vsub / vmul / vdiv`
+  for F32 element-wise ops.
+- `ggml-cpu/vec.h` uses `vDSP_vsmsa`, `vDSP_vsmul`, `vDSP_sve`,
+  `vDSP_maxv`, etc., for small vector ops.
+- `ggml-cpu/ops.cpp` uses `vDSP_vadd`, `vDSP_vsadd`, `vDSP_measqv` in
+  reductions / add1.
+- A separate llamafile sgemm tile path (`ggml-cpu/llamafile/sgemm.cpp`,
+  used from `ggml-cpu.c:1296` and `:1364`) handles CPU-side mat-mat
+  for prompt processing when the CPU backend is the one actually
+  running mat-mat. This is not Accelerate's sgemm; it's the bundled
+  llamafile micro-kernels.
+
+None of this is reachable from the live 27B Metal graph at `pp320`
+because every mat-mat-class node is sitting on `[ MTL0 ]`. Accelerate
+matters only for the slivers of CPU-side work — input embedding
+gather, tokenizer prep, sampler — i.e. exactly the boundary work that
+our own engine already does on Apple-CPU paths without sgemm.
+
+### Implications for our scoreboard
+
+1. `pp320 ~240.9 t/s` on `llama-bench` is a pure Metal number. Our gap
+   to it is fully a GPU-engine gap, not a "missing fast CPU sgemm"
+   gap.
+2. The `MTL,BLAS` string in the backend column is a registration
+   artifact, not a hot-path participation signal. We should mentally
+   strip it when comparing to our `qwen-llm` numbers.
+3. There is no upside in adding an Accelerate sgemm lane to qwen-llm
+   for the dense Q4_K prompt path: even llama.cpp leaves BLAS idle
+   here, because Metal buffer types report `is_host = false` and the
+   sched's only BLAS-upgrade trigger requires host-mapped weights.
+4. The one place a BLAS-equivalent path can still legitimately matter
+   in llama.cpp builds is offloading mat-mats when weights are kept on
+   CPU host memory (partial offload, MoE expert pinning, CPU-tier
+   models). None of our guardrail Qwen3.5/3.6 configs do that, so it
+   stays out of our scoreboard.
+
+### Decision
+
+- Do not pursue an Accelerate / BLAS lane for qwen-llm under current
+  guardrails.
+- Continue treating the `pp320` gap as a pure Metal-engine target;
+  this matches the active roadmap item 1.
+- Note the registration-string trap in the roadmap so we do not chase
+  a phantom CPU lane in future llama-bench comparisons.
+
+### Validation Method (for reproducing)
+
+```text
+# show registration vs. hot-path assignment
+GGML_SCHED_DEBUG=2 ~/code/llama.cpp/build/bin/llama-bench \
+    -m ~/models/Qwen3.6-27B-Q4_K_M.gguf -n 0 -p 320 -r 1 --verbose \
+    2> /tmp/llamabench-sched.stderr
+
+# tally per-op backend tags
+rg -o '\[ ?(MTL0|CPU|BLAS|NULL) +\]' /tmp/llamabench-sched.stderr \
+    | sort | uniq -c | sort -rn
+
+# the BLAS rows
+rg '\bBLAS\b' /tmp/llamabench-sched.stderr
+```
+
+Expected on M4 Max + dense Qwen3.6 Q4_K_M: tens of thousands of
+`[ MTL0 ]`, ~6 `[ BLAS ]` rows, all of them on `token_embd.weight`'s
+buffer label rather than a real compute node.
+
+## 2026-05-16 — Reorient Around llama-bench Prompt Parity
+
+Status: docs-only roadmap reset after fresh llama.cpp baselines.
+
+### Fresh Baselines
+
+- `qwen-llm` repeated 320-token dense prompt: `~205.4-205.9 t/s`
+- current `llama-cli -st` on the same prompt: `~206.7 t/s` prompt,
+  `~22.5 t/s` generation
+- current `llama-bench pp320`: `~240.9 t/s`
+- local merged-PR MTP single-turn check on
+  `Qwen3.6-27B-MTP-Q4_K_M.gguf` with `draft-mtp`, `n_max=3`, `p_min=0.75`:
+  `~182.3 t/s` prompt, `~22.4 t/s` generation
+
+### Interpretation
+
+- User-facing CLI parity is real enough now that it is no longer the hard target.
+- The harder prompt-only scoreboard is `llama-bench`, and on that metric the
+  remaining gap is still substantial.
+- That means the roadmap should not be centered purely on the remaining GDN tail.
+  The current GDN-tail headroom is real but not large enough by itself to close
+  the full `llama-bench` pure-prompt miss.
+- The merged llama.cpp MTP path is useful prior art, but not yet a scary speed
+  baseline on this local single-turn Apple harness. Its own PR notes prompt-side
+  penalties from D2H embedding transfers, which reinforces keeping prompt-path
+  efficiency first-class in our spec thinking too.
+
+### Method Reset
+
+- Measurement work should only exist to test a concrete causal performance
+  hypothesis.
+- The immediate hypothesis worth testing is whether the remaining `pp320` miss is
+  partly harness semantics rather than engine work.
+- If that hypothesis fails, the next attack shifts back to engine structure,
+  with prompt-native packed attention ahead of more small cleanup loops.
+
+### On-Disk Priority Reset
+
+1. Add a phase-matched pure prompt frontier harness in `qwen-bench` so we can
+   compare against `llama-bench` on the right semantics.
+2. Treat true packed prompt attention as the likely next major dense prompt lane
+   if that harness confirms the remaining pure-prompt miss is real GPU work.
+3. Keep the remaining GDN tail cleanup as a bounded follow-on, not the sole
+   top-level plan.
+
 ## 2026-05-16 — Packed Attention Body Cleanup
 
 Status: improved checkpoint reached, not yet committed in git.

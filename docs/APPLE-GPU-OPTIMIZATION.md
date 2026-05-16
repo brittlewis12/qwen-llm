@@ -82,8 +82,10 @@ same optimization strategy.
   group-16 tile choice.
 - Dense FFN and projections: decode uses fused mat-vec style kernels; prefill is
   increasingly about real mat-mat quality on Q4/Q5/Q6 surfaces.
-- MoE: router and expert execution are already GPU-resident, but packed prefill
-  is still bottlenecked by token-major routed expert execution.
+- MoE: router and expert execution are already GPU-resident. Packed prefill now
+  batches the Q8 mixer projections, but remains bottlenecked by the routed/shared
+  expert tail; both generic expert-major gather/scatter and a small token-major
+  packed route/down cleanup failed to move pp320 materially.
 - GDN / recurrent state: these kernels are structurally different from attention
   and can be dominated by tiny dependent updates, not bulk FLOPs.
 - DFlash / MTP: speculative paths add their own attention and verification
@@ -94,7 +96,9 @@ Current repo bottleneck map from the docs:
 - Dense packed prompt prefill is now mostly FFN / projection mat-mat quality,
   not recurrent glue.
 - Long-context dense decode still has meaningful attention cost growth.
-- MoE packed prefill is mostly a routed expert scheduling problem.
+- MoE packed prefill is mostly a routed/shared expert-tail scheduling problem;
+  Q8 mixer packing is fixed, but the next branch needs stage proof before more
+  complexity is stacked onto it.
 - Current dense KV-Q8 is a measured negative result on M4 for the existing
   reader shape.
 - CPU encode overhead exists, but current roadmap evidence says it is not yet
@@ -727,11 +731,21 @@ Measure first:
 
 Try first:
 
-- explicit ledger of `(token_idx, topk_rank, expert_id, weight)`,
-- group by expert,
-- run grouped expert-major FFN,
-- scatter / reduce back in fixed top-k order,
-- treat reduced-precision routed-mid storage as a follow-on, not the first bet.
+- stage-level A/Bs of route/copy, routed gate/up, routed down/reduce, and
+  shared/residual at multiple `P` values before changing structure,
+- expert reuse / locality measurement before attempting persistent grouped work,
+- custom persistent routed kernels only if they improve expert weight locality or
+  keep useful expert state resident,
+- keep shared-expert batching and reduced-precision routed-mid experiments out of
+  the first branch unless a profile shows they are the limiter.
+
+Avoid by default:
+
+- generic CPU-ledger expert-major gather/scatter + per-expert GEMM; it is already
+  a measured negative on A3B and A10B,
+- more token-major packing of route metadata or Q5 down/reduce unless it clears an
+  end-to-end pp320 gate, because the current packed route/down cleanup was
+  correctness-positive but throughput-neutral.
 
 ### GDN / recurrent state
 

@@ -300,6 +300,63 @@ impl GgufFile {
             .and_then(|v| v.as_f64())
             .map(|f| f as f32)
     }
+
+    /// Producer-declared end-of-generation token ids.
+    ///
+    /// Strictly reads what the GGUF KV section declares — no heuristic
+    /// name-matching, no fallback to "what we think Qwen probably means".
+    /// The producer's choice is authoritative.
+    ///
+    /// Reads:
+    /// * `tokenizer.ggml.eos_token_id`   — scalar OR array (both are
+    ///                                     legal per the GGUF spec; some
+    ///                                     Llama-3 / Phi GGUFs ship arrays)
+    /// * `tokenizer.ggml.eot_token_id`   — optional, scalar. Added when
+    ///                                     the producer wants to split
+    ///                                     "end of turn" from "end of
+    ///                                     pretraining"
+    ///
+    /// Returns a deduplicated `Vec<i32>` in declaration order
+    /// (EOS-array items first, EOT appended if not already present).
+    ///
+    /// Errors with [`GgufError::MissingKey`] if **neither** key is
+    /// declared. A GGUF with no terminator is a sign of a corrupt or
+    /// partially-converted file; we surface that loudly rather than
+    /// silently picking a default.
+    ///
+    /// Implementation note: `Vec` (not `SmallVec`) is correct here — this
+    /// is read once at init and stored on the decoder; the hot-loop
+    /// membership check is over a 1-2 element slice regardless of
+    /// backing storage.
+    pub fn stop_token_ids(&self) -> Result<Vec<i32>, GgufError> {
+        let mut out: Vec<i32> = Vec::with_capacity(2);
+
+        // EOS: scalar OR array. Try scalar first (the common case for
+        // Qwen 3.5/3.6), then fall back to array form.
+        if let Some(eos) = self.get_u64("tokenizer.ggml.eos_token_id") {
+            out.push(eos as i32);
+        } else if let Some(eos_arr) = self.get_u64_array("tokenizer.ggml.eos_token_id") {
+            for id in eos_arr {
+                let id = id as i32;
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+
+        // EOT: optional, scalar. Append if not already present.
+        if let Some(eot) = self.get_u64("tokenizer.ggml.eot_token_id") {
+            let eot = eot as i32;
+            if !out.contains(&eot) {
+                out.push(eot);
+            }
+        }
+
+        if out.is_empty() {
+            return Err(GgufError::MissingKey("tokenizer.ggml.eos_token_id"));
+        }
+        Ok(out)
+    }
 }
 
 /// Read `general.alignment` (default 32). Rejects values that would cause
@@ -798,5 +855,39 @@ mod tests {
             }
         }
         assert!(found, "no token embedding tensor found");
+    }
+
+    #[test]
+    fn stop_token_ids_on_real_gguf() {
+        let path = fixture();
+        let g = GgufFile::open(&path).expect("open");
+        let stops = g
+            .stop_token_ids()
+            .expect("real Qwen 3.5 GGUF must declare a stop token");
+        assert!(!stops.is_empty());
+        // The smallest local fixture is the 0.8B instruct GGUF; if both
+        // 0.8B and the bundled gguf-rs LE-v3 fixture are unavailable we
+        // wouldn't have reached this assertion. For instruct Qwen 3.5
+        // the declared EOS is 248046.
+        if path.to_string_lossy().contains("Qwen3.5-0.8B") {
+            assert_eq!(stops, vec![248046], "0.8B instruct EOS");
+        }
+    }
+
+    #[test]
+    fn stop_token_ids_missing_key_errors() {
+        // Use the minimal-gguf fixture (no metadata at all) to exercise
+        // the missing-key path without depending on a real model file.
+        let bytes = build_minimal_gguf();
+        let path = write_temp(&bytes);
+        let g = GgufFile::open(&path).expect("minimal gguf opens");
+        let err = g
+            .stop_token_ids()
+            .expect_err("minimal GGUF declares no EOS");
+        assert!(
+            matches!(err, GgufError::MissingKey("tokenizer.ggml.eos_token_id")),
+            "expected MissingKey, got {err:?}",
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

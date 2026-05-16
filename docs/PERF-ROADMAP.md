@@ -5,6 +5,10 @@ current: update the ranking when new measurements change expected value, risk,
 or dependencies. Treat `docs/PLAN.md` as the architecture/history plan; this
 file is the active optimization queue.
 
+Working rule: optimize from causal performance hypotheses, not from measurement
+novelty. Every measurement task in this file should exist only to kill or
+confirm a concrete engine hypothesis.
+
 For append-only checkpoint history and exact current handoff state, see
 `docs/PERF-LOG.md`.
 
@@ -38,18 +42,41 @@ M4 Max, release `qwen-bench`, sequential runs.
 | 122B A10B | 16K | 33.47 | 29.9 | group16 tile4 + NWG64 |
 | 122B A10B | 32K | 35.14 | 28.5 | group16 tile4 + NWG64 |
 
-Prompt-only anchor, same repeated 320-token prompt:
+Prompt-only anchors, `pp320` synthetic prompt unless noted:
 
-- `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
-- current `llama.cpp` baseline: `212.44 t/s`
+- `qwen-llm` 9B dense packed pp: `~710.0 t/s`; `llama-bench`: `~824.0 t/s`
+- `qwen-llm` 27B dense packed pp: `~211.9 t/s`; `llama-bench`: `~240.9 t/s`
+- `qwen-llm` 35B A3B packed pp after Q8 mixer packing: `~197.4 t/s`;
+  `llama-bench`: `~1222.4 t/s`
+- `qwen-llm` 122B A10B packed pp after Q8 mixer packing: `~85.2 t/s`;
+  `llama-bench`: `~393.3 t/s`
+- prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
+- current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
+  `~22.5 t/s` generation
 
 Recent confirmed wins:
 
+- `qwen-bench pp` now exposes a phase-matched prompt-only harness and lowering
+  summary for dense/MoE prompt work. It confirmed the dense `pp320` miss is real
+  (`~710/824 t/s` on 9B, `~211.9/240.9 t/s` on 27B) and uncovered the largest
+  MoE issue: Q8 mixer projections were falling through to decode-shaped
+  per-token paths.
+- Enabling `Q8_0` packed mat-mat eligibility for MoE GDN/attention projections
+  moves A3B pp320 from `~96 t/s` to `~194-198 t/s` and A10B pp320 from
+  `~37.6 t/s` to `~85.1 t/s`, while dense 9B/27B guardrails stay flat.
+  That is the current MoE keeper; the later packed-routed cleanup did not move
+  pp320 materially.
 - Packed attention-body cleanup now batches consecutive-position RoPE for Q/K and
   scatters the whole chunk's K/V rows into the cache in one dispatch before the
   per-token attention loop. On the repeated 320-token 27B prompt, packed prefill
   moves from ~201.5-202.3 t/s to `~205.4-205.9 t/s` and trims total wall from
   ~1582-1588 ms to ~1554-1558 ms.
+- Fresh local `llama-cli -st` checks now show dense user-facing parity is real:
+  `llama.cpp` is about `206.7 t/s` prompt / `22.5 t/s` generation on the same
+  repeated prompt, while `qwen-llm` is already `~205.6 t/s` on prompt-only runs.
+- Fresh local `llama-bench` still says the harder pure-prompt target is much
+  higher: `pp320 ~240.9 t/s`. That keeps prompt-only parity, not CLI parity, as
+  the main scoreboard target.
 - Packed dense GDN prep is now over the whole prompt chunk. The old packed GDN
   prep loop used `P` launches of `ssm_conv_silu`, two L2 norms, and three
   scatters before the packed recurrence; the new path replaces that with one
@@ -69,7 +96,8 @@ Recent confirmed wins:
   moves packed prefill from ~183.1 t/s to ~186.2-186.5 t/s and trims GPU total
   from ~1717 ms to ~1690 ms.
 - Latest same-prompt dense read is now `~205.6 t/s` on 27B, which cuts the fresh
-  `llama.cpp` prompt gap down to roughly three percent.
+  `llama-cli -st` prompt gap down to roughly three percent even though the harder
+  `llama-bench` pure-prompt gap still remains.
 - Production-shape dense prompt no-op profiling says the remaining packed-prefill
   cost is real GPU work. After the packed attention-body cleanup, the old
   attention-body no-op delta falls from about `~162 ms` wall / `~156 ms` GPU to
@@ -125,6 +153,11 @@ Recent measured negatives:
   end-to-end on A3B packed prefill.
 - F16 routed-inner traffic reduction on the live Q5-down MoE path is a wash to
   slight loser end-to-end.
+- Token-major packed routed MoE cleanup with packed route metadata, packed Q4_K
+  gate/up, and packed Q5_K down+weighted-sum is A3B-correct but pp320-neutral:
+  A3B `197.41 +/- 0.12 t/s`, A10B `85.16 +/- 0.75 t/s`, below gates of
+  `>=208` / `>=89 t/s`. Treat it as experimental/default-off material unless a
+  later stage profile proves a local win.
 - Dense paired `gate+up` prompt fusion is exact-correct but only `~1.04x` in the
   exact-shape 27B microbench at `N=321`, below the go gate.
 - Forcing single Q4 prompt mat-mat to `NR1=16` is worse than the current `NR1=32`
@@ -132,18 +165,73 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Dense Prompt: Remaining GDN Tail Cleanup
+### 1. Hypothesis: part of the remaining `pp320` gap is harness/phase mismatch
+
+Optimizes: decision quality and scoreboard fidelity.
+
+Why it moves to the top:
+
+- We are near parity on the user-facing CLI harness but still far behind on
+  `llama-bench pp320`.
+- Before another major rewrite, we need to know how much of that miss is real
+  prompt work and how much is benchmark semantics.
+- This is the one measurement-heavy item that remains justified because it tests
+  a direct causal hypothesis about the gap.
+- The `MTL,BLAS` backend string `llama-bench` prints is a registration artifact,
+  not a hot-path signal: at `pp320` on 27B Q4_K_M every mat-mat / mat-vec node
+  runs on Metal and the BLAS backend executes zero ops. See the BLAS hot-path
+  audit in `docs/PERF-LOG.md` for the per-node sched-debug evidence. The gap is
+  Metal vs Metal, not "we are missing a CPU sgemm lane".
+
+Current design rule:
+
+- `qwen-bench pp` now covers the core harness need: synthetic `pp<N>`, no decode
+  loop, optional tail skip, wall/GPU reporting, and lowering summaries.
+- Keep using it as the scoreboard harness for dense and MoE prompt work; do not
+  overfit to the older repeated-prompt decode harness.
+
+Acceptance gates:
+
+- Maintain `qwen-bench pp` while adding any future prompt phase buckets.
+- Recompute the remaining prompt gap against `llama-bench pp320` after each major
+  prompt-path change.
+
+### 2. Hypothesis: if the `pp320` gap is real, decode-shaped prompt attention is the dominant remaining engine problem
+
+Optimizes: the largest likely remaining structural prompt-only gap once harness
+semantics are aligned.
+
+Why it moves up:
+
+- The cheap packed attention-body cleanup already landed, but if the pure prompt
+  gap survives harness matching, GDN-tail cleanup alone cannot close it.
+- Our prompt attention still retains decode-shaped structure in the inner loop.
+- That makes prompt-native packed attention the strongest causal explanation for
+  a large remaining `pp320` miss.
+
+Current design rule:
+
+- Keep the new packed RoPE + chunk-scatter shape as the base path.
+- Only escalate after item 1 confirms the remaining miss is real and not mostly
+  harness semantics.
+- Prefer prompt-native packed attention / verify primitives over more small glue
+  cleanups once the hypothesis survives.
+
+Acceptance gates:
+
+- End-to-end pure prompt throughput must move materially against the new harness.
+- Correctness must stay green on `prefill_tokens_matches_single_token_loop_27b`.
+
+### 3. Hypothesis: if prompt attention is not enough, the next real dense prompt miss is GDN out-proj / recurrence tail
 
 Optimizes: the residual dense prompt GDN work after the packed prep rewrite and
 attention-body cleanup.
 
 Why it moves back to the top:
 
-- The packed attention-body cleanup landed and shrank the prompt gap to roughly
-  three percent versus current `llama.cpp`.
-- The old real-graph split ladder still says the remaining GDN tail is mostly in
-  out-proj plus a smaller packed recurrence cost, and that is now the clearest
-  remaining non-FFN dense prompt surface.
+- The split ladder still says the remaining GDN tail is mostly out-proj plus a
+  smaller recurrence cost.
+- This is now a bounded fallback hypothesis, not the assumed main story.
 
 Current design rule:
 
@@ -155,7 +243,7 @@ Acceptance gates:
 - End-to-end dense packed prefill must move on 27B against the repeated prompt.
 - Correctness must stay green on `prefill_tokens_matches_single_token_loop_27b`.
 
-### 2. Dense Prompt: Attention Body Cleanup
+### 4. Dense Prompt: Attention Body Cleanup
 
 Optimizes: any additional dense prompt throughput still available in the
 full-attention layers.
@@ -165,8 +253,8 @@ Why it stays near the top:
 - The packed consecutive RoPE + chunk-scatter cleanup was a real win, but the
   attention body still costs on the order of `~120 ms` wall on the repeated
   prompt.
-- If the remaining GDN-tail work stalls, a more ambitious attention-body move is
-  still the best alternate lane.
+- If the remaining GDN-tail work stalls, this remains the best smaller-bore
+  alternate lane before a true packed prompt attention rewrite.
 
 Current design rule:
 
@@ -179,7 +267,7 @@ Acceptance gates:
 - End-to-end dense packed prefill must move on 27B against the repeated prompt.
 - Correctness must stay green on `prefill_tokens_matches_single_token_loop_27b`.
 
-### 3. Decode Command-Model Overlap
+### 5. Decode Command-Model Overlap
 
 Optimizes: apples-to-apples dense decode latency, especially 27B at 4K and up.
 
@@ -238,7 +326,7 @@ Status:
 - The combined branch is not additive with GDN-only overlap, but it remains the
   strongest decode-focused command-model variant measured so far.
 
-### 4. Read-Only Weight Residency And Scratch Storage Cleanup
+### 6. Read-Only Weight Residency And Scratch Storage Cleanup
 
 Optimizes: decode and prompt wall via cheaper Metal bookkeeping and cleaner GPU
 memory behavior.
@@ -265,27 +353,42 @@ Acceptance gates:
 - Keep these as cheap structural cleanup unless traces show a larger-than-expected
   wall effect.
 
-### 5. MoE Next: Token-Major Cleanup Or Custom Persistent Kernel Research
+### 7. MoE Next: Token-Major Cleanup Or Custom Persistent Kernel Research
 
 Optimizes: MoE prompt throughput on A3B / 122B after the generic grouped path was
 falsified.
 
-Why it moves down:
+Current read:
 
-- The obvious grouped-expert version is now a measured negative result.
+- The obvious grouped-expert version is a measured negative result.
 - Shared-stage batching and F16 routed-inner traffic reduction also failed to
   beat the current packed stage-1 MoE path end-to-end.
-- The remaining MoE upside likely requires either smaller token-major cleanup or a
-  genuinely custom persistent grouped kernel, not another generic gather/scatter
-  experiment.
+- The Q8 mixer eligibility fix was the first major MoE prompt unlock, moving
+  A3B pp320 to `~194-198 t/s` and A10B pp320 to `~85.1 t/s`.
+- A follow-on token-major packed routed branch, including packed route/top-k and
+  packed Q5 down+weighted-sum, is currently correctness-positive on A3B but does
+  not move end-to-end pp320. Do not use it as evidence that token-major packing
+  is a win.
+- No-FFN probes after that fix show the remaining gap is now dominated by the
+  token-loop routed/shared expert path, not mixer projections.
+- Packed MoE tail profiling at `P=8` splits one block roughly into route/copy
+  `~14-20%`, routed FFN `~47-58%`, and shared/residual/copy `~28-32%`.
+- The next MoE upside likely requires smaller token-major cleanup or a genuinely
+  custom persistent routed kernel, not another generic gather/scatter experiment.
 
 Acceptance gates:
 
 - Any new MoE branch must explain why it avoids the generic grouped-GEMM failure
   mode before it gets implementation time.
 - Keep MoE correctness gates and packed-MoE tail attribution in the loop.
+- Keep or enable the packed-routed branch only if it clears the explicit gate:
+  A3B pp320 `>=208 t/s`, A10B pp320 `>=89 t/s`, no dense guardrail regression,
+  and routed phase at least `10-15%` lower in a stage profile.
+- If separated from the forced checkpoint, default the packed-routed branch off
+  or drop it unless the missing A10B correctness and dense guardrails pass and a
+  local phase win appears.
 
-### 6. Use 9B As The Fast Dense Long-Context Canary
+### 8. Use 9B As The Fast Dense Long-Context Canary
 
 Optimizes: experiment throughput and long-context turnaround while preserving the
 27B guardrail.
@@ -307,7 +410,7 @@ Acceptance gates:
 - Long-context experiments should be reproducible first on 9B, then confirmed on
   27B before the roadmap moves.
 
-### 7. No-Copy GGUF Views And Residency Warmup
+### 9. No-Copy GGUF Views And Residency Warmup
 
 Optimizes: TTFT, cold-start variance, load-time memory pressure, and possible VM
 object overhead.
@@ -331,7 +434,7 @@ Acceptance gates:
 - Prototype shows materially better load time, first measured token stability, or
   memory / VM-object behavior without regressing steady-state throughput.
 
-### 8. Frontier Benchmark Harness With Snapshot / Restore
+### 10. Frontier Benchmark Harness With Snapshot / Restore
 
 Optimizes: benchmark quality and long-context decision speed.
 
@@ -348,7 +451,7 @@ Acceptance gates:
   measure a fixed local window.
 - Use it to compare qwen vs llama phase-for-phase, not on blended totals.
 
-### 9. Speculative Path: Attack Repeated Long-Context Attention Cost
+### 11. Speculative Path: Attack Repeated Long-Context Attention Cost
 
 Optimizes: DFlash / MTP viability at realistic context lengths.
 
@@ -373,7 +476,7 @@ Highest-EV speculative kernel targets:
    `k_full` / `v_full` materialization.
 3. Adaptive draft compute width, not only adaptive verify width.
 
-### 10. Mid-Graph Flush / Overlap Before ICB / MTL4
+### 12. Mid-Graph Flush / Overlap Before ICB / MTL4
 
 Optimizes: decode and prompt wall only if later traces show more cadence slack at
 other contexts or shapes.
@@ -388,7 +491,7 @@ Acceptance gates:
 - Only pursue after double-buffered decode and structural cleanup are measured.
 - Require trace evidence of additional idle gap before escalating further.
 
-### 11. KV-Q8 / Quantized KV Cache For Long Context
+### 13. KV-Q8 / Quantized KV Cache For Long Context
 
 Optimizes: long-context decode, DFlash usefulness at long context, memory.
 
@@ -416,7 +519,7 @@ Acceptance gates:
 - Revisit only with a concrete new kernel structure and a fast feedback plan.
 - Cut again quickly if attention does not beat F16 at 32K or 64K.
 
-### 12. Dense Decode Surgery And Small Decode Hygiene
+### 14. Dense Decode Surgery And Small Decode Hygiene
 
 Optimizes: dense decode throughput and measurement integrity.
 

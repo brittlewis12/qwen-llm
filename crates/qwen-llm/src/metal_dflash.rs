@@ -34,10 +34,11 @@ use crate::metal::{
     encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32,
     encode_gdn_step_decay_packed_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_swiglu_q4_K_f32_packed_slots,
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32,
+    encode_split_q_gate_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
 };
 use crate::metal_forward::{
     MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
@@ -69,6 +70,16 @@ fn prefill_noop_ffn_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_FFN"))
 }
 
+fn prefill_moe_packed_routed_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_PREFILL_MOE_PACKED_ROUTED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
 fn prefill_noop_gdn_body_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_GDN_BODY"))
@@ -86,6 +97,12 @@ enum PrefillGdnSplitMode {
     OutOnly,
     PrepOut,
     PrepStepOut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefillTailMode {
+    ReadLogits,
+    SkipTail,
 }
 
 impl PrefillGdnSplitMode {
@@ -1001,6 +1018,8 @@ pub struct MetalDFlashLayerMajorScratch {
 
     /// `[N * topk]` i32-in-F32 buffer — packed routed expert ids per token.
     pub moe_topk_idx_pack: MetalTensor,
+    /// `[N, n_expert]` F32 — packed router logits per token.
+    pub moe_router_probs_pack: MetalTensor,
     /// `[N * topk]` F32 — packed routed expert weights per token.
     pub moe_topk_weight_pack: MetalTensor,
     /// `[N]` F32 — packed shared expert gate per token.
@@ -1135,6 +1154,10 @@ impl MetalDFlashLayerMajorScratch {
             ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
             moe_topk_idx_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk])?,
+            moe_router_probs_pack: MetalTensor::zeros_f32(
+                ctx,
+                vec![n, (arch.expert_count as u64).max(1)],
+            )?,
             moe_topk_weight_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk])?,
             moe_shared_gate_pack: MetalTensor::zeros_f32(ctx, vec![n])?,
             moe_inner_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk * moe_f_exp])?,
@@ -2195,7 +2218,10 @@ pub fn encode_packed_verify_layer_major_inner(
                 // overhead exceeds BW savings (see docs/H5-DFLASH.md
                 // rev 10).
                 let gdn_mat_mat_eligible = |dtype: GgmlType| {
-                    matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K)
+                    matches!(
+                        dtype,
+                        GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+                    )
                 };
                 let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
                     && gdn_mat_mat_eligible(g.in_proj_z.dtype)
@@ -2395,7 +2421,10 @@ pub fn encode_packed_verify_layer_major_inner(
                 // RoPE + KV-scatter + attn-v4 + gate-sigmoid-mul (which
                 // we batch into step C as a flat elementwise pair).
                 let attn_mat_mat_eligible = |dtype: GgmlType| {
-                    matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K)
+                    matches!(
+                        dtype,
+                        GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+                    )
                 };
                 let attn_batched = attn_mat_mat_eligible(a.q.dtype)
                     && attn_mat_mat_eligible(a.k.dtype)
@@ -3031,6 +3060,55 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
     target_layer_ids: &[u32],
     hidden_dst: Option<&MetalTensor>,
 ) -> Result<(Vec<f32>, f64), DFlashError> {
+    let (logits, gpu_ms) = prefill_tokens_with_multi_hidden_profiled_inner(
+        base,
+        token_ids,
+        start_position,
+        target_session,
+        layer_scratch,
+        target_layer_ids,
+        hidden_dst,
+        PrefillTailMode::ReadLogits,
+    )?;
+    let logits = logits.ok_or_else(|| {
+        DFlashError::Metal(MetalError::BadShape {
+            kernel: "prefill_tokens_with_multi_hidden_profiled",
+            detail: "internal tail mode returned no logits".into(),
+        })
+    })?;
+    Ok((logits, gpu_ms))
+}
+
+pub fn prefill_tokens_prompt_only_profiled(
+    base: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    target_session: &mut MetalSession,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+) -> Result<f64, DFlashError> {
+    let (_, gpu_ms) = prefill_tokens_with_multi_hidden_profiled_inner(
+        base,
+        token_ids,
+        start_position,
+        target_session,
+        layer_scratch,
+        &[],
+        None,
+        PrefillTailMode::SkipTail,
+    )?;
+    Ok(gpu_ms)
+}
+
+fn prefill_tokens_with_multi_hidden_profiled_inner(
+    base: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    target_session: &mut MetalSession,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    target_layer_ids: &[u32],
+    hidden_dst: Option<&MetalTensor>,
+    tail_mode: PrefillTailMode,
+) -> Result<(Option<Vec<f32>>, f64), DFlashError> {
     let arch = &base.model.arch;
     let total_n = token_ids.len();
     let h = arch.hidden_size as usize;
@@ -3146,10 +3224,18 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
     }
 
     // Cache mat-mat-eligible predicates once.
-    let gdn_mat_mat_eligible =
-        |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
-    let attn_mat_mat_eligible =
-        |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
+    let gdn_mat_mat_eligible = |dtype: GgmlType| {
+        matches!(
+            dtype,
+            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+        )
+    };
+    let attn_mat_mat_eligible = |dtype: GgmlType| {
+        matches!(
+            dtype,
+            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+        )
+    };
     let ffn_mat_mat_eligible = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
 
     // Per-call ids buffer. P=16 i32 = 64 bytes; trivial alloc cost.
@@ -3781,6 +3867,7 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                 MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down, g.ffn_moe.as_ref()),
                 MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down, a.ffn_moe.as_ref()),
             };
+            let skip_ffn = prefill_noop_ffn_enabled();
 
             // Sized FFN pack views.
             let ffn_gate_pack_p = layer_scratch
@@ -3805,35 +3892,234 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                     enc.end();
                 }
 
-                for n_idx in 0..chunk_p {
-                    let enc = KernelEncoder::begin(&cmd_buf);
-                    encode_copy_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &x_pack_p,
-                        n_idx * h,
-                        &target_session.x,
-                        h,
-                    )?;
-                    encode_copy_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &h_pack_p,
-                        n_idx * h,
-                        &target_session.h,
-                        h,
-                    )?;
-                    base.encode_moe_route_prepare(&enc, target_session, moe)?;
-                    base.encode_moe_ffn_apply_gpu(&enc, target_session, g_w, u_w, d_w, moe)?;
-                    encode_scatter_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &target_session.x,
-                        &x_pack_p,
-                        n_idx * h,
-                        h,
-                    )?;
-                    enc.end();
+                let router_mat_mat_eligible = |dtype: GgmlType| {
+                    matches!(
+                        dtype,
+                        GgmlType::F32
+                            | GgmlType::Q4_K
+                            | GgmlType::Q5_K
+                            | GgmlType::Q6_K
+                            | GgmlType::Q8_0
+                    )
+                };
+                let packed_routed_path = prefill_moe_packed_routed_enabled()
+                    && g_w.dtype == GgmlType::Q4_K
+                    && u_w.dtype == GgmlType::Q4_K
+                    && d_w.dtype == GgmlType::Q5_K;
+
+                if !skip_ffn && packed_routed_path {
+                    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+                    let n_expert = arch.expert_count as usize;
+                    let f_exp = arch.expert_feed_forward_length as usize;
+                    let packed_route_path = router_mat_mat_eligible(moe.gate_inp.dtype)
+                        && moe.gate_inp_shexp.dtype == GgmlType::F32
+                        && n_expert <= 256
+                        && (1..=16).contains(&topk);
+                    let moe_topk_idx_pack_p = layer_scratch
+                        .moe_topk_idx_pack
+                        .view_subrange(0, vec![(chunk_p * topk) as u64]);
+                    let moe_router_probs_pack_p = layer_scratch
+                        .moe_router_probs_pack
+                        .view_subrange(0, vec![(chunk_p * n_expert) as u64]);
+                    let moe_topk_weight_pack_p = layer_scratch
+                        .moe_topk_weight_pack
+                        .view_subrange(0, vec![(chunk_p * topk) as u64]);
+                    let moe_shared_gate_pack_p = layer_scratch
+                        .moe_shared_gate_pack
+                        .view_subrange(0, vec![chunk_p as u64]);
+                    let moe_inner_pack_p = layer_scratch
+                        .moe_inner_pack
+                        .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
+                    let moe_mixer_out_pack_p = layer_scratch
+                        .mixer_out_pack
+                        .view_subrange(0, vec![(chunk_p * h) as u64]);
+
+                    if packed_route_path {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            &moe.gate_inp,
+                            &h_pack_p,
+                            &moe_router_probs_pack_p,
+                            h,
+                            n_expert,
+                            chunk_p,
+                        )?;
+                        encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                            base.ctx,
+                            &enc,
+                            &moe_router_probs_pack_p,
+                            &moe.gate_inp_shexp,
+                            &h_pack_p,
+                            &moe_topk_idx_pack_p,
+                            &moe_topk_weight_pack_p,
+                            &moe_shared_gate_pack_p,
+                            n_expert,
+                            topk,
+                            h,
+                            chunk_p,
+                        )?;
+                        enc.end();
+                    } else {
+                        for n_idx in 0..chunk_p {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &h_pack_p,
+                                n_idx * h,
+                                &target_session.h,
+                                h,
+                            )?;
+                            base.encode_moe_route_prepare(&enc, target_session, moe)?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.moe_topk_idx,
+                                &moe_topk_idx_pack_p,
+                                n_idx * topk,
+                                topk,
+                            )?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.moe_topk_weight,
+                                &moe_topk_weight_pack_p,
+                                n_idx * topk,
+                                topk,
+                            )?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.moe_shared_gate,
+                                &moe_shared_gate_pack_p,
+                                n_idx,
+                                1,
+                            )?;
+                            enc.end();
+                        }
+                    }
+
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_moe_swiglu_q4_K_f32_packed_slots(
+                            base.ctx,
+                            &enc,
+                            &moe.gate_exps,
+                            &moe.up_exps,
+                            &h_pack_p,
+                            &moe_topk_idx_pack_p,
+                            &moe_inner_pack_p,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                        )?;
+                        encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                            base.ctx,
+                            &enc,
+                            &moe.down_exps,
+                            &moe_inner_pack_p,
+                            &moe_topk_idx_pack_p,
+                            &moe_topk_weight_pack_p,
+                            &moe_mixer_out_pack_p,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                        )?;
+                        enc.end();
+                    }
+
+                    for n_idx in 0..chunk_p {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &x_pack_p,
+                            n_idx * h,
+                            &target_session.x,
+                            h,
+                        )?;
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &h_pack_p,
+                            n_idx * h,
+                            &target_session.h,
+                            h,
+                        )?;
+                        let mixer_n =
+                            moe_mixer_out_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &mixer_n,
+                            0,
+                            &target_session.mixer_out,
+                            h,
+                        )?;
+                        let shared_gate_n =
+                            moe_shared_gate_pack_p.view_subrange(n_idx as u64, vec![1]);
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &shared_gate_n,
+                            0,
+                            &target_session.moe_shared_gate,
+                            1,
+                        )?;
+                        base.encode_moe_shared_ffn_gpu(&enc, target_session, g_w, u_w, d_w)?;
+                        encode_add_inplace_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.x,
+                            &target_session.mixer_out,
+                        )?;
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.x,
+                            &x_pack_p,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
+                    }
+                } else if !skip_ffn {
+                    for n_idx in 0..chunk_p {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &x_pack_p,
+                            n_idx * h,
+                            &target_session.x,
+                            h,
+                        )?;
+                        encode_copy_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &h_pack_p,
+                            n_idx * h,
+                            &target_session.h,
+                            h,
+                        )?;
+                        base.encode_moe_route_prepare(&enc, target_session, moe)?;
+                        base.encode_moe_ffn_apply_gpu(&enc, target_session, g_w, u_w, d_w, moe)?;
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.x,
+                            &x_pack_p,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
+                    }
                 }
 
                 if let Some(dst) = hidden_dst {
@@ -3857,13 +4143,11 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                 let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
                     && ffn_mat_mat_eligible(u_w.dtype)
                     && ffn_mat_mat_eligible(d_w.dtype);
-                let skip_dense_ffn = prefill_noop_ffn_enabled();
-
                 let enc = KernelEncoder::begin(&cmd_buf);
                 encode_rms_norm_batched_f32(
                     base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
                 )?;
-                if skip_dense_ffn {
+                if skip_ffn {
                     // profiling only: leave x_pack unchanged after post-norm so a
                     // production-shape run can report the direct FFN wall delta.
                 } else if mat_mat_path {
@@ -3958,35 +4242,40 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
         // (single-token scratch); we copy x_pack[chunk_p-1, :] into
         // session.h via final norm directly, skipping the session.x copy.
         if is_last_chunk {
-            let enc = KernelEncoder::begin(&cmd_buf);
-            let x_last = x_pack_p.view_subrange(((chunk_p - 1) * h) as u64, vec![h as u64]);
-            encode_rms_norm_mul_f32(
-                base.ctx,
-                &enc,
-                &x_last,
-                &base.model.output_norm,
-                &target_session.h,
-                RMS_EPS,
-            )?;
-            encode_mat_vec_dispatch(
-                base.ctx,
-                &enc,
-                &base.model.lm_head,
-                &target_session.h,
-                &target_session.logits,
-                h,
-                v,
-            )?;
-            enc.end();
+            if matches!(tail_mode, PrefillTailMode::ReadLogits) {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                let x_last = x_pack_p.view_subrange(((chunk_p - 1) * h) as u64, vec![h as u64]);
+                encode_rms_norm_mul_f32(
+                    base.ctx,
+                    &enc,
+                    &x_last,
+                    &base.model.output_norm,
+                    &target_session.h,
+                    RMS_EPS,
+                )?;
+                encode_mat_vec_dispatch(
+                    base.ctx,
+                    &enc,
+                    &base.model.lm_head,
+                    &target_session.h,
+                    &target_session.logits,
+                    h,
+                    v,
+                )?;
+                enc.end();
+            }
             cmd_buf.commit();
             cmd_buf.waitUntilCompleted();
             prefill_gpu_total_ms += (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
-            let mut last_logits = vec![0.0f32; v];
-            unsafe {
-                let src = target_session.logits.buffer.contents().as_ptr() as *const f32;
-                std::ptr::copy_nonoverlapping(src, last_logits.as_mut_ptr(), v);
+            if matches!(tail_mode, PrefillTailMode::ReadLogits) {
+                let mut last_logits = vec![0.0f32; v];
+                unsafe {
+                    let src = target_session.logits.buffer.contents().as_ptr() as *const f32;
+                    std::ptr::copy_nonoverlapping(src, last_logits.as_mut_ptr(), v);
+                }
+                return Ok((Some(last_logits), prefill_gpu_total_ms));
             }
-            return Ok((last_logits, prefill_gpu_total_ms));
+            return Ok((None, prefill_gpu_total_ms));
         }
 
         // Non-last chunk: just commit + wait (no tail).
@@ -5154,10 +5443,18 @@ mod tests {
             .map_err(crate::metal_forward::MfError::from)
         });
 
-        let gdn_mat_mat_eligible =
-            |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
-        let attn_mat_mat_eligible =
-            |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K);
+        let gdn_mat_mat_eligible = |dtype: GgmlType| {
+            matches!(
+                dtype,
+                GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+            )
+        };
+        let attn_mat_mat_eligible = |dtype: GgmlType| {
+            matches!(
+                dtype,
+                GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+            )
+        };
         let ffn_mat_mat_eligible =
             |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
 

@@ -25,12 +25,13 @@ use qwen_llm::{
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
-        MetalDFlashVerifyScratch, prefill_tokens_with_multi_hidden,
-        prefill_tokens_with_multi_hidden_profiled,
+        MetalDFlashVerifyScratch, prefill_tokens_prompt_only_profiled,
+        prefill_tokens_with_multi_hidden, prefill_tokens_with_multi_hidden_profiled,
     },
-    metal_forward::{MetalForward, MetalModel, MetalSession},
+    metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     prefix_cache::PrefixCache,
+    tensor::GgmlType,
     tokenizer::Tokenizer,
 };
 use std::path::PathBuf;
@@ -54,6 +55,8 @@ enum Cmd {
     /// Packed prefill is the default no-spec path. `--sequential-prefill`
     /// keeps the legacy token-by-token prompt replay loop for A/B work.
     Decode(DecodeArgs),
+    /// Prompt-only prefill benchmark aligned with llama-bench pp semantics.
+    Pp(PpArgs),
     /// Sweep context length (ramp + measure window).
     CtxSweep(CtxSweepArgs),
     /// Phase-resolved profile at one context length (uses the
@@ -140,6 +143,39 @@ struct DecodeArgs {
     /// of using the GPU argmax fast path.
     #[arg(long)]
     full_logits_decode: bool,
+}
+
+#[derive(Parser, Debug)]
+struct PpArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Synthetic prompt token count, matching llama-bench's pp<N> shape.
+    #[arg(
+        short = 'p',
+        long = "n-prompt",
+        alias = "tokens",
+        default_value = "320"
+    )]
+    n_prompt: usize,
+    /// Optional real prompt text. If set, --n-prompt is ignored.
+    #[arg(long)]
+    prompt: Option<String>,
+    /// Number of timed repetitions after warmup.
+    #[arg(long, default_value = "5")]
+    runs: usize,
+    /// Skip the warmup prefill pass.
+    #[arg(long)]
+    no_warmup: bool,
+    /// Packed prefill chunk size. If omitted, uses the model-aware default.
+    #[arg(long)]
+    prefill_chunk: Option<usize>,
+    /// Include final norm + lm_head + logits readback, like decode's prefill seed.
+    #[arg(long)]
+    with_tail: bool,
+    /// Deterministic seed for synthetic token generation.
+    #[arg(long, default_value = "1")]
+    seed: u64,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -270,13 +306,49 @@ struct MtpArgs {
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
-    /// EOS token id (used to early-terminate generation).
-    /// 0.8B / 27B Qwen3.5/3.6: 248046 (`<|im_end|>`).
-    #[arg(long, default_value = "248046")]
-    eos: i32,
+    /// Stop tokens for generation, comma-separated (e.g.
+    /// `--stop-tokens 248046,248044`). When omitted, the stop set is
+    /// resolved from the GGUF's declared `tokenizer.ggml.eos_token_id`
+    /// (and `eot_token_id` if present) at runtime. There is no
+    /// hardcoded fallback — a GGUF that declares no stops is an error.
+    #[arg(long, value_parser = parse_stop_tokens)]
+    stop_tokens: Option<Vec<i32>>,
     /// Skip the warmup pass.
     #[arg(long)]
     no_warmup: bool,
+}
+
+/// Parse a comma-separated list of i32 token ids for `--stop-tokens`.
+/// Rejects empty input and non-numeric components; clap surfaces the
+/// error inline with the flag name.
+fn parse_stop_tokens(s: &str) -> Result<Vec<i32>, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("must contain at least one token id".into());
+    }
+    trimmed
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<i32>()
+                .map_err(|e| format!("invalid token id {part:?}: {e}"))
+        })
+        .collect()
+}
+
+/// Resolve the effective stop-token set: CLI override if provided,
+/// otherwise the GGUF's declared set. Errors when the GGUF declares
+/// nothing AND no override is given. No heuristic fallback — silent
+/// defaults are exactly the bug this is fixing.
+fn resolve_stop_tokens(
+    g: &qwen_llm::gguf::GgufFile,
+    override_set: Option<Vec<i32>>,
+) -> Result<Vec<i32>> {
+    if let Some(s) = override_set {
+        return Ok(s);
+    }
+    g.stop_token_ids()
+        .map_err(|e| anyhow!("resolving stop tokens from GGUF: {e}"))
 }
 
 fn render_qwen_single_turn_prompt(
@@ -303,6 +375,154 @@ fn render_qwen_single_turn_prompt(
     out
 }
 
+fn synthetic_prompt_ids(n: usize, vocab_size: u32, seed: u64) -> Vec<i32> {
+    let mut state = if seed == 0 { 1 } else { seed };
+    let vocab = vocab_size.max(1) as u64;
+    let mut ids = Vec::with_capacity(n);
+    for _ in 0..n {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        ids.push((state % vocab) as i32);
+    }
+    ids
+}
+
+fn sample_mean(xs: &[f64]) -> f64 {
+    xs.iter().sum::<f64>() / xs.len() as f64
+}
+
+fn sample_stdev(xs: &[f64]) -> f64 {
+    if xs.len() <= 1 {
+        return 0.0;
+    }
+    let mean = sample_mean(xs);
+    let variance = xs
+        .iter()
+        .map(|x| {
+            let d = x - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / (xs.len() - 1) as f64;
+    variance.sqrt()
+}
+
+fn print_prefill_lowering_summary(mm: &MetalModel) {
+    let mat_mat_gdn = |dtype: GgmlType| {
+        matches!(
+            dtype,
+            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+        )
+    };
+    let mat_mat_attn = |dtype: GgmlType| {
+        matches!(
+            dtype,
+            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+        )
+    };
+    let mat_mat_dense_ffn = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+
+    let mut gdn_total = 0usize;
+    let mut gdn_batched = 0usize;
+    let mut attn_total = 0usize;
+    let mut attn_batched = 0usize;
+    let mut dense_ffn_total = 0usize;
+    let mut dense_ffn_batched = 0usize;
+    let mut moe_total = 0usize;
+    let mut moe_gpu_supported = 0usize;
+    let mut first_gdn = None;
+    let mut first_attn = None;
+    let mut first_moe = None;
+
+    for block in &mm.blocks {
+        match block {
+            MetalBlock::Gdn(g) => {
+                gdn_total += 1;
+                let gdn_ok = mat_mat_gdn(g.in_proj_qkv.dtype)
+                    && mat_mat_gdn(g.in_proj_z.dtype)
+                    && mat_mat_gdn(g.out_proj.dtype);
+                if gdn_ok {
+                    gdn_batched += 1;
+                }
+                first_gdn.get_or_insert(format!(
+                    "qkv={:?} z={:?} out={:?}",
+                    g.in_proj_qkv.dtype, g.in_proj_z.dtype, g.out_proj.dtype
+                ));
+                if let Some(moe) = &g.ffn_moe {
+                    moe_total += 1;
+                    let moe_ok = matches!(moe.gate_exps.dtype, GgmlType::Q4_K | GgmlType::Q5_K)
+                        && moe.gate_exps.dtype == moe.up_exps.dtype
+                        && matches!(moe.down_exps.dtype, GgmlType::Q5_K | GgmlType::Q6_K);
+                    if moe_ok {
+                        moe_gpu_supported += 1;
+                    }
+                    first_moe.get_or_insert(format!(
+                        "gate={:?} up={:?} down={:?}",
+                        moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype
+                    ));
+                } else {
+                    dense_ffn_total += 1;
+                    if mat_mat_dense_ffn(g.ffn_gate.dtype)
+                        && mat_mat_dense_ffn(g.ffn_up.dtype)
+                        && mat_mat_dense_ffn(g.ffn_down.dtype)
+                    {
+                        dense_ffn_batched += 1;
+                    }
+                }
+            }
+            MetalBlock::Attn(a) => {
+                attn_total += 1;
+                let attn_ok = mat_mat_attn(a.q.dtype)
+                    && mat_mat_attn(a.k.dtype)
+                    && mat_mat_attn(a.v.dtype)
+                    && mat_mat_attn(a.o.dtype);
+                if attn_ok {
+                    attn_batched += 1;
+                }
+                first_attn.get_or_insert(format!(
+                    "q={:?} k={:?} v={:?} o={:?}",
+                    a.q.dtype, a.k.dtype, a.v.dtype, a.o.dtype
+                ));
+                if let Some(moe) = &a.ffn_moe {
+                    moe_total += 1;
+                    let moe_ok = matches!(moe.gate_exps.dtype, GgmlType::Q4_K | GgmlType::Q5_K)
+                        && moe.gate_exps.dtype == moe.up_exps.dtype
+                        && matches!(moe.down_exps.dtype, GgmlType::Q5_K | GgmlType::Q6_K);
+                    if moe_ok {
+                        moe_gpu_supported += 1;
+                    }
+                    first_moe.get_or_insert(format!(
+                        "gate={:?} up={:?} down={:?}",
+                        moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype
+                    ));
+                } else {
+                    dense_ffn_total += 1;
+                    if mat_mat_dense_ffn(a.ffn_gate.dtype)
+                        && mat_mat_dense_ffn(a.ffn_up.dtype)
+                        && mat_mat_dense_ffn(a.ffn_down.dtype)
+                    {
+                        dense_ffn_batched += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "[pp] lowering: gdn_batched={gdn_batched}/{gdn_total} attn_batched={attn_batched}/{attn_total} dense_ffn_batched={dense_ffn_batched}/{dense_ffn_total} moe_gpu_token_loop={moe_gpu_supported}/{moe_total}"
+    );
+    if let Some(s) = first_gdn {
+        eprintln!("[pp] dtype sample gdn: {s}");
+    }
+    if let Some(s) = first_attn {
+        eprintln!("[pp] dtype sample attn: {s}");
+    }
+    if let Some(s) = first_moe {
+        eprintln!("[pp] dtype sample moe: {s}");
+    }
+}
+
 #[derive(Parser, Debug)]
 struct DflashLazyArgs {
     /// Path to the target GGUF (e.g. Qwen3.6-27B-Q4_K_M.gguf).
@@ -322,9 +542,11 @@ struct DflashLazyArgs {
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "32")]
     tokens: usize,
-    /// EOS token id.
-    #[arg(long, default_value = "248046")]
-    eos: i32,
+    /// Stop tokens for generation, comma-separated. When omitted, the
+    /// stop set is resolved from the GGUF's declared
+    /// `tokenizer.ggml.eos_token_id` (and `eot_token_id` if present).
+    #[arg(long, value_parser = parse_stop_tokens)]
+    stop_tokens: Option<Vec<i32>>,
     /// Effective-N: only consider the first M draft positions per outer
     /// step (1 ≤ M ≤ block_size - 1). Reveals where α decays in the
     /// block; if α at M=8 is close to α at M=15, larger N is just paying
@@ -355,9 +577,11 @@ struct DflashArgs {
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
-    /// EOS token id.
-    #[arg(long, default_value = "248046")]
-    eos: i32,
+    /// Stop tokens for generation, comma-separated. When omitted, the
+    /// stop set is resolved from the GGUF's declared
+    /// `tokenizer.ggml.eos_token_id` (and `eot_token_id` if present).
+    #[arg(long, value_parser = parse_stop_tokens)]
+    stop_tokens: Option<Vec<i32>>,
     /// Skip the warmup pass.
     #[arg(long)]
     no_warmup: bool,
@@ -423,6 +647,7 @@ fn main() -> Result<()> {
         Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),
+        Cmd::Pp(a) => run_pp(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
@@ -441,7 +666,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         disable_thinking,
         spec_tokens,
         tokens,
-        eos,
+        stop_tokens,
         no_warmup,
     } = args;
 
@@ -452,6 +677,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     }
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let stops = resolve_stop_tokens(&g, stop_tokens)?;
     let m = Model::from_gguf(&g).context("parse model arch")?;
     let mtp_view = m.mtp.as_ref().ok_or_else(|| {
         anyhow!(
@@ -476,7 +702,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} ({} tokens) gen={} eos={eos}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -490,6 +716,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec_tokens,
         prompt_ids.len(),
         tokens,
+        stops,
     );
 
     let mf = MetalForward::new(&ctx, &mm);
@@ -528,7 +755,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     for _ in 0..tokens {
         ref_tokens.push(next_tok);
         ref_emitted += 1;
-        if next_tok == eos {
+        if stops.contains(&next_tok) {
             break;
         }
         pos += 1;
@@ -545,7 +772,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
     let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
     let result = if spec_tokens == 1 {
-        spec.decode(&prompt_ids, tokens, eos, &mut spec_session)
+        spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
             .context("spec decode")?
     } else {
         let mut verify_scratch =
@@ -557,7 +784,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec.decode_packed_n(
             &prompt_ids,
             tokens,
-            eos,
+            &stops,
             &mut spec_session,
             spec_tokens,
             &mut verify_scratch,
@@ -658,7 +885,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
         drafter,
         prompt,
         tokens,
-        eos,
+        stop_tokens,
         effective_n,
         no_warmup,
     } = args;
@@ -668,6 +895,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
 
     let target_g =
         GgufFile::open(&model).with_context(|| format!("open target {}", model.display()))?;
+    let stops = resolve_stop_tokens(&target_g, stop_tokens)?;
     let target_m = Model::from_gguf(&target_g).context("parse target arch")?;
     let drafter_g =
         GgufFile::open(&drafter).with_context(|| format!("open drafter {}", drafter.display()))?;
@@ -698,7 +926,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
         drafter.display()
     );
     eprintln!(
-        "[dflash-lazy] prompt={prompt:?} ({n_prompt} tokens) gen={tokens} eos={eos} \
+        "[dflash-lazy] prompt={prompt:?} ({n_prompt} tokens) gen={tokens} stop_tokens={stops:?} \
          block_size={n} D={d} effective_M={m}"
     );
 
@@ -788,7 +1016,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
         }
         // Emit carry (was selected last iter or by bootstrap; not yet emitted).
         emitted.push(carry_tok);
-        if carry_tok == eos {
+        if stops.contains(&carry_tok) {
             break;
         }
         if emitted.len() >= tokens {
@@ -837,7 +1065,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
             accepted_total += 1;
             n_accepted_this_step += 1;
             emitted.push(drafts[j]);
-            if emitted.len() >= tokens || drafts[j] == eos {
+            if emitted.len() >= tokens || stops.contains(&drafts[j]) {
                 // Note: we don't `return` here because we still want to
                 // emit() through the outer loop. The outer-loop
                 // `if emitted.len() >= tokens` check at the top of the
@@ -902,7 +1130,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     let t_ref_decode = Instant::now();
     for _ in 0..tokens {
         ref_emitted.push(next_tok);
-        if next_tok == eos {
+        if stops.contains(&next_tok) {
             break;
         }
         pos += 1;
@@ -1060,7 +1288,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         drafter,
         prompt,
         tokens,
-        eos,
+        stop_tokens,
         no_warmup,
         skip_equivalence_check,
         profile,
@@ -1074,6 +1302,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
 
     let target_g =
         GgufFile::open(&model).with_context(|| format!("open target {}", model.display()))?;
+    let stops = resolve_stop_tokens(&target_g, stop_tokens)?;
     let target_m = Model::from_gguf(&target_g).context("parse target arch")?;
     let drafter_g =
         GgufFile::open(&drafter).with_context(|| format!("open drafter {}", drafter.display()))?;
@@ -1098,7 +1327,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         drafter.display()
     );
     eprintln!(
-        "[dflash] prompt={prompt:?} ({n_prompt} tokens) gen={tokens} eos={eos} \
+        "[dflash] prompt={prompt:?} ({n_prompt} tokens) gen={tokens} stop_tokens={stops:?} \
          block_size={n_block} D={d}"
     );
 
@@ -1186,7 +1415,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         }
         // Emit carry (selected last iter or by bootstrap; not yet in emitted).
         emitted.push(carry_tok);
-        if carry_tok == eos || emitted.len() >= tokens {
+        if stops.contains(&carry_tok) || emitted.len() >= tokens {
             break;
         }
 
@@ -1306,8 +1535,8 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             if emitted.len() >= tokens {
                 break 'outer;
             }
-            if drafts[j] == eos {
-                // Emit-through-EOS; stop.
+            if stops.contains(&drafts[j]) {
+                // Emit-through-stop; halt.
                 break 'outer;
             }
         }
@@ -1405,7 +1634,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let t_ref_decode = Instant::now();
         for _ in 0..tokens {
             ref_emitted.push(next_tok);
-            if next_tok == eos {
+            if stops.contains(&next_tok) {
                 break;
             }
             pos += 1;
@@ -1552,6 +1781,155 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             ));
         }
     }
+
+    Ok(())
+}
+
+fn run_pp(args: PpArgs) -> Result<()> {
+    let PpArgs {
+        model,
+        n_prompt,
+        prompt,
+        runs,
+        no_warmup,
+        prefill_chunk,
+        with_tail,
+        seed,
+    } = args;
+    if runs == 0 {
+        return Err(anyhow!("--runs must be >= 1"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    eprintln!("[pp] device: {}", ctx.describe());
+
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
+
+    let (ids, source_label) = if let Some(prompt) = prompt {
+        let tok = Tokenizer::open(&model).context("open tokenizer")?;
+        let ids = tok.encode(&prompt, false).context("tokenize prompt")?;
+        (ids, format!("text prompt ({} chars)", prompt.len()))
+    } else {
+        if n_prompt == 0 {
+            return Err(anyhow!("--n-prompt must be >= 1"));
+        }
+        (
+            synthetic_prompt_ids(n_prompt, m.arch.vocab_size, seed),
+            format!("synthetic token ids (seed={seed})"),
+        )
+    };
+    if ids.is_empty() {
+        return Err(anyhow!("prompt tokenized to an empty sequence"));
+    }
+
+    let prefill_chunk = prefill_chunk.unwrap_or_else(|| {
+        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+            128
+        } else {
+            512
+        }
+    });
+    if prefill_chunk == 0 {
+        return Err(anyhow!("--prefill-chunk must be >= 1"));
+    }
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let cap = ids.len() + 16;
+    eprintln!(
+        "[pp] model={} source={} n_prompt={} runs={} chunk={} tail={}",
+        model.display(),
+        source_label,
+        ids.len(),
+        runs,
+        prefill_chunk,
+        if with_tail { "final-logits" } else { "skip" }
+    );
+    print_prefill_lowering_summary(&mm);
+
+    if !no_warmup {
+        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
+        let mut scratch =
+            MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
+                .context("warmup prefill scratch")?;
+        if with_tail {
+            let _ = prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
+                .context("warmup prefill with tail")?;
+        } else {
+            let _ = prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
+                .context("warmup prompt-only prefill")?;
+        }
+    }
+
+    let mut wall_samples = Vec::with_capacity(runs);
+    let mut gpu_samples = Vec::with_capacity(runs);
+    let mut ts_samples = Vec::with_capacity(runs);
+    for run_idx in 0..runs {
+        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
+        let mut scratch =
+            MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
+                .context("timed prefill scratch")?;
+
+        let t0 = Instant::now();
+        let gpu_ms = if with_tail {
+            let (_, gpu_ms) = prefill_tokens_with_multi_hidden_profiled(
+                &mf,
+                &ids,
+                0,
+                &mut s,
+                &mut scratch,
+                &[],
+                None,
+            )
+            .context("timed prefill with tail")?;
+            gpu_ms
+        } else {
+            prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
+                .context("timed prompt-only prefill")?
+        };
+        let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let ts = ids.len() as f64 * 1000.0 / wall_ms;
+        wall_samples.push(wall_ms);
+        gpu_samples.push(gpu_ms);
+        ts_samples.push(ts);
+        eprintln!(
+            "[pp] run {:>2}: wall {:>8.1} ms  gpu {:>8.1} ms  {:>7.2} t/s",
+            run_idx + 1,
+            wall_ms,
+            gpu_ms,
+            ts
+        );
+    }
+
+    let wall_mean = sample_mean(&wall_samples);
+    let gpu_mean = sample_mean(&gpu_samples);
+    let ts_mean = sample_mean(&ts_samples);
+    let ts_sd = sample_stdev(&ts_samples);
+    eprintln!();
+    eprintln!("[pp] === results ===");
+    eprintln!(
+        "[pp] prompt: {} tokens in {:.1} ms avg = {:.2} ms/token = {:.2} +/- {:.2} t/s",
+        ids.len(),
+        wall_mean,
+        wall_mean / ids.len() as f64,
+        ts_mean,
+        ts_sd
+    );
+    eprintln!(
+        "[pp] gpu:    {:.1} ms avg = {:.2} ms/token = {:.1}% of wall",
+        gpu_mean,
+        gpu_mean / ids.len() as f64,
+        100.0 * gpu_mean / wall_mean.max(1e-9)
+    );
+    eprintln!(
+        "[pp] note: session and scratch allocation are outside the timed interval; tail={}.",
+        if with_tail {
+            "included"
+        } else {
+            "skipped to match llama-bench pp logits policy"
+        }
+    );
 
     Ok(())
 }

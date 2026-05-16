@@ -49,3 +49,40 @@ kernel void kernel_rope_neox_f32(
     buf[base + i]            = a * c - b * s;
     buf[base + i + half_rot] = a * s + b * c;
 }
+
+struct rope_packed_args {
+    uint  n_tokens;
+    uint  n_heads;
+    uint  head_dim;
+    uint  n_rot;
+    uint  start_position;
+    float theta_base;
+};
+
+kernel void kernel_rope_neox_f32_packed_consecutive(
+        constant rope_packed_args & args [[buffer(0)]],
+        device       float * buf         [[buffer(1)]],
+        uint tid [[thread_position_in_grid]]) {
+    const uint half_rot = args.n_rot / 2u;
+    const uint pairs_per_token = args.n_heads * half_rot;
+    const uint total_pairs = args.n_tokens * pairs_per_token;
+    if (tid >= total_pairs) return;
+
+    const uint tok = tid / pairs_per_token;
+    const uint local = tid % pairs_per_token;
+    const uint hi = local / half_rot;
+    const uint i = local % half_rot;
+    const uint position = args.start_position + tok;
+
+    const float exponent = float(2u * i) / float(args.n_rot);
+    const float freq = float(position) / pow(args.theta_base, exponent);
+    const float c = cos(freq);
+    const float s = sin(freq);
+
+    const uint row_base = tok * args.n_heads * args.head_dim;
+    const uint base = row_base + hi * args.head_dim;
+    const float a = buf[base + i];
+    const float b = buf[base + i + half_rot];
+    buf[base + i]            = a * c - b * s;
+    buf[base + i + half_rot] = a * s + b * c;
+}

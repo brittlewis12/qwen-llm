@@ -6,6 +6,76 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-16 — Packed Attention Body Cleanup
+
+Status: improved checkpoint reached, not yet committed in git.
+
+### What Changed
+
+- Used `cx` to scrutinize the packed attention-body plan before touching code.
+- Added `kernel_rope_neox_f32_packed_consecutive` in `kernels/rope.metal` and
+  `encode_rope_neox_f32_packed_consecutive` in `crates/qwen-llm/src/metal.rs`.
+- Updated packed dense attention prefill in `crates/qwen-llm/src/metal_dflash.rs`
+  so it now:
+  - applies consecutive-position RoPE to packed Q once per chunk
+  - applies consecutive-position RoPE to packed K once per chunk
+  - scatters the whole chunk's K/V rows into the cache in one dispatch
+  - keeps the per-token loop only for the actual attention decode step
+- Kept the profiler-aligned packed attention path in sync with the new shape.
+
+### Why This Was The Right Move
+
+`cx` argued the best bounded next move was not a true packed causal-attention
+ rewrite, but a cleanup of the existing decode-shaped attention body: remove the
+ chunk's per-token RoPE(Q), RoPE(K), and K/V scatter dispatches first, then see
+ what attention body still costs.
+
+### Measured Impact
+
+Repeated 320-token quick-brown-fox prompt, 27B dense, packed prefill chunk 512,
+release build, sequential runs:
+
+- Before this change (after v0.94): `~1582-1588 ms`, `201.5-202.3 t/s`,
+  `~1570-1576 ms` GPU
+- After this change: `~1554-1558 ms`, `205.4-205.9 t/s`,
+  `~1545-1549 ms` GPU
+
+Net:
+
+- about `1.9-2.1%` faster prompt prefill on the repeated 27B prompt
+- dense same-prompt gap versus current `llama.cpp` (`212.44 t/s`) is now down to
+  roughly three percent
+
+### Updated Dense Prompt Read
+
+Representative post-change no-op on the same prompt:
+
+- baseline: `~1556-1558 ms` wall, `~1545-1549 ms` GPU
+- `QWEN_PREFILL_NOOP_ATTN_BODY=1`: `~1425-1449 ms` wall,
+  `~1419-1441 ms` GPU
+
+So the packed attention-body cleanup cut that bucket from roughly
+`~162 ms` wall / `~156 ms` GPU down to about `~120 ms` wall / `~118 ms` GPU.
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo test --release -p qwen-llm rope_neox_packed_consecutive_matches_cpu -- --nocapture`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+
+Correctness stayed green:
+
+- packed RoPE matches CPU in a dedicated unit test
+- dense packed prefill oracle still passes with `cos(final logits)=1.000000`
+
+### Current Next Step
+
+1. Return to the remaining packed GDN tail / out-proj path with the split ladder,
+   since attention is no longer the largest non-FFN dense prompt bucket.
+2. Only revisit a more invasive packed attention rewrite if the narrower GDN-tail
+   work stalls.
+
 ## 2026-05-16 — Packed GDN Prep Over Prompt Tokens
 
 Status: improved checkpoint reached, not yet committed in git.

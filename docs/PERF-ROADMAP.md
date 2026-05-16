@@ -40,11 +40,16 @@ M4 Max, release `qwen-bench`, sequential runs.
 
 Prompt-only anchor, same repeated 320-token prompt:
 
-- `qwen-llm` 27B dense packed prefill: `~201.5-202.3 t/s`
+- `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` baseline: `212.44 t/s`
 
 Recent confirmed wins:
 
+- Packed attention-body cleanup now batches consecutive-position RoPE for Q/K and
+  scatters the whole chunk's K/V rows into the cache in one dispatch before the
+  per-token attention loop. On the repeated 320-token 27B prompt, packed prefill
+  moves from ~201.5-202.3 t/s to `~205.4-205.9 t/s` and trims total wall from
+  ~1582-1588 ms to ~1554-1558 ms.
 - Packed dense GDN prep is now over the whole prompt chunk. The old packed GDN
   prep loop used `P` launches of `ssm_conv_silu`, two L2 norms, and three
   scatters before the packed recurrence; the new path replaces that with one
@@ -63,13 +68,14 @@ Recent confirmed wins:
   instead of one dispatch per token. On the repeated 320-token 27B prompt, this
   moves packed prefill from ~183.1 t/s to ~186.2-186.5 t/s and trims GPU total
   from ~1717 ms to ~1690 ms.
-- Latest same-prompt dense read is now `~202 t/s` on 27B, which cuts the fresh
-  `llama.cpp` prompt gap down to roughly five percent.
+- Latest same-prompt dense read is now `~205.6 t/s` on 27B, which cuts the fresh
+  `llama.cpp` prompt gap down to roughly three percent.
 - Production-shape dense prompt no-op profiling says the remaining packed-prefill
-  cost is real GPU work. After the packed GDN prep win, the next large non-FFN
-  dense prompt buckets are now attention body at about `~162 ms` wall /
-  `~156 ms` GPU and the remaining GDN body at about `~156 ms` wall. That keeps
-  isolated FFN mat-mat kernels exonerated as the hidden prompt mystery.
+  cost is real GPU work. After the packed attention-body cleanup, the old
+  attention-body no-op delta falls from about `~162 ms` wall / `~156 ms` GPU to
+  roughly `~120 ms` wall / `~118 ms` GPU, leaving the remaining GDN tail /
+  out-proj path as the clearest non-FFN prompt target. That keeps isolated FFN
+  mat-mat kernels exonerated as the hidden prompt mystery.
 - Prompt-prefill scratch now skips the unused `[P, V]` logits pack on no-spec
   prompt paths, removing a large dead allocation from timed prefill and nudging
   dense 27B prompt throughput to ~173.3 t/s.
@@ -126,47 +132,47 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Dense Prompt: Attention Body Cleanup
+### 1. Dense Prompt: Remaining GDN Tail Cleanup
 
-Optimizes: dense prompt throughput on the full-attention layers after GDN.
+Optimizes: the residual dense prompt GDN work after the packed prep rewrite and
+attention-body cleanup.
 
-Why it moves up:
+Why it moves back to the top:
 
-- Production-shape no-op profiling after the packed GDN prep win says attention
-  body now costs about `~162 ms` wall / `~156 ms` GPU on the repeated 320-token
-  prompt, making it the largest remaining non-FFN dense prompt bucket.
-- Full-attention prefill is still decode-shaped in the middle: per-token RoPE,
-  KV append, and decode attention inside the chunk.
-- The packed GDN prep win already captured the obvious prep-loop waste on the GDN
-  side, so attention now deserves the first focused follow-up.
-
-Current design rule:
-
-- Start with bounded cleanup around the existing attention math: batched
-  consecutive-position RoPE and chunk-wise KV scatter / glue removal.
-- Defer truly packed causal prefill attention until these cheaper cleanups are
-  falsified.
-
-Acceptance gates:
-
-- End-to-end dense packed prefill must move on 27B without regressing decode.
-
-### 2. Dense Prompt: Remaining GDN Body Cleanup
-
-Optimizes: the residual dense prompt GDN work after the packed prep rewrite.
-
-Why it stays high:
-
-- The new split ladder says the packed GDN body still totals about `~156 ms`
-  wall on the repeated prompt even after the prep rewrite.
-- Most of the old prep waste is gone, so the remaining GDN cost is now smaller
-  and sharper: roughly `~95 ms` in the out-proj tail and `~40-45 ms` in the
-  packed recurrence on the original ladder.
+- The packed attention-body cleanup landed and shrank the prompt gap to roughly
+  three percent versus current `llama.cpp`.
+- The old real-graph split ladder still says the remaining GDN tail is mostly in
+  out-proj plus a smaller packed recurrence cost, and that is now the clearest
+  remaining non-FFN dense prompt surface.
 
 Current design rule:
 
 - Keep using the real-graph `QWEN_PREFILL_GDN_SPLIT` ladder for bounded probes.
-- Prefer narrow recurrence or out-proj cleanups over another broad GDN rewrite.
+- Prefer narrow out-proj / recurrence cleanups over another broad rewrite.
+
+Acceptance gates:
+
+- End-to-end dense packed prefill must move on 27B against the repeated prompt.
+- Correctness must stay green on `prefill_tokens_matches_single_token_loop_27b`.
+
+### 2. Dense Prompt: Attention Body Cleanup
+
+Optimizes: any additional dense prompt throughput still available in the
+full-attention layers.
+
+Why it stays near the top:
+
+- The packed consecutive RoPE + chunk-scatter cleanup was a real win, but the
+  attention body still costs on the order of `~120 ms` wall on the repeated
+  prompt.
+- If the remaining GDN-tail work stalls, a more ambitious attention-body move is
+  still the best alternate lane.
+
+Current design rule:
+
+- Keep the new packed RoPE + chunk-scatter shape as the base path.
+- Only escalate to more invasive packed causal prefill attention if smaller
+  cleanups stop moving the prompt.
 
 Acceptance gates:
 

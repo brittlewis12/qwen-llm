@@ -140,7 +140,7 @@ flowchart TD
         GDNPack --> GDNTail[GDN recurrence over time]
         GDNTail --> GDNBack[batched out_proj]
         Mix --> AttnPack[attn: batched Q/K/V/norm front]
-        AttnPack --> AttnSeq[per-token RoPE + KV append + attn_v4]
+        AttnPack --> AttnSeq[packed RoPE + chunk KV append, then per-token attn_v4]
         AttnSeq --> AttnBack[batched gate + o_proj]
         GDNBack --> Res1[batched residual 1]
         AttnBack --> Res1
@@ -168,6 +168,9 @@ What this buys:
   `gdn_step_decay` across prompt tokens inside one packed kernel, and batches
   `rmsnorm_gated` across the full prompt chunk, so the remaining dense prompt
   gap is no longer mostly recurrent glue.
+- Dense attention prompt work now also batches consecutive-position RoPE for Q/K
+  and appends the chunk's K/V rows in one scatter pass before the per-token
+  attention decode loop.
 - MoE packed prefill is currently stage 1: mixer prep and post-norm batch over
   `P`, while routed expert execution is still token-by-token for exact routing.
   MoE defaults use a tuned conservative chunk (`P=128`) because grouped routed
@@ -319,9 +322,9 @@ Concrete sizes for the dense 27B shape:
 
 - Prompt-body structure: latest production-shape no-op profiling says the live
   dense prompt gap is no longer a mysterious FFN kernel problem. FFN is simply
-  the largest accounted-for bucket, while the next clear opportunities are the
-  decode-shaped attention body inside packed prefill and the smaller remaining
-  GDN out-proj / recurrence tail.
+  the largest accounted-for bucket, while the next clear opportunity is the
+  smaller remaining GDN out-proj / recurrence tail after the packed attention
+  body cleanup.
 - Multi-token GDN body: our packed step and batched gated norm are wins, but
   llama.cpp's fused GDN op is still a useful reference for the remaining prompt
   tail and any future recurrence specialization.
@@ -343,8 +346,8 @@ flowchart TD
     Goal --> MoEPrefill[MoE prefill]
     Goal --> Decode[decode]
 
-    DensePrefill --> AttnBody[packed attention body cleanup]
     DensePrefill --> GDNBody[remaining packed GDN tail]
+    DensePrefill --> AttnBody[deeper packed attention work only if needed]
     DensePrefill --> FFNMM[FFN/projection mat-mat quality only if re-convicted]
     DensePrefill --> TailSkip[tail/logits minimization complete]
 

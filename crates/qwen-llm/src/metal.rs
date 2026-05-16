@@ -4466,6 +4466,77 @@ pub fn encode_rope_neox_f32(
     Ok(())
 }
 
+pub fn encode_rope_neox_f32_packed_consecutive(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    buf: &MetalTensor,
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+    n_rot: usize,
+    start_position: u32,
+    theta_base: f32,
+) -> Result<(), MetalError> {
+    if buf.n_elements() as usize != n_tokens * n_heads * head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rope_neox_packed_consecutive",
+            detail: format!(
+                "buf.n={} != n_tokens*n_heads*head_dim={}",
+                buf.n_elements(),
+                n_tokens * n_heads * head_dim
+            ),
+        });
+    }
+    if n_rot % 2 != 0 || n_rot > head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rope_neox_packed_consecutive",
+            detail: format!("n_rot={n_rot} must be even and ≤ head_dim={head_dim}"),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_tokens: u32,
+        n_heads: u32,
+        head_dim: u32,
+        n_rot: u32,
+        start_position: u32,
+        theta_base: f32,
+    }
+    let pso = ctx.pipeline("kernel_rope_neox_f32_packed_consecutive")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_tokens: n_tokens as u32,
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            n_rot: n_rot as u32,
+            start_position,
+            theta_base,
+        },
+    );
+    enc.set_tensor(1, buf);
+
+    let total_pairs = n_tokens * n_heads * (n_rot / 2);
+    let tg_threads = 64usize;
+    let n_tg = total_pairs.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// SSM conv1d step + SiLU. Per-channel depthwise convolution of width K
 /// (=4 for Qwen3.5/3.6), then SiLU. Mutates `conv_buf` (slides time
 /// window). See `kernels/ssm_conv.metal` for layout details.
@@ -8628,6 +8699,71 @@ mod tests {
                     "rope_neox n_heads={n_heads} pos={position}: max|Δ|={max_abs}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn rope_neox_packed_consecutive_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let head_dim = 256;
+        let n_rot = 64;
+        let theta_base = 10_000_000.0f32;
+        for &(n_tokens, n_heads, start_position) in &[(5usize, 4usize, 0u32), (3, 24, 17)] {
+            let total = n_tokens * n_heads * head_dim;
+            let buf_init: Vec<f32> = (0..total)
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+                .collect();
+
+            let mut buf_cpu = buf_init.clone();
+            for tok in 0..n_tokens {
+                let start = tok * n_heads * head_dim;
+                let end = start + n_heads * head_dim;
+                rope_neox_cpu_ref(
+                    &mut buf_cpu[start..end],
+                    n_heads,
+                    head_dim,
+                    n_rot,
+                    start_position + tok as u32,
+                    theta_base,
+                );
+            }
+
+            let buf_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&buf_init),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_rope_neox_f32_packed_consecutive(
+                    &ctx,
+                    enc,
+                    &buf_t,
+                    n_tokens,
+                    n_heads,
+                    head_dim,
+                    n_rot,
+                    start_position,
+                    theta_base,
+                )
+            })
+            .unwrap();
+            let gpu = read_back_f32(&buf_t.buffer, total);
+
+            let max_abs = gpu
+                .iter()
+                .zip(buf_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs < 1e-5,
+                "rope_neox_packed n_tokens={n_tokens} n_heads={n_heads} start={start_position}: max|Δ|={max_abs}"
+            );
         }
     }
 

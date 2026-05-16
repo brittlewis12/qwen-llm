@@ -35,8 +35,9 @@ use crate::metal::{
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32,
     encode_gdn_step_decay_packed_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32,
+    encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32,
 };
 use crate::metal_forward::{
     MetalBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
@@ -3619,47 +3620,50 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
                         if prefill_noop_attn_body_enabled() {
                             apply_mixer_residual = false;
                         } else {
-                            for n_idx in 0..chunk_p {
-                                let position_n = chunk_start + n_idx as u32;
-                                let q_normed_n = q_normed_pack_p
-                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                                let k_normed_n = k_normed_pack_p
-                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                                let v_now_n = v_now_pack_p
-                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                                let attn_o_n = attn_o_pack_p
-                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                            {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_rope_neox_f32(
+                                encode_rope_neox_f32_packed_consecutive(
                                     base.ctx,
                                     &enc,
-                                    &q_normed_n,
+                                    &q_normed_pack_p,
+                                    chunk_p,
                                     n_q,
                                     head_dim,
                                     n_rot,
-                                    position_n,
+                                    chunk_start,
                                     arch.rope_theta,
                                 )?;
-                                encode_rope_neox_f32(
+                                encode_rope_neox_f32_packed_consecutive(
                                     base.ctx,
                                     &enc,
-                                    &k_normed_n,
+                                    &k_normed_pack_p,
+                                    chunk_p,
                                     n_kv,
                                     head_dim,
                                     n_rot,
-                                    position_n,
+                                    chunk_start,
                                     arch.rope_theta,
                                 )?;
                                 encode_scatter_offset_f32_to_f16_kv(
                                     base.ctx,
                                     &enc,
-                                    &k_normed_n,
-                                    &v_now_n,
+                                    &k_normed_pack_p,
+                                    &v_now_pack_p,
                                     &target_session.kv_k[ai],
                                     &target_session.kv_v[ai],
-                                    (position_n as usize) * kv_dim,
-                                    kv_dim,
+                                    (chunk_start as usize) * kv_dim,
+                                    chunk_p * kv_dim,
                                 )?;
+                                enc.end();
+                            }
+
+                            for n_idx in 0..chunk_p {
+                                let position_n = chunk_start + n_idx as u32;
+                                let q_normed_n = q_normed_pack_p
+                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                let attn_o_n = attn_o_pack_p
+                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                let enc = KernelEncoder::begin(&cmd_buf);
                                 target_session.kv_n_pos[ai] = position_n as usize + 1;
 
                                 const V4_HEAD_DIM: usize = 256;
@@ -5581,46 +5585,44 @@ mod tests {
                             .map_err(crate::metal_forward::MfError::from)
                         });
                         attn_decode_ms += timed("attn_decode", &mut |enc| {
+                            crate::metal::encode_rope_neox_f32_packed_consecutive(
+                                &ctx,
+                                enc,
+                                &q_normed_pack_p,
+                                total_n,
+                                n_q,
+                                head_dim,
+                                n_rot,
+                                0,
+                                arch.rope_theta,
+                            )?;
+                            crate::metal::encode_rope_neox_f32_packed_consecutive(
+                                &ctx,
+                                enc,
+                                &k_normed_pack_p,
+                                total_n,
+                                n_kv,
+                                head_dim,
+                                n_rot,
+                                0,
+                                arch.rope_theta,
+                            )?;
+                            crate::metal::encode_scatter_offset_f32_to_f16_kv(
+                                &ctx,
+                                enc,
+                                &k_normed_pack_p,
+                                &v_now_pack_p,
+                                &sess.kv_k[ai],
+                                &sess.kv_v[ai],
+                                0,
+                                total_n * kv_dim,
+                            )?;
                             for n_idx in 0..total_n {
                                 let position_n = n_idx as u32;
                                 let q_normed_n = q_normed_pack_p
                                     .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                                let k_normed_n = k_normed_pack_p
-                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                                let v_now_n = v_now_pack_p
-                                    .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
                                 let attn_o_n = attn_o_pack_p
                                     .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                                crate::metal::encode_rope_neox_f32(
-                                    &ctx,
-                                    enc,
-                                    &q_normed_n,
-                                    n_q,
-                                    head_dim,
-                                    n_rot,
-                                    position_n,
-                                    arch.rope_theta,
-                                )?;
-                                crate::metal::encode_rope_neox_f32(
-                                    &ctx,
-                                    enc,
-                                    &k_normed_n,
-                                    n_kv,
-                                    head_dim,
-                                    n_rot,
-                                    position_n,
-                                    arch.rope_theta,
-                                )?;
-                                crate::metal::encode_scatter_offset_f32_to_f16_kv(
-                                    &ctx,
-                                    enc,
-                                    &k_normed_n,
-                                    &v_now_n,
-                                    &sess.kv_k[ai],
-                                    &sess.kv_v[ai],
-                                    n_idx * kv_dim,
-                                    kv_dim,
-                                )?;
                                 sess.kv_n_pos[ai] = n_idx + 1;
                                 let group = n_q / n_kv;
                                 let nwg =

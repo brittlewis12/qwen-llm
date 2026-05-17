@@ -83,9 +83,8 @@ same optimization strategy.
 - Dense FFN and projections: decode uses fused mat-vec style kernels; prefill is
   increasingly about real mat-mat quality on Q4/Q5/Q6 surfaces.
 - MoE: router and expert execution are already GPU-resident. Packed prefill now
-  batches the Q8 mixer projections, but remains bottlenecked by the routed/shared
-  expert tail; both generic expert-major gather/scatter and a small token-major
-  packed route/down cleanup failed to move pp320 materially.
+  batches Q8 mixer projections, routed expert tail, and shared expert tail over
+  prompt chunks. Generic expert-major gather/scatter remains a measured negative.
 - GDN / recurrent state: these kernels are structurally different from attention
   and can be dominated by tiny dependent updates, not bulk FLOPs.
 - DFlash / MTP: speculative paths add their own attention and verification
@@ -96,9 +95,9 @@ Current repo bottleneck map from the docs:
 - Dense packed prompt prefill is now mostly FFN / projection mat-mat quality,
   not recurrent glue.
 - Long-context dense decode still has meaningful attention cost growth.
-- MoE packed prefill is mostly a routed/shared expert-tail scheduling problem;
-  Q8 mixer packing is fixed, but the next branch needs stage proof before more
-  complexity is stacked onto it.
+- MoE packed prefill has had the obvious Q8 mixer, routed expert, and shared
+  expert token-loop bottlenecks lifted. The next branch needs a fresh phase
+  profile before more complexity is stacked onto it.
 - Current dense KV-Q8 is a measured negative result on M4 for the existing
   reader shape.
 - CPU encode overhead exists, but current roadmap evidence says it is not yet
@@ -736,16 +735,15 @@ Try first:
 - expert reuse / locality measurement before attempting persistent grouped work,
 - custom persistent routed kernels only if they improve expert weight locality or
   keep useful expert state resident,
-- keep shared-expert batching and reduced-precision routed-mid experiments out of
-  the first branch unless a profile shows they are the limiter.
+- keep reduced-precision routed-mid experiments out of the first branch unless a
+  profile shows they are the limiter.
 
 Avoid by default:
 
 - generic CPU-ledger expert-major gather/scatter + per-expert GEMM; it is already
   a measured negative on A3B and A10B,
-- more token-major packing of route metadata or Q5 down/reduce unless it clears an
-  end-to-end pp320 gate, because the current packed route/down cleanup was
-  correctness-positive but throughput-neutral.
+- broad token-major packing beyond the fixed route/routed tail unless it clears
+  an end-to-end prompt-length sweep and a stage profile.
 
 ### GDN / recurrent state
 
@@ -841,8 +839,9 @@ Use this before changing code.
 
 - If `phase` says dense prompt is FFN / projection dominated, work on paired
   same-input projection fusion and mat-mat quality first.
-- If MoE packed prefill is still routed-FFN dominated, do expert-major grouping
-  before any more token-loop cleanup.
+- If MoE packed prefill looks routed/shared dominated, first check whether the
+  packed token-major paths are active; generic expert-major grouping already lost
+  and should not be the default next move.
 - If attention cost rises sharply with context and the GPU is busy, tune
   attention shape or KV layout.
 - If attention cost rises with context and LLC / MMU limiters are high while ALU

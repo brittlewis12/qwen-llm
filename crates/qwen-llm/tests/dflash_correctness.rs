@@ -2105,6 +2105,120 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
 }
 
 #[test]
+fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
+    let model_path = "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf";
+    if !std::path::Path::new(model_path).exists() {
+        eprintln!("[prefill-vs-single-a10b] skipped — target GGUF missing");
+        return;
+    }
+    let ctx = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[prefill-vs-single-a10b] loading 122B A10B…");
+    let g = GgufFile::open(model_path).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
+    let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+    let mf = MetalForward::new(&ctx, &mm);
+    let arch = &mm.arch;
+
+    let total_n: usize = 6;
+    let p: usize = 4;
+    let token_ids: Vec<i32> = (0..total_n)
+        .map(|i| ((i * 19 + 7) % (arch.vocab_size as usize - 1)) as i32 + 1)
+        .collect();
+    let cap = total_n + 16;
+
+    eprintln!("[prefill-vs-single-a10b] running oracle…");
+    let mut sess_a = MetalSession::fresh(&ctx, &mm, cap).expect("sess A");
+    let oracle_t = std::time::Instant::now();
+    let mut last_a = Vec::new();
+    for (i, &tid) in token_ids.iter().enumerate() {
+        last_a = mf
+            .single_token(tid, i as u32, &mut sess_a)
+            .expect("oracle forward");
+    }
+    let oracle_ms = oracle_t.elapsed().as_secs_f64() * 1e3;
+    eprintln!("[prefill-vs-single-a10b] oracle wall: {oracle_ms:.1} ms");
+
+    eprintln!(
+        "[prefill-vs-single-a10b] running prefill_tokens (P={p}, chunks={})…",
+        total_n.div_ceil(p)
+    );
+    let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
+    let mut layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+    let exp_t = std::time::Instant::now();
+    let last_b = prefill_tokens_with_multi_hidden(
+        &mf,
+        &token_ids,
+        0,
+        &mut sess_b,
+        &mut layer_scratch,
+        &[],
+        None,
+    )
+    .expect("prefill");
+    let exp_ms = exp_t.elapsed().as_secs_f64() * 1e3;
+    eprintln!("[prefill-vs-single-a10b] prefill wall: {exp_ms:.1} ms");
+    eprintln!(
+        "[prefill-vs-single-a10b] SPEEDUP: {:.2}×",
+        oracle_ms / exp_ms
+    );
+
+    assert_eq!(last_a.len(), last_b.len(), "logits len mismatch");
+    let cos_logits = cosine_27b(&last_a, &last_b);
+    eprintln!("[prefill-vs-single-a10b] cos(final logits)={cos_logits:.6}");
+    assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
+
+    assert_eq!(sess_a.gdn_state.len(), sess_b.gdn_state.len());
+    let mut gdn_state_min_cos = f64::INFINITY;
+    let mut gdn_conv_min_cos = f64::INFINITY;
+    for gi in 0..sess_a.gdn_state.len() {
+        let a_state = read_tensor_f32_27b(&sess_a.gdn_state[gi]);
+        let b_state = read_tensor_f32_27b(&sess_b.gdn_state[gi]);
+        gdn_state_min_cos = gdn_state_min_cos.min(cosine_27b(&a_state, &b_state));
+        let a_conv = read_tensor_f32_27b(&sess_a.gdn_conv[gi]);
+        let b_conv = read_tensor_f32_27b(&sess_b.gdn_conv[gi]);
+        gdn_conv_min_cos = gdn_conv_min_cos.min(cosine_27b(&a_conv, &b_conv));
+    }
+    eprintln!(
+        "[prefill-vs-single-a10b] GDN state cos_min={gdn_state_min_cos:.6} conv cos_min={gdn_conv_min_cos:.6}"
+    );
+    assert!(
+        gdn_state_min_cos >= 0.999,
+        "GDN state cos_min={gdn_state_min_cos} < 0.999"
+    );
+    assert!(
+        gdn_conv_min_cos >= 0.999,
+        "GDN conv cos_min={gdn_conv_min_cos} < 0.999"
+    );
+
+    assert_eq!(sess_a.kv_k.len(), sess_b.kv_k.len());
+    let kv_prefix_elems = total_n * (arch.n_kv_heads as usize * arch.attn_head_dim as usize);
+    let mut kv_k_min_cos = f64::INFINITY;
+    let mut kv_v_min_cos = f64::INFINITY;
+    for ai in 0..sess_a.kv_k.len() {
+        assert_eq!(sess_a.kv_n_pos[ai], total_n, "oracle kv_n_pos[{ai}] != T");
+        assert_eq!(sess_b.kv_n_pos[ai], total_n, "prefill kv_n_pos[{ai}] != T");
+        let a_k = read_kv_prefix_f16_to_f32(&sess_a.kv_k[ai], kv_prefix_elems);
+        let b_k = read_kv_prefix_f16_to_f32(&sess_b.kv_k[ai], kv_prefix_elems);
+        let a_v = read_kv_prefix_f16_to_f32(&sess_a.kv_v[ai], kv_prefix_elems);
+        let b_v = read_kv_prefix_f16_to_f32(&sess_b.kv_v[ai], kv_prefix_elems);
+        kv_k_min_cos = kv_k_min_cos.min(cosine_27b(&a_k, &b_k));
+        kv_v_min_cos = kv_v_min_cos.min(cosine_27b(&a_v, &b_v));
+    }
+    eprintln!(
+        "[prefill-vs-single-a10b] KV K cos_min={kv_k_min_cos:.6} V cos_min={kv_v_min_cos:.6}"
+    );
+    assert!(kv_k_min_cos >= 0.999, "KV K cos_min={kv_k_min_cos} < 0.999");
+    assert!(kv_v_min_cos >= 0.999, "KV V cos_min={kv_v_min_cos} < 0.999");
+}
+
+#[test]
 fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
     let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
     if !std::path::Path::new(model_path).exists() {

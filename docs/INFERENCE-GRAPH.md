@@ -171,11 +171,11 @@ What this buys:
 - Dense attention prompt work now also batches consecutive-position RoPE for Q/K
   and appends the chunk's K/V rows in one scatter pass before the per-token
   attention decode loop.
-- MoE packed prefill now batches Q8 mixer projections over `P`, which was the
-  large prompt unlock for A3B/A10B. Routed/shared expert execution is still the
-  live structural bottleneck: a token-major packed route/down cleanup was
-  correctness-positive on A3B but pp320-neutral, and generic grouped expert-major
-  gather/scatter was already measured negative.
+- MoE packed prefill now batches Q8 mixer projections, routed expert tail, and
+  the shared-expert branch over `P`. Q8 mixer packing was the first large prompt
+  unlock; packed routed gate/up/down was the second; packed shared gate/up/down
+  plus rowwise shared-gate residual was the third. Generic grouped expert-major
+  gather/scatter remains a measured negative.
 
 ## 4. llama.cpp Execution Graph
 
@@ -236,7 +236,7 @@ flowchart LR
 | Weight layout | Native hot dtypes kept in `MetalTensor`; some required F32 tensors dequant at load | Backend buffers can mmap/copy from GGUF; generic tensor layout | llama has mature storage/offload; we choose hot-path-specific seams. |
 | KV cache | Per-attn-layer F16 buffers in `MetalSession`; experimental Q8 path | `llama_kv_cache` ring/cell model, K/V type configurable | llama has mature multi-seq/cache management; ours is lean single-stream. |
 | GDN state | FP32 per-GDN-layer state mutated directly by kernels | Recurrent memory cells, state tensor read/write via graph ops | llama is general across sequence management; ours avoids generic state plumbing. |
-| MoE route | GPU top-k/shared gate, routed expert bank kernels; packed prefill token loop | `build_moe_ffn`/`MUL_MAT_ID` style generic route execution | We have direct control; grouped packed prefill is still open. |
+| MoE route | GPU top-k/shared gate, routed expert bank kernels; packed prefill batches route, routed experts, and shared expert over prompt chunks | `build_moe_ffn`/`MUL_MAT_ID` style generic route execution | We have direct control; generic grouped packed prefill was negative, while token-major packed tails are now major prompt wins. |
 
 ## 6. Memory Topology
 
@@ -281,7 +281,7 @@ Concrete sizes for the dense 27B shape:
 | Full attention decode | `attn_v4` groups sibling Q heads per KV head and reads K/V once per GQA group; split-K over context; now live for dense `group=4`, dense `group=6`, MoE `group=8`, and MoE `group=16` | Generic attention path through ggml ops / flash-attn kernels | Our GQA-dedup attention is a concrete long-context advantage and now unlocks the whole small dense line as a fast canary. |
 | KV append | Fused K+V scatter to F16; optional Q8 experiment | `SET_ROWS`/cache helpers, configurable cache types | Our Q8 experiment lost on M4 for the current reader; F16 is still best. |
 | Dense FFN decode | Fused Q4 gate/up SwiGLU plus down mat-vec | `build_ffn` through generic matmul/GLU ops | This is a direct decode win surface. |
-| MoE decode / prefill tail | GPU route prep, top-k + shared gate fusion, expert-bank kernels for routed/shared paths; prefill has Q8 packed mixer but still token-loop expert tail | `build_moe_ffn` with generic MoE graph and `MUL_MAT_ID` style execution | Decode is strong; packed prefill needs a measured expert-tail redesign, not generic grouped gather/scatter or more unproven token-major packing. |
+| MoE decode / prefill tail | GPU route prep, top-k + shared gate fusion, expert-bank kernels for routed/shared paths; prefill has Q8 packed mixer plus packed routed and shared expert tails | `build_moe_ffn` with generic MoE graph and `MUL_MAT_ID` style execution | Decode is strong; packed prefill needs a fresh phase profile before the next attack, not generic grouped gather/scatter. |
 | Final sampling | GPU argmax path avoids full logits readback in greedy decode | llama.cpp has mature sampling stack; logits handling depends on caller | GPU argmax is modest for MoE, neutral dense, but simplifies greedy fast path. |
 
 ## 8. What We Learned From llama.cpp
@@ -331,8 +331,8 @@ Concrete sizes for the dense 27B shape:
   tail and any future recurrence specialization.
 - MoE prompt execution: llama.cpp's generic MoE machinery is not the end state
   for us, but it is still the best correctness/shape reference while researching
-  the expert tail. The repo has now falsified both generic grouped gather/scatter
-  and a small token-major packed route/down cleanup as end-to-end pp wins.
+  the expert tail. The repo has falsified generic grouped gather/scatter, while
+  the fixed token-major packed routed tail is now a real end-to-end pp win.
 - Scheduler maturity: llama.cpp's backend scheduler and command-buffer encoding
   can overlap CPU encoding with GPU execution. We need evidence before ICB/MTL4,
   but the design space is real.

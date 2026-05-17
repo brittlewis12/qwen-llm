@@ -2776,6 +2776,66 @@ pub fn encode_axpy_f32(
     Ok(())
 }
 
+pub fn encode_axpy_rowwise_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    scales: &MetalTensor,
+    accum: &MetalTensor,
+    n_cols: usize,
+    n_rows: usize,
+) -> Result<(), MetalError> {
+    let n = n_cols * n_rows;
+    if x.n_elements() as usize != n
+        || accum.n_elements() as usize != n
+        || scales.n_elements() as usize != n_rows
+    {
+        return Err(MetalError::BadShape {
+            kernel: "axpy_rowwise",
+            detail: format!(
+                "expected x/accum n={} and scales rows={}, got x={} accum={} scales={}",
+                n,
+                n_rows,
+                x.n_elements(),
+                accum.n_elements(),
+                scales.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_axpy_rowwise_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_cols: u32,
+        n_rows: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_cols: n_cols as u32,
+            n_rows: n_rows as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, scales);
+    enc.set_tensor(3, accum);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_topk_select_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

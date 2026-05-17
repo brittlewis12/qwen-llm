@@ -31,10 +31,11 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
+    encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32,
     encode_gdn_step_decay_packed_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_swiglu_q4_K_f32_packed_slots,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
@@ -75,6 +76,36 @@ fn prefill_moe_packed_routed_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_PREFILL_MOE_PACKED_ROUTED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn prefill_moe_packed_route_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_PREFILL_MOE_PACKED_ROUTE").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn prefill_moe_packed_down_sum_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_PREFILL_MOE_PACKED_DOWN_SUM").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn prefill_moe_packed_shared_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_PREFILL_MOE_PACKED_SHARED").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -1028,6 +1059,14 @@ pub struct MetalDFlashLayerMajorScratch {
     pub moe_inner_pack: MetalTensor,
     /// `[N * topk, H]` F32 — packed routed expert outputs before tokenwise reduction.
     pub moe_expert_out_pack: MetalTensor,
+    /// `[N, F_shared]` F32 — packed shared-expert gate projection.
+    pub moe_shared_ffn_gate_pack: MetalTensor,
+    /// `[N, F_shared]` F32 — packed shared-expert up projection.
+    pub moe_shared_ffn_up_pack: MetalTensor,
+    /// `[N, F_shared]` F32 — packed shared-expert SwiGLU inner activations.
+    pub moe_shared_ffn_inner_pack: MetalTensor,
+    /// `[N, H]` F32 — packed shared-expert down projection before rowwise gate.
+    pub moe_shared_ffn_out_pack: MetalTensor,
 
     /// `[N, V]` F32 — batched lm_head output (final logits across all N
     /// tokens). H5.3b.6: lifts lm_head out of the per-token mat-vec
@@ -1120,6 +1159,7 @@ impl MetalDFlashLayerMajorScratch {
         let v = arch.vocab_size as u64;
         let moe_topk = arch.expert_used_count.min(arch.expert_count).max(1) as u64;
         let moe_f_exp = arch.expert_feed_forward_length.max(1) as u64;
+        let moe_f_shared = arch.expert_shared_feed_forward_length.max(1) as u64;
 
         // GDN dims. Sized at 1 element when the arch has no GDN to keep
         // the buffers allocatable; the GDN layer-major path is gated on
@@ -1162,6 +1202,10 @@ impl MetalDFlashLayerMajorScratch {
             moe_shared_gate_pack: MetalTensor::zeros_f32(ctx, vec![n])?,
             moe_inner_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk * moe_f_exp])?,
             moe_expert_out_pack: MetalTensor::zeros_f32(ctx, vec![n * moe_topk * h])?,
+            moe_shared_ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, moe_f_shared])?,
+            moe_shared_ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, moe_f_shared])?,
+            moe_shared_ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, moe_f_shared])?,
+            moe_shared_ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
             final_logits_pack: MetalTensor::zeros_f32(ctx, final_logits_shape)?,
             gdn_qkv_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
             gdn_z_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
@@ -3903,18 +3947,25 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     )
                 };
                 let packed_routed_path = prefill_moe_packed_routed_enabled()
-                    && g_w.dtype == GgmlType::Q4_K
-                    && u_w.dtype == GgmlType::Q4_K
-                    && d_w.dtype == GgmlType::Q5_K;
+                    && moe.gate_exps.dtype == GgmlType::Q4_K
+                    && moe.up_exps.dtype == GgmlType::Q4_K
+                    && moe.down_exps.dtype == GgmlType::Q5_K;
 
                 if !skip_ffn && packed_routed_path {
                     let topk = arch.expert_used_count.min(arch.expert_count) as usize;
                     let n_expert = arch.expert_count as usize;
                     let f_exp = arch.expert_feed_forward_length as usize;
-                    let packed_route_path = router_mat_mat_eligible(moe.gate_inp.dtype)
+                    let f_shared = arch.expert_shared_feed_forward_length as usize;
+                    let packed_route_path = prefill_moe_packed_route_enabled()
+                        && router_mat_mat_eligible(moe.gate_inp.dtype)
                         && moe.gate_inp_shexp.dtype == GgmlType::F32
                         && n_expert <= 256
                         && (1..=16).contains(&topk);
+                    let packed_shared_path = prefill_moe_packed_shared_enabled()
+                        && f_shared > 0
+                        && router_mat_mat_eligible(g_w.dtype)
+                        && router_mat_mat_eligible(u_w.dtype)
+                        && router_mat_mat_eligible(d_w.dtype);
                     let moe_topk_idx_pack_p = layer_scratch
                         .moe_topk_idx_pack
                         .view_subrange(0, vec![(chunk_p * topk) as u64]);
@@ -3932,6 +3983,21 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
                     let moe_mixer_out_pack_p = layer_scratch
                         .mixer_out_pack
+                        .view_subrange(0, vec![(chunk_p * h) as u64]);
+                    let moe_expert_out_pack_p = layer_scratch
+                        .moe_expert_out_pack
+                        .view_subrange(0, vec![(chunk_p * topk * h) as u64]);
+                    let moe_shared_ffn_gate_pack_p = layer_scratch
+                        .moe_shared_ffn_gate_pack
+                        .view_subrange(0, vec![(chunk_p * f_shared) as u64]);
+                    let moe_shared_ffn_up_pack_p = layer_scratch
+                        .moe_shared_ffn_up_pack
+                        .view_subrange(0, vec![(chunk_p * f_shared) as u64]);
+                    let moe_shared_ffn_inner_pack_p = layer_scratch
+                        .moe_shared_ffn_inner_pack
+                        .view_subrange(0, vec![(chunk_p * f_shared) as u64]);
+                    let moe_shared_ffn_out_pack_p = layer_scratch
+                        .moe_shared_ffn_out_pack
                         .view_subrange(0, vec![(chunk_p * h) as u64]);
 
                     if packed_route_path {
@@ -4001,7 +4067,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         }
                     }
 
-                    {
+                    if prefill_moe_packed_down_sum_enabled() {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         encode_moe_swiglu_q4_K_f32_packed_slots(
                             base.ctx,
@@ -4032,62 +4098,166 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             chunk_p,
                         )?;
                         enc.end();
+                    } else {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_moe_swiglu_q4_K_f32_packed_slots(
+                            base.ctx,
+                            &enc,
+                            &moe.gate_exps,
+                            &moe.up_exps,
+                            &h_pack_p,
+                            &moe_topk_idx_pack_p,
+                            &moe_inner_pack_p,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                        )?;
+                        for n_idx in 0..chunk_p {
+                            let inner_n = moe_inner_pack_p.view_subrange(
+                                (n_idx * topk * f_exp) as u64,
+                                vec![(topk * f_exp) as u64],
+                            );
+                            let idx_n = moe_topk_idx_pack_p
+                                .view_subrange((n_idx * topk) as u64, vec![topk as u64]);
+                            let weight_n = moe_topk_weight_pack_p
+                                .view_subrange((n_idx * topk) as u64, vec![topk as u64]);
+                            let expert_out_n = moe_expert_out_pack_p
+                                .view_subrange((n_idx * topk * h) as u64, vec![(topk * h) as u64]);
+                            let mixer_n = moe_mixer_out_pack_p
+                                .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                            encode_moe_down_q5_K_f32(
+                                base.ctx,
+                                &enc,
+                                &moe.down_exps,
+                                &inner_n,
+                                &idx_n,
+                                &expert_out_n,
+                                f_exp,
+                                h,
+                                n_expert,
+                                topk,
+                            )?;
+                            encode_moe_weighted_sum_f32(
+                                base.ctx,
+                                &enc,
+                                &expert_out_n,
+                                &weight_n,
+                                &mixer_n,
+                                h,
+                                topk,
+                            )?;
+                        }
+                        enc.end();
                     }
 
-                    for n_idx in 0..chunk_p {
+                    if packed_shared_path {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_copy_offset_f32(
+                        encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
-                            &x_pack_p,
-                            n_idx * h,
-                            &target_session.x,
-                            h,
-                        )?;
-                        encode_copy_offset_f32(
-                            base.ctx,
-                            &enc,
+                            g_w,
                             &h_pack_p,
-                            n_idx * h,
-                            &target_session.h,
+                            &moe_shared_ffn_gate_pack_p,
                             h,
+                            f_shared,
+                            chunk_p,
                         )?;
-                        let mixer_n =
-                            moe_mixer_out_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                        encode_copy_offset_f32(
+                        encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
-                            &mixer_n,
-                            0,
-                            &target_session.mixer_out,
+                            u_w,
+                            &h_pack_p,
+                            &moe_shared_ffn_up_pack_p,
                             h,
+                            f_shared,
+                            chunk_p,
                         )?;
-                        let shared_gate_n =
-                            moe_shared_gate_pack_p.view_subrange(n_idx as u64, vec![1]);
-                        encode_copy_offset_f32(
+                        encode_silu_mul_f32(
                             base.ctx,
                             &enc,
-                            &shared_gate_n,
-                            0,
-                            &target_session.moe_shared_gate,
-                            1,
+                            &moe_shared_ffn_gate_pack_p,
+                            &moe_shared_ffn_up_pack_p,
+                            &moe_shared_ffn_inner_pack_p,
                         )?;
-                        base.encode_moe_shared_ffn_gpu(&enc, target_session, g_w, u_w, d_w)?;
-                        encode_add_inplace_f32(
+                        encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
-                            &target_session.x,
-                            &target_session.mixer_out,
-                        )?;
-                        encode_scatter_offset_f32(
-                            base.ctx,
-                            &enc,
-                            &target_session.x,
-                            &x_pack_p,
-                            n_idx * h,
+                            d_w,
+                            &moe_shared_ffn_inner_pack_p,
+                            &moe_shared_ffn_out_pack_p,
+                            f_shared,
                             h,
+                            chunk_p,
                         )?;
+                        encode_axpy_rowwise_f32(
+                            base.ctx,
+                            &enc,
+                            &moe_shared_ffn_out_pack_p,
+                            &moe_shared_gate_pack_p,
+                            &moe_mixer_out_pack_p,
+                            h,
+                            chunk_p,
+                        )?;
+                        encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &moe_mixer_out_pack_p)?;
                         enc.end();
+                    } else {
+                        for n_idx in 0..chunk_p {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &x_pack_p,
+                                n_idx * h,
+                                &target_session.x,
+                                h,
+                            )?;
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &h_pack_p,
+                                n_idx * h,
+                                &target_session.h,
+                                h,
+                            )?;
+                            let mixer_n = moe_mixer_out_pack_p
+                                .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &mixer_n,
+                                0,
+                                &target_session.mixer_out,
+                                h,
+                            )?;
+                            let shared_gate_n =
+                                moe_shared_gate_pack_p.view_subrange(n_idx as u64, vec![1]);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &shared_gate_n,
+                                0,
+                                &target_session.moe_shared_gate,
+                                1,
+                            )?;
+                            base.encode_moe_shared_ffn_gpu(&enc, target_session, g_w, u_w, d_w)?;
+                            encode_add_inplace_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.x,
+                                &target_session.mixer_out,
+                            )?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.x,
+                                &x_pack_p,
+                                n_idx * h,
+                                h,
+                            )?;
+                            enc.end();
+                        }
                     }
                 } else if !skip_ffn {
                     for n_idx in 0..chunk_p {
@@ -5153,6 +5323,19 @@ mod tests {
         }
     }
 
+    fn timed_gpu_cmd<F>(ctx: &MetalContext, f: F) -> f64
+    where
+        F: FnOnce(&KernelEncoder),
+    {
+        let cmd = ctx.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        f(&enc);
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3
+    }
+
     fn run_packed_moe_tail_profile(model_path: &str, label: &str, chunk_p: usize, n_runs: usize) {
         if !std::path::Path::new(model_path).exists() {
             eprintln!("[packed-moe-tail-{label}] skipped — fixture missing");
@@ -5361,6 +5544,462 @@ mod tests {
             "122b",
             8,
             3,
+        );
+    }
+
+    fn run_packed_moe_tail_ab_profile(
+        model_path: &str,
+        label: &str,
+        chunk_ps: &[usize],
+        n_runs: usize,
+    ) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[moe-tail-ab-{label}] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let arch = &mm.arch;
+        assert_eq!(arch.kind, crate::model::ArchKind::Moe);
+        let h = arch.hidden_size as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let n_expert = arch.expert_count as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+
+        let block = &mf.model.blocks[0];
+        let (post_norm, g_w, u_w, d_w, moe) = match block {
+            crate::metal_forward::MetalBlock::Gdn(g) => (
+                &g.post_attn_norm,
+                &g.ffn_gate,
+                &g.ffn_up,
+                &g.ffn_down,
+                g.ffn_moe.as_ref().expect("moe block"),
+            ),
+            crate::metal_forward::MetalBlock::Attn(a) => (
+                &a.post_attn_norm,
+                &a.ffn_gate,
+                &a.ffn_up,
+                &a.ffn_down,
+                a.ffn_moe.as_ref().expect("moe block"),
+            ),
+        };
+
+        for &chunk_p in chunk_ps {
+            let mut session = MetalSession::fresh(&ctx, &mm, chunk_p + 16).expect("session");
+            let scratch =
+                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, chunk_p as u32).expect("scratch");
+            let x_pack = scratch.x_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+            let h_pack = scratch.h_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+            let router_probs_pack = scratch
+                .moe_router_probs_pack
+                .view_subrange(0, vec![(chunk_p * n_expert) as u64]);
+            let topk_idx_pack = scratch
+                .moe_topk_idx_pack
+                .view_subrange(0, vec![(chunk_p * topk) as u64]);
+            let topk_weight_pack = scratch
+                .moe_topk_weight_pack
+                .view_subrange(0, vec![(chunk_p * topk) as u64]);
+            let shared_gate_pack = scratch
+                .moe_shared_gate_pack
+                .view_subrange(0, vec![chunk_p as u64]);
+            let moe_inner_pack = scratch
+                .moe_inner_pack
+                .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
+            let mixer_out_pack = scratch
+                .mixer_out_pack
+                .view_subrange(0, vec![(chunk_p * h) as u64]);
+            let x_init: Vec<f32> = (0..chunk_p * h)
+                .map(|i| ((i % 37) as f32 - 18.0) * 1e-2)
+                .collect();
+
+            let mut old_postnorm = 0.0f64;
+            let mut old_route = 0.0f64;
+            let mut old_routed = 0.0f64;
+            let mut old_shared = 0.0f64;
+            let mut old_wall = 0.0f64;
+            let mut new_postnorm = 0.0f64;
+            let mut new_route = 0.0f64;
+            let mut new_swiglu = 0.0f64;
+            let mut new_down = 0.0f64;
+            let mut new_shared = 0.0f64;
+            let mut new_wall = 0.0f64;
+            let mut old_one_cb = 0.0f64;
+            let mut new_one_cb = 0.0f64;
+
+            for run_idx in 0..=n_runs {
+                let sample = run_idx > 0;
+
+                write_tensor_f32(&x_pack, &x_init);
+                let old_wall_start = Instant::now();
+                let ms = timed_gpu_cmd(&ctx, |enc| {
+                    encode_rms_norm_batched_f32(
+                        &ctx,
+                        enc,
+                        &x_pack,
+                        post_norm,
+                        &h_pack,
+                        chunk_p,
+                        h,
+                        crate::metal_forward::RMS_EPS,
+                    )
+                    .expect("old postnorm");
+                });
+                if sample {
+                    old_postnorm += ms;
+                }
+                for n_idx in 0..chunk_p {
+                    let ms = timed_gpu_cmd(&ctx, |enc| {
+                        encode_copy_offset_f32(&ctx, enc, &x_pack, n_idx * h, &session.x, h)
+                            .expect("old copy x");
+                        encode_copy_offset_f32(&ctx, enc, &h_pack, n_idx * h, &session.h, h)
+                            .expect("old copy h");
+                        mf.encode_moe_route_prepare(enc, &mut session, moe)
+                            .expect("old route");
+                    });
+                    if sample {
+                        old_route += ms;
+                    }
+                    let ms = timed_gpu_cmd(&ctx, |enc| {
+                        mf.encode_moe_routed_ffn_gpu(enc, &mut session, moe)
+                            .expect("old routed");
+                    });
+                    if sample {
+                        old_routed += ms;
+                    }
+                    let ms = timed_gpu_cmd(&ctx, |enc| {
+                        mf.encode_moe_shared_ffn_gpu(enc, &mut session, g_w, u_w, d_w)
+                            .expect("old shared");
+                        encode_add_inplace_f32(&ctx, enc, &session.x, &session.mixer_out)
+                            .expect("old resid");
+                        encode_scatter_offset_f32(&ctx, enc, &session.x, &x_pack, n_idx * h, h)
+                            .expect("old scatter");
+                    });
+                    if sample {
+                        old_shared += ms;
+                    }
+                }
+                if sample {
+                    old_wall += old_wall_start.elapsed().as_secs_f64() * 1e3;
+                }
+
+                write_tensor_f32(&x_pack, &x_init);
+                let new_wall_start = Instant::now();
+                let ms = timed_gpu_cmd(&ctx, |enc| {
+                    encode_rms_norm_batched_f32(
+                        &ctx,
+                        enc,
+                        &x_pack,
+                        post_norm,
+                        &h_pack,
+                        chunk_p,
+                        h,
+                        crate::metal_forward::RMS_EPS,
+                    )
+                    .expect("new postnorm");
+                });
+                if sample {
+                    new_postnorm += ms;
+                }
+                let ms = timed_gpu_cmd(&ctx, |enc| {
+                    encode_mat_mat_dispatch(
+                        &ctx,
+                        enc,
+                        &moe.gate_inp,
+                        &h_pack,
+                        &router_probs_pack,
+                        h,
+                        n_expert,
+                        chunk_p,
+                    )
+                    .expect("new router matmat");
+                    encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                        &ctx,
+                        enc,
+                        &router_probs_pack,
+                        &moe.gate_inp_shexp,
+                        &h_pack,
+                        &topk_idx_pack,
+                        &topk_weight_pack,
+                        &shared_gate_pack,
+                        n_expert,
+                        topk,
+                        h,
+                        chunk_p,
+                    )
+                    .expect("new packed topk/shared gate");
+                });
+                if sample {
+                    new_route += ms;
+                }
+                let ms = timed_gpu_cmd(&ctx, |enc| {
+                    encode_moe_swiglu_q4_K_f32_packed_slots(
+                        &ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        &h_pack,
+                        &topk_idx_pack,
+                        &moe_inner_pack,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                    )
+                    .expect("new packed swiglu");
+                });
+                if sample {
+                    new_swiglu += ms;
+                }
+                let ms = timed_gpu_cmd(&ctx, |enc| {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                        &ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner_pack,
+                        &topk_idx_pack,
+                        &topk_weight_pack,
+                        &mixer_out_pack,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                    )
+                    .expect("new packed down+sum");
+                });
+                if sample {
+                    new_down += ms;
+                }
+                for n_idx in 0..chunk_p {
+                    let mixer_n = mixer_out_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                    let shared_gate_n = shared_gate_pack.view_subrange(n_idx as u64, vec![1]);
+                    let ms = timed_gpu_cmd(&ctx, |enc| {
+                        encode_copy_offset_f32(&ctx, enc, &x_pack, n_idx * h, &session.x, h)
+                            .expect("new copy x");
+                        encode_copy_offset_f32(&ctx, enc, &h_pack, n_idx * h, &session.h, h)
+                            .expect("new copy h");
+                        encode_copy_offset_f32(&ctx, enc, &mixer_n, 0, &session.mixer_out, h)
+                            .expect("new copy routed out");
+                        encode_copy_offset_f32(
+                            &ctx,
+                            enc,
+                            &shared_gate_n,
+                            0,
+                            &session.moe_shared_gate,
+                            1,
+                        )
+                        .expect("new copy shared gate");
+                        mf.encode_moe_shared_ffn_gpu(enc, &mut session, g_w, u_w, d_w)
+                            .expect("new shared");
+                        encode_add_inplace_f32(&ctx, enc, &session.x, &session.mixer_out)
+                            .expect("new resid");
+                        encode_scatter_offset_f32(&ctx, enc, &session.x, &x_pack, n_idx * h, h)
+                            .expect("new scatter");
+                    });
+                    if sample {
+                        new_shared += ms;
+                    }
+                }
+                if sample {
+                    new_wall += new_wall_start.elapsed().as_secs_f64() * 1e3;
+                }
+
+                write_tensor_f32(&x_pack, &x_init);
+                let ms = timed_gpu_cmd(&ctx, |enc| {
+                    encode_rms_norm_batched_f32(
+                        &ctx,
+                        enc,
+                        &x_pack,
+                        post_norm,
+                        &h_pack,
+                        chunk_p,
+                        h,
+                        crate::metal_forward::RMS_EPS,
+                    )
+                    .expect("old-cb postnorm");
+                    for n_idx in 0..chunk_p {
+                        encode_copy_offset_f32(&ctx, enc, &x_pack, n_idx * h, &session.x, h)
+                            .expect("old-cb copy x");
+                        encode_copy_offset_f32(&ctx, enc, &h_pack, n_idx * h, &session.h, h)
+                            .expect("old-cb copy h");
+                        mf.encode_moe_route_prepare(enc, &mut session, moe)
+                            .expect("old-cb route");
+                        mf.encode_moe_routed_ffn_gpu(enc, &mut session, moe)
+                            .expect("old-cb routed");
+                        mf.encode_moe_shared_ffn_gpu(enc, &mut session, g_w, u_w, d_w)
+                            .expect("old-cb shared");
+                        encode_add_inplace_f32(&ctx, enc, &session.x, &session.mixer_out)
+                            .expect("old-cb resid");
+                        encode_scatter_offset_f32(&ctx, enc, &session.x, &x_pack, n_idx * h, h)
+                            .expect("old-cb scatter");
+                    }
+                });
+                if sample {
+                    old_one_cb += ms;
+                }
+
+                write_tensor_f32(&x_pack, &x_init);
+                let ms = timed_gpu_cmd(&ctx, |enc| {
+                    encode_rms_norm_batched_f32(
+                        &ctx,
+                        enc,
+                        &x_pack,
+                        post_norm,
+                        &h_pack,
+                        chunk_p,
+                        h,
+                        crate::metal_forward::RMS_EPS,
+                    )
+                    .expect("new-cb postnorm");
+                    encode_mat_mat_dispatch(
+                        &ctx,
+                        enc,
+                        &moe.gate_inp,
+                        &h_pack,
+                        &router_probs_pack,
+                        h,
+                        n_expert,
+                        chunk_p,
+                    )
+                    .expect("new-cb router matmat");
+                    encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                        &ctx,
+                        enc,
+                        &router_probs_pack,
+                        &moe.gate_inp_shexp,
+                        &h_pack,
+                        &topk_idx_pack,
+                        &topk_weight_pack,
+                        &shared_gate_pack,
+                        n_expert,
+                        topk,
+                        h,
+                        chunk_p,
+                    )
+                    .expect("new-cb packed topk/shared gate");
+                    encode_moe_swiglu_q4_K_f32_packed_slots(
+                        &ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        &h_pack,
+                        &topk_idx_pack,
+                        &moe_inner_pack,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                    )
+                    .expect("new-cb packed swiglu");
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                        &ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner_pack,
+                        &topk_idx_pack,
+                        &topk_weight_pack,
+                        &mixer_out_pack,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                    )
+                    .expect("new-cb packed down+sum");
+                    for n_idx in 0..chunk_p {
+                        let mixer_n =
+                            mixer_out_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        let shared_gate_n = shared_gate_pack.view_subrange(n_idx as u64, vec![1]);
+                        encode_copy_offset_f32(&ctx, enc, &x_pack, n_idx * h, &session.x, h)
+                            .expect("new-cb copy x");
+                        encode_copy_offset_f32(&ctx, enc, &h_pack, n_idx * h, &session.h, h)
+                            .expect("new-cb copy h");
+                        encode_copy_offset_f32(&ctx, enc, &mixer_n, 0, &session.mixer_out, h)
+                            .expect("new-cb copy routed out");
+                        encode_copy_offset_f32(
+                            &ctx,
+                            enc,
+                            &shared_gate_n,
+                            0,
+                            &session.moe_shared_gate,
+                            1,
+                        )
+                        .expect("new-cb copy shared gate");
+                        mf.encode_moe_shared_ffn_gpu(enc, &mut session, g_w, u_w, d_w)
+                            .expect("new-cb shared");
+                        encode_add_inplace_f32(&ctx, enc, &session.x, &session.mixer_out)
+                            .expect("new-cb resid");
+                        encode_scatter_offset_f32(&ctx, enc, &session.x, &x_pack, n_idx * h, h)
+                            .expect("new-cb scatter");
+                    }
+                });
+                if sample {
+                    new_one_cb += ms;
+                }
+            }
+
+            let denom = n_runs as f64;
+            let old_postnorm = old_postnorm / denom;
+            let old_route = old_route / denom;
+            let old_routed = old_routed / denom;
+            let old_shared = old_shared / denom;
+            let old_wall = old_wall / denom;
+            let new_postnorm = new_postnorm / denom;
+            let new_route = new_route / denom;
+            let new_swiglu = new_swiglu / denom;
+            let new_down = new_down / denom;
+            let new_shared = new_shared / denom;
+            let new_wall = new_wall / denom;
+            let old_one_cb = old_one_cb / denom;
+            let new_one_cb = new_one_cb / denom;
+            let old_gpu = old_postnorm + old_route + old_routed + old_shared;
+            let new_gpu = new_postnorm + new_route + new_swiglu + new_down + new_shared;
+            eprintln!(
+                "[moe-tail-ab-{label}] P={chunk_p} split_old_gpu={old_gpu:.2} ms split_new_gpu={new_gpu:.2} ms split_speedup={:.3} old_wall={old_wall:.2} ms new_wall={new_wall:.2} ms",
+                old_gpu / new_gpu
+            );
+            eprintln!(
+                "[moe-tail-ab-{label}]   one_cb old={old_one_cb:.2} ms new={new_one_cb:.2} ms speedup={:.3}",
+                old_one_cb / new_one_cb
+            );
+            eprintln!(
+                "[moe-tail-ab-{label}]   old postnorm={old_postnorm:.2} route+copy={old_route:.2} routed={old_routed:.2} shared+resid+copy={old_shared:.2}"
+            );
+            eprintln!(
+                "[moe-tail-ab-{label}]   new postnorm={new_postnorm:.2} packed_route={new_route:.2} swiglu={new_swiglu:.2} down_sum={new_down:.2} shared+resid+copy={new_shared:.2}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_packed_moe_tail_ab_profile() {
+        run_packed_moe_tail_ab_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b",
+            &[8, 16, 64, 128, 320],
+            3,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_packed_moe_tail_ab_profile() {
+        run_packed_moe_tail_ab_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b",
+            &[8, 64, 128, 320],
+            2,
         );
     }
 

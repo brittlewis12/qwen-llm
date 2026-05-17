@@ -6,6 +6,182 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-16 — MoE Packed Shared Expert + Rowwise Residual
+
+Status: second major MoE prompt win after packed routed experts. This batches the
+shared-expert branch that became the largest remaining MoE tail bucket.
+
+### What Changed
+
+- Added packed shared-expert scratch in `MetalDFlashLayerMajorScratch`:
+  `[P, F_shared]` gate/up/inner and `[P, H]` shared output.
+- Added `kernel_axpy_rowwise_f32` plus Rust wrapper so one kernel can apply
+  `mixer_out[token, :] += shared_gate[token] * shared_out[token, :]` across the
+  prompt chunk.
+- In packed MoE prefill, shared gate/up/down now run via `encode_mat_mat_dispatch`
+  over `h_pack`, `silu_mul`, rowwise AXPY into routed `mixer_out_pack`, and one
+  packed residual add into `x_pack`.
+- Added `QWEN_PREFILL_MOE_PACKED_SHARED=0` as a kill switch.
+
+### Measurements
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic prompts, one prompt chunk
+unless noted, tail skipped, sequential.
+
+35B A3B Q4_K_M:
+
+| Prompt tokens | Packed routed + shared | Shared disabled | Routed disabled baseline | Notes |
+| ---: | ---: | ---: | ---: | --- |
+| 64 | `360.39 t/s` | — | `188.52 t/s` | prompt-length sweep |
+| 128 | `389.68 t/s` | — | `194.46 t/s` | prompt-length sweep |
+| 320 | `399.77 t/s` | `262.09 t/s` | `196.71 t/s` | `~2.03x` over routed-disabled baseline |
+| 512 | `396.10 t/s` | — | `196.20 t/s` | prompt-length sweep |
+| 1024 | `390.14 t/s` | — | `194.33 t/s` | prompt-length sweep |
+
+122B A10B Q4_K_XL:
+
+| Prompt tokens | Packed routed + shared | Shared disabled | Routed disabled baseline | Notes |
+| ---: | ---: | ---: | ---: | --- |
+| 128 | `143.96 t/s` | — | `83.95 t/s` | prompt-length sweep |
+| 320 | `148.92 t/s` | `107.63 t/s` | `84.81 t/s` | `~1.76x` over routed-disabled baseline |
+| 512 | `149.40 t/s` | — | `84.68 t/s` | prompt-length sweep |
+
+Default MoE chunking (`chunk=128`) remains strong at pp320:
+
+- 35B A3B: `375.91 +/- 0.43 t/s`
+- 122B A10B: `150.37 +/- 0.02 t/s`
+
+Dense guardrails after adding shared scratch and rowwise AXPY stayed flat:
+
+- 9B dense pp320: `711.60 +/- 0.81 t/s`
+- 27B dense pp320: `212.08 +/- 0.15 t/s`
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B default packed path:
+  - `prefill_tokens_matches_single_token_loop_35b_a3b_moe` passed.
+  - `prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b` passed.
+- A10B default packed path:
+  - `prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke` passed.
+- A3B separate-process kill-switch matrix passed:
+  - `QWEN_PREFILL_MOE_PACKED_SHARED=0`
+  - `QWEN_PREFILL_MOE_PACKED_ROUTE=0`
+  - `QWEN_PREFILL_MOE_PACKED_DOWN_SUM=0`
+
+### Current Read
+
+- MoE prompt prefill has now moved in two steps after the pp harness exposed the
+  gap: Q8 mixer packing, then packed routed + shared expert tails.
+- The A3B pp320 stack moved roughly `~96 -> ~197 -> ~261 -> ~400 t/s`.
+- The A10B pp320 stack moved roughly `~37.6 -> ~85 -> ~107 -> ~149 t/s`.
+- Remaining MoE gap to llama-bench is still large, but the live bottleneck is no
+  longer obvious token-loop expert dispatch. The next attack should start with a
+  fresh phase profile and prompt-length sweep rather than assuming another MoE
+  FFN rewrite is the highest-EV move.
+
+## 2026-05-16 — MoE Packed-Routed Branch Activated + Q4_K Layout Fix
+
+Status: major MoE prompt win reached after correcting the checkpointed branch.
+The previous "did not clear gate" result was a false negative: production was
+gated on shared-expert dtypes, so the packed routed path was not actually active
+in pp runs.
+
+### What Changed
+
+- Fixed the production gate for `QWEN_PREFILL_MOE_PACKED_ROUTED`: it now checks
+  routed expert dtypes (`moe.gate_exps`, `moe.up_exps`, `moe.down_exps`) instead
+  of shared-expert `ffn_gate/up/down` dtypes.
+- Fixed `kernel_moe_swiglu_q4_K_f32_packed_slots`: the packed Q4_K routed
+  gate/up kernel now mirrors the single-token Q4_K byte layout exactly, with only
+  the token offset added. The earlier packed kernel used the wrong Q4_K layout and
+  failed correctness once the branch was truly active.
+- Added subpath kill switches for diagnosis:
+  - `QWEN_PREFILL_MOE_PACKED_ROUTE=0`
+  - `QWEN_PREFILL_MOE_PACKED_DOWN_SUM=0`
+- Added an ignored MoE tail A/B profiler that compares old token-loop routed FFN
+  against packed route + packed routed gate/up/down at multiple `P` values and
+  reports both split-stage and one-command-buffer timings.
+- Added an A10B single-token-loop vs packed-prefill smoke correctness test.
+
+### Prompt-Length Sweep
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic prompts, one prompt chunk
+(`--prefill-chunk == -p`), tail skipped, sequential. `fallback` means
+`QWEN_PREFILL_MOE_PACKED_ROUTED=0`.
+
+35B A3B Q4_K_M:
+
+| Prompt tokens | Packed routed | Fallback | Speedup |
+| ---: | ---: | ---: | ---: |
+| 64 | `249.01 t/s` | `188.52 t/s` | `1.32x` |
+| 128 | `259.18 t/s` | `194.46 t/s` | `1.33x` |
+| 320 | `261.20 t/s` | `196.71 t/s` | `1.33x` |
+| 512 | `259.88 t/s` | `196.20 t/s` | `1.32x` |
+| 1024 | `256.19 t/s` | `194.33 t/s` | `1.32x` |
+
+122B A10B Q4_K_XL:
+
+| Prompt tokens | Packed routed | Fallback | Speedup |
+| ---: | ---: | ---: | ---: |
+| 128 | `104.71 t/s` | `83.95 t/s` | `1.25x` |
+| 320 | `106.73 t/s` | `84.81 t/s` | `1.26x` |
+| 512 | `107.05 t/s` | `84.68 t/s` | `1.26x` |
+
+Default MoE chunking (`chunk=128`) remains above the gate at pp320:
+
+- 35B A3B: `254.43 +/- 0.64 t/s`
+- 122B A10B: `107.18 +/- 0.05 t/s`
+
+Dense guardrails stayed flat when rerun sequentially:
+
+- 9B dense pp320: `711.75 +/- 0.15 t/s`
+- 27B dense pp320: `212.00 +/- 0.02 t/s`
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_35b_a3b_moe -- --nocapture`
+  - final logits cos `0.999985`; GDN/KV minima `>=0.999736`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b -- --nocapture`
+  - final logits cos `1.000000`; hidden cos_min `1.000000`
+- `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke -- --nocapture`
+  - final logits/GDN/KV cos all `1.000000`
+
+### Attribution
+
+The fixed A3B one-command-buffer profiler shows the packed path wins across the
+range and scales with `P`:
+
+| P | Old tail | New tail | Speedup |
+| ---: | ---: | ---: | ---: |
+| 8 | `2.43 ms` | `2.00 ms` | `1.21x` |
+| 16 | `3.59 ms` | `2.54 ms` | `1.41x` |
+| 64 | `7.98 ms` | `5.15 ms` | `1.55x` |
+| 128 | `15.86 ms` | `10.15 ms` | `1.56x` |
+| 320 | `40.90 ms` | `25.71 ms` | `1.59x` |
+
+At `P=320`, the new split-stage profile is:
+
+- packed route/top-k/shared gate: `0.81 ms`
+- packed Q4_K routed SwiGLU: `4.84 ms`
+- packed Q5_K down+sum: `8.24 ms`
+- shared expert + residual + copies: `15.56 ms`
+
+### Current Read
+
+- The packed routed branch is now a real keeper, not a neutral probe.
+- `pp320` remains a useful llama-bench anchor, but the prompt-length sweep shows
+  the win is not a 320-token artifact.
+- The next MoE bottleneck is shared expert / residual / copy, not route/top-k or
+  routed gate/up/down. Prior shared batching was negative, so the next attack
+  needs a narrower stage A/B rather than reintroducing generic batching.
+- Remaining risks to keep in view: packed route top-k near-tie stability, more
+  A10B/odd-length correctness coverage, and avoiding future divergence between
+  the single-token and packed Q4_K dequant layouts.
+
 ## 2026-05-16 — Checkpoint: MoE Packed-Routed Probe Did Not Clear Gate
 
 Status: checkpointing a mixed worktree. The Q8 mixer fix remains a real keeper;

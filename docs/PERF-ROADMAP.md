@@ -44,11 +44,13 @@ M4 Max, release `qwen-bench`, sequential runs.
 
 Prompt-only anchors, `pp320` synthetic prompt unless noted:
 
-- `qwen-llm` 9B dense packed pp: `~710.0 t/s`; `llama-bench`: `~824.0 t/s`
-- `qwen-llm` 27B dense packed pp: `~211.9 t/s`; `llama-bench`: `~240.9 t/s`
-- `qwen-llm` 35B A3B packed pp after Q8 mixer packing: `~197.4 t/s`;
+- `qwen-llm` 9B dense packed pp: `~711.8 t/s`; `llama-bench`: `~824.0 t/s`
+- `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
+- `qwen-llm` 35B A3B packed pp after packed routed+shared expert tail:
+  `~399.8 t/s`;
   `llama-bench`: `~1222.4 t/s`
-- `qwen-llm` 122B A10B packed pp after Q8 mixer packing: `~85.2 t/s`;
+- `qwen-llm` 122B A10B packed pp after packed routed+shared expert tail:
+  `~148.9 t/s`;
   `llama-bench`: `~393.3 t/s`
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
@@ -64,8 +66,15 @@ Recent confirmed wins:
 - Enabling `Q8_0` packed mat-mat eligibility for MoE GDN/attention projections
   moves A3B pp320 from `~96 t/s` to `~194-198 t/s` and A10B pp320 from
   `~37.6 t/s` to `~85.1 t/s`, while dense 9B/27B guardrails stay flat.
-  That is the current MoE keeper; the later packed-routed cleanup did not move
-  pp320 materially.
+- Activating the packed routed expert tail after fixing its production dtype gate
+  and Q4_K byte layout moves A3B pp320 to `~261.5 t/s` and A10B pp320 to
+  `~106.8 t/s`. The win holds across prompt lengths: A3B `pp64..pp1024` stays
+  `~249-261 t/s` vs fallback `~188-197 t/s`; A10B `pp128..pp512` stays
+  `~105-107 t/s` vs fallback `~84-85 t/s`.
+- Batching the shared-expert branch plus rowwise shared gate/residual is another
+  major MoE prompt win: A3B pp320 moves to `~399.8 t/s` and A10B pp320 to
+  `~148.9 t/s`; default chunk-128 pp320 is `~375.9 t/s` on A3B and
+  `~150.4 t/s` on A10B. Dense 9B/27B guardrails remain flat.
 - Packed attention-body cleanup now batches consecutive-position RoPE for Q/K and
   scatters the whole chunk's K/V rows into the cache in one dispatch before the
   per-token attention loop. On the repeated 320-token 27B prompt, packed prefill
@@ -153,11 +162,6 @@ Recent measured negatives:
   end-to-end on A3B packed prefill.
 - F16 routed-inner traffic reduction on the live Q5-down MoE path is a wash to
   slight loser end-to-end.
-- Token-major packed routed MoE cleanup with packed route metadata, packed Q4_K
-  gate/up, and packed Q5_K down+weighted-sum is A3B-correct but pp320-neutral:
-  A3B `197.41 +/- 0.12 t/s`, A10B `85.16 +/- 0.75 t/s`, below gates of
-  `>=208` / `>=89 t/s`. Treat it as experimental/default-off material unless a
-  later stage profile proves a local win.
 - Dense paired `gate+up` prompt fusion is exact-correct but only `~1.04x` in the
   exact-shape 27B microbench at `N=321`, below the go gate.
 - Forcing single Q4 prompt mat-mat to `NR1=16` is worse than the current `NR1=32`
@@ -353,10 +357,10 @@ Acceptance gates:
 - Keep these as cheap structural cleanup unless traces show a larger-than-expected
   wall effect.
 
-### 7. MoE Next: Token-Major Cleanup Or Custom Persistent Kernel Research
+### 7. MoE Next: Fresh Phase Profile After Packed Expert Tails
 
-Optimizes: MoE prompt throughput on A3B / 122B after the generic grouped path was
-falsified.
+Optimizes: MoE prompt throughput on A3B / 122B after Q8 mixer, packed routed,
+and packed shared-expert prompt wins.
 
 Current read:
 
@@ -365,28 +369,27 @@ Current read:
   beat the current packed stage-1 MoE path end-to-end.
 - The Q8 mixer eligibility fix was the first major MoE prompt unlock, moving
   A3B pp320 to `~194-198 t/s` and A10B pp320 to `~85.1 t/s`.
-- A follow-on token-major packed routed branch, including packed route/top-k and
-  packed Q5 down+weighted-sum, is currently correctness-positive on A3B but does
-  not move end-to-end pp320. Do not use it as evidence that token-major packing
-  is a win.
-- No-FFN probes after that fix show the remaining gap is now dominated by the
-  token-loop routed/shared expert path, not mixer projections.
-- Packed MoE tail profiling at `P=8` splits one block roughly into route/copy
-  `~14-20%`, routed FFN `~47-58%`, and shared/residual/copy `~28-32%`.
-- The next MoE upside likely requires smaller token-major cleanup or a genuinely
-  custom persistent routed kernel, not another generic gather/scatter experiment.
+- The packed routed branch became a real win once the production gate checked
+  routed expert dtypes and the packed Q4_K SwiGLU layout matched the single-token
+  kernel. A3B pp320 is now `~261.5 t/s`; A10B pp320 is now `~106.8 t/s`.
+- The packed shared-expert branch then moved A3B pp320 to `~399.8 t/s` and A10B
+  pp320 to `~148.9 t/s` by batching shared gate/up/down and applying shared gate
+  with a rowwise AXPY into the routed mixer output.
+- The next MoE upside is no longer obvious. Start from a fresh phase profile after
+  both packed expert tails, then decide whether attention/GDN, remaining MoE
+  elementwise/copy, or command structure is the strongest next target.
 
 Acceptance gates:
 
 - Any new MoE branch must explain why it avoids the generic grouped-GEMM failure
   mode before it gets implementation time.
 - Keep MoE correctness gates and packed-MoE tail attribution in the loop.
-- Keep or enable the packed-routed branch only if it clears the explicit gate:
-  A3B pp320 `>=208 t/s`, A10B pp320 `>=89 t/s`, no dense guardrail regression,
-  and routed phase at least `10-15%` lower in a stage profile.
-- If separated from the forced checkpoint, default the packed-routed branch off
-  or drop it unless the missing A10B correctness and dense guardrails pass and a
-  local phase win appears.
+- Keep packed routed enabled only with the current correctness matrix green:
+  A3B single-token-loop + hidden capture, A10B smoke, and dense 9B/27B guardrails.
+- Keep packed shared enabled only with the current correctness matrix green,
+  including separate-process kill-switch checks for route/down/shared toggles.
+- Before the next MoE optimization, rerun a phase profile and a prompt-length
+  sweep; do not assume the old shared/residual/copy bucket is still dominant.
 
 ### 8. Use 9B As The Fast Dense Long-Context Canary
 

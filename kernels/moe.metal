@@ -486,72 +486,77 @@ kernel void kernel_moe_swiglu_q4_K_f32_packed_slots(
         }
 
         for (short row = 0; row < NR0_Q4K; ++row) {
-            device const uchar * qg = row0_g + (ulong)row * row_stride_bytes + (ulong)ib * Q4K_BYTES;
-            device const uchar * qu = row0_u + (ulong)row * row_stride_bytes + (ulong)ib * Q4K_BYTES;
-            device const half  * dh_g = (device const half *)qg;
-            device const half  * dh_u = (device const half *)qu;
-            device const uint16_t * qs_g = (device const uint16_t *)(qg + 2);
-            device const uint16_t * qs_u = (device const uint16_t *)(qu + 2);
-            device const uint16_t * qh_g = (device const uint16_t *)(qg + 66);
-            device const uint16_t * qh_u = (device const uint16_t *)(qu + 66);
-            device const uint16_t * scales_g = (device const uint16_t *)(qg + 18);
-            device const uint16_t * scales_u = (device const uint16_t *)(qu + 18);
+            if (first_row + row >= args.n_out) break;
 
-            for (int l = 0; l < 2; ++l) {
-                const uint16_t sc = scales_g[iq + l * 2];
-                sc16[l] = sc;
-            }
-            float4 acc1 = {0.f, 0.f, 0.f, 0.f};
-            float4 acc2 = {0.f, 0.f, 0.f, 0.f};
-            for (int i = 0; i < 8; ++i) {
-                const uint16_t q1 = qs_g[iq + i * 2];
-                const uint16_t q2 = qh_g[iq + i] & kmask1;
-                acc1[0] += yl[2*i + 0] * (q1 & 0x000F);
-                acc1[1] += yl[2*i + 1] * (q1 & 0x0F00);
-                acc1[2] += yl[2*i + 8] * (q1 & 0x00F0);
-                acc1[3] += yl[2*i + 9] * (q1 & 0xF000);
-                acc2[0] += yh[2*i + 0] * (q2 & 0x000F);
-                acc2[1] += yh[2*i + 1] * (q2 & 0x0F00);
-                acc2[2] += yh[2*i + 8] * (q2 & 0x00F0);
-                acc2[3] += yh[2*i + 9] * (q2 & 0xF000);
-            }
-            sumf_g[row] += (float)dh_g[0] * (
-                  (acc1[0] + 1.f/256.f * acc1[1]) * sc8[0]
-                + (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f
-                + (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4]
-                + (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f
-            ) - (float)dh_g[1] * (
-                  sumy[0] * sc8[2] + sumy[1] * sc8[3]
-                + sumy[2] * sc8[6] + sumy[3] * sc8[7]
-            );
+            {
+                device const uchar * blk = row0_g + (ulong)row * row_stride_bytes + (ulong)ib * Q4K_BYTES;
+                device const half     * dh = (device const half *) blk;
+                device const uint16_t * sc = (device const uint16_t *)(blk + 4) + iq;
+                device const uint16_t * q1 = (device const uint16_t *)(blk + 4 + 12) + 16 * iq + 4 * ir;
+                device const uint16_t * q2 = q1 + 32;
 
-            for (int l = 0; l < 2; ++l) {
-                const uint16_t sc = scales_u[iq + l * 2];
-                sc16[l] = sc;
+                sc16[0] =  sc[0]                & kmask1;
+                sc16[1] =  sc[2]                & kmask1;
+                sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
+                sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+
+                float4 acc1 = {0.f, 0.f, 0.f, 0.f};
+                float4 acc2 = {0.f, 0.f, 0.f, 0.f};
+                for (short i = 0; i < 4; ++i) {
+                    acc1[0] += yl[2*i + 0] * (q1[i] & 0x000F);
+                    acc1[1] += yl[2*i + 1] * (q1[i] & 0x0F00);
+                    acc1[2] += yl[2*i + 8] * (q1[i] & 0x00F0);
+                    acc1[3] += yl[2*i + 9] * (q1[i] & 0xF000);
+                    acc2[0] += yh[2*i + 0] * (q2[i] & 0x000F);
+                    acc2[1] += yh[2*i + 1] * (q2[i] & 0x0F00);
+                    acc2[2] += yh[2*i + 8] * (q2[i] & 0x00F0);
+                    acc2[3] += yh[2*i + 9] * (q2[i] & 0xF000);
+                }
+                sumf_g[row] += (float)dh[0] * (
+                      (acc1[0] + 1.f/256.f * acc1[1]) * sc8[0]
+                    + (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f
+                    + (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4]
+                    + (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f
+                ) - (float)dh[1] * (
+                      sumy[0] * sc8[2] + sumy[1] * sc8[3]
+                    + sumy[2] * sc8[6] + sumy[3] * sc8[7]
+                );
             }
-            acc1 = {0.f, 0.f, 0.f, 0.f};
-            acc2 = {0.f, 0.f, 0.f, 0.f};
-            for (int i = 0; i < 8; ++i) {
-                const uint16_t q1 = qs_u[iq + i * 2];
-                const uint16_t q2 = qh_u[iq + i] & kmask1;
-                acc1[0] += yl[2*i + 0] * (q1 & 0x000F);
-                acc1[1] += yl[2*i + 1] * (q1 & 0x0F00);
-                acc1[2] += yl[2*i + 8] * (q1 & 0x00F0);
-                acc1[3] += yl[2*i + 9] * (q1 & 0xF000);
-                acc2[0] += yh[2*i + 0] * (q2 & 0x000F);
-                acc2[1] += yh[2*i + 1] * (q2 & 0x0F00);
-                acc2[2] += yh[2*i + 8] * (q2 & 0x00F0);
-                acc2[3] += yh[2*i + 9] * (q2 & 0xF000);
+
+            {
+                device const uchar * blk = row0_u + (ulong)row * row_stride_bytes + (ulong)ib * Q4K_BYTES;
+                device const half     * dh = (device const half *) blk;
+                device const uint16_t * sc = (device const uint16_t *)(blk + 4) + iq;
+                device const uint16_t * q1 = (device const uint16_t *)(blk + 4 + 12) + 16 * iq + 4 * ir;
+                device const uint16_t * q2 = q1 + 32;
+
+                sc16[0] =  sc[0]                & kmask1;
+                sc16[1] =  sc[2]                & kmask1;
+                sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
+                sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+
+                float4 acc1 = {0.f, 0.f, 0.f, 0.f};
+                float4 acc2 = {0.f, 0.f, 0.f, 0.f};
+                for (short i = 0; i < 4; ++i) {
+                    acc1[0] += yl[2*i + 0] * (q1[i] & 0x000F);
+                    acc1[1] += yl[2*i + 1] * (q1[i] & 0x0F00);
+                    acc1[2] += yl[2*i + 8] * (q1[i] & 0x00F0);
+                    acc1[3] += yl[2*i + 9] * (q1[i] & 0xF000);
+                    acc2[0] += yh[2*i + 0] * (q2[i] & 0x000F);
+                    acc2[1] += yh[2*i + 1] * (q2[i] & 0x0F00);
+                    acc2[2] += yh[2*i + 8] * (q2[i] & 0x00F0);
+                    acc2[3] += yh[2*i + 9] * (q2[i] & 0xF000);
+                }
+                sumf_u[row] += (float)dh[0] * (
+                      (acc1[0] + 1.f/256.f * acc1[1]) * sc8[0]
+                    + (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f
+                    + (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4]
+                    + (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f
+                ) - (float)dh[1] * (
+                      sumy[0] * sc8[2] + sumy[1] * sc8[3]
+                    + sumy[2] * sc8[6] + sumy[3] * sc8[7]
+                );
             }
-            sumf_u[row] += (float)dh_u[0] * (
-                  (acc1[0] + 1.f/256.f * acc1[1]) * sc8[0]
-                + (acc1[2] + 1.f/256.f * acc1[3]) * sc8[1] * 1.f/16.f
-                + (acc2[0] + 1.f/256.f * acc2[1]) * sc8[4]
-                + (acc2[2] + 1.f/256.f * acc2[3]) * sc8[5] * 1.f/16.f
-            ) - (float)dh_u[1] * (
-                  sumy[0] * sc8[2] + sumy[1] * sc8[3]
-                + sumy[2] * sc8[6] + sumy[3] * sc8[7]
-            );
         }
         y4 += 4 * QK_K;
     }
@@ -1099,4 +1104,21 @@ kernel void kernel_axpy_scalar_f32(
         uint tid [[thread_position_in_grid]]) {
     if (tid >= args.n) return;
     accum[tid] += scale[0] * x[tid];
+}
+
+struct axpy_rowwise_args {
+    uint n_cols;
+    uint n_rows;
+};
+
+kernel void kernel_axpy_rowwise_f32(
+        constant axpy_rowwise_args & args [[buffer(0)]],
+        device const float        * x     [[buffer(1)]],
+        device const float        * scale [[buffer(2)]],
+        device       float        * accum [[buffer(3)]],
+        uint tid [[thread_position_in_grid]]) {
+    const uint total = args.n_cols * args.n_rows;
+    if (tid >= total) return;
+    const uint row = tid / args.n_cols;
+    accum[tid] += scale[row] * x[tid];
 }

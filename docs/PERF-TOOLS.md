@@ -403,6 +403,10 @@ norm / `lm_head` / logits tail.
 Rules for pp sweeps:
 
 - Do not run pp benchmarks in parallel with any other repo build/bench workload.
+- Treat `pp320` as the llama-bench scoreboard anchor, not as the sole
+  representative prompt. For keeper/regression decisions, sweep at least
+  `64,128,320,512,1024` when model size allows; for 122B-class runs, `128,320,512`
+  is the minimum useful range.
 - Prefer synthetic token ids for parity with `llama-bench`; use `--prompt` only
   when the question is tokenizer/template dependent.
 - Keep `--with-tail` off for pure `llama-bench pp<N>` comparison; use it only to

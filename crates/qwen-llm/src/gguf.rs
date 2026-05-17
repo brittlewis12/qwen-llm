@@ -34,6 +34,9 @@ const GGUF_DEFAULT_ALIGNMENT: u64 = 32;
 const SPLIT_NO_KEY: &str = "split.no";
 const SPLIT_COUNT_KEY: &str = "split.count";
 const SPLIT_TENSORS_COUNT_KEY: &str = "split.tensors.count";
+/// Real split counts are tiny; this bound keeps adversarial metadata from
+/// driving enormous path vectors or file-open loops before we can fail safely.
+const MAX_SPLITS: u64 = 1024;
 /// Hard cap on `general.alignment`. The on-disk default is 32; values up to
 /// the page size are reasonable. Anything larger is almost certainly a
 /// malicious / corrupted file.
@@ -119,6 +122,7 @@ impl GgufFile {
                 model: first.model,
             });
         }
+        validate_split_count(split_count, path)?;
 
         let split_no = metadata_u64(&first.model, SPLIT_NO_KEY).ok_or_else(|| {
             GgufError::Decode(format!(
@@ -139,6 +143,7 @@ impl GgufFile {
                     path.display()
                 ))
             })?;
+        validate_split_tensors_count(split_tensors_count, path)?;
 
         let split_paths = infer_split_paths(path, split_count)?;
         let split_count_usize = usize::try_from(split_count).map_err(|_| {
@@ -152,6 +157,7 @@ impl GgufFile {
 
         let mut shards = Vec::with_capacity(split_count_usize);
         let mut tensors = Vec::with_capacity(split_tensors_capacity);
+        ensure_split_extend_within_declared_count(0, first.tensors.len(), split_tensors_count)?;
         shards.push(first.shard);
         tensors.extend(first.tensors);
         let model = first.model;
@@ -163,6 +169,11 @@ impl GgufFile {
                 split_path,
                 idx as u64,
                 split_count,
+                split_tensors_count,
+            )?;
+            ensure_split_extend_within_declared_count(
+                tensors.len(),
+                loaded.tensors.len(),
                 split_tensors_count,
             )?;
             shards.push(loaded.shard);
@@ -329,6 +340,7 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
             "unsupported GGUF version {version} (only v3 supported)"
         )));
     }
+    prevalidate_header_before_decode(&mmap)?;
 
     // Hand gguf-rs a fresh, separate File, positioned just past the magic
     // (its `decode()` reads version next, not magic). gguf-rs is the metadata
@@ -392,6 +404,7 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
                 t.name
             )));
         }
+        validate_tensor_storage_size(&t.name, t.kind, elements, t.size)?;
 
         // TENSOR-13: t.offset is relative to data start; alignment applies to
         // that. (Equivalent to data_offset % alignment == 0 since
@@ -518,6 +531,7 @@ fn validate_split_shard_metadata(
             path.display()
         ))
     })?;
+    validate_split_count(got_count, path)?;
     if got_count != expected_count {
         return Err(GgufError::Decode(format!(
             "invalid split count: {got_count} (file: {}), expected {expected_count}",
@@ -526,6 +540,7 @@ fn validate_split_shard_metadata(
     }
 
     if let Some(got_total) = metadata_u64(model, SPLIT_TENSORS_COUNT_KEY) {
+        validate_split_tensors_count(got_total, path)?;
         if got_total != expected_total_tensors {
             return Err(GgufError::Decode(format!(
                 "invalid split tensor count: {got_total} (file: {}), expected {expected_total_tensors}",
@@ -534,6 +549,42 @@ fn validate_split_shard_metadata(
         }
     }
 
+    Ok(())
+}
+
+fn validate_split_count(split_count: u64, path: &Path) -> Result<(), GgufError> {
+    if split_count > MAX_SPLITS {
+        return Err(GgufError::Decode(format!(
+            "split.count {split_count} in {} exceeds cap {MAX_SPLITS}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_split_tensors_count(total_tensors: u64, path: &Path) -> Result<(), GgufError> {
+    if total_tensors > MAX_TENSORS {
+        return Err(GgufError::Decode(format!(
+            "split.tensors.count {total_tensors} in {} exceeds cap {MAX_TENSORS}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_split_extend_within_declared_count(
+    current: usize,
+    additional: usize,
+    expected_total: u64,
+) -> Result<(), GgufError> {
+    let next = current.checked_add(additional).ok_or_else(|| {
+        GgufError::Decode("split tensor count overflows usize while merging shards".into())
+    })?;
+    if next as u64 > expected_total {
+        return Err(GgufError::Decode(format!(
+            "split shards declare {expected_total} tensors but at least {next} were found"
+        )));
+    }
     Ok(())
 }
 
@@ -556,6 +607,194 @@ fn validate_unified_tensor_table(
             tensors.len()
         )));
     }
+    Ok(())
+}
+
+fn validate_tensor_storage_size(
+    name: &str,
+    kind: u32,
+    elements: u64,
+    declared_size: u64,
+) -> Result<(), GgufError> {
+    let (block_size, type_size) = ggml_type_layout(kind).ok_or_else(|| {
+        GgufError::Decode(format!(
+            "tensor {name:?} declares unsupported GGML type {kind}"
+        ))
+    })?;
+    if block_size == 0 || type_size == 0 {
+        return Err(GgufError::Decode(format!(
+            "tensor {name:?} declares removed GGML type {kind}"
+        )));
+    }
+    if elements % block_size != 0 {
+        return Err(GgufError::Decode(format!(
+            "tensor {name:?} element count {elements} is not divisible by GGML block size {block_size} for type {kind}"
+        )));
+    }
+    let expected = elements
+        .checked_div(block_size)
+        .and_then(|blocks| blocks.checked_mul(type_size))
+        .ok_or_else(|| {
+            GgufError::Decode(format!(
+                "tensor {name:?} byte size overflows for type {kind}"
+            ))
+        })?;
+    if declared_size != expected {
+        return Err(GgufError::Decode(format!(
+            "tensor {name:?} has byte size {declared_size}, expected {expected} for type {kind}"
+        )));
+    }
+    Ok(())
+}
+
+fn ggml_type_layout(kind: u32) -> Option<(u64, u64)> {
+    let k = 256;
+    Some(match kind {
+        0 => (1, 4),
+        1 => (1, 2),
+        2 => (32, 2 + 32 / 2),
+        3 => (32, 2 + 2 + 32 / 2),
+        4 | 5 => (0, 0),
+        6 => (32, 2 + 4 + 32 / 2),
+        7 => (32, 2 + 2 + 4 + 32 / 2),
+        8 => (32, 2 + 32),
+        9 => (32, 4 + 4 + 32),
+        10 => (k, k / 16 + k / 4 + 2 + 2),
+        11 => (k, k / 8 + k / 4 + 12 + 2),
+        12 => (k, 2 + 2 + 12 + k / 2),
+        13 => (k, 2 + 2 + 12 + k / 8 + k / 2),
+        14 => (k, k / 2 + k / 4 + k / 16 + 2),
+        15 => (k, 4 + k + k / 16 * 2),
+        16 => (k, 2 + k / 8 * 2),
+        17 => (k, 2 + k / 8 * 2 + k / 32),
+        18 => (k, 2 + 3 * (k / 8)),
+        19 => (k, 2 + k / 8 + k / 16),
+        20 => (32, 2 + 16),
+        21 => (k, 2 + 13 * (k / 32) + k / 64),
+        22 => (k, 2 + k / 4 + k / 16),
+        23 => (k, 2 + 2 + k / 64 + k / 2),
+        // gguf-rs still decodes the scalar GGML tensor types using the same
+        // historical block-size rule as its size table; mirror it so our
+        // independent check agrees with the parser for accepted files.
+        24 => (k, 1),
+        25 => (k, 2),
+        26 => (k, 4),
+        27 => (k, 8),
+        28 => (k, 8),
+        29 => (k, k / 8 + k / 16 + k / 32),
+        30 => (k, 2),
+        31..=33 => (0, 0),
+        34 => (k, 2 + k / 64 + (k - 4 * (k / 64)) / 5),
+        35 => (k, 2 + k / 4),
+        36..=38 => (0, 0),
+        39 => (k, k + 1 + 16),
+        _ => return None,
+    })
+}
+
+/// Replay enough of the GGUF header before handing the file to `gguf-rs` to
+/// ensure malformed adversarial files fail as `GgufError`, not as parser
+/// panics or unbounded parser work. The full cross-checking still happens in
+/// `locate_tensor_data_start` after decode.
+fn prevalidate_header_before_decode(mmap: &[u8]) -> Result<(), GgufError> {
+    let mut p: usize = 0;
+
+    let magic = read_u32(mmap, &mut p)?;
+    if magic != GGUF_MAGIC {
+        return Err(GgufError::BadMagic);
+    }
+    let version = read_u32(mmap, &mut p)?;
+    if version != 3 {
+        return Err(GgufError::Decode(format!(
+            "unsupported GGUF version {version} (only v3 supported)"
+        )));
+    }
+
+    let num_tensors = read_u64(mmap, &mut p)?;
+    let num_kv = read_u64(mmap, &mut p)?;
+    if num_tensors > MAX_TENSORS {
+        return Err(GgufError::Decode(format!(
+            "absurd tensor count: {num_tensors} (cap {MAX_TENSORS})"
+        )));
+    }
+    if num_kv > MAX_KV {
+        return Err(GgufError::Decode(format!(
+            "absurd kv count: {num_kv} (cap {MAX_KV})"
+        )));
+    }
+
+    for _ in 0..num_kv {
+        let key_len = read_u64(mmap, &mut p)?;
+        if key_len == 0 {
+            return Err(GgufError::Decode("metadata key has zero length".into()));
+        }
+        if key_len > MAX_KEY_LEN {
+            return Err(GgufError::Decode(format!(
+                "metadata key length {key_len} exceeds {MAX_KEY_LEN}"
+            )));
+        }
+        bounds_check(mmap, p, key_len as usize)?;
+        std::str::from_utf8(&mmap[p..p + key_len as usize])
+            .map_err(|e| GgufError::Decode(format!("metadata key not valid UTF-8: {e}")))?;
+        p += key_len as usize;
+
+        let value_type = read_u32(mmap, &mut p)?;
+        skip_value(mmap, &mut p, value_type, version)?;
+    }
+
+    for _ in 0..num_tensors {
+        let name_len = read_u64(mmap, &mut p)?;
+        if name_len == 0 {
+            return Err(GgufError::Decode("tensor name has zero length".into()));
+        }
+        if name_len > MAX_TENSOR_NAME_LEN {
+            return Err(GgufError::Decode(format!(
+                "tensor name length {name_len} exceeds {MAX_TENSOR_NAME_LEN}"
+            )));
+        }
+        bounds_check(mmap, p, name_len as usize)?;
+        std::str::from_utf8(&mmap[p..p + name_len as usize])
+            .map_err(|e| GgufError::Decode(format!("tensor name not valid UTF-8: {e}")))?;
+        p += name_len as usize;
+
+        let n_dims = read_u32(mmap, &mut p)?;
+        if n_dims == 0 || n_dims > 4 {
+            return Err(GgufError::Decode(format!(
+                "tensor declares {n_dims} dimensions (must be 1..=4)"
+            )));
+        }
+        let mut elements: u64 = 1;
+        for _ in 0..n_dims {
+            let dim = read_u64(mmap, &mut p)?;
+            if dim == 0 {
+                return Err(GgufError::Decode(
+                    "tensor has a zero-length dimension".into(),
+                ));
+            }
+            if dim > MAX_DIMENSION {
+                return Err(GgufError::Decode(format!(
+                    "tensor dimension {dim} exceeds {MAX_DIMENSION}"
+                )));
+            }
+            elements = elements.checked_mul(dim).ok_or_else(|| {
+                GgufError::Decode("tensor dimension product overflows u64".into())
+            })?;
+        }
+        if elements > MAX_ELEMENTS {
+            return Err(GgufError::Decode(format!(
+                "tensor element count {elements} exceeds {MAX_ELEMENTS}"
+            )));
+        }
+        let kind = read_u32(mmap, &mut p)?;
+        if kind >= 40 {
+            return Err(GgufError::Decode(format!(
+                "tensor declares invalid GGML type {kind}"
+            )));
+        }
+        bounds_check(mmap, p, 8)?; // offset
+        p += 8;
+    }
+
     Ok(())
 }
 
@@ -853,6 +1092,11 @@ fn skip_value(mmap: &[u8], p: &mut usize, value_type: u32, version: u32) -> Resu
         9 => {
             // array: u32 item_type, length (u64 in v2/v3, u32 in v1), then items
             let item_type = read_u32(mmap, p)?;
+            if item_type == 9 {
+                return Err(GgufError::Decode(
+                    "nested metadata arrays are not supported".into(),
+                ));
+            }
             let len = if version == 1 {
                 read_u32(mmap, p)? as u64
             } else {
@@ -985,6 +1229,7 @@ mod tests {
 
     enum TestKv<'a> {
         U16(&'a str, u16),
+        U64(&'a str, u64),
         I32(&'a str, i32),
     }
 
@@ -1020,6 +1265,11 @@ mod tests {
                 TestKv::U16(key, value) => {
                     push_string(&mut b, key);
                     b.extend_from_slice(&2u32.to_le_bytes());
+                    b.extend_from_slice(&value.to_le_bytes());
+                }
+                TestKv::U64(key, value) => {
+                    push_string(&mut b, key);
+                    b.extend_from_slice(&10u32.to_le_bytes());
                     b.extend_from_slice(&value.to_le_bytes());
                 }
                 TestKv::I32(key, value) => {
@@ -1076,6 +1326,93 @@ mod tests {
             b.push(0);
         }
         b.extend_from_slice(&1.0f32.to_le_bytes());
+        b
+    }
+
+    fn build_bad_rank_gguf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        push_string(&mut b, "bad");
+        b.extend_from_slice(&5u32.to_le_bytes());
+        for _ in 0..5 {
+            b.extend_from_slice(&1u64.to_le_bytes());
+        }
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        while b.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+            b.push(0);
+        }
+        b.extend_from_slice(&1.0f32.to_le_bytes());
+        b
+    }
+
+    fn build_bad_dimension_gguf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        push_string(&mut b, "bad");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(MAX_DIMENSION + 1).to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        while b.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+            b.push(0);
+        }
+        b.extend_from_slice(&1.0f32.to_le_bytes());
+        b
+    }
+
+    fn build_bad_type_gguf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        push_string(&mut b, "bad");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        while b.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+            b.push(0);
+        }
+        b.extend_from_slice(&1.0f32.to_le_bytes());
+        b
+    }
+
+    fn build_bad_quant_alignment_gguf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        push_string(&mut b, "bad_q");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&12u32.to_le_bytes()); // Q4_K requires 256-element blocks
+        b.extend_from_slice(&0u64.to_le_bytes());
+        while b.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+            b.push(0);
+        }
+        b.extend_from_slice(&[0u8; 4]);
+        b
+    }
+
+    fn build_nested_array_metadata_gguf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        push_string(&mut b, "nested");
+        b.extend_from_slice(&9u32.to_le_bytes()); // array
+        b.extend_from_slice(&9u32.to_le_bytes()); // item_type = array
+        b.extend_from_slice(&1u64.to_le_bytes()); // one nested item
         b
     }
 
@@ -1376,8 +1713,110 @@ mod tests {
     }
 
     #[test]
+    fn rejects_split_tensor_count_overrun_while_merging() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                1,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                2,
+                1,
+                &[TestTensor {
+                    name: "b",
+                    value: 2.0,
+                }],
+            ),
+        );
+        assert_rejects!(&first, GgufError::Decode(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_absurd_split_count_before_allocating_paths() {
+        let path = write_temp(&build_test_gguf(
+            &[
+                TestKv::U16(SPLIT_NO_KEY, 0),
+                TestKv::U64(SPLIT_COUNT_KEY, MAX_SPLITS + 1),
+                TestKv::I32(SPLIT_TENSORS_COUNT_KEY, 1),
+            ],
+            &[TestTensor {
+                name: "a",
+                value: 1.0,
+            }],
+        ));
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_absurd_split_tensor_count_before_allocating_table() {
+        let path = write_temp(&build_test_gguf(
+            &[
+                TestKv::U16(SPLIT_NO_KEY, 0),
+                TestKv::U16(SPLIT_COUNT_KEY, 2),
+                TestKv::U64(SPLIT_TENSORS_COUNT_KEY, MAX_TENSORS + 1),
+            ],
+            &[TestTensor {
+                name: "a",
+                value: 1.0,
+            }],
+        ));
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn rejects_overlap_inside_one_shard() {
         let path = write_temp(&build_overlapping_gguf());
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_bad_tensor_rank_before_parser_can_panic() {
+        let path = write_temp(&build_bad_rank_gguf());
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_bad_tensor_dimension_before_parser_can_panic() {
+        let path = write_temp(&build_bad_dimension_gguf());
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_bad_tensor_type_before_parser_can_panic() {
+        let path = write_temp(&build_bad_type_gguf());
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_bad_quant_block_alignment_before_slicing() {
+        let path = write_temp(&build_bad_quant_alignment_gguf());
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_nested_metadata_array_before_recursing() {
+        let path = write_temp(&build_nested_array_metadata_gguf());
         assert_rejects!(&path, GgufError::Decode(_));
         let _ = std::fs::remove_file(&path);
     }

@@ -1,8 +1,8 @@
 //! Backend-agnostic tensor descriptor.
 //!
-//! A `TensorDesc` is a view into the mmap'd GGUF file: name + shape + ggml
-//! type tag + byte offset. Nothing is copied at load time; the file *is*
-//! the resident model.
+//! A `TensorDesc` is a view into one mmap'd GGUF shard: name + shape + ggml
+//! type tag + shard index + byte offset. Nothing is copied at load time; the
+//! file shard *is* the resident model storage.
 
 use std::fmt;
 
@@ -83,13 +83,15 @@ impl fmt::Display for GgmlType {
 
 /// One tensor's descriptor in the GGUF file.
 ///
-/// `data_offset` is the absolute byte offset from the start of the mmap'd
-/// file. `n_bytes` is `ggml_nbytes()` for the (shape, type) pair.
+/// `shard_idx` selects the mmap'd GGUF shard inside `GgufFile`. `data_offset`
+/// is the absolute byte offset from the start of that shard's mmap.
+/// `n_bytes` is `ggml_nbytes()` for the (shape, type) pair.
 #[derive(Debug, Clone)]
 pub struct TensorDesc {
     pub name: String,
     pub shape: Vec<u64>,
     pub dtype: GgmlType,
+    pub shard_idx: usize,
     pub data_offset: u64,
     pub n_bytes: u64,
 }

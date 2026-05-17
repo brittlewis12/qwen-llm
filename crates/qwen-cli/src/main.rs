@@ -38,12 +38,13 @@ fn main() -> Result<()> {
 
     let gguf = qwen_llm::gguf::GgufFile::open(&model_path)?;
     println!(
-        "loaded {}: arch={} {} tensors, mmap={} MiB, tensor-data starts at {}",
+        "loaded {}: arch={} {} tensors, {} shard(s), mmap={} MiB, primary tensor-data starts at {}",
         model_path.display(),
         gguf.architecture().unwrap_or_else(|| "?".into()),
         gguf.tensors.len(),
-        gguf.mmap.len() / (1024 * 1024),
-        gguf.tensor_data_start,
+        gguf.shard_count(),
+        gguf.total_mapped_len() / (1024 * 1024),
+        gguf.primary_shard().tensor_data_start,
     );
 
     // Group tensors by layer index. The GDN-layer test is "has ssm_* tensor",

@@ -3,9 +3,10 @@
 //! Parsing is delegated to `gguf-rs` (Britt's own crate, in `~/code/gguf`)
 //! for metadata + tensor-table semantics. We layer:
 //!
-//! 1. An independent `Mmap` of the file so kernels read tensor bytes
+//! 1. Independent `Mmap`s of the GGUF file(s) so kernels read tensor bytes
 //!    directly out of the page cache. **No tensor data is ever copied at
-//!    load time.**
+//!    load time.** llama.cpp-style split GGUFs are kept as multiple shard
+//!    mmaps behind one logical tensor table.
 //! 2. A second pass over the on-disk header to recover the tensor-data
 //!    start offset (gguf-rs's parser is streaming and doesn't expose it).
 //! 3. Defense-in-depth validation: magic + version checks, bounds checks
@@ -25,11 +26,14 @@ use memmap2::Mmap;
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// "GGUF" in little-endian (only LE is supported; see [`open`] preconditions).
 const GGUF_MAGIC: u32 = 0x46554747;
 const GGUF_DEFAULT_ALIGNMENT: u64 = 32;
+const SPLIT_NO_KEY: &str = "split.no";
+const SPLIT_COUNT_KEY: &str = "split.count";
+const SPLIT_TENSORS_COUNT_KEY: &str = "split.tensors.count";
 /// Hard cap on `general.alignment`. The on-disk default is 32; values up to
 /// the page size are reasonable. Anything larger is almost certainly a
 /// malicious / corrupted file.
@@ -53,21 +57,41 @@ impl From<anyhow::Error> for GgufError {
     }
 }
 
-/// One opened GGUF file.
+/// One opened GGUF shard.
 ///
-/// * `mmap` is held for the full lifetime; tensor slices reference it.
-/// * `tensors` are absolute-offset descriptors (origin = start of file).
-/// * `model` is the gguf-rs decoded view of metadata + tensor table.
+/// Split GGUFs are a set of complete GGUF containers, each with its own
+/// header, tensor table, tensor-data start, and mmap. Tensor descriptors carry
+/// a shard index so the public [`GgufFile::slice`] API can stay one logical
+/// model view.
 #[allow(dead_code)] // Debug is used by tests via expect_err
-pub struct GgufFile {
+pub struct GgufShard {
+    pub path: PathBuf,
     pub mmap: Mmap,
-    pub tensors: Vec<TensorDesc>,
-    pub model: GGUFModel,
     /// Absolute byte offset of the start of the tensor-data section.
-    /// All `TensorDesc.data_offset` values include this.
+    /// `TensorDesc.data_offset` values for this shard include this.
     pub tensor_data_start: u64,
     /// Tensor-data alignment in bytes (from `general.alignment`, default 32).
     pub alignment: u64,
+}
+
+/// One logical GGUF model, backed by one or more mmap'd GGUF shards.
+///
+/// * `shards` are held for the full lifetime; tensor slices reference them.
+/// * `tensors` is the unified tensor namespace across all shards.
+/// * `model` is the gguf-rs decoded view of shard 0 metadata. llama.cpp's
+///   `gguf-split` stores full model/tokenizer metadata only in shard 0; later
+///   shard metadata is used only during split validation.
+#[allow(dead_code)]
+pub struct GgufFile {
+    pub shards: Vec<GgufShard>,
+    pub tensors: Vec<TensorDesc>,
+    pub model: GGUFModel,
+}
+
+struct LoadedShard {
+    shard: GgufShard,
+    tensors: Vec<TensorDesc>,
+    model: GGUFModel,
 }
 
 impl GgufFile {
@@ -86,165 +110,91 @@ impl GgufFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, GgufError> {
         let path = path.as_ref();
 
-        // Open + mmap the file. mmap is the source of truth for tensor data.
-        let file = File::open(path)?;
-        // SAFETY: regular file held for the lifetime of `Self`. Memory
-        // mapping a file handed to us by the user is the standard path; if
-        // the file is concurrently truncated underneath us we'll SIGBUS on
-        // access — that is an OS-level signal we cannot prevent in safe
-        // Rust without copying, and would be the user racing themselves.
-        let mmap = unsafe { Mmap::map(&file)? };
-
-        // Validate magic against the mmap directly. The mmap is the *only*
-        // path that the rest of this function trusts; the streaming parser
-        // is given a separate `File` and its results are reconciled below.
-        validate_magic(&mmap)?;
-        let version = read_u32_at(&mmap, 4)?;
-        if version != 3 {
-            return Err(GgufError::Decode(format!(
-                "unsupported GGUF version {version} (only v3 supported)"
-            )));
-        }
-
-        // Hand gguf-rs a fresh, separate File, positioned just past the
-        // magic (its `decode()` reads version next, not magic). gguf-rs is
-        // the metadata parser of record; we re-derive structural offsets
-        // independently below.
-        let mut parse_file = File::open(path)?;
-        parse_file.seek(SeekFrom::Start(4))?;
-        let mut container = GGUFContainer::new(
-            GByteOrder::LE,
-            Box::new(BufReader::with_capacity(64 * 1024, parse_file)),
-            u64::MAX,
-        );
-        let model = container.decode()?;
-
-        // Read and validate alignment.
-        let alignment = read_alignment(&model)?;
-
-        // Independently locate tensor-data start by replaying the header
-        // layout against the mmap. This both validates the on-disk
-        // structure and yields the offset we need for absolute tensor
-        // addressing. Cross-checks the (num_tensors, num_kv) against
-        // gguf-rs's parse to catch any disagreement.
-        let tensor_data_start = locate_tensor_data_start(&mmap, &model, alignment)?;
-
-        // Build TensorDesc list with absolute offsets, validating every
-        // tensor lies fully inside the file with no overflow, with no
-        // overlap between any two tensor data ranges.
-        //
-        // Invariants enforced (cf. gguf-validator SPEC.md):
-        // * TENSOR-06: every dim > 0
-        // * TENSOR-07: every dim <= MAX_DIMENSION
-        // * TENSOR-08/09: product fits in u64 and <= MAX_ELEMENTS
-        // * TENSOR-13: tensor offset is a multiple of alignment
-        // * LAYOUT-02/05/08: tensor range fits in file with no overflow
-        // * LAYOUT-03: no two tensor ranges overlap
-        let mmap_len = mmap.len() as u64;
-        let mut tensors: Vec<TensorDesc> = Vec::with_capacity(model.tensors().len());
-        for t in model.tensors() {
-            // gguf-rs stores trailing 1s for unused dims; drop them so
-            // `shape.len()` reflects actual rank.
-            let mut shape: Vec<u64> = t.shape.to_vec();
-            while shape.len() > 1 && *shape.last().unwrap() == 1 {
-                shape.pop();
-            }
-
-            for &d in &shape {
-                if d == 0 {
-                    return Err(GgufError::Decode(format!(
-                        "tensor {:?} has a zero-length dimension: {:?}",
-                        t.name, shape
-                    )));
-                }
-                if d > MAX_DIMENSION {
-                    return Err(GgufError::Decode(format!(
-                        "tensor {:?} dimension {d} exceeds {MAX_DIMENSION}",
-                        t.name
-                    )));
-                }
-            }
-            let mut elements: u64 = 1;
-            for &d in &shape {
-                elements = elements.checked_mul(d).ok_or_else(|| {
-                    GgufError::Decode(format!(
-                        "tensor {:?} dimension product overflows u64",
-                        t.name
-                    ))
-                })?;
-            }
-            if elements > MAX_ELEMENTS {
-                return Err(GgufError::Decode(format!(
-                    "tensor {:?} element count {elements} exceeds {MAX_ELEMENTS}",
-                    t.name
-                )));
-            }
-
-            // TENSOR-13: t.offset is relative to data start; alignment
-            // applies to that. (Equivalent to data_offset % alignment == 0
-            // since tensor_data_start itself is aligned.)
-            if t.offset % alignment != 0 {
-                return Err(GgufError::Decode(format!(
-                    "tensor {:?} offset {} not aligned to {}",
-                    t.name, t.offset, alignment
-                )));
-            }
-
-            let data_offset = tensor_data_start.checked_add(t.offset).ok_or_else(|| {
-                GgufError::Decode(format!(
-                    "tensor {:?} offset {} overflows when added to data start {}",
-                    t.name, t.offset, tensor_data_start
-                ))
-            })?;
-            let end = data_offset.checked_add(t.size).ok_or_else(|| {
-                GgufError::Decode(format!(
-                    "tensor {:?} (offset {}, size {}) end overflows u64",
-                    t.name, data_offset, t.size
-                ))
-            })?;
-            if end > mmap_len {
-                return Err(GgufError::Decode(format!(
-                    "tensor {:?} extends past EOF: end={} file_size={}",
-                    t.name, end, mmap_len
-                )));
-            }
-            tensors.push(TensorDesc {
-                name: t.name.clone(),
-                shape,
-                dtype: GgmlType::from_raw(t.kind),
-                data_offset,
-                n_bytes: t.size,
+        let first = open_one_shard(path, 0)?;
+        let split_count = metadata_u64(&first.model, SPLIT_COUNT_KEY).unwrap_or(0);
+        if split_count <= 1 {
+            return Ok(Self {
+                shards: vec![first.shard],
+                tensors: first.tensors,
+                model: first.model,
             });
         }
 
-        // LAYOUT-03: no two tensor data ranges overlap. Sort indices by
-        // offset, then check adjacent pairs.
-        let mut sort_idx: Vec<usize> = (0..tensors.len()).collect();
-        sort_idx.sort_by_key(|&i| tensors[i].data_offset);
-        for w in sort_idx.windows(2) {
-            let (a, b) = (&tensors[w[0]], &tensors[w[1]]);
-            if a.data_offset + a.n_bytes > b.data_offset {
-                return Err(GgufError::Decode(format!(
-                    "tensors {:?} and {:?} have overlapping data ranges",
-                    a.name, b.name
-                )));
-            }
+        let split_no = metadata_u64(&first.model, SPLIT_NO_KEY).ok_or_else(|| {
+            GgufError::Decode(format!(
+                "missing {SPLIT_NO_KEY:?} in split GGUF {}",
+                path.display()
+            ))
+        })?;
+        if split_no != 0 {
+            return Err(GgufError::Decode(format!(
+                "illegal split file idx {split_no} (file: {}), model must be loaded with the first split",
+                path.display()
+            )));
+        }
+        let split_tensors_count =
+            metadata_u64(&first.model, SPLIT_TENSORS_COUNT_KEY).ok_or_else(|| {
+                GgufError::Decode(format!(
+                    "missing {SPLIT_TENSORS_COUNT_KEY:?} in split GGUF {}",
+                    path.display()
+                ))
+            })?;
+
+        let split_paths = infer_split_paths(path, split_count)?;
+        let split_count_usize = usize::try_from(split_count).map_err(|_| {
+            GgufError::Decode(format!("split.count {split_count} does not fit in usize"))
+        })?;
+        let split_tensors_capacity = usize::try_from(split_tensors_count).map_err(|_| {
+            GgufError::Decode(format!(
+                "split.tensors.count {split_tensors_count} does not fit in usize"
+            ))
+        })?;
+
+        let mut shards = Vec::with_capacity(split_count_usize);
+        let mut tensors = Vec::with_capacity(split_tensors_capacity);
+        shards.push(first.shard);
+        tensors.extend(first.tensors);
+        let model = first.model;
+
+        for (idx, split_path) in split_paths.iter().enumerate().skip(1) {
+            let loaded = open_one_shard(split_path, idx)?;
+            validate_split_shard_metadata(
+                &loaded.model,
+                split_path,
+                idx as u64,
+                split_count,
+                split_tensors_count,
+            )?;
+            shards.push(loaded.shard);
+            tensors.extend(loaded.tensors);
         }
 
+        validate_unified_tensor_table(&tensors, split_tensors_count)?;
         Ok(Self {
-            mmap,
+            shards,
             tensors,
             model,
-            tensor_data_start,
-            alignment,
         })
+    }
+
+    pub fn primary_shard(&self) -> &GgufShard {
+        &self.shards[0]
+    }
+
+    pub fn total_mapped_len(&self) -> usize {
+        self.shards.iter().map(|shard| shard.mmap.len()).sum()
+    }
+
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
     }
 
     /// Slice into the mmap for `desc`. Slice lifetime is tied to `&self`.
     pub fn slice(&self, desc: &TensorDesc) -> &[u8] {
+        let shard = &self.shards[desc.shard_idx];
         let start = desc.data_offset as usize;
         let end = start + desc.n_bytes as usize;
-        &self.mmap[start..end]
+        &shard.mmap[start..end]
     }
 
     /// Find a tensor by name. Common pattern: `find("token_embd.weight")`.
@@ -262,7 +212,7 @@ impl GgufFile {
 
     /// Convenience: lookup a u64-typed metadata value by key.
     pub fn get_u64(&self, key: &str) -> Option<u64> {
-        value_as_u64(self.model.metadata().get(key))
+        metadata_u64(&self.model, key)
     }
 
     /// Convenience: lookup a string-typed metadata value by key.
@@ -359,6 +309,256 @@ impl GgufFile {
     }
 }
 
+fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufError> {
+    // Open + mmap the file. mmap is the source of truth for tensor data.
+    let file = File::open(path)?;
+    // SAFETY: regular file held for the lifetime of `Self`. Memory mapping a
+    // file handed to us by the user is the standard path; if the file is
+    // concurrently truncated underneath us we'll SIGBUS on access — that is an
+    // OS-level signal we cannot prevent in safe Rust without copying, and
+    // would be the user racing themselves.
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    // Validate magic against the mmap directly. The mmap is the *only* path
+    // that the rest of this function trusts; the streaming parser is given a
+    // separate `File` and its results are reconciled below.
+    validate_magic(&mmap)?;
+    let version = read_u32_at(&mmap, 4)?;
+    if version != 3 {
+        return Err(GgufError::Decode(format!(
+            "unsupported GGUF version {version} (only v3 supported)"
+        )));
+    }
+
+    // Hand gguf-rs a fresh, separate File, positioned just past the magic
+    // (its `decode()` reads version next, not magic). gguf-rs is the metadata
+    // parser of record; we re-derive structural offsets independently below.
+    let mut parse_file = File::open(path)?;
+    parse_file.seek(SeekFrom::Start(4))?;
+    let mut container = GGUFContainer::new(
+        GByteOrder::LE,
+        Box::new(BufReader::with_capacity(64 * 1024, parse_file)),
+        u64::MAX,
+    );
+    let model = container.decode()?;
+
+    // Read and validate alignment.
+    let alignment = read_alignment(&model)?;
+
+    // Independently locate tensor-data start by replaying the header layout
+    // against the mmap. This both validates the on-disk structure and yields
+    // the offset we need for absolute tensor addressing. Cross-checks the
+    // (num_tensors, num_kv) against gguf-rs's parse to catch disagreement.
+    let tensor_data_start = locate_tensor_data_start(&mmap, &model, alignment)?;
+
+    // Build TensorDesc list with absolute offsets, validating every tensor
+    // lies fully inside this shard with no overflow and no overlap.
+    let mmap_len = mmap.len() as u64;
+    let mut tensors: Vec<TensorDesc> = Vec::with_capacity(model.tensors().len());
+    for t in model.tensors() {
+        // gguf-rs stores trailing 1s for unused dims; drop them so
+        // `shape.len()` reflects actual rank.
+        let mut shape: Vec<u64> = t.shape.to_vec();
+        while shape.len() > 1 && *shape.last().unwrap() == 1 {
+            shape.pop();
+        }
+
+        for &d in &shape {
+            if d == 0 {
+                return Err(GgufError::Decode(format!(
+                    "tensor {:?} has a zero-length dimension: {:?}",
+                    t.name, shape
+                )));
+            }
+            if d > MAX_DIMENSION {
+                return Err(GgufError::Decode(format!(
+                    "tensor {:?} dimension {d} exceeds {MAX_DIMENSION}",
+                    t.name
+                )));
+            }
+        }
+        let mut elements: u64 = 1;
+        for &d in &shape {
+            elements = elements.checked_mul(d).ok_or_else(|| {
+                GgufError::Decode(format!(
+                    "tensor {:?} dimension product overflows u64",
+                    t.name
+                ))
+            })?;
+        }
+        if elements > MAX_ELEMENTS {
+            return Err(GgufError::Decode(format!(
+                "tensor {:?} element count {elements} exceeds {MAX_ELEMENTS}",
+                t.name
+            )));
+        }
+
+        // TENSOR-13: t.offset is relative to data start; alignment applies to
+        // that. (Equivalent to data_offset % alignment == 0 since
+        // tensor_data_start itself is aligned.)
+        if t.offset % alignment != 0 {
+            return Err(GgufError::Decode(format!(
+                "tensor {:?} offset {} not aligned to {}",
+                t.name, t.offset, alignment
+            )));
+        }
+
+        let data_offset = tensor_data_start.checked_add(t.offset).ok_or_else(|| {
+            GgufError::Decode(format!(
+                "tensor {:?} offset {} overflows when added to data start {}",
+                t.name, t.offset, tensor_data_start
+            ))
+        })?;
+        let end = data_offset.checked_add(t.size).ok_or_else(|| {
+            GgufError::Decode(format!(
+                "tensor {:?} (offset {}, size {}) end overflows u64",
+                t.name, data_offset, t.size
+            ))
+        })?;
+        if end > mmap_len {
+            return Err(GgufError::Decode(format!(
+                "tensor {:?} extends past EOF: end={} file_size={}",
+                t.name, end, mmap_len
+            )));
+        }
+        tensors.push(TensorDesc {
+            name: t.name.clone(),
+            shape,
+            dtype: GgmlType::from_raw(t.kind),
+            shard_idx,
+            data_offset,
+            n_bytes: t.size,
+        });
+    }
+
+    // LAYOUT-03: no two tensor data ranges overlap within this shard. Offsets
+    // in different shards are intentionally independent and may be identical.
+    let mut sort_idx: Vec<usize> = (0..tensors.len()).collect();
+    sort_idx.sort_by_key(|&i| tensors[i].data_offset);
+    for w in sort_idx.windows(2) {
+        let (a, b) = (&tensors[w[0]], &tensors[w[1]]);
+        if a.data_offset + a.n_bytes > b.data_offset {
+            return Err(GgufError::Decode(format!(
+                "tensors {:?} and {:?} have overlapping data ranges",
+                a.name, b.name
+            )));
+        }
+    }
+
+    Ok(LoadedShard {
+        shard: GgufShard {
+            path: path.to_path_buf(),
+            mmap,
+            tensor_data_start,
+            alignment,
+        },
+        tensors,
+        model,
+    })
+}
+
+fn infer_split_paths(path: &Path, split_count: u64) -> Result<Vec<PathBuf>, GgufError> {
+    let path_str = path.to_str().ok_or_else(|| {
+        GgufError::Decode(format!("split GGUF path is not valid UTF-8: {path:?}"))
+    })?;
+    let first_suffix = split_suffix(0, split_count);
+    let Some(prefix) = path_str.strip_suffix(&first_suffix) else {
+        return Err(GgufError::Decode(format!(
+            "invalid split file name: {} (expected suffix {first_suffix:?})",
+            path.display()
+        )));
+    };
+    if prefix.is_empty() {
+        return Err(GgufError::Decode(format!(
+            "invalid split file: {}",
+            path.display()
+        )));
+    }
+    let split_count_usize = usize::try_from(split_count).map_err(|_| {
+        GgufError::Decode(format!("split.count {split_count} does not fit in usize"))
+    })?;
+    let mut paths = Vec::with_capacity(split_count_usize);
+    for idx in 0..split_count {
+        paths.push(PathBuf::from(format!(
+            "{}{}",
+            prefix,
+            split_suffix(idx, split_count)
+        )));
+    }
+    Ok(paths)
+}
+
+fn split_suffix(split_no: u64, split_count: u64) -> String {
+    format!("-{:05}-of-{:05}.gguf", split_no + 1, split_count)
+}
+
+fn validate_split_shard_metadata(
+    model: &GGUFModel,
+    path: &Path,
+    expected_idx: u64,
+    expected_count: u64,
+    expected_total_tensors: u64,
+) -> Result<(), GgufError> {
+    let got_idx = metadata_u64(model, SPLIT_NO_KEY).ok_or_else(|| {
+        GgufError::Decode(format!(
+            "missing {SPLIT_NO_KEY:?} in GGUF split {}",
+            path.display()
+        ))
+    })?;
+    if got_idx != expected_idx {
+        return Err(GgufError::Decode(format!(
+            "invalid split file idx: {got_idx} (file: {}), expected {expected_idx}",
+            path.display()
+        )));
+    }
+
+    let got_count = metadata_u64(model, SPLIT_COUNT_KEY).ok_or_else(|| {
+        GgufError::Decode(format!(
+            "missing {SPLIT_COUNT_KEY:?} in GGUF split {}",
+            path.display()
+        ))
+    })?;
+    if got_count != expected_count {
+        return Err(GgufError::Decode(format!(
+            "invalid split count: {got_count} (file: {}), expected {expected_count}",
+            path.display()
+        )));
+    }
+
+    if let Some(got_total) = metadata_u64(model, SPLIT_TENSORS_COUNT_KEY) {
+        if got_total != expected_total_tensors {
+            return Err(GgufError::Decode(format!(
+                "invalid split tensor count: {got_total} (file: {}), expected {expected_total_tensors}",
+                path.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_unified_tensor_table(
+    tensors: &[TensorDesc],
+    expected_total_tensors: u64,
+) -> Result<(), GgufError> {
+    let mut names = std::collections::HashSet::with_capacity(tensors.len());
+    for t in tensors {
+        if !names.insert(t.name.as_str()) {
+            return Err(GgufError::Decode(format!(
+                "invalid model: tensor {:?} is duplicated across GGUF splits",
+                t.name
+            )));
+        }
+    }
+    if tensors.len() as u64 != expected_total_tensors {
+        return Err(GgufError::Decode(format!(
+            "corrupted split model: {expected_total_tensors} tensors expected but {} found",
+            tensors.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Read `general.alignment` (default 32). Rejects values that would cause
 /// arithmetic anomalies downstream (0, or > [`MAX_ALIGNMENT`]).
 fn read_alignment(model: &GGUFModel) -> Result<u64, GgufError> {
@@ -378,7 +578,14 @@ fn read_alignment(model: &GGUFModel) -> Result<u64, GgufError> {
 }
 
 fn value_as_u64(v: Option<&Value>) -> Option<u64> {
-    v.and_then(|v| v.as_u64())
+    v.and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+    })
+}
+
+fn metadata_u64(model: &GGUFModel, key: &str) -> Option<u64> {
+    value_as_u64(model.metadata().get(key))
 }
 
 /// Validate the leading 4 bytes are the GGUF magic.
@@ -710,36 +917,44 @@ mod tests {
         let path = fixture();
         let g = GgufFile::open(&path).expect("open");
         assert!(!g.tensors.is_empty(), "tensor table is empty");
-        assert!(g.tensor_data_start > 0);
+        let primary = g.primary_shard();
+        assert!(primary.tensor_data_start > 0);
         // tensor data start must be aligned.
-        assert_eq!(g.tensor_data_start % g.alignment, 0);
+        assert_eq!(primary.tensor_data_start % primary.alignment, 0);
 
         // First tensor must begin exactly at tensor_data_start
         // (the smallest relative offset is always 0).
-        let min_offset = g.tensors.iter().map(|t| t.data_offset).min().unwrap();
-        assert_eq!(min_offset, g.tensor_data_start);
-
-        // Last tensor must end inside the file.
-        let max_end = g
+        let min_offset = g
             .tensors
             .iter()
-            .map(|t| t.data_offset + t.n_bytes)
-            .max()
-            .unwrap() as usize;
-        assert!(
-            max_end <= g.mmap.len(),
-            "max tensor end {} > file size {}",
-            max_end,
-            g.mmap.len()
-        );
+            .filter(|t| t.shard_idx == 0)
+            .map(|t| t.data_offset)
+            .min()
+            .unwrap();
+        assert_eq!(min_offset, primary.tensor_data_start);
+
+        // Every tensor must end inside its own shard.
+        for t in &g.tensors {
+            let end = (t.data_offset + t.n_bytes) as usize;
+            let shard_len = g.shards[t.shard_idx].mmap.len();
+            assert!(
+                end <= shard_len,
+                "tensor {} end {} > shard {} file size {}",
+                t.name,
+                end,
+                t.shard_idx,
+                shard_len
+            );
+        }
 
         eprintln!(
-            "[gguf-test] {}: arch={:?}, {} tensors, data starts at {}, file is {} MiB",
+            "[gguf-test] {}: arch={:?}, {} tensors, {} shard(s), primary data starts at {}, mmap total is {} MiB",
             path.display(),
             g.architecture(),
             g.tensors.len(),
-            g.tensor_data_start,
-            g.mmap.len() / (1024 * 1024),
+            g.shard_count(),
+            primary.tensor_data_start,
+            g.total_mapped_len() / (1024 * 1024),
         );
     }
 
@@ -768,6 +983,102 @@ mod tests {
         b
     }
 
+    enum TestKv<'a> {
+        U16(&'a str, u16),
+        I32(&'a str, i32),
+    }
+
+    struct TestTensor<'a> {
+        name: &'a str,
+        value: f32,
+    }
+
+    fn push_string(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+
+    fn build_test_gguf(kvs: &[TestKv<'_>], tensors: &[TestTensor<'_>]) -> Vec<u8> {
+        let mut data = Vec::new();
+        let mut offsets = Vec::with_capacity(tensors.len());
+        for t in tensors {
+            while data.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+                data.push(0);
+            }
+            offsets.push(data.len() as u64);
+            data.extend_from_slice(&t.value.to_le_bytes());
+        }
+
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+        b.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+
+        for kv in kvs {
+            match kv {
+                TestKv::U16(key, value) => {
+                    push_string(&mut b, key);
+                    b.extend_from_slice(&2u32.to_le_bytes());
+                    b.extend_from_slice(&value.to_le_bytes());
+                }
+                TestKv::I32(key, value) => {
+                    push_string(&mut b, key);
+                    b.extend_from_slice(&5u32.to_le_bytes());
+                    b.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+
+        for (i, t) in tensors.iter().enumerate() {
+            push_string(&mut b, t.name);
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&1u64.to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(&offsets[i].to_le_bytes());
+        }
+
+        while b.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+            b.push(0);
+        }
+        b.extend_from_slice(&data);
+        b
+    }
+
+    fn build_split_shard(
+        split_no: u16,
+        split_count: u16,
+        total_tensors: i32,
+        tensors: &[TestTensor<'_>],
+    ) -> Vec<u8> {
+        let kvs = [
+            TestKv::U16(SPLIT_NO_KEY, split_no),
+            TestKv::U16(SPLIT_COUNT_KEY, split_count),
+            TestKv::I32(SPLIT_TENSORS_COUNT_KEY, total_tensors),
+        ];
+        build_test_gguf(&kvs, tensors)
+    }
+
+    fn build_overlapping_gguf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&2u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        for name in ["a", "b"] {
+            push_string(&mut b, name);
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&1u64.to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(&0u64.to_le_bytes());
+        }
+        while b.len() % GGUF_DEFAULT_ALIGNMENT as usize != 0 {
+            b.push(0);
+        }
+        b.extend_from_slice(&1.0f32.to_le_bytes());
+        b
+    }
+
     fn write_temp(bytes: &[u8]) -> std::path::PathBuf {
         use std::io::Write;
         let mut tmp = std::env::temp_dir();
@@ -784,14 +1095,24 @@ mod tests {
         tmp
     }
 
-    #[test]
-    fn minimal_gguf_round_trip() {
-        let bytes = build_minimal_gguf();
-        let path = write_temp(&bytes);
-        let g = GgufFile::open(&path).expect("minimal gguf should parse");
-        assert_eq!(g.tensors.len(), 1);
-        assert_eq!(g.tensors[0].name, "t");
-        let _ = std::fs::remove_file(&path);
+    fn write_file(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    fn temp_split_dir() -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "qwen-gguf-split-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
     }
 
     macro_rules! assert_rejects {
@@ -801,6 +1122,264 @@ mod tests {
                 Err(e) => assert!(matches!(e, $pat), "got unexpected error: {e:?}"),
             }
         }};
+    }
+
+    #[test]
+    fn minimal_gguf_round_trip() {
+        let bytes = build_minimal_gguf();
+        let path = write_temp(&bytes);
+        let g = GgufFile::open(&path).expect("minimal gguf should parse");
+        assert_eq!(g.tensors.len(), 1);
+        assert_eq!(g.tensors[0].name, "t");
+        assert_eq!(g.tensors[0].shard_idx, 0);
+        assert_eq!(g.shard_count(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn opens_split_gguf_from_first_shard() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                2,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                2,
+                2,
+                &[TestTensor {
+                    name: "b",
+                    value: 2.0,
+                }],
+            ),
+        );
+
+        let g = GgufFile::open(&first).expect("split gguf should parse");
+        assert_eq!(g.shard_count(), 2);
+        assert_eq!(g.tensors.len(), 2);
+        let a = g.find("a").expect("a tensor");
+        let b = g.find("b").expect("b tensor");
+        assert_eq!(a.shard_idx, 0);
+        assert_eq!(b.shard_idx, 1);
+        assert_eq!(
+            a.data_offset, b.data_offset,
+            "shard-local offsets may match"
+        );
+        assert_eq!(g.slice(a), &1.0f32.to_le_bytes());
+        assert_eq!(g.slice(b), &2.0f32.to_le_bytes());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_opening_nonfirst_split() {
+        let dir = temp_split_dir();
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                2,
+                2,
+                &[TestTensor {
+                    name: "b",
+                    value: 2.0,
+                }],
+            ),
+        );
+        assert_rejects!(&second, GgufError::Decode(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_missing_split_sibling() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                2,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        assert_rejects!(&first, GgufError::Io(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_bad_split_suffix() {
+        let dir = temp_split_dir();
+        let first = dir.join("model.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                1,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        assert_rejects!(&first, GgufError::Decode(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_wrong_split_no() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                2,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        write_file(
+            &second,
+            &build_split_shard(
+                0,
+                2,
+                2,
+                &[TestTensor {
+                    name: "b",
+                    value: 2.0,
+                }],
+            ),
+        );
+        assert_rejects!(&first, GgufError::Decode(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_wrong_split_count() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                2,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                3,
+                2,
+                &[TestTensor {
+                    name: "b",
+                    value: 2.0,
+                }],
+            ),
+        );
+        assert_rejects!(&first, GgufError::Decode(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_duplicate_tensor_names_across_splits() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                2,
+                &[TestTensor {
+                    name: "dup",
+                    value: 1.0,
+                }],
+            ),
+        );
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                2,
+                2,
+                &[TestTensor {
+                    name: "dup",
+                    value: 2.0,
+                }],
+            ),
+        );
+        assert_rejects!(&first, GgufError::Decode(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_split_tensor_count_mismatch() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                3,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                2,
+                3,
+                &[TestTensor {
+                    name: "b",
+                    value: 2.0,
+                }],
+            ),
+        );
+        assert_rejects!(&first, GgufError::Decode(_));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_overlap_inside_one_shard() {
+        let path = write_temp(&build_overlapping_gguf());
+        assert_rejects!(&path, GgufError::Decode(_));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

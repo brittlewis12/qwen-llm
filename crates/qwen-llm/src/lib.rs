@@ -6,7 +6,7 @@
 //! decision record. This crate is structured around the v1 plan:
 //!
 //! * [`gguf`]      — mmap-only GGUF v3 reader. No copies. Tensor descriptor
-//!                   table indexing into the mmap'd file.
+//!                   table indexing into one or more mmap'd GGUF shards.
 //! * [`codec`]     — tooling-only CPU dequantization via `llama_cpp_sys_2`'s
 //!                   `ggml_get_type_traits().to_float` seam. Universal quant
 //!                   coverage; not on the GPU hot path.

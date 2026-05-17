@@ -706,6 +706,7 @@ impl<'a> Forward<'a> {
             name: format!("{}[expert={expert_idx}]", t.name),
             shape: vec![t.shape[0], t.shape[1]],
             dtype: t.dtype,
+            shard_idx: t.shard_idx,
             data_offset: 0,
             n_bytes: per_expert_bytes as u64,
         };

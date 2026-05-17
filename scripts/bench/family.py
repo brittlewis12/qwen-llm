@@ -208,6 +208,19 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--run-tag", default="", help="suffix on the output dir name")
     ap.add_argument("--no-digest", action="store_true")
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="allow reusing a non-empty output directory; deletes lcpp-*.json, "
+        "qwen-*.json, manifest.json, README.md before running",
+    )
+    ap.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="permit qwen-llm builds with uncommitted worktree changes "
+        "(default: refuse, since the resulting artifact's `build_commit` "
+        "stamp points at the parent commit and lies about provenance)",
+    )
     ap.add_argument("--qwen-bench", type=Path, default=DEFAULT_QWEN_BENCH)
     ap.add_argument("--llama-bench", type=Path, default=DEFAULT_LLAMA_BENCH)
     ap.add_argument("--models-toml", type=Path, default=DEFAULT_MODELS_TOML)
@@ -237,6 +250,26 @@ def main() -> int:
     if args.run_tag:
         suffix += f"-{args.run_tag}"
     out_dir = ROOT / "docs" / "bench" / f"{stamp}{suffix}-family"
+    # Stale-file guard. Same-minute reruns (e.g. interrupted sweep, narrowed
+    # shape grid) would otherwise leak old rows into the digest input set.
+    if out_dir.exists() and any(out_dir.iterdir()):
+        known = sorted(
+            p
+            for p in out_dir.iterdir()
+            if p.name == "manifest.json"
+            or p.name == "README.md"
+            or p.name.startswith(("lcpp-", "qwen-"))
+        )
+        if not args.overwrite:
+            existing = ", ".join(p.name for p in known) or "(unrelated files)"
+            die(
+                f"output dir already populated: {out_dir}\n"
+                f"  existing: {existing}\n"
+                f"  rerun with --overwrite to remove the generated files first, "
+                f"or wait a minute for a new timestamp"
+            )
+        for p in known:
+            p.unlink()
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[family] output: {out_dir}", file=sys.stderr)
 
@@ -249,6 +282,18 @@ def main() -> int:
     lcpp_engine = probe_lcpp(llama_bench, sample_path)
     qwen_engine = probe_qwen(qwen_bench, sample_path)
 
+    # Provenance guard: a dirty qwen-llm build will stamp its rows with the
+    # *parent* commit (the last one cargo saw via .git/HEAD), so the artifact
+    # silently claims to be from a commit that doesn't contain the changes
+    # actually running. cx-round-2 #1.
+    if qwen_engine.get("build_dirty") and not args.allow_dirty:
+        die(
+            "qwen-llm build is dirty (uncommitted changes in worktree). "
+            "The resulting `build_commit` stamp will point at the parent "
+            "commit and misrepresent provenance. Commit your changes and "
+            "rebuild, or rerun with --allow-dirty to override."
+        )
+
     manifest = {
         "stamp": stamp,
         "host": capture_host(),
@@ -258,6 +303,10 @@ def main() -> int:
             "tg_shapes": tg_shapes,
             "runs": args.runs,
             "tag_filter": args.tag or "",
+            # Driver runs `lcpp(model_i); qwen(model_i)` for each model so
+            # crash recovery is local and lcpp's baseline for each model is
+            # taken minutes (not hours) before our number.
+            "engine_order": "per_model_lcpp_then_qwen",
         },
         "qwen_env_at_start": capture_qwen_env(),
         "models": [
@@ -267,7 +316,10 @@ def main() -> int:
                 "kind": row["kind"],
                 "quant": row["quant"],
                 "path": str(path),
-                "size_bytes": size,
+                # On-disk file footprint (sum across shards). NOT
+                # the same as a row's `model_size`, which is weight
+                # tensor bytes only.
+                "file_size_bytes": size,
             }
             for row, path, size in resolved
         ],

@@ -23,6 +23,14 @@ from typing import Any
 PEAK_GB_S = 546.0  # M4 Max published peak. Documented in docs/PLAN.md.
 
 
+def manifest_file_size_gib(model_entry: dict) -> float:
+    """On-disk footprint in GiB. Older manifests used `size_bytes`; current
+    ones use `file_size_bytes` (renamed when `model_size` in the row
+    schema was retargeted to weight tensor bytes only). Read either."""
+    bytes_ = model_entry.get("file_size_bytes") or model_entry.get("size_bytes") or 0
+    return bytes_ / (1024**3)
+
+
 def load_dir(root: Path) -> dict[str, Any]:
     """Read everything we need from one family.sh result directory.
 
@@ -144,7 +152,7 @@ def pp_table(state: dict, shapes: list[int]) -> str:
         tag = m["tag"]
         lcpp_rows = state["lcpp"].get(tag, [])
         qwen_rows = state["qwen"].get(tag, [])
-        size = m["size_bytes"] / (1024**3)
+        size = manifest_file_size_gib(m)
         cells: list[str] = [f"{m['display']} {m['kind']}", f"{size:.1f} GiB"]
         for p in shapes:
             test = f"pp{p}"
@@ -170,7 +178,7 @@ def tg_table(state: dict, shapes: list[int]) -> str:
         tag = m["tag"]
         lcpp_rows = state["lcpp"].get(tag, [])
         qwen_rows = state["qwen"].get(tag, [])
-        size = m["size_bytes"] / (1024**3)
+        size = manifest_file_size_gib(m)
         cells: list[str] = [f"{m['display']} {m['kind']}", f"{size:.1f} GiB"]
         for n in shapes:
             test = f"tg{n}"
@@ -253,14 +261,7 @@ def family_summary_table(state: dict) -> str:
 
 
 def sanity_flags(state: dict, pp_shapes: list[int], tg_shapes: list[int]) -> list[str]:
-    """Surface anomalies that should make a reader pause.
-
-    Currently checks:
-      * Build-dirty stamp on qwen-llm (results may not be reproducible).
-      * pp throughput non-monotonic (pp1024 < pp512) — historically a
-        prefill-chunk-tuning artifact.
-      * Missing row pairs (qwen ran but lcpp didn't, or vice versa).
-    """
+    """Surface anomalies that should make a reader pause."""
     flags: list[str] = []
     if state["manifest"]["engines"]["qwen_llm"].get("build_dirty"):
         flags.append(
@@ -268,6 +269,27 @@ def sanity_flags(state: dict, pp_shapes: list[int], tg_shapes: list[int]) -> lis
             "in the worktree. Results are reproducible only if you also "
             "stash the same diff."
         )
+    # Missing (model, shape) coverage: enumerate every cell the sweep
+    # claims to cover and report any that didn't materialize in the JSON
+    # set. Without this check a half-complete sweep prints a verdict table
+    # full of "—" cells and reads as if the run succeeded.
+    expected: list[tuple[str, str]] = []
+    for m in state["manifest"]["models"]:
+        for p in pp_shapes:
+            expected.append((m["tag"], f"pp{p}"))
+        for n in tg_shapes:
+            expected.append((m["tag"], f"tg{n}"))
+    for tag, test in expected:
+        qw = find_row(state["qwen"].get(tag, []), test)
+        lc = find_row(state["lcpp"].get(tag, []), test)
+        if qw is None and lc is None:
+            flags.append(f"{tag} {test}: neither engine ran (missing from JSON set).")
+        elif qw is None:
+            flags.append(f"{tag} {test}: qwen-llm row missing.")
+        elif lc is None:
+            flags.append(f"{tag} {test}: llama.cpp row missing.")
+    # pp throughput non-monotonic (pp1024 < pp512) — historically a
+    # prefill-chunk-tuning artifact worth surfacing.
     for m in state["manifest"]["models"]:
         tag = m["tag"]
         qw = state["qwen"].get(tag, [])
@@ -352,14 +374,16 @@ def main(argv: list[str]) -> int:
     print()
     print("## Method")
     print()
-    print(
-        "- `llama-bench` ran first across the entire family with the "
-        f"same shape grid (`-r {manifest['sweep']['runs']}`)."
-    )
-    print(
-        "- `qwen-bench` ran second, same models, same shape grid, same "
-        "physical host. Never in parallel with the lcpp runs."
-    )
+    runs = manifest["sweep"]["runs"]
+    order = manifest["sweep"].get("engine_order", "per_model_lcpp_then_qwen")
+    if order == "per_model_lcpp_then_qwen":
+        print(
+            f"- Per model: `llama-bench` first (`-r {runs}`), then "
+            "`qwen-bench` on the same model. Interleaved by model, never "
+            "in parallel."
+        )
+    else:
+        print(f"- engine_order = `{order}` (see `manifest.json`).")
     print(
         "- JSON outputs are persisted alongside this digest. To re-derive "
         "this README, run `scripts/bench/digest.py <dir>`."

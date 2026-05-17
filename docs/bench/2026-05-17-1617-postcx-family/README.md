@@ -6,7 +6,7 @@ Apples-to-apples scoreboard for the Qwen3.5 / 3.6 family. Same physical box, seq
 
 - Host: `zekrom` — Darwin zekrom.local 24.6.0 arm64
 - Loadavg at start: `3.12 2.79 3.03`
-- `qwen-llm`: `9dcf6c3c5` (**dirty worktree**)
+- `qwen-llm`: `05db44990`
 - `llama.cpp`: `0253fb21f` (build 9187, backends `MTL,BLAS`)
 - GPU: `Apple M4 Max`
 - QWEN_* env: (none set)
@@ -41,10 +41,10 @@ Effective decode bandwidth at tg128 (`model_size × tg t/s × 1.073`). Peak: 546
 
 | model | qwen GB/s | qwen % peak | lcpp GB/s | lcpp % peak |
 | --- | ---: | ---: | ---: | ---: |
-| Qwen3.5-0.8B | 180 | 33% | 130 | 24% |
-| Qwen3.5-2B | 255 | 47% | 233 | 43% |
-| Qwen3.5-4B | 288 | 53% | 249 | 46% |
-| Qwen3.5-9B | 381 | 70% | 343 | 63% |
+| Qwen3.5-0.8B | 176 | 32% | 130 | 24% |
+| Qwen3.5-2B | 252 | 46% | 233 | 43% |
+| Qwen3.5-4B | 287 | 53% | 249 | 46% |
+| Qwen3.5-9B | 380 | 70% | 343 | 63% |
 | Qwen3.6-27B | 410 | 75% | 357 | 65% |
 
 ## Family verdict
@@ -61,13 +61,11 @@ Effective decode bandwidth at tg128 (`model_size × tg t/s × 1.073`). Peak: 546
 
 ## Method
 
-- `llama-bench` ran first across the entire family with the same shape grid (`-r 3`).
-- `qwen-bench` ran second, same models, same shape grid, same physical host. Never in parallel with the lcpp runs.
+- Per model: `llama-bench` first (`-r 3`), then `qwen-bench` on the same model. Interleaved by model, never in parallel.
 - JSON outputs are persisted alongside this digest. To re-derive this README, run `scripts/bench/digest.py <dir>`.
 
 ## Sanity flags
 
-- qwen-llm build was dirty at sweep start — uncommitted changes in the worktree. Results are reproducible only if you also stash the same diff.
 - Qwen3.5-0.8B: pp1024 < pp512 (3644 vs 3970 t/s). Prefill-chunk default may be suboptimal at the larger prompt.
 - Qwen3.5-2B: pp1024 < pp512 (2373 vs 2487 t/s). Prefill-chunk default may be suboptimal at the larger prompt.
 - Qwen3.5-9B: pp1024 < pp512 (653 vs 681 t/s). Prefill-chunk default may be suboptimal at the larger prompt.

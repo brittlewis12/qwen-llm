@@ -16,17 +16,17 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::{
     gguf::GgufFile,
-    loader::{open_dflash_drafter, Model},
+    loader::{Model, open_dflash_drafter},
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
-        prefill_tokens_prompt_only_profiled, prefill_tokens_with_multi_hidden,
-        prefill_tokens_with_multi_hidden_profiled, DFlashDecoder, MetalDFlashHead,
-        MetalDFlashLayerMajorScratch, MetalDFlashSession, MetalDFlashVerifyScratch,
+        DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
+        MetalDFlashVerifyScratch, prefill_tokens_prompt_only_profiled,
+        prefill_tokens_with_multi_hidden, prefill_tokens_with_multi_hidden_profiled,
     },
     metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
@@ -492,6 +492,13 @@ fn utc_iso8601_now() -> String {
     let minute = (sod % 3600) / 60;
     let second = sod % 60;
     format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Sum of weight-tensor bytes (matches lcpp's `model_size` = `llama_model_size`).
+/// NOT file size — GGUF metadata and alignment padding are excluded so
+/// derived bandwidth numbers are apples-to-apples with lcpp.
+fn model_weight_bytes(g: &qwen_llm::gguf::GgufFile) -> u64 {
+    g.tensors.iter().map(|t| t.n_bytes).sum()
 }
 
 fn capture_qwen_env() -> std::collections::BTreeMap<String, String> {
@@ -1871,7 +1878,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
             // Sort by descending sum.
             let mut sorted: Vec<_> = agg.iter().collect();
-            sorted.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+            sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
             for (name, (sum_ms, count)) in &sorted {
                 let avg = *sum_ms / (*count as f64);
                 let pct = 100.0 * *sum_ms / total_gpu_ms;
@@ -2069,9 +2076,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
             build_dirty: dirty,
             test_time: utc_iso8601_now(),
             model_filename: model.display().to_string(),
-            // Sum across all shards so split GGUFs report total weight bytes,
-            // not just the entry-point shard. Matches lcpp's `model_size`.
-            model_size: g.total_mapped_len() as u64,
+            model_size: model_weight_bytes(&g),
             model_n_params: g
                 .get_u64("general.parameter_count")
                 .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum()),
@@ -2235,7 +2240,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
             qwen_llm::model::ArchKind::Dense => "dense",
             qwen_llm::model::ArchKind::Moe => "moe",
         };
-        let model_size = g.total_mapped_len() as u64;
+        let model_size = model_weight_bytes(&g);
         let model_n_params = g
             .get_u64("general.parameter_count")
             .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum());
@@ -2289,7 +2294,9 @@ fn run_tg(args: TgArgs) -> Result<()> {
             gpu_mean,
             100.0 * gpu_mean / wall_mean.max(1e-9)
         );
-        eprintln!("[tg] note: empty KV per rep, random tokens, no logits readback — matches `llama-bench tg{n_gen}`.");
+        eprintln!(
+            "[tg] note: empty KV per rep, random tokens, no logits readback — matches `llama-bench tg{n_gen}`."
+        );
     }
 
     Ok(())
@@ -2563,8 +2570,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
 
     if json_mode {
         let (commit, dirty) = qwen_build_identity();
-        // See run_pp() for the split-shard rationale.
-        let model_size = g.total_mapped_len() as u64;
+        let model_size = model_weight_bytes(&g);
         let model_n_params = g
             .get_u64("general.parameter_count")
             .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum());

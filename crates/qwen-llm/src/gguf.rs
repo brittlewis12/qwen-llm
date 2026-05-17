@@ -21,7 +21,7 @@
 //! GGUF. We avoid that path entirely.
 
 use crate::tensor::{GgmlType, TensorDesc};
-use gguf_rs::{ByteOrder as GByteOrder, GGUFContainer, GGUFModel};
+use gguf_rs::{GGUFContainer, GGUFModel};
 use memmap2::Mmap;
 use serde_json::Value;
 use std::fs::File;
@@ -342,16 +342,16 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
     }
     prevalidate_header_before_decode(&mmap)?;
 
-    // Hand gguf-rs a fresh, separate File, positioned just past the magic
-    // (its `decode()` reads version next, not magic). gguf-rs is the metadata
-    // parser of record; we re-derive structural offsets independently below.
+    // Hand gguf-rs a fresh, separate File from byte 0. The checked decoder now
+    // reads and validates the magic itself before parsing the rest of the
+    // header. gguf-rs remains the metadata parser of record; we re-derive
+    // structural offsets independently below.
     let mut parse_file = File::open(path)?;
-    parse_file.seek(SeekFrom::Start(4))?;
     let mut container = GGUFContainer::new(
-        GByteOrder::LE,
         Box::new(BufReader::with_capacity(64 * 1024, parse_file)),
         u64::MAX,
-    );
+    )?
+    .with_input_len(mmap.len() as u64);
     let model = container.decode()?;
 
     // Read and validate alignment.
@@ -1211,7 +1211,7 @@ mod tests {
         b.extend_from_slice(&3u32.to_le_bytes()); // version
         b.extend_from_slice(&1u64.to_le_bytes()); // 1 tensor
         b.extend_from_slice(&0u64.to_le_bytes()); // 0 KV
-        // tensor info
+                                                  // tensor info
         let name = b"t";
         b.extend_from_slice(&(name.len() as u64).to_le_bytes());
         b.extend_from_slice(name);
@@ -1219,7 +1219,7 @@ mod tests {
         b.extend_from_slice(&1u64.to_le_bytes()); // shape[0] = 1
         b.extend_from_slice(&0u32.to_le_bytes()); // type F32
         b.extend_from_slice(&0u64.to_le_bytes()); // offset 0
-        // align to 32, then 4 bytes of f32 payload
+                                                  // align to 32, then 4 bytes of f32 payload
         while b.len() % 32 != 0 {
             b.push(0);
         }

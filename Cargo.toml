@@ -37,6 +37,7 @@ byteorder = "1.5"
 half = { version = "2.6", features = ["bytemuck"] }
 bytemuck = { version = "1.16", features = ["derive"] }
 gguf-rs = { path = "../gguf" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 
 # dequant codec for tooling / re-pack-on-load (see docs/PLAN.md weight-format role table)

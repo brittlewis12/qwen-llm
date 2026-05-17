@@ -919,6 +919,8 @@ dependencies = [
  "clap",
  "objc2-metal",
  "qwen-llm",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

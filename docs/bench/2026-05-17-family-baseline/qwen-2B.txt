@@ -1,0 +1,23 @@
+=== pp128 ===
+[pp] run  1: wall     60.0 ms  gpu     56.3 ms  2131.69 t/s
+[pp] run  2: wall     60.4 ms  gpu     56.4 ms  2120.62 t/s
+[pp] run  3: wall     60.1 ms  gpu     56.7 ms  2128.50 t/s
+[pp] prompt: 128 tokens in 60.2 ms avg = 0.47 ms/token = 2126.94 +/- 5.70 t/s
+=== pp512 ===
+[pp] run  1: wall    206.0 ms  gpu    202.2 ms  2485.43 t/s
+[pp] run  2: wall    207.0 ms  gpu    203.1 ms  2473.05 t/s
+[pp] run  3: wall    207.4 ms  gpu    203.7 ms  2468.47 t/s
+[pp] prompt: 512 tokens in 206.8 ms avg = 0.40 ms/token = 2475.65 +/- 8.78 t/s
+=== pp1024 ===
+[pp] run  1: wall    434.9 ms  gpu    428.8 ms  2354.49 t/s
+[pp] run  2: wall    439.3 ms  gpu    433.2 ms  2331.13 t/s
+[pp] run  3: wall    440.0 ms  gpu    433.5 ms  2327.20 t/s
+[pp] prompt: 1024 tokens in 438.1 ms avg = 0.43 ms/token = 2337.61 +/- 14.76 t/s
+=== tg32 ===
+[bench] prefill: 9 tokens in 25.2 ms = 2.80 ms/token = 357.3 t/s
+[bench] decode:  32 tokens in 159.9 ms = 5.00 ms/token (avg) = 200.1 t/s
+[bench] steady:  4.99 ms/token (excl. first decode) = 200.25 t/s
+=== tg128 ===
+[bench] prefill: 9 tokens in 25.8 ms = 2.87 ms/token = 348.7 t/s
+[bench] decode:  128 tokens in 639.9 ms = 5.00 ms/token (avg) = 200.0 t/s
+[bench] steady:  5.00 ms/token (excl. first decode) = 200.12 t/s

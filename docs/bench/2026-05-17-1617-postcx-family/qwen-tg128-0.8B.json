@@ -1,0 +1,35 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "9dcf6c3c5",
+    "build_dirty": 1,
+    "test_time": "2026-05-17T16:17:34Z",
+    "model_filename": "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf",
+    "model_size": 532517120,
+    "model_n_params": 752393024,
+    "arch_kind": "dense",
+    "test": "tg128",
+    "n_tokens": 128,
+    "n_repetitions": 3,
+    "avg_ts": 337.3854080344478,
+    "stddev_ts": 2.5125921953865262,
+    "samples_ts": [
+      335.9644353088249,
+      340.28649863470014,
+      335.90529015981826
+    ],
+    "samples_ns": [
+      380992708,
+      376153625,
+      381059792
+    ],
+    "avg_ns": 379402041,
+    "avg_gpu_ns": 339624776,
+    "decode_gb_per_s": 179.65689130340954,
+    "prefill_chunk": null,
+    "decode_mode": "apples-lcpp",
+    "prefill_mode": null,
+    "qwen_env": {}
+  }
+]

@@ -16,17 +16,17 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::{
     gguf::GgufFile,
-    loader::{Model, open_dflash_drafter},
+    loader::{open_dflash_drafter, Model},
     metal::{MetalContext, MetalTensor},
     metal_dflash::{
-        DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
-        MetalDFlashVerifyScratch, prefill_tokens_prompt_only_profiled,
-        prefill_tokens_with_multi_hidden, prefill_tokens_with_multi_hidden_profiled,
+        prefill_tokens_prompt_only_profiled, prefill_tokens_with_multi_hidden,
+        prefill_tokens_with_multi_hidden_profiled, DFlashDecoder, MetalDFlashHead,
+        MetalDFlashLayerMajorScratch, MetalDFlashSession, MetalDFlashVerifyScratch,
     },
     metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
@@ -57,6 +57,11 @@ enum Cmd {
     Decode(DecodeArgs),
     /// Prompt-only prefill benchmark aligned with llama-bench pp semantics.
     Pp(PpArgs),
+    /// Generation-only benchmark aligned with `llama-bench tg<N>` semantics:
+    /// empty KV per rep, random tokens, no logits readback, N decode steps.
+    /// This is the apples-to-apples decode comparison. Use `decode` for real
+    /// generation with a prompt.
+    Tg(TgArgs),
     /// Sweep context length (ramp + measure window).
     CtxSweep(CtxSweepArgs),
     /// Phase-resolved profile at one context length (uses the
@@ -143,6 +148,13 @@ struct DecodeArgs {
     /// of using the GPU argmax fast path.
     #[arg(long)]
     full_logits_decode: bool,
+    /// Number of timed repetitions. Each rep re-tokenizes, re-prefills, and
+    /// re-decodes from a fresh session. avg_ts / stddev_ts are over reps.
+    #[arg(long, default_value = "1")]
+    runs: usize,
+    /// `text` or `json` (`llama-bench -o json` shape).
+    #[arg(short = 'o', long, value_enum, default_value = "text")]
+    output: OutputFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -176,12 +188,44 @@ struct PpArgs {
     /// Deterministic seed for synthetic token generation.
     #[arg(long, default_value = "1")]
     seed: u64,
+    /// `text` or `json` (`llama-bench -o json` shape).
+    #[arg(short = 'o', long, value_enum, default_value = "text")]
+    output: OutputFormat,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum OraclePhase {
     Prefill,
     Final,
+}
+
+/// Generation-only bench, modeled after `llama-bench tg<N>`.
+///
+/// Each rep: fresh session (empty KV) → random first token → loop N times,
+/// feeding `single_token_argmax` and discarding the returned token. The
+/// argmax path still encodes the lm_head matmul (same GPU graph as
+/// production decode) but skips full-vocab logits readback. lcpp does not
+/// even read the argmax i32; the residual difference is one i32 readback
+/// per token, dwarfed by the per-token GPU work.
+#[derive(Parser, Debug)]
+struct TgArgs {
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Number of tokens to generate per timed rep.
+    #[arg(short = 'n', long = "n-gen", default_value = "128")]
+    n_gen: usize,
+    /// Number of timed reps after warmup.
+    #[arg(long, default_value = "3")]
+    runs: usize,
+    /// Skip the warmup pass.
+    #[arg(long)]
+    no_warmup: bool,
+    /// Deterministic seed for random token selection.
+    #[arg(long, default_value = "1")]
+    seed: u64,
+    /// `text` or `json` (`llama-bench -o json` shape).
+    #[arg(short = 'o', long, value_enum, default_value = "text")]
+    output: OutputFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -373,6 +417,109 @@ fn render_qwen_single_turn_prompt(
         out.push_str("<think>\n\n</think>\n\n");
     }
     out
+}
+
+/// JSON schema version for `BenchRow`. Bump when fields are renamed,
+/// removed, or have their semantics changed. Adding new optional fields
+/// (always-null on old emitters) does NOT require a bump.
+const BENCH_SCHEMA_VERSION: u32 = 1;
+
+/// One bench result row. Field names match `llama-bench`'s JSON schema where
+/// the meaning is the same; engine-specific fields are `Option<T>` and
+/// serialized as explicit `null` (NOT omitted) so downstream consumers can
+/// rely on a stable field set.
+#[derive(Debug, Clone, serde::Serialize)]
+struct BenchRow {
+    schema_version: u32,
+    engine: &'static str,
+    build_commit: &'static str,
+    /// `1` if probed dirty at runtime via `git status --porcelain`.
+    build_dirty: u8,
+    test_time: String,
+    model_filename: String,
+    model_size: u64,
+    model_n_params: u64,
+    arch_kind: &'static str,
+    /// `pp<N>` or `tg<N>`, matching `llama-bench`'s shape vocabulary.
+    test: String,
+    n_tokens: usize,
+    n_repetitions: usize,
+    avg_ts: f64,
+    stddev_ts: f64,
+    samples_ts: Vec<f64>,
+    samples_ns: Vec<u64>,
+    avg_ns: u64,
+    avg_gpu_ns: Option<u64>,
+    /// Effective decode bandwidth (GB/s). `None` for `pp<N>` rows and for
+    /// MoE `tg<N>` rows — MoE active-param accounting is out of scope here,
+    /// and the naive `model_size × t/s` overstates by ~10x for MoE.
+    decode_gb_per_s: Option<f64>,
+    prefill_chunk: Option<usize>,
+    decode_mode: Option<&'static str>,
+    prefill_mode: Option<&'static str>,
+    qwen_env: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum, Default)]
+enum OutputFormat {
+    #[default]
+    Text,
+    /// Suppresses stderr text so `qwen-bench ... -o json | jq` works clean.
+    Json,
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ`, matching lcpp's `test_time` shape. Uses
+/// Hinnant's days_from_civil so we don't pull in chrono.
+fn utc_iso8601_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    let hour = sod / 3600;
+    let minute = (sod % 3600) / 60;
+    let second = sod % 60;
+    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn capture_qwen_env() -> std::collections::BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(k, _)| k.starts_with("QWEN_"))
+        .collect()
+}
+
+/// Returns `(commit, dirty)` for stamping into JSON output.
+///
+/// Commit comes from `build.rs` (env at compile time → git → "unknown").
+///
+/// Dirty is probed at *runtime* via `git status --porcelain` because cargo's
+/// `rerun-if-changed` directives only watch `.git/HEAD` and `.git/index`:
+/// editing a tracked file without staging it does NOT invalidate the cached
+/// build, so a stale `QWEN_BUILD_DIRTY=0` from the last clean compile would
+/// otherwise lie about a dirty worktree. We fall back to the compile-time
+/// value when the runtime probe fails (no git binary, not in a repo).
+fn qwen_build_identity() -> (&'static str, u8) {
+    let commit = env!("QWEN_BUILD_COMMIT");
+    let baked_dirty = env!("QWEN_BUILD_DIRTY").parse::<u8>().unwrap_or(0);
+    let runtime_dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()
+        .map(|o| if o.stdout.is_empty() { 0u8 } else { 1u8 });
+    (commit, runtime_dirty.unwrap_or(baked_dirty))
 }
 
 fn synthetic_prompt_ids(n: usize, vocab_size: u32, seed: u64) -> Vec<i32> {
@@ -648,6 +795,7 @@ fn main() -> Result<()> {
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),
         Cmd::Pp(a) => run_pp(a),
+        Cmd::Tg(a) => run_tg(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
@@ -1723,7 +1871,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
             // Sort by descending sum.
             let mut sorted: Vec<_> = agg.iter().collect();
-            sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
+            sorted.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
             for (name, (sum_ms, count)) in &sorted {
                 let avg = *sum_ms / (*count as f64);
                 let pct = 100.0 * *sum_ms / total_gpu_ms;
@@ -1795,13 +1943,16 @@ fn run_pp(args: PpArgs) -> Result<()> {
         prefill_chunk,
         with_tail,
         seed,
+        output,
     } = args;
     if runs == 0 {
         return Err(anyhow!("--runs must be >= 1"));
     }
+    let json_mode = matches!(output, OutputFormat::Json);
+    macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
 
     let ctx = MetalContext::new().context("init MetalContext")?;
-    eprintln!("[pp] device: {}", ctx.describe());
+    text_log!("[pp] device: {}", ctx.describe());
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
@@ -1837,7 +1988,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
 
     let mf = MetalForward::new(&ctx, &mm);
     let cap = ids.len() + 16;
-    eprintln!(
+    text_log!(
         "[pp] model={} source={} n_prompt={} runs={} chunk={} tail={}",
         model.display(),
         source_label,
@@ -1846,7 +1997,9 @@ fn run_pp(args: PpArgs) -> Result<()> {
         prefill_chunk,
         if with_tail { "final-logits" } else { "skip" }
     );
-    print_prefill_lowering_summary(&mm);
+    if !json_mode {
+        print_prefill_lowering_summary(&mm);
+    }
 
     if !no_warmup {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
@@ -1893,7 +2046,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
         wall_samples.push(wall_ms);
         gpu_samples.push(gpu_ms);
         ts_samples.push(ts);
-        eprintln!(
+        text_log!(
             "[pp] run {:>2}: wall {:>8.1} ms  gpu {:>8.1} ms  {:>7.2} t/s",
             run_idx + 1,
             wall_ms,
@@ -1906,30 +2059,238 @@ fn run_pp(args: PpArgs) -> Result<()> {
     let gpu_mean = sample_mean(&gpu_samples);
     let ts_mean = sample_mean(&ts_samples);
     let ts_sd = sample_stdev(&ts_samples);
-    eprintln!();
-    eprintln!("[pp] === results ===");
-    eprintln!(
-        "[pp] prompt: {} tokens in {:.1} ms avg = {:.2} ms/token = {:.2} +/- {:.2} t/s",
-        ids.len(),
-        wall_mean,
-        wall_mean / ids.len() as f64,
-        ts_mean,
-        ts_sd
+
+    if json_mode {
+        let (commit, dirty) = qwen_build_identity();
+        let row = BenchRow {
+            schema_version: BENCH_SCHEMA_VERSION,
+            engine: "qwen-llm",
+            build_commit: commit,
+            build_dirty: dirty,
+            test_time: utc_iso8601_now(),
+            model_filename: model.display().to_string(),
+            // Sum across all shards so split GGUFs report total weight bytes,
+            // not just the entry-point shard. Matches lcpp's `model_size`.
+            model_size: g.total_mapped_len() as u64,
+            model_n_params: g
+                .get_u64("general.parameter_count")
+                .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum()),
+            arch_kind: match m.arch.kind {
+                qwen_llm::model::ArchKind::Dense => "dense",
+                qwen_llm::model::ArchKind::Moe => "moe",
+            },
+            test: format!("pp{}", ids.len()),
+            n_tokens: ids.len(),
+            n_repetitions: runs,
+            avg_ts: ts_mean,
+            stddev_ts: ts_sd,
+            samples_ts: ts_samples.clone(),
+            samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
+            avg_ns: (wall_mean * 1e6) as u64,
+            avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
+            // pp is not a steady-state-bandwidth measurement, so we don't
+            // emit a derived GB/s for prefill rows. Digest tools can compute
+            // their own if they want, but the canonical bandwidth comparison
+            // is on decode.
+            decode_gb_per_s: None,
+            prefill_chunk: Some(prefill_chunk),
+            decode_mode: None,
+            prefill_mode: Some("packed"),
+            qwen_env: capture_qwen_env(),
+        };
+        // Wrap in an array to match `llama-bench -o json`.
+        let arr = vec![row];
+        let json = serde_json::to_string_pretty(&arr).context("serialize pp bench row")?;
+        println!("{json}");
+    } else {
+        eprintln!();
+        eprintln!("[pp] === results ===");
+        eprintln!(
+            "[pp] prompt: {} tokens in {:.1} ms avg = {:.2} ms/token = {:.2} +/- {:.2} t/s",
+            ids.len(),
+            wall_mean,
+            wall_mean / ids.len() as f64,
+            ts_mean,
+            ts_sd
+        );
+        eprintln!(
+            "[pp] gpu:    {:.1} ms avg = {:.2} ms/token = {:.1}% of wall",
+            gpu_mean,
+            gpu_mean / ids.len() as f64,
+            100.0 * gpu_mean / wall_mean.max(1e-9)
+        );
+        eprintln!(
+            "[pp] note: session and scratch allocation are outside the timed interval; tail={}.",
+            if with_tail {
+                "included"
+            } else {
+                "skipped to match llama-bench pp logits policy"
+            }
+        );
+    }
+
+    Ok(())
+}
+
+fn run_tg(args: TgArgs) -> Result<()> {
+    let TgArgs {
+        model,
+        n_gen,
+        runs,
+        no_warmup,
+        seed,
+        output,
+    } = args;
+    if runs == 0 {
+        return Err(anyhow!("--runs must be >= 1"));
+    }
+    if n_gen == 0 {
+        return Err(anyhow!("--n-gen must be >= 1"));
+    }
+    let json_mode = matches!(output, OutputFormat::Json);
+    macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    text_log!("[tg] device: {}", ctx.describe());
+
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
+    let mf = MetalForward::new(&ctx, &mm);
+
+    let vocab = m.arch.vocab_size.max(1);
+    // xorshift64* with the same `seed` controls the random tokens across
+    // reps, so the bench is fully deterministic. Single shared state so
+    // rep N+1 isn't reading the same tokens as rep N.
+    let mut rng_state = if seed == 0 { 1u64 } else { seed };
+    let mut next_rand_tok = || -> i32 {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        (rng_state % vocab as u64) as i32
+    };
+
+    text_log!(
+        "[tg] model={} n_gen={} runs={} seed={}",
+        model.display(),
+        n_gen,
+        runs,
+        seed
     );
-    eprintln!(
-        "[pp] gpu:    {:.1} ms avg = {:.2} ms/token = {:.1}% of wall",
-        gpu_mean,
-        gpu_mean / ids.len() as f64,
-        100.0 * gpu_mean / wall_mean.max(1e-9)
-    );
-    eprintln!(
-        "[pp] note: session and scratch allocation are outside the timed interval; tail={}.",
-        if with_tail {
-            "included"
-        } else {
-            "skipped to match llama-bench pp logits policy"
+
+    let cap = n_gen + 16;
+    let run_once = |first_tok: i32, ranges: &mut dyn FnMut() -> i32| -> Result<(f64, f64)> {
+        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("tg session")?;
+        let t0 = Instant::now();
+        let mut tok = first_tok;
+        // GPU-busy accumulator across the N decode steps. We report wall as
+        // the headline t/s (matches lcpp's printer), and surface gpu as an
+        // engine-specific field on the JSON row.
+        let mut gpu_ms_acc = 0.0;
+        for pos in 0..n_gen {
+            // Use `single_token_argmax_profiled` (dispatches dense/MoE
+            // internally) so we can sum per-step GPU time. The argmax i32 is
+            // discarded; the next input is drawn from the seeded RNG, matching
+            // lcpp's `test_gen` (random tokens, no logits coupling).
+            let (_argmax, prof) = mf.single_token_argmax_profiled(tok, pos as u32, &mut s)?;
+            gpu_ms_acc += prof.gpu_kernel_ms;
+            tok = ranges();
         }
-    );
+        let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        Ok((wall_ms, gpu_ms_acc))
+    };
+
+    if !no_warmup {
+        let first = next_rand_tok();
+        let _ = run_once(first, &mut next_rand_tok).context("tg warmup")?;
+    }
+
+    let mut wall_samples: Vec<f64> = Vec::with_capacity(runs);
+    let mut gpu_samples: Vec<f64> = Vec::with_capacity(runs);
+    let mut ts_samples: Vec<f64> = Vec::with_capacity(runs);
+    for run_idx in 0..runs {
+        let first = next_rand_tok();
+        let (wall_ms, gpu_ms) = run_once(first, &mut next_rand_tok).context("tg run")?;
+        let ts = n_gen as f64 * 1000.0 / wall_ms;
+        wall_samples.push(wall_ms);
+        gpu_samples.push(gpu_ms);
+        ts_samples.push(ts);
+        text_log!(
+            "[tg] run {:>2}: wall {:>8.1} ms  gpu {:>8.1} ms  {:>7.2} t/s",
+            run_idx + 1,
+            wall_ms,
+            gpu_ms,
+            ts
+        );
+    }
+
+    let wall_mean = sample_mean(&wall_samples);
+    let gpu_mean = sample_mean(&gpu_samples);
+    let ts_mean = sample_mean(&ts_samples);
+    let ts_sd = sample_stdev(&ts_samples);
+
+    if json_mode {
+        let (commit, dirty) = qwen_build_identity();
+        let arch_kind_str: &'static str = match m.arch.kind {
+            qwen_llm::model::ArchKind::Dense => "dense",
+            qwen_llm::model::ArchKind::Moe => "moe",
+        };
+        let model_size = g.total_mapped_len() as u64;
+        let model_n_params = g
+            .get_u64("general.parameter_count")
+            .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum());
+        // Bandwidth is only meaningful for dense; MoE active-param accounting
+        // lives outside this schema today.
+        let gb_per_s = if matches!(m.arch.kind, qwen_llm::model::ArchKind::Dense)
+            && model_size > 0
+            && wall_mean > 0.0
+        {
+            Some((model_size as f64 / 1e9) / (wall_mean / 1000.0 / n_gen as f64))
+        } else {
+            None
+        };
+        let row = BenchRow {
+            schema_version: BENCH_SCHEMA_VERSION,
+            engine: "qwen-llm",
+            build_commit: commit,
+            build_dirty: dirty,
+            test_time: utc_iso8601_now(),
+            model_filename: model.display().to_string(),
+            model_size,
+            model_n_params,
+            arch_kind: arch_kind_str,
+            test: format!("tg{}", n_gen),
+            n_tokens: n_gen,
+            n_repetitions: runs,
+            avg_ts: ts_mean,
+            stddev_ts: ts_sd,
+            samples_ts: ts_samples.clone(),
+            samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
+            avg_ns: (wall_mean * 1e6) as u64,
+            avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
+            decode_gb_per_s: gb_per_s,
+            prefill_chunk: None,
+            decode_mode: Some("apples-lcpp"),
+            prefill_mode: None,
+            qwen_env: capture_qwen_env(),
+        };
+        let arr = vec![row];
+        let json = serde_json::to_string_pretty(&arr).context("serialize tg bench row")?;
+        println!("{json}");
+    } else {
+        eprintln!();
+        eprintln!("[tg] === results ===");
+        eprintln!(
+            "[tg] gen: {n_gen} tokens × {runs} runs, avg {:.1} ms = {:.2} +/- {:.2} t/s",
+            wall_mean, ts_mean, ts_sd
+        );
+        eprintln!(
+            "[tg] gpu: {:.1} ms avg ({:.1}% of wall)",
+            gpu_mean,
+            100.0 * gpu_mean / wall_mean.max(1e-9)
+        );
+        eprintln!("[tg] note: empty KV per rep, random tokens, no logits readback — matches `llama-bench tg{n_gen}`.");
+    }
 
     Ok(())
 }
@@ -1945,12 +2306,19 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         sequential_prefill,
         prefill_chunk,
         full_logits_decode,
+        runs,
+        output,
     } = args;
+    if runs == 0 {
+        return Err(anyhow!("--runs must be >= 1"));
+    }
     let prompt =
         prompt.unwrap_or_else(|| "The quick brown fox jumps over the lazy dog".to_string());
+    let json_mode = matches!(output, OutputFormat::Json);
+    macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
 
     let ctx = MetalContext::new().context("init MetalContext")?;
-    eprintln!("[bench] device: {}", ctx.describe());
+    text_log!("[bench] device: {}", ctx.describe());
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
@@ -2023,109 +2391,168 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         }
     }
 
-    let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
+    // Per-rep accumulators. The artifacts the oracle / text-output / MoE
+    // profile blocks below need (last_logits, gen_ids, per_token_prof,
+    // prefill_logits_for_oracle, s) all reflect the LAST timed rep — the
+    // single-shot path is `--runs 1`, which preserves the old behavior.
+    let want_prefill_oracle = oracle.is_some() && oracle_phase == OraclePhase::Prefill;
+    let need_final_logits = oracle.is_some() && oracle_phase == OraclePhase::Final && tokens > 0;
+    let mut prefill_walls: Vec<f64> = Vec::with_capacity(runs);
+    let mut prefill_gpus: Vec<f64> = Vec::with_capacity(runs);
+    let mut decode_walls: Vec<f64> = Vec::with_capacity(runs);
+    let mut decode_steady_walls: Vec<f64> = Vec::with_capacity(runs);
+    // last-rep artifacts; set inside the loop and consumed below.
+    let mut s: MetalSession;
     let mut prefill_token_ms: Vec<f64> = Vec::with_capacity(ids.len());
     let mut decode_token_ms: Vec<f64> = Vec::with_capacity(tokens);
     let mut per_token_prof: Vec<qwen_llm::metal_forward::TokenProfile> =
         Vec::with_capacity(ids.len() + tokens);
     let mut last_logits: Vec<f32> = Vec::new();
-    let mut prefill_gpu_total_ms: Option<f64> = None;
-    let want_prefill_oracle = oracle.is_some() && oracle_phase == OraclePhase::Prefill;
     let mut prefill_logits_for_oracle: Option<Vec<f32>> = None;
+    let mut gen_ids: Vec<i32> = Vec::with_capacity(tokens);
 
-    let t0 = Instant::now();
+    for rep in 0..runs {
+        // Fresh session per rep so we measure a steady-state cold-cache
+        // prefill+decode pair, not the cumulative state of the previous rep.
+        s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
+        prefill_token_ms.clear();
+        decode_token_ms.clear();
+        per_token_prof.clear();
+        gen_ids.clear();
+        last_logits.clear();
+        let mut prefill_gpu_total_ms: Option<f64> = None;
 
-    if use_packed_prefill {
-        let mut scratch =
-            MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
-                .context("packed prefill scratch")?;
-        let (logits, gpu_total_ms) = prefill_tokens_with_multi_hidden_profiled(
-            &mf,
-            &ids,
-            0,
-            &mut s,
-            &mut scratch,
-            &[],
-            None,
-        )
-        .context("packed prefill")?;
-        last_logits = logits;
-        prefill_gpu_total_ms = Some(gpu_total_ms);
-        if want_prefill_oracle {
-            prefill_logits_for_oracle = Some(last_logits.clone());
+        let t0 = Instant::now();
+        if use_packed_prefill {
+            let mut scratch =
+                MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
+                    .context("packed prefill scratch")?;
+            let (logits, gpu_total_ms) = prefill_tokens_with_multi_hidden_profiled(
+                &mf,
+                &ids,
+                0,
+                &mut s,
+                &mut scratch,
+                &[],
+                None,
+            )
+            .context("packed prefill")?;
+            last_logits = logits;
+            prefill_gpu_total_ms = Some(gpu_total_ms);
+            if want_prefill_oracle {
+                prefill_logits_for_oracle = Some(last_logits.clone());
+            }
+        } else {
+            for (i, &tid) in ids.iter().enumerate() {
+                let tt = Instant::now();
+                if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+                    let (logits, prof) = mf.single_token_profiled(tid, i as u32, &mut s)?;
+                    last_logits = logits;
+                    per_token_prof.push(prof);
+                } else {
+                    last_logits = mf.single_token(tid, i as u32, &mut s)?;
+                }
+                prefill_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
+            }
+            if want_prefill_oracle {
+                prefill_logits_for_oracle = Some(last_logits.clone());
+            }
         }
-    } else {
-        for (i, &tid) in ids.iter().enumerate() {
+        let prefill_wall = t0.elapsed().as_secs_f64() * 1e3;
+        prefill_walls.push(prefill_wall);
+        if let Some(g_ms) = prefill_gpu_total_ms {
+            prefill_gpus.push(g_ms);
+        }
+
+        // Decode loop: default greedy path uses GPU argmax so we don't read
+        // back a full vocab row on every generated token. `--full-logits-decode`
+        // forces the legacy path for A/B and debugging.
+        let t1 = Instant::now();
+        let mut next_tok = argmax_i32(&last_logits);
+        for k in 0..tokens {
+            let pos = ids.len() + k;
+            let input_tok = next_tok;
+            gen_ids.push(input_tok);
             let tt = Instant::now();
-            if m.arch.kind == qwen_llm::model::ArchKind::Moe {
-                let (logits, prof) = mf.single_token_profiled(tid, i as u32, &mut s)?;
+            let need_logits_this_step =
+                !use_gpu_argmax_decode || (need_final_logits && k + 1 == tokens);
+            if need_logits_this_step && m.arch.kind == qwen_llm::model::ArchKind::Moe {
+                let (logits, prof) = mf.single_token_profiled(input_tok, pos as u32, &mut s)?;
+                next_tok = argmax_i32(&logits);
                 last_logits = logits;
                 per_token_prof.push(prof);
+            } else if need_logits_this_step {
+                last_logits = mf.single_token(input_tok, pos as u32, &mut s)?;
+                next_tok = argmax_i32(&last_logits);
+            } else if m.arch.kind == qwen_llm::model::ArchKind::Moe {
+                let (argmax, prof) =
+                    mf.single_token_argmax_profiled(input_tok, pos as u32, &mut s)?;
+                next_tok = argmax;
+                per_token_prof.push(prof);
             } else {
-                last_logits = mf.single_token(tid, i as u32, &mut s)?;
+                next_tok = mf.single_token_argmax(input_tok, pos as u32, &mut s)?;
             }
-            prefill_token_ms.push(tt.elapsed().as_secs_f64() * 1e3);
+            let step_ms = tt.elapsed().as_secs_f64() * 1e3;
+            decode_token_ms.push(step_ms);
         }
-        if want_prefill_oracle {
-            prefill_logits_for_oracle = Some(last_logits.clone());
-        }
-    }
-    let prefill_wall = t0.elapsed().as_secs_f64() * 1e3;
-    let prefill_avg = prefill_wall / ids.len() as f64;
-
-    // Decode loop: default greedy path uses GPU argmax so we don't read back a
-    // full vocab row on every generated token. `--full-logits-decode` forces
-    // the legacy path for A/B and debugging.
-    let mut gen_ids: Vec<i32> = Vec::with_capacity(tokens);
-    let t1 = Instant::now();
-    let need_final_logits = oracle.is_some() && oracle_phase == OraclePhase::Final && tokens > 0;
-    let mut next_tok = argmax_i32(&last_logits);
-    for k in 0..tokens {
-        let pos = ids.len() + k;
-        let input_tok = next_tok;
-        gen_ids.push(input_tok);
-        let tt = Instant::now();
-        let need_logits_this_step =
-            !use_gpu_argmax_decode || (need_final_logits && k + 1 == tokens);
-        if need_logits_this_step && m.arch.kind == qwen_llm::model::ArchKind::Moe {
-            let (logits, prof) = mf.single_token_profiled(input_tok, pos as u32, &mut s)?;
-            next_tok = argmax_i32(&logits);
-            last_logits = logits;
-            per_token_prof.push(prof);
-        } else if need_logits_this_step {
-            last_logits = mf.single_token(input_tok, pos as u32, &mut s)?;
-            next_tok = argmax_i32(&last_logits);
-        } else if m.arch.kind == qwen_llm::model::ArchKind::Moe {
-            let (argmax, prof) = mf.single_token_argmax_profiled(input_tok, pos as u32, &mut s)?;
-            next_tok = argmax;
-            per_token_prof.push(prof);
+        let decode_wall = t1.elapsed().as_secs_f64() * 1e3;
+        decode_walls.push(decode_wall);
+        // Decode-only steady-state: skip the very first decode (cache-cold
+        // for some downstream PSO + heavily warm-up sensitive).
+        let steady_ms = if decode_token_ms.len() > 1 {
+            decode_token_ms[1..].iter().sum::<f64>() / (decode_token_ms.len() - 1) as f64
+        } else if decode_token_ms.len() == 1 {
+            decode_wall
         } else {
-            next_tok = mf.single_token_argmax(input_tok, pos as u32, &mut s)?;
+            0.0
+        };
+        if !decode_token_ms.is_empty() {
+            decode_steady_walls.push(steady_ms);
         }
-        let step_ms = tt.elapsed().as_secs_f64() * 1e3;
-        decode_token_ms.push(step_ms);
+        text_log!(
+            "[bench] rep {:>2}: prefill {:>8.1} ms ({:.1} t/s)  decode {:>8.1} ms ({:.1} t/s)",
+            rep + 1,
+            prefill_wall,
+            ids.len() as f64 * 1000.0 / prefill_wall,
+            decode_wall,
+            if tokens > 0 {
+                tokens as f64 * 1000.0 / decode_wall
+            } else {
+                0.0
+            }
+        );
     }
-    let decode_wall = t1.elapsed().as_secs_f64() * 1e3;
 
-    let total_wall = t0.elapsed().as_secs_f64() * 1e3;
-
+    let prefill_wall = sample_mean(&prefill_walls);
+    let prefill_avg = prefill_wall / ids.len() as f64;
+    let prefill_gpu_total_ms = if prefill_gpus.is_empty() {
+        None
+    } else {
+        Some(sample_mean(&prefill_gpus))
+    };
+    let decode_wall = if decode_walls.is_empty() {
+        0.0
+    } else {
+        sample_mean(&decode_walls)
+    };
+    let total_wall = prefill_wall + decode_wall;
     let decode_avg_ms = if tokens > 0 {
         Some(decode_wall / tokens as f64)
     } else {
         None
     };
-    // Decode-only steady-state: skip the very first decode (cache-cold for
-    // some downstream PSO + heavily warm-up sensitive).
-    let decode_steady_ms = if decode_token_ms.len() > 1 {
-        Some(decode_token_ms[1..].iter().sum::<f64>() / (decode_token_ms.len() - 1) as f64)
-    } else if decode_token_ms.len() == 1 {
-        Some(decode_wall)
+    let decode_steady_ms = if !decode_steady_walls.is_empty() {
+        Some(sample_mean(&decode_steady_walls))
     } else {
         None
     };
+    let prefill_ts_samples: Vec<f64> = prefill_walls
+        .iter()
+        .map(|w| ids.len() as f64 * 1000.0 / w)
+        .collect();
+    let decode_steady_ts_samples: Vec<f64> =
+        decode_steady_walls.iter().map(|ms| 1000.0 / ms).collect();
 
-    eprintln!();
-    eprintln!("[bench] === results ===");
     let decode_mode_label = if use_gpu_argmax_decode && need_final_logits {
         "gpu-argmax + final-logits-oracle"
     } else if use_gpu_argmax_decode {
@@ -2133,6 +2560,116 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     } else {
         "full-logits"
     };
+
+    if json_mode {
+        let (commit, dirty) = qwen_build_identity();
+        // See run_pp() for the split-shard rationale.
+        let model_size = g.total_mapped_len() as u64;
+        let model_n_params = g
+            .get_u64("general.parameter_count")
+            .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum());
+        let arch_kind_str: &'static str = match m.arch.kind {
+            qwen_llm::model::ArchKind::Dense => "dense",
+            qwen_llm::model::ArchKind::Moe => "moe",
+        };
+        let qwen_env = capture_qwen_env();
+        let mut rows: Vec<BenchRow> = Vec::new();
+        // pp seed row: mean across reps.
+        rows.push(BenchRow {
+            schema_version: BENCH_SCHEMA_VERSION,
+            engine: "qwen-llm",
+            build_commit: commit,
+            build_dirty: dirty,
+            test_time: utc_iso8601_now(),
+            model_filename: model.display().to_string(),
+            model_size,
+            model_n_params,
+            arch_kind: arch_kind_str,
+            test: format!("pp{}", ids.len()),
+            n_tokens: ids.len(),
+            n_repetitions: runs,
+            avg_ts: sample_mean(&prefill_ts_samples),
+            stddev_ts: sample_stdev(&prefill_ts_samples),
+            samples_ts: prefill_ts_samples.clone(),
+            samples_ns: prefill_walls.iter().map(|w| (*w * 1e6) as u64).collect(),
+            avg_ns: (prefill_wall * 1e6) as u64,
+            avg_gpu_ns: prefill_gpu_total_ms.map(|g| (g * 1e6) as u64),
+            decode_gb_per_s: None,
+            prefill_chunk: if use_packed_prefill {
+                Some(prefill_chunk)
+            } else {
+                None
+            },
+            decode_mode: None,
+            prefill_mode: Some(if use_packed_prefill {
+                "packed"
+            } else {
+                "sequential"
+            }),
+            qwen_env: qwen_env.clone(),
+        });
+        // tg row: post-first-token steady-state mean per rep, averaged
+        // across reps. Matches lcpp's `tg<N>` printer (its `avg_ts` is the
+        // mean of per-rep tokens/sec).
+        if !decode_steady_ts_samples.is_empty() {
+            let steady_mean_ms = decode_steady_ms.unwrap_or(0.0);
+            let gb_per_s = if matches!(m.arch.kind, qwen_llm::model::ArchKind::Dense)
+                && model_size > 0
+                && steady_mean_ms > 0.0
+            {
+                Some((model_size as f64 / 1e9) / (steady_mean_ms / 1000.0))
+            } else {
+                None
+            };
+            rows.push(BenchRow {
+                schema_version: BENCH_SCHEMA_VERSION,
+                engine: "qwen-llm",
+                build_commit: commit,
+                build_dirty: dirty,
+                test_time: utc_iso8601_now(),
+                model_filename: model.display().to_string(),
+                model_size,
+                model_n_params,
+                arch_kind: arch_kind_str,
+                test: format!("tg{}", tokens),
+                n_tokens: tokens,
+                n_repetitions: decode_steady_ts_samples.len(),
+                avg_ts: sample_mean(&decode_steady_ts_samples),
+                stddev_ts: sample_stdev(&decode_steady_ts_samples),
+                samples_ts: decode_steady_ts_samples.clone(),
+                samples_ns: decode_steady_walls
+                    .iter()
+                    .map(|m| (*m * 1e6) as u64)
+                    .collect(),
+                avg_ns: (steady_mean_ms * 1e6) as u64,
+                avg_gpu_ns: None,
+                decode_gb_per_s: gb_per_s,
+                prefill_chunk: if use_packed_prefill {
+                    Some(prefill_chunk)
+                } else {
+                    None
+                },
+                decode_mode: Some(if use_gpu_argmax_decode {
+                    "gpu-argmax"
+                } else {
+                    "full-logits"
+                }),
+                prefill_mode: None,
+                qwen_env,
+            });
+        }
+        let json = serde_json::to_string_pretty(&rows).context("serialize decode bench rows")?;
+        println!("{json}");
+        // Still run the oracle check + generation print below in non-json
+        // mode; in json mode we skip both since they're text-only.
+        return Ok(());
+    }
+
+    eprintln!();
+    eprintln!(
+        "[bench] === results ({runs} run{}) ===",
+        if runs == 1 { "" } else { "s" }
+    );
     eprintln!("[bench] decode mode: {}", decode_mode_label);
     eprintln!(
         "[bench] prefill mode: {}",
@@ -2147,35 +2684,37 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     if use_packed_prefill {
         eprintln!("[bench] prefill chunk: {prefill_chunk}");
     }
+    let prefill_ts_mean = sample_mean(&prefill_ts_samples);
+    let prefill_ts_sd = sample_stdev(&prefill_ts_samples);
     eprintln!(
-        "[bench] prefill: {} tokens in {prefill_wall:.1} ms = {prefill_avg:.2} ms/token = {:.1} t/s",
-        ids.len(),
-        1000.0 / prefill_avg
+        "[bench] prefill: {} tokens in {prefill_wall:.1} ms avg = {prefill_avg:.2} ms/token = {prefill_ts_mean:.1} +/- {prefill_ts_sd:.1} t/s",
+        ids.len()
     );
     if let Some(prefill_gpu_total_ms) = prefill_gpu_total_ms {
         eprintln!(
-            "[bench] prefill gpu: {prefill_gpu_total_ms:.1} ms total = {:.2} ms/token = {:.1}% of prefill wall",
+            "[bench] prefill gpu: {prefill_gpu_total_ms:.1} ms avg = {:.2} ms/token = {:.1}% of prefill wall",
             prefill_gpu_total_ms / ids.len() as f64,
             100.0 * prefill_gpu_total_ms / prefill_wall.max(1e-9)
         );
     }
     if let Some(avg_ms) = decode_avg_ms {
         eprintln!(
-            "[bench] decode:  {tokens} tokens in {decode_wall:.1} ms = {avg_ms:.2} ms/token (avg) = {:.1} t/s",
+            "[bench] decode:  {tokens} tokens in {decode_wall:.1} ms avg = {avg_ms:.2} ms/token (avg) = {:.1} t/s",
             1000.0 * tokens as f64 / decode_wall
         );
     } else {
         eprintln!("[bench] decode:  0 tokens requested (no decode loop)");
     }
     if let Some(steady_ms) = decode_steady_ms {
+        let steady_ts_mean = sample_mean(&decode_steady_ts_samples);
+        let steady_ts_sd = sample_stdev(&decode_steady_ts_samples);
         eprintln!(
-            "[bench] steady:  {steady_ms:.2} ms/token (excl. first decode) = {:.2} t/s",
-            1000.0 / steady_ms
+            "[bench] steady:  {steady_ms:.2} ms/token (excl. first decode) = {steady_ts_mean:.2} +/- {steady_ts_sd:.2} t/s",
         );
     } else {
         eprintln!("[bench] steady:  N/A (no decode tokens)");
     }
-    eprintln!("[bench] total:   {total_wall:.1} ms wall");
+    eprintln!("[bench] total:   {total_wall:.1} ms wall (mean)");
 
     if use_packed_prefill {
         eprintln!("[bench] prefill per-token: packed mode (no sequential replay series)");

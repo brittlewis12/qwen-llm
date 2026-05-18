@@ -18,11 +18,17 @@
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::{NSError, NSString};
+use objc2_metal::{
+    MTLAllocation, MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice, MTLResidencySet,
+    MTLResidencySetDescriptor,
+};
 use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
-    metal::{MetalContext, MetalTensor},
+    metal::{KernelEncoder, MetalContext, MetalTensor, encode_touch_bytes_f32},
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
         MetalDFlashVerifyScratch, prefill_tokens_prompt_only_profiled,
@@ -34,8 +40,109 @@ use qwen_llm::{
     tensor::GgmlType,
     tokenizer::Tokenizer,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
+fn pp_warm_moe_weight_banks(ctx: &MetalContext, mf: &MetalForward<'_>) -> Result<usize> {
+    let stride_bytes = std::env::var("QWEN_PP_TOUCH_STRIDE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(16 * 1024);
+    let sink = MetalTensor::zeros_f32(ctx, vec![256])?;
+    let cmd = ctx.queue.commandBuffer().context("warmup command buffer")?;
+    let enc = KernelEncoder::begin(&cmd);
+    let mut touched = 0usize;
+    for block in &mf.model.blocks {
+        let moe = match block {
+            MetalBlock::Gdn(g) => g.ffn_moe.as_ref(),
+            MetalBlock::Attn(a) => a.ffn_moe.as_ref(),
+        };
+        let Some(moe) = moe else { continue };
+        for tensor in [&moe.gate_exps, &moe.up_exps, &moe.down_exps] {
+            encode_touch_bytes_f32(ctx, &enc, tensor, &sink, stride_bytes)?;
+            touched += 1;
+        }
+    }
+    enc.end();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+    Ok(touched)
+}
+
+fn buffer_as_allocation(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+) -> &ProtocolObject<dyn MTLAllocation> {
+    ProtocolObject::from_ref(buffer)
+}
+
+struct PpResidencySetGuard {
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
+}
+
+impl Drop for PpResidencySetGuard {
+    fn drop(&mut self) {
+        self.queue.removeResidencySet(&self.set);
+        self.set.endResidency();
+    }
+}
+
+fn pp_register_moe_residency_set(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+) -> Result<(PpResidencySetGuard, usize, u64)> {
+    let mut seen = HashSet::new();
+    let mut buffers = Vec::new();
+    for block in &mf.model.blocks {
+        let moe = match block {
+            MetalBlock::Gdn(g) => g.ffn_moe.as_ref(),
+            MetalBlock::Attn(a) => a.ffn_moe.as_ref(),
+        };
+        let Some(moe) = moe else { continue };
+        for tensor in [&moe.gate_exps, &moe.up_exps, &moe.down_exps] {
+            let ptr = Retained::as_ptr(&tensor.buffer) as *const _ as usize;
+            if seen.insert(ptr) {
+                buffers.push(&*tensor.buffer);
+            }
+        }
+    }
+    if buffers.is_empty() {
+        return Err(anyhow!(
+            "no MoE expert-bank buffers found for residency set"
+        ));
+    }
+
+    let desc = MTLResidencySetDescriptor::new();
+    desc.setLabel(Some(&NSString::from_str("qwen-bench-pp-moe-banks")));
+    // SAFETY: initialCapacity is advisory only; we pass the exact number of
+    // unique allocations we are about to register.
+    unsafe { desc.setInitialCapacity(buffers.len()) };
+    let set = ctx
+        .device
+        .newResidencySetWithDescriptor_error(&desc)
+        .map_err(|e: Retained<NSError>| anyhow!(e.localizedDescription().to_string()))?;
+    for buffer in &buffers {
+        set.addAllocation(buffer_as_allocation(buffer));
+    }
+    set.commit();
+    set.requestResidency();
+    ctx.queue.addResidencySet(&set);
+    let bytes = set.allocatedSize();
+    let guard = PpResidencySetGuard {
+        queue: ctx.queue.clone(),
+        set,
+    };
+    Ok((guard, buffers.len(), bytes))
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -220,6 +327,13 @@ struct TgArgs {
     /// Skip the warmup pass.
     #[arg(long)]
     no_warmup: bool,
+    /// Bench-only CPU/GPU overlap path: encode token N+1 while token N is
+    /// executing on the GPU. Commands are still committed serially.
+    #[arg(long)]
+    pipelined: bool,
+    /// Bench-only GDN front-projection overlap path. Currently MoE-only in tg.
+    #[arg(long)]
+    concurrent_gdn_proj: bool,
     /// Deterministic seed for random token selection.
     #[arg(long, default_value = "1")]
     seed: u64,
@@ -2008,6 +2122,30 @@ fn run_pp(args: PpArgs) -> Result<()> {
         print_prefill_lowering_summary(&mm);
     }
 
+    let residency_guard = if env_flag_enabled("QWEN_PP_RESIDENCY_SET")
+        && m.arch.kind == qwen_llm::model::ArchKind::Moe
+    {
+        let (guard, allocations, bytes) =
+            pp_register_moe_residency_set(&ctx, &mf).context("register MoE residency set")?;
+        text_log!(
+            "[pp] residency: registered {allocations} MoE expert-bank allocations ({:.2} GiB tracked)",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+        Some(guard)
+    } else {
+        None
+    };
+
+    if residency_guard.is_some() && env_flag_enabled("QWEN_PP_WARM_MOE_BANKS") {
+        text_log!("[pp] residency-set active; skipping QWEN_PP_WARM_MOE_BANKS touch pass");
+    } else if env_flag_enabled("QWEN_PP_WARM_MOE_BANKS")
+        && m.arch.kind == qwen_llm::model::ArchKind::Moe
+    {
+        let touched =
+            pp_warm_moe_weight_banks(&ctx, &mf).context("warm grouped MoE weight banks")?;
+        text_log!("[pp] warmup: touched {touched} MoE expert-bank tensors via GPU residency pass");
+    }
+
     if !no_warmup {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
         let mut scratch =
@@ -2143,6 +2281,8 @@ fn run_tg(args: TgArgs) -> Result<()> {
         n_gen,
         runs,
         no_warmup,
+        pipelined,
+        concurrent_gdn_proj,
         seed,
         output,
     } = args;
@@ -2151,6 +2291,11 @@ fn run_tg(args: TgArgs) -> Result<()> {
     }
     if n_gen == 0 {
         return Err(anyhow!("--n-gen must be >= 1"));
+    }
+    if pipelined && concurrent_gdn_proj {
+        return Err(anyhow!(
+            "--pipelined and --concurrent-gdn-proj are separate bench-only decode experiments; use one at a time"
+        ));
     }
     let json_mode = matches!(output, OutputFormat::Json);
     macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
@@ -2176,31 +2321,122 @@ fn run_tg(args: TgArgs) -> Result<()> {
     };
 
     text_log!(
-        "[tg] model={} n_gen={} runs={} seed={}",
+        "[tg] model={} n_gen={} runs={} seed={} mode={}{}",
         model.display(),
         n_gen,
         runs,
-        seed
+        seed,
+        if pipelined { "pipelined" } else { "default" },
+        if concurrent_gdn_proj {
+            "+concurrent_gdn"
+        } else {
+            ""
+        }
     );
 
     let cap = n_gen + 16;
+    let ids_ping = if pipelined {
+        Some([
+            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined ids ping0")?,
+            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined ids ping1")?,
+        ])
+    } else {
+        None
+    };
+    let argmax_ping = if pipelined {
+        Some([
+            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined argmax ping0")?,
+            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined argmax ping1")?,
+        ])
+    } else {
+        None
+    };
     let run_once = |first_tok: i32, ranges: &mut dyn FnMut() -> i32| -> Result<(f64, f64)> {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("tg session")?;
-        let t0 = Instant::now();
-        let mut tok = first_tok;
-        // GPU-busy accumulator across the N decode steps. We report wall as
-        // the headline t/s (matches lcpp's printer), and surface gpu as an
-        // engine-specific field on the JSON row.
-        let mut gpu_ms_acc = 0.0;
-        for pos in 0..n_gen {
-            // Use `single_token_argmax_profiled` (dispatches dense/MoE
-            // internally) so we can sum per-step GPU time. The argmax i32 is
-            // discarded; the next input is drawn from the seeded RNG, matching
-            // lcpp's `test_gen` (random tokens, no logits coupling).
-            let (_argmax, prof) = mf.single_token_argmax_profiled(tok, pos as u32, &mut s)?;
-            gpu_ms_acc += prof.gpu_kernel_ms;
-            tok = ranges();
+        if !pipelined {
+            let t0 = Instant::now();
+            let mut tok = first_tok;
+            // GPU-busy accumulator across the N decode steps. We report wall as
+            // the headline t/s (matches lcpp's printer), and surface gpu as an
+            // engine-specific field on the JSON row.
+            let mut gpu_ms_acc = 0.0;
+            for pos in 0..n_gen {
+                // Use `single_token_argmax_profiled` (dispatches dense/MoE
+                // internally) so we can sum per-step GPU time. The argmax i32 is
+                // discarded; the next input is drawn from the seeded RNG, matching
+                // lcpp's `test_gen` (random tokens, no logits coupling).
+                let (_argmax, prof) = if concurrent_gdn_proj {
+                    if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
+                        return Err(anyhow!(
+                            "--concurrent-gdn-proj tg mode is currently MoE-only"
+                        ));
+                    }
+                    mf.single_token_argmax_profiled_concurrent_gdn_moe(tok, pos as u32, &mut s)?
+                } else {
+                    mf.single_token_argmax_profiled(tok, pos as u32, &mut s)?
+                };
+                gpu_ms_acc += prof.gpu_kernel_ms;
+                tok = ranges();
+            }
+            let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+            return Ok((wall_ms, gpu_ms_acc));
         }
+
+        let ids_ping = ids_ping.as_ref().expect("pipelined ids");
+        let argmax_ping = argmax_ping.as_ref().expect("pipelined argmax");
+        let mut inputs = Vec::with_capacity(n_gen.max(1));
+        inputs.push(first_tok);
+        for _ in 1..n_gen {
+            inputs.push(ranges());
+        }
+        let _unused_next = ranges();
+
+        let t0 = Instant::now();
+        let mut gpu_ms_acc = 0.0;
+        unsafe {
+            let ptr = ids_ping[0].buffer.contents().as_ptr() as *mut i32;
+            *ptr = inputs[0];
+        }
+        let first_cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("tg pipelined first command buffer")?;
+        let first_enc = KernelEncoder::begin(&first_cmd);
+        mf.encode_single_token_argmax(&first_enc, 0, &mut s, &ids_ping[0], &argmax_ping[0])?;
+        first_enc.end();
+        first_cmd.commit();
+        let mut pending_cmd = first_cmd;
+        let mut pending_slot = 0usize;
+
+        for (pos, tok) in inputs.iter().copied().enumerate().skip(1) {
+            let next_slot = pending_slot ^ 1;
+            let next_cmd = ctx
+                .queue
+                .commandBuffer()
+                .context("tg pipelined next command buffer")?;
+            let next_enc = KernelEncoder::begin(&next_cmd);
+            mf.encode_single_token_argmax(
+                &next_enc,
+                pos as u32,
+                &mut s,
+                &ids_ping[next_slot],
+                &argmax_ping[next_slot],
+            )?;
+            next_enc.end();
+
+            pending_cmd.waitUntilCompleted();
+            gpu_ms_acc += (pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3;
+            unsafe {
+                let ptr = ids_ping[next_slot].buffer.contents().as_ptr() as *mut i32;
+                *ptr = tok;
+            }
+            next_cmd.commit();
+            pending_cmd = next_cmd;
+            pending_slot = next_slot;
+        }
+
+        pending_cmd.waitUntilCompleted();
+        gpu_ms_acc += (pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3;
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
         Ok((wall_ms, gpu_ms_acc))
     };
@@ -2275,7 +2511,13 @@ fn run_tg(args: TgArgs) -> Result<()> {
             avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
             decode_gb_per_s: gb_per_s,
             prefill_chunk: None,
-            decode_mode: Some("apples-lcpp"),
+            decode_mode: Some(if pipelined {
+                "apples-lcpp-pipelined"
+            } else if concurrent_gdn_proj {
+                "apples-lcpp-concurrent-gdn"
+            } else {
+                "apples-lcpp"
+            }),
             prefill_mode: None,
             qwen_env: capture_qwen_env(),
         };
@@ -2297,6 +2539,15 @@ fn run_tg(args: TgArgs) -> Result<()> {
         eprintln!(
             "[tg] note: empty KV per rep, random tokens, no logits readback — matches `llama-bench tg{n_gen}`."
         );
+        if pipelined {
+            eprintln!(
+                "[tg] note: bench-only CPU/GPU overlap path; commands still commit serially."
+            );
+        } else if concurrent_gdn_proj {
+            eprintln!(
+                "[tg] note: bench-only concurrent GDN front-projection path; currently MoE-only."
+            );
+        }
     }
 
     Ok(())
@@ -3377,9 +3628,6 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     }
 
     if pipelined {
-        if mm.arch.kind != qwen_llm::model::ArchKind::Dense {
-            return Err(anyhow!("--pipelined decode-window is currently dense-only"));
-        }
         let ids_ping = [
             MetalTensor::zeros_f32(&ctx, vec![1])?,
             MetalTensor::zeros_f32(&ctx, vec![1])?,
@@ -3403,13 +3651,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         let first_cmd = ctx.queue.commandBuffer().expect("command buffer");
         let first_encode_t = Instant::now();
         let first_enc = qwen_llm::metal::KernelEncoder::begin(&first_cmd);
-        mf.encode_single_token_argmax_dense(
-            &first_enc,
-            pos,
-            &mut s,
-            &ids_ping[0],
-            &argmax_ping[0],
-        )?;
+        mf.encode_single_token_argmax(&first_enc, pos, &mut s, &ids_ping[0], &argmax_ping[0])?;
         first_enc.end();
         encode_ms.push(first_encode_t.elapsed().as_secs_f64() * 1e3);
         first_cmd.commit();
@@ -3422,7 +3664,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
             let next_cmd = ctx.queue.commandBuffer().expect("command buffer");
             let next_encode_t = Instant::now();
             let next_enc = qwen_llm::metal::KernelEncoder::begin(&next_cmd);
-            mf.encode_single_token_argmax_dense(
+            mf.encode_single_token_argmax(
                 &next_enc,
                 pos,
                 &mut s,
@@ -3459,7 +3701,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         let avg_total = total_ms / window as f64;
         let avg_gpu = gpu_ms.iter().sum::<f64>() / window as f64;
         let avg_enc = encode_ms.iter().sum::<f64>() / window as f64;
-        let avg_wait = wait_ms.iter().sum::<f64>() / window as f64;
+        let _avg_wait = wait_ms.iter().sum::<f64>() / window as f64;
         let med_gpu = median(&gpu_ms);
         let med_enc = median(&encode_ms);
         let med_wait = median(&wait_ms);
@@ -3493,14 +3735,25 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     let mut prev_tok = 0i32;
     for i in 0..window {
         let pos = target_ctx as u32 + i as u32;
-        let (logits, p) = if concurrent_gdn_proj && concurrent_attn_proj {
-            mf.single_token_profiled_concurrent_gdn_attn_dense(prev_tok, pos, &mut s)?
-        } else if concurrent_gdn_proj {
-            mf.single_token_profiled_concurrent_gdn_dense(prev_tok, pos, &mut s)?
-        } else if concurrent_attn_proj {
-            mf.single_token_profiled_concurrent_attn_dense(prev_tok, pos, &mut s)?
-        } else {
-            mf.single_token_profiled(prev_tok, pos, &mut s)?
+        let (logits, p) = match (mm.arch.kind, concurrent_gdn_proj, concurrent_attn_proj) {
+            (qwen_llm::model::ArchKind::Dense, true, true) => {
+                mf.single_token_profiled_concurrent_gdn_attn_dense(prev_tok, pos, &mut s)?
+            }
+            (qwen_llm::model::ArchKind::Dense, true, false) => {
+                mf.single_token_profiled_concurrent_gdn_dense(prev_tok, pos, &mut s)?
+            }
+            (qwen_llm::model::ArchKind::Dense, false, true) => {
+                mf.single_token_profiled_concurrent_attn_dense(prev_tok, pos, &mut s)?
+            }
+            (qwen_llm::model::ArchKind::Moe, true, false) => {
+                mf.single_token_profiled_concurrent_gdn_moe(prev_tok, pos, &mut s)?
+            }
+            (qwen_llm::model::ArchKind::Moe, _, true) => {
+                return Err(anyhow!(
+                    "--concurrent-attn-proj decode-window is currently dense-only"
+                ));
+            }
+            _ => mf.single_token_profiled(prev_tok, pos, &mut s)?,
         };
         samples.push(p);
         prev_tok = argmax_i32(&logits);

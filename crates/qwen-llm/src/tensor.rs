@@ -1,10 +1,21 @@
 //! Backend-agnostic tensor descriptor.
 //!
 //! A `TensorDesc` is a view into one mmap'd GGUF shard: name + shape + ggml
-//! type tag + shard index + byte offset. Nothing is copied at load time; the
-//! file shard *is* the resident model storage.
+//! type tag + shard index + byte offset. It describes on-disk GGUF storage;
+//! GPU backends may still copy those bytes into backend-native buffers.
 
 use std::fmt;
+
+/// Checked product of a tensor shape.
+///
+/// Use this instead of `shape.iter().product()` for any file-derived or
+/// metadata-derived shape. The standard iterator product silently wraps in
+/// release builds for integer types.
+pub fn checked_shape_elements(shape: &[u64]) -> Option<u64> {
+    shape
+        .iter()
+        .try_fold(1_u64, |acc, &dim| acc.checked_mul(dim))
+}
 
 /// Mirrors `enum ggml_type` in `ggml.h`. Kept as a numeric tag so the wider
 /// codebase doesn't need `llama-cpp-sys-2` in its public API.
@@ -75,6 +86,55 @@ impl GgmlType {
     }
 }
 
+pub(crate) fn ggml_type_layout_raw(raw: u32) -> Option<(u64, u64)> {
+    const K: u64 = 256;
+    Some(match raw {
+        0 => (1, 4),
+        1 => (1, 2),
+        2 => (32, 2 + 32 / 2),
+        3 => (32, 2 + 2 + 32 / 2),
+        4 | 5 => (0, 0),
+        6 => (32, 2 + 4 + 32 / 2),
+        7 => (32, 2 + 2 + 4 + 32 / 2),
+        8 => (32, 2 + 32),
+        9 => (32, 4 + 4 + 32),
+        10 => (K, K / 16 + K / 4 + 2 + 2),
+        11 => (K, K / 8 + K / 4 + 12 + 2),
+        12 => (K, 2 + 2 + 12 + K / 2),
+        13 => (K, 2 + 2 + 12 + K / 8 + K / 2),
+        14 => (K, K / 2 + K / 4 + K / 16 + 2),
+        15 => (K, 4 + K + K / 16 * 2),
+        16 => (K, 2 + K / 8 * 2),
+        17 => (K, 2 + K / 8 * 2 + K / 32),
+        18 => (K, 2 + 3 * (K / 8)),
+        19 => (K, 2 + K / 8 + K / 16),
+        20 => (32, 2 + 16),
+        21 => (K, 2 + 13 * (K / 32) + K / 64),
+        22 => (K, 2 + K / 4 + K / 16),
+        23 => (K, 2 + 2 + K / 64 + K / 2),
+        24 => (1, 1),
+        25 => (1, 2),
+        26 => (1, 4),
+        27 => (1, 8),
+        28 => (1, 8),
+        29 => (K, K / 8 + K / 16 + K / 32),
+        30 => (1, 2),
+        31..=33 => (0, 0),
+        34 => (K, 2 + K / 64 + (K - 4 * (K / 64)) / 5),
+        35 => (K, 2 + K / 4),
+        36..=38 => (0, 0),
+        39 => (32, 17),
+        _ => return None,
+    })
+}
+
+pub(crate) fn ggml_type_layout(dtype: GgmlType) -> Option<(u64, u64)> {
+    match dtype {
+        GgmlType::Unknown => None,
+        _ => ggml_type_layout_raw(dtype as u32),
+    }
+}
+
 impl fmt::Display for GgmlType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
@@ -97,7 +157,44 @@ pub struct TensorDesc {
 }
 
 impl TensorDesc {
+    pub fn checked_n_elements(&self) -> Option<u64> {
+        checked_shape_elements(&self.shape)
+    }
+
     pub fn n_elements(&self) -> u64 {
-        self.shape.iter().product()
+        self.checked_n_elements()
+            .expect("TensorDesc shape element count overflow")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GgmlType, ggml_type_layout, ggml_type_layout_raw};
+
+    #[test]
+    fn ggml_scalar_and_extended_layouts_match_authoritative_values() {
+        let cases = [
+            (24, (1, 1)),
+            (25, (1, 2)),
+            (26, (1, 4)),
+            (27, (1, 8)),
+            (28, (1, 8)),
+            (29, (256, 56)),
+            (30, (1, 2)),
+            (34, (256, 2 + 4 + (256 - 16) / 5)),
+            (35, (256, 66)),
+            (39, (32, 17)),
+        ];
+        for (raw, layout) in cases {
+            assert_eq!(ggml_type_layout_raw(raw), Some(layout), "raw type {raw}");
+        }
+    }
+
+    #[test]
+    fn ggml_enum_layouts_match_raw_table() {
+        assert_eq!(ggml_type_layout(GgmlType::BF16), ggml_type_layout_raw(30));
+        assert_eq!(ggml_type_layout(GgmlType::MXFP4), ggml_type_layout_raw(39));
+        assert_eq!(ggml_type_layout(GgmlType::F32), ggml_type_layout_raw(0));
+        assert_eq!(ggml_type_layout(GgmlType::Unknown), None);
     }
 }

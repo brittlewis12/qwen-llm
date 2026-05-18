@@ -40,7 +40,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use crate::tensor::{GgmlType, TensorDesc};
+use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layout};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MetalError {
@@ -63,6 +63,70 @@ pub enum MetalError {
         kernel: &'static str,
         detail: String,
     },
+    #[error(
+        "tensor size overflow: shape={shape:?} × {elem_bytes} bytes/elem does not fit in usize"
+    )]
+    TensorSizeOverflow { shape: Vec<u64>, elem_bytes: usize },
+    #[error("tensor byte size overflow: shape={shape:?}, dtype={dtype:?} does not fit")]
+    TensorByteSizeOverflow { shape: Vec<u64>, dtype: GgmlType },
+}
+
+/// Checked element-count and byte-size computation for a tensor shape.
+/// Returns `(n_elements, n_bytes)`, both as `usize` validated to fit.
+/// Use this before any allocation or kernel arg derived from
+/// `shape.iter().product()` — release-build u64 overflow there is silent.
+fn checked_shape_bytes(shape: &[u64], elem_bytes: usize) -> Result<(usize, usize), MetalError> {
+    let n = checked_shape_elements(shape).ok_or_else(|| MetalError::TensorSizeOverflow {
+        shape: shape.to_vec(),
+        elem_bytes,
+    })?;
+    let n_usize = usize::try_from(n).map_err(|_| MetalError::TensorSizeOverflow {
+        shape: shape.to_vec(),
+        elem_bytes,
+    })?;
+    let bytes = n_usize
+        .checked_mul(elem_bytes)
+        .ok_or_else(|| MetalError::TensorSizeOverflow {
+            shape: shape.to_vec(),
+            elem_bytes,
+        })?;
+    Ok((n_usize, bytes))
+}
+
+fn checked_ggml_shape_bytes(shape: &[u64], dtype: GgmlType) -> Result<(usize, usize), MetalError> {
+    let elements =
+        checked_shape_elements(shape).ok_or_else(|| MetalError::TensorByteSizeOverflow {
+            shape: shape.to_vec(),
+            dtype,
+        })?;
+    let (block_size, type_size) = ggml_type_layout(dtype).ok_or_else(|| MetalError::BadShape {
+        kernel: "tensor_size",
+        detail: format!("unsupported Metal tensor dtype {dtype:?}"),
+    })?;
+    if block_size == 0 || type_size == 0 || elements % block_size != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "tensor_size",
+            detail: format!(
+                "shape {shape:?} with {} elements is not divisible by block_size {block_size} for dtype {dtype:?}",
+                elements
+            ),
+        });
+    }
+    let bytes_u128 = (elements as u128 / block_size as u128)
+        .checked_mul(type_size as u128)
+        .ok_or_else(|| MetalError::TensorByteSizeOverflow {
+            shape: shape.to_vec(),
+            dtype,
+        })?;
+    let bytes = usize::try_from(bytes_u128).map_err(|_| MetalError::TensorByteSizeOverflow {
+        shape: shape.to_vec(),
+        dtype,
+    })?;
+    let n = usize::try_from(elements).map_err(|_| MetalError::TensorByteSizeOverflow {
+        shape: shape.to_vec(),
+        dtype,
+    })?;
+    Ok((n, bytes))
 }
 
 type Device = Retained<ProtocolObject<dyn MTLDevice>>;
@@ -234,25 +298,40 @@ pub struct MetalTensor {
 impl MetalTensor {
     /// Total element count.
     pub fn n_elements(&self) -> u64 {
-        self.shape.iter().product()
+        checked_shape_elements(&self.shape).expect("MetalTensor shape element count overflow")
     }
 
     /// Total byte length (consults the dtype's per-block layout via
-    /// `llama_cpp_sys_2`).
+    /// checked host-side arithmetic).
     pub fn n_bytes(&self) -> u64 {
-        let raw = self.dtype as i32 as u32;
-        // SAFETY: ggml_row_size is a pure size calculator with no allocation.
-        unsafe { llama_cpp_sys_2::ggml_row_size(raw, self.n_elements() as i64) as u64 }
+        let (_n, bytes) = checked_ggml_shape_bytes(&self.shape, self.dtype)
+            .expect("MetalTensor byte-size computation overflow");
+        bytes as u64
     }
 
     /// Build a tensor from raw bytes (e.g. the GGUF mmap slice for a
     /// weight tensor). Copies into a fresh `MTLBuffer` with shared storage.
+    ///
+    /// Validates that `bytes.len()` matches the byte size implied by
+    /// `(shape, dtype)`. Without this check, a mismatched caller can
+    /// create a short buffer with a large logical shape, and every
+    /// downstream kernel or view silently operates past the buffer end.
     pub fn from_bytes(
         ctx: &MetalContext,
         bytes: &[u8],
         shape: Vec<u64>,
         dtype: GgmlType,
     ) -> Result<Self, MetalError> {
+        let (_n, expected) = checked_ggml_shape_bytes(&shape, dtype)?;
+        if bytes.len() != expected {
+            return Err(MetalError::BadShape {
+                kernel: "from_bytes",
+                detail: format!(
+                    "bytes.len()={} but shape={shape:?} dtype={dtype:?} expects {expected} bytes",
+                    bytes.len()
+                ),
+            });
+        }
         let buffer = ctx.buffer_from(bytes)?;
         Ok(Self {
             buffer,
@@ -275,8 +354,8 @@ impl MetalTensor {
     /// Allocate an F32 activation/scratch tensor of the given shape,
     /// uninitialized.
     pub fn zeros_f32(ctx: &MetalContext, shape: Vec<u64>) -> Result<Self, MetalError> {
-        let n: u64 = shape.iter().product();
-        let buffer = ctx.buffer_uninit(n as usize * std::mem::size_of::<f32>())?;
+        let (_n, bytes) = checked_shape_bytes(&shape, std::mem::size_of::<f32>())?;
+        let buffer = ctx.buffer_uninit(bytes)?;
         Ok(Self {
             buffer,
             offset: 0,
@@ -290,8 +369,8 @@ impl MetalTensor {
     /// scatter kernel converts F32 → F16 on append; the attn_decode
     /// kernel reads F16 and casts to F32 in the dot product.
     pub fn zeros_f16(ctx: &MetalContext, shape: Vec<u64>) -> Result<Self, MetalError> {
-        let n: u64 = shape.iter().product();
-        let buffer = ctx.buffer_uninit(n as usize * 2)?; // half = 2 bytes
+        let (_n, bytes) = checked_shape_bytes(&shape, 2)?; // half = 2 bytes
+        let buffer = ctx.buffer_uninit(bytes)?;
         Ok(Self {
             buffer,
             offset: 0,
@@ -304,13 +383,8 @@ impl MetalTensor {
     /// Logical shape is still expressed in ELEMENTS; byte size follows ggml's
     /// Q8_0 block layout via `n_bytes()`.
     pub fn zeros_q8_0(ctx: &MetalContext, shape: Vec<u64>) -> Result<Self, MetalError> {
-        let probe = Self {
-            buffer: ctx.buffer_uninit(1)?,
-            offset: 0,
-            shape: shape.clone(),
-            dtype: GgmlType::Q8_0,
-        };
-        let buffer = ctx.buffer_uninit(probe.n_bytes() as usize)?;
+        let (_n, bytes) = checked_ggml_shape_bytes(&shape, GgmlType::Q8_0)?;
+        let buffer = ctx.buffer_uninit(bytes)?;
         Ok(Self {
             buffer,
             offset: 0,
@@ -342,15 +416,28 @@ impl MetalTensor {
                 "view_subrange only supports F32/F16 (no super-block alignment), got {other:?}"
             ),
         };
-        let n_view: u64 = shape.iter().product();
+        let n_view = checked_shape_elements(&shape).expect("view_subrange shape overflow");
         let parent_n = self.n_elements();
-        debug_assert!(
-            elem_offset + n_view <= parent_n,
+        // Always-on bounds check: a release-build OOB view is silent GPU UB
+        // (kernels happily read/write past the buffer end). All callers
+        // here are computing static slot indices, not user input, so a
+        // failure is a programming bug, not a recoverable condition.
+        assert!(
+            elem_offset
+                .checked_add(n_view)
+                .is_some_and(|end| end <= parent_n),
             "view_subrange OOB: elem_offset={elem_offset} + n_view={n_view} > parent_n={parent_n}"
         );
+        let byte_delta = elem_offset
+            .checked_mul(elem_size)
+            .expect("view_subrange byte offset overflow");
+        let offset = self
+            .offset
+            .checked_add(byte_delta)
+            .expect("view_subrange absolute offset overflow");
         Self {
             buffer: self.buffer.clone(),
-            offset: self.offset + elem_offset * elem_size,
+            offset,
             shape,
             dtype: self.dtype,
         }
@@ -360,20 +447,27 @@ impl MetalTensor {
     /// expert banks where each expert slice is already laid out as a
     /// contiguous 2D tensor in the parent buffer.
     pub fn view_bytes(&self, byte_offset: u64, shape: Vec<u64>) -> Self {
-        let view = Self {
+        // Always-on bounds check: see view_subrange for rationale.
+        let (_view_n, view_bytes_usize) = checked_ggml_shape_bytes(&shape, self.dtype)
+            .expect("view_bytes byte-size computation overflow");
+        let view_bytes = view_bytes_usize as u64;
+        let parent_bytes = self.n_bytes();
+        assert!(
+            byte_offset
+                .checked_add(view_bytes)
+                .is_some_and(|end| end <= parent_bytes),
+            "view_bytes OOB: byte_offset={byte_offset} + view_bytes={view_bytes} > parent_bytes={parent_bytes}"
+        );
+        let offset = self
+            .offset
+            .checked_add(byte_offset)
+            .expect("view_bytes absolute offset overflow");
+        Self {
             buffer: self.buffer.clone(),
-            offset: self.offset + byte_offset,
+            offset,
             shape,
             dtype: self.dtype,
-        };
-        debug_assert!(
-            byte_offset + view.n_bytes() <= self.n_bytes(),
-            "view_bytes OOB: byte_offset={} + view_bytes={} > parent_bytes={}",
-            byte_offset,
-            view.n_bytes(),
-            self.n_bytes()
-        );
-        view
+        }
     }
 }
 
@@ -524,6 +618,24 @@ impl BlitEncoder {
         dst_offset: u64,
         n_bytes: u64,
     ) {
+        // Always-on bounds check: Metal does not validate blit ranges and
+        // a release-build OOB blit is silent GPU/host corruption.
+        let src_end = src_offset
+            .checked_add(n_bytes)
+            .expect("blit src offset+n overflow");
+        let dst_end = dst_offset
+            .checked_add(n_bytes)
+            .expect("blit dst offset+n overflow");
+        let src_len = src.length() as u64;
+        let dst_len = dst.length() as u64;
+        assert!(
+            src_end <= src_len,
+            "blit src OOB: src_offset={src_offset} + n_bytes={n_bytes} > src.len={src_len}"
+        );
+        assert!(
+            dst_end <= dst_len,
+            "blit dst OOB: dst_offset={dst_offset} + n_bytes={n_bytes} > dst.len={dst_len}"
+        );
         unsafe {
             self.raw
                 .copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
@@ -541,7 +653,9 @@ impl BlitEncoder {
     /// (callers writing per-token checkpoint slots typically already
     /// have this guarantee by construction).
     pub fn copy_tensor(&self, src: &MetalTensor, dst: &MetalTensor) {
-        debug_assert_eq!(
+        // Always-on (was debug_assert): a release-build size mismatch
+        // would silently short-copy or overrun the destination.
+        assert_eq!(
             src.n_bytes(),
             dst.n_bytes(),
             "copy_tensor: src/dst byte sizes differ ({} vs {})",
@@ -1268,6 +1382,204 @@ pub fn encode_moe_swiglu_q4_K_f32_packed_slots(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if n_hidden % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_n16",
+            detail: format!("n_hidden={n_hidden} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::Q4_K || w_up.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_n16",
+            detail: format!(
+                "expected Q4_K gate/up expert banks, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_n16",
+            detail: format!(
+                "shape mismatch x={} counts={} ids={} inner={} expected x={} counts={} ids={} inner={}",
+                x_pack.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                inner.n_elements(),
+                n_tokens * n_hidden,
+                n_expert,
+                n_expert * n_tokens,
+                n_tokens * topk * n_ffn
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_q4_K_f32_grouped_slots_n16")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        ffn: u32,
+        hidden: u32,
+        n_expert: u32,
+        topk: u32,
+        n_tokens: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let nb01 = ((n_hidden / 256) * 144) as u32;
+    enc.set_bytes(
+        0,
+        &Args {
+            ffn: n_ffn as u32,
+            hidden: n_hidden as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+            n_tokens: n_tokens as u32,
+            nb01,
+            stride_b: n_hidden as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x_pack);
+    enc.set_tensor(4, counts);
+    enc.set_tensor(5, ids);
+    enc.set_tensor(6, inner);
+    enc.set_threadgroup_memory(0, 16384);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(16),
+            height: n_ffn.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_fused_routed_q4q5_token_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    w_down: &MetalTensor,
+    x_pack: &MetalTensor,
+    topk_idx_pack: &MetalTensor,
+    topk_w_pack: &MetalTensor,
+    out: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if n_hidden % 256 != 0 || n_ffn % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_fused_routed_q4q5_token",
+            detail: format!("n_hidden={n_hidden} and n_ffn={n_ffn} must both be divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::Q4_K
+        || w_up.dtype != GgmlType::Q4_K
+        || w_down.dtype != GgmlType::Q5_K
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_fused_routed_q4q5_token",
+            detail: format!(
+                "expected gate/up/down dtypes Q4_K/Q4_K/Q5_K, got {:?}/{:?}/{:?}",
+                w_gate.dtype, w_up.dtype, w_down.dtype
+            ),
+        });
+    }
+    if x_pack.n_elements() as usize != n_tokens * n_hidden
+        || topk_idx_pack.n_elements() as usize != n_tokens * topk
+        || topk_w_pack.n_elements() as usize != n_tokens * topk
+        || out.n_elements() as usize != n_tokens * n_hidden
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_fused_routed_q4q5_token",
+            detail: format!(
+                "shape mismatch: x={} idx={} w={} out={} expected x={} idx={} w={} out={}",
+                x_pack.n_elements(),
+                topk_idx_pack.n_elements(),
+                topk_w_pack.n_elements(),
+                out.n_elements(),
+                n_tokens * n_hidden,
+                n_tokens * topk,
+                n_tokens * topk,
+                n_tokens * n_hidden
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_fused_routed_q4q5_token_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        hidden: u32,
+        ffn: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            hidden: n_hidden as u32,
+            ffn: n_ffn as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, w_down);
+    enc.set_tensor(4, x_pack);
+    enc.set_tensor(5, topk_idx_pack);
+    enc.set_tensor(6, topk_w_pack);
+    enc.set_tensor(7, out);
+    enc.set_threadgroup_memory(0, n_ffn * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: n_tokens,
+            depth: 1,
+        },
+        MTLSize {
+            width: 512,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_down_q5_K_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1343,6 +1655,181 @@ pub fn encode_moe_down_q5_K_f32(
         },
         MTLSize {
             width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_down_q5_K_f32_grouped_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    expert_idx: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_rows: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q5_K_grouped_rows",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::Q5_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q5_K_grouped_rows",
+            detail: format!("expected Q5_K expert down, got {:?}", weight.dtype),
+        });
+    }
+    if inner.n_elements() as usize != n_rows * n_in
+        || expert_idx.n_elements() as usize != n_rows
+        || out.n_elements() as usize != n_rows * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q5_K_grouped_rows",
+            detail: format!(
+                "shape mismatch: inner={} idx={} out={} expected inner={} idx={} out={}",
+                inner.n_elements(),
+                expert_idx.n_elements(),
+                out.n_elements(),
+                n_rows * n_in,
+                n_rows,
+                n_rows * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_q5_K_f32_grouped_rows")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: 0,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, expert_idx);
+    enc.set_tensor(4, out);
+
+    const NR0: usize = 1;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: n_rows,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_down_q5_K_f32_grouped_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q5_K_grouped_slots",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::Q5_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q5_K_grouped_slots",
+            detail: format!("expected Q5_K expert down, got {:?}", weight.dtype),
+        });
+    }
+    let slot_count = out.n_elements() as usize / n_out;
+    if inner.n_elements() as usize != slot_count * n_in
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || out.n_elements() as usize != slot_count * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q5_K_grouped_slots",
+            detail: format!(
+                "shape mismatch: inner={} counts={} ids={} out={} expected inner={} counts={} ids={} out={}",
+                inner.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                out.n_elements(),
+                slot_count * n_in,
+                n_expert,
+                n_expert * n_tokens,
+                slot_count * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_q5_K_f32_grouped_slots")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let nb01 = ((n_in / 256) * 176) as u32;
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_tokens as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b: n_in as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, counts);
+    enc.set_tensor(4, ids);
+    enc.set_tensor(5, out);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
             height: 1,
             depth: 1,
         },
@@ -1752,6 +2239,129 @@ pub fn encode_moe_weighted_sum_f32(
     Ok(())
 }
 
+pub fn encode_moe_weighted_sum_packed_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    expert_out: &MetalTensor,
+    weights: &MetalTensor,
+    out: &MetalTensor,
+    n_out: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if expert_out.n_elements() as usize != n_tokens * topk * n_out
+        || weights.n_elements() as usize != n_tokens * topk
+        || out.n_elements() as usize != n_tokens * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_weighted_sum_packed",
+            detail: format!(
+                "shape mismatch: expert_out={} weights={} out={} expected expert_out={} weights={} out={}",
+                expert_out.n_elements(),
+                weights.n_elements(),
+                out.n_elements(),
+                n_tokens * topk * n_out,
+                n_tokens * topk,
+                n_tokens * n_out
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_moe_weighted_sum_packed_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_out: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_out: n_out as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, expert_out);
+    enc.set_tensor(2, weights);
+    enc.set_tensor(3, out);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(32),
+            height: n_tokens,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_scatter_rows_f32_unique(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    rows: &MetalTensor,
+    out: &MetalTensor,
+    n_cols: usize,
+    n_rows: usize,
+) -> Result<(), MetalError> {
+    let n = n_cols * n_rows;
+    if x.n_elements() as usize != n
+        || rows.n_elements() as usize != n_rows
+        || out.n_elements() as usize % n_cols != 0
+    {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_rows_unique",
+            detail: format!(
+                "expected x n={} rows n_rows={} out multiple of n_cols={}, got x={} rows={} out={}",
+                n,
+                n_rows,
+                n_cols,
+                x.n_elements(),
+                rows.n_elements(),
+                out.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_scatter_rows_f32_unique")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_cols: u32,
+        n_rows: u32,
+        out_rows: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_cols: n_cols as u32,
+            n_rows: n_rows as u32,
+            out_rows: (out.n_elements() as usize / n_cols) as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, rows);
+    enc.set_tensor(3, out);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_axpy_scalar_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2110,6 +2720,68 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
         },
         MTLSize {
             width: THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_moe_route_bucket_slots_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    topk_idx: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    n_expert: usize,
+    n_tokens: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if topk_idx.n_elements() as usize != n_tokens * topk
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_route_bucket_slots",
+            detail: format!(
+                "shape mismatch idx={} counts={} ids={} expected idx={} counts={} ids={}",
+                topk_idx.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                n_tokens * topk,
+                n_expert,
+                n_expert * n_tokens
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_moe_route_bucket_slots_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_expert: u32,
+        n_tokens: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_expert: n_expert as u32,
+            n_tokens: n_tokens as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, topk_idx);
+    enc.set_tensor(2, counts);
+    enc.set_tensor(3, ids);
+    enc.dispatch(
+        MTLSize {
+            width: n_expert.div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
             height: 1,
             depth: 1,
         },
@@ -2731,6 +3403,96 @@ pub fn encode_add_inplace_f32(
     Ok(())
 }
 
+pub fn encode_fill_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    y: &MetalTensor,
+    value: f32,
+) -> Result<(), MetalError> {
+    let n = y.n_elements() as usize;
+    let pso = ctx.pipeline("kernel_fill_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        value: f32,
+    }
+    enc.set_bytes(0, &Args { n: n as u32, value });
+    enc.set_tensor(1, y);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_touch_bytes_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    sink: &MetalTensor,
+    stride_bytes: usize,
+) -> Result<(), MetalError> {
+    let sink_n = sink.n_elements() as usize;
+    if sink_n == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "touch_bytes",
+            detail: "sink must have at least one element".into(),
+        });
+    }
+    let n_bytes = src.n_bytes() as usize;
+    if n_bytes == 0 || stride_bytes == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "touch_bytes",
+            detail: format!("n_bytes={n_bytes} stride_bytes={stride_bytes} must both be > 0"),
+        });
+    }
+    let n_steps = n_bytes.div_ceil(stride_bytes);
+    let pso = ctx.pipeline("kernel_touch_bytes_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_steps: u32,
+        stride_bytes: u32,
+        n_bytes: u64,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_steps: n_steps as u32,
+            stride_bytes: stride_bytes as u32,
+            n_bytes: n_bytes as u64,
+        },
+    );
+    enc.set_tensor(1, src);
+    enc.set_tensor(2, sink);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: sink_n.min(256),
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_axpy_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2809,6 +3571,72 @@ pub fn encode_axpy_rowwise_f32(
     struct Args {
         n_cols: u32,
         n_rows: u32,
+        out_rows: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_cols: n_cols as u32,
+            n_rows: n_rows as u32,
+            out_rows: (accum.n_elements() as usize / n_cols) as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, scales);
+    enc.set_tensor(3, accum);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_scatter_axpy_rows_unique_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    rows: &MetalTensor,
+    scales: &MetalTensor,
+    accum: &MetalTensor,
+    n_cols: usize,
+    n_rows: usize,
+) -> Result<(), MetalError> {
+    let n = n_cols * n_rows;
+    if x.n_elements() as usize != n
+        || rows.n_elements() as usize != n_rows
+        || scales.n_elements() as usize != n_rows
+        || accum.n_elements() as usize % n_cols != 0
+    {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_axpy_rows_unique",
+            detail: format!(
+                "expected x n={} rows/scales n_rows={} accum multiple of n_cols={}, got x={} rows={} scales={} accum={}",
+                n,
+                n_rows,
+                n_cols,
+                x.n_elements(),
+                rows.n_elements(),
+                scales.n_elements(),
+                accum.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_scatter_axpy_rows_unique_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_cols: u32,
+        n_rows: u32,
     }
     enc.set_bytes(
         0,
@@ -2818,8 +3646,9 @@ pub fn encode_axpy_rowwise_f32(
         },
     );
     enc.set_tensor(1, x);
-    enc.set_tensor(2, scales);
-    enc.set_tensor(3, accum);
+    enc.set_tensor(2, rows);
+    enc.set_tensor(3, scales);
+    enc.set_tensor(4, accum);
     let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     enc.dispatch(
         MTLSize {
@@ -4137,17 +4966,29 @@ pub fn encode_scatter_offset_f32_to_f16_kv(
             ),
         });
     }
-    if (dst_off + n) as u64 > k_dst.n_elements() || (dst_off + n) as u64 > v_dst.n_elements() {
+    let dst_end = dst_off.checked_add(n).ok_or_else(|| MetalError::BadShape {
+        kernel: "scatter_offset_f32_to_f16_kv",
+        detail: format!("dst_off={dst_off} + n={n} overflows usize"),
+    })?;
+    if dst_end as u64 > k_dst.n_elements() || dst_end as u64 > v_dst.n_elements() {
         return Err(MetalError::BadShape {
             kernel: "scatter_offset_f32_to_f16_kv",
             detail: format!(
                 "dst_off+n={} exceeds k.n={} or v.n={}",
-                dst_off + n,
+                dst_end,
                 k_dst.n_elements(),
                 v_dst.n_elements()
             ),
         });
     }
+    let n_u32 = u32::try_from(n).map_err(|_| MetalError::BadShape {
+        kernel: "scatter_offset_f32_to_f16_kv",
+        detail: format!("n={n} does not fit u32 kernel args"),
+    })?;
+    let dst_off_u32 = u32::try_from(dst_off).map_err(|_| MetalError::BadShape {
+        kernel: "scatter_offset_f32_to_f16_kv",
+        detail: format!("dst_off={dst_off} does not fit u32 kernel args"),
+    })?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -4159,8 +5000,8 @@ pub fn encode_scatter_offset_f32_to_f16_kv(
     enc.set_bytes(
         0,
         &Args {
-            n: n as u32,
-            dst_off: dst_off as u32,
+            n: n_u32,
+            dst_off: dst_off_u32,
         },
     );
     enc.set_tensor(1, k_src);
@@ -4234,17 +5075,31 @@ pub fn encode_scatter_offset_f32_to_q8_0_kv(
             detail: format!("dst_off={dst_off} and n={n} must both be multiples of {QK8_0}"),
         });
     }
-    if (dst_off + n) as u64 > k_dst.n_elements() || (dst_off + n) as u64 > v_dst.n_elements() {
+    let dst_end = dst_off.checked_add(n).ok_or_else(|| MetalError::BadShape {
+        kernel: "scatter_offset_f32_to_q8_0_kv",
+        detail: format!("dst_off={dst_off} + n={n} overflows usize"),
+    })?;
+    if dst_end as u64 > k_dst.n_elements() || dst_end as u64 > v_dst.n_elements() {
         return Err(MetalError::BadShape {
             kernel: "scatter_offset_f32_to_q8_0_kv",
             detail: format!(
                 "dst_off+n={} exceeds k.n={} or v.n={}",
-                dst_off + n,
+                dst_end,
                 k_dst.n_elements(),
                 v_dst.n_elements()
             ),
         });
     }
+    let n_blocks = n / QK8_0;
+    let dst_block_off = dst_off / QK8_0;
+    let n_blocks_u32 = u32::try_from(n_blocks).map_err(|_| MetalError::BadShape {
+        kernel: "scatter_offset_f32_to_q8_0_kv",
+        detail: format!("n_blocks={n_blocks} does not fit u32 kernel args"),
+    })?;
+    let dst_block_off_u32 = u32::try_from(dst_block_off).map_err(|_| MetalError::BadShape {
+        kernel: "scatter_offset_f32_to_q8_0_kv",
+        detail: format!("dst_block_off={dst_block_off} does not fit u32 kernel args"),
+    })?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -4256,8 +5111,8 @@ pub fn encode_scatter_offset_f32_to_q8_0_kv(
     enc.set_bytes(
         0,
         &Args {
-            n_blocks: (n / QK8_0) as u32,
-            dst_block_off: (dst_off / QK8_0) as u32,
+            n_blocks: n_blocks_u32,
+            dst_block_off: dst_block_off_u32,
         },
     );
     enc.set_tensor(1, k_src);
@@ -4266,7 +5121,7 @@ pub fn encode_scatter_offset_f32_to_q8_0_kv(
     enc.set_tensor(4, v_dst);
     enc.dispatch(
         MTLSize {
-            width: (n / QK8_0) as usize,
+            width: n / QK8_0,
             height: 1,
             depth: 1,
         },
@@ -6245,6 +7100,27 @@ pub fn bench_q4_k_mat_mat_chained(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_shape_bytes_rejects_product_overflow() {
+        let err = checked_shape_bytes(&[u64::MAX, 2], std::mem::size_of::<f32>())
+            .expect_err("shape product must overflow");
+        assert!(matches!(err, MetalError::TensorSizeOverflow { .. }));
+    }
+
+    #[test]
+    fn checked_shape_bytes_rejects_byte_overflow() {
+        let err = checked_shape_bytes(&[usize::MAX as u64 / 4 + 1], std::mem::size_of::<f32>())
+            .expect_err("byte count must overflow usize");
+        assert!(matches!(err, MetalError::TensorSizeOverflow { .. }));
+    }
+
+    #[test]
+    fn checked_ggml_shape_bytes_rejects_bad_q8_block() {
+        let err = checked_ggml_shape_bytes(&[31], GgmlType::Q8_0)
+            .expect_err("Q8_0 element count must align to a 32-element block");
+        assert!(matches!(err, MetalError::BadShape { .. }));
+    }
 
     #[test]
     fn metal_context_initializes() {
@@ -9846,7 +10722,6 @@ mod tests {
     #[test]
     #[ignore]
     fn attn_v4_nwg_sweep_moe_shapes() {
-        use std::time::Instant;
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -9928,7 +10803,6 @@ mod tests {
                             .unwrap();
                         }
                         enc.end();
-                        let t = Instant::now();
                         cmd.commit();
                         cmd.waitUntilCompleted();
                         let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
@@ -9950,7 +10824,6 @@ mod tests {
     #[test]
     #[ignore]
     fn attn_v4_tile_c_sweep_moe_shapes() {
-        use std::time::Instant;
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -10042,7 +10915,6 @@ mod tests {
                                 .unwrap();
                             }
                             enc.end();
-                            let t = Instant::now();
                             cmd.commit();
                             cmd.waitUntilCompleted();
                             let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;

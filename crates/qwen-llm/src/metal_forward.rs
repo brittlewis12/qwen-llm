@@ -69,6 +69,58 @@ pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
     )
 }
 
+fn alloc_shape_error(detail: &'static str) -> MetalError {
+    MetalError::BadShape {
+        kernel: "session_alloc",
+        detail: detail.into(),
+    }
+}
+
+pub(crate) fn checked_u64_mul(a: u64, b: u64, detail: &'static str) -> Result<u64, MetalError> {
+    a.checked_mul(b).ok_or_else(|| alloc_shape_error(detail))
+}
+
+pub(crate) fn checked_u64_add(a: u64, b: u64, detail: &'static str) -> Result<u64, MetalError> {
+    a.checked_add(b).ok_or_else(|| alloc_shape_error(detail))
+}
+
+pub(crate) fn checked_u64_mul3(
+    a: u64,
+    b: u64,
+    c: u64,
+    detail: &'static str,
+) -> Result<u64, MetalError> {
+    checked_u64_mul(checked_u64_mul(a, b, detail)?, c, detail)
+}
+
+pub(crate) fn checked_u64_mul4(
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    detail: &'static str,
+) -> Result<u64, MetalError> {
+    checked_u64_mul(checked_u64_mul3(a, b, c, detail)?, d, detail)
+}
+
+pub(crate) fn checked_u64_double(a: u64, detail: &'static str) -> Result<u64, MetalError> {
+    checked_u64_mul(a, 2, detail)
+}
+
+pub(crate) fn checked_u64_div_exact(
+    numerator: u64,
+    denominator: u64,
+    detail: &'static str,
+) -> Result<u64, MetalError> {
+    if denominator == 0 {
+        return Err(alloc_shape_error(detail));
+    }
+    if numerator % denominator != 0 {
+        return Err(alloc_shape_error(detail));
+    }
+    Ok(numerator / denominator)
+}
+
 fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
     static KV_Q8: OnceLock<bool> = OnceLock::new();
     let enabled = *KV_Q8.get_or_init(|| {
@@ -83,6 +135,16 @@ fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
     } else {
         GgmlType::F16
     }
+}
+
+fn concurrent_gdn_moe_decode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_MOE_CONCURRENT_GDN").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
 }
 
 /// Return type for [`MetalForward::single_token_phase_profiled`]:
@@ -385,8 +447,9 @@ impl MetalSession {
         let head_dim = arch.attn_head_dim as u64;
         let n_q = arch.n_q_heads as u64;
         let n_kv = arch.n_kv_heads as u64;
-        let q_dim = n_q * head_dim;
-        let kv_dim = n_kv * head_dim;
+        let q_dim = checked_u64_mul(n_q, head_dim, "q_dim overflow")?;
+        let kv_dim = checked_u64_mul(n_kv, head_dim, "kv_dim overflow")?;
+        let q_group = checked_u64_div_exact(n_q, n_kv, "n_q_heads / n_kv_heads invalid")?;
         let moe_router_n = if arch.kind == ArchKind::Moe {
             arch.expert_count.max(1) as u64
         } else {
@@ -398,32 +461,64 @@ impl MetalSession {
             1
         };
         let moe_inner_n = if arch.kind == ArchKind::Moe {
-            moe_topk_n * arch.expert_feed_forward_length.max(1) as u64
+            checked_u64_mul(
+                moe_topk_n,
+                arch.expert_feed_forward_length.max(1) as u64,
+                "moe_inner_n overflow",
+            )?
         } else {
             1
         };
         let moe_expert_out_n = if arch.kind == ArchKind::Moe {
-            moe_topk_n * h
+            checked_u64_mul(moe_topk_n, h, "moe_expert_out_n overflow")?
         } else {
             1
         };
         let vh = arch.gdn_head_dim as u64;
         let n_v = arch.gdn_n_v_heads as u64;
         let n_k = arch.gdn_n_k_heads as u64;
-        let conv_dim = (2 * n_k + n_v) * vh;
+        let conv_heads = checked_u64_add(
+            checked_u64_double(n_k, "2 * gdn_n_k_heads overflow")?,
+            n_v,
+            "2 * gdn_n_k_heads + gdn_n_v_heads overflow",
+        )?;
+        let conv_dim = checked_u64_mul(conv_heads, vh, "conv_dim overflow")?;
         let conv_kernel = arch.gdn_conv_kernel as u64;
-        let v_dim = n_v * vh;
-        let k_dim = n_k * vh;
+        let v_dim = checked_u64_mul(n_v, vh, "v_dim overflow")?;
+        let k_dim = checked_u64_mul(n_k, vh, "k_dim overflow")?;
+        let kv_shape = vec![checked_u64_mul(
+            kv_capacity as u64,
+            kv_dim,
+            "kv cache size overflow",
+        )?];
+        let gdn_conv_elems = checked_u64_mul(
+            conv_kernel.saturating_sub(1),
+            conv_dim,
+            "gdn conv scratch size overflow",
+        )?;
+        let gdn_state_elems = checked_u64_mul3(n_v, vh, vh, "gdn state size overflow")?;
+        let attn_q_full_elems = checked_u64_double(q_dim, "2 * q_dim overflow")?;
+        let attn_v4_o_partial_elems = checked_u64_mul4(
+            n_kv,
+            ATTN_V4_MAX_NWG as u64,
+            q_group,
+            head_dim,
+            "attn_v4_o_partial size overflow",
+        )?;
+        let attn_v4_ml_partial_elems = checked_u64_mul4(
+            n_kv,
+            ATTN_V4_MAX_NWG as u64,
+            q_group,
+            2,
+            "attn_v4_ml_partial size overflow",
+        )?;
 
         let mut gdn_conv = Vec::new();
         let mut gdn_state = Vec::new();
         for b in &model.blocks {
             if matches!(b, MetalBlock::Gdn(_)) {
-                gdn_conv.push(MetalTensor::zeros_f32(
-                    ctx,
-                    vec![(conv_kernel - 1) * conv_dim],
-                )?);
-                gdn_state.push(MetalTensor::zeros_f32(ctx, vec![n_v * vh * vh])?);
+                gdn_conv.push(MetalTensor::zeros_f32(ctx, vec![gdn_conv_elems])?);
+                gdn_state.push(MetalTensor::zeros_f32(ctx, vec![gdn_state_elems])?);
             }
         }
 
@@ -437,7 +532,7 @@ impl MetalSession {
         let mut kv_n_pos = Vec::new();
         for b in &model.blocks {
             if matches!(b, MetalBlock::Attn(_)) {
-                let shape = vec![kv_capacity as u64 * kv_dim];
+                let shape = kv_shape.clone();
                 kv_k.push(match kv_dtype {
                     GgmlType::F16 => MetalTensor::zeros_f16(ctx, shape.clone())?,
                     GgmlType::Q8_0 => MetalTensor::zeros_q8_0(ctx, shape.clone())?,
@@ -478,7 +573,7 @@ impl MetalSession {
             gdn_normed: MetalTensor::zeros_f32(ctx, vec![v_dim])?,
             gdn_proj: MetalTensor::zeros_f32(ctx, vec![h])?,
             mixer_out: MetalTensor::zeros_f32(ctx, vec![h])?,
-            attn_q_full: MetalTensor::zeros_f32(ctx, vec![2 * q_dim])?,
+            attn_q_full: MetalTensor::zeros_f32(ctx, vec![attn_q_full_elems])?,
             attn_q: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             attn_gate: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             attn_q_normed: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
@@ -488,14 +583,8 @@ impl MetalSession {
             attn_scores: MetalTensor::zeros_f32(ctx, vec![kv_capacity as u64])?,
             attn_o: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             // v4 partials: n_kv * NWG_max * GROUP * head_dim (and *2 for ml).
-            attn_v4_o_partial: MetalTensor::zeros_f32(
-                ctx,
-                vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * head_dim],
-            )?,
-            attn_v4_ml_partial: MetalTensor::zeros_f32(
-                ctx,
-                vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * 2],
-            )?,
+            attn_v4_o_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_o_partial_elems])?,
+            attn_v4_ml_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_ml_partial_elems])?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
             argmax_tok: MetalTensor::zeros_f32(ctx, vec![1])?,
             moe_router_probs: MetalTensor::zeros_f32(ctx, vec![moe_router_n])?,
@@ -553,10 +642,11 @@ impl<'a> MetalForward<'a> {
         ranked.truncate(n_expert_used);
 
         let shared_gate_scalar = {
-            let mut s = 0.0f32;
-            for i in 0..h {
-                s += h_cpu[i] * moe.gate_inp_shexp_cpu[i];
-            }
+            let s: f32 = h_cpu[..h]
+                .iter()
+                .zip(&moe.gate_inp_shexp_cpu[..h])
+                .map(|(a, b)| a * b)
+                .sum();
             1.0 / (1.0 + (-s).exp())
         };
         MoeRouteDecision {
@@ -725,12 +815,13 @@ impl<'a> MetalForward<'a> {
         let f_shared = arch.expert_shared_feed_forward_length as usize;
         let n_expert = arch.expert_count as usize;
 
+        // 2^-14 (FP16 minimum normal): matches forward.rs MoE normalization floor.
         let weight_sum = route
             .ranked
             .iter()
             .map(|(_, p)| *p)
             .sum::<f32>()
-            .max(6.103515625e-5);
+            .max(f32::from_bits(0x3880_0000));
 
         unsafe {
             let dst = (session.mixer_out.buffer.contents().as_ptr() as *mut u8)
@@ -1224,6 +1315,306 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
+    pub fn single_token_profiled_concurrent_gdn_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        let arch = &self.model.arch;
+        if arch.kind != ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_get_rows_f32(
+                self.ctx,
+                &enc,
+                &self.model.token_embd,
+                &session.ids_buf,
+                &session.x,
+                1,
+                h,
+            )?;
+            enc.end();
+        }
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            match block {
+                MetalBlock::Gdn(g) => {
+                    let i = gdn_idx;
+                    gdn_idx += 1;
+                    let moe = g.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        enc.end();
+                    }
+                    {
+                        let enc = KernelEncoder::begin_concurrent(&cmd_buf);
+                        self.encode_gdn_front_projections(&enc, g, session)?;
+                        enc.end();
+                    }
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        self.encode_gdn_after_projections(&enc, g, i, session)?;
+                        encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.post_attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        self.encode_moe_route_prepare(&enc, session, moe)?;
+                        self.encode_moe_ffn_apply_gpu(
+                            &enc,
+                            session,
+                            &g.ffn_gate,
+                            &g.ffn_up,
+                            &g.ffn_down,
+                            moe,
+                        )?;
+                        enc.end();
+                    }
+                }
+                MetalBlock::Attn(_) => {
+                    let slot = MixerSlot::Attn(attn_idx);
+                    attn_idx += 1;
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+                    enc.end();
+                }
+            }
+        }
+
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+        }
+
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let mut out = vec![0.0f32; arch.vocab_size as usize];
+        unsafe {
+            let src = session.logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+        }
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            out,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+        ))
+    }
+
+    pub fn single_token_argmax_profiled_concurrent_gdn_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(i32, TokenProfile), MfError> {
+        let arch = &self.model.arch;
+        if arch.kind != ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let ids_buf = session.ids_buf.clone();
+        let argmax_tok = session.argmax_tok.clone();
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_get_rows_f32(
+                self.ctx,
+                &enc,
+                &self.model.token_embd,
+                &ids_buf,
+                &session.x,
+                1,
+                h,
+            )?;
+            enc.end();
+        }
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            match block {
+                MetalBlock::Gdn(g) => {
+                    let i = gdn_idx;
+                    gdn_idx += 1;
+                    let moe = g.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        enc.end();
+                    }
+                    {
+                        let enc = KernelEncoder::begin_concurrent(&cmd_buf);
+                        self.encode_gdn_front_projections(&enc, g, session)?;
+                        enc.end();
+                    }
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        self.encode_gdn_after_projections(&enc, g, i, session)?;
+                        encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.post_attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        self.encode_moe_route_prepare(&enc, session, moe)?;
+                        self.encode_moe_ffn_apply_gpu(
+                            &enc,
+                            session,
+                            &g.ffn_gate,
+                            &g.ffn_up,
+                            &g.ffn_down,
+                            moe,
+                        )?;
+                        enc.end();
+                    }
+                }
+                MetalBlock::Attn(_) => {
+                    let slot = MixerSlot::Attn(attn_idx);
+                    attn_idx += 1;
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+                    enc.end();
+                }
+            }
+        }
+
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                arch.vocab_size as usize,
+            )?;
+            encode_argmax_f32(
+                self.ctx,
+                &enc,
+                &session.logits,
+                &argmax_tok,
+                1,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+        }
+
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let argmax = unsafe {
+            let src = argmax_tok.buffer.contents().as_ptr() as *const i32;
+            *src
+        };
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            argmax,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+        ))
+    }
+
     pub fn single_token_profiled_concurrent_attn_dense(
         &self,
         token_id: i32,
@@ -1510,7 +1901,11 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<Vec<f32>, MfError> {
-        let (logits, _) = self.single_token_profiled_moe(token_id, position, session)?;
+        let (logits, _) = if concurrent_gdn_moe_decode_enabled() {
+            self.single_token_profiled_concurrent_gdn_moe(token_id, position, session)?
+        } else {
+            self.single_token_profiled_moe(token_id, position, session)?
+        };
         Ok(logits)
     }
 
@@ -1531,7 +1926,11 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
     ) -> Result<(i32, TokenProfile), MfError> {
         if self.model.arch.kind == ArchKind::Moe {
-            return self.single_token_argmax_profiled_moe(token_id, position, session);
+            return if concurrent_gdn_moe_decode_enabled() {
+                self.single_token_argmax_profiled_concurrent_gdn_moe(token_id, position, session)
+            } else {
+                self.single_token_argmax_profiled_moe(token_id, position, session)
+            };
         }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
@@ -1579,6 +1978,21 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
+    pub fn encode_single_token_argmax(
+        &self,
+        enc: &KernelEncoder,
+        position: u32,
+        session: &mut MetalSession,
+        ids_buf: &MetalTensor,
+        argmax_tok: &MetalTensor,
+    ) -> Result<(), MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return self
+                .encode_single_token_argmax_moe(enc, position, session, ids_buf, argmax_tok);
+        }
+        self.encode_single_token_argmax_dense(enc, position, session, ids_buf, argmax_tok)
+    }
+
     pub fn encode_single_token_argmax_dense(
         &self,
         enc: &KernelEncoder,
@@ -1591,7 +2005,7 @@ impl<'a> MetalForward<'a> {
 
         encode_get_rows_f32(
             self.ctx,
-            &enc,
+            enc,
             &self.model.token_embd,
             ids_buf,
             &session.x,
@@ -1603,7 +2017,7 @@ impl<'a> MetalForward<'a> {
         let mut attn_idx = 0usize;
         for (il, block) in self.model.blocks.iter().enumerate() {
             self.encode_block(
-                &enc,
+                enc,
                 il,
                 block,
                 &mut gdn_idx,
@@ -1615,7 +2029,7 @@ impl<'a> MetalForward<'a> {
 
         encode_rms_norm_mul_f32(
             self.ctx,
-            &enc,
+            enc,
             &session.x,
             &self.model.output_norm,
             &session.h,
@@ -1623,7 +2037,7 @@ impl<'a> MetalForward<'a> {
         )?;
         encode_mat_vec_dispatch(
             self.ctx,
-            &enc,
+            enc,
             &self.model.lm_head,
             &session.h,
             &session.logits,
@@ -1632,7 +2046,74 @@ impl<'a> MetalForward<'a> {
         )?;
         encode_argmax_f32(
             self.ctx,
-            &enc,
+            enc,
+            &session.logits,
+            argmax_tok,
+            1,
+            arch.vocab_size as usize,
+        )?;
+        Ok(())
+    }
+
+    fn encode_single_token_argmax_moe(
+        &self,
+        enc: &KernelEncoder,
+        position: u32,
+        session: &mut MetalSession,
+        ids_buf: &MetalTensor,
+        argmax_tok: &MetalTensor,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+
+        encode_get_rows_f32(
+            self.ctx,
+            enc,
+            &self.model.token_embd,
+            ids_buf,
+            &session.x,
+            1,
+            h,
+        )?;
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            let slot = match block {
+                MetalBlock::Gdn(_) => {
+                    let s = MixerSlot::Gdn(gdn_idx);
+                    gdn_idx += 1;
+                    s
+                }
+                MetalBlock::Attn(_) => {
+                    let s = MixerSlot::Attn(attn_idx);
+                    attn_idx += 1;
+                    s
+                }
+            };
+            self.encode_moe_block_gpu(enc, block, slot, position, session)?;
+        }
+
+        encode_rms_norm_mul_f32(
+            self.ctx,
+            enc,
+            &session.x,
+            &self.model.output_norm,
+            &session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            self.ctx,
+            enc,
+            &self.model.lm_head,
+            &session.h,
+            &session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+        encode_argmax_f32(
+            self.ctx,
+            enc,
             &session.logits,
             argmax_tok,
             1,
@@ -1746,7 +2227,6 @@ impl<'a> MetalForward<'a> {
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
         }
-        let h = arch.hidden_size as usize;
         let t_total = std::time::Instant::now();
 
         unsafe {
@@ -1754,63 +2234,13 @@ impl<'a> MetalForward<'a> {
             *ptr = token_id;
         }
 
+        let ids_buf = session.ids_buf.clone();
+        let argmax_tok = session.argmax_tok.clone();
+
         let t_encode = std::time::Instant::now();
         let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
         let enc = KernelEncoder::begin(&cmd_buf);
-
-        encode_get_rows_f32(
-            self.ctx,
-            &enc,
-            &self.model.token_embd,
-            &session.ids_buf,
-            &session.x,
-            1,
-            h,
-        )?;
-
-        let mut gdn_idx = 0usize;
-        let mut attn_idx = 0usize;
-        for block in &self.model.blocks {
-            let slot = match block {
-                MetalBlock::Gdn(_) => {
-                    let s = MixerSlot::Gdn(gdn_idx);
-                    gdn_idx += 1;
-                    s
-                }
-                MetalBlock::Attn(_) => {
-                    let s = MixerSlot::Attn(attn_idx);
-                    attn_idx += 1;
-                    s
-                }
-            };
-            self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
-        }
-
-        encode_rms_norm_mul_f32(
-            self.ctx,
-            &enc,
-            &session.x,
-            &self.model.output_norm,
-            &session.h,
-            RMS_EPS,
-        )?;
-        encode_mat_vec_dispatch(
-            self.ctx,
-            &enc,
-            &self.model.lm_head,
-            &session.h,
-            &session.logits,
-            h,
-            arch.vocab_size as usize,
-        )?;
-        encode_argmax_f32(
-            self.ctx,
-            &enc,
-            &session.logits,
-            &session.argmax_tok,
-            1,
-            arch.vocab_size as usize,
-        )?;
+        self.encode_single_token_argmax_moe(&enc, position, session, &ids_buf, &argmax_tok)?;
         enc.end();
         let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
 
@@ -1821,7 +2251,7 @@ impl<'a> MetalForward<'a> {
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
         let argmax = unsafe {
-            let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
+            let src = argmax_tok.buffer.contents().as_ptr() as *const i32;
             *src
         };
         let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
@@ -2671,7 +3101,11 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
     ) -> Result<(Vec<f32>, TokenProfile), MfError> {
         if self.model.arch.kind == ArchKind::Moe {
-            return self.single_token_profiled_moe(token_id, position, session);
+            return if concurrent_gdn_moe_decode_enabled() {
+                self.single_token_profiled_concurrent_gdn_moe(token_id, position, session)
+            } else {
+                self.single_token_profiled_moe(token_id, position, session)
+            };
         }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
@@ -2780,9 +3214,6 @@ impl<'a> MetalForward<'a> {
         position: u32,
         s: &mut MetalSession,
     ) -> Result<(), MfError> {
-        let arch = &self.model.arch;
-        let h = arch.hidden_size as usize;
-
         // Pre-mixer norm.
         let attn_norm = match block {
             MetalBlock::Gdn(g) => &g.attn_norm,
@@ -3015,6 +3446,15 @@ impl<'a> MetalForward<'a> {
             position,
             arch.rope_theta,
         )?;
+        let kv_dst_off = usize::try_from(checked_u64_mul(
+            position as u64,
+            kv_dim as u64,
+            "kv dst offset overflow",
+        )?)
+        .map_err(|_| MetalError::BadShape {
+            kernel: "attn_step",
+            detail: "kv dst offset does not fit usize".into(),
+        })?;
         match s.kv_k[attn_i].dtype {
             GgmlType::F16 => encode_scatter_offset_f32_to_f16_kv(
                 self.ctx,
@@ -3023,7 +3463,7 @@ impl<'a> MetalForward<'a> {
                 &s.attn_v_now,
                 &s.kv_k[attn_i],
                 &s.kv_v[attn_i],
-                (position as usize) * kv_dim,
+                kv_dst_off,
                 kv_dim,
             )?,
             GgmlType::Q8_0 => encode_scatter_offset_f32_to_q8_0_kv(
@@ -3033,7 +3473,7 @@ impl<'a> MetalForward<'a> {
                 &s.attn_v_now,
                 &s.kv_k[attn_i],
                 &s.kv_v[attn_i],
-                (position as usize) * kv_dim,
+                kv_dst_off,
                 kv_dim,
             )?,
             other => {
@@ -3433,6 +3873,15 @@ impl<'a> MetalForward<'a> {
         // KV cache append: F32 source → F16 destination (cache is F16 to
         // halve attention bandwidth at long context). Fused K+V scatter
         // (Bulk-API principle): one dispatch writes both, saving 16 dispatches/token.
+        let kv_dst_off = usize::try_from(checked_u64_mul(
+            position as u64,
+            kv_dim as u64,
+            "kv dst offset overflow",
+        )?)
+        .map_err(|_| MetalError::BadShape {
+            kernel: "attn_step_q8",
+            detail: "kv dst offset does not fit usize".into(),
+        })?;
         match s.kv_k[attn_i].dtype {
             GgmlType::F16 => encode_scatter_offset_f32_to_f16_kv(
                 self.ctx,
@@ -3441,7 +3890,7 @@ impl<'a> MetalForward<'a> {
                 &s.attn_v_now,
                 &s.kv_k[attn_i],
                 &s.kv_v[attn_i],
-                (position as usize) * kv_dim,
+                kv_dst_off,
                 kv_dim,
             )?,
             GgmlType::Q8_0 => encode_scatter_offset_f32_to_q8_0_kv(
@@ -3451,7 +3900,7 @@ impl<'a> MetalForward<'a> {
                 &s.attn_v_now,
                 &s.kv_k[attn_i],
                 &s.kv_v[attn_i],
-                (position as usize) * kv_dim,
+                kv_dst_off,
                 kv_dim,
             )?,
             other => {
@@ -3541,12 +3990,24 @@ pub fn encode_scatter_offset_f32(
             detail: format!("src.n={} != n={n}", src.n_elements()),
         });
     }
-    if (dst_off + n) as u64 > dst.n_elements() {
+    let dst_end = dst_off.checked_add(n).ok_or_else(|| MetalError::BadShape {
+        kernel: "scatter_offset",
+        detail: format!("dst_off={dst_off} + n={n} overflows usize"),
+    })?;
+    if dst_end as u64 > dst.n_elements() {
         return Err(MetalError::BadShape {
             kernel: "scatter_offset",
-            detail: format!("dst_off+n={} > dst.n={}", dst_off + n, dst.n_elements()),
+            detail: format!("dst_off+n={dst_end} > dst.n={}", dst.n_elements()),
         });
     }
+    let n_u32 = u32::try_from(n).map_err(|_| MetalError::BadShape {
+        kernel: "scatter_offset",
+        detail: format!("n={n} does not fit u32 kernel args"),
+    })?;
+    let dst_off_u32 = u32::try_from(dst_off).map_err(|_| MetalError::BadShape {
+        kernel: "scatter_offset",
+        detail: format!("dst_off={dst_off} does not fit u32 kernel args"),
+    })?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -3558,8 +4019,8 @@ pub fn encode_scatter_offset_f32(
     enc.set_bytes(
         0,
         &Args {
-            n: n as u32,
-            dst_off: dst_off as u32,
+            n: n_u32,
+            dst_off: dst_off_u32,
         },
     );
     enc.set_tensor(1, src);
@@ -3917,8 +4378,13 @@ impl SessionSnapshot {
 /// Caller must ensure any prior GPU write is complete (i.e., the command
 /// buffer that wrote this tensor was committed AND waitUntilCompleted'd).
 fn read_tensor_into(dst: &mut [u8], t: &MetalTensor) {
-    debug_assert!(
-        dst.len() as u64 + t.offset <= t.buffer.length() as u64,
+    // Always-on bounds check: this guards an unchecked memcpy. A debug-only
+    // assert would let release builds silently read past the MTLBuffer end.
+    let end = (dst.len() as u64)
+        .checked_add(t.offset)
+        .expect("read offset+len overflow");
+    assert!(
+        end <= t.buffer.length() as u64,
         "read OOB: offset={} + n={} > buffer.len={}",
         t.offset,
         dst.len(),
@@ -3934,8 +4400,12 @@ fn read_tensor_into(dst: &mut [u8], t: &MetalTensor) {
 /// Caller must ensure any in-flight GPU read of this tensor has completed
 /// before calling. Subsequent GPU work will see the written bytes.
 fn write_tensor_bytes(t: &MetalTensor, bytes: &[u8]) {
-    debug_assert!(
-        bytes.len() as u64 + t.offset <= t.buffer.length() as u64,
+    // Always-on bounds check: see read_tensor_into above.
+    let end = (bytes.len() as u64)
+        .checked_add(t.offset)
+        .expect("write offset+len overflow");
+    assert!(
+        end <= t.buffer.length() as u64,
         "write OOB: offset={} + n={} > buffer.len={}",
         t.offset,
         bytes.len(),
@@ -4114,6 +4584,13 @@ mod tests {
     use crate::gguf::GgufFile;
     use crate::loader::Model;
 
+    #[test]
+    fn checked_u64_div_exact_rejects_zero_or_remainder() {
+        assert!(checked_u64_div_exact(12, 3, "ok").is_ok());
+        assert!(checked_u64_div_exact(12, 0, "zero").is_err());
+        assert!(checked_u64_div_exact(13, 3, "remainder").is_err());
+    }
+
     fn argmax_i32_local(xs: &[f32]) -> i32 {
         xs.iter()
             .enumerate()
@@ -4194,6 +4671,83 @@ mod tests {
             cos > cos_floor,
             "[argmax-chain-{label}] cos={cos} below floor {cos_floor}"
         );
+    }
+
+    fn run_concurrent_gdn_moe_equivalence(
+        model_path: &str,
+        label: &str,
+        max_prompt_tokens: usize,
+        cos_floor: f64,
+    ) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[moe-concurrent-gdn-{label}] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        assert_eq!(m.arch.kind, ArchKind::Moe);
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tok");
+        let mut ids = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        ids.truncate(ids.len().min(max_prompt_tokens));
+        assert!(!ids.is_empty(), "tokenizer returned empty prompt");
+
+        let mf = MetalForward::new(&ctx, &mm);
+        let cap = ids.len() + 8;
+        let mut s_serial = MetalSession::fresh(&ctx, &mm, cap).expect("serial session");
+        let mut s_conc = MetalSession::fresh(&ctx, &mm, cap).expect("concurrent session");
+        let mut last_serial = Vec::new();
+
+        let compare = |lhs: &[f32], rhs: &[f32], where_label: &str| {
+            let mut max_abs = 0.0f32;
+            let mut dot = 0.0f64;
+            let mut na = 0.0f64;
+            let mut nb = 0.0f64;
+            for i in 0..lhs.len() {
+                max_abs = max_abs.max((lhs[i] - rhs[i]).abs());
+                dot += lhs[i] as f64 * rhs[i] as f64;
+                na += (lhs[i] as f64).powi(2);
+                nb += (rhs[i] as f64).powi(2);
+            }
+            let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+            let arg_l = argmax_i32_local(lhs);
+            let arg_r = argmax_i32_local(rhs);
+            eprintln!(
+                "[moe-concurrent-gdn-{label}] {where_label}: argmax serial={arg_l} conc={arg_r} max|Δ|={max_abs:.4} cos={cos:.6}"
+            );
+            assert_eq!(arg_l, arg_r, "[{where_label}] argmax disagreement");
+            assert!(
+                cos >= cos_floor,
+                "[{where_label}] cos={cos} below floor {cos_floor}"
+            );
+        };
+
+        for (i, &tid) in ids.iter().enumerate() {
+            let (serial, _) = mf
+                .single_token_profiled(tid, i as u32, &mut s_serial)
+                .expect("serial prompt step");
+            let (concurrent, _) = mf
+                .single_token_profiled_concurrent_gdn_moe(tid, i as u32, &mut s_conc)
+                .expect("concurrent prompt step");
+            compare(&serial, &concurrent, &format!("prompt-step-{i}"));
+            last_serial = serial;
+        }
+
+        let next_tok = argmax_i32_local(&last_serial);
+        let (serial, _) = mf
+            .single_token_profiled(next_tok, ids.len() as u32, &mut s_serial)
+            .expect("serial follow-up");
+        let (concurrent, _) = mf
+            .single_token_profiled_concurrent_gdn_moe(next_tok, ids.len() as u32, &mut s_conc)
+            .expect("concurrent follow-up");
+        compare(&serial, &concurrent, "follow-up");
     }
 
     /// Validate a single GDN block end-to-end on Metal vs the CPU oracle.
@@ -4469,6 +5023,26 @@ mod tests {
         assert_eq!(argmax_serial, argmax_conc, "argmax disagreement");
         assert!(cos > 0.9999, "cos={cos} below threshold");
         assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
+    }
+
+    #[test]
+    fn metal_single_token_concurrent_gdn_moe_matches_serial_a3b() {
+        run_concurrent_gdn_moe_equivalence(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b",
+            4,
+            0.995,
+        );
+    }
+
+    #[test]
+    fn metal_single_token_concurrent_gdn_moe_matches_serial_a10b_smoke() {
+        run_concurrent_gdn_moe_equivalence(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+            "a10b",
+            2,
+            0.995,
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ authors = ["Britt Lewis"]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSError", "NSData"] }
 objc2-metal = { version = "0.3", features = [
+    "MTLAllocation",
     "MTLDevice",
     "MTLCommandQueue",
     "MTLCommandBuffer",
@@ -25,6 +26,7 @@ objc2-metal = { version = "0.3", features = [
     "MTLComputePipeline",
     "MTLBinaryArchive",
     "MTLResource",
+    "MTLResidencySet",
     "MTLTypes",
     "MTLArgumentEncoder",
     "block2",

@@ -78,7 +78,8 @@ fn bench_q4k_mat_vec(c: &mut Criterion) {
         let n_out = t.shape[1] as usize;
 
         // Persistent tensors.
-        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("w");
+        let w_t =
+            MetalTensor::from_gguf_tensor(&ctx, t, g.try_slice(t).expect("slice")).expect("w");
         let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
         let x_t = MetalTensor::from_bytes(
             &ctx,
@@ -132,7 +133,8 @@ fn bench_q6k_mat_vec(c: &mut Criterion) {
         let n_in = t.shape[0] as usize;
         let n_out = t.shape[1] as usize;
 
-        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("w");
+        let w_t =
+            MetalTensor::from_gguf_tensor(&ctx, t, g.try_slice(t).expect("slice")).expect("w");
         let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
         let x_t = MetalTensor::from_bytes(
             &ctx,
@@ -224,7 +226,8 @@ fn bench_q4k_mat_mat(c: &mut Criterion) {
         }
 
         // Persistent tensors.
-        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("w");
+        let w_t =
+            MetalTensor::from_gguf_tensor(&ctx, t, g.try_slice(t).expect("slice")).expect("w");
         // Mat-vec activation: just one row.
         let x_vec: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
         let x_vec_t = MetalTensor::from_bytes(

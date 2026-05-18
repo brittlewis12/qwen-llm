@@ -6,6 +6,171 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-18 — Concurrent GDN MoE Decode Front Projections
+
+Status: default-on for MoE decode on this repo, with
+`QWEN_DECODE_MOE_CONCURRENT_GDN=0` as the rollback path while broader device
+rollout evidence is still expanding.
+
+### What Changed
+
+- Ported the existing dense concurrent-GDN front-projection split into MoE
+  decode:
+  - serial token embedding + pre-GDN RMSNorm,
+  - `begin_concurrent` for GDN front projections,
+  - serial GDN tail, residual, postnorm, MoE route, and MoE FFN.
+- Added bounded decode A/B harnesses for the new path:
+  - `qwen-bench tg --concurrent-gdn-proj` for apples-to-apples decode,
+  - `qwen-bench decode-window --concurrent-gdn-proj` for fixed-context traces.
+- Added serial-vs-concurrent decode correctness gates on A3B and A10B.
+- Promoted the path into production decode behind a rollback flag instead of a
+  bench-only switch.
+
+### Measurements
+
+All runs are M4 Max, release `qwen-bench`, random-token `tg` or fixed-context
+`decode-window`, three reps unless noted.
+
+Apples-to-apples decode (`tg`):
+
+| Model | Shape | Serial | Concurrent GDN | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| 35B A3B Q4_K_M | `tg32` | `73.97 t/s` | `77.76 t/s` | `1.05x` |
+| 35B A3B Q4_K_M | `tg128` | `73.60 t/s` | `77.95 t/s` | `1.06x` |
+| 122B A10B Q4_K_XL | `tg32` | `32.39 t/s` | `35.06 t/s` | `1.08x` |
+| 122B A10B Q4_K_XL | `tg128` | `32.52 t/s` | `34.90 t/s` | `1.07x` |
+
+Fixed-context decode-window (`window=32`):
+
+- 35B A3B `ctx=128`: `73.2 -> 75.6 t/s`
+- 35B A3B `ctx=4096`: `66.6 -> 71.5 t/s`
+- 122B A10B `ctx=128`: `32.0 -> 34.3 t/s`
+- 122B A10B `ctx=4096`: `31.4 -> 34.0 t/s`
+
+The win is not just wall-time accounting: GPU time moves in the right direction
+on every measured row, and A10B now clears the prior local `llama-bench tg128`
+anchor (`~33.8 t/s`) with room.
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `metal_single_token_concurrent_gdn_moe_matches_serial_a3b`
+- `metal_single_token_concurrent_gdn_moe_matches_serial_a10b_smoke`
+- `qwen-bench tg` A/B sweep on A3B and A10B for `tg32` / `tg128`
+- `qwen-bench decode-window` A/B on A3B and A10B at `ctx=128` and `ctx=4096`
+
+### Current Read
+
+- The earlier pipelined token-submission work was real but small. The meaningful
+  MoE decode frontier was GDN mixer structure, not host overlap.
+- This is now the material MoE decode win surface: A3B and A10B both move by
+  roughly five to eight percent, and A10B crosses the old external decode
+  parity anchor.
+- The rollback path should stay live until more devices and a fuller A10B decode
+  chain matrix are logged, but the path is strong enough to be the repo default.
+
+## 2026-05-18 — A10B `pp128` Cold Variance Is Expert-Bank First-Touch
+
+Status: benchmark methodology note, not a new steady-state runtime frontier.
+
+### What Changed
+
+- Added a bench-only GPU touch pass over MoE expert-bank weights:
+  `QWEN_PP_WARM_MOE_BANKS=1`.
+- Added a bench-only `MTLResidencySet` experiment over the existing copied MoE
+  expert-bank buffers: `QWEN_PP_RESIDENCY_SET=1`.
+
+### Measurements
+
+Fresh-process A10B grouped `pp128`:
+
+- baseline cold seeds: about `138-150 t/s`, GPU only `~84-85%` of wall.
+- touch-warm expert banks: about `234.1 t/s`, GPU `~99.2%` of wall.
+- residency-set expert banks: about `232.8-236.0 t/s`, GPU `~99.2%` of wall.
+- steady-state `pp320/pp512` stay effectively flat with or without the
+  residency-set path.
+
+### Current Read
+
+- The ugly A10B `pp128` cold variance is now explained as first-touch expert-bank
+  residency/page behavior, not as a steady-state MoE math/kernel miss.
+- Keep the touch/residency-set knobs as benchmark methodology tools for cold
+  `pp128` fidelity. Do not treat them as the next production performance queue
+  unless load latency or peak-memory duplication becomes a measured product pain.
+
+## 2026-05-17 — GPU-Owned Grouped MoE Prompt Backend
+
+Status: endorsed for production inside the proven `Q4_K/Q4_K/Q5_K` MoE packed
+prefill envelope, with `QWEN_PREFILL_MOE_GROUPED=0` as the kill switch.
+
+### What Changed
+
+- Added a fully GPU-owned grouped routed backend for MoE packed prefill:
+  - GPU route compaction into per-expert slot counts and slot id lists,
+  - grouped `Q4_K` gate/up + fused `silu(gate) * up` kernel writing slot-major
+    routed inner activations,
+  - grouped `Q5_K` down kernel writing slot-major routed outputs,
+  - packed weighted sum reducing slot-major routed outputs back to token-major
+    mixer rows.
+- Kept the previous packed token-major path as the fallback outside the proven
+  envelope and as the opt-out path when `QWEN_PREFILL_MOE_GROUPED=0`.
+- Added exact oracles for the grouped routed subkernels:
+  - grouped `Q5_K` down vs known-good `mat_mat_q5_k`,
+  - grouped `Q4_K` routed SwiGLU vs the existing packed `moe_inner_pack`.
+- Added one awkward multi-chunk boundary correctness test for A10B (`T=129`,
+  `P=128`) because the new default path is most at risk where chunk boundaries
+  and grouped ids interact.
+
+### Measurements
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic prompts, sequential.
+
+Default chunking (`chunk=128`) at pp320:
+
+| Model | Previous default | Grouped default | Speedup |
+| --- | ---: | ---: | ---: |
+| 35B A3B Q4_K_M | `~399.6 t/s` | `~556.4 t/s` | `1.39x` |
+| 122B A10B Q4_K_XL | `~149.4 t/s` | `~218.1 t/s` | `1.46x` |
+
+One-chunk (`chunk=320`) at pp320:
+
+| Model | Previous chunk320 | Grouped chunk320 | Speedup |
+| --- | ---: | ---: | ---: |
+| 35B A3B Q4_K_M | `~399.6 t/s` | `~710.4 t/s` | `1.78x` |
+| 122B A10B Q4_K_XL | `~149.4 t/s` | `~278.7 t/s` | `1.87x` |
+
+Dense guardrails stayed flat on the same build:
+
+- 9B dense pp320: `712.18 +/- 0.43 t/s`
+- 27B dense pp320: `211.91 +/- 0.18 t/s`
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke`
+- `prefill_tokens_matches_single_token_loop_35b_a3b_moe`
+- `prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b`
+- `prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary`
+  (`T=129`, `P=128`) — passed with final-logit cos `0.999957`, GDN/KV minima
+  `>= 0.999035`.
+
+### Current Read
+
+- The old generic grouped-expert objection no longer applies to this path. The
+  winning version is GPU-owned, exact, and end-to-end positive on both MoE
+  guardrails.
+- Routed MoE prompt work is no longer the dominant family gap it was at the start
+  of this investigation. The MoE prompt path now has a production-resolution
+  backend for the proven quant envelope.
+- The next performance queue should stop treating MoE prompt prefill as the main
+  unresolved frontier and shift back toward the remaining dense prompt gap and the
+  last decode parity edge cases.
+- One rollout caveat remains: A10B `pp128` on the grouped backend is materially
+  noisier than `pp320/pp512`. Seed sweeps still settle into the expected
+  `~235 t/s` band, but some first runs are much slower (`~24-158 t/s`) even after
+  broad synthetic warmup. Treat that as a cold-route/cold-residency risk until a
+  better causal read is logged.
+
 ## 2026-05-16 — MoE Packed Shared Expert + Rowwise Residual
 
 Status: second major MoE prompt win after packed routed experts. This batches the

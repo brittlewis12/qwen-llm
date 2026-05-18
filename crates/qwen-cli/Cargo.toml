@@ -23,6 +23,8 @@ workspace = true
 
 [dependencies]
 qwen-llm = { path = "../qwen-llm" }
+objc2.workspace = true
+objc2-foundation.workspace = true
 objc2-metal.workspace = true
 
 anyhow.workspace = true

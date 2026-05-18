@@ -47,16 +47,29 @@ Prompt-only anchors, `pp320` synthetic prompt unless noted:
 - `qwen-llm` 9B dense packed pp: `~711.8 t/s`; `llama-bench`: `~824.0 t/s`
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
 - `qwen-llm` 35B A3B packed pp after packed routed+shared expert tail:
-  `~399.8 t/s`;
+  `~556.4 t/s` at default chunk128, `~710.4 t/s` at chunk320;
   `llama-bench`: `~1222.4 t/s`
 - `qwen-llm` 122B A10B packed pp after packed routed+shared expert tail:
-  `~148.9 t/s`;
+  `~218.1 t/s` at default chunk128, `~278.7 t/s` at chunk320;
   `llama-bench`: `~393.3 t/s`
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
   `~22.5 t/s` generation
 
 Recent confirmed wins:
+
+- MoE decode now has a real GDN-side concurrency win. Reusing the dense
+  concurrent-GDN front-projection split inside MoE decode and making it the repo
+  default with `QWEN_DECODE_MOE_CONCURRENT_GDN=0` as a rollback path moves A3B
+  from `~74.0/73.6 t/s` to `~77.8/78.0 t/s` at `tg32/tg128`, and A10B from
+  `~32.4/32.5 t/s` to `~35.1/34.9 t/s`. At `ctx=4096`, decode-window also moves
+  A3B `66.6 -> 71.5 t/s` and A10B `31.4 -> 34.0 t/s`, with GPU time improving on
+  every measured row.
+- A10B `pp128` cold variance is now explained as expert-bank first-touch, not as
+  a steady-state runtime miss. Bench-only `QWEN_PP_WARM_MOE_BANKS=1` and
+  `QWEN_PP_RESIDENCY_SET=1` collapse the cold outliers while leaving steady-state
+  `pp320/pp512` flat, so treat them as benchmark methodology knobs rather than a
+  top runtime roadmap item.
 
 - `qwen-bench pp` now exposes a phase-matched prompt-only harness and lowering
   summary for dense/MoE prompt work. It confirmed the dense `pp320` miss is real
@@ -75,6 +88,11 @@ Recent confirmed wins:
   major MoE prompt win: A3B pp320 moves to `~399.8 t/s` and A10B pp320 to
   `~148.9 t/s`; default chunk-128 pp320 is `~375.9 t/s` on A3B and
   `~150.4 t/s` on A10B. Dense 9B/27B guardrails remain flat.
+- A fully GPU-owned grouped expert-major routed backend now lands as the current
+  production-resolution MoE prompt path for the proven `Q4_K/Q4_K/Q5_K`
+  envelope. Default chunk-128 pp320 rises to `~556.4 t/s` on A3B and
+  `~218.1 t/s` on A10B; chunk320 reaches `~710.4 t/s` / `~278.7 t/s`. Dense
+  9B/27B guardrails stay flat.
 - Packed attention-body cleanup now batches consecutive-position RoPE for Q/K and
   scatters the whole chunk's K/V rows into the cache in one dispatch before the
   per-token attention loop. On the repeated 320-token 27B prompt, packed prefill
@@ -329,6 +347,16 @@ Status:
   - `ctx=16384`: `47.23 -> 46.14 ms/token`
 - The combined branch is not additive with GDN-only overlap, but it remains the
   strongest decode-focused command-model variant measured so far.
+- Treat encoder-boundary removal in these concurrent paths as an anti-bet until
+  a fresh A/B proves otherwise: the split is buying GPU-side overlap between
+  independent front projections, not merely adding host encode overhead. Host
+  encode is already only ~0.20 ms of ~42.14 ms GPU time at 27B dense 4K, so the
+  upper bound on collapsing encoders is well under 0.5%; the load-bearing piece
+  is the middle `begin_concurrent` encoder for the front projections, and any
+  merge must preserve that concurrent-dispatch property.
+- MoE no longer shares the same decode-overlap uncertainty: concurrent GDN front
+  projections are now production-wired for MoE decode on this repo, and the A3B /
+  A10B `tg32/tg128` sweeps are already materially positive.
 
 ### 6. Read-Only Weight Residency And Scratch Storage Cleanup
 
@@ -343,12 +371,16 @@ Why it belongs near the top now:
   orthogonal to no-copy GGUF views and should help regardless of mmap strategy.
 - Scratch is still `StorageModeShared` everywhere today, which is convenient but
   not obviously ideal for GPU-only hot tensors.
+- The new A10B `pp128` cold-run study keeps this bounded: touching or pinning MoE
+  expert-bank buffers fixes a benchmark-hotness artifact, but steady-state
+  `pp320/pp512` stay flat, so this is still structural cleanup rather than the
+  highest-EV runtime lever.
 
 Immediate target order:
 
 1. Mark read-only weights as untracked and managed by a residency set.
-2. Move GPU-only scratch arenas toward `StorageModePrivate` where the CPU never
-   reads them.
+2. Audit CPU readback/debug use, then move only proven GPU-only scratch arenas
+   toward `StorageModePrivate`; avoid a blanket allocator swap.
 3. Measure decode/prefill again before bundling this with larger graph changes.
 
 Acceptance gates:
@@ -356,17 +388,20 @@ Acceptance gates:
 - Any change must preserve correctness and avoid regressing steady-state decode.
 - Keep these as cheap structural cleanup unless traces show a larger-than-expected
   wall effect.
+- Specifically: `--full-logits-decode` (exact-token oracle) and any tap-based
+  hidden-state captures must stay green across a scratch storage-mode change,
+  since a blanket `StorageModePrivate` swap silently breaks CPU readback paths.
+  `MetalSession::fresh` currently allocates ~39 scratch tensors via
+  `MetalTensor::zeros_f32` (`StorageModeShared`); the audit must classify each
+  as GPU-only vs CPU-readable before any allocator change lands.
 
-### 7. MoE Next: Fresh Phase Profile After Packed Expert Tails
+### 7. MoE Next: Rollout And Stress The Grouped Expert-Major Backend
 
-Optimizes: MoE prompt throughput on A3B / 122B after Q8 mixer, packed routed,
-and packed shared-expert prompt wins.
+Optimizes: safe rollout and edge-case validation of the grouped expert-major MoE
+packed-prefill backend.
 
 Current read:
 
-- The obvious grouped-expert version is a measured negative result.
-- Shared-stage batching and F16 routed-inner traffic reduction also failed to
-  beat the current packed stage-1 MoE path end-to-end.
 - The Q8 mixer eligibility fix was the first major MoE prompt unlock, moving
   A3B pp320 to `~194-198 t/s` and A10B pp320 to `~85.1 t/s`.
 - The packed routed branch became a real win once the production gate checked
@@ -375,21 +410,30 @@ Current read:
 - The packed shared-expert branch then moved A3B pp320 to `~399.8 t/s` and A10B
   pp320 to `~148.9 t/s` by batching shared gate/up/down and applying shared gate
   with a rowwise AXPY into the routed mixer output.
-- The next MoE upside is no longer obvious. Start from a fresh phase profile after
-  both packed expert tails, then decide whether attention/GDN, remaining MoE
-  elementwise/copy, or command structure is the strongest next target.
+- A fully GPU-owned grouped expert-major backend now moves default chunk-128
+  pp320 to `~556.4 t/s` on A3B and `~218.1 t/s` on A10B, with chunk320 reaching
+  `~710.4 t/s` / `~278.7 t/s`.
+- This is no longer the old generic grouped-GEMM negative result. The winning path
+  is GPU-compacted, oracle-exact at the routed subkernels, and positive end-to-end
+  on both MoE guardrails.
+- A10B route-shape stability is not fully solved yet: `pp320/pp512` are stable on
+  seed sweeps, but `pp128` still shows large cold-run variance before settling
+  into the expected high-throughput band.
+- The immediate MoE task is not another rewrite; it is rollout discipline:
+  awkward chunk boundaries, long multi-chunk prompts, pathological route shapes,
+  and fallback integrity outside the proven quant envelope.
 
 Acceptance gates:
 
-- Any new MoE branch must explain why it avoids the generic grouped-GEMM failure
-  mode before it gets implementation time.
-- Keep MoE correctness gates and packed-MoE tail attribution in the loop.
-- Keep packed routed enabled only with the current correctness matrix green:
-  A3B single-token-loop + hidden capture, A10B smoke, and dense 9B/27B guardrails.
-- Keep packed shared enabled only with the current correctness matrix green,
-  including separate-process kill-switch checks for route/down/shared toggles.
-- Before the next MoE optimization, rerun a phase profile and a prompt-length
-  sweep; do not assume the old shared/residual/copy bucket is still dominant.
+- Keep `QWEN_PREFILL_MOE_GROUPED=0` as the kill switch while rollout evidence is
+  still expanding.
+- Default-on only for the proven `Q4_K/Q4_K/Q5_K` MoE packed-prefill envelope;
+  fallback stays live for unsupported dtypes/shapes.
+- Keep the current correctness matrix green: A3B single-token-loop + hidden
+  capture, A10B smoke, awkward chunk-boundary A10B (`T=129`, `P=128`), and dense
+  9B/27B guardrails.
+- Expand route-shape and multi-chunk coverage before calling the rollout complete,
+  with special attention to A10B `pp128` cold-run instability.
 
 ### 8. Use 9B As The Fast Dense Long-Context Canary
 
@@ -477,7 +521,9 @@ Highest-EV speculative kernel targets:
    KV reads.
 2. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-3. Adaptive draft compute width, not only adaptive verify width.
+3. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+   show N16 mat-mat-heavy surfaces remain material after the attention fixes.
+4. Adaptive draft compute width, not only adaptive verify width.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4
 
@@ -539,6 +585,14 @@ Acceptance gates:
 
 - Any decode surgery must be driven by a fresh dense phase profile identifying a
   specific waste pocket.
+- First candidate if the profile supports it: GDN decode recurrence tiling across
+  multiple `dv` rows to reduce launch/TG overhead and duplicated Q/K loads, but
+  only if `gdn_step_decay` is materially above its unavoidable state R/W floor.
+  The reducible component is the redundant `q_h`/`k_h` device-pointer reload
+  across the `head_dim × n_v_heads` TG grid (currently ~384× per head per token
+  for `head_dim=128, n_v/n_k=3`); the state R/W itself (~6 MiB/layer/token,
+  ~288 MiB/token across 48 GDN layers on 27B) is irreducible without restructuring
+  the recurrence. Budget the win at ~2-4% decode if k/q-bound; 0% if state-R/W-bound.
 - Exact-token A/B paths (`--full-logits-decode`) and argmax regression tests stay
   green while decode work proceeds.
 

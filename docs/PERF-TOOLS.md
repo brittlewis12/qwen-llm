@@ -415,6 +415,30 @@ Rules for pp sweeps:
   `moe_gpu_token_loop`) with any result.
 - Treat experimental MoE flags such as `QWEN_PREFILL_MOE_PACKED_ROUTED` as part of
   the benchmark identity and report them explicitly.
+- For cold A10B `pp128` methodology, `QWEN_PP_WARM_MOE_BANKS=1` or
+  `QWEN_PP_RESIDENCY_SET=1` removes expert-bank first-touch outliers. Report those
+  knobs explicitly and do not claim them as steady-state throughput wins.
+
+### qwen-bench tg decode sweeps
+
+Use `qwen-bench tg` for apples-to-apples decode numbers: empty KV per rep,
+random tokens, no logits readback.
+
+```sh
+: "${MODEL:?set MODEL to a GGUF}"
+./target/release/qwen-bench tg \
+  -m "$MODEL" \
+  -n 128 \
+  --runs 3
+```
+
+Rules for tg sweeps:
+
+- Keep `tg32` and `tg128` together for MoE decode rollout decisions.
+- For the current repo default, MoE decode already includes concurrent GDN front
+  projections; use `QWEN_DECODE_MOE_CONCURRENT_GDN=0` for the serial fallback A/B.
+- Pair `tg` with `decode-window --target-ctx 4096 --window 32` when the question
+  is whether a decode win survives longer context, not just empty-KV decode.
 
 ### llama.cpp baselines
 

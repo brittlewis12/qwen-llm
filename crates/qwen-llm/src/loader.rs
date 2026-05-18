@@ -71,6 +71,96 @@ pub enum LoadError {
     },
     #[error("unexpected layer kind for blk.{idx}: expected {expected:?} based on pattern")]
     LayerKind { idx: u32, expected: LayerKind },
+    #[error("metadata key {key:?} = {got} is out of range (must fit in u32)")]
+    MetadataOverflow { key: &'static str, got: u64 },
+    #[error("metadata key {key:?} = {got} is out of range (must fit in i32)")]
+    MetadataI32Overflow { key: &'static str, got: u64 },
+    #[error("metadata key {key:?} = {got} exceeds safety cap {cap}")]
+    MetadataCap {
+        key: &'static str,
+        got: u64,
+        cap: u64,
+    },
+    #[error("metadata key {key:?} = {got} is inconsistent: must be <= {bound_key:?} = {bound}")]
+    MetadataInconsistent {
+        key: &'static str,
+        got: u64,
+        bound_key: &'static str,
+        bound: u64,
+    },
+    #[error("metadata-derived dimension overflows u64: {0}")]
+    DimensionOverflow(&'static str),
+    #[error("metadata key {key:?} = {numerator} is not divisible by {divisor_key:?} = {divisor}")]
+    MetadataNotDivisible {
+        key: &'static str,
+        numerator: u64,
+        divisor_key: &'static str,
+        divisor: u64,
+    },
+}
+
+const MAX_ARCH_LAYERS: u32 = 4096;
+const MAX_ARCH_DIM: u32 = 1 << 20;
+const MAX_DFLASH_BLOCK_SIZE: u32 = 4096;
+const MAX_KERNEL_DIM: u64 = 1 << 20;
+const MAX_GDN_STATE_ELEMS: u64 = 1 << 24;
+
+/// Strict narrowing of GGUF u64 metadata to u32. Returns a typed error
+/// instead of silently truncating, which `as u32` would do on a malformed
+/// GGUF claiming e.g. `block_count = u64::MAX`.
+fn u64_to_u32(key: &'static str, got: u64) -> Result<u32, LoadError> {
+    u32::try_from(got).map_err(|_| LoadError::MetadataOverflow { key, got })
+}
+
+fn u64_to_i32(key: &'static str, got: u64) -> Result<i32, LoadError> {
+    i32::try_from(got).map_err(|_| LoadError::MetadataI32Overflow { key, got })
+}
+
+fn ensure_cap(key: &'static str, got: u32, cap: u32) -> Result<(), LoadError> {
+    if got > cap {
+        return Err(LoadError::MetadataCap {
+            key,
+            got: got as u64,
+            cap: cap as u64,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_nonzero(key: &'static str, got: u32) -> Result<(), LoadError> {
+    if got == 0 {
+        return Err(LoadError::BadMetadata(key));
+    }
+    Ok(())
+}
+
+fn ensure_divisible(
+    key: &'static str,
+    numerator: u32,
+    divisor_key: &'static str,
+    divisor: u32,
+) -> Result<(), LoadError> {
+    if numerator % divisor != 0 {
+        return Err(LoadError::MetadataNotDivisible {
+            key,
+            numerator: numerator as u64,
+            divisor_key,
+            divisor: divisor as u64,
+        });
+    }
+    Ok(())
+}
+
+fn checked_mul_dim(a: u64, b: u64, label: &'static str) -> Result<u64, LoadError> {
+    a.checked_mul(b).ok_or(LoadError::DimensionOverflow(label))
+}
+
+fn checked_add_dim(a: u64, b: u64, label: &'static str) -> Result<u64, LoadError> {
+    a.checked_add(b).ok_or(LoadError::DimensionOverflow(label))
+}
+
+fn checked_double_dim(a: u64, label: &'static str) -> Result<u64, LoadError> {
+    checked_mul_dim(a, 2, label)
 }
 
 /// Per-block weight references for a GDN layer.
@@ -365,12 +455,22 @@ impl<'a> Model<'a> {
                     // GDN tensors. Combined dim for in_proj_qkv = (n_k + n_k + n_v) * head_dim
                     // = 2*16*128 + 48*128 = 4096 + 6144 = 10240 for 27B,
                     // but qwen3.5-0.8B uses 2*16*128 + 16*128 = 4096+2048 = 6144 — matches!
-                    let qkv_out = (2 * arch.gdn_n_k_heads + arch.gdn_n_v_heads) * arch.gdn_head_dim;
-                    let z_out = arch.gdn_n_v_heads * arch.gdn_head_dim;
+                    let qkv_heads = checked_add_dim(
+                        checked_double_dim(arch.gdn_n_k_heads as u64, "2 * gdn_n_k_heads")?,
+                        arch.gdn_n_v_heads as u64,
+                        "2 * gdn_n_k_heads + gdn_n_v_heads",
+                    )?;
+                    let qkv_out =
+                        checked_mul_dim(qkv_heads, arch.gdn_head_dim as u64, "gdn qkv_out")?;
+                    let z_out = checked_mul_dim(
+                        arch.gdn_n_v_heads as u64,
+                        arch.gdn_head_dim as u64,
+                        "gdn z_out",
+                    )?;
                     let in_proj_qkv = need(g, &format!("blk.{i}.attn_qkv.weight"))?;
-                    check_shape(in_proj_qkv, &[arch.hidden_size as u64, qkv_out as u64])?;
+                    check_shape(in_proj_qkv, &[arch.hidden_size as u64, qkv_out])?;
                     let in_proj_z = need(g, &format!("blk.{i}.attn_gate.weight"))?;
-                    check_shape(in_proj_z, &[arch.hidden_size as u64, z_out as u64])?;
+                    check_shape(in_proj_z, &[arch.hidden_size as u64, z_out])?;
                     // GGUF `ssm_beta.weight` feeds β = sigmoid(...).
                     // GGUF `ssm_alpha.weight` feeds the softplus → gate path.
                     // The names are confusing — don't read them as the
@@ -392,18 +492,12 @@ impl<'a> Model<'a> {
                     check_shape(dt_bias, &[arch.gdn_n_v_heads as u64])?;
                     let conv1d = need(g, &format!("blk.{i}.ssm_conv1d.weight"))?;
                     let conv_dim =
-                        (2 * arch.gdn_n_k_heads + arch.gdn_n_v_heads) * arch.gdn_head_dim;
-                    check_shape(conv1d, &[arch.gdn_conv_kernel as u64, conv_dim as u64])?;
+                        checked_mul_dim(qkv_heads, arch.gdn_head_dim as u64, "gdn conv_dim")?;
+                    check_shape(conv1d, &[arch.gdn_conv_kernel as u64, conv_dim])?;
                     let norm = need(g, &format!("blk.{i}.ssm_norm.weight"))?;
                     check_shape(norm, &[arch.gdn_head_dim as u64])?;
                     let out_proj = need(g, &format!("blk.{i}.ssm_out.weight"))?;
-                    check_shape(
-                        out_proj,
-                        &[
-                            (arch.gdn_n_v_heads * arch.gdn_head_dim) as u64,
-                            arch.hidden_size as u64,
-                        ],
-                    )?;
+                    check_shape(out_proj, &[z_out, arch.hidden_size as u64])?;
                     Block::Gdn(GdnBlock {
                         attn_norm,
                         post_attention_norm,
@@ -423,19 +517,33 @@ impl<'a> Model<'a> {
                     })
                 }
                 LayerKind::GatedAttention => {
-                    let q_dim = arch.n_q_heads * arch.attn_head_dim;
-                    let kv_dim = arch.n_kv_heads * arch.attn_head_dim;
+                    let q_dim = checked_mul_dim(
+                        arch.n_q_heads as u64,
+                        arch.attn_head_dim as u64,
+                        "attn q_dim",
+                    )?;
+                    let kv_dim = checked_mul_dim(
+                        arch.n_kv_heads as u64,
+                        arch.attn_head_dim as u64,
+                        "attn kv_dim",
+                    )?;
                     // Gated attention: q_proj outputs 2× the heads' worth — first
                     // half is Q, second half is the sigmoid output gate. So the
                     // weight matrix is [hidden, 2*q_dim].
                     let q = need(g, &format!("blk.{i}.attn_q.weight"))?;
-                    check_shape(q, &[arch.hidden_size as u64, 2 * q_dim as u64])?;
+                    check_shape(
+                        q,
+                        &[
+                            arch.hidden_size as u64,
+                            checked_double_dim(q_dim, "2 * attn q_dim")?,
+                        ],
+                    )?;
                     let k = need(g, &format!("blk.{i}.attn_k.weight"))?;
-                    check_shape(k, &[arch.hidden_size as u64, kv_dim as u64])?;
+                    check_shape(k, &[arch.hidden_size as u64, kv_dim])?;
                     let v = need(g, &format!("blk.{i}.attn_v.weight"))?;
-                    check_shape(v, &[arch.hidden_size as u64, kv_dim as u64])?;
+                    check_shape(v, &[arch.hidden_size as u64, kv_dim])?;
                     let o = need(g, &format!("blk.{i}.attn_output.weight"))?;
-                    check_shape(o, &[q_dim as u64, arch.hidden_size as u64])?;
+                    check_shape(o, &[q_dim, arch.hidden_size as u64])?;
                     let q_norm = need(g, &format!("blk.{i}.attn_q_norm.weight"))?;
                     check_shape(q_norm, &[arch.attn_head_dim as u64])?;
                     let k_norm = need(g, &format!("blk.{i}.attn_k_norm.weight"))?;
@@ -502,7 +610,10 @@ fn bind_mtp_head<'a>(g: &'a GgufFile, arch: &Arch) -> Result<Option<MtpHead<'a>>
     // eh_proj: [2*H, H]
     check_shape(
         eh_proj,
-        &[2 * arch.hidden_size as u64, arch.hidden_size as u64],
+        &[
+            checked_double_dim(arch.hidden_size as u64, "mtp 2 * hidden_size")?,
+            arch.hidden_size as u64,
+        ],
     )?;
 
     let enorm = need(g, &format!("blk.{i}.nextn.enorm.weight"))?;
@@ -536,17 +647,31 @@ fn bind_mtp_head<'a>(g: &'a GgufFile, arch: &Arch) -> Result<Option<MtpHead<'a>>
         ffn_down,
         &[arch.intermediate_size as u64, arch.hidden_size as u64],
     )?;
-    let q_dim = arch.n_q_heads * arch.attn_head_dim;
-    let kv_dim = arch.n_kv_heads * arch.attn_head_dim;
+    let q_dim = checked_mul_dim(
+        arch.n_q_heads as u64,
+        arch.attn_head_dim as u64,
+        "mtp q_dim",
+    )?;
+    let kv_dim = checked_mul_dim(
+        arch.n_kv_heads as u64,
+        arch.attn_head_dim as u64,
+        "mtp kv_dim",
+    )?;
     let q = need(g, &format!("blk.{i}.attn_q.weight"))?;
     // Gated attention: q_proj outputs 2× q_dim (Q + sigmoid gate).
-    check_shape(q, &[arch.hidden_size as u64, 2 * q_dim as u64])?;
+    check_shape(
+        q,
+        &[
+            arch.hidden_size as u64,
+            checked_double_dim(q_dim, "mtp 2 * q_dim")?,
+        ],
+    )?;
     let k = need(g, &format!("blk.{i}.attn_k.weight"))?;
-    check_shape(k, &[arch.hidden_size as u64, kv_dim as u64])?;
+    check_shape(k, &[arch.hidden_size as u64, kv_dim])?;
     let v = need(g, &format!("blk.{i}.attn_v.weight"))?;
-    check_shape(v, &[arch.hidden_size as u64, kv_dim as u64])?;
+    check_shape(v, &[arch.hidden_size as u64, kv_dim])?;
     let o = need(g, &format!("blk.{i}.attn_output.weight"))?;
-    check_shape(o, &[q_dim as u64, arch.hidden_size as u64])?;
+    check_shape(o, &[q_dim, arch.hidden_size as u64])?;
     let q_norm = need(g, &format!("blk.{i}.attn_q_norm.weight"))?;
     check_shape(q_norm, &[arch.attn_head_dim as u64])?;
     let k_norm = need(g, &format!("blk.{i}.attn_k_norm.weight"))?;
@@ -595,71 +720,134 @@ pub fn open_dflash_drafter<'a>(
     // -------- Read drafter config from KV metadata --------
     let n_layer = drafter_gguf
         .get_u64("dflash-draft.block_count")
-        .ok_or(LoadError::BadMetadata("dflash-draft.block_count"))? as u32;
-    let hidden_size = drafter_gguf
+        .ok_or(LoadError::BadMetadata("dflash-draft.block_count"))?;
+    let n_layer = u64_to_u32("dflash-draft.block_count", n_layer)?;
+    let hidden_size_raw = drafter_gguf
         .get_u64("dflash-draft.embedding_length")
-        .ok_or(LoadError::BadMetadata("dflash-draft.embedding_length"))?
-        as u32;
-    let intermediate_size = drafter_gguf
+        .ok_or(LoadError::BadMetadata("dflash-draft.embedding_length"))?;
+    let hidden_size = u64_to_u32("dflash-draft.embedding_length", hidden_size_raw)?;
+    let intermediate_size_raw = drafter_gguf
         .get_u64("dflash-draft.feed_forward_length")
-        .ok_or(LoadError::BadMetadata("dflash-draft.feed_forward_length"))?
-        as u32;
-    let n_q_heads = drafter_gguf
+        .ok_or(LoadError::BadMetadata("dflash-draft.feed_forward_length"))?;
+    let intermediate_size = u64_to_u32("dflash-draft.feed_forward_length", intermediate_size_raw)?;
+    let n_q_heads_raw = drafter_gguf
         .get_u64("dflash-draft.attention.head_count")
-        .ok_or(LoadError::BadMetadata("dflash-draft.attention.head_count"))?
-        as u32;
-    let n_kv_heads = drafter_gguf
+        .ok_or(LoadError::BadMetadata("dflash-draft.attention.head_count"))?;
+    let n_q_heads = u64_to_u32("dflash-draft.attention.head_count", n_q_heads_raw)?;
+    let n_kv_heads_raw = drafter_gguf
         .get_u64("dflash-draft.attention.head_count_kv")
         .ok_or(LoadError::BadMetadata(
             "dflash-draft.attention.head_count_kv",
-        ))? as u32;
-    let head_dim = drafter_gguf
+        ))?;
+    let n_kv_heads = u64_to_u32("dflash-draft.attention.head_count_kv", n_kv_heads_raw)?;
+    let head_dim_raw = drafter_gguf
         .get_u64("dflash-draft.attention.key_length")
-        .ok_or(LoadError::BadMetadata("dflash-draft.attention.key_length"))?
-        as u32;
+        .ok_or(LoadError::BadMetadata("dflash-draft.attention.key_length"))?;
+    let head_dim = u64_to_u32("dflash-draft.attention.key_length", head_dim_raw)?;
     let rope_theta = drafter_gguf
         .get_f32("dflash-draft.rope.freq_base")
         .unwrap_or(10_000_000.0);
     let swa_window = drafter_gguf
         .get_u64("dflash-draft.attention.sliding_window")
-        .unwrap_or(0) as u32;
+        .map_or(Ok(0), |v| {
+            u64_to_u32("dflash-draft.attention.sliding_window", v)
+        })?;
     let block_size = drafter_gguf
         .get_u64("dflash-draft.dflash.block_size")
-        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.block_size"))?
-        as u32;
+        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.block_size"))?;
+    let block_size = u64_to_u32("dflash-draft.dflash.block_size", block_size)?;
     let mask_token_id = drafter_gguf
         .get_u64("dflash-draft.dflash.mask_token_id")
-        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.mask_token_id"))?
-        as i32;
+        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.mask_token_id"))?;
+    let mask_token_id = u64_to_i32("dflash-draft.dflash.mask_token_id", mask_token_id)?;
     let target_layer_ids: Vec<u32> = drafter_gguf
         .get_u64_array("dflash-draft.dflash.target_layer_ids")
+        .map_err(|_| LoadError::BadMetadata("dflash-draft.dflash.target_layer_ids"))?
         .ok_or(LoadError::BadMetadata(
             "dflash-draft.dflash.target_layer_ids",
         ))?
         .into_iter()
-        .map(|v| v as u32)
-        .collect();
+        .map(|v| u64_to_u32("dflash-draft.dflash.target_layer_ids", v))
+        .collect::<Result<Vec<_>, _>>()?;
     let n_target_features = drafter_gguf
         .get_u64("dflash-draft.dflash.n_target_features")
         .ok_or(LoadError::BadMetadata(
             "dflash-draft.dflash.n_target_features",
-        ))? as u32;
+        ))?;
+    let n_target_features = u64_to_u32("dflash-draft.dflash.n_target_features", n_target_features)?;
     let swa_pattern: Vec<bool> = drafter_gguf
         .get_bool_array("dflash-draft.attention.sliding_window_pattern")
+        .map_err(|_| LoadError::BadMetadata("dflash-draft.attention.sliding_window_pattern"))?
         .ok_or(LoadError::BadMetadata(
             "dflash-draft.attention.sliding_window_pattern",
         ))?;
 
     // -------- Compatibility validation --------
     let target_h = target_model.arch.hidden_size;
+    ensure_cap("dflash-draft.block_count", n_layer, MAX_ARCH_LAYERS)?;
+    ensure_nonzero("dflash-draft.block_count", n_layer)?;
+    ensure_cap("dflash-draft.embedding_length", hidden_size, MAX_ARCH_DIM)?;
+    ensure_nonzero("dflash-draft.embedding_length", hidden_size)?;
+    ensure_cap(
+        "dflash-draft.feed_forward_length",
+        intermediate_size,
+        MAX_ARCH_DIM,
+    )?;
+    ensure_nonzero("dflash-draft.feed_forward_length", intermediate_size)?;
+    ensure_cap("dflash-draft.attention.head_count", n_q_heads, MAX_ARCH_DIM)?;
+    ensure_nonzero("dflash-draft.attention.head_count", n_q_heads)?;
+    ensure_cap(
+        "dflash-draft.attention.head_count_kv",
+        n_kv_heads,
+        MAX_ARCH_DIM,
+    )?;
+    ensure_nonzero("dflash-draft.attention.head_count_kv", n_kv_heads)?;
+    ensure_divisible(
+        "dflash-draft.attention.head_count",
+        n_q_heads,
+        "dflash-draft.attention.head_count_kv",
+        n_kv_heads,
+    )?;
+    ensure_cap("dflash-draft.attention.key_length", head_dim, MAX_ARCH_DIM)?;
+    ensure_nonzero("dflash-draft.attention.key_length", head_dim)?;
+    ensure_cap(
+        "dflash-draft.dflash.block_size",
+        block_size,
+        MAX_DFLASH_BLOCK_SIZE,
+    )?;
+    ensure_nonzero("dflash-draft.dflash.block_size", block_size)?;
+    ensure_cap(
+        "dflash-draft.dflash.n_target_features",
+        n_target_features,
+        MAX_ARCH_DIM,
+    )?;
+    ensure_nonzero("dflash-draft.dflash.n_target_features", n_target_features)?;
     if hidden_size != target_h {
         return Err(LoadError::BadMetadata(
             "dflash-draft.embedding_length must equal target's hidden_size \
              (drafter shares target's tok_embd / lm_head; H mismatch breaks composition)",
         ));
     }
-    let expected_n_target_features = (target_layer_ids.len() as u32) * target_h;
-    if n_target_features != expected_n_target_features {
+    let target_feature_layers =
+        u32::try_from(target_layer_ids.len()).map_err(|_| LoadError::MetadataOverflow {
+            key: "dflash-draft.dflash.target_layer_ids",
+            got: target_layer_ids.len() as u64,
+        })?;
+    ensure_cap(
+        "dflash-draft.dflash.target_layer_ids",
+        target_feature_layers,
+        MAX_ARCH_LAYERS,
+    )?;
+    ensure_nonzero(
+        "dflash-draft.dflash.target_layer_ids",
+        target_feature_layers,
+    )?;
+    let expected_n_target_features = checked_mul_dim(
+        target_layer_ids.len() as u64,
+        target_h as u64,
+        "dflash target_layer_ids.len * target_h",
+    )?;
+    if n_target_features as u64 != expected_n_target_features {
         return Err(LoadError::BadMetadata(
             "dflash-draft.dflash.n_target_features mismatch: \
              expected K · H_target",
@@ -672,10 +860,27 @@ pub fn open_dflash_drafter<'a>(
             ));
         }
     }
-    if swa_pattern.len() as u32 != n_layer {
+    if swa_pattern.len() != n_layer as usize {
         return Err(LoadError::BadMetadata(
             "dflash-draft.attention.sliding_window_pattern length must equal block_count",
         ));
+    }
+
+    let q_dim = checked_mul_dim(n_q_heads as u64, head_dim as u64, "dflash q_dim")?;
+    if q_dim > MAX_KERNEL_DIM {
+        return Err(LoadError::MetadataCap {
+            key: "dflash-draft.attention.q_dim",
+            got: q_dim,
+            cap: MAX_KERNEL_DIM,
+        });
+    }
+    let kv_dim = checked_mul_dim(n_kv_heads as u64, head_dim as u64, "dflash kv_dim")?;
+    if kv_dim > MAX_KERNEL_DIM {
+        return Err(LoadError::MetadataCap {
+            key: "dflash-draft.attention.kv_dim",
+            got: kv_dim,
+            cap: MAX_KERNEL_DIM,
+        });
     }
 
     // -------- Top-level adornment tensors --------
@@ -687,8 +892,6 @@ pub fn open_dflash_drafter<'a>(
     check_shape(output_norm, &[hidden_size as u64])?;
 
     // -------- Per-layer tensors --------
-    let q_dim = (n_q_heads * head_dim) as u64;
-    let kv_dim = (n_kv_heads * head_dim) as u64;
     let h = hidden_size as u64;
     let f = intermediate_size as u64;
     let mut layers: Vec<DFlashLayer<'a>> = Vec::with_capacity(n_layer as usize);
@@ -745,7 +948,7 @@ pub fn open_dflash_drafter<'a>(
             swa_window,
             block_size,
             mask_token_id,
-            n_target_features_layers: target_layer_ids.len() as u32,
+            n_target_features_layers: target_feature_layers,
         },
         target_layer_ids,
         fc,
@@ -801,32 +1004,58 @@ fn build_arch_from_metadata(g: &GgufFile, arch_name: &str) -> Result<Arch, LoadE
     // n_layer here. Older GGUFs (pre-MTP-converter) don't have the
     // nextn_predict_layers key, in which case we default to 0 and the
     // subtraction is a no-op (preserving the prior behavior).
-    let block_count = g
+    let block_count_u64 = g
         .get_u64(&format!("{p}.block_count"))
-        .ok_or(LoadError::BadMetadata("qwen35.block_count"))? as u32;
-    let mtp_n_hidden_layers = g.get_u64(&format!("{p}.nextn_predict_layers")).unwrap_or(0) as u32;
-    let n_layer = block_count.saturating_sub(mtp_n_hidden_layers);
+        .ok_or(LoadError::BadMetadata("qwen35.block_count"))?;
+    let block_count = u64_to_u32("qwen35.block_count", block_count_u64)?;
+    let mtp_n_hidden_layers_u64 = g.get_u64(&format!("{p}.nextn_predict_layers")).unwrap_or(0);
+    let mtp_n_hidden_layers = u64_to_u32("qwen35.nextn_predict_layers", mtp_n_hidden_layers_u64)?;
+    ensure_cap("qwen35.block_count", block_count, MAX_ARCH_LAYERS)?;
+    ensure_cap(
+        "qwen35.nextn_predict_layers",
+        mtp_n_hidden_layers,
+        MAX_ARCH_LAYERS,
+    )?;
+    // Strict subtraction: a malformed GGUF with `nextn_predict_layers >
+    // block_count` previously saturated to a 0-layer model, which then
+    // produced a downstream panic in an unrelated module. Reject up front.
+    if mtp_n_hidden_layers > block_count {
+        return Err(LoadError::MetadataInconsistent {
+            key: "qwen35.nextn_predict_layers",
+            got: mtp_n_hidden_layers as u64,
+            bound_key: "qwen35.block_count",
+            bound: block_count as u64,
+        });
+    }
+    let n_layer = block_count - mtp_n_hidden_layers;
     let hidden_size = g
         .get_u64(&format!("{p}.embedding_length"))
-        .ok_or(LoadError::BadMetadata("qwen35.embedding_length"))? as u32;
+        .ok_or(LoadError::BadMetadata("qwen35.embedding_length"))?;
+    let hidden_size = u64_to_u32("qwen35.embedding_length", hidden_size)?;
     let intermediate_size = if kind == ArchKind::Dense {
-        g.get_u64(&format!("{p}.feed_forward_length"))
-            .ok_or(LoadError::BadMetadata("qwen35.feed_forward_length"))? as u32
+        let value = g
+            .get_u64(&format!("{p}.feed_forward_length"))
+            .ok_or(LoadError::BadMetadata("qwen35.feed_forward_length"))?;
+        u64_to_u32("qwen35.feed_forward_length", value)?
     } else {
         0
     };
-    let n_q_heads = g
+    let n_q_heads_raw = g
         .get_u64(&format!("{p}.attention.head_count"))
-        .ok_or(LoadError::BadMetadata("qwen35.attention.head_count"))? as u32;
-    let n_kv_heads =
-        g.get_u64(&format!("{p}.attention.head_count_kv"))
-            .ok_or(LoadError::BadMetadata("qwen35.attention.head_count_kv"))? as u32;
-    let attn_head_dim =
-        g.get_u64(&format!("{p}.attention.key_length"))
-            .ok_or(LoadError::BadMetadata("qwen35.attention.key_length"))? as u32;
-    let full_attention_interval = g
-        .get_u64(&format!("{p}.full_attention_interval"))
-        .unwrap_or(4) as u32;
+        .ok_or(LoadError::BadMetadata("qwen35.attention.head_count"))?;
+    let n_q_heads = u64_to_u32("qwen35.attention.head_count", n_q_heads_raw)?;
+    let n_kv_heads_raw = g
+        .get_u64(&format!("{p}.attention.head_count_kv"))
+        .ok_or(LoadError::BadMetadata("qwen35.attention.head_count_kv"))?;
+    let n_kv_heads = u64_to_u32("qwen35.attention.head_count_kv", n_kv_heads_raw)?;
+    let attn_head_dim_raw = g
+        .get_u64(&format!("{p}.attention.key_length"))
+        .ok_or(LoadError::BadMetadata("qwen35.attention.key_length"))?;
+    let attn_head_dim = u64_to_u32("qwen35.attention.key_length", attn_head_dim_raw)?;
+    let full_attention_interval = match g.get_u64(&format!("{p}.full_attention_interval")) {
+        Some(value) => u64_to_u32("qwen35.full_attention_interval", value)?,
+        None => 4,
+    };
 
     // GDN dims.
     // ssm.inner_size = num_v_heads * head_dim
@@ -836,42 +1065,54 @@ fn build_arch_from_metadata(g: &GgufFile, arch_name: &str) -> Result<Arch, LoadE
     // ssm.conv_kernel = conv kernel size
     let ssm_state_size = g
         .get_u64(&format!("{p}.ssm.state_size"))
-        .ok_or(LoadError::BadMetadata("qwen35.ssm.state_size"))? as u32;
-    let ssm_time_step_rank =
-        g.get_u64(&format!("{p}.ssm.time_step_rank"))
-            .ok_or(LoadError::BadMetadata("qwen35.ssm.time_step_rank"))? as u32;
+        .ok_or(LoadError::BadMetadata("qwen35.ssm.state_size"))?;
+    let ssm_state_size = u64_to_u32("qwen35.ssm.state_size", ssm_state_size)?;
+    let ssm_time_step_rank = g
+        .get_u64(&format!("{p}.ssm.time_step_rank"))
+        .ok_or(LoadError::BadMetadata("qwen35.ssm.time_step_rank"))?;
+    let ssm_time_step_rank = u64_to_u32("qwen35.ssm.time_step_rank", ssm_time_step_rank)?;
     let ssm_group_count = g
         .get_u64(&format!("{p}.ssm.group_count"))
-        .ok_or(LoadError::BadMetadata("qwen35.ssm.group_count"))? as u32;
+        .ok_or(LoadError::BadMetadata("qwen35.ssm.group_count"))?;
+    let ssm_group_count = u64_to_u32("qwen35.ssm.group_count", ssm_group_count)?;
     let ssm_conv_kernel = g
         .get_u64(&format!("{p}.ssm.conv_kernel"))
-        .ok_or(LoadError::BadMetadata("qwen35.ssm.conv_kernel"))? as u32;
+        .ok_or(LoadError::BadMetadata("qwen35.ssm.conv_kernel"))?;
+    let ssm_conv_kernel = u64_to_u32("qwen35.ssm.conv_kernel", ssm_conv_kernel)?;
 
     let expert_count = if kind == ArchKind::Moe {
-        g.get_u64(&format!("{p}.expert_count"))
-            .ok_or(LoadError::BadMetadata("qwen35moe.expert_count"))? as u32
+        let value = g
+            .get_u64(&format!("{p}.expert_count"))
+            .ok_or(LoadError::BadMetadata("qwen35moe.expert_count"))?;
+        u64_to_u32("qwen35moe.expert_count", value)?
     } else {
         0
     };
     let expert_used_count = if kind == ArchKind::Moe {
-        g.get_u64(&format!("{p}.expert_used_count"))
-            .ok_or(LoadError::BadMetadata("qwen35moe.expert_used_count"))? as u32
+        let value = g
+            .get_u64(&format!("{p}.expert_used_count"))
+            .ok_or(LoadError::BadMetadata("qwen35moe.expert_used_count"))?;
+        u64_to_u32("qwen35moe.expert_used_count", value)?
     } else {
         0
     };
     let expert_feed_forward_length = if kind == ArchKind::Moe {
-        g.get_u64(&format!("{p}.expert_feed_forward_length"))
+        let value = g
+            .get_u64(&format!("{p}.expert_feed_forward_length"))
             .ok_or(LoadError::BadMetadata(
                 "qwen35moe.expert_feed_forward_length",
-            ))? as u32
+            ))?;
+        u64_to_u32("qwen35moe.expert_feed_forward_length", value)?
     } else {
         0
     };
     let expert_shared_feed_forward_length = if kind == ArchKind::Moe {
-        g.get_u64(&format!("{p}.expert_shared_feed_forward_length"))
+        let value = g
+            .get_u64(&format!("{p}.expert_shared_feed_forward_length"))
             .ok_or(LoadError::BadMetadata(
                 "qwen35moe.expert_shared_feed_forward_length",
-            ))? as u32
+            ))?;
+        u64_to_u32("qwen35moe.expert_shared_feed_forward_length", value)?
     } else {
         0
     };
@@ -881,7 +1122,167 @@ fn build_arch_from_metadata(g: &GgufFile, arch_name: &str) -> Result<Arch, LoadE
     let vocab_size = g
         .find("token_embd.weight")
         .and_then(|t| t.shape.get(1).copied())
-        .ok_or(LoadError::BadMetadata("token_embd.weight"))? as u32;
+        .ok_or(LoadError::BadMetadata("token_embd.weight"))?;
+    let vocab_size = u64_to_u32("token_embd.weight.shape[1]", vocab_size)?;
+
+    ensure_cap(
+        "qwen35.block_count - nextn_predict_layers",
+        n_layer,
+        MAX_ARCH_LAYERS,
+    )?;
+    ensure_nonzero("qwen35.block_count - nextn_predict_layers", n_layer)?;
+    ensure_cap("qwen35.embedding_length", hidden_size, MAX_ARCH_DIM)?;
+    ensure_nonzero("qwen35.embedding_length", hidden_size)?;
+    ensure_cap(
+        "qwen35.feed_forward_length",
+        intermediate_size,
+        MAX_ARCH_DIM,
+    )?;
+    if kind == ArchKind::Dense {
+        ensure_nonzero("qwen35.feed_forward_length", intermediate_size)?;
+    }
+    ensure_cap("qwen35.attention.head_count", n_q_heads, MAX_ARCH_DIM)?;
+    ensure_nonzero("qwen35.attention.head_count", n_q_heads)?;
+    ensure_cap("qwen35.attention.head_count_kv", n_kv_heads, MAX_ARCH_DIM)?;
+    ensure_nonzero("qwen35.attention.head_count_kv", n_kv_heads)?;
+    ensure_divisible(
+        "qwen35.attention.head_count",
+        n_q_heads,
+        "qwen35.attention.head_count_kv",
+        n_kv_heads,
+    )?;
+    ensure_cap("qwen35.attention.key_length", attn_head_dim, MAX_ARCH_DIM)?;
+    ensure_nonzero("qwen35.attention.key_length", attn_head_dim)?;
+    ensure_cap(
+        "qwen35.full_attention_interval",
+        full_attention_interval,
+        MAX_ARCH_LAYERS,
+    )?;
+    ensure_nonzero("qwen35.full_attention_interval", full_attention_interval)?;
+    ensure_cap("qwen35.ssm.state_size", ssm_state_size, MAX_ARCH_DIM)?;
+    ensure_nonzero("qwen35.ssm.state_size", ssm_state_size)?;
+    ensure_cap(
+        "qwen35.ssm.time_step_rank",
+        ssm_time_step_rank,
+        MAX_ARCH_DIM,
+    )?;
+    ensure_nonzero("qwen35.ssm.time_step_rank", ssm_time_step_rank)?;
+    ensure_cap("qwen35.ssm.group_count", ssm_group_count, MAX_ARCH_DIM)?;
+    ensure_nonzero("qwen35.ssm.group_count", ssm_group_count)?;
+    ensure_cap(
+        "qwen35.ssm.conv_kernel",
+        ssm_conv_kernel,
+        MAX_DFLASH_BLOCK_SIZE,
+    )?;
+    ensure_nonzero("qwen35.ssm.conv_kernel", ssm_conv_kernel)?;
+    ensure_cap("qwen35moe.expert_count", expert_count, MAX_ARCH_DIM)?;
+    if kind == ArchKind::Moe {
+        ensure_nonzero("qwen35moe.expert_count", expert_count)?;
+    }
+    ensure_cap(
+        "qwen35moe.expert_used_count",
+        expert_used_count,
+        MAX_ARCH_DIM,
+    )?;
+    if kind == ArchKind::Moe {
+        ensure_nonzero("qwen35moe.expert_used_count", expert_used_count)?;
+    }
+    if kind == ArchKind::Moe && expert_used_count > expert_count {
+        return Err(LoadError::MetadataInconsistent {
+            key: "qwen35moe.expert_used_count",
+            got: expert_used_count as u64,
+            bound_key: "qwen35moe.expert_count",
+            bound: expert_count as u64,
+        });
+    }
+    ensure_cap(
+        "qwen35moe.expert_feed_forward_length",
+        expert_feed_forward_length,
+        MAX_ARCH_DIM,
+    )?;
+    if kind == ArchKind::Moe {
+        ensure_nonzero(
+            "qwen35moe.expert_feed_forward_length",
+            expert_feed_forward_length,
+        )?;
+    }
+    ensure_cap(
+        "qwen35moe.expert_shared_feed_forward_length",
+        expert_shared_feed_forward_length,
+        MAX_ARCH_DIM,
+    )?;
+    if kind == ArchKind::Moe {
+        ensure_nonzero(
+            "qwen35moe.expert_shared_feed_forward_length",
+            expert_shared_feed_forward_length,
+        )?;
+    }
+    ensure_cap("token_embd.weight.shape[1]", vocab_size, MAX_ARCH_DIM)?;
+    ensure_nonzero("token_embd.weight.shape[1]", vocab_size)?;
+
+    let q_dim = checked_mul_dim(n_q_heads as u64, attn_head_dim as u64, "qwen35 q_dim")?;
+    if q_dim > MAX_KERNEL_DIM {
+        return Err(LoadError::MetadataCap {
+            key: "qwen35.attention.q_dim",
+            got: q_dim,
+            cap: MAX_KERNEL_DIM,
+        });
+    }
+    let kv_dim = checked_mul_dim(n_kv_heads as u64, attn_head_dim as u64, "qwen35 kv_dim")?;
+    if kv_dim > MAX_KERNEL_DIM {
+        return Err(LoadError::MetadataCap {
+            key: "qwen35.attention.kv_dim",
+            got: kv_dim,
+            cap: MAX_KERNEL_DIM,
+        });
+    }
+    let gdn_v_dim = checked_mul_dim(
+        ssm_time_step_rank as u64,
+        ssm_state_size as u64,
+        "qwen35 gdn_v_dim",
+    )?;
+    if gdn_v_dim > MAX_KERNEL_DIM {
+        return Err(LoadError::MetadataCap {
+            key: "qwen35.ssm.v_dim",
+            got: gdn_v_dim,
+            cap: MAX_KERNEL_DIM,
+        });
+    }
+    let gdn_k_dim = checked_mul_dim(
+        ssm_group_count as u64,
+        ssm_state_size as u64,
+        "qwen35 gdn_k_dim",
+    )?;
+    if gdn_k_dim > MAX_KERNEL_DIM {
+        return Err(LoadError::MetadataCap {
+            key: "qwen35.ssm.k_dim",
+            got: gdn_k_dim,
+            cap: MAX_KERNEL_DIM,
+        });
+    }
+    let gdn_conv_heads = checked_add_dim(
+        checked_double_dim(ssm_group_count as u64, "qwen35 2 * gdn_n_k_heads")?,
+        ssm_time_step_rank as u64,
+        "qwen35 gdn conv heads",
+    )?;
+    let gdn_conv_dim =
+        checked_mul_dim(gdn_conv_heads, ssm_state_size as u64, "qwen35 gdn_conv_dim")?;
+    if gdn_conv_dim > MAX_KERNEL_DIM {
+        return Err(LoadError::MetadataCap {
+            key: "qwen35.ssm.conv_dim",
+            got: gdn_conv_dim,
+            cap: MAX_KERNEL_DIM,
+        });
+    }
+    let gdn_state_elems =
+        checked_mul_dim(gdn_v_dim, ssm_state_size as u64, "qwen35 gdn_state_elems")?;
+    if gdn_state_elems > MAX_GDN_STATE_ELEMS {
+        return Err(LoadError::MetadataCap {
+            key: "qwen35.ssm.state_elems",
+            got: gdn_state_elems,
+            cap: MAX_GDN_STATE_ELEMS,
+        });
+    }
 
     // RoPE.
     let rope_theta = g
@@ -924,10 +1325,11 @@ pub fn gdn_state_bytes(arch: &Arch) -> u64 {
         .filter(|&i| arch.layer_kind(i) == LayerKind::GatedDeltaNet)
         .count() as u64;
     n_gdn_layers
-        * arch.gdn_n_v_heads as u64
-        * arch.gdn_head_dim as u64
-        * arch.gdn_head_dim as u64
-        * std::mem::size_of::<f32>() as u64
+        .checked_mul(arch.gdn_n_v_heads as u64)
+        .and_then(|v| v.checked_mul(arch.gdn_head_dim as u64))
+        .and_then(|v| v.checked_mul(arch.gdn_head_dim as u64))
+        .and_then(|v| v.checked_mul(std::mem::size_of::<f32>() as u64))
+        .unwrap_or(u64::MAX)
 }
 
 /// Best-effort summary string for diagnostics.
@@ -981,6 +1383,27 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_narrowing_rejects_u32_overflow() {
+        let err = u64_to_u32("test", u64::from(u32::MAX) + 1)
+            .expect_err("metadata cast must not truncate");
+        assert!(matches!(err, LoadError::MetadataOverflow { .. }));
+    }
+
+    #[test]
+    fn metadata_dimension_math_rejects_overflow() {
+        let err = checked_mul_dim(u64::MAX, 2, "test product")
+            .expect_err("dimension multiplication must not wrap");
+        assert!(matches!(err, LoadError::DimensionOverflow("test product")));
+    }
+
+    #[test]
+    fn metadata_divisibility_rejects_bad_gqa_ratio() {
+        let err = ensure_divisible("q", 13, "kv", 3)
+            .expect_err("non-divisible grouped-query ratio must be rejected");
+        assert!(matches!(err, LoadError::MetadataNotDivisible { .. }));
+    }
 
     #[test]
     fn loads_0_8b_f32() {

@@ -5,8 +5,8 @@
 //! See [`docs/PLAN.md`](../../../../docs/PLAN.md) for the full architectural
 //! decision record. This crate is structured around the v1 plan:
 //!
-//! * [`gguf`]      — mmap-only GGUF v3 reader. No copies. Tensor descriptor
-//!                   table indexing into one or more mmap'd GGUF shards.
+//! * [`gguf`]      — mmap-backed GGUF v3 reader. Tensor descriptor table
+//!                   indexes one or more mmap'd GGUF shards.
 //! * [`codec`]     — tooling-only CPU dequantization via `llama_cpp_sys_2`'s
 //!                   `ggml_get_type_traits().to_float` seam. Universal quant
 //!                   coverage; not on the GPU hot path.
@@ -15,8 +15,10 @@
 //!                   binary archive.
 //! * [`model`]     — Qwen3.5/3.6 architecture description: layer pattern,
 //!                   GDN/attn dims, tensor name conventions.
-//! * [`tensor`]    — backend-agnostic tensor descriptor (mmap'd region +
-//!                   shape + ggml type tag).
+//! * [`tensor`]    — backend-agnostic tensor descriptor for GGUF-backed
+//!                   tensors (shard/offset/shape/type).
+//! * Metal weights are then copied once from the GGUF mmap into persistent
+//!   `StorageModeShared` `MTLBuffer`s at model load.
 //! * [`tokenizer`] — Qwen2 byte-level BPE, vocab 248,320, embedded tokens
 //!                   read from GGUF metadata.
 //!

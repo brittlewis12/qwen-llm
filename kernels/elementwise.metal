@@ -77,6 +77,39 @@ kernel void kernel_add_inplace_f32(
     x[tid] += y[tid];
 }
 
+struct fill_args {
+    uint n;
+    float value;
+};
+
+kernel void kernel_fill_f32(
+        constant fill_args & args [[buffer(0)]],
+        device       float * y    [[buffer(1)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    y[tid] = args.value;
+}
+
+struct touch_bytes_args {
+    uint n_steps;
+    uint stride_bytes;
+    ulong n_bytes;
+};
+
+kernel void kernel_touch_bytes_f32(
+        constant touch_bytes_args & args [[buffer(0)]],
+        device const uchar       * src   [[buffer(1)]],
+        device       float       * sink  [[buffer(2)]],
+        ushort tid [[thread_index_in_threadgroup]],
+        ushort ntg [[threads_per_threadgroup]]) {
+    float acc = 0.0f;
+    for (uint i = tid; i < args.n_steps; i += ntg) {
+        const ulong off = min((ulong)i * args.stride_bytes, args.n_bytes - 1);
+        acc += (float)src[off];
+    }
+    sink[tid] = acc;
+}
+
 // out[i] = a[i] * b[i]
 kernel void kernel_mul_f32(
         constant n_args & args [[buffer(0)]],

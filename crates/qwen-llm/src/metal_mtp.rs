@@ -41,7 +41,8 @@ use crate::metal_dflash::{
     encode_restore_after_partial_accept_inner,
 };
 use crate::metal_forward::{
-    ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalSession, RMS_EPS, encode_mat_vec_dispatch,
+    ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalSession, RMS_EPS, checked_u64_div_exact,
+    checked_u64_double, checked_u64_mul, checked_u64_mul4, encode_mat_vec_dispatch,
     encode_scatter_offset_f32, weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
@@ -194,18 +195,37 @@ impl MetalMtpSession {
         let head_dim = arch.attn_head_dim as u64;
         let n_q = arch.n_q_heads as u64;
         let n_kv = arch.n_kv_heads as u64;
-        let q_dim = n_q * head_dim;
-        let kv_dim = n_kv * head_dim;
+        let q_dim = checked_u64_mul(n_q, head_dim, "mtp q_dim overflow")?;
+        let kv_dim = checked_u64_mul(n_kv, head_dim, "mtp kv_dim overflow")?;
+        let q_group = checked_u64_div_exact(n_q, n_kv, "mtp n_q_heads / n_kv_heads invalid")?;
+        let kv_cache_elems =
+            checked_u64_mul(kv_capacity as u64, kv_dim, "mtp kv cache size overflow")?;
+        let eh_concat_elems = checked_u64_double(h, "mtp 2 * hidden_size overflow")?;
+        let attn_q_full_elems = checked_u64_double(q_dim, "mtp 2 * q_dim overflow")?;
+        let attn_v4_o_partial_elems = checked_u64_mul4(
+            n_kv,
+            ATTN_V4_MAX_NWG as u64,
+            q_group,
+            head_dim,
+            "mtp attn_v4_o_partial size overflow",
+        )?;
+        let attn_v4_ml_partial_elems = checked_u64_mul4(
+            n_kv,
+            ATTN_V4_MAX_NWG as u64,
+            q_group,
+            2,
+            "mtp attn_v4_ml_partial size overflow",
+        )?;
 
         Ok(Self {
-            kv_k: MetalTensor::zeros_f16(ctx, vec![kv_capacity as u64 * kv_dim])?,
-            kv_v: MetalTensor::zeros_f16(ctx, vec![kv_capacity as u64 * kv_dim])?,
+            kv_k: MetalTensor::zeros_f16(ctx, vec![kv_cache_elems])?,
+            kv_v: MetalTensor::zeros_f16(ctx, vec![kv_cache_elems])?,
             kv_n_pos: 0,
             kv_capacity,
             e: MetalTensor::zeros_f32(ctx, vec![h])?,
             e_normed: MetalTensor::zeros_f32(ctx, vec![h])?,
             h_normed: MetalTensor::zeros_f32(ctx, vec![h])?,
-            eh_concat: MetalTensor::zeros_f32(ctx, vec![2 * h])?,
+            eh_concat: MetalTensor::zeros_f32(ctx, vec![eh_concat_elems])?,
             x: MetalTensor::zeros_f32(ctx, vec![h])?,
             h: MetalTensor::zeros_f32(ctx, vec![h])?,
             ffn_gate: MetalTensor::zeros_f32(ctx, vec![f])?,
@@ -213,7 +233,7 @@ impl MetalMtpSession {
             ffn_inner: MetalTensor::zeros_f32(ctx, vec![f])?,
             ffn_out: MetalTensor::zeros_f32(ctx, vec![h])?,
             mixer_out: MetalTensor::zeros_f32(ctx, vec![h])?,
-            attn_q_full: MetalTensor::zeros_f32(ctx, vec![2 * q_dim])?,
+            attn_q_full: MetalTensor::zeros_f32(ctx, vec![attn_q_full_elems])?,
             attn_q: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             attn_gate: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             attn_q_normed: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
@@ -221,14 +241,8 @@ impl MetalMtpSession {
             attn_v_now: MetalTensor::zeros_f32(ctx, vec![kv_dim])?,
             attn_k_normed: MetalTensor::zeros_f32(ctx, vec![kv_dim])?,
             attn_o: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
-            attn_v4_o_partial: MetalTensor::zeros_f32(
-                ctx,
-                vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * head_dim],
-            )?,
-            attn_v4_ml_partial: MetalTensor::zeros_f32(
-                ctx,
-                vec![n_kv * (ATTN_V4_MAX_NWG as u64) * (n_q / n_kv) * 2],
-            )?,
+            attn_v4_o_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_o_partial_elems])?,
+            attn_v4_ml_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_ml_partial_elems])?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
             draft_argmax: MetalTensor::zeros_f32(ctx, vec![1])?,
             ids_buf: MetalTensor::zeros_f32(ctx, vec![1])?,
@@ -1020,7 +1034,7 @@ impl<'a> SpeculativeDecoder<'a> {
         verify_scratch: &mut MetalDFlashVerifyScratch,
         layer_scratch: &mut MetalDFlashLayerMajorScratch,
     ) -> Result<DecodeOutput, MtpError> {
-        if spec_tokens < 2 || spec_tokens > 3 {
+        if !(2..=3).contains(&spec_tokens) {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n",
                 detail: format!("spec_tokens={spec_tokens} must be in [2, 3]"),
@@ -1180,6 +1194,9 @@ impl<'a> SpeculativeDecoder<'a> {
             // Recursive draft slots beyond the first are approximate. Rebuild the
             // canonical MTP KV for the accepted prefix from captured base hiddens.
             self.mtp_session.kv_n_pos = processed_pos as usize + 1;
+            // Co-indexed dispatch across two Metal scratch slots and the
+            // drafts[] array; `j` is the slot id, not just an index.
+            #[allow(clippy::needless_range_loop)]
             for j in 0..n_accepted {
                 let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
                 let bridge_position = processed_pos + 1 + j as u32;

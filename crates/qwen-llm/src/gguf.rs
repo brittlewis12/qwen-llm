@@ -20,12 +20,12 @@
 //! `Cursor`) — fine for its 5 MB test fixture, catastrophic for a 27 GB
 //! GGUF. We avoid that path entirely.
 
-use crate::tensor::{GgmlType, TensorDesc};
+use crate::tensor::{GgmlType, TensorDesc, ggml_type_layout_raw};
 use gguf_rs::{GGUFContainer, GGUFModel};
 use memmap2::Mmap;
 use serde_json::Value;
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// "GGUF" in little-endian (only LE is supported; see [`open`] preconditions).
@@ -201,11 +201,47 @@ impl GgufFile {
     }
 
     /// Slice into the mmap for `desc`. Slice lifetime is tied to `&self`.
-    pub fn slice(&self, desc: &TensorDesc) -> &[u8] {
-        let shard = &self.shards[desc.shard_idx];
-        let start = desc.data_offset as usize;
-        let end = start + desc.n_bytes as usize;
-        &shard.mmap[start..end]
+    ///
+    /// Public callers get a fallible boundary so forged or stale descriptors
+    /// cannot panic the process.
+    pub fn try_slice(&self, desc: &TensorDesc) -> Result<&[u8], GgufError> {
+        let Some(shard) = self.shards.get(desc.shard_idx) else {
+            return Err(GgufError::Decode(format!(
+                "tensor {:?} references missing shard {}",
+                desc.name, desc.shard_idx
+            )));
+        };
+        let start = usize::try_from(desc.data_offset).map_err(|_| {
+            GgufError::Decode(format!(
+                "tensor {:?} data_offset {} does not fit usize",
+                desc.name, desc.data_offset
+            ))
+        })?;
+        let len = usize::try_from(desc.n_bytes).map_err(|_| {
+            GgufError::Decode(format!(
+                "tensor {:?} n_bytes {} does not fit usize",
+                desc.name, desc.n_bytes
+            ))
+        })?;
+        let end = start.checked_add(len).ok_or_else(|| {
+            GgufError::Decode(format!("tensor {:?} slice endpoint overflow", desc.name))
+        })?;
+        if end > shard.mmap.len() {
+            return Err(GgufError::Decode(format!(
+                "tensor {:?} range [{}..{}) exceeds shard {} length {}",
+                desc.name,
+                start,
+                end,
+                desc.shard_idx,
+                shard.mmap.len()
+            )));
+        }
+        Ok(&shard.mmap[start..end])
+    }
+
+    pub(crate) fn slice(&self, desc: &TensorDesc) -> &[u8] {
+        self.try_slice(desc)
+            .expect("tensor descriptor should have been validated against its GGUF shard")
     }
 
     /// Find a tensor by name. Common pattern: `find("token_embd.weight")`.
@@ -232,25 +268,43 @@ impl GgufFile {
     }
 
     /// Convenience: lookup an array-of-u64 typed metadata value by key.
-    /// Returns `None` if the key is missing OR not an array. Skips elements
-    /// that don't parse as u64.
-    pub fn get_u64_array(&self, key: &str) -> Option<Vec<u64>> {
-        self.model
-            .metadata()
-            .get(key)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+    /// Returns `Ok(None)` if the key is missing, and `Err` if the key exists
+    /// but is not a pure array of u64 values.
+    pub fn get_u64_array(&self, key: &str) -> Result<Option<Vec<u64>>, GgufError> {
+        let Some(value) = self.model.metadata().get(key) else {
+            return Ok(None);
+        };
+        let arr = value
+            .as_array()
+            .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not an array")))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (idx, value) in arr.iter().enumerate() {
+            let parsed = value.as_u64().ok_or_else(|| {
+                GgufError::Decode(format!("metadata key {key:?}[{idx}] is not a u64"))
+            })?;
+            out.push(parsed);
+        }
+        Ok(Some(out))
     }
 
     /// Convenience: lookup an array-of-bool typed metadata value by key.
-    /// Returns `None` if the key is missing OR not an array. Skips elements
-    /// that don't parse as bool.
-    pub fn get_bool_array(&self, key: &str) -> Option<Vec<bool>> {
-        self.model
-            .metadata()
-            .get(key)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_bool()).collect())
+    /// Returns `Ok(None)` if the key is missing, and `Err` if the key exists
+    /// but is not a pure array of bool values.
+    pub fn get_bool_array(&self, key: &str) -> Result<Option<Vec<bool>>, GgufError> {
+        let Some(value) = self.model.metadata().get(key) else {
+            return Ok(None);
+        };
+        let arr = value
+            .as_array()
+            .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not an array")))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (idx, value) in arr.iter().enumerate() {
+            let parsed = value.as_bool().ok_or_else(|| {
+                GgufError::Decode(format!("metadata key {key:?}[{idx}] is not a bool"))
+            })?;
+            out.push(parsed);
+        }
+        Ok(Some(out))
     }
 
     /// Convenience: lookup an f32-typed metadata value by key.
@@ -295,10 +349,10 @@ impl GgufFile {
         // EOS: scalar OR array. Try scalar first (the common case for
         // Qwen 3.5/3.6), then fall back to array form.
         if let Some(eos) = self.get_u64("tokenizer.ggml.eos_token_id") {
-            out.push(eos as i32);
-        } else if let Some(eos_arr) = self.get_u64_array("tokenizer.ggml.eos_token_id") {
+            out.push(token_id_to_i32("tokenizer.ggml.eos_token_id", eos)?);
+        } else if let Some(eos_arr) = self.get_u64_array("tokenizer.ggml.eos_token_id")? {
             for id in eos_arr {
-                let id = id as i32;
+                let id = token_id_to_i32("tokenizer.ggml.eos_token_id", id)?;
                 if !out.contains(&id) {
                     out.push(id);
                 }
@@ -307,7 +361,7 @@ impl GgufFile {
 
         // EOT: optional, scalar. Append if not already present.
         if let Some(eot) = self.get_u64("tokenizer.ggml.eot_token_id") {
-            let eot = eot as i32;
+            let eot = token_id_to_i32("tokenizer.ggml.eot_token_id", eot)?;
             if !out.contains(&eot) {
                 out.push(eot);
             }
@@ -318,6 +372,14 @@ impl GgufFile {
         }
         Ok(out)
     }
+}
+
+fn token_id_to_i32(key: &'static str, value: u64) -> Result<i32, GgufError> {
+    i32::try_from(value).map_err(|_| {
+        GgufError::Decode(format!(
+            "metadata key {key:?} token id {value} does not fit in i32"
+        ))
+    })
 }
 
 fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufError> {
@@ -346,7 +408,7 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
     // reads and validates the magic itself before parsing the rest of the
     // header. gguf-rs remains the metadata parser of record; we re-derive
     // structural offsets independently below.
-    let mut parse_file = File::open(path)?;
+    let parse_file = File::open(path)?;
     let mut container = GGUFContainer::new(
         Box::new(BufReader::with_capacity(64 * 1024, parse_file)),
         u64::MAX,
@@ -450,7 +512,10 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
     sort_idx.sort_by_key(|&i| tensors[i].data_offset);
     for w in sort_idx.windows(2) {
         let (a, b) = (&tensors[w[0]], &tensors[w[1]]);
-        if a.data_offset + a.n_bytes > b.data_offset {
+        let a_end = a.data_offset.checked_add(a.n_bytes).ok_or_else(|| {
+            GgufError::Decode(format!("tensor {:?} endpoint overflows u64", a.name))
+        })?;
+        if a_end > b.data_offset {
             return Err(GgufError::Decode(format!(
                 "tensors {:?} and {:?} have overlapping data ranges",
                 a.name, b.name
@@ -616,7 +681,7 @@ fn validate_tensor_storage_size(
     elements: u64,
     declared_size: u64,
 ) -> Result<(), GgufError> {
-    let (block_size, type_size) = ggml_type_layout(kind).ok_or_else(|| {
+    let (block_size, type_size) = ggml_type_layout_raw(kind).ok_or_else(|| {
         GgufError::Decode(format!(
             "tensor {name:?} declares unsupported GGML type {kind}"
         ))
@@ -645,51 +710,6 @@ fn validate_tensor_storage_size(
         )));
     }
     Ok(())
-}
-
-fn ggml_type_layout(kind: u32) -> Option<(u64, u64)> {
-    let k = 256;
-    Some(match kind {
-        0 => (1, 4),
-        1 => (1, 2),
-        2 => (32, 2 + 32 / 2),
-        3 => (32, 2 + 2 + 32 / 2),
-        4 | 5 => (0, 0),
-        6 => (32, 2 + 4 + 32 / 2),
-        7 => (32, 2 + 2 + 4 + 32 / 2),
-        8 => (32, 2 + 32),
-        9 => (32, 4 + 4 + 32),
-        10 => (k, k / 16 + k / 4 + 2 + 2),
-        11 => (k, k / 8 + k / 4 + 12 + 2),
-        12 => (k, 2 + 2 + 12 + k / 2),
-        13 => (k, 2 + 2 + 12 + k / 8 + k / 2),
-        14 => (k, k / 2 + k / 4 + k / 16 + 2),
-        15 => (k, 4 + k + k / 16 * 2),
-        16 => (k, 2 + k / 8 * 2),
-        17 => (k, 2 + k / 8 * 2 + k / 32),
-        18 => (k, 2 + 3 * (k / 8)),
-        19 => (k, 2 + k / 8 + k / 16),
-        20 => (32, 2 + 16),
-        21 => (k, 2 + 13 * (k / 32) + k / 64),
-        22 => (k, 2 + k / 4 + k / 16),
-        23 => (k, 2 + 2 + k / 64 + k / 2),
-        // gguf-rs still decodes the scalar GGML tensor types using the same
-        // historical block-size rule as its size table; mirror it so our
-        // independent check agrees with the parser for accepted files.
-        24 => (k, 1),
-        25 => (k, 2),
-        26 => (k, 4),
-        27 => (k, 8),
-        28 => (k, 8),
-        29 => (k, k / 8 + k / 16 + k / 32),
-        30 => (k, 2),
-        31..=33 => (0, 0),
-        34 => (k, 2 + k / 64 + (k - 4 * (k / 64)) / 5),
-        35 => (k, 2 + k / 4),
-        36..=38 => (0, 0),
-        39 => (k, k + 1 + 16),
-        _ => return None,
-    })
 }
 
 /// Replay enough of the GGUF header before handing the file to `gguf-rs` to
@@ -1211,7 +1231,7 @@ mod tests {
         b.extend_from_slice(&3u32.to_le_bytes()); // version
         b.extend_from_slice(&1u64.to_le_bytes()); // 1 tensor
         b.extend_from_slice(&0u64.to_le_bytes()); // 0 KV
-                                                  // tensor info
+        // tensor info
         let name = b"t";
         b.extend_from_slice(&(name.len() as u64).to_le_bytes());
         b.extend_from_slice(name);
@@ -1219,7 +1239,7 @@ mod tests {
         b.extend_from_slice(&1u64.to_le_bytes()); // shape[0] = 1
         b.extend_from_slice(&0u32.to_le_bytes()); // type F32
         b.extend_from_slice(&0u64.to_le_bytes()); // offset 0
-                                                  // align to 32, then 4 bytes of f32 payload
+        // align to 32, then 4 bytes of f32 payload
         while b.len() % 32 != 0 {
             b.push(0);
         }
@@ -1516,6 +1536,14 @@ mod tests {
         );
         assert_eq!(g.slice(a), &1.0f32.to_le_bytes());
         assert_eq!(g.slice(b), &2.0f32.to_le_bytes());
+
+        let mut forged = a.clone();
+        forged.shard_idx = 99;
+        assert!(matches!(g.try_slice(&forged), Err(GgufError::Decode(_))));
+
+        let mut forged = b.clone();
+        forged.data_offset = u64::MAX;
+        assert!(matches!(g.try_slice(&forged), Err(GgufError::Decode(_))));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -281,7 +281,7 @@ Concrete sizes for the dense 27B shape:
 | Full attention decode | `attn_v4` groups sibling Q heads per KV head and reads K/V once per GQA group; split-K over context; now live for dense `group=4`, dense `group=6`, MoE `group=8`, and MoE `group=16` | Generic attention path through ggml ops / flash-attn kernels | Our GQA-dedup attention is a concrete long-context advantage and now unlocks the whole small dense line as a fast canary. |
 | KV append | Fused K+V scatter to F16; optional Q8 experiment | `SET_ROWS`/cache helpers, configurable cache types | Our Q8 experiment lost on M4 for the current reader; F16 is still best. |
 | Dense FFN decode | Fused Q4 gate/up SwiGLU plus down mat-vec | `build_ffn` through generic matmul/GLU ops | This is a direct decode win surface. |
-| MoE decode / prefill tail | GPU route prep, top-k + shared gate fusion, expert-bank kernels for routed/shared paths; prefill has Q8 packed mixer plus packed routed and shared expert tails | `build_moe_ffn` with generic MoE graph and `MUL_MAT_ID` style execution | Decode is strong; packed prefill needs a fresh phase profile before the next attack, not generic grouped gather/scatter. |
+| MoE decode / prefill tail | GPU route prep, top-k + shared gate fusion, expert-bank kernels for routed/shared paths; MoE decode now splits GDN blocks into serial norm, concurrent front projections, then serial tail/postnorm/route/FFN; prefill has Q8 packed mixer plus grouped routed/shared expert tails | `build_moe_ffn` with generic MoE graph and `MUL_MAT_ID` style execution | The important semantic delta is structure: MoE decode no longer treats the GDN mixer as one serial front half before routing, and packed prefill is no longer the old grouped gather/scatter story. |
 | Final sampling | GPU argmax path avoids full logits readback in greedy decode | llama.cpp has mature sampling stack; logits handling depends on caller | GPU argmax is modest for MoE, neutral dense, but simplifies greedy fast path. |
 
 ## 8. What We Learned From llama.cpp
@@ -318,6 +318,9 @@ Concrete sizes for the dense 27B shape:
   common no-sampling path.
 - MoE single-token path: GPU router/top-k/shared-gate and expert-bank kernels keep
   decode GPU-resident and explain the strong MoE decode numbers.
+- MoE decode GDN concurrency: GDN blocks now admit the same “serial norm ->
+  concurrent front projections -> serial tail” structural split that first paid
+  off on the dense decode path.
 
 ## 10. Where llama.cpp Still Teaches Us
 

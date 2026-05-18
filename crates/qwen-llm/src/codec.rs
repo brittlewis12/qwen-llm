@@ -24,6 +24,8 @@ pub enum CodecError {
     NoToFloat(i32),
     #[error("byte length {got} does not match expected {expected} for shape × dtype")]
     SizeMismatch { got: usize, expected: usize },
+    #[error("tensor size overflows host usize for {name:?}")]
+    SizeOverflow { name: String },
 }
 
 /// Dequantize the raw `bytes` of a `desc` tensor into a fresh `Vec<f32>`.
@@ -32,26 +34,49 @@ pub enum CodecError {
 /// covers F32 / F16 / BF16 / Q*_0 / Q*_1 / Q*_K / IQ* / MXFP4 — everything
 /// llama.cpp ships.
 pub fn dequant_to_f32(desc: &TensorDesc, bytes: &[u8]) -> Result<Vec<f32>, CodecError> {
-    let n = desc.n_elements() as usize;
+    let n_u64 = desc
+        .checked_n_elements()
+        .ok_or_else(|| CodecError::SizeOverflow {
+            name: desc.name.clone(),
+        })?;
+    let n = usize::try_from(n_u64).map_err(|_| CodecError::SizeOverflow {
+        name: desc.name.clone(),
+    })?;
+
+    // Universal length guard: `to_float(src, dst, n)` reads `desc.n_bytes`
+    // from `src` with no FFI-side bounds check. Callers that hand us a
+    // sub-slice (e.g. forward.rs splitting a packed tensor) are the
+    // realistic mismatch source; mmap-wide callers will pass-through.
+    let expected = usize::try_from(desc.n_bytes).map_err(|_| CodecError::SizeOverflow {
+        name: desc.name.clone(),
+    })?;
+    if bytes.len() != expected {
+        return Err(CodecError::SizeMismatch {
+            got: bytes.len(),
+            expected,
+        });
+    }
 
     // Fast path: F32 — no codec call needed.
     if desc.dtype == GgmlType::F32 {
-        if bytes.len() != n * std::mem::size_of::<f32>() {
-            return Err(CodecError::SizeMismatch {
-                got: bytes.len(),
-                expected: n * std::mem::size_of::<f32>(),
-            });
-        }
         // SAFETY: alignment of f32 is 4; mmap pages are page-aligned, but
         // `bytes` may not be — copy out via byte-wise read.
         let mut out = Vec::<f32>::with_capacity(n);
-        // SAFETY: we just allocated `n` slots.
+        let copy_bytes =
+            n.checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CodecError::SizeOverflow {
+                    name: desc.name.clone(),
+                })?;
+        if expected != copy_bytes {
+            return Err(CodecError::SizeMismatch {
+                got: expected,
+                expected: copy_bytes,
+            });
+        }
+        // SAFETY: we just allocated `n` slots; size guard above proves
+        // `bytes.len() == n * size_of::<f32>()` for F32 dtype.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                out.as_mut_ptr() as *mut u8,
-                n * std::mem::size_of::<f32>(),
-            );
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, copy_bytes);
             out.set_len(n);
         }
         return Ok(out);
@@ -71,8 +96,8 @@ pub fn dequant_to_f32(desc: &TensorDesc, bytes: &[u8]) -> Result<Vec<f32>, Codec
 
     let mut out = vec![0.0f32; n];
     // SAFETY: `to_float(src, dst, n_elements)` reads `desc.n_bytes` from
-    // `bytes` and writes `n` f32s to `out`. `bytes.len()` is checked at
-    // mmap slice time to equal `desc.n_bytes`.
+    // `bytes` and writes `n` f32s to `out`. The universal length guard
+    // above ensures `bytes.len() == desc.n_bytes` for this (shape, dtype).
     unsafe {
         to_float(
             bytes.as_ptr() as *const std::ffi::c_void,

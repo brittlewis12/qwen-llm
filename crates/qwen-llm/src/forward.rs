@@ -778,11 +778,13 @@ impl<'a> Forward<'a> {
         });
         ranked.truncate(n_expert_used);
 
+        // 2^-14 (FP16 minimum normal): floor matches what llama.cpp
+        // uses to keep MoE renormalization stable on FP16 accumulators.
         let weight_sum: f32 = ranked
             .iter()
             .map(|(_, p)| *p)
             .sum::<f32>()
-            .max(6.103515625e-5);
+            .max(f32::from_bits(0x3880_0000));
         let mut out = vec![0.0f32; h];
         for (expert_idx, prob) in ranked {
             let weight = prob / weight_sum;

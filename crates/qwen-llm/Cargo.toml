@@ -24,6 +24,8 @@ half.workspace = true
 bytemuck.workspace = true
 gguf-rs.workspace = true
 serde_json.workspace = true
+unicode-general-category.workspace = true
+rustc-hash.workspace = true
 
 llama-cpp-sys-2.workspace = true
 
@@ -36,6 +38,7 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+proptest = "1"
 
 [build-dependencies]
 anyhow.workspace = true

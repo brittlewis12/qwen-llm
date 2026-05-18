@@ -4,7 +4,7 @@
 //! tokens occupy the high range starting at 248,044
 //! (`<|endoftext|>`, `<|im_start|>`, `<|im_end|>`, vision/audio pads, etc).
 //!
-//! ## Implementation choice (and the swap path)
+//! ## Implementation choice
 //!
 //! Tokenization is a non-hot-path operation: it runs once per prompt at
 //! ingest, and again only when streaming user output. The throughput
@@ -14,32 +14,33 @@
 //!
 //! | option | byte-perfect w/ llama-cli oracle | drops llama-cpp link | LOC |
 //! |---|---|---|---|
-//! | **`llama-cpp-sys-2` shim (current)** | yes — shared codepath | no | ~50 |
+//! | **native GGUF Qwen35 path (default)** | yes — differentially tested | no | in-tree |
+//! | **`llama-cpp-sys-2` oracle backend** | yes — shared codepath | no | ~50 |
 //! | **`tokenizers` (huggingface) crate** | not guaranteed (BPE tie-break edges) | yes | ~30 |
-//! | **`tiktoken-rs`** | n/a — different vocab family | yes | n/a |
 //!
-//! For the v1 phase where we're chasing byte-for-byte logit equivalence
-//! with `llama-cli` on `Qwen3.5-0.8B.F32.gguf`, the llama-cpp shim is
-//! the safer call because it shares the exact tokenizer used by the
-//! oracle — any divergence in our kernels can't be confused with a BPE
-//! edge case.
-//!
-//! Once kernels are validated, swapping to the `tokenizers` crate (which
-//! reads Qwen's shipping `tokenizer.json` directly from HF, pure Rust,
-//! no FFI) is a 30-line change behind the [`Tokenize`] trait below. The
-//! same way the codec seam is staged for in-tree replacement.
+//! The default path is now the in-tree native GGUF tokenizer for the Qwen
+//! 3.5/3.6 family. The llama.cpp-backed backend remains available as an oracle
+//! for differential testing and benchmarking.
 
 use crate::gguf::GgufFile;
+use rustc_hash::FxHashMap as HashMap;
+use serde_json::Value;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::ffi::CString;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Once;
+use unicode_general_category::{GeneralCategory, get_general_category};
 
-/// Backend-agnostic tokenizer interface. Implemented today by the
-/// llama.cpp-backed [`Tokenizer`]; the planned `huggingface_tokenizers`
-/// backend will implement the same trait.
+const NATIVE_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Backend-agnostic tokenizer interface. Implemented by the default native
+/// tokenizer and the llama.cpp oracle backend.
 pub trait Tokenize {
     fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError>;
+    fn try_decode_piece(&self, token: i32) -> Result<String, TokError>;
+    fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError>;
     fn decode(&self, tokens: &[i32]) -> String;
     fn n_vocab(&self) -> u32;
     fn bos(&self) -> Option<i32>;
@@ -58,6 +59,14 @@ pub enum TokError {
     NoVocab,
     #[error("llama_vocab_n_tokens returned invalid count {0}")]
     BadVocabSize(i32),
+    #[error("gguf tokenizer load failed: {0}")]
+    Gguf(#[from] crate::gguf::GgufError),
+    #[error("unsupported GGUF tokenizer model={model:?} pre={pre:?}")]
+    UnsupportedNativeTokenizer { model: String, pre: String },
+    #[error("gguf tokenizer metadata is invalid: {0}")]
+    BadMetadata(String),
+    #[error("native tokenizer input is too large: {bytes} bytes exceeds cap {max_bytes}")]
+    NativeInputTooLong { bytes: usize, max_bytes: usize },
     #[error("input text is too large for llama.cpp tokenizer: {0} bytes")]
     InputBytesTooLong(usize),
     #[error("tokenize failed: input too long ({0} tokens needed)")]
@@ -98,11 +107,11 @@ fn ensure_backend() {
     });
 }
 
-/// Tokenizer for a Qwen3.5/3.6 GGUF model.
+/// llama.cpp-backed oracle tokenizer for a Qwen3.5/3.6 GGUF model.
 ///
 /// Holds an owned `llama_model` pointer (so vocab metadata stays valid).
 /// The pointer is freed in `Drop`.
-pub struct Tokenizer {
+pub struct LlamaCppTokenizer {
     model: NonNull<llama_cpp_sys_2::llama_model>,
     vocab: NonNull<llama_cpp_sys_2::llama_vocab>,
     n_vocab: u32,
@@ -112,11 +121,21 @@ pub struct Tokenizer {
 
 // SAFETY: the tokenizer owns the llama model handle until Drop, and llama.cpp's
 // tokenization API is explicitly documented as thread-safe in `llama.h`.
-unsafe impl Send for Tokenizer {}
-unsafe impl Sync for Tokenizer {}
+unsafe impl Send for LlamaCppTokenizer {}
+unsafe impl Sync for LlamaCppTokenizer {}
 
 fn checked_i32_len(n: usize) -> Result<i32, TokError> {
     i32::try_from(n).map_err(|_| TokError::InputBytesTooLong(n))
+}
+
+fn validate_native_input_len(n: usize) -> Result<(), TokError> {
+    if n > NATIVE_MAX_INPUT_BYTES {
+        return Err(TokError::NativeInputTooLong {
+            bytes: n,
+            max_bytes: NATIVE_MAX_INPUT_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn checked_i32_count(n: usize) -> Result<i32, TokError> {
@@ -131,7 +150,7 @@ fn needed_count_or_overflow(n: i32) -> Result<usize, TokError> {
     usize::try_from(n.unsigned_abs()).map_err(|_| TokError::TokenizeOverflow)
 }
 
-impl Tokenizer {
+impl LlamaCppTokenizer {
     fn checked_token(&self, token: i32) -> Result<i32, TokError> {
         if token < 0 || token >= self.n_vocab as i32 {
             return Err(TokError::InvalidToken(token));
@@ -354,25 +373,31 @@ impl Tokenizer {
     }
 }
 
-impl Tokenize for Tokenizer {
+impl Tokenize for LlamaCppTokenizer {
     fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError> {
-        Tokenizer::encode(self, text, add_special)
+        LlamaCppTokenizer::encode(self, text, add_special)
+    }
+    fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
+        LlamaCppTokenizer::try_decode_piece(self, token)
+    }
+    fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError> {
+        LlamaCppTokenizer::try_decode(self, tokens)
     }
     fn decode(&self, tokens: &[i32]) -> String {
-        Tokenizer::decode(self, tokens)
+        LlamaCppTokenizer::decode(self, tokens)
     }
     fn n_vocab(&self) -> u32 {
-        Tokenizer::n_vocab(self)
+        LlamaCppTokenizer::n_vocab(self)
     }
     fn bos(&self) -> Option<i32> {
-        Tokenizer::bos(self)
+        LlamaCppTokenizer::bos(self)
     }
     fn eos(&self) -> Option<i32> {
-        Tokenizer::eos(self)
+        LlamaCppTokenizer::eos(self)
     }
 }
 
-impl Drop for Tokenizer {
+impl Drop for LlamaCppTokenizer {
     fn drop(&mut self) {
         // SAFETY: paired with the load above. After this call the vocab
         // pointer is dangling; no method on `self` is reachable post-drop.
@@ -384,16 +409,1171 @@ impl Drop for Tokenizer {
     }
 }
 
+pub type Tokenizer = NativeTokenizer;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TokenAttr {
+    Undefined,
+    Normal,
+    Unknown,
+    Control,
+    UserDefined,
+    Unused,
+    Byte,
+}
+
+impl TokenAttr {
+    fn from_gguf(n: i64) -> Result<Self, TokError> {
+        match n {
+            0 => Ok(Self::Undefined),
+            1 => Ok(Self::Normal),
+            2 => Ok(Self::Unknown),
+            3 => Ok(Self::Control),
+            4 => Ok(Self::UserDefined),
+            5 => Ok(Self::Unused),
+            6 => Ok(Self::Byte),
+            other => Err(TokError::BadMetadata(format!(
+                "unsupported tokenizer.ggml.token_type value {other}"
+            ))),
+        }
+    }
+
+    fn is_partition_special(self) -> bool {
+        matches!(self, Self::Control | Self::UserDefined | Self::Unknown)
+    }
+
+    fn is_decode_literal(self) -> bool {
+        matches!(self, Self::Control | Self::UserDefined | Self::Unknown)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NativeToken {
+    text: String,
+    attr: TokenAttr,
+}
+
+#[derive(Clone, Debug)]
+struct SpecialToken {
+    text: String,
+    id: i32,
+}
+
+/// Pure-Rust GGUF tokenizer for the Qwen 3.5 / 3.6 family.
+///
+/// This is intentionally not a universal GGUF tokenizer. It accepts only the
+/// tokenizer metadata shape shipped by Qwen 3.5/3.6 GGUFs:
+/// `tokenizer.ggml.model = "gpt2"` and `tokenizer.ggml.pre = "qwen35"`.
+/// The llama.cpp-backed [`Tokenizer`] remains the default/oracle until this
+/// backend has exhaustive parity coverage.
+pub struct NativeTokenizer {
+    id_to_token: Vec<NativeToken>,
+    pair_merges: HashMap<u64, MergeInfo>,
+    byte_token_ids: [i32; 256],
+    special_matcher: SpecialMatcher,
+    decoded_piece_bytes: Vec<Box<[u8]>>,
+    bos: Option<i32>,
+    eos: Option<i32>,
+    add_bos: bool,
+    add_eos: bool,
+}
+
+impl NativeTokenizer {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, TokError> {
+        let gguf = GgufFile::open(path)?;
+        Self::from_gguf(&gguf)
+    }
+
+    pub fn from_gguf(g: &GgufFile) -> Result<Self, TokError> {
+        let model = required_str(g, "tokenizer.ggml.model")?;
+        let pre = required_str(g, "tokenizer.ggml.pre")?;
+        if model != "gpt2" || pre != "qwen35" {
+            return Err(TokError::UnsupportedNativeTokenizer {
+                model: model.to_string(),
+                pre: pre.to_string(),
+            });
+        }
+
+        let token_texts = required_string_array(g, "tokenizer.ggml.tokens")?;
+        let token_types = required_i64_array(g, "tokenizer.ggml.token_type")?;
+        if token_texts.len() != token_types.len() {
+            return Err(TokError::BadMetadata(format!(
+                "tokenizer.ggml.tokens has {} entries but token_type has {}",
+                token_texts.len(),
+                token_types.len()
+            )));
+        }
+
+        let mut id_to_token = Vec::with_capacity(token_texts.len());
+        let mut token_to_id = HashMap::default();
+        token_to_id.reserve(token_texts.len());
+        for (id, (text, ty)) in token_texts.into_iter().zip(token_types).enumerate() {
+            if token_to_id
+                .insert(text.clone(), id_to_i32("tokenizer.ggml.tokens", id)?)
+                .is_some()
+            {
+                return Err(TokError::BadMetadata(format!(
+                    "duplicate tokenizer token text {text:?}"
+                )));
+            }
+            id_to_token.push(NativeToken {
+                text,
+                attr: TokenAttr::from_gguf(ty)?,
+            });
+        }
+
+        let mut byte_token_ids = [0i32; 256];
+        for byte in 0u8..=255 {
+            let token = token_to_id
+                .get(&byte_to_unicode(byte).to_string())
+                .copied()
+                .ok_or_else(|| {
+                    TokError::BadMetadata(format!("missing byte token for byte 0x{byte:02x}"))
+                })?;
+            byte_token_ids[byte as usize] = token;
+        }
+
+        let merges = required_string_array(g, "tokenizer.ggml.merges")?;
+        let mut pair_merges = HashMap::default();
+        pair_merges.reserve(merges.len());
+        for (rank, merge) in merges.iter().enumerate() {
+            let (left, right) = split_merge(merge)?;
+            let left_id = token_to_id.get(left).copied().ok_or_else(|| {
+                TokError::BadMetadata(format!(
+                    "merge {merge:?} references missing left token {left:?}"
+                ))
+            })?;
+            let right_id = token_to_id.get(right).copied().ok_or_else(|| {
+                TokError::BadMetadata(format!(
+                    "merge {merge:?} references missing right token {right:?}"
+                ))
+            })?;
+            let merged_text = format!("{left}{right}");
+            let merged_id = token_to_id.get(&merged_text).copied().ok_or_else(|| {
+                TokError::BadMetadata(format!(
+                    "merge {merge:?} has no merged token {merged_text:?} in vocab"
+                ))
+            })?;
+            let old = pair_merges.insert(
+                pair_key(left_id, right_id),
+                MergeInfo {
+                    rank: rank as u32,
+                    merged_id,
+                },
+            );
+            if old.is_some() {
+                return Err(TokError::BadMetadata(format!(
+                    "duplicate tokenizer.ggml.merges pair {left:?} {right:?}"
+                )));
+            }
+        }
+
+        // llama.cpp's GPT-2/BPE tokenizer defaults both BOS and EOS to 11,
+        // then lets GGUF metadata override them. Qwen35 GGUFs commonly omit
+        // BOS but do declare EOS.
+        let bos = optional_token_id(g, "tokenizer.ggml.bos_token_id")?.or(Some(11));
+        let eos = optional_token_id(g, "tokenizer.ggml.eos_token_id")?.or(Some(11));
+        validate_optional_token_id("tokenizer.ggml.bos_token_id", bos, id_to_token.len())?;
+        validate_optional_token_id("tokenizer.ggml.eos_token_id", eos, id_to_token.len())?;
+        let add_bos = optional_bool(g, "tokenizer.ggml.add_bos_token")?.unwrap_or(false);
+        let add_eos = optional_bool(g, "tokenizer.ggml.add_eos_token")?.unwrap_or(false);
+
+        let mut special_tokens = Vec::new();
+        for (id, token) in id_to_token.iter().enumerate() {
+            if token.attr.is_partition_special() || is_qwen_control_text(&token.text) {
+                special_tokens.push(SpecialToken {
+                    text: token.text.clone(),
+                    id: id_to_i32("tokenizer.ggml.tokens", id)?,
+                });
+            }
+        }
+        special_tokens.sort_by(|a, b| {
+            b.text
+                .len()
+                .cmp(&a.text.len())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let special_matcher = SpecialMatcher::new(&special_tokens);
+
+        let decoded_piece_bytes = id_to_token
+            .iter()
+            .map(|token| decode_token_bytes_uncached(token).into_boxed_slice())
+            .collect();
+
+        Ok(Self {
+            id_to_token,
+            pair_merges,
+            byte_token_ids,
+            special_matcher,
+            decoded_piece_bytes,
+            bos,
+            eos,
+            add_bos,
+            add_eos,
+        })
+    }
+
+    fn checked_token(&self, token: i32) -> Result<usize, TokError> {
+        if token < 0 || token as usize >= self.id_to_token.len() {
+            return Err(TokError::InvalidToken(token));
+        }
+        Ok(token as usize)
+    }
+
+    pub fn n_vocab(&self) -> u32 {
+        self.id_to_token.len().try_into().unwrap_or(u32::MAX)
+    }
+
+    pub fn bos(&self) -> Option<i32> {
+        self.bos
+    }
+
+    pub fn eos(&self) -> Option<i32> {
+        self.eos
+    }
+
+    pub fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError> {
+        validate_native_input_len(text.len())?;
+        let mut out = Vec::new();
+        if add_special && self.add_bos {
+            out.push(self.bos.expect("validated bos id"));
+        }
+
+        for fragment in self.partition_special(text) {
+            match fragment {
+                Fragment::Token(id) => out.push(id),
+                Fragment::Text(s) => self.encode_raw(s, &mut out)?,
+            }
+        }
+
+        if add_special && self.add_eos {
+            out.push(self.eos.expect("validated eos id"));
+        }
+        Ok(out)
+    }
+
+    fn partition_special<'a>(&self, text: &'a str) -> Vec<Fragment<'a>> {
+        self.special_matcher.partition(text)
+    }
+
+    fn encode_raw(&self, text: &str, out: &mut Vec<i32>) -> Result<(), TokError> {
+        for piece in qwen35_pretokenize(text) {
+            self.encode_bpe_piece(piece.as_bytes(), out);
+        }
+        Ok(())
+    }
+
+    fn encode_bpe_piece(&self, piece: &[u8], out: &mut Vec<i32>) {
+        if piece.is_empty() {
+            return;
+        }
+        let mut symbols = symbols_for_piece(piece, &self.byte_token_ids);
+        if symbols.is_empty() {
+            return;
+        }
+
+        let mut queue = BinaryHeap::new();
+        for i in 1..symbols.len() {
+            self.add_bigram(&symbols, i - 1, i, &mut queue);
+        }
+
+        while let Some(bigram) = queue.pop() {
+            if !valid_bigram(&symbols, &bigram) {
+                continue;
+            }
+            let left = bigram.left;
+            let right = bigram.right;
+            symbols[left].id = bigram.merged_id;
+            symbols[right].alive = false;
+            let next = symbols[right].next;
+            symbols[left].next = next;
+            if let Some(next) = next {
+                symbols[next].prev = Some(left);
+            }
+            if let Some(prev) = symbols[left].prev {
+                self.add_bigram(&symbols, prev, left, &mut queue);
+            }
+            if let Some(next) = symbols[left].next {
+                self.add_bigram(&symbols, left, next, &mut queue);
+            }
+        }
+
+        let mut idx = Some(0usize);
+        while let Some(i) = idx {
+            let sym = &symbols[i];
+            if sym.alive {
+                out.push(sym.id);
+            }
+            idx = sym.next;
+        }
+    }
+
+    fn add_bigram(
+        &self,
+        symbols: &[Symbol],
+        left: usize,
+        right: usize,
+        queue: &mut BinaryHeap<Bigram>,
+    ) {
+        if !symbols[left].alive || !symbols[right].alive {
+            return;
+        }
+        let left_id = symbols[left].id;
+        let right_id = symbols[right].id;
+        if let Some(&merge) = self.pair_merges.get(&pair_key(left_id, right_id)) {
+            queue.push(Bigram {
+                left,
+                right,
+                left_id,
+                right_id,
+                rank: merge.rank,
+                merged_id: merge.merged_id,
+            });
+        }
+    }
+
+    pub fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
+        let token = self.checked_token(token)?;
+        let bytes = self.decode_token_bytes(token);
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    pub fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError> {
+        let mut ids = Vec::with_capacity(tokens.len());
+        let mut total = 0usize;
+        for &token in tokens {
+            let idx = self.checked_token(token)?;
+            ids.push(idx);
+            total += self.decode_token_bytes(idx).len();
+        }
+        let mut bytes = Vec::with_capacity(total);
+        for idx in ids {
+            bytes.extend_from_slice(self.decode_token_bytes(idx));
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn decode_token_bytes(&self, token: usize) -> &[u8] {
+        &self.decoded_piece_bytes[token]
+    }
+
+    pub fn decode_piece(&self, token: i32) -> String {
+        self.try_decode_piece(token).unwrap_or_default()
+    }
+
+    pub fn decode(&self, tokens: &[i32]) -> String {
+        self.try_decode(tokens).unwrap_or_else(|_| {
+            let mut out = String::new();
+            for &t in tokens {
+                out.push_str(&self.decode_piece(t));
+            }
+            out
+        })
+    }
+}
+
+impl Tokenize for NativeTokenizer {
+    fn encode(&self, text: &str, add_special: bool) -> Result<Vec<i32>, TokError> {
+        NativeTokenizer::encode(self, text, add_special)
+    }
+    fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
+        NativeTokenizer::try_decode_piece(self, token)
+    }
+    fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError> {
+        NativeTokenizer::try_decode(self, tokens)
+    }
+    fn decode(&self, tokens: &[i32]) -> String {
+        NativeTokenizer::decode(self, tokens)
+    }
+    fn n_vocab(&self) -> u32 {
+        NativeTokenizer::n_vocab(self)
+    }
+    fn bos(&self) -> Option<i32> {
+        NativeTokenizer::bos(self)
+    }
+    fn eos(&self) -> Option<i32> {
+        NativeTokenizer::eos(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Fragment<'a> {
+    Text(&'a str),
+    Token(i32),
+}
+
+#[derive(Default)]
+struct SpecialTrieNode {
+    edges: HashMap<u8, usize>,
+    terminal: Option<i32>,
+}
+
+struct SpecialMatcher {
+    nodes: Vec<SpecialTrieNode>,
+}
+
+impl SpecialMatcher {
+    fn new(tokens: &[SpecialToken]) -> Self {
+        let mut nodes = vec![SpecialTrieNode::default()];
+        for token in tokens {
+            if token.text.is_empty() {
+                continue;
+            }
+            let mut idx = 0usize;
+            for &byte in token.text.as_bytes() {
+                let next = if let Some(&child) = nodes[idx].edges.get(&byte) {
+                    child
+                } else {
+                    let child = nodes.len();
+                    nodes.push(SpecialTrieNode::default());
+                    nodes[idx].edges.insert(byte, child);
+                    child
+                };
+                idx = next;
+            }
+            nodes[idx].terminal = Some(token.id);
+        }
+        Self { nodes }
+    }
+
+    fn partition<'a>(&self, text: &'a str) -> Vec<Fragment<'a>> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        let mut raw_start = 0usize;
+        let mut pos = 0usize;
+        while pos < bytes.len() {
+            if let Some((end, id)) = self.match_at(bytes, pos) {
+                if raw_start < pos {
+                    out.push(Fragment::Text(&text[raw_start..pos]));
+                }
+                out.push(Fragment::Token(id));
+                raw_start = end;
+                pos = end;
+            } else {
+                pos += 1;
+            }
+        }
+        if raw_start < text.len() {
+            out.push(Fragment::Text(&text[raw_start..]));
+        }
+        out
+    }
+
+    fn match_at(&self, bytes: &[u8], start: usize) -> Option<(usize, i32)> {
+        let mut idx = 0usize;
+        let mut pos = start;
+        let mut best = None;
+        while pos < bytes.len() {
+            let Some(&next) = self.nodes[idx].edges.get(&bytes[pos]) else {
+                break;
+            };
+            idx = next;
+            pos += 1;
+            if let Some(id) = self.nodes[idx].terminal {
+                best = Some((pos, id));
+            }
+        }
+        best
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Symbol {
+    id: i32,
+    prev: Option<usize>,
+    next: Option<usize>,
+    alive: bool,
+}
+
+fn symbols_for_piece(piece: &[u8], byte_token_ids: &[i32; 256]) -> Vec<Symbol> {
+    let mut symbols = Vec::with_capacity(piece.len());
+    for (i, &byte) in piece.iter().enumerate() {
+        symbols.push(Symbol {
+            id: byte_token_ids[byte as usize],
+            prev: i.checked_sub(1),
+            next: (i + 1 < piece.len()).then_some(i + 1),
+            alive: true,
+        });
+    }
+    symbols
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MergeInfo {
+    rank: u32,
+    merged_id: i32,
+}
+
+fn pair_key(left: i32, right: i32) -> u64 {
+    debug_assert!(left >= 0 && right >= 0);
+    ((left as u32 as u64) << 32) | (right as u32 as u64)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Bigram {
+    left: usize,
+    right: usize,
+    left_id: i32,
+    right_id: i32,
+    rank: u32,
+    merged_id: i32,
+}
+
+impl Ord for Bigram {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .rank
+            .cmp(&self.rank)
+            .then_with(|| other.left.cmp(&self.left))
+    }
+}
+
+impl PartialOrd for Bigram {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn valid_bigram(symbols: &[Symbol], bigram: &Bigram) -> bool {
+    let Some(left) = symbols.get(bigram.left) else {
+        return false;
+    };
+    let Some(right) = symbols.get(bigram.right) else {
+        return false;
+    };
+    if !left.alive
+        || !right.alive
+        || left.next != Some(bigram.right)
+        || right.prev != Some(bigram.left)
+    {
+        return false;
+    }
+    left.id == bigram.left_id && right.id == bigram.right_id
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CharFlags {
+    is_number: bool,
+    is_letter: bool,
+    is_accent_mark: bool,
+    is_whitespace: bool,
+    any: bool,
+}
+
+impl CharFlags {
+    fn for_char(ch: char) -> Self {
+        let category = get_general_category(ch);
+        Self {
+            is_number: matches!(
+                category,
+                GeneralCategory::DecimalNumber
+                    | GeneralCategory::LetterNumber
+                    | GeneralCategory::OtherNumber
+            ),
+            is_letter: matches!(
+                category,
+                GeneralCategory::UppercaseLetter
+                    | GeneralCategory::LowercaseLetter
+                    | GeneralCategory::TitlecaseLetter
+                    | GeneralCategory::ModifierLetter
+                    | GeneralCategory::OtherLetter
+            ),
+            is_accent_mark: matches!(
+                category,
+                GeneralCategory::NonspacingMark
+                    | GeneralCategory::SpacingMark
+                    | GeneralCategory::EnclosingMark
+            ),
+            is_whitespace: ch.is_whitespace(),
+            any: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CharInfo {
+    ch: char,
+    start: usize,
+    flags: CharFlags,
+}
+
+fn qwen35_pretokenize(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<CharInfo> = text
+        .char_indices()
+        .map(|(start, ch)| CharInfo {
+            ch,
+            start,
+            flags: CharFlags::for_char(ch),
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut prev = 0usize;
+    let mut pos = 0usize;
+    while pos < chars.len() {
+        let ch = chars[pos].ch;
+        let flags = chars[pos].flags;
+
+        if ch == '\'' && pos + 1 < chars.len() {
+            let next = chars[pos + 1].ch.to_ascii_lowercase();
+            if matches!(next, 's' | 't' | 'm' | 'd') {
+                push_token(text, &chars, &mut out, &mut prev, pos + 2);
+                pos = pos + 2;
+                continue;
+            }
+            if pos + 2 < chars.len() {
+                let next2 = chars[pos + 2].ch.to_ascii_lowercase();
+                if (next == 'r' && next2 == 'e')
+                    || (next == 'v' && next2 == 'e')
+                    || (next == 'l' && next2 == 'l')
+                {
+                    push_token(text, &chars, &mut out, &mut prev, pos + 3);
+                    pos = pos + 3;
+                    continue;
+                }
+            }
+        }
+
+        if !(ch == '\r' || ch == '\n' || flags.is_number)
+            && (flags.is_letter
+                || flags.is_accent_mark
+                || char_flags(&chars, pos + 1).is_accent_mark
+                || char_flags(&chars, pos + 1).is_letter)
+        {
+            pos += 1;
+            while {
+                let f = char_flags(&chars, pos);
+                f.is_letter || f.is_accent_mark
+            } {
+                pos += 1;
+            }
+            push_token(text, &chars, &mut out, &mut prev, pos);
+            continue;
+        }
+
+        if flags.is_number {
+            pos += 1;
+            push_token(text, &chars, &mut out, &mut prev, pos);
+            continue;
+        }
+
+        let mut flags2 = if ch == ' ' {
+            char_flags(&chars, pos + 1)
+        } else {
+            flags
+        };
+        if !(flags2.is_whitespace || flags2.is_letter || flags2.is_accent_mark || flags2.is_number)
+            && flags.any
+        {
+            if ch == ' ' {
+                pos += 1;
+            }
+            while !(flags2.is_whitespace
+                || flags2.is_letter
+                || flags2.is_accent_mark
+                || flags2.is_number)
+                && flags2.any
+            {
+                pos += 1;
+                flags2 = char_flags(&chars, pos);
+            }
+            while char_at(&chars, pos).is_some_and(|c| c == '\r' || c == '\n') {
+                pos += 1;
+            }
+            push_token(text, &chars, &mut out, &mut prev, pos);
+            continue;
+        }
+
+        let mut num_whitespaces = 0usize;
+        let mut last_end_r_or_n = 0usize;
+        while char_flags(&chars, pos + num_whitespaces).is_whitespace {
+            let c = chars[pos + num_whitespaces].ch;
+            if c == '\r' || c == '\n' {
+                last_end_r_or_n = pos + num_whitespaces + 1;
+            }
+            num_whitespaces += 1;
+        }
+        if last_end_r_or_n > 0 {
+            pos = last_end_r_or_n;
+            push_token(text, &chars, &mut out, &mut prev, pos);
+            continue;
+        }
+        if num_whitespaces > 1 && pos + num_whitespaces < chars.len() {
+            pos += num_whitespaces - 1;
+            push_token(text, &chars, &mut out, &mut prev, pos);
+            continue;
+        }
+        if num_whitespaces > 0 {
+            pos += num_whitespaces;
+            push_token(text, &chars, &mut out, &mut prev, pos);
+            continue;
+        }
+
+        pos += 1;
+        push_token(text, &chars, &mut out, &mut prev, pos);
+    }
+    out
+}
+
+fn push_token<'a>(
+    text: &'a str,
+    chars: &[CharInfo],
+    out: &mut Vec<&'a str>,
+    prev: &mut usize,
+    end_pos: usize,
+) {
+    let end = if end_pos == chars.len() {
+        text.len()
+    } else {
+        chars[end_pos].start
+    };
+    if *prev < end {
+        out.push(&text[*prev..end]);
+    }
+    *prev = end;
+}
+
+fn char_flags(chars: &[CharInfo], pos: usize) -> CharFlags {
+    chars.get(pos).map(|c| c.flags).unwrap_or_default()
+}
+
+fn char_at(chars: &[CharInfo], pos: usize) -> Option<char> {
+    chars.get(pos).map(|c| c.ch)
+}
+
+fn byte_to_unicode(byte: u8) -> char {
+    match byte {
+        0x21..=0x7e | 0xa1..=0xac | 0xae..=0xff => byte as char,
+        _ => {
+            let mut n = 0u32;
+            for b in 0u8..=255 {
+                if matches!(b, 0x21..=0x7e | 0xa1..=0xac | 0xae..=0xff) {
+                    continue;
+                }
+                if b == byte {
+                    return char::from_u32(256 + n).expect("byte unicode scalar");
+                }
+                n += 1;
+            }
+            unreachable!("all u8 values are covered")
+        }
+    }
+}
+
+fn unicode_to_byte(ch: char) -> Option<u8> {
+    let cpt = ch as u32;
+    if matches!(cpt, 0x21..=0x7e | 0xa1..=0xac | 0xae..=0xff) {
+        return Some(cpt as u8);
+    }
+    let mut n = 0u32;
+    for b in 0u8..=255 {
+        if matches!(b, 0x21..=0x7e | 0xa1..=0xac | 0xae..=0xff) {
+            continue;
+        }
+        if cpt == 256 + n {
+            return Some(b);
+        }
+        n += 1;
+    }
+    None
+}
+
+fn unknown_byte_text(ch: char, token_text: &str) -> Vec<u8> {
+    let mut out = String::from("[UNK_BYTE_0x");
+    let mut buf = [0u8; 4];
+    for byte in ch.encode_utf8(&mut buf).as_bytes() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out.push_str(token_text);
+    out.push(']');
+    out.into_bytes()
+}
+
+fn decode_token_bytes_uncached(data: &NativeToken) -> Vec<u8> {
+    if data.attr.is_decode_literal() || is_qwen_control_text(&data.text) {
+        return data.text.as_bytes().to_vec();
+    }
+    if matches!(data.attr, TokenAttr::Unused | TokenAttr::Undefined) {
+        return Vec::new();
+    }
+    if data.attr == TokenAttr::Byte {
+        if let Some(byte) = parse_hex_byte_token(&data.text) {
+            return vec![byte];
+        }
+    }
+
+    let mut out = Vec::with_capacity(data.text.len());
+    for ch in data.text.chars() {
+        if let Some(byte) = unicode_to_byte(ch) {
+            out.push(byte);
+        } else {
+            out.extend(unknown_byte_text(ch, &data.text));
+        }
+    }
+    out
+}
+
+fn split_merge(merge: &str) -> Result<(&str, &str), TokError> {
+    let bytes = merge.as_bytes();
+    let Some(rel) = bytes.iter().skip(1).position(|&b| b == b' ') else {
+        return Err(TokError::BadMetadata(format!(
+            "malformed tokenizer.ggml.merges entry {merge:?}"
+        )));
+    };
+    let sep = rel + 1;
+    let left = &merge[..sep];
+    let right = &merge[sep + 1..];
+    if left.is_empty() || right.is_empty() {
+        return Err(TokError::BadMetadata(format!(
+            "malformed tokenizer.ggml.merges entry {merge:?}"
+        )));
+    }
+    Ok((left, right))
+}
+
+fn required_str<'a>(g: &'a GgufFile, key: &str) -> Result<&'a str, TokError> {
+    g.get_str(key)
+        .ok_or_else(|| TokError::BadMetadata(format!("missing string metadata key {key:?}")))
+}
+
+fn required_string_array(g: &GgufFile, key: &str) -> Result<Vec<String>, TokError> {
+    let value = g
+        .model
+        .metadata()
+        .get(key)
+        .ok_or_else(|| TokError::BadMetadata(format!("missing array metadata key {key:?}")))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| TokError::BadMetadata(format!("metadata key {key:?} is not an array")))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, value) in arr.iter().enumerate() {
+        let s = value.as_str().ok_or_else(|| {
+            TokError::BadMetadata(format!("metadata key {key:?}[{idx}] is not a string"))
+        })?;
+        out.push(s.to_string());
+    }
+    Ok(out)
+}
+
+fn required_i64_array(g: &GgufFile, key: &str) -> Result<Vec<i64>, TokError> {
+    let value = g
+        .model
+        .metadata()
+        .get(key)
+        .ok_or_else(|| TokError::BadMetadata(format!("missing array metadata key {key:?}")))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| TokError::BadMetadata(format!("metadata key {key:?} is not an array")))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, value) in arr.iter().enumerate() {
+        let n = value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|n| i64::try_from(n).ok()))
+            .ok_or_else(|| {
+                TokError::BadMetadata(format!("metadata key {key:?}[{idx}] is not an integer"))
+            })?;
+        out.push(n);
+    }
+    Ok(out)
+}
+
+fn validate_optional_token_id(
+    key: &str,
+    value: Option<i32>,
+    n_vocab: usize,
+) -> Result<(), TokError> {
+    let Some(value) = value else { return Ok(()) };
+    if value < 0 || value as usize >= n_vocab {
+        return Err(TokError::BadMetadata(format!(
+            "metadata key {key:?} token id {value} is outside vocab size {n_vocab}"
+        )));
+    }
+    Ok(())
+}
+
+fn optional_bool(g: &GgufFile, key: &str) -> Result<Option<bool>, TokError> {
+    let Some(value) = g.model.metadata().get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| TokError::BadMetadata(format!("metadata key {key:?} is not a bool")))
+}
+
+fn optional_token_id(g: &GgufFile, key: &str) -> Result<Option<i32>, TokError> {
+    let Some(value) = g.model.metadata().get(key) else {
+        return Ok(None);
+    };
+    value_to_i32(value, key).map(Some)
+}
+
+fn value_to_i32(value: &Value, key: &str) -> Result<i32, TokError> {
+    let n = value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|n| i64::try_from(n).ok()))
+        .ok_or_else(|| TokError::BadMetadata(format!("metadata key {key:?} is not an integer")))?;
+    i32::try_from(n)
+        .map_err(|_| TokError::BadMetadata(format!("metadata key {key:?} value {n} exceeds i32")))
+}
+
+fn id_to_i32(key: &str, id: usize) -> Result<i32, TokError> {
+    i32::try_from(id).map_err(|_| TokError::BadMetadata(format!("{key} index {id} exceeds i32")))
+}
+
+fn is_qwen_control_text(text: &str) -> bool {
+    matches!(
+        text,
+        "<|endoftext|>"
+            | "<|im_start|>"
+            | "<|im_end|>"
+            | "<|fim_prefix|>"
+            | "<|fim_middle|>"
+            | "<|fim_suffix|>"
+            | "<|fim_pad|>"
+    )
+}
+
+fn parse_hex_byte_token(text: &str) -> Option<u8> {
+    let hex = text.strip_prefix("<0x")?.strip_suffix('>')?;
+    if hex.len() != 2 {
+        return None;
+    }
+    u8::from_str_radix(hex, 16).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
-    fn fixture() -> Option<&'static str> {
+    struct OraclePair {
+        path: &'static str,
+        ffi: LlamaCppTokenizer,
+        native: NativeTokenizer,
+    }
+
+    fn oracle_pair() -> Option<&'static OraclePair> {
+        static ORACLE: std::sync::OnceLock<Option<OraclePair>> = std::sync::OnceLock::new();
+        ORACLE
+            .get_or_init(|| {
+                let path = fixture()?;
+                Some(OraclePair {
+                    path,
+                    ffi: LlamaCppTokenizer::open(path).expect("open ffi tokenizer"),
+                    native: NativeTokenizer::open(path).expect("open native tokenizer"),
+                })
+            })
+            .as_ref()
+    }
+
+    fn fixtures() -> Vec<&'static str> {
         let candidates = [
             "/Users/tito/models/Qwen3.5-0.8B.F32.gguf",
             "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf",
+            "/Users/tito/models/Qwen3.5-4B-BF16.gguf",
+            "/Users/tito/models/Qwen3.5-27B-Q4_K_M.gguf",
+            "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            "/Users/tito/models/Qwen3.6-27B-MTP-Q4_K_M.gguf",
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         ];
-        candidates.iter().copied().find(|p| Path::new(p).exists())
+        candidates
+            .iter()
+            .copied()
+            .filter(|p| Path::new(p).exists())
+            .collect()
+    }
+
+    fn fixture() -> Option<&'static str> {
+        fixtures().into_iter().next()
+    }
+
+    fn adversarial_prompts() -> &'static [&'static str] {
+        &[
+            "",
+            "Hello, world!",
+            "   leading and trailing   ",
+            "line1\nline2\r\nline3",
+            "\n\n\n",
+            "\t\tfn main() { println!(\"hi\"); }",
+            "I can't believe they're testing Qwen's tokenizer.",
+            "quote opener: 'verbose and \"quoted\" text",
+            "digits 1 12 123 1234 １２３ ①Ⅻ",
+            "数字123和标点，emoji🙂 + variation❤\u{fe0f}",
+            "family emoji: 👨‍👩‍👧‍👦 and scientist 👩🏽‍🔬",
+            "combining: e\u{301} cafe\u{301} a\u{20dd}",
+            "nbsp:\u{00a0}thin:\u{2009}em:\u{2003}zwsp:\u{200b}",
+            "cjk + ascii + digits: 上海 2010 Boston 未来",
+            "<|im_start|>user\nhi<|im_end|>",
+            "x<|im_start|><|im_end|>y",
+            "<|endoftext|><|im_start|>assistant\n<think>hi</think>",
+            "<|fim_prefix|>code<|fim_middle|>body<|fim_suffix|>",
+            "```rust\nfn f(x: usize) -> usize { x + 1 }\n```",
+            "json: {\"tools\":[{\"name\":\"search\",\"parameters\":{\"query\":\"hi\"}}]}",
+        ]
+    }
+
+    fn assert_tokenizers_match(
+        ffi: &LlamaCppTokenizer,
+        native: &NativeTokenizer,
+        path: &str,
+        prompt: &str,
+        add_special: bool,
+    ) {
+        assert_eq!(native.n_vocab(), ffi.n_vocab(), "path={path}");
+        assert_eq!(native.bos(), ffi.bos(), "path={path}");
+        assert_eq!(native.eos(), ffi.eos(), "path={path}");
+        let ffi_ids = ffi.encode(prompt, add_special).expect("ffi encode");
+        let native_ids = native.encode(prompt, add_special).expect("native encode");
+        assert_eq!(
+            native_ids, ffi_ids,
+            "encode mismatch path={path} prompt={prompt:?} add_special={add_special}"
+        );
+        assert_eq!(
+            native.try_decode(&native_ids).expect("native decode"),
+            ffi.try_decode(&ffi_ids).expect("ffi decode"),
+            "decode mismatch path={path} prompt={prompt:?} add_special={add_special}"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (self.0 >> 32) as u32
+        }
+
+        fn gen_range(&mut self, upper: u32) -> u32 {
+            if upper == 0 {
+                0
+            } else {
+                self.next_u32() % upper
+            }
+        }
+    }
+
+    fn generated_unicode_prompts() -> Vec<String> {
+        let chunks = [
+            " ",
+            "\t",
+            "\n",
+            "\r\n",
+            "a",
+            "Z",
+            "foo",
+            "bar",
+            "'s",
+            "'re",
+            "123",
+            "１２３",
+            "①",
+            "Ⅻ",
+            "数字",
+            "上海",
+            "🙂",
+            "👨‍👩‍👧‍👦",
+            "👩🏽‍🔬",
+            "e\u{301}",
+            "❤\u{fe0f}",
+            "\u{00a0}",
+            "\u{2009}",
+            "\u{2003}",
+            "\u{200b}",
+            "{",
+            "}",
+            "[",
+            "]",
+            ":",
+            ",",
+            "\"",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<|fim_prefix|>",
+            "<|fim_middle|>",
+            "<|fim_suffix|>",
+        ];
+        let mut rng = Lcg::new(0x1234_5678_9abc_def0);
+        let mut out = Vec::with_capacity(96);
+        for _ in 0..96 {
+            let n = 1 + rng.gen_range(24) as usize;
+            let mut s = String::new();
+            for _ in 0..n {
+                s.push_str(chunks[rng.gen_range(chunks.len() as u32) as usize]);
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    fn fuzz_prompt_strategy() -> impl Strategy<Value = String> {
+        const CHUNKS: &[&str] = &[
+            " ",
+            "\t",
+            "\n",
+            "\r\n",
+            "a",
+            "Z",
+            "foo",
+            "bar",
+            "'s",
+            "'re",
+            "123",
+            "１２３",
+            "①",
+            "Ⅻ",
+            "数字",
+            "上海",
+            "🙂",
+            "👨‍👩‍👧‍👦",
+            "👩🏽‍🔬",
+            "e\u{301}",
+            "❤\u{fe0f}",
+            "\u{00a0}",
+            "\u{2009}",
+            "\u{2003}",
+            "\u{200b}",
+            "{",
+            "}",
+            "[",
+            "]",
+            ":",
+            ",",
+            "\"",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<|fim_prefix|>",
+            "<|fim_middle|>",
+            "<|fim_suffix|>",
+            "```rust\n",
+            "```\n",
+        ];
+        prop::collection::vec(0usize..CHUNKS.len(), 0..40).prop_map(|idxs| {
+            let mut s = String::new();
+            for idx in idxs {
+                s.push_str(CHUNKS[idx]);
+            }
+            s
+        })
+    }
+
+    fn special_token_texts(native: &NativeTokenizer) -> Vec<String> {
+        let mut texts = Vec::new();
+        for token in &native.id_to_token {
+            if token.attr.is_partition_special() || is_qwen_control_text(&token.text) {
+                texts.push(token.text.clone());
+            }
+        }
+        texts.sort();
+        texts.dedup();
+        texts
     }
 
     #[test]
@@ -442,7 +1622,7 @@ mod tests {
 
     #[test]
     fn rejects_path_with_interior_nul() {
-        let err = Tokenizer::open(Path::new("/tmp/bad\0path.gguf"))
+        let err = LlamaCppTokenizer::open(Path::new("/tmp/bad\0path.gguf"))
             .err()
             .expect("nul path");
         assert!(matches!(err, TokError::PathContainsNul(_)));
@@ -452,6 +1632,13 @@ mod tests {
     fn checked_i32_len_rejects_oversized_inputs() {
         let err = checked_i32_len(i32::MAX as usize + 1).expect_err("oversized input");
         assert!(matches!(err, TokError::InputBytesTooLong(_)));
+    }
+
+    #[test]
+    fn native_input_cap_rejects_oversized_inputs() {
+        let err = validate_native_input_len(NATIVE_MAX_INPUT_BYTES + 1)
+            .expect_err("native oversized input");
+        assert!(matches!(err, TokError::NativeInputTooLong { .. }));
     }
 
     #[test]
@@ -466,5 +1653,204 @@ mod tests {
             .try_decode(&[tok.n_vocab() as i32])
             .expect_err("oob token should fail");
         assert!(matches!(err, TokError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn native_matches_llama_cpp_oracle_on_edge_prompts() {
+        let Some(path) = fixture() else { return };
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
+        for prompt in adversarial_prompts() {
+            for add_special in [false, true] {
+                assert_tokenizers_match(&ffi, &native, path, prompt, add_special);
+            }
+        }
+    }
+
+    #[test]
+    fn native_matches_llama_cpp_on_generated_unicode_prompts() {
+        let Some(path) = fixture() else { return };
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
+        for prompt in generated_unicode_prompts() {
+            for add_special in [false, true] {
+                assert_tokenizers_match(&ffi, &native, path, &prompt, add_special);
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 64,
+            max_shrink_iters: 0,
+            .. proptest::test_runner::Config::default()
+        })]
+
+        #[test]
+        fn native_matches_llama_cpp_property_fuzz(
+            prompt in fuzz_prompt_strategy(),
+            add_special in any::<bool>(),
+        ) {
+            if let Some(oracle) = oracle_pair() {
+                assert_tokenizers_match(
+                    &oracle.ffi,
+                    &oracle.native,
+                    oracle.path,
+                    &prompt,
+                    add_special,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "exhaustive cross-model oracle sweep"]
+    fn native_matches_llama_cpp_across_model_matrix() {
+        let fixtures = fixtures();
+        if fixtures.is_empty() {
+            return;
+        }
+        let prompts = [
+            "Hello, world!",
+            "<|im_start|>user\nhi<|im_end|>",
+            "combining: e\u{301} cafe\u{301}",
+            "family emoji: 👨‍👩‍👧‍👦 and scientist 👩🏽‍🔬",
+            "nbsp:\u{00a0}thin:\u{2009}em:\u{2003}zwsp:\u{200b}",
+            "<|fim_prefix|>code<|fim_middle|>body<|fim_suffix|>",
+        ];
+        for path in fixtures {
+            let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+            let native = NativeTokenizer::open(path).expect("open native tokenizer");
+            for prompt in prompts {
+                for add_special in [false, true] {
+                    assert_tokenizers_match(&ffi, &native, path, prompt, add_special);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_rejects_invalid_decode_token() {
+        let Some(path) = fixture() else { return };
+        let native = match NativeTokenizer::open(path) {
+            Ok(native) => native,
+            Err(TokError::UnsupportedNativeTokenizer { .. }) => return,
+            Err(err) => panic!("open native tokenizer: {err}"),
+        };
+        assert!(matches!(
+            native.try_decode_piece(-1),
+            Err(TokError::InvalidToken(-1))
+        ));
+        assert!(matches!(
+            native.try_decode(&[native.n_vocab() as i32]),
+            Err(TokError::InvalidToken(_))
+        ));
+    }
+
+    #[test]
+    fn native_decode_piece_matches_llama_cpp_for_full_vocab() {
+        let Some(path) = fixture() else { return };
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = match NativeTokenizer::open(path) {
+            Ok(native) => native,
+            Err(TokError::UnsupportedNativeTokenizer { .. }) => return,
+            Err(err) => panic!("open native tokenizer: {err}"),
+        };
+        assert_eq!(native.n_vocab(), ffi.n_vocab());
+        for id in 0..ffi.n_vocab() as i32 {
+            assert_eq!(
+                native.try_decode_piece(id).expect("native piece"),
+                ffi.try_decode_piece(id).expect("ffi piece"),
+                "decode_piece mismatch at token {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_random_token_sequences_match_llama_cpp() {
+        let Some(path) = fixture() else { return };
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
+        let mut rng = Lcg::new(0x5eed_fade_dead_beef);
+        for len in [0usize, 1, 2, 3, 4, 7, 16, 31, 64] {
+            for _ in 0..32 {
+                let tokens: Vec<i32> = (0..len)
+                    .map(|_| rng.gen_range(native.n_vocab()) as i32)
+                    .collect();
+                assert_eq!(
+                    native.try_decode(&tokens).expect("native decode"),
+                    ffi.try_decode(&tokens).expect("ffi decode"),
+                    "random detokenize mismatch len={len} tokens={tokens:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_special_token_literals_match_llama_cpp() {
+        let Some(path) = fixture() else { return };
+        let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
+        let specials = special_token_texts(&native);
+        for text in &specials {
+            assert_tokenizers_match(&ffi, &native, path, text, false);
+            assert_tokenizers_match(&ffi, &native, path, text, true);
+        }
+        for pair in specials.windows(2).take(32) {
+            let joined = format!("{}{}", pair[0], pair[1]);
+            assert_tokenizers_match(&ffi, &native, path, &joined, false);
+        }
+    }
+
+    #[test]
+    #[ignore = "exhaustive cross-model special-token oracle sweep"]
+    fn native_special_token_literals_match_llama_cpp_across_model_matrix() {
+        for path in fixtures() {
+            let ffi = LlamaCppTokenizer::open(path).expect("open ffi tokenizer");
+            let native = NativeTokenizer::open(path).expect("open native tokenizer");
+            let specials = special_token_texts(&native);
+            for text in &specials {
+                assert_tokenizers_match(&ffi, &native, path, text, false);
+                assert_tokenizers_match(&ffi, &native, path, text, true);
+            }
+        }
+    }
+
+    #[test]
+    fn byte_unicode_mapping_round_trips_all_bytes() {
+        for byte in 0u8..=255 {
+            let ch = byte_to_unicode(byte);
+            assert_eq!(unicode_to_byte(ch), Some(byte), "byte {byte}");
+        }
+    }
+
+    #[test]
+    fn qwen35_pretokenizer_keeps_combining_marks_with_letters() {
+        let parts = qwen35_pretokenize("e\u{301} cafe\u{301}!");
+        assert_eq!(parts, vec!["e\u{301}", " cafe\u{301}", "!"]);
+    }
+
+    #[test]
+    fn special_matcher_prefers_longest_same_start() {
+        let matcher = SpecialMatcher::new(&[
+            SpecialToken {
+                text: "<|im|>".into(),
+                id: 1,
+            },
+            SpecialToken {
+                text: "<|im_start|>".into(),
+                id: 2,
+            },
+            SpecialToken {
+                text: "<|im_end|>".into(),
+                id: 3,
+            },
+        ]);
+        let parts = matcher.partition("x<|im_start|>y<|im_end|>z");
+        assert!(matches!(parts[0], Fragment::Text("x")));
+        assert!(matches!(parts[1], Fragment::Token(2)));
+        assert!(matches!(parts[2], Fragment::Text("y")));
+        assert!(matches!(parts[3], Fragment::Token(3)));
+        assert!(matches!(parts[4], Fragment::Text("z")));
     }
 }

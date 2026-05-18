@@ -38,7 +38,7 @@ use qwen_llm::{
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     prefix_cache::PrefixCache,
     tensor::GgmlType,
-    tokenizer::Tokenizer,
+    tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -219,6 +219,9 @@ enum Cmd {
     /// speedup vs DFlash=off baseline. Greedy equivalence with DFlash=off
     /// is asserted (token sequences must be identical).
     Dflash(DflashArgs),
+    /// Tokenizer microbench: compare native GGUF Qwen35 tokenizer against
+    /// the current llama.cpp FFI oracle for encode/decode parity + speed.
+    Tok(TokArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -912,6 +915,48 @@ struct VocabAuditArgs {
     show_examples: usize,
 }
 
+#[derive(Parser, Debug)]
+struct TokArgs {
+    /// Path to a Qwen 3.5 / 3.6 GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Prompt text. If absent, uses a fixed mixed tokenizer stress prompt.
+    #[arg(short = 'p', long, conflicts_with_all = ["file", "messages"])]
+    prompt: Option<String>,
+    /// Read prompt text from a file.
+    #[arg(long, conflicts_with = "messages")]
+    file: Option<PathBuf>,
+    /// Render a JSON messages input into a Qwen chat-template prompt.
+    ///
+    /// Accepted shapes:
+    /// - bare `[{ role, content }, ...]`
+    /// - wrapped `{ messages: [...], ... }`
+    #[arg(long)]
+    messages: Option<PathBuf>,
+    /// Use only the first N messages from `--messages` before rendering.
+    #[arg(long)]
+    messages_max: Option<usize>,
+    /// Preserve assistant `<think>...</think>` history from `--messages`.
+    /// By default the bench preserves thinking only for wrapped Qwen3.6
+    /// rollouts and strips it otherwise.
+    #[arg(long)]
+    messages_preserve_thinking: bool,
+    /// Force stripping assistant `<think>...</think>` history from
+    /// `--messages`, even if auto-detection would preserve it.
+    #[arg(long, conflicts_with = "messages_preserve_thinking")]
+    messages_strip_thinking: bool,
+    /// Do not append a final `<|im_start|>assistant\n` generation marker for
+    /// `--messages` prompts.
+    #[arg(long)]
+    messages_no_generation_prompt: bool,
+    /// Timed encode/decode iterations for each backend.
+    #[arg(long, default_value = "1000")]
+    iters: usize,
+    /// Pass add_special=true to both tokenizer backends.
+    #[arg(long)]
+    add_special: bool,
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -933,6 +978,352 @@ fn main() -> Result<()> {
         Cmd::Mtp(a) => run_mtp(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
         Cmd::Dflash(a) => run_dflash(a),
+        Cmd::Tok(a) => run_tok(a),
+    }
+}
+
+fn run_tok(args: TokArgs) -> Result<()> {
+    let TokArgs {
+        model,
+        prompt,
+        file,
+        messages,
+        messages_max,
+        messages_preserve_thinking,
+        messages_strip_thinking,
+        messages_no_generation_prompt,
+        iters,
+        add_special,
+    } = args;
+    if iters == 0 {
+        anyhow::bail!("--iters must be > 0");
+    }
+    let (source, text) = match (prompt, file, messages) {
+        (Some(prompt), None, None) => ("inline".to_string(), prompt),
+        (None, Some(path), None) => {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("read {}", path.display()))?;
+            (format!("file:{}", path.display()), text)
+        }
+        (None, None, Some(path)) => (
+            format!("messages:{}", path.display()),
+            load_messages_prompt(
+                &path,
+                messages_max,
+                messages_thinking_mode(messages_preserve_thinking, messages_strip_thinking),
+                !messages_no_generation_prompt,
+            )?,
+        ),
+        (None, None, None) => ("default".to_string(), default_tok_prompt()),
+        _ => unreachable!("clap conflicts_with"),
+    };
+
+    let t0 = Instant::now();
+    let ffi = LlamaCppTokenizer::open(&model).context("open llama.cpp FFI tokenizer")?;
+    let ffi_load = t0.elapsed();
+
+    let t0 = Instant::now();
+    let gguf = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let native = NativeTokenizer::from_gguf(&gguf).context("open native GGUF tokenizer")?;
+    let native_load = t0.elapsed();
+
+    let ffi_ids = ffi.encode(&text, add_special).context("ffi encode")?;
+    let native_ids = native.encode(&text, add_special).context("native encode")?;
+    if ffi_ids != native_ids {
+        let first = ffi_ids
+            .iter()
+            .zip(&native_ids)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| ffi_ids.len().min(native_ids.len()));
+        anyhow::bail!(
+            "native/ffi encode mismatch at token {first}: ffi_len={} native_len={} ffi={:?} native={:?}",
+            ffi_ids.len(),
+            native_ids.len(),
+            ffi_ids.get(first),
+            native_ids.get(first)
+        );
+    }
+    let ffi_text = ffi.try_decode(&ffi_ids).context("ffi decode")?;
+    let native_text = native.try_decode(&native_ids).context("native decode")?;
+    if ffi_text != native_text {
+        anyhow::bail!(
+            "native/ffi decode mismatch: ffi_len={} native_len={}",
+            ffi_text.len(),
+            native_text.len()
+        );
+    }
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(ffi.encode(&text, add_special).context("ffi encode timed")?);
+    }
+    let ffi_encode = t0.elapsed();
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(
+            native
+                .encode(&text, add_special)
+                .context("native encode timed")?,
+        );
+    }
+    let native_encode = t0.elapsed();
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(ffi.try_decode(&ffi_ids).context("ffi decode timed")?);
+    }
+    let ffi_decode = t0.elapsed();
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(
+            native
+                .try_decode(&native_ids)
+                .context("native decode timed")?,
+        );
+    }
+    let native_decode = t0.elapsed();
+
+    let n_tokens = ffi_ids.len() * iters;
+    println!("[tok] model={}", model.display());
+    println!(
+        "[tok] source={} chars={} tokens={} iters={} add_special={}",
+        source,
+        text.len(),
+        ffi_ids.len(),
+        iters,
+        add_special
+    );
+    println!(
+        "[tok] load_ms: ffi={:.3} native={:.3}",
+        ffi_load.as_secs_f64() * 1000.0,
+        native_load.as_secs_f64() * 1000.0
+    );
+    print_tok_rate("ffi encode", ffi_encode, n_tokens);
+    print_tok_rate("native encode", native_encode, n_tokens);
+    print_tok_rate("ffi decode", ffi_decode, n_tokens);
+    print_tok_rate("native decode", native_decode, n_tokens);
+    Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MessagesThinkingMode {
+    Auto,
+    Preserve,
+    Strip,
+}
+
+fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThinkingMode {
+    if preserve {
+        MessagesThinkingMode::Preserve
+    } else if strip {
+        MessagesThinkingMode::Strip
+    } else {
+        MessagesThinkingMode::Auto
+    }
+}
+
+fn load_messages_prompt(
+    path: &PathBuf,
+    max_messages: Option<usize>,
+    thinking_mode: MessagesThinkingMode,
+    append_generation_prompt: bool,
+) -> Result<String> {
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parse messages input {}", path.display()))?;
+    let (mut messages, meta) = parse_messages_input(value)?;
+    if let Some(max) = max_messages {
+        messages.truncate(max);
+    }
+    if messages.is_empty() {
+        anyhow::bail!("messages input {} contains no messages", path.display());
+    }
+    let preserve_thinking = match thinking_mode {
+        MessagesThinkingMode::Preserve => true,
+        MessagesThinkingMode::Strip => false,
+        MessagesThinkingMode::Auto => messages_auto_preserve_thinking(&meta),
+    };
+    Ok(render_qwen_messages_prompt(
+        &messages,
+        preserve_thinking,
+        append_generation_prompt,
+    ))
+}
+
+fn messages_auto_preserve_thinking(meta: &serde_json::Value) -> bool {
+    if meta
+        .get("preserve_thinking")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    meta.get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_ascii_lowercase().contains("qwen3.6"))
+        .unwrap_or(false)
+}
+
+fn parse_messages_input(value: serde_json::Value) -> Result<(Vec<ChatMessage>, serde_json::Value)> {
+    match value {
+        serde_json::Value::Array(_) => {
+            let messages: Vec<ChatMessage> =
+                serde_json::from_value(value).context("parse bare messages array")?;
+            Ok((messages, serde_json::Value::Null))
+        }
+        serde_json::Value::Object(mut obj) => {
+            let messages_value = obj.remove("messages").ok_or_else(|| {
+                anyhow!("wrapped messages input must contain a top-level `messages` array")
+            })?;
+            let messages: Vec<ChatMessage> =
+                serde_json::from_value(messages_value).context("parse wrapped messages array")?;
+
+            let mut merged = serde_json::Map::new();
+            if let Some(meta_value) = obj.remove("meta") {
+                match meta_value {
+                    serde_json::Value::Object(map) => merged.extend(map),
+                    serde_json::Value::Null => {}
+                    other => {
+                        merged.insert("meta".into(), other);
+                    }
+                }
+            }
+            for (key, value) in obj {
+                merged.insert(key, value);
+            }
+            Ok((messages, serde_json::Value::Object(merged)))
+        }
+        other => Err(anyhow!(
+            "messages input must be a message array or wrapped object, got {other}"
+        )),
+    }
+}
+
+fn render_qwen_messages_prompt(
+    messages: &[ChatMessage],
+    preserve_thinking: bool,
+    append_generation_prompt: bool,
+) -> String {
+    let mut out = String::new();
+    for msg in messages {
+        out.push_str("<|im_start|>");
+        out.push_str(&msg.role);
+        out.push('\n');
+        if msg.role == "assistant" && !preserve_thinking {
+            out.push_str(&strip_think(&msg.content));
+        } else {
+            out.push_str(&msg.content);
+        }
+        out.push_str("<|im_end|>\n");
+    }
+    if append_generation_prompt {
+        out.push_str("<|im_start|>assistant\n");
+    }
+    out
+}
+
+fn strip_think(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<think>") {
+        if let Some((_, tail)) = rest.split_once("</think>") {
+            return tail.trim().to_string();
+        }
+    }
+    text.to_string()
+}
+
+fn default_tok_prompt() -> String {
+    "<|im_start|>user\nHello, world!\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n数字123 combining e\u{301} emoji🙂\u{fe0f}\n<|im_end|>"
+        .to_string()
+}
+
+fn print_tok_rate(label: &str, elapsed: Duration, n_tokens: usize) {
+    let secs = elapsed.as_secs_f64();
+    let tok_s = n_tokens as f64 / secs.max(f64::MIN_POSITIVE);
+    println!(
+        "[tok] {label}: {:.3} ms total, {:.0} tok/s",
+        secs * 1000.0,
+        tok_s
+    );
+}
+
+#[cfg(test)]
+mod tok_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn auto_preserves_thinking_only_for_qwen36() {
+        assert!(messages_auto_preserve_thinking(
+            &json!({ "model": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf" })
+        ));
+        assert!(messages_auto_preserve_thinking(
+            &json!({ "preserve_thinking": true, "model": "anything" })
+        ));
+        assert!(!messages_auto_preserve_thinking(
+            &json!({ "model": "/Users/tito/models/Qwen3.5-27B-Q4_K_M.gguf" })
+        ));
+        assert!(!messages_auto_preserve_thinking(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn strip_think_only_strips_leading_qwen_block() {
+        assert_eq!(strip_think("<think>hidden</think>shown"), "shown");
+        assert_eq!(strip_think("plain text"), "plain text");
+        assert_eq!(strip_think("  plain text  "), "  plain text  ");
+        assert_eq!(
+            strip_think("prefix </think> shown"),
+            "prefix </think> shown"
+        );
+    }
+
+    #[test]
+    fn render_messages_prompt_respects_thinking_mode() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "<think>hidden</think>shown".into(),
+            },
+        ];
+        let stripped = render_qwen_messages_prompt(&messages, false, true);
+        let preserved = render_qwen_messages_prompt(&messages, true, true);
+        assert!(stripped.contains("shown<|im_end|>"));
+        assert!(!stripped.contains("hidden"));
+        assert!(preserved.contains("<think>hidden</think>shown"));
+        assert!(preserved.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn parse_messages_input_accepts_top_level_metadata() {
+        let value = json!({
+            "model": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            "preserve_thinking": true,
+            "messages": [
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let (messages, meta) = parse_messages_input(value).expect("parse messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            meta.get("model").and_then(|v| v.as_str()),
+            Some("/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf")
+        );
+        assert_eq!(
+            meta.get("preserve_thinking").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }
 
@@ -967,7 +1358,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
 
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
     let mtp_head = MetalMtpHead::load(&ctx, &g, mtp_view).context("metal-load MTP head")?;
-    let tok = Tokenizer::open(&model).context("open tokenizer")?;
+    let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
 
     if !qwen_chat && (system.is_some() || disable_thinking) {
         anyhow::bail!("`--system` and `--disable-thinking` require `--qwen-chat`");
@@ -1182,7 +1573,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
 
     let mm = MetalModel::load(&ctx, &target_g, &target_m).context("metal-load target")?;
     let mhead = MetalDFlashHead::load(&ctx, &drafter_g, &head).context("metal-load drafter")?;
-    let tok = Tokenizer::open(&model).context("open tokenizer")?;
+    let tok = Tokenizer::from_gguf(&target_g).context("open tokenizer")?;
 
     let prompt_ids = tok.encode(&prompt, false).context("tokenize prompt")?;
     let n_prompt = prompt_ids.len();
@@ -1588,7 +1979,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let head = open_dflash_drafter(&drafter_g, &target_m).context("bind drafter")?;
     let mm = MetalModel::load(&ctx, &target_g, &target_m).context("metal-load target")?;
     let mhead = MetalDFlashHead::load(&ctx, &drafter_g, &head).context("metal-load drafter")?;
-    let tok = Tokenizer::open(&model).context("open tokenizer")?;
+    let tok = Tokenizer::from_gguf(&target_g).context("open tokenizer")?;
 
     let prompt_ids = tok.encode(&prompt, false).context("tokenize prompt")?;
     let n_prompt = prompt_ids.len();
@@ -2090,7 +2481,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
 
     let (ids, source_label) = if let Some(prompt) = prompt {
-        let tok = Tokenizer::open(&model).context("open tokenizer")?;
+        let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
         let ids = tok.encode(&prompt, false).context("tokenize prompt")?;
         (ids, format!("text prompt ({} chars)", prompt.len()))
     } else {
@@ -2586,7 +2977,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
-    let tok = Tokenizer::open(&model).context("open tokenizer")?;
+    let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
 
     let ids = tok.encode(&prompt, false).context("tokenize prompt")?;
     if ids.is_empty() {
@@ -3057,7 +3448,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     }
 
     if !gen_ids.is_empty() {
-        let text = tok.decode(&gen_ids);
+        let text = tok.try_decode(&gen_ids)?;
         eprintln!("[bench] generated: {:?}", text);
     }
 
@@ -3221,7 +3612,7 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
     let m = Model::from_gguf(&g)?;
     let vocab_size = m.arch.vocab_size as usize;
     let mm = MetalModel::load(&ctx, &g, &m)?;
-    let tok = Tokenizer::open(&model)?;
+    let tok = Tokenizer::from_gguf(&g)?;
     let mf = MetalForward::new(&ctx, &mm);
 
     let mut ks = ks;
@@ -3326,7 +3717,7 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
                     *global.misses.get_mut(&k).unwrap() += 1;
                     *cat_stats.misses.get_mut(&k).unwrap() += 1;
                     if cat_stats.examples[&k].len() < show_examples {
-                        let decoded = tok.decode(&[argmax as i32]);
+                        let decoded = tok.try_decode_piece(argmax as i32)?;
                         cat_stats.examples.get_mut(&k).unwrap().push((
                             cat.clone(),
                             decoded.clone(),
@@ -3334,7 +3725,7 @@ fn run_vocab_audit(args: VocabAuditArgs) -> Result<()> {
                         ));
                     }
                     if global.examples[&k].len() < show_examples * 2 {
-                        let decoded = tok.decode(&[argmax as i32]);
+                        let decoded = tok.try_decode_piece(argmax as i32)?;
                         global
                             .examples
                             .get_mut(&k)
@@ -4015,7 +4406,7 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     let g = GgufFile::open(&model)?;
     let m = Model::from_gguf(&g)?;
     let mm = MetalModel::load(&ctx, &g, &m)?;
-    let tok = Tokenizer::open(&model)?;
+    let tok = Tokenizer::from_gguf(&g)?;
 
     let mut prefix_ids = tok.encode(&prefix, false)?;
     if let Some(target) = target_prefix_len {
@@ -4182,8 +4573,8 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
             tokens,
             100.0 * n_same as f64 / tokens as f64
         );
-        let cold_text = tok.decode(&cold_extra);
-        let warm_text = tok.decode(&warm_extra);
+        let cold_text = tok.try_decode(&cold_extra)?;
+        let warm_text = tok.try_decode(&warm_extra)?;
         eprintln!("[prefix-cache] cold generated: {:?}", cold_text);
         eprintln!("[prefix-cache] warm generated: {:?}", warm_text);
     }

@@ -41,6 +41,8 @@ bytemuck = { version = "1.16", features = ["derive"] }
 gguf-rs = { path = "../gguf" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+unicode-general-category = "0.6"
+rustc-hash = "2"
 
 # dequant codec for tooling / re-pack-on-load (see docs/PLAN.md weight-format role table)
 llama-cpp-sys-2 = { path = "../llama-cpp-rs/llama-cpp-sys-2" }

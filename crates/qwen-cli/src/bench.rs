@@ -621,6 +621,13 @@ fn capture_qwen_env() -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
+fn default_prefill_chunk(kind: qwen_llm::model::ArchKind, prompt_len: usize) -> usize {
+    match kind {
+        qwen_llm::model::ArchKind::Moe => prompt_len.clamp(1, 1024),
+        qwen_llm::model::ArchKind::Dense => prompt_len.clamp(1, 1024),
+    }
+}
+
 /// Returns `(commit, dirty)` for stamping into JSON output.
 ///
 /// Commit comes from `build.rs` (env at compile time → git → "unknown").
@@ -2099,13 +2106,8 @@ fn run_pp(args: PpArgs) -> Result<()> {
         return Err(anyhow!("prompt tokenized to an empty sequence"));
     }
 
-    let prefill_chunk = prefill_chunk.unwrap_or_else(|| {
-        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
-            128
-        } else {
-            512
-        }
-    });
+    let prefill_chunk =
+        prefill_chunk.unwrap_or_else(|| default_prefill_chunk(m.arch.kind, ids.len()));
     if prefill_chunk == 0 {
         return Err(anyhow!("--prefill-chunk must be >= 1"));
     }
@@ -2590,13 +2592,8 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     if ids.is_empty() {
         return Err(anyhow!("prompt tokenized to an empty sequence"));
     }
-    let prefill_chunk = prefill_chunk.unwrap_or_else(|| {
-        if m.arch.kind == qwen_llm::model::ArchKind::Moe {
-            128
-        } else {
-            512
-        }
-    });
+    let prefill_chunk =
+        prefill_chunk.unwrap_or_else(|| default_prefill_chunk(m.arch.kind, ids.len()));
     if prefill_chunk == 0 {
         return Err(anyhow!("--prefill-chunk must be >= 1"));
     }

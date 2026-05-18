@@ -547,7 +547,7 @@ struct BenchRow {
     schema_version: u32,
     engine: &'static str,
     build_commit: &'static str,
-    /// `1` if probed dirty at runtime via `git status --porcelain`.
+    /// `1` if probed dirty at runtime via tracked-only git status.
     build_dirty: u8,
     test_time: String,
     model_filename: String,
@@ -625,17 +625,20 @@ fn capture_qwen_env() -> std::collections::BTreeMap<String, String> {
 ///
 /// Commit comes from `build.rs` (env at compile time → git → "unknown").
 ///
-/// Dirty is probed at *runtime* via `git status --porcelain` because cargo's
+/// Dirty is probed at *runtime* via tracked-only
+/// `git status --porcelain --untracked-files=no` because cargo's
 /// `rerun-if-changed` directives only watch `.git/HEAD` and `.git/index`:
 /// editing a tracked file without staging it does NOT invalidate the cached
 /// build, so a stale `QWEN_BUILD_DIRTY=0` from the last clean compile would
-/// otherwise lie about a dirty worktree. We fall back to the compile-time
-/// value when the runtime probe fails (no git binary, not in a repo).
+/// otherwise lie about a dirty worktree. Untracked artifacts are ignored so the
+/// benchmark harness does not poison its own provenance by writing output under
+/// the repo. We fall back to the compile-time value when the runtime probe
+/// fails (no git binary, not in a repo).
 fn qwen_build_identity() -> (&'static str, u8) {
     let commit = env!("QWEN_BUILD_COMMIT");
     let baked_dirty = env!("QWEN_BUILD_DIRTY").parse::<u8>().unwrap_or(0);
     let runtime_dirty = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .ok()

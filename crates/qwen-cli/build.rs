@@ -1,7 +1,8 @@
 //! Stamps `QWEN_BUILD_COMMIT` and `QWEN_BUILD_DIRTY` into the binary so
 //! `qwen-bench -o json` can emit a build identity matching lcpp's
 //! `build_commit` field. Commit resolution: env var, then `git rev-parse`,
-//! then `"unknown"`. Dirty defaults to checking `git status --porcelain`.
+//! then `"unknown"`. Dirty is tracked-only by default: untracked artifacts
+//! under the repo should not poison benchmark provenance.
 
 use std::process::Command;
 
@@ -46,7 +47,7 @@ fn main() {
         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
         .unwrap_or_else(|| {
             Command::new("git")
-                .args(["status", "--porcelain"])
+                .args(["status", "--porcelain", "--untracked-files=no"])
                 .current_dir(&manifest_dir)
                 .output()
                 .map(|o| !o.stdout.is_empty())

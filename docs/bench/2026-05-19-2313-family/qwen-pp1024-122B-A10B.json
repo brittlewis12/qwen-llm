@@ -1,0 +1,35 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "8cb2965ba",
+    "build_dirty": 0,
+    "test_time": "2026-05-19T23:22:39Z",
+    "model_filename": "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+    "model_size": 77018996736,
+    "model_n_params": 122111526912,
+    "arch_kind": "moe",
+    "test": "pp1024",
+    "n_tokens": 1024,
+    "n_repetitions": 3,
+    "avg_ts": 327.96251720193555,
+    "stddev_ts": 3.039660087398868,
+    "samples_ts": [
+      324.4529947708326,
+      329.6728635988485,
+      329.76169323612555
+    ],
+    "samples_ns": [
+      3156081209,
+      3106109459,
+      3105272750
+    ],
+    "avg_ns": 3122487805,
+    "avg_gpu_ns": 3087190333,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 1024,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "qwen_env": {}
+  }
+]

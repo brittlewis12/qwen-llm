@@ -2172,7 +2172,6 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
     assert_eq!(last_a.len(), last_b.len(), "logits len mismatch");
     let cos_logits = cosine_27b(&last_a, &last_b);
     eprintln!("[prefill-vs-single-a10b] cos(final logits)={cos_logits:.6}");
-    assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
 
     assert_eq!(sess_a.gdn_state.len(), sess_b.gdn_state.len());
     let mut gdn_state_min_cos = f64::INFINITY;
@@ -2214,6 +2213,7 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
     eprintln!(
         "[prefill-vs-single-a10b] KV K cos_min={kv_k_min_cos:.6} V cos_min={kv_v_min_cos:.6}"
     );
+    assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
     assert!(kv_k_min_cos >= 0.999, "KV K cos_min={kv_k_min_cos} < 0.999");
     assert!(kv_v_min_cos >= 0.999, "KV V cos_min={kv_v_min_cos} < 0.999");
 }

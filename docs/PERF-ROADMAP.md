@@ -42,21 +42,39 @@ M4 Max, release `qwen-bench`, sequential runs.
 | 122B A10B | 16K | 33.47 | 29.9 | group16 tile4 + NWG64 |
 | 122B A10B | 32K | 35.14 | 28.5 | group16 tile4 + NWG64 |
 
-Prompt-only anchors, `pp320` synthetic prompt unless noted:
+Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
 - `qwen-llm` 9B dense packed pp: `~711.8 t/s`; `llama-bench`: `~824.0 t/s`
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
-- `qwen-llm` 35B A3B packed pp after packed routed+shared expert tail:
-  `~556.4 t/s` at default chunk128, `~710.4 t/s` at chunk320;
-  `llama-bench`: `~1222.4 t/s`
-- `qwen-llm` 122B A10B packed pp after packed routed+shared expert tail:
-  `~218.1 t/s` at default chunk128, `~278.7 t/s` at chunk320;
-  `llama-bench`: `~393.3 t/s`
+- `qwen-llm` 35B A3B grouped MoE default now allowlists fused route+bucket plus
+  hot-expert `n32` when `chunk_p >= 512`: about `681 t/s` at `pp256`,
+  `743 t/s` at `pp512`, and `770 t/s` at `pp1024`; `llama-bench pp320` anchor is
+  still `~1222.4 t/s`
+- `qwen-llm` 122B A10B grouped MoE default now allowlists the same combo when
+  `chunk_p >= 512`: about `264 t/s` at `pp256`, `303 t/s` at `pp512`, and
+  `308 t/s` at `pp1024`; `llama-bench pp320` anchor is still `~393.3 t/s`
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
   `~22.5 t/s` generation
 
 Recent confirmed wins:
+
+- Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
+  used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel
+  cast it to signed `int`, turning the bound into `-1` and early-returning active
+  experts. After fixing the sentinel, A10B smoke / boundary and A3B
+  prefill-vs-single gates recovered, the fused route+bucket oracle became clean,
+  and the routed MoE prompt story had to be re-based.
+- That corrected re-baseline changes the active MoE path ranking:
+  - `route_bucket` itself is small,
+  - routed `grouped_swiglu` is still the largest MoE prompt bucket,
+  - router logits are the next meaningful routed cost.
+- The first post-fix routed-compute attack that converts end-to-end is a GPU-owned
+  hot-expert grouped-Q4 split over the existing per-expert `counts/ids` ledger.
+  Combined with fused route+bucket and allowlisted at `chunk_p >= 512`, it moves
+  A10B from about `297.0 -> 302.9 t/s` at `pp512` and `299.6 -> 309.3 t/s` at
+  `pp1024`, and A3B from about `736.3 -> 744.9 t/s` at `pp512` and
+  `754.7 -> 776.7 t/s` at `pp1024`.
 
 - MoE decode now has a real GDN-side concurrency win. Reusing the dense
   concurrent-GDN front-projection split inside MoE decode and making it the repo
@@ -395,45 +413,43 @@ Acceptance gates:
   `MetalTensor::zeros_f32` (`StorageModeShared`); the audit must classify each
   as GPU-only vs CPU-readable before any allocator change lands.
 
-### 7. MoE Next: Rollout And Stress The Grouped Expert-Major Backend
+### 7. MoE Next: Router Logits And Scheduling After The Corrected Routed Backend
 
-Optimizes: safe rollout and edge-case validation of the grouped expert-major MoE
-packed-prefill backend.
+Optimizes: the remaining routed MoE prompt cost now that grouped Q4 is correct,
+fused route+bucket is validated, and hot-expert grouped SwiGLU converts at larger
+prompt chunks.
 
 Current read:
 
-- The Q8 mixer eligibility fix was the first major MoE prompt unlock, moving
-  A3B pp320 to `~194-198 t/s` and A10B pp320 to `~85.1 t/s`.
-- The packed routed branch became a real win once the production gate checked
-  routed expert dtypes and the packed Q4_K SwiGLU layout matched the single-token
-  kernel. A3B pp320 is now `~261.5 t/s`; A10B pp320 is now `~106.8 t/s`.
-- The packed shared-expert branch then moved A3B pp320 to `~399.8 t/s` and A10B
-  pp320 to `~148.9 t/s` by batching shared gate/up/down and applying shared gate
-  with a rowwise AXPY into the routed mixer output.
-- A fully GPU-owned grouped expert-major backend now moves default chunk-128
-  pp320 to `~556.4 t/s` on A3B and `~218.1 t/s` on A10B, with chunk320 reaching
-  `~710.4 t/s` / `~278.7 t/s`.
-- This is no longer the old generic grouped-GEMM negative result. The winning path
-  is GPU-compacted, oracle-exact at the routed subkernels, and positive end-to-end
-  on both MoE guardrails.
-- A10B route-shape stability is not fully solved yet: `pp320/pp512` are stable on
-  seed sweeps, but `pp128` still shows large cold-run variance before settling
-  into the expected high-throughput band.
-- The immediate MoE task is not another rewrite; it is rollout discipline:
-  awkward chunk boundaries, long multi-chunk prompts, pathological route shapes,
-  and fallback integrity outside the proven quant envelope.
+- The grouped expert-major MoE prompt backend is now the stable base path again.
+- Fused route+bucket is real but modest by itself; the corrected route split shows
+  bucket construction is small and router logits / routed compute are the real
+  costs.
+- `n32-all` is not a ship candidate: it improves grouped compute locally but does
+  not clear the end-to-end pp gate.
+- GPU-owned hot-expert grouped SwiGLU over the existing `counts/ids` ledger is the
+  first post-fix routed-compute attack that converts end-to-end at `pp512+`,
+  especially when composed with fused route+bucket.
+- The default MoE prompt policy now effectively allowlists the combo only for
+  `chunk_p >= 512`; shorter prompts keep the corrected grouped baseline.
+- That leaves the next real frontier upstream of grouped Q4 tuning:
+  router logits mat-mat shape / scheduling and any remaining routed launch
+  structure that keeps local grouped-compute wins from converting more strongly.
 
 Acceptance gates:
 
 - Keep `QWEN_PREFILL_MOE_GROUPED=0` as the kill switch while rollout evidence is
   still expanding.
+- Keep the route-only and hot-only flags forceable, but do not default either one
+  globally outside the allowlisted combo regime.
 - Default-on only for the proven `Q4_K/Q4_K/Q5_K` MoE packed-prefill envelope;
-  fallback stays live for unsupported dtypes/shapes.
+  fallback stays live for unsupported dtypes/shapes and for prompt chunks below
+  the allowlist.
 - Keep the current correctness matrix green: A3B single-token-loop + hidden
   capture, A10B smoke, awkward chunk-boundary A10B (`T=129`, `P=128`), and dense
   9B/27B guardrails.
-- Expand route-shape and multi-chunk coverage before calling the rollout complete,
-  with special attention to A10B `pp128` cold-run instability.
+- Any next routed optimization must beat the current allowlisted combo on both A3B
+  and A10B at `pp512` / `pp1024`, not just improve grouped-Q4 microproofs.
 
 ### 8. Use 9B As The Fast Dense Long-Context Canary
 

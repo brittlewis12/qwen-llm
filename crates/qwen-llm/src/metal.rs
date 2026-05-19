@@ -1397,6 +1397,43 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
     topk: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
+        ctx,
+        enc,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
     if n_hidden % 256 != 0 {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_grouped_slots_n16",
@@ -1445,6 +1482,8 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
         n_tokens: u32,
         nb01: u32,
         stride_b: u32,
+        min_count: u32,
+        max_count: u32,
     }
     let nb01 = ((n_hidden / 256) * 144) as u32;
     enc.set_bytes(
@@ -1457,6 +1496,8 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
             n_tokens: n_tokens as u32,
             nb01,
             stride_b: n_hidden as u32,
+            min_count,
+            max_count,
         },
     );
     enc.set_tensor(1, w_gate);
@@ -1469,6 +1510,147 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
     enc.dispatch(
         MTLSize {
             width: n_tokens.div_ceil(16),
+            height: n_ffn.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
+        ctx,
+        enc,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
+    if n_hidden % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_n32",
+            detail: format!("n_hidden={n_hidden} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::Q4_K || w_up.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_n32",
+            detail: format!(
+                "expected Q4_K gate/up expert banks, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_n32",
+            detail: format!(
+                "shape mismatch x={} counts={} ids={} inner={} expected x={} counts={} ids={} inner={}",
+                x_pack.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                inner.n_elements(),
+                n_tokens * n_hidden,
+                n_expert,
+                n_expert * n_tokens,
+                n_tokens * topk * n_ffn
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_q4_K_f32_grouped_slots_n32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        ffn: u32,
+        hidden: u32,
+        n_expert: u32,
+        topk: u32,
+        n_tokens: u32,
+        nb01: u32,
+        stride_b: u32,
+        min_count: u32,
+        max_count: u32,
+    }
+    let nb01 = ((n_hidden / 256) * 144) as u32;
+    enc.set_bytes(
+        0,
+        &Args {
+            ffn: n_ffn as u32,
+            hidden: n_hidden as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+            n_tokens: n_tokens as u32,
+            nb01,
+            stride_b: n_hidden as u32,
+            min_count,
+            max_count,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x_pack);
+    enc.set_tensor(4, counts);
+    enc.set_tensor(5, ids);
+    enc.set_tensor(6, inner);
+    enc.set_threadgroup_memory(0, 16384);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
             height: n_ffn.div_ceil(64),
             depth: n_expert,
         },
@@ -2299,6 +2481,77 @@ pub fn encode_moe_weighted_sum_packed_f32(
     Ok(())
 }
 
+pub fn encode_moe_grouped_finalizer_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    expert_out: &MetalTensor,
+    topk_w: &MetalTensor,
+    shared_gate: &MetalTensor,
+    shared_out: &MetalTensor,
+    x_pack: &MetalTensor,
+    n_out: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    let n_slots = n_tokens * topk;
+    if expert_out.n_elements() as usize != n_slots * n_out
+        || topk_w.n_elements() as usize != n_slots
+        || shared_gate.n_elements() as usize != n_tokens
+        || shared_out.n_elements() as usize != n_tokens * n_out
+        || x_pack.n_elements() as usize != n_tokens * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_grouped_finalizer",
+            detail: format!(
+                "shape mismatch: expert_out={} topk_w={} shared_gate={} shared_out={} x_pack={} expected expert_out={} topk_w={} shared_gate={} shared_out={} x_pack={}",
+                expert_out.n_elements(),
+                topk_w.n_elements(),
+                shared_gate.n_elements(),
+                shared_out.n_elements(),
+                x_pack.n_elements(),
+                n_slots * n_out,
+                n_slots,
+                n_tokens,
+                n_tokens * n_out,
+                n_tokens * n_out
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_moe_grouped_finalizer_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_out: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_out: n_out as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, expert_out);
+    enc.set_tensor(2, topk_w);
+    enc.set_tensor(3, shared_gate);
+    enc.set_tensor(4, shared_out);
+    enc.set_tensor(5, x_pack);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(2),
+            height: n_tokens,
+            depth: 1,
+        },
+        MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_scatter_rows_f32_unique(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2589,6 +2842,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
         n_expert: u32,
         topk: u32,
         hidden: u32,
+        n_tokens: u32,
     }
     enc.set_bytes(
         0,
@@ -2596,6 +2850,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
             n_expert: n_expert as u32,
             topk: topk as u32,
             hidden: hidden as u32,
+            n_tokens: 1,
         },
     );
     enc.set_tensor(1, logits);
@@ -2693,6 +2948,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
         n_expert: u32,
         topk: u32,
         hidden: u32,
+        n_tokens: u32,
     }
     enc.set_bytes(
         0,
@@ -2700,6 +2956,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
             n_expert: n_expert as u32,
             topk: topk as u32,
             hidden: hidden as u32,
+            n_tokens: n_tokens as u32,
         },
     );
     enc.set_tensor(1, logits);
@@ -2708,6 +2965,104 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
     enc.set_tensor(4, out_idx);
     enc.set_tensor(5, out_w);
     enc.set_tensor(6, shared_out);
+    const THREADS: usize = 256;
+    enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, THREADS * std::mem::size_of::<i32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: n_tokens,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    shared_weight: &MetalTensor,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    shared_out: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    n_expert: usize,
+    topk: usize,
+    hidden: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if logits.dtype != GgmlType::F32
+        || shared_weight.dtype != GgmlType::F32
+        || x.dtype != GgmlType::F32
+        || out_w.dtype != GgmlType::F32
+        || shared_out.dtype != GgmlType::F32
+        || counts.dtype != GgmlType::F32
+        || ids.dtype != GgmlType::F32
+    {
+        return Err(MetalError::BadShape {
+            kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
+            detail: "expected F32 buffers throughout".into(),
+        });
+    }
+    if n_expert == 0 || n_expert > 256 || topk == 0 || topk > 16 || topk > n_expert {
+        return Err(MetalError::BadShape {
+            kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
+            detail: format!(
+                "expected 1 <= topk <= n_expert <= 256 and topk <= 16, got n_expert={n_expert} topk={topk}"
+            ),
+        });
+    }
+    if logits.n_elements() as usize != n_tokens * n_expert
+        || out_idx.n_elements() as usize != n_tokens * topk
+        || out_w.n_elements() as usize != n_tokens * topk
+        || shared_weight.n_elements() as usize != hidden
+        || x.n_elements() as usize != n_tokens * hidden
+        || shared_out.n_elements() as usize != n_tokens
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+    {
+        return Err(MetalError::BadShape {
+            kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
+            detail: "shape mismatch in packed route+bucket inputs/outputs".into(),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_topk_bucket_logits_softmax_dot_sigmoid_packed_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_expert: u32,
+        topk: u32,
+        hidden: u32,
+        n_tokens: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+            hidden: hidden as u32,
+            n_tokens: n_tokens as u32,
+        },
+    );
+    enc.set_tensor(1, logits);
+    enc.set_tensor(2, shared_weight);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, out_idx);
+    enc.set_tensor(5, out_w);
+    enc.set_tensor(6, shared_out);
+    enc.set_tensor(7, counts);
+    enc.set_tensor(8, ids);
     const THREADS: usize = 256;
     enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
     enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
@@ -3637,12 +3992,15 @@ pub fn encode_scatter_axpy_rows_unique_f32(
     struct Args {
         n_cols: u32,
         n_rows: u32,
+        out_rows: u32,
     }
+    let out_rows = accum.n_elements() as usize / n_cols;
     enc.set_bytes(
         0,
         &Args {
             n_cols: n_cols as u32,
             n_rows: n_rows as u32,
+            out_rows: out_rows as u32,
         },
     );
     enc.set_tensor(1, x);

@@ -6,6 +6,100 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-19 — Fix Grouped Q4 Sentinel, Validate Fused Route, And Allowlist Hot Routed SwiGLU
+
+Status: default-on for the proven grouped MoE prompt path when `chunk_p >= 512`,
+with `QWEN_PREFILL_MOE_ROUTE_BUCKET_FUSED=0` and
+`QWEN_PREFILL_MOE_GROUPED_HOT_Q4_N32=0` as rollback flags.
+
+### What Changed
+
+- Fixed a real grouped-Q4 correctness bug in the routed MoE prompt path:
+  grouped `Q4_K` SwiGLU used `u32::MAX` as the open-ended `max_count` sentinel,
+  while the Metal kernel cast it to signed `int`. That turned the bound into `-1`
+  and caused active experts to early-return.
+- Re-based all grouped-Q4 conclusions after the fix:
+  - A10B smoke and chunk128-boundary prefill-vs-single gates are green again,
+  - A3B prefill-vs-single is green again,
+  - the fused route+bucket oracle now compares real routed outputs and passes on
+    A3B and A10B.
+- Split the old `route+bucket` profile bucket into `route_logits`,
+  `route_select`, and `route_bucket`. The corrected A10B `pp512` read showed the
+  real routed costs are `grouped_swiglu` first and router logits second; bucket
+  construction itself is small.
+- Kept `n32-all` as a force-only/debug lever after the corrected end-to-end table
+  showed local grouped-compute wins that did not reliably convert to prompt t/s.
+- Added a GPU-owned hot-expert grouped-Q4 path over the existing per-expert
+  `counts/ids` ledger:
+  - hot experts use `n32` grouped SwiGLU,
+  - cold experts stay on `n16`,
+  - no CPU planning, no extra split buffers.
+- Added auto allowlist policy for the two MoE prompt wins that do convert:
+  - fused route+bucket,
+  - hot expert `n32` with default threshold `48`,
+  enabled only when `chunk_p >= 512` unless forced by env.
+
+### Measurements
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic prompts, tail skipped,
+two reps.
+
+Corrected routed-tail split, A10B `pp512`, fused-route off:
+
+- `route_logits`: `5.95 ms`
+- `route_select`: `0.11 ms`
+- `route_bucket`: `0.84 ms`
+- `grouped_swiglu`: `10.92 ms`
+- `grouped_down`: `3.38 ms`
+
+This is the key corrected read: bucket construction was a distraction; routed
+expert compute is still the largest MoE prompt bucket, and router logits are the
+next meaningful routed cost.
+
+2x2 routed ablation table:
+
+| Model | Shape | Baseline | Route | Hot(th48) | Combo |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 122B A10B Q4_K_XL | `pp256` | `265.71 t/s` | `260.43 t/s` | `259.11 t/s` | `266.93 t/s` |
+| 122B A10B Q4_K_XL | `pp512` | `297.04 t/s` | `293.77 t/s` | `299.66 t/s` | `302.87 t/s` |
+| 122B A10B Q4_K_XL | `pp1024` | `299.60 t/s` | `302.90 t/s` | `306.41 t/s` | `309.28 t/s` |
+| 35B A3B Q4_K_M | `pp256` | `676.26 t/s` | `688.62 t/s` | `677.07 t/s` | `683.45 t/s` |
+| 35B A3B Q4_K_M | `pp512` | `736.27 t/s` | `741.32 t/s` | `737.33 t/s` | `744.85 t/s` |
+| 35B A3B Q4_K_M | `pp1024` | `754.68 t/s` | `768.15 t/s` | `760.35 t/s` | `776.74 t/s` |
+
+Default policy after rebuild (`chunk_p >= 512` gets combo automatically; shorter
+prompts stay on the corrected grouped baseline):
+
+- 122B A10B: `pp256 ~264 t/s`, `pp512 ~303 t/s`, `pp1024 ~308 t/s`
+- 35B A3B: `pp256 ~681 t/s`, `pp512 ~743 t/s`, `pp1024 ~770 t/s`
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `metal_35b_a3b_moe_route_bucket_fused_oracle_512`
+- `metal_122b_a10b_moe_route_bucket_fused_oracle_512`
+- `prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke`
+- `prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary`
+- `prefill_tokens_matches_single_token_loop_35b_a3b_moe`
+- corrected grouped-Q4 `n32` proofs on A3B/A10B for `pp512` and `pp1024`
+- corrected hot-expert threshold scans on A3B and A10B at `pp512`
+- 2x2 `qwen-bench pp` ablation table on A3B/A10B for `pp256` / `pp512` /
+  `pp1024`
+
+### Current Read
+
+- The grouped-Q4 sentinel bug invalidated a large chunk of the earlier MoE prompt
+  story. After fixing it, the routed-compute path is stronger than it looked and
+  the fused route+bucket branch is genuinely correct.
+- `n32-all` is not a ship candidate: it improves grouped compute locally but does
+  not convert cleanly to end-to-end prompt throughput.
+- The first post-fix routed-compute attack that does convert is GPU-owned
+  hot-expert specialization at threshold `48`, especially when composed with the
+  fused route+bucket cleanup at `pp512+`.
+- The next MoE prompt frontier is no longer generic grouped-Q4 tuning. It is the
+  upstream routed path around router logits / scheduling, with hot-expert compute
+  retained as the best current routed FFN shape.
+
 ## 2026-05-18 — Concurrent GDN MoE Decode Front Projections
 
 Status: default-on for MoE decode on this repo, with

@@ -6,6 +6,78 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-19 — Specialize MoE Router Logits Over Expert Rows
+
+Status: default-on for the proven MoE prompt regime when `chunk_p >= 512`, with
+`QWEN_PREFILL_MOE_ROUTE_LOGITS_E8P32=0` as the rollback path.
+
+### What Changed
+
+- Added a router-only `F32` `E8xP32` mat-mat kernel that computes 8 expert rows
+  per threadgroup tile while reusing each token row's activation loads.
+- Kept the kernel narrow:
+  - router logits only,
+  - `F32` router weights only,
+  - requires `n_in % 4 == 0` and `n_out % 8 == 0`,
+  - leaves top-k, shared gate, bucketing, and routed FFN math unchanged.
+- Added a route oracle that compares generic vs `E8xP32` route logits on A3B and
+  A10B at `pp512` and `pp1024`, checking router-prob cosine, exact top-k ids,
+  top-k weight cosine, and shared-gate cosine.
+- Allowlisted the kernel into the default MoE prompt path only when `chunk_p >= 512`;
+  shorter prompts keep the existing route path.
+
+### Measurements
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic prompts, tail skipped,
+two reps.
+
+Corrected A10B routed-tail split, `pp512`, before this kernel:
+
+- `route_logits`: `5.95 ms`
+- `route_select`: `0.11 ms`
+- `route_bucket`: `0.84 ms`
+- `grouped_swiglu`: `10.92 ms`
+- `grouped_down`: `3.38 ms`
+
+With `QWEN_PREFILL_MOE_ROUTE_LOGITS_E8P32=1`, the same A10B `pp512` routed-tail
+profile moves `route_logits` from `5.95 ms` to `0.47 ms`. At A10B `pp1024`,
+`route_logits` is `1.03 ms`.
+
+End-to-end prompt impact in the default composed MoE path (`route-fused + hot-th48`
+already active at `chunk_p >= 512`):
+
+| Model | Shape | Previous default | With `E8xP32` | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| 122B A10B Q4_K_XL | `pp512` | `~302.9 t/s` | `~315.5 t/s` | `1.04x` |
+| 122B A10B Q4_K_XL | `pp1024` | `~309.3 t/s` | `~324.7 t/s` | `1.05x` |
+| 35B A3B Q4_K_M | `pp512` | `~744.9 t/s` | `~797.6 t/s` | `1.07x` |
+| 35B A3B Q4_K_M | `pp1024` | `~776.7 t/s` | `~815.1 t/s` | `1.05x` |
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `metal_35b_a3b_moe_route_logits_e8p32_oracle_512`
+- `metal_35b_a3b_moe_route_logits_e8p32_oracle_1024`
+- `metal_122b_a10b_moe_route_logits_e8p32_oracle_512`
+- `metal_122b_a10b_moe_route_logits_e8p32_oracle_1024`
+- `prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke`
+- `prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary`
+- `prefill_tokens_matches_single_token_loop_35b_a3b_moe`
+- `qwen-bench pp` A10B/A3B checks at `pp512` and `pp1024`
+
+### Current Read
+
+- The corrected route split was right: bucket construction was never the main
+  routed bottleneck. Router logits were a real remaining cost and this kernel
+  removes most of it on the proven MoE shapes.
+- The current default MoE prompt path is now the corrected grouped backend plus:
+  - fused route+bucket,
+  - GPU-owned hot-expert grouped Q4 at threshold `48`,
+  - `E8xP32` router logits when `chunk_p >= 512`.
+- The next frontier is no longer another router kernel. It is whether the routed
+  path can hide or reduce more of the remaining `grouped_swiglu` / scheduling
+  cost without losing the clean rollout shape we have now.
+
 ## 2026-05-19 — Fix Grouped Q4 Sentinel, Validate Fused Route, And Allowlist Hot Routed SwiGLU
 
 Status: default-on for the proven grouped MoE prompt path when `chunk_p >= 512`,

@@ -905,6 +905,91 @@ pub fn encode_mat_mat_f32(
     Ok(())
 }
 
+pub fn encode_mat_mat_f32_router_e8p32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32_router_e8p32",
+            detail: format!("weight.dtype = {:?}, expected F32", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32_router_e8p32",
+            detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
+        });
+    }
+    if n_in % 4 != 0 || n_out % 8 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32_router_e8p32",
+            detail: format!(
+                "expected n_in % 4 == 0 and n_out % 8 == 0, got n_in={n_in} n_out={n_out}"
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32_router_e8p32",
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={}",
+                x.n_elements(),
+                n_query * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_out * n_query {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_f32_router_e8p32",
+            detail: format!(
+                "y.n_elements={} != n_out*n_query={}",
+                y.n_elements(),
+                n_out * n_query
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_mat_f32_f32_router_e8p32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_query: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_query: n_query as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out / 8,
+            height: n_query.div_ceil(32),
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Q4_K mat-vec on raw `block_q4_K` bytes. Same shape semantics as
 /// [`encode_mat_vec_f32`]; `weight.dtype` must be `Q4_K`.
 pub fn encode_mat_vec_q4_k_f32(

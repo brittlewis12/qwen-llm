@@ -112,3 +112,75 @@ kernel void kernel_mat_mat_f32_f32(
         y[row + q * args.n_out] = acc;
     }
 }
+
+// Router logits F32 mat-mat specialized for small expert counts. One thread owns
+// one query lane and computes 8 expert rows, reusing the same activation loads.
+// Output layout matches kernel_mat_mat_f32_f32: [n_out, n_query] column-major.
+kernel void kernel_mat_mat_f32_f32_router_e8p32(
+        constant mat_mat_args & args [[buffer(0)]],
+        device const float   * weight [[buffer(1)]], // [n_in, n_out]
+        device const float   * x      [[buffer(2)]], // [n_query, n_in] row-major
+        device       float   * y      [[buffer(3)]], // [n_out, n_query] col-major
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    const uint row0 = tgpig.x * 8u;
+    const uint q = tgpig.y * 32u + tid;
+    if (q >= args.n_query) return;
+
+    device const float * x_row = x + (ulong)q * args.n_in;
+    const uint n_in_v4 = args.n_in / 4u;
+    device const float4 * x4 = (device const float4 *)x_row;
+
+    device const float4 * w0 = (device const float4 *)(weight + (ulong)(row0 + 0u) * args.n_in);
+    device const float4 * w1 = (device const float4 *)(weight + (ulong)(row0 + 1u) * args.n_in);
+    device const float4 * w2 = (device const float4 *)(weight + (ulong)(row0 + 2u) * args.n_in);
+    device const float4 * w3 = (device const float4 *)(weight + (ulong)(row0 + 3u) * args.n_in);
+    device const float4 * w4 = (device const float4 *)(weight + (ulong)(row0 + 4u) * args.n_in);
+    device const float4 * w5 = (device const float4 *)(weight + (ulong)(row0 + 5u) * args.n_in);
+    device const float4 * w6 = (device const float4 *)(weight + (ulong)(row0 + 6u) * args.n_in);
+    device const float4 * w7 = (device const float4 *)(weight + (ulong)(row0 + 7u) * args.n_in);
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+
+    for (uint i = 0; i < n_in_v4; ++i) {
+        const float4 xv = x4[i];
+        acc0 += dot(w0[i], xv);
+        acc1 += dot(w1[i], xv);
+        acc2 += dot(w2[i], xv);
+        acc3 += dot(w3[i], xv);
+        acc4 += dot(w4[i], xv);
+        acc5 += dot(w5[i], xv);
+        acc6 += dot(w6[i], xv);
+        acc7 += dot(w7[i], xv);
+    }
+
+    const uint tail_start = n_in_v4 * 4u;
+    for (uint i = tail_start; i < args.n_in; ++i) {
+        const float xv = x_row[i];
+        acc0 += weight[(ulong)(row0 + 0u) * args.n_in + i] * xv;
+        acc1 += weight[(ulong)(row0 + 1u) * args.n_in + i] * xv;
+        acc2 += weight[(ulong)(row0 + 2u) * args.n_in + i] * xv;
+        acc3 += weight[(ulong)(row0 + 3u) * args.n_in + i] * xv;
+        acc4 += weight[(ulong)(row0 + 4u) * args.n_in + i] * xv;
+        acc5 += weight[(ulong)(row0 + 5u) * args.n_in + i] * xv;
+        acc6 += weight[(ulong)(row0 + 6u) * args.n_in + i] * xv;
+        acc7 += weight[(ulong)(row0 + 7u) * args.n_in + i] * xv;
+    }
+
+    const ulong out_base = (ulong)q * args.n_out + row0;
+    y[out_base + 0u] = acc0;
+    y[out_base + 1u] = acc1;
+    y[out_base + 2u] = acc2;
+    y[out_base + 3u] = acc3;
+    y[out_base + 4u] = acc4;
+    y[out_base + 5u] = acc5;
+    y[out_base + 6u] = acc6;
+    y[out_base + 7u] = acc7;
+}

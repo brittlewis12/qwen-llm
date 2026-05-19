@@ -47,12 +47,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 - `qwen-llm` 9B dense packed pp: `~711.8 t/s`; `llama-bench`: `~824.0 t/s`
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
 - `qwen-llm` 35B A3B grouped MoE default now allowlists fused route+bucket plus
-  hot-expert `n32` when `chunk_p >= 512`: about `681 t/s` at `pp256`,
-  `743 t/s` at `pp512`, and `770 t/s` at `pp1024`; `llama-bench pp320` anchor is
-  still `~1222.4 t/s`
+  hot-expert `n32` and the `E8xP32` router-logits kernel when `chunk_p >= 512`:
+  about `690 t/s` at `pp256`, `798 t/s` at `pp512`, and `815 t/s` at `pp1024`;
+  `llama-bench pp320` anchor is still `~1222.4 t/s`
 - `qwen-llm` 122B A10B grouped MoE default now allowlists the same combo when
-  `chunk_p >= 512`: about `264 t/s` at `pp256`, `303 t/s` at `pp512`, and
-  `308 t/s` at `pp1024`; `llama-bench pp320` anchor is still `~393.3 t/s`
+  `chunk_p >= 512`: about `264 t/s` at `pp256`, `316 t/s` at `pp512`, and
+  `325 t/s` at `pp1024`; `llama-bench pp320` anchor is still `~393.3 t/s`
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
   `~22.5 t/s` generation
@@ -75,6 +75,13 @@ Recent confirmed wins:
   A10B from about `297.0 -> 302.9 t/s` at `pp512` and `299.6 -> 309.3 t/s` at
   `pp1024`, and A3B from about `736.3 -> 744.9 t/s` at `pp512` and
   `754.7 -> 776.7 t/s` at `pp1024`.
+- A router-only `F32` `E8xP32` kernel now removes most of the remaining router
+  logits cost on the proven MoE prompt shapes. Corrected A10B `pp512`
+  `route_logits` falls from `5.95 ms` to `0.47 ms`, and A10B `pp1024`
+  `route_logits` is `1.03 ms`. Allowlisted with the existing composed MoE prompt
+  path at `chunk_p >= 512`, it moves A10B from about `302.9 -> 315.5 t/s` at
+  `pp512` and `309.3 -> 324.7 t/s` at `pp1024`, and A3B from about
+  `744.9 -> 797.6 t/s` at `pp512` and `776.7 -> 815.1 t/s` at `pp1024`.
 
 - MoE decode now has a real GDN-side concurrency win. Reusing the dense
   concurrent-GDN front-projection split inside MoE decode and making it the repo
@@ -413,28 +420,25 @@ Acceptance gates:
   `MetalTensor::zeros_f32` (`StorageModeShared`); the audit must classify each
   as GPU-only vs CPU-readable before any allocator change lands.
 
-### 7. MoE Next: Router Logits And Scheduling After The Corrected Routed Backend
+### 7. MoE Next: Routed Scheduling And Post-Router Compute After E8xP32
 
 Optimizes: the remaining routed MoE prompt cost now that grouped Q4 is correct,
-fused route+bucket is validated, and hot-expert grouped SwiGLU converts at larger
-prompt chunks.
+fused route+bucket is validated, hot-expert grouped SwiGLU converts at larger
+prompt chunks, and router logits have a proven specialized kernel.
 
 Current read:
 
 - The grouped expert-major MoE prompt backend is now the stable base path again.
-- Fused route+bucket is real but modest by itself; the corrected route split shows
-  bucket construction is small and router logits / routed compute are the real
-  costs.
-- `n32-all` is not a ship candidate: it improves grouped compute locally but does
-  not clear the end-to-end pp gate.
-- GPU-owned hot-expert grouped SwiGLU over the existing `counts/ids` ledger is the
-  first post-fix routed-compute attack that converts end-to-end at `pp512+`,
-  especially when composed with fused route+bucket.
-- The default MoE prompt policy now effectively allowlists the combo only for
-  `chunk_p >= 512`; shorter prompts keep the corrected grouped baseline.
-- That leaves the next real frontier upstream of grouped Q4 tuning:
-  router logits mat-mat shape / scheduling and any remaining routed launch
-  structure that keeps local grouped-compute wins from converting more strongly.
+- Fused route+bucket and hot-th48 grouped Q4 are both kept because they compose
+  positively at `chunk_p >= 512`.
+- `n32-all` is still not a ship candidate: it improves grouped compute locally but
+  does not clear the end-to-end pp gate.
+- Router logits no longer look like the next missing kernel. The `E8xP32` kernel
+  is already good enough to ship on the proven regime.
+- That leaves the next real frontier after the router logits kernel:
+  remaining routed scheduling / launch structure and any additional post-router
+  routed compute shaping that can move `grouped_swiglu` without undoing the
+  clean allowlist we now have.
 
 Acceptance gates:
 
@@ -449,7 +453,8 @@ Acceptance gates:
   capture, A10B smoke, awkward chunk-boundary A10B (`T=129`, `P=128`), and dense
   9B/27B guardrails.
 - Any next routed optimization must beat the current allowlisted combo on both A3B
-  and A10B at `pp512` / `pp1024`, not just improve grouped-Q4 microproofs.
+  and A10B at `pp512` / `pp1024`, not just improve grouped-Q4 or router-logit
+  microproofs.
 
 ### 8. Use 9B As The Fast Dense Long-Context Canary
 

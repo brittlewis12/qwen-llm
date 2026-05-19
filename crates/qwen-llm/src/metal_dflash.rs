@@ -34,7 +34,7 @@ use crate::metal::{
     encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
     encode_fill_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
     encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_moe_down_q5_K_f32,
+    encode_l2_norm_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_swiglu_q4_K_f32_packed_slots,
     encode_moe_weighted_sum_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
     encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
@@ -217,6 +217,36 @@ fn prefill_moe_hot_expert_min_slots() -> Option<usize> {
         }
         Err(_) => None,
     })
+}
+
+fn prefill_moe_route_logits_e8p32_mode() -> PrefillEnvMode {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_ROUTE_LOGITS_E8P32"))
+}
+
+fn encode_moe_route_logits_dispatch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), crate::metal_forward::MfError> {
+    let enabled = match prefill_moe_route_logits_e8p32_mode() {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => n_query >= 512,
+    };
+    if enabled && weight.dtype == GgmlType::F32 && n_in % 4 == 0 && n_out % 8 == 0 && n_query >= 32
+    {
+        Ok(encode_mat_mat_f32_router_e8p32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?)
+    } else {
+        encode_mat_mat_dispatch(ctx, enc, weight, x, y, n_in, n_out, n_query)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4356,7 +4386,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
 
                     if fused_route_bucket {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_mat_mat_dispatch(
+                        encode_moe_route_logits_dispatch(
                             base.ctx,
                             &enc,
                             &moe.gate_inp,
@@ -4386,7 +4416,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         enc.end();
                     } else if packed_route_path {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_mat_mat_dispatch(
+                        encode_moe_route_logits_dispatch(
                             base.ctx,
                             &enc,
                             &moe.gate_inp,
@@ -7510,7 +7540,7 @@ mod tests {
             });
 
             route_logits_ms += timed_gpu_cmd(&ctx, |enc| {
-                encode_mat_mat_dispatch(
+                encode_moe_route_logits_dispatch(
                     &ctx,
                     enc,
                     &moe.gate_inp,
@@ -8120,6 +8150,175 @@ mod tests {
         assert!(cos_reduced > 0.999999, "reduced cos too low: {cos_reduced}");
     }
 
+    fn run_moe_route_logits_e8p32_oracle(model_path: &str, label: &str, chunk_p: usize) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[moe-route-e8p32-{label}] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let arch = &mm.arch;
+        assert_eq!(arch.kind, crate::model::ArchKind::Moe);
+        let h = arch.hidden_size as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let n_expert = arch.expert_count as usize;
+
+        let block = &mf.model.blocks[0];
+        let (post_norm, moe) = match block {
+            crate::metal_forward::MetalBlock::Gdn(g) => {
+                (&g.post_attn_norm, g.ffn_moe.as_ref().expect("moe block"))
+            }
+            crate::metal_forward::MetalBlock::Attn(a) => {
+                (&a.post_attn_norm, a.ffn_moe.as_ref().expect("moe block"))
+            }
+        };
+        assert_eq!(
+            moe.gate_inp.dtype,
+            GgmlType::F32,
+            "route logits oracle expects F32 router"
+        );
+        assert_eq!(
+            n_expert % 8,
+            0,
+            "route logits oracle expects expert_count % 8 == 0"
+        );
+        assert_eq!(h % 4, 0, "route logits oracle expects hidden % 4 == 0");
+
+        let scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, chunk_p as u32).expect("scratch");
+        let x_pack = scratch.x_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+        let h_pack = scratch.h_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+        let probs_generic = scratch
+            .moe_router_probs_pack
+            .view_subrange(0, vec![(chunk_p * n_expert) as u64]);
+        let probs_e8 =
+            MetalTensor::zeros_f32(&ctx, vec![(chunk_p * n_expert) as u64]).expect("probs_e8");
+        let idx_generic = scratch
+            .moe_topk_idx_pack
+            .view_subrange(0, vec![(chunk_p * topk) as u64]);
+        let w_generic = scratch
+            .moe_topk_weight_pack
+            .view_subrange(0, vec![(chunk_p * topk) as u64]);
+        let gate_generic = scratch
+            .moe_shared_gate_pack
+            .view_subrange(0, vec![chunk_p as u64]);
+        let idx_e8 = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * topk) as u64]).expect("idx_e8");
+        let w_e8 = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * topk) as u64]).expect("w_e8");
+        let gate_e8 = MetalTensor::zeros_f32(&ctx, vec![chunk_p as u64]).expect("gate_e8");
+        let x_init: Vec<f32> = (0..chunk_p * h)
+            .map(|i| ((i % 37) as f32 - 18.0) * 1e-2)
+            .collect();
+        write_tensor_f32(&x_pack, &x_init);
+
+        let _ = timed_gpu_cmd(&ctx, |enc| {
+            encode_rms_norm_batched_f32(
+                &ctx,
+                enc,
+                &x_pack,
+                post_norm,
+                &h_pack,
+                chunk_p,
+                h,
+                crate::metal_forward::RMS_EPS,
+            )
+            .expect("postnorm");
+        });
+
+        let _ = timed_gpu_cmd(&ctx, |enc| {
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &moe.gate_inp,
+                &h_pack,
+                &probs_generic,
+                h,
+                n_expert,
+                chunk_p,
+            )
+            .expect("generic route logits");
+            encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                &ctx,
+                enc,
+                &probs_generic,
+                &moe.gate_inp_shexp,
+                &h_pack,
+                &idx_generic,
+                &w_generic,
+                &gate_generic,
+                n_expert,
+                topk,
+                h,
+                chunk_p,
+            )
+            .expect("generic topk");
+        });
+
+        let _ = timed_gpu_cmd(&ctx, |enc| {
+            crate::metal::encode_mat_mat_f32_router_e8p32(
+                &ctx,
+                enc,
+                &moe.gate_inp,
+                &h_pack,
+                &probs_e8,
+                h,
+                n_expert,
+                chunk_p,
+            )
+            .expect("e8p32 route logits");
+            encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                &ctx,
+                enc,
+                &probs_e8,
+                &moe.gate_inp_shexp,
+                &h_pack,
+                &idx_e8,
+                &w_e8,
+                &gate_e8,
+                n_expert,
+                topk,
+                h,
+                chunk_p,
+            )
+            .expect("e8p32 topk");
+        });
+
+        let probs_generic_cpu = read_tensor_f32(&probs_generic);
+        let probs_e8_cpu = read_tensor_f32(&probs_e8);
+        let idx_generic_cpu = read_tensor_i32_f32buf(&idx_generic);
+        let idx_e8_cpu = read_tensor_i32_f32buf(&idx_e8);
+        let w_generic_cpu = read_tensor_f32(&w_generic);
+        let w_e8_cpu = read_tensor_f32(&w_e8);
+        let gate_generic_cpu = read_tensor_f32(&gate_generic);
+        let gate_e8_cpu = read_tensor_f32(&gate_e8);
+
+        let probs_cos = cosine_f32(&probs_generic_cpu, &probs_e8_cpu);
+        let w_cos = cosine_f32(&w_generic_cpu, &w_e8_cpu);
+        let gate_cos = cosine_f32(&gate_generic_cpu, &gate_e8_cpu);
+        let mismatch_count = idx_generic_cpu
+            .iter()
+            .zip(&idx_e8_cpu)
+            .filter(|(a, b)| a != b)
+            .count();
+        eprintln!(
+            "[moe-route-e8p32-{label}] probs_cos={probs_cos:.6} topk_mismatches={mismatch_count} w_cos={w_cos:.6} gate_cos={gate_cos:.6}"
+        );
+        assert_eq!(mismatch_count, 0, "topk mismatch count {mismatch_count}");
+        assert!(
+            probs_cos > 0.999999,
+            "router probs cos too low: {probs_cos}"
+        );
+        assert!(w_cos > 0.999999, "topk weight cos too low: {w_cos}");
+        assert!(gate_cos > 0.999999, "shared gate cos too low: {gate_cos}");
+    }
+
     #[test]
     #[ignore]
     fn metal_35b_a3b_moe_route_bucket_fused_oracle_512() {
@@ -8137,6 +8336,46 @@ mod tests {
             "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
             "122b",
             512,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_moe_route_logits_e8p32_oracle_512() {
+        run_moe_route_logits_e8p32_oracle(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-512",
+            512,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_moe_route_logits_e8p32_oracle_1024() {
+        run_moe_route_logits_e8p32_oracle(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-1024",
+            1024,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_moe_route_logits_e8p32_oracle_512() {
+        run_moe_route_logits_e8p32_oracle(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-512",
+            512,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_moe_route_logits_e8p32_oracle_1024() {
+        run_moe_route_logits_e8p32_oracle(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-1024",
+            1024,
         );
     }
 

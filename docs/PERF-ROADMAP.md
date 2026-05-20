@@ -82,6 +82,17 @@ Recent confirmed wins:
   path at `chunk_p >= 512`, it moves A10B from about `302.9 -> 315.5 t/s` at
   `pp512` and `309.3 -> 324.7 t/s` at `pp1024`, and A3B from about
   `744.9 -> 797.6 t/s` at `pp512` and `776.7 -> 815.1 t/s` at `pp1024`.
+- The clean post-`v0.100` family sweep materially updates the MoE prompt picture:
+  A10B is now about `0.72x` at `pp512` and `0.76x` at `pp1024`, while A3B is
+  still much farther behind at about `0.55x` / `0.58x`. That keeps MoE prefill as
+  the main scoreboard gap even though the current exact grouped path is much
+  better than the old baseline.
+- Post-`v0.100` exact local grouped-MoE search-space elimination is now large:
+  `F16` grouped inner default, cold `n8`, hot `th32` rollout, hot grouped-down
+  atomic accumulate, persistent/locality queues, hot `32x32`, active hot tile
+  lists, and a resident paired gate/up mirror all failed to produce a default-
+  worthy win on this hardware / repo shape. Treat the exact local
+  `grouped_swiglu` variant family as plateaued until a new mechanism is found.
 
 - MoE decode now has a real GDN-side concurrency win. Reusing the dense
   concurrent-GDN front-projection split inside MoE decode and making it the repo
@@ -420,11 +431,10 @@ Acceptance gates:
   `MetalTensor::zeros_f32` (`StorageModeShared`); the audit must classify each
   as GPU-only vs CPU-readable before any allocator change lands.
 
-### 7. MoE Next: Routed Scheduling And Post-Router Compute After E8xP32
+### 7. MoE Next: Execution-Model Reset After The Exact Grouped Plateau
 
-Optimizes: the remaining routed MoE prompt cost now that grouped Q4 is correct,
-fused route+bucket is validated, hot-expert grouped SwiGLU converts at larger
-prompt chunks, and router logits have a proven specialized kernel.
+Optimizes: the remaining MoE prompt scoreboard gap after the current exact grouped
+backend has locally plateaued on this hardware / repo shape.
 
 Current read:
 
@@ -435,10 +445,14 @@ Current read:
   does not clear the end-to-end pp gate.
 - Router logits no longer look like the next missing kernel. The `E8xP32` kernel
   is already good enough to ship on the proven regime.
-- That leaves the next real frontier after the router logits kernel:
-  remaining routed scheduling / launch structure and any additional post-router
-  routed compute shaping that can move `grouped_swiglu` without undoing the
-  clean allowlist we now have.
+- The obvious exact local `grouped_swiglu` variant family is now well sampled and
+  mostly exhausted here: tile, threshold, queue/locality, atomic-down, and
+  resident-mirror branches all went flat or negative.
+- That means the next serious MoE-first branch is **not** another local grouped
+  kernel tweak. It is either:
+  - an exact execution-model differential against llama.cpp’s routed FFN path, or
+  - a broader routed-work / model-shape change that reduces MoE work rather than
+    trying to execute the same work a little differently.
 
 Acceptance gates:
 
@@ -452,9 +466,11 @@ Acceptance gates:
 - Keep the current correctness matrix green: A3B single-token-loop + hidden
   capture, A10B smoke, awkward chunk-boundary A10B (`T=129`, `P=128`), and dense
   9B/27B guardrails.
-- Any next routed optimization must beat the current allowlisted combo on both A3B
-  and A10B at `pp512` / `pp1024`, not just improve grouped-Q4 or router-logit
-  microproofs.
+- Do not spend another major engineering branch on a new exact local
+  `grouped_swiglu` variant unless a new diagnostic shows a new mechanism beyond
+  the already-falsified tile / threshold / queue / mirror family.
+- Any next MoE-first branch must beat the current allowlisted combo on both A3B
+  and A10B at `pp512` / `pp1024`, not just improve a routed microprofile.
 
 ### 8. Use 9B As The Fast Dense Long-Context Canary
 

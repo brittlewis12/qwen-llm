@@ -6,6 +6,77 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-19 — Post-v0.100 MoE Preload Plateau And Search-Space Elimination
+
+Status: the current exact grouped MoE prompt path is much stronger than the old
+baseline, but the local `grouped_swiglu` micro-optimization family looks
+plateaued on this M4 Max / Qwen3.5-3.6 shape. Preserve the evidence so we do
+not retread the same dead branches.
+
+### What Changed
+
+- Recorded the first clean full-family scoreboard on committed `v0.100` in
+  `docs/bench/2026-05-19-2313-family`.
+- Re-ran grouped MoE tail profiles on the current validated default and added a
+  real route split (`route_logits`, `route_select`, `route_bucket`) plus route
+  weight concentration stats.
+- Exhaustively tested the next obvious grouped-MoE prompt branches after
+  `v0.100` and kept or killed them from end-to-end evidence rather than local
+  kernel intuition.
+
+### Measurements
+
+Clean family scoreboard on committed `v0.100`:
+
+- 35B A3B `pp512`: `788 t/s` vs `1420 t/s` (`~0.55x`)
+- 35B A3B `pp1024`: `814 t/s` vs `1410 t/s` (`~0.58x`)
+- 122B A10B `pp512`: `322 t/s` vs `450 t/s` (`~0.72x`)
+- 122B A10B `pp1024`: `328 t/s` vs `433 t/s` (`~0.76x`)
+
+Rebased current default routed-tail split:
+
+- 122B A10B `pp512`: `grouped_swiglu ~13.47 ms`, `grouped_down ~4.64 ms`,
+  route side `~0.65 ms` total
+- 122B A10B `pp1024`: `grouped_swiglu ~16.86 ms`, `grouped_down ~5.79 ms`
+- 35B A3B `pp512`: `grouped_swiglu ~5.99 ms`
+- 35B A3B `pp1024`: `grouped_swiglu ~9.37 ms`
+
+Route-weight concentration on the same default path is diffuse, not hot-top-k:
+
+- A10B `pp512`: `avg_top1 ~0.2157`, `avg_top2 ~0.1628`, `avg_tail ~0.6215`
+- A10B `pp1024`: `avg_top1 ~0.2150`, `avg_top2 ~0.1625`, `avg_tail ~0.6224`
+- A3B `pp512`: `avg_top1 ~0.2238`, `avg_top2 ~0.1555`, `avg_tail ~0.6207`
+- A3B `pp1024`: `avg_top1 ~0.2238`, `avg_top2 ~0.1555`, `avg_tail ~0.6207`
+
+Dead or demoted post-`v0.100` branches:
+
+| branch | result | evidence |
+| --- | --- | --- |
+| grouped inner `F16` default path | force-only | correctness-safe; A10B `pp512 ~315.5 -> 322.6`, `pp1024 ~324.7 -> 326.6`; A3B `pp512 ~797.6 -> 800.5`, `pp1024 ~815.1 -> 819.6` |
+| cold `n8` grouped Q4 | kill | exact/correct after geometry fix, but regressed both A10B and A3B end-to-end |
+| hot threshold `32` rollout | kill | correctness-safe, but 5-run medians were flat on A10B and slightly worse on A3B `pp512` |
+| hot grouped-down atomic accumulate | kill | correctness-safe, but regressed both guardrails |
+| hot persistent/locality grouped-swiglu queues | kill | correctness-safe, severe regressions |
+| paired gate/up resident mirror | kill | correctness-safe, catastrophic residency / wall-time blow-up (`A10B pp512 ~1.45 t/s`) |
+| hot `32x32` grouped-swiglu | kill | correctness-safe, flat / slightly worse on A10B, only noise-level positive on A3B |
+| active hot tile-list with true indirect dispatch | kill | correctness-safe, effectively flat: A10B `~323.1 / 328.1 t/s` vs default `~324.2 / 328.5`; A3B `~798.3 / 818.0` vs `~795.9 / 815.6` |
+
+### Current Read
+
+- The current exact grouped MoE prompt path is **not** the old broken baseline;
+  it is the corrected grouped backend plus route/logit and hot-expert wins. The
+  clean family sweep proves the MoE prompt gap is materially smaller than the old
+  `~0.5x` mental model on A10B, but still the largest scoreboard miss.
+- The obvious exact local `grouped_swiglu` variant family is now well sampled and
+  mostly exhausted on this hardware / repo shape. More tile / threshold / queue /
+  mirror tweaks should be considered guilty until they show a new mechanism, not
+  just a new geometry.
+- The surviving MoE-first path is no longer “another small grouped kernel tweak.”
+  It is either:
+  - a diagnostic reset / exact execution-model differential against llama.cpp, or
+  - a broader routed-work / model-shape change that does less MoE work rather than
+    doing the same work differently.
+
 ## 2026-05-19 — Specialize MoE Router Logits Over Expert Rows
 
 Status: default-on for the proven MoE prompt regime when `chunk_p >= 512`, with

@@ -6,6 +6,111 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-20 — Exact MoE Tail Concurrency Converts; Generic Split Sidecar Does Not
+
+Status: two new guarded experimental branches now exist, both off by default:
+
+- `QWEN_PREFILL_MOE_GROUPED_ZERO_FILL=0` skips grouped routed `inner/out`
+  zero-fills after new coverage proof.
+- `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL=1` overlaps the live grouped routed
+  tail with the live shared FFN tail for `chunk_p >= 512`.
+
+### What Changed
+
+- Added grouped routed slot-coverage + poison-fill oracles and proved the current
+  grouped `inner/out` zero-fills are not semantically required on the proven
+  `Q4_K/Q4_K/Q5_K` MoE prompt path.
+- Added Metal trace labels / signposts plus llama.cpp Metal graph-debug capture
+  so the exact MoE prompt differential is anchored in real graph structure
+  rather than intuition alone.
+- Re-based the “llama-like split routed FFN” experiments against the **live
+  grouped production backend**, not the old packed-slot denominator.
+- Added a narrower id-aware grouped-Q4 proof that reuses the existing grouped
+  `counts/ids` buckets directly for separate gate/up matmuls, then composes with
+  the existing `silu_mul` + grouped Q5 down + weighted reduce.
+- Added a bounded production-style overlap branch that keeps the live grouped
+  routed kernels and live shared FFN kernels unchanged, but places them in a
+  concurrent compute encoder before the final combine.
+
+### Measurements
+
+All runs are M4 Max, release `qwen-bench pp`, synthetic prompts, tail skipped.
+
+Grouped zero-fill is real but small:
+
+- 35B A3B `pp512`: `~797.3 -> ~803.7 t/s` (`~+0.8%`)
+- 122B A10B `pp512` GPU time: about `1557.8 -> 1549.4 ms` (`~+0.5%` GPU)
+- New slot-coverage + poison-fill oracles on A3B / A10B `pp512` are exact:
+  `cos=1.0`, `max_abs=0`
+
+The first “split sidecar” intuition was misleading until re-based against the
+live grouped backend.
+
+Fair `pp512` routed-tail comparator on the same route buckets:
+
+- 35B A3B:
+  - packed tail: `27.17 ms`
+  - live grouped tail: `3.60 ms`
+  - separate id-aware gate/up + `silu_mul` + grouped down/reduce:
+    - gate/up GPU sum: `2.34 + 1.38 = 3.72 ms`
+    - full prototype wall (with shell tax): `35.16 ms`
+- 122B A10B:
+  - packed tail: `48.82 ms`
+  - live grouped tail: `9.55 ms`
+  - separate id-aware gate/up + `silu_mul` + grouped down/reduce:
+    - gate/up GPU sum: `6.17 + 3.48 = 9.65 ms`
+    - full prototype wall (with shell tax): `11.45 ms`
+
+This is the crucial corrected read: separate gate/up is only at parity to slight
+loss versus the live grouped backend, not a meaningful routed-tail win.
+
+Bounded overlap on the **live** grouped backend is exact and much more promising:
+
+- Block-local MoE tail only, `pp512`:
+  - 35B A3B: `serial_gpu 7.77 ms -> concurrent_gpu 4.26 ms`
+  - 122B A10B: `serial_gpu 14.82 ms -> concurrent_gpu 9.88 ms`
+
+That large local effect converts in the real prefill path, but only to a
+bounded end-to-end win:
+
+- 35B A3B `pp512`: `796.35 -> 816.28 t/s` (`1.025x`)
+- 122B A10B `pp512` (warmed): `326.52 -> 335.11 t/s` (`1.026x`)
+- 35B A3B `pp1024`: `816.64 -> 821.70 t/s` (`1.006x`)
+- 122B A10B `pp1024` (warmed): `329.37 -> 332.90 t/s` (`1.011x`)
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `QWEN_PREFILL_MOE_GROUPED_ZERO_FILL=0 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm metal_35b_a3b_grouped_zero_fill_coverage_oracle_512 --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm metal_122b_a10b_grouped_zero_fill_coverage_oracle_512 --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm metal_35b_a3b_grouped_swiglu_down_backend_profile_512 --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm metal_122b_a10b_grouped_swiglu_down_backend_profile_512 --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm metal_35b_a3b_grouped_overlap_falsifier_512 --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm metal_122b_a10b_grouped_overlap_falsifier_512 --release -- --ignored --nocapture`
+- `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL=1 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture`
+- `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL=1 cargo test -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke --release -- --nocapture`
+- `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL=1 cargo test -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary --release -- --ignored --nocapture`
+- Sequential `qwen-bench pp` checks on A3B / A10B at `pp512` and `pp1024`
+
+### Current Read
+
+- Grouped routed zero-fill is now a correctness-covered cleanup lever, not a big
+  scoreboard lever.
+- The large “generic split sidecar” hope was wrong once compared against the live
+  grouped backend. Beating the old packed-slot denominator was not evidence that
+  a broad split routed FFN sidecar was the right next branch.
+- The narrower id-aware gate/up proof is the decisive read: fusion/register
+  pressure is probably **not** the main remaining exact MoE prompt miss on this
+  repo shape, because separate grouped gate/up matmuls only reach parity with the
+  live grouped path.
+- The best near-term exact branch is now the guarded concurrent-tail rollout:
+  it is exact on the covered matrix and converts to a real, if bounded,
+  low-single-digit prompt win at `pp512`.
+- Do not spend another major branch on a large new exact routed sidecar unless a
+  smaller `MUL_MAT_ID`-style microproof beats the current grouped projection /
+  routed tail directly, not just the obsolete packed denominator.
+
 ## 2026-05-19 — Post-v0.100 MoE Preload Plateau And Search-Space Elimination
 
 Status: the current exact grouped MoE prompt path is much stronger than the old

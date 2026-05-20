@@ -53,6 +53,11 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 - `qwen-llm` 122B A10B grouped MoE default now allowlists the same combo when
   `chunk_p >= 512`: about `264 t/s` at `pp256`, `316 t/s` at `pp512`, and
   `325 t/s` at `pp1024`; `llama-bench pp320` anchor is still `~393.3 t/s`
+- Experimental `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL=1` branch on the same
+  exact grouped backend currently measures about `816 t/s` on 35B A3B `pp512`
+  and `335 t/s` on warmed 122B A10B `pp512`, but only small additional gains by
+  `pp1024` (`~822 t/s`, `~333 t/s`). Treat it as a likely keeper branch for the
+  `pp512` regime, not as proof that the main MoE prompt gap is solved.
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
   `~22.5 t/s` generation
@@ -93,6 +98,14 @@ Recent confirmed wins:
   lists, and a resident paired gate/up mirror all failed to produce a default-
   worthy win on this hardware / repo shape. Treat the exact local
   `grouped_swiglu` variant family as plateaued until a new mechanism is found.
+- Grouped routed `inner/out` zero-fill is now correctness-covered as a real but
+  small cleanup lever (`~0.5-0.8%` on the current prompt guardrails), not a main
+  roadmap item.
+- A bounded exact MoE prompt concurrency branch is now real: overlapping the live
+  grouped routed tail with the live shared FFN at `chunk_p >= 512` preserves the
+  current correctness matrix and converts to about `1-3%` end-to-end on `pp512`,
+  but fades by `pp1024`. This is the strongest near-term exact production branch,
+  not the main structural MoE answer.
 
 - MoE decode now has a real GDN-side concurrency win. Reusing the dense
   concurrent-GDN front-projection split inside MoE decode and making it the repo
@@ -212,6 +225,12 @@ Recent measured negatives:
 
 - Generic grouped expert-major MoE routed FFN via CPU ledger + gather/scatter +
   generic per-expert mat-mat is strongly negative on both A3B and 122B.
+- Re-based “split routed FFN sidecar” experiments now show that beating the old
+  packed-slot path was the wrong denominator: against the live grouped backend,
+  separate gate/up grouped matmats plus the existing `silu_mul` + grouped down
+  only reach parity to slight loss on `pp512`, so broad split-sidecar work is
+  demoted until a smaller `MUL_MAT_ID`-style proof beats the current grouped
+  projection / routed tail directly.
 - Shared-expert batched stage-2 rewrite is semantically correct but slower
   end-to-end on A3B packed prefill.
 - F16 routed-inner traffic reduction on the live Q5-down MoE path is a wash to
@@ -448,11 +467,21 @@ Current read:
 - The obvious exact local `grouped_swiglu` variant family is now well sampled and
   mostly exhausted here: tile, threshold, queue/locality, atomic-down, and
   resident-mirror branches all went flat or negative.
-- That means the next serious MoE-first branch is **not** another local grouped
-  kernel tweak. It is either:
-  - an exact execution-model differential against llama.cpp’s routed FFN path, or
-  - a broader routed-work / model-shape change that reduces MoE work rather than
-    trying to execute the same work a little differently.
+- Two more exact reads now narrow the field further:
+  - grouped `inner/out` zero-fill is safe to skip and slightly positive, but too
+    small to change the scoreboard by itself;
+  - a re-based split routed FFN proof only reaches parity to slight loss versus
+    the live grouped backend, so “just make it llama-like by separating gate/up”
+    is not enough.
+- The strongest near-term exact branch is now the guarded concurrent-tail path:
+  overlap the live grouped routed tail with the live shared FFN at `chunk_p >= 512`.
+  It converts to roughly `1-3%` end-to-end on `pp512`, but collapses quickly by
+  `pp1024`, so it should be treated as a bounded production win, not the final
+  structural answer.
+- That leaves the next serious structural MoE-first branch as a **narrow** kernel
+  proof, not a broad sidecar rewrite: a true `MUL_MAT_ID`-style / id-aware
+  projection microproof that beats the current grouped projection or routed tail
+  directly on both A3B and A10B.
 
 Acceptance gates:
 
@@ -466,9 +495,15 @@ Acceptance gates:
 - Keep the current correctness matrix green: A3B single-token-loop + hidden
   capture, A10B smoke, awkward chunk-boundary A10B (`T=129`, `P=128`), and dense
   9B/27B guardrails.
+- Treat the concurrent-tail branch as shape-gated until a full active-shape
+  prefill oracle exists for the covered `pp512+` regime; do not assume the large
+  block-local overlap effect composes into a large end-to-end win.
 - Do not spend another major engineering branch on a new exact local
   `grouped_swiglu` variant unless a new diagnostic shows a new mechanism beyond
   the already-falsified tile / threshold / queue / mirror family.
+- Before writing a large new id-aware kernel, require a smaller microproof to beat
+  the current grouped projection / routed tail directly on both A3B and A10B, not
+  just the obsolete packed denominator.
 - Any next MoE-first branch must beat the current allowlisted combo on both A3B
   and A10B at `pp512` / `pp1024`, not just improve a routed microprofile.
 

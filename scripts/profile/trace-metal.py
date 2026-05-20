@@ -120,6 +120,8 @@ def summarize(trace: str, process_prefix: str) -> dict:
     enc_rows = rows(enc_root)
     encoder_count = 0
     encoder_cb_ids = set()
+    encoder_labels: dict[str, dict[str, float | int]] = {}
+    qwen_prefill_phase_counts: dict[str, int] = {}
     for item in enc_rows:
         proc = get_fmt(item, "process")
         event = get_fmt(item, "metal-event-name")
@@ -128,6 +130,18 @@ def summarize(trace: str, process_prefix: str) -> dict:
             cb = get_fmt(item, "metal-command-buffer-id")
             if cb:
                 encoder_cb_ids.add(cb)
+            label = get_fmt(item, "metal-object-label") or "<unlabeled>"
+            dur_ms = (
+                parse_ms(get_raw(item, "duration"), get_fmt(item, "duration")) or 0.0
+            )
+            stats = encoder_labels.setdefault(label, {"count": 0, "encode_ms": 0.0})
+            stats["count"] = int(stats["count"]) + 1
+            stats["encode_ms"] = float(stats["encode_ms"]) + dur_ms
+            for match in re.finditer(r"qwen-prefill-l(\d+)-([A-Za-z0-9-]+)", label):
+                phase = match.group(2)
+                qwen_prefill_phase_counts[phase] = (
+                    qwen_prefill_phase_counts.get(phase, 0) + 1
+                )
 
     comp_root = export_table(trace, "metal-command-buffer-completed")
     comp_rows = rows(comp_root)
@@ -250,6 +264,8 @@ def summarize(trace: str, process_prefix: str) -> dict:
         "process_compute_gap_long_count": len(long_process_gap_ms),
         "process_compute_gap_long_total_ms": sum(long_process_gap_ms),
         "compute_intervals_per_cb_histogram": interval_histogram,
+        "encoder_labels": encoder_labels,
+        "qwen_prefill_phase_counts": qwen_prefill_phase_counts,
     }
 
 
@@ -314,6 +330,22 @@ def main() -> int:
             for k, v in sorted(data["compute_intervals_per_cb_histogram"].items())
         )
         print(f"compute intervals per cb histogram: {hist}")
+    if data["encoder_labels"]:
+        print("encoder labels by CPU encode time:")
+        for label, stats in sorted(
+            data["encoder_labels"].items(),
+            key=lambda kv: float(kv[1]["encode_ms"]),
+            reverse=True,
+        )[:20]:
+            print(
+                f"  {label}: count {int(stats['count'])} encode_ms {float(stats['encode_ms']):.3f}"
+            )
+    if data["qwen_prefill_phase_counts"]:
+        counts = ", ".join(
+            f"{phase}:{count}"
+            for phase, count in sorted(data["qwen_prefill_phase_counts"].items())
+        )
+        print(f"qwen prefill phase label counts: {counts}")
     return 0
 
 

@@ -58,6 +58,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   and `335 t/s` on warmed 122B A10B `pp512`, but only small additional gains by
   `pp1024` (`~822 t/s`, `~333 t/s`). Treat it as a likely keeper branch for the
   `pp512` regime, not as proof that the main MoE prompt gap is solved.
+- Experimental A3B group-8 long-context attention subgrouping now clears a much
+  bigger bar than the MoE-only prompt branches: with `QWEN_ATTN_V4_G8_TILE=2`,
+  long synthetic A3B prompt throughput improves from about `520 -> 577 t/s` at
+  `7.8k` tokens and `214 -> 308 t/s` at `34.5k`, while a real same-fixture
+  TheCurrent endpoint improves from about `208 -> 308 t/s`. Treat this as the
+  first real structural crack in the long-prompt A3B beast, not as a final
+  default yet.
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
   `~22.5 t/s` generation
@@ -106,6 +113,11 @@ Recent confirmed wins:
   current correctness matrix and converts to about `1-3%` end-to-end on `pp512`,
   but fades by `pp1024`. This is the strongest near-term exact production branch,
   not the main structural MoE answer.
+- Real-rollout and matched-token synthetic ladders now agree on a stronger story:
+  A3B long-prompt collapse is primarily an attention/context-growth problem, not a
+  prompt-template artifact and not mostly routed MoE compute. Attention no-op on
+  long A3B prompts lifts throughput by roughly `4-5x`, while routed MoE no-op is
+  much smaller and mostly constant per token.
 
 - MoE decode now has a real GDN-side concurrency win. Reusing the dense
   concurrent-GDN front-projection split inside MoE decode and making it the repo
@@ -242,7 +254,43 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: part of the remaining `pp320` gap is harness/phase mismatch
+### 1. Hypothesis: A3B long-prompt prefill is still decode-shaped attention in disguise
+
+Optimizes: the now-clearest structural prompt gap after the A3B group-8 long-
+context subgroup fix.
+
+Why it moves to the top:
+
+- Same-fixture real-rollout ladders and matched-token synthetic ladders now agree:
+  A3B collapses with long prompts while A10B is much flatter.
+- Attention no-op dominates the slope; GDN and routed MoE are much smaller by
+  comparison.
+- The new `g8_t2` subgroup path removes a major local A3B attention bottleneck,
+  but the remaining slope is still strongly attention-shaped and weakly sensitive
+  to larger `prefill_chunk`, which points at the decode-shaped prompt attention
+  algorithm itself.
+- `llama.cpp` is prompt-native on Metal for this stage; `qwen-llm` still runs
+  per-token decode attention inside prefill chunks.
+
+Current design rule:
+
+- Keep the new A3B group-8 subgroup path as an experimental / guarded prefill
+  win, not a universal decode selector.
+- Do not let more MoE-side local work outrank a prompt-native packed-attention
+  microproof.
+- The next structural proof should isolate the attention body only, not the whole
+  prefill stack.
+
+Acceptance gates:
+
+- Show a prompt-native packed-attention microproof at A3B shape (`group=8`,
+  `head_dim=256`, F16 KV) that beats repeated decode-shaped attention by at least
+  `~1.25x` at `16K` and `~1.35x` at `32K`, or projects to a meaningful end-to-end
+  long-prompt win.
+- Keep correctness against the existing path / naive reference on active long-
+  context shapes.
+
+### 2. Hypothesis: part of the remaining `pp320` gap is harness/phase mismatch
 
 Optimizes: decision quality and scoreboard fidelity.
 

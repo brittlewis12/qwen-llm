@@ -419,6 +419,26 @@ Rules for pp sweeps:
   `QWEN_PP_RESIDENCY_SET=1` removes expert-bank first-touch outliers. Report those
   knobs explicitly and do not claim them as steady-state throughput wins.
 
+### Real rollout prompt lane
+
+Synthetic `pp<N>` remains the fast scoreboard harness, but it is not the only
+prompt regime we care about. Keep a small sparse lane of real rendered prompts
+derived from narrative / interactive rollouts so prompt-shape and chat-template
+effects are not forgotten.
+
+Canonical corpus and usage rules live in:
+
+- `docs/bench/real-rollouts/README.md`
+
+Design rule:
+
+- Use synthetic `pp<N>` for short-feedback kernel work.
+- Use the real-rollout lane when the hypothesis might depend on prompt shape,
+  long preserved assistant history, `<think>` preservation/stripping, or any
+  effect that may scale differently from synthetic prompts.
+- Do not run a huge ladder by default. Start with one short and one longer real
+  prompt; only add more points if the endpoints imply a crossover story.
+
 ### qwen-bench tg decode sweeps
 
 Use `qwen-bench tg` for apples-to-apples decode numbers: empty KV per rep,

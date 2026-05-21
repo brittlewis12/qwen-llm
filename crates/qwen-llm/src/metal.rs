@@ -37,8 +37,13 @@ use objc2_metal::{
     MTLDispatchType, MTLFence, MTLLibrary, MTLResourceOptions, MTLSize,
 };
 use parking_lot::Mutex;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+
+thread_local! {
+    static ATTN_V4_GROUP_TILE_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+}
 
 use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layout};
 
@@ -4972,8 +4977,27 @@ pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
 /// threadgroups: tile4 trades extra K/V reads for much higher occupancy and
 /// lower register pressure. Keep `QWEN_ATTN_V4_G16_TILE` as a kill switch / A/B
 /// knob (`4`, `8`, or `16`), but default long-context group16 to tile4.
+fn attn_v4_g8_tile_override(var: &str) -> Option<usize> {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|v| matches!(*v, 2 | 4 | 8))
+}
+
 pub fn attn_v4_choose_group_tile(n_pos: usize, group: usize) -> usize {
-    if group != 16 || n_pos < 4096 {
+    if let Some(tile) = ATTN_V4_GROUP_TILE_OVERRIDE.with(|cell| cell.get()) {
+        return tile;
+    }
+    if n_pos < 4096 {
+        return group;
+    }
+    if group == 8 {
+        static G8_TILE: OnceLock<Option<usize>> = OnceLock::new();
+        return G8_TILE
+            .get_or_init(|| attn_v4_g8_tile_override("QWEN_ATTN_V4_G8_TILE"))
+            .unwrap_or(8);
+    }
+    if group != 16 {
         return group;
     }
     static G16_TILE: OnceLock<Option<usize>> = OnceLock::new();
@@ -4985,6 +5009,33 @@ pub fn attn_v4_choose_group_tile(n_pos: usize, group: usize) -> usize {
                 .filter(|v| matches!(*v, 4 | 8 | 16))
         })
         .unwrap_or(4)
+}
+
+pub fn attn_v4_choose_group_tile_prefill(n_pos: usize, group: usize) -> usize {
+    if n_pos < 4096 {
+        return group;
+    }
+    if group == 8 {
+        static G8_PREFILL_TILE: OnceLock<Option<usize>> = OnceLock::new();
+        return G8_PREFILL_TILE
+            .get_or_init(|| {
+                attn_v4_g8_tile_override("QWEN_ATTN_V4_G8_PREFILL_TILE")
+                    .or_else(|| attn_v4_g8_tile_override("QWEN_ATTN_V4_G8_TILE"))
+            })
+            .unwrap_or(8);
+    }
+    attn_v4_choose_group_tile(n_pos, group)
+}
+
+pub fn with_attn_v4_group_tile_override<T>(tile: usize, f: impl FnOnce() -> T) -> T {
+    let prev = ATTN_V4_GROUP_TILE_OVERRIDE.with(|cell| {
+        let prev = cell.get();
+        cell.set(Some(tile));
+        prev
+    });
+    let out = f();
+    ATTN_V4_GROUP_TILE_OVERRIDE.with(|cell| cell.set(prev));
+    out
 }
 
 /// Encode v4 main kernel + reduce kernel in sequence.
@@ -5059,7 +5110,10 @@ pub fn encode_attn_decode_v4_f32(
             detail: format!("group_tile={group_tile} must divide group={group}"),
         });
     }
-    if group_tile != group && !(group == 16 && matches!(group_tile, 4 | 8)) {
+    if group_tile != group
+        && !(group == 16 && matches!(group_tile, 4 | 8)
+            || group == 8 && matches!(group_tile, 2 | 4))
+    {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4",
             detail: format!("unsupported subgroup: group={group} group_tile={group_tile}"),
@@ -5145,6 +5199,14 @@ pub fn encode_attn_decode_v4_f32(
         }
     } else {
         match (k_cache.dtype, group, group_tile, tile_c) {
+            (GgmlType::F16, 8, 4, 16) => "kernel_attn_decode_v4_g8_t4_c16_f32",
+            (GgmlType::F16, 8, 4, 32) => "kernel_attn_decode_v4_g8_t4_f32",
+            (GgmlType::F16, 8, 4, 64) => "kernel_attn_decode_v4_g8_t4_c64_f32",
+            (GgmlType::F16, 8, 4, 128) => "kernel_attn_decode_v4_g8_t4_c128_f32",
+            (GgmlType::F16, 8, 2, 16) => "kernel_attn_decode_v4_g8_t2_c16_f32",
+            (GgmlType::F16, 8, 2, 32) => "kernel_attn_decode_v4_g8_t2_f32",
+            (GgmlType::F16, 8, 2, 64) => "kernel_attn_decode_v4_g8_t2_c64_f32",
+            (GgmlType::F16, 8, 2, 128) => "kernel_attn_decode_v4_g8_t2_c128_f32",
             (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
             (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
             (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
@@ -5330,7 +5392,10 @@ pub fn encode_attn_decode_v4_main_only_f32(
             detail: format!("group_tile={group_tile} must divide group={group}"),
         });
     }
-    if group_tile != group && !(group == 16 && matches!(group_tile, 4 | 8)) {
+    if group_tile != group
+        && !(group == 16 && matches!(group_tile, 4 | 8)
+            || group == 8 && matches!(group_tile, 2 | 4))
+    {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main",
             detail: format!("unsupported subgroup: group={group} group_tile={group_tile}"),
@@ -5406,6 +5471,14 @@ pub fn encode_attn_decode_v4_main_only_f32(
         }
     } else {
         match (k_cache.dtype, group, group_tile, tile_c) {
+            (GgmlType::F16, 8, 4, 16) => "kernel_attn_decode_v4_g8_t4_c16_f32",
+            (GgmlType::F16, 8, 4, 32) => "kernel_attn_decode_v4_g8_t4_f32",
+            (GgmlType::F16, 8, 4, 64) => "kernel_attn_decode_v4_g8_t4_c64_f32",
+            (GgmlType::F16, 8, 4, 128) => "kernel_attn_decode_v4_g8_t4_c128_f32",
+            (GgmlType::F16, 8, 2, 16) => "kernel_attn_decode_v4_g8_t2_c16_f32",
+            (GgmlType::F16, 8, 2, 32) => "kernel_attn_decode_v4_g8_t2_f32",
+            (GgmlType::F16, 8, 2, 64) => "kernel_attn_decode_v4_g8_t2_c64_f32",
+            (GgmlType::F16, 8, 2, 128) => "kernel_attn_decode_v4_g8_t2_c128_f32",
             (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
             (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
             (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
@@ -11180,6 +11253,128 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Focused correctness gate for the A3B group-8 long-context subgroup path.
+    ///
+    /// Run in a fresh process with one of:
+    ///
+    /// - `QWEN_ATTN_V4_G8_TILE=4 cargo test -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv --release -- --ignored --nocapture`
+    /// - `QWEN_ATTN_V4_G8_TILE=2 cargo test -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv --release -- --ignored --nocapture`
+    ///
+    /// The env var is intentionally process-global (`OnceLock`) so this test stays
+    /// ignored and single-purpose.
+    #[test]
+    #[ignore]
+    fn attn_v4_group8_subgroup_matches_naive_f16kv() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let n_q = 16usize;
+        let n_kv = 2usize;
+        let hd = 256usize;
+        let kv_dim = n_kv * hd;
+        for &(n_pos, nwg, tile_c) in &[(4096usize, 64usize, 64usize), (6144, 64, 64)] {
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let cap = n_pos;
+            let k_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..cap * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(cap * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+
+            let y_naive_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_f16kv_f32(
+                    &ctx, enc, &q_t, &k_cache, &v_cache, &y_naive_t, n_q, n_kv, hd, n_pos,
+                )
+            })
+            .unwrap();
+            let y_naive = read_back_f32(&y_naive_t.buffer, n_q * hd);
+
+            let o_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * (n_q / n_kv) * hd) as u64])
+                    .unwrap();
+            let ml_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * (n_q / n_kv) * 2) as u64]).unwrap();
+            let y_v4_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_cache,
+                    &v_cache,
+                    &o_partial,
+                    &ml_partial,
+                    &y_v4_t,
+                    n_q,
+                    n_kv,
+                    hd,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )
+            })
+            .unwrap();
+            let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
+            let max_abs = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let dot: f64 = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (*a as f64) * (*b as f64))
+                .sum();
+            let na: f64 = y_v4.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            let nb: f64 = y_naive
+                .iter()
+                .map(|x| (*x as f64).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let cos = dot / (na * nb);
+            eprintln!(
+                "[v4-g8-subgroup n_pos={n_pos:>5} nwg={nwg:>2} C={tile_c:>2}] max|Δ|={max_abs:.2e} cos={cos:.6}"
+            );
+            assert!(
+                cos > 0.9999,
+                "group8 subgroup cos too low at n_pos={n_pos}: {cos}"
+            );
+            assert!(
+                max_abs < 5e-3,
+                "group8 subgroup max|Δ| too high at n_pos={n_pos}: {max_abs}"
+            );
         }
     }
 

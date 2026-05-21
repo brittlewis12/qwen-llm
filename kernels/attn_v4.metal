@@ -796,6 +796,31 @@ ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_f32,       4, 32)
 ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_c64_f32,   4, 64)
 ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_c128_f32,  4, 128)
 
+#define ATTN_V4_G8_SUBGROUP_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
+kernel void NAME( \
+        constant attn_v4_args & args      [[buffer(0)]], \
+        device const float    * q          [[buffer(1)]], \
+        device const half     * k_cache    [[buffer(2)]], \
+        device const half     * v_cache    [[buffer(3)]], \
+        device       float    * o_partial  [[buffer(4)]], \
+        device       float    * ml_partial [[buffer(5)]], \
+        threadgroup  half     * sq         [[threadgroup(0)]], \
+        threadgroup  float    * ss         [[threadgroup(1)]], \
+        uint3  tgpig [[threadgroup_position_in_grid]], \
+        ushort tiisg [[thread_index_in_simdgroup]]) { \
+    attn_v4_main_subgroup_body<8, GROUP_TILE_VAL, C_VAL>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+                                                         sq, ss, tgpig, tiisg); \
+}
+
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t4_c16_f32,   4, 16)
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t4_f32,       4, 32)
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t4_c64_f32,   4, 64)
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t4_c128_f32,  4, 128)
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c16_f32,   2, 16)
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_f32,       2, 32)
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c64_f32,   2, 64)
+ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c128_f32,  2, 128)
+
 // ============================================================================
 // Reduce kernel: combines NWG partials per Q head, normalizes by global l.
 //

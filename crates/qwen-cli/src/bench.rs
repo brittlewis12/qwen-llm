@@ -281,8 +281,32 @@ struct PpArgs {
     )]
     n_prompt: usize,
     /// Optional real prompt text. If set, --n-prompt is ignored.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["file", "messages"])]
     prompt: Option<String>,
+    /// Read prompt text from a file. If set, --n-prompt is ignored.
+    #[arg(long, conflicts_with = "messages")]
+    file: Option<PathBuf>,
+    /// Render a JSON messages input into a Qwen chat-template prompt.
+    ///
+    /// Accepted shapes:
+    /// - bare `[{ role, content }, ...]`
+    /// - wrapped `{ messages: [...], ... }`
+    #[arg(long)]
+    messages: Option<PathBuf>,
+    /// Use only the first N messages from `--messages` before rendering.
+    #[arg(long)]
+    messages_max: Option<usize>,
+    /// Preserve assistant `<think>...</think>` history from `--messages`.
+    #[arg(long)]
+    messages_preserve_thinking: bool,
+    /// Force stripping assistant `<think>...</think>` history from
+    /// `--messages`, even if auto-detection would preserve it.
+    #[arg(long, conflicts_with = "messages_preserve_thinking")]
+    messages_strip_thinking: bool,
+    /// Do not append a final `<|im_start|>assistant\n` generation marker for
+    /// `--messages` prompts.
+    #[arg(long)]
+    messages_no_generation_prompt: bool,
     /// Number of timed repetitions after warmup.
     #[arg(long, default_value = "5")]
     runs: usize,
@@ -2460,6 +2484,12 @@ fn run_pp(args: PpArgs) -> Result<()> {
         model,
         n_prompt,
         prompt,
+        file,
+        messages,
+        messages_max,
+        messages_preserve_thinking,
+        messages_strip_thinking,
+        messages_no_generation_prompt,
         runs,
         no_warmup,
         prefill_chunk,
@@ -2484,6 +2514,30 @@ fn run_pp(args: PpArgs) -> Result<()> {
         let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
         let ids = tok.encode(&prompt, false).context("tokenize prompt")?;
         (ids, format!("text prompt ({} chars)", prompt.len()))
+    } else if let Some(path) = file {
+        let prompt =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
+        let ids = tok.encode(&prompt, false).context("tokenize prompt file")?;
+        (
+            ids,
+            format!("file prompt:{} ({} chars)", path.display(), prompt.len()),
+        )
+    } else if let Some(path) = messages {
+        let prompt = load_messages_prompt(
+            &path,
+            messages_max,
+            messages_thinking_mode(messages_preserve_thinking, messages_strip_thinking),
+            !messages_no_generation_prompt,
+        )?;
+        let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
+        let ids = tok
+            .encode(&prompt, false)
+            .context("tokenize rendered messages prompt")?;
+        (
+            ids,
+            format!("messages:{} ({} chars)", path.display(), prompt.len()),
+        )
     } else {
         if n_prompt == 0 {
             return Err(anyhow!("--n-prompt must be >= 1"));

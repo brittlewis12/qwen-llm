@@ -6,6 +6,122 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-21 — Real Rollout Prompt Lane And A3B Group-8 Long-Prefill Attention Breakthrough
+
+Status: new prompt-benchmarking and attention-diagnostic work is landed as
+experimental infrastructure, not as a default path change yet.
+
+### What Changed
+
+- Added real prompt sources to `qwen-bench pp`: inline text, `--file`, and
+  canonical `--messages` rendering with model-family replay semantics.
+- Added a durable “real rollout prompt lane” rooted in TheCurrent-derived
+  message fixtures so prompt characterization no longer depends on memory or
+  one-off local scripts.
+- Added group-8 subgroup attention variants (`g8_t4`, `g8_t2`) for the v4 A3B
+  long-context decode-shaped attention main pass, plus env-controlled selector
+  support.
+- Added focused correctness and microbench coverage for the new group-8 subgroup
+  path, plus per-chunk prompt tracing for long synthetic prefills.
+
+### Measurements
+
+Real-rollout characterization at clean `v0.101` showed the first serious prompt
+regime mismatch with synthetic headline rows:
+
+- `current-reva-short-qwen36`: about `7,986` tokens
+- `current-mei-medium-qwen36`: about `23,122` tokens
+- full `v02_reva.json` preserve replay: about `34,502` tokens
+
+Same-fixture and matched-token ladders now agree that the long-prompt beast is
+real and not mostly prompt/template noise.
+
+A3B synthetic long ladder (baseline):
+
+- `7,841 tok`: `~519.7 t/s`
+- `15,983 tok`: `~372.8 t/s`
+- `26,059 tok`: `~264.1 t/s`
+- `34,502 tok`: `~213.9 t/s`
+
+A10B synthetic long ladder (warmed baseline):
+
+- `6,598 tok`: `~232.6 t/s`
+- `10,578 tok`: `~245.1 t/s`
+- `15,549 tok`: `~242.3 t/s`
+- `19,591 tok`: `~231.7 t/s`
+
+Routed MoE no-op deltas across the same ladder are mostly a constant per-token
+offset, not the growing slope term. Dense 27B also degrades materially on the
+same synthetic token-count ladder, which exonerates “mostly MoE-specific” as the
+lead story.
+
+The decisive prompt-phase result is attention:
+
+- A3B synthetic `noop_attn` lifts `~501 -> 1057 t/s` at `7,841 tok` and
+  `~209 -> 973 t/s` at `34,502 tok`.
+- A3B `noop_gdn` is tiny by comparison (`~501 -> 534`, `~209 -> 215`).
+- A10B `noop_attn` is also large, but its baseline slope is much flatter.
+
+Decode-phase snapshots already hinted at this direction: from `4K -> 32K`, A3B
+`attn mixer` grows `~2.78 -> ~8.61 ms` while `gdn mixer`, `moe route`, and
+`moe ffn` stay nearly flat.
+
+Group-8 subgroup attention was the first real structural crack in the A3B path.
+
+At A3B shape (`group=8`, `n_pos=32768`, `nwg=64`, `C=64`), attention v4 main
+pass microbench:
+
+- old group-8 main pass: `~0.660 ms/call`
+- `g8_t4`: `~0.430 ms/call`
+- `g8_t2`: `~0.416 ms/call`
+
+End-to-end A3B long synthetic prompt throughput improves strongly with
+`QWEN_ATTN_V4_G8_TILE=2`:
+
+- `7,841 tok`: `~519.7 -> ~576.7 t/s`
+- `15,983 tok`: `~372.8 -> ~471.7 t/s`
+- `34,502 tok`: `~213.9 -> ~308.4 t/s`
+
+Real same-fixture A3B endpoint (`v02_reva.json`, `25` msgs, preserve replay):
+
+- baseline: `~208.3 t/s`
+- `g8_t4`: `~286.0 t/s`
+- `g8_t2`: `~307.6 t/s`
+
+Per-chunk A3B long synthetic (`N=34502`, `P=1024`) shows the slope is reduced,
+not erased:
+
+- baseline chunk near `start=32768`: `~8.24 ms/token`
+- `g8_t2` same chunk: `~5.17 ms/token`
+
+The remaining long-prompt term is still strongly attention-shaped, and weak
+`prefill_chunk` sensitivity after `g8_t2` argues it is not mostly chunk-count
+overhead.
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `QWEN_ATTN_V4_G8_TILE=2 cargo test -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm attn_v4_main_reduce_breakdown_moe_shapes --release -- --ignored --nocapture`
+- `QWEN_ATTN_V4_G8_TILE=4 cargo test -p qwen-llm attn_v4_main_reduce_breakdown_moe_shapes --release -- --ignored --nocapture`
+- `QWEN_ATTN_V4_G8_TILE=2 cargo test -p qwen-llm attn_v4_nwg_sweep_moe_shapes --release -- --ignored --nocapture`
+- `QWEN_ATTN_V4_G8_TILE=2 cargo test -p qwen-llm attn_v4_tile_c_sweep_moe_shapes --release -- --ignored --nocapture`
+- Sequential `qwen-bench pp` synthetic and real-rollout ladders on A3B / A10B
+- Sequential `qwen-bench pp` MoE-noop and attention-noop ladders
+
+### Current Read
+
+- The exploding long-prompt slope is now strongly *not* primarily routed MoE
+  compute. Routed MoE is a meaningful constant tax; attention is the growing
+  term.
+- The old A3B group-8 attention main-pass shape was a major local long-context
+  inefficiency. `g8_t2` removes a large part of it.
+- The remaining structural miss is still likely the decode-shaped attention body
+  inside prompt prefill chunks, not chunk-count overhead and not primarily MoE.
+- The next serious branch should be prompt-native packed prefill attention.
+- `g8_t2` should be treated as a prefill-focused guarded win until decode has a
+  separate selector / regression matrix.
+
 ## 2026-05-20 — Exact MoE Tail Concurrency Converts; Generic Split Sidecar Does Not
 
 Status: two new guarded experimental branches now exist, both off by default:

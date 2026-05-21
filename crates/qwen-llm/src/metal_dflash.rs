@@ -49,6 +49,7 @@ use crate::metal_forward::{
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 fn env_flag_enabled(name: &str) -> bool {
     matches!(
@@ -249,6 +250,11 @@ fn prefill_moe_route_logits_e8p32_mode() -> PrefillEnvMode {
 fn prefill_trace_labels_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_LABELS"))
+}
+
+fn prefill_trace_chunks_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_CHUNKS"))
 }
 
 fn label_prefill_encoder(enc: &KernelEncoder, layer: usize, label: &str) {
@@ -3675,6 +3681,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
     let n_chunks = total_n.div_ceil(p_max);
     let mut prefill_gpu_total_ms = 0.0f64;
     for chunk_idx in 0..n_chunks {
+        let chunk_wall = Instant::now();
         let chunk_base = chunk_idx * p_max;
         let chunk_p = (total_n - chunk_base).min(p_max);
         let chunk_start = start_position + chunk_base as u32;
@@ -4132,6 +4139,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
 
                         if prefill_noop_attn_body_enabled() {
                             apply_mixer_residual = false;
+                            target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
                         } else {
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
@@ -4192,21 +4200,31 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         target_session.kv_n_pos[ai],
                                         group,
                                     );
-                                    crate::metal::encode_attn_decode_v4_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &q_normed_n,
-                                        &target_session.kv_k[ai],
-                                        &target_session.kv_v[ai],
-                                        &target_session.attn_v4_o_partial,
-                                        &target_session.attn_v4_ml_partial,
-                                        &attn_o_n,
-                                        n_q,
-                                        n_kv,
-                                        head_dim,
-                                        target_session.kv_n_pos[ai],
-                                        nwg,
-                                        tile_c,
+                                    let group_tile =
+                                        crate::metal::attn_v4_choose_group_tile_prefill(
+                                            target_session.kv_n_pos[ai],
+                                            group,
+                                        );
+                                    crate::metal::with_attn_v4_group_tile_override(
+                                        group_tile,
+                                        || {
+                                            crate::metal::encode_attn_decode_v4_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &q_normed_n,
+                                                &target_session.kv_k[ai],
+                                                &target_session.kv_v[ai],
+                                                &target_session.attn_v4_o_partial,
+                                                &target_session.attn_v4_ml_partial,
+                                                &attn_o_n,
+                                                n_q,
+                                                n_kv,
+                                                head_dim,
+                                                target_session.kv_n_pos[ai],
+                                                nwg,
+                                                tile_c,
+                                            )
+                                        },
                                     )?;
                                 } else {
                                     crate::metal::encode_attn_decode_f16kv_f32(
@@ -4250,6 +4268,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         // F32 oracle / fallback: per-token encode_attn.
                         if prefill_noop_attn_body_enabled() {
                             apply_mixer_residual = false;
+                            target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
                         } else {
                             for n_idx in 0..chunk_p {
                                 let enc = KernelEncoder::begin(&cmd_buf);
@@ -5391,7 +5410,21 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             }
             cmd_buf.commit();
             cmd_buf.waitUntilCompleted();
-            prefill_gpu_total_ms += (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+            let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+            let chunk_wall_ms = chunk_wall.elapsed().as_secs_f64() * 1e3;
+            prefill_gpu_total_ms += chunk_gpu_ms;
+            if prefill_trace_chunks_enabled() {
+                eprintln!(
+                    "[prefill-chunk] idx={} start={} tokens={} gpu_ms={:.2} wall_ms={:.2} ms_per_tok={:.4} cumulative_gpu_ms={:.2}",
+                    chunk_idx,
+                    chunk_start,
+                    chunk_p,
+                    chunk_gpu_ms,
+                    chunk_wall_ms,
+                    chunk_gpu_ms / chunk_p as f64,
+                    prefill_gpu_total_ms,
+                );
+            }
             if matches!(tail_mode, PrefillTailMode::ReadLogits) {
                 let mut last_logits = vec![0.0f32; v];
                 unsafe {
@@ -5406,7 +5439,21 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         // Non-last chunk: just commit + wait (no tail).
         cmd_buf.commit();
         cmd_buf.waitUntilCompleted();
-        prefill_gpu_total_ms += (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+        let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+        let chunk_wall_ms = chunk_wall.elapsed().as_secs_f64() * 1e3;
+        prefill_gpu_total_ms += chunk_gpu_ms;
+        if prefill_trace_chunks_enabled() {
+            eprintln!(
+                "[prefill-chunk] idx={} start={} tokens={} gpu_ms={:.2} wall_ms={:.2} ms_per_tok={:.4} cumulative_gpu_ms={:.2}",
+                chunk_idx,
+                chunk_start,
+                chunk_p,
+                chunk_gpu_ms,
+                chunk_wall_ms,
+                chunk_gpu_ms / chunk_p as f64,
+                prefill_gpu_total_ms,
+            );
+        }
     }
 
     // unreachable: the last chunk always returns inside the loop. But

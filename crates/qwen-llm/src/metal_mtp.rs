@@ -121,6 +121,7 @@ impl MetalMtpHead {
                 q: load_weight(mtp.attn.q)?,
                 k: load_weight(mtp.attn.k)?,
                 v: load_weight(mtp.attn.v)?,
+                qkv_fused: None,
                 o: load_weight(mtp.attn.o)?,
                 q_norm: load_f32(mtp.attn.q_norm)?,
                 k_norm: load_f32(mtp.attn.k_norm)?,

@@ -39,14 +39,18 @@ use crate::metal::{
     encode_moe_weighted_sum_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
     encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_split_q_gate_f32, encode_split_qkv_fused_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32,
 };
 use crate::metal_forward::{
-    MetalBlock, MetalForward, MetalSession, RMS_EPS, checked_u64_add, checked_u64_double,
-    checked_u64_mul, checked_u64_mul3, encode_mat_mat_dispatch, encode_mat_vec_dispatch,
-    encode_scatter_offset_f32, weight_dtype_kept_native,
+    ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalSession, RMS_EPS, checked_u64_add,
+    checked_u64_double, checked_u64_mul, checked_u64_mul3, checked_u64_mul4,
+    encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
+    weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -257,12 +261,122 @@ fn prefill_trace_chunks_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_CHUNKS"))
 }
 
+fn prefill_trace_attn_phases_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_ATTN_PHASES"))
+}
+
+fn flush_prefill_phase(
+    ctx: &MetalContext,
+    cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    prefill_gpu_total_ms: &mut f64,
+    enabled: bool,
+    chunk_idx: usize,
+    chunk_start: u32,
+    layer_idx: usize,
+    phase: &str,
+) {
+    if !enabled {
+        return;
+    }
+    cmd_buf.commit();
+    cmd_buf.waitUntilCompleted();
+    let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+    *prefill_gpu_total_ms += gpu_ms;
+    eprintln!(
+        "[prefill-attn-phase] chunk={} start={} layer={} phase={} gpu_ms={:.2}",
+        chunk_idx, chunk_start, layer_idx, phase, gpu_ms
+    );
+    *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+}
+
+fn prefill_attn_packed_g8_enabled(n_pos: usize, group: usize) -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    if group != 8 || n_pos < 4096 {
+        return false;
+    }
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_PACKED_G8")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => true,
+    }
+}
+
+fn prefill_attn_packed_g16_enabled(n_pos: usize, group: usize) -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    if group != 16 || n_pos < 4096 {
+        return false;
+    }
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_PACKED_G16")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => true,
+    }
+}
+
+fn prefill_attn_fused_qkv_g8_enabled(n_pos: usize, group: usize) -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    if group != 8 || n_pos < 4096 {
+        return false;
+    }
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_FUSED_QKV_G8")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => false,
+    }
+}
+
+fn prefill_attn_packed_g8_rows() -> usize {
+    static ROWS: OnceLock<usize> = OnceLock::new();
+    *ROWS.get_or_init(|| {
+        std::env::var("QWEN_PREFILL_ATTN_PACKED_G8_ROWS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| (1..=ATTN_PREFILL_V4_PACKED_ROWS).contains(&n))
+            .unwrap_or(4)
+    })
+}
+
+fn prefill_attn_packed_g16_rows() -> usize {
+    static ROWS: OnceLock<usize> = OnceLock::new();
+    *ROWS.get_or_init(|| {
+        std::env::var("QWEN_PREFILL_ATTN_PACKED_G16_ROWS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| (1..=ATTN_PREFILL_V4_PACKED_ROWS).contains(&n))
+            .unwrap_or(4)
+    })
+}
+
+fn prefill_attn_packed_g8_oracle_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_PACKED_G8_ORACLE"))
+}
+
+fn prefill_attn_packed_g16_oracle_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_PACKED_G16_ORACLE"))
+}
+
 fn label_prefill_encoder(enc: &KernelEncoder, layer: usize, label: &str) {
     if prefill_trace_labels_enabled() {
         let tag = format!("qwen-prefill-l{layer:03}-{label}");
         enc.set_label(&tag);
         enc.insert_debug_signpost(&tag);
     }
+}
+
+fn cosine_f32_slices(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for i in 0..a.len() {
+        dot += a[i] as f64 * b[i] as f64;
+        na += (a[i] as f64).powi(2);
+        nb += (b[i] as f64).powi(2);
+    }
+    dot / (na.sqrt() * nb.sqrt() + 1e-30)
 }
 
 fn encode_moe_route_logits_dispatch(
@@ -1344,6 +1458,9 @@ pub struct MetalDFlashLayerMajorScratch {
     pub mixer_out_pack: MetalTensor,
 
     // Attention scratch (only meaningful on attn layers).
+    /// `[N, 2·q_dim + 2·kv_dim]` F32 — fused QKV front projection for the
+    /// experimental group-8 packed-prefill path.
+    pub attn_qkv_fused_pack: MetalTensor,
     /// `[N, 2·q_dim]` F32 — gated Q projection (Q + gate interleaved).
     pub attn_q_full_pack: MetalTensor,
     /// `[N, q_dim]` F32 — Q after split.
@@ -1360,6 +1477,12 @@ pub struct MetalDFlashLayerMajorScratch {
     pub attn_k_normed_pack: MetalTensor,
     /// `[N, q_dim]` F32 — attention output (post softmax+V agg, post gate).
     pub attn_o_pack: MetalTensor,
+    /// `[R, n_kv, NWG, group, head_dim]` F32 — packed-prompt attention partials
+    /// for the experimental A3B/group-8 prompt-native microproof.
+    pub attn_prefill_v4_o_partial_pack: MetalTensor,
+    /// `[R, n_kv, NWG, group, 2]` F32 — packed-prompt attention `(m, l)`
+    /// partials for the same microproof.
+    pub attn_prefill_v4_ml_partial_pack: MetalTensor,
 
     // FFN scratch.
     /// `[N, F]` F32 — FFN gate output (skipped when fused Q4_K SwiGLU is used).
@@ -1507,6 +1630,11 @@ impl MetalDFlashLayerMajorScratch {
         let moe_f_exp = arch.expert_feed_forward_length.max(1) as u64;
         let moe_f_shared = arch.expert_shared_feed_forward_length.max(1) as u64;
         let attn_q_full_dim = checked_u64_double(q_dim, "layer-major 2 * q_dim overflow")?;
+        let attn_qkv_fused_dim = checked_u64_add(
+            attn_q_full_dim,
+            checked_u64_double(kv_dim, "layer-major 2 * kv_dim overflow")?,
+            "layer-major attn qkv fused dim overflow",
+        )?;
         let moe_slot_elems = checked_u64_mul(n, moe_topk, "layer-major moe slot count overflow")?;
         let moe_inner_elems = checked_u64_mul(
             moe_slot_elems,
@@ -1520,6 +1648,44 @@ impl MetalDFlashLayerMajorScratch {
             n,
             "layer-major moe group ids size overflow",
         )?;
+        let attn_group = (arch.n_q_heads as u64)
+            .checked_div((arch.n_kv_heads as u64).max(1))
+            .unwrap_or(1)
+            .max(1);
+        let attn_prefill_v4_o_partial_elems = checked_u64_mul4(
+            ATTN_PREFILL_V4_PACKED_ROWS as u64,
+            (arch.n_kv_heads as u64).max(1),
+            ATTN_V4_MAX_NWG as u64,
+            checked_u64_mul(
+                attn_group,
+                head_dim,
+                "layer-major attn prefill partial group*head overflow",
+            )?,
+            "layer-major attn prefill partial size overflow",
+        )?;
+        let attn_prefill_v4_ml_partial_elems = checked_u64_mul4(
+            ATTN_PREFILL_V4_PACKED_ROWS as u64,
+            (arch.n_kv_heads as u64).max(1),
+            ATTN_V4_MAX_NWG as u64,
+            checked_u64_mul(
+                attn_group,
+                2,
+                "layer-major attn prefill ml partial group*2 overflow",
+            )?,
+            "layer-major attn prefill ml partial size overflow",
+        )?;
+        let attn_group = attn_group as usize;
+        let enable_attn_packed = matches!(
+            std::env::var("QWEN_PREFILL_ATTN_PACKED_G8").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ) || matches!(
+            std::env::var("QWEN_PREFILL_ATTN_PACKED_G16").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ) || (head_dim as usize == 256 && matches!(attn_group, 8 | 16));
+        let enable_attn_fused_qkv_g8 = matches!(
+            std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        );
 
         // GDN dims. Sized at 1 element when the arch has no GDN to keep
         // the buffers allocatable; the GDN layer-major path is gated on
@@ -1558,6 +1724,14 @@ impl MetalDFlashLayerMajorScratch {
             x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
             h_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
             mixer_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
+            attn_qkv_fused_pack: MetalTensor::zeros_f32(
+                ctx,
+                if enable_attn_fused_qkv_g8 {
+                    vec![n, attn_qkv_fused_dim]
+                } else {
+                    vec![1]
+                },
+            )?,
             attn_q_full_pack: MetalTensor::zeros_f32(ctx, vec![n, attn_q_full_dim])?,
             attn_q_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
             attn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
@@ -1566,6 +1740,22 @@ impl MetalDFlashLayerMajorScratch {
             attn_v_now_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
             attn_k_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
             attn_o_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
+            attn_prefill_v4_o_partial_pack: MetalTensor::zeros_f32(
+                ctx,
+                if enable_attn_packed {
+                    vec![attn_prefill_v4_o_partial_elems]
+                } else {
+                    vec![1]
+                },
+            )?,
+            attn_prefill_v4_ml_partial_pack: MetalTensor::zeros_f32(
+                ctx,
+                if enable_attn_packed {
+                    vec![attn_prefill_v4_ml_partial_elems]
+                } else {
+                    vec![1]
+                },
+            )?,
             ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
@@ -4044,6 +4234,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         && attn_mat_mat_eligible(a.k.dtype)
                         && attn_mat_mat_eligible(a.v.dtype)
                         && attn_mat_mat_eligible(a.o.dtype);
+                    let trace_attn_phases = prefill_trace_attn_phases_enabled();
+                    let attn_q_full_dim = 2 * q_dim;
 
                     if attn_batched {
                         // Sized views of attn pack scratch.
@@ -4071,76 +4263,287 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         let attn_o_pack_p = layer_scratch
                             .attn_o_pack
                             .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
+                        let use_fused_qkv = prefill_attn_fused_qkv_g8_enabled(
+                            chunk_start as usize + chunk_p,
+                            n_q / n_kv,
+                        ) && a.qkv_fused.is_some();
+                        let qkv_fused_dim = attn_q_full_dim + 2 * kv_dim;
 
                         // Step A: batched front-end Q gated / K / V projections + Q-norm + K-norm.
-                        {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_mat_mat_dispatch(
+                        if trace_attn_phases {
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                if use_fused_qkv {
+                                    let fused_qkv_pack = layer_scratch
+                                        .attn_qkv_fused_pack
+                                        .view_subrange(0, vec![(chunk_p * qkv_fused_dim) as u64]);
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        a.qkv_fused.as_ref().expect("qkv_fused"),
+                                        &h_pack_p,
+                                        &fused_qkv_pack,
+                                        h,
+                                        qkv_fused_dim,
+                                        chunk_p,
+                                    )?;
+                                    encode_split_qkv_fused_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &fused_qkv_pack,
+                                        &q_full_pack_p,
+                                        &k_now_pack_p,
+                                        &v_now_pack_p,
+                                        chunk_p,
+                                        attn_q_full_dim,
+                                        kv_dim,
+                                    )?;
+                                } else {
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &a.q,
+                                        &h_pack_p,
+                                        &q_full_pack_p,
+                                        h,
+                                        2 * q_dim,
+                                        chunk_p,
+                                    )?;
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &a.k,
+                                        &h_pack_p,
+                                        &k_now_pack_p,
+                                        h,
+                                        kv_dim,
+                                        chunk_p,
+                                    )?;
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &a.v,
+                                        &h_pack_p,
+                                        &v_now_pack_p,
+                                        h,
+                                        kv_dim,
+                                        chunk_p,
+                                    )?;
+                                }
+                                if !use_fused_qkv {
+                                    encode_split_q_gate_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_full_pack_p,
+                                        &q_pack_p,
+                                        &gate_pack_p,
+                                        chunk_p * n_q,
+                                        head_dim,
+                                    )?;
+                                }
+                                enc.end();
+                            }
+                            flush_prefill_phase(
                                 base.ctx,
-                                &enc,
-                                &a.q,
-                                &h_pack_p,
-                                &q_full_pack_p,
-                                h,
-                                2 * q_dim,
-                                chunk_p,
-                            )?;
-                            encode_split_q_gate_f32(
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_attn_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                if use_fused_qkv { "qkv_matmul" } else { "proj" },
+                            );
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                if use_fused_qkv {
+                                    let fused_qkv_pack = layer_scratch
+                                        .attn_qkv_fused_pack
+                                        .view_subrange(0, vec![(chunk_p * qkv_fused_dim) as u64]);
+                                    encode_split_qkv_fused_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &fused_qkv_pack,
+                                        &q_full_pack_p,
+                                        &k_now_pack_p,
+                                        &v_now_pack_p,
+                                        chunk_p,
+                                        attn_q_full_dim,
+                                        kv_dim,
+                                    )?;
+                                }
+                                encode_split_q_gate_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_full_pack_p,
+                                    &q_pack_p,
+                                    &gate_pack_p,
+                                    chunk_p * n_q,
+                                    head_dim,
+                                )?;
+                                enc.end();
+                            }
+                            flush_prefill_phase(
                                 base.ctx,
-                                &enc,
-                                &q_full_pack_p,
-                                &q_pack_p,
-                                &gate_pack_p,
-                                chunk_p * n_q,
-                                head_dim,
-                            )?;
-                            encode_mat_mat_dispatch(
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_attn_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                if use_fused_qkv {
+                                    "split"
+                                } else {
+                                    "split_q_gate"
+                                },
+                            );
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_rms_norm_batched_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_pack_p,
+                                    &a.q_norm,
+                                    &q_normed_pack_p,
+                                    chunk_p * n_q,
+                                    head_dim,
+                                    RMS_EPS,
+                                )?;
+                                encode_rms_norm_batched_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &k_now_pack_p,
+                                    &a.k_norm,
+                                    &k_normed_pack_p,
+                                    chunk_p * n_kv,
+                                    head_dim,
+                                    RMS_EPS,
+                                )?;
+                                enc.end();
+                            }
+                            flush_prefill_phase(
                                 base.ctx,
-                                &enc,
-                                &a.k,
-                                &h_pack_p,
-                                &k_now_pack_p,
-                                h,
-                                kv_dim,
-                                chunk_p,
-                            )?;
-                            encode_mat_mat_dispatch(
-                                base.ctx,
-                                &enc,
-                                &a.v,
-                                &h_pack_p,
-                                &v_now_pack_p,
-                                h,
-                                kv_dim,
-                                chunk_p,
-                            )?;
-                            encode_rms_norm_batched_f32(
-                                base.ctx,
-                                &enc,
-                                &q_pack_p,
-                                &a.q_norm,
-                                &q_normed_pack_p,
-                                chunk_p * n_q,
-                                head_dim,
-                                RMS_EPS,
-                            )?;
-                            encode_rms_norm_batched_f32(
-                                base.ctx,
-                                &enc,
-                                &k_now_pack_p,
-                                &a.k_norm,
-                                &k_normed_pack_p,
-                                chunk_p * n_kv,
-                                head_dim,
-                                RMS_EPS,
-                            )?;
-                            enc.end();
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_attn_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "norm",
+                            );
+                        } else {
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                if use_fused_qkv {
+                                    let fused_qkv_pack = layer_scratch
+                                        .attn_qkv_fused_pack
+                                        .view_subrange(0, vec![(chunk_p * qkv_fused_dim) as u64]);
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        a.qkv_fused.as_ref().expect("qkv_fused"),
+                                        &h_pack_p,
+                                        &fused_qkv_pack,
+                                        h,
+                                        qkv_fused_dim,
+                                        chunk_p,
+                                    )?;
+                                    encode_split_qkv_fused_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &fused_qkv_pack,
+                                        &q_full_pack_p,
+                                        &k_now_pack_p,
+                                        &v_now_pack_p,
+                                        chunk_p,
+                                        attn_q_full_dim,
+                                        kv_dim,
+                                    )?;
+                                } else {
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &a.q,
+                                        &h_pack_p,
+                                        &q_full_pack_p,
+                                        h,
+                                        2 * q_dim,
+                                        chunk_p,
+                                    )?;
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &a.k,
+                                        &h_pack_p,
+                                        &k_now_pack_p,
+                                        h,
+                                        kv_dim,
+                                        chunk_p,
+                                    )?;
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &a.v,
+                                        &h_pack_p,
+                                        &v_now_pack_p,
+                                        h,
+                                        kv_dim,
+                                        chunk_p,
+                                    )?;
+                                }
+                                encode_split_q_gate_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_full_pack_p,
+                                    &q_pack_p,
+                                    &gate_pack_p,
+                                    chunk_p * n_q,
+                                    head_dim,
+                                )?;
+                                encode_rms_norm_batched_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_pack_p,
+                                    &a.q_norm,
+                                    &q_normed_pack_p,
+                                    chunk_p * n_q,
+                                    head_dim,
+                                    RMS_EPS,
+                                )?;
+                                encode_rms_norm_batched_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &k_now_pack_p,
+                                    &a.k_norm,
+                                    &k_normed_pack_p,
+                                    chunk_p * n_kv,
+                                    head_dim,
+                                    RMS_EPS,
+                                )?;
+                                enc.end();
+                            }
                         }
 
                         if prefill_noop_attn_body_enabled() {
                             apply_mixer_residual = false;
                             target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
                         } else {
+                            let use_packed_g8 = prefill_attn_packed_g8_enabled(
+                                chunk_start as usize + chunk_p,
+                                n_q / n_kv,
+                            ) && target_session.kv_k[ai].dtype == GgmlType::F16
+                                && target_session.kv_v[ai].dtype == GgmlType::F16
+                                && head_dim == 256
+                                && n_q == 16
+                                && n_kv == 2;
+                            let use_packed_g16 = prefill_attn_packed_g16_enabled(
+                                chunk_start as usize + chunk_p,
+                                n_q / n_kv,
+                            ) && target_session.kv_k[ai].dtype
+                                == GgmlType::F16
+                                && target_session.kv_v[ai].dtype == GgmlType::F16
+                                && head_dim == 256
+                                && n_q == 32
+                                && n_kv == 2;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_rope_neox_f32_packed_consecutive(
@@ -4177,71 +4580,295 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 )?;
                                 enc.end();
                             }
+                            flush_prefill_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_attn_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "rope_scatter",
+                            );
 
-                            for n_idx in 0..chunk_p {
-                                let position_n = chunk_start + n_idx as u32;
-                                let q_normed_n = q_normed_pack_p
-                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                                let attn_o_n = attn_o_pack_p
-                                    .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                                let enc = KernelEncoder::begin(&cmd_buf);
-                                target_session.kv_n_pos[ai] = position_n as usize + 1;
-
-                                const V4_HEAD_DIM: usize = 256;
+                            if use_packed_g8 || use_packed_g16 {
                                 let group = n_q / n_kv;
-                                let use_v4 =
-                                    head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
-                                if use_v4 {
-                                    let nwg = crate::metal::attn_v4_choose_nwg(
-                                        target_session.kv_n_pos[ai],
+                                let packed_rows = if use_packed_g8 {
+                                    prefill_attn_packed_g8_rows()
+                                } else {
+                                    prefill_attn_packed_g16_rows()
+                                };
+                                let attn_packed_oracle = if use_packed_g8 {
+                                    prefill_attn_packed_g8_oracle_enabled()
+                                } else {
+                                    prefill_attn_packed_g16_oracle_enabled()
+                                };
+                                let nwg = crate::metal::attn_v4_choose_nwg(
+                                    chunk_start as usize + chunk_p,
+                                    group,
+                                );
+                                if trace_attn_phases {
+                                    let row_groups = chunk_p.div_ceil(packed_rows);
+                                    let partial_bytes = chunk_p
+                                        * n_kv
+                                        * nwg
+                                        * group
+                                        * (head_dim + 2)
+                                        * std::mem::size_of::<f32>();
+                                    eprintln!(
+                                        "[prefill-attn-packed-shape] layer={} chunk_start={} chunk_p={} group={} packed_rows={} row_groups={} dispatches={} nwg={} partial_rw_mib={:.2}",
+                                        il,
+                                        chunk_start,
+                                        chunk_p,
                                         group,
+                                        packed_rows,
+                                        row_groups,
+                                        row_groups * 2,
+                                        nwg,
+                                        (partial_bytes as f64 * 2.0) / (1024.0 * 1024.0),
                                     );
-                                    let tile_c = crate::metal::attn_v4_choose_tile_c(
-                                        target_session.kv_n_pos[ai],
-                                        group,
+                                }
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                label_prefill_encoder(
+                                    &enc,
+                                    il,
+                                    if use_packed_g8 {
+                                        "attn-prefill-g8-packed"
+                                    } else {
+                                        "attn-prefill-g16-packed"
+                                    },
+                                );
+                                for row_base in (0..chunk_p).step_by(packed_rows) {
+                                    let rows_n = (chunk_p - row_base).min(packed_rows);
+                                    let q_rows = q_normed_pack_p.view_subrange(
+                                        (row_base * q_dim) as u64,
+                                        vec![(rows_n * q_dim) as u64],
                                     );
-                                    let group_tile =
-                                        crate::metal::attn_v4_choose_group_tile_prefill(
+                                    let attn_o_rows = attn_o_pack_p.view_subrange(
+                                        (row_base * q_dim) as u64,
+                                        vec![(rows_n * q_dim) as u64],
+                                    );
+                                    let o_partial_rows =
+                                        layer_scratch.attn_prefill_v4_o_partial_pack.view_subrange(
+                                            0,
+                                            vec![
+                                                (rows_n * n_kv * ATTN_V4_MAX_NWG * group * head_dim)
+                                                    as u64,
+                                            ],
+                                        );
+                                    let ml_partial_rows = layer_scratch
+                                        .attn_prefill_v4_ml_partial_pack
+                                        .view_subrange(
+                                            0,
+                                            vec![
+                                                (rows_n * n_kv * ATTN_V4_MAX_NWG * group * 2)
+                                                    as u64,
+                                            ],
+                                        );
+                                    if use_packed_g8 {
+                                        crate::metal::encode_attn_prefill_v4_g8_t2_q2_c64_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &q_rows,
+                                            &target_session.kv_k[ai],
+                                            &target_session.kv_v[ai],
+                                            &o_partial_rows,
+                                            &ml_partial_rows,
+                                            &attn_o_rows,
+                                            rows_n,
+                                            chunk_start as usize + row_base,
+                                            nwg,
+                                        )?;
+                                    } else {
+                                        crate::metal::encode_attn_prefill_v4_g16_t4_q2_c64_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &q_rows,
+                                            &target_session.kv_k[ai],
+                                            &target_session.kv_v[ai],
+                                            &o_partial_rows,
+                                            &ml_partial_rows,
+                                            &attn_o_rows,
+                                            rows_n,
+                                            chunk_start as usize + row_base,
+                                            nwg,
+                                        )?;
+                                    }
+                                }
+                                enc.end();
+                                if attn_packed_oracle {
+                                    cmd_buf.commit();
+                                    cmd_buf.waitUntilCompleted();
+                                    prefill_gpu_total_ms +=
+                                        (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+                                    let attn_oracle_pack = MetalTensor::zeros_f32(
+                                        base.ctx,
+                                        vec![(chunk_p * q_dim) as u64],
+                                    )?;
+                                    let oracle_cmd = base
+                                        .ctx
+                                        .queue
+                                        .commandBuffer()
+                                        .expect("oracle command buffer");
+                                    for n_idx in 0..chunk_p {
+                                        let q_normed_n = q_normed_pack_p.view_subrange(
+                                            (n_idx * q_dim) as u64,
+                                            vec![q_dim as u64],
+                                        );
+                                        let attn_o_n = attn_oracle_pack.view_subrange(
+                                            (n_idx * q_dim) as u64,
+                                            vec![q_dim as u64],
+                                        );
+                                        let enc = KernelEncoder::begin(&oracle_cmd);
+                                        let position_n = chunk_start + n_idx as u32;
+                                        let nwg = crate::metal::attn_v4_choose_nwg(
+                                            position_n as usize + 1,
+                                            group,
+                                        );
+                                        let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                            position_n as usize + 1,
+                                            group,
+                                        );
+                                        let group_tile =
+                                            crate::metal::attn_v4_choose_group_tile_prefill(
+                                                position_n as usize + 1,
+                                                group,
+                                            );
+                                        crate::metal::with_attn_v4_group_tile_override(
+                                            group_tile,
+                                            || {
+                                                crate::metal::encode_attn_decode_v4_f32(
+                                                    base.ctx,
+                                                    &enc,
+                                                    &q_normed_n,
+                                                    &target_session.kv_k[ai],
+                                                    &target_session.kv_v[ai],
+                                                    &target_session.attn_v4_o_partial,
+                                                    &target_session.attn_v4_ml_partial,
+                                                    &attn_o_n,
+                                                    n_q,
+                                                    n_kv,
+                                                    head_dim,
+                                                    position_n as usize + 1,
+                                                    nwg,
+                                                    tile_c,
+                                                )
+                                            },
+                                        )?;
+                                        enc.end();
+                                    }
+                                    oracle_cmd.commit();
+                                    oracle_cmd.waitUntilCompleted();
+
+                                    let packed = cpu_read_f32buf(&attn_o_pack_p);
+                                    let oracle = cpu_read_f32buf(&attn_oracle_pack);
+                                    let cos = cosine_f32_slices(&packed, &oracle);
+                                    let mut max_abs = 0.0f32;
+                                    let mut worst = 0usize;
+                                    for i in 0..packed.len() {
+                                        let d = (packed[i] - oracle[i]).abs();
+                                        if d > max_abs {
+                                            max_abs = d;
+                                            worst = i;
+                                        }
+                                    }
+                                    eprintln!(
+                                        "[prefill-attn-packed-g{}-oracle] layer={} chunk_start={} chunk_p={} cos={:.6} max_abs={:.3e} worst_idx={}",
+                                        group, il, chunk_start, chunk_p, cos, max_abs, worst,
+                                    );
+                                    if cos < 0.99999 || max_abs > 2e-3 {
+                                        return Err(DFlashError::Metal(MetalError::BadShape {
+                                            kernel: if use_packed_g8 {
+                                                "prefill_attn_packed_g8_oracle"
+                                            } else {
+                                                "prefill_attn_packed_g16_oracle"
+                                            },
+                                            detail: format!(
+                                                "layer={il} chunk_start={chunk_start} chunk_p={chunk_p} cos={cos:.6} max_abs={max_abs:.3e}"
+                                            ),
+                                        }));
+                                    }
+                                    cmd_buf =
+                                        base.ctx.queue.commandBuffer().expect("command buffer");
+                                }
+                                target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
+                            } else {
+                                for n_idx in 0..chunk_p {
+                                    let position_n = chunk_start + n_idx as u32;
+                                    let q_normed_n = q_normed_pack_p
+                                        .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                    let attn_o_n = attn_o_pack_p
+                                        .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    target_session.kv_n_pos[ai] = position_n as usize + 1;
+
+                                    const V4_HEAD_DIM: usize = 256;
+                                    let group = n_q / n_kv;
+                                    let use_v4 =
+                                        head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
+                                    if use_v4 {
+                                        let nwg = crate::metal::attn_v4_choose_nwg(
                                             target_session.kv_n_pos[ai],
                                             group,
                                         );
-                                    crate::metal::with_attn_v4_group_tile_override(
-                                        group_tile,
-                                        || {
-                                            crate::metal::encode_attn_decode_v4_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &q_normed_n,
-                                                &target_session.kv_k[ai],
-                                                &target_session.kv_v[ai],
-                                                &target_session.attn_v4_o_partial,
-                                                &target_session.attn_v4_ml_partial,
-                                                &attn_o_n,
-                                                n_q,
-                                                n_kv,
-                                                head_dim,
+                                        let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                            target_session.kv_n_pos[ai],
+                                            group,
+                                        );
+                                        let group_tile =
+                                            crate::metal::attn_v4_choose_group_tile_prefill(
                                                 target_session.kv_n_pos[ai],
-                                                nwg,
-                                                tile_c,
-                                            )
-                                        },
-                                    )?;
-                                } else {
-                                    crate::metal::encode_attn_decode_f16kv_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &q_normed_n,
-                                        &target_session.kv_k[ai],
-                                        &target_session.kv_v[ai],
-                                        &attn_o_n,
-                                        n_q,
-                                        n_kv,
-                                        head_dim,
-                                        target_session.kv_n_pos[ai],
-                                    )?;
+                                                group,
+                                            );
+                                        crate::metal::with_attn_v4_group_tile_override(
+                                            group_tile,
+                                            || {
+                                                crate::metal::encode_attn_decode_v4_f32(
+                                                    base.ctx,
+                                                    &enc,
+                                                    &q_normed_n,
+                                                    &target_session.kv_k[ai],
+                                                    &target_session.kv_v[ai],
+                                                    &target_session.attn_v4_o_partial,
+                                                    &target_session.attn_v4_ml_partial,
+                                                    &attn_o_n,
+                                                    n_q,
+                                                    n_kv,
+                                                    head_dim,
+                                                    target_session.kv_n_pos[ai],
+                                                    nwg,
+                                                    tile_c,
+                                                )
+                                            },
+                                        )?;
+                                    } else {
+                                        crate::metal::encode_attn_decode_f16kv_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &q_normed_n,
+                                            &target_session.kv_k[ai],
+                                            &target_session.kv_v[ai],
+                                            &attn_o_n,
+                                            n_q,
+                                            n_kv,
+                                            head_dim,
+                                            target_session.kv_n_pos[ai],
+                                        )?;
+                                    }
+                                    enc.end();
                                 }
-                                enc.end();
                             }
+                            flush_prefill_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_attn_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "body",
+                            );
 
                             let enc = KernelEncoder::begin(&cmd_buf);
                             encode_sigmoid_f32(base.ctx, &enc, &gate_pack_p, &q_pack_p)?;
@@ -16112,6 +16739,42 @@ mod tests {
         run_scenario("T=5 single-chunk", 5, 8, 0);
         run_scenario("T=11/P=8 multi-chunk", 11, 8, 0);
         run_scenario("start_position>0 (prefix=2, T=6)", 6, 8, 2);
+        run_scenario(
+            "A3B packed-attn active-shape (prefix=4096, T=4, P=8)",
+            4,
+            8,
+            4096,
+        );
+        run_scenario(
+            "A3B packed-attn threshold-cross (prefix=4095, T=2, P=8)",
+            2,
+            8,
+            4095,
+        );
+        run_scenario(
+            "A3B packed-attn single-row (prefix=4096, T=1, P=8)",
+            1,
+            8,
+            4096,
+        );
+        run_scenario(
+            "A3B packed-attn full-tile (prefix=4096, T=8, P=8)",
+            8,
+            8,
+            4096,
+        );
+        run_scenario(
+            "A3B packed-attn multi-tile (prefix=4096, T=16, P=16)",
+            16,
+            16,
+            4096,
+        );
+        run_scenario(
+            "A3B packed-attn late-prefix (prefix=8191, T=2, P=8)",
+            2,
+            8,
+            8191,
+        );
     }
 
     fn cosine_f32(a: &[f32], b: &[f32]) -> f64 {
@@ -16137,3 +16800,4 @@ mod tests {
         out
     }
 }
+const ATTN_PREFILL_V4_PACKED_ROWS: usize = 8;

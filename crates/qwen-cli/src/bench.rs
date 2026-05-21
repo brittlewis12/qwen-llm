@@ -28,12 +28,17 @@ use objc2_metal::{
 use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
-    metal::{KernelEncoder, MetalContext, MetalTensor, encode_touch_bytes_f32},
+    metal::{
+        KernelEncoder, MetalContext, MetalTensor, encode_attn_decode_v4_f32,
+        encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
+        encode_scatter_offset_f32_to_f16, encode_touch_bytes_f32, with_attn_v4_group_tile_override,
+    },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
         MetalDFlashVerifyScratch, prefill_tokens_prompt_only_profiled,
         prefill_tokens_with_multi_hidden, prefill_tokens_with_multi_hidden_profiled,
     },
+    metal_forward::encode_mat_mat_dispatch,
     metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     prefix_cache::PrefixCache,
@@ -222,6 +227,10 @@ enum Cmd {
     /// Tokenizer microbench: compare native GGUF Qwen35 tokenizer against
     /// the current llama.cpp FFI oracle for encode/decode parity + speed.
     Tok(TokArgs),
+    #[command(hide = true)]
+    AttnPrefillMicro(AttnPrefillMicroArgs),
+    #[command(hide = true)]
+    AttnFrontMicro(AttnFrontMicroArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -981,6 +990,36 @@ struct TokArgs {
     add_special: bool,
 }
 
+#[derive(Parser, Debug)]
+struct AttnPrefillMicroArgs {
+    /// Path to a GGUF file.
+    #[arg(
+        short = 'm',
+        long,
+        default_value = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+    )]
+    model: PathBuf,
+    /// Absolute position of the first packed query row.
+    #[arg(long, default_value = "16384")]
+    base_pos: usize,
+    /// Number of packed query rows.
+    #[arg(long, default_value = "128")]
+    rows: usize,
+    /// Split-K partitions.
+    #[arg(long, default_value = "64")]
+    nwg: usize,
+}
+
+#[derive(Parser, Debug)]
+struct AttnFrontMicroArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Number of packed rows.
+    #[arg(long, default_value = "1024")]
+    rows: usize,
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1003,7 +1042,334 @@ fn main() -> Result<()> {
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
         Cmd::Dflash(a) => run_dflash(a),
         Cmd::Tok(a) => run_tok(a),
+        Cmd::AttnPrefillMicro(a) => run_attn_prefill_micro(a),
+        Cmd::AttnFrontMicro(a) => run_attn_front_micro(a),
     }
+}
+
+fn run_attn_front_micro(args: AttnFrontMicroArgs) -> Result<()> {
+    let AttnFrontMicroArgs { model, rows } = args;
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    let block = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Attn(a) => Some(a),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("model has no full-attention block"))?;
+    let h = mm.arch.hidden_size as usize;
+    let head_dim = mm.arch.attn_head_dim as usize;
+    let n_q = mm.arch.n_q_heads as usize;
+    let n_kv = mm.arch.n_kv_heads as usize;
+    let q_dim = n_q * head_dim;
+    let kv_dim = n_kv * head_dim;
+    let fused_out = 2 * q_dim + 2 * kv_dim;
+
+    let x: Vec<f32> = (0..rows * h)
+        .map(|i| ((i % 37) as f32 - 18.0) * 1e-2)
+        .collect();
+    let as_bytes = |xs: &[f32]| unsafe {
+        std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs))
+    };
+    let x_t = MetalTensor::from_bytes(&ctx, as_bytes(&x), vec![(rows * h) as u64], GgmlType::F32)?;
+
+    let read_tensor_bytes = |t: &MetalTensor| -> Vec<u8> {
+        let n = t.n_bytes() as usize;
+        let mut out = vec![0u8; n];
+        unsafe {
+            let src = (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize);
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+        }
+        out
+    };
+    let mut fused_bytes = Vec::new();
+    fused_bytes.extend_from_slice(&read_tensor_bytes(&block.q));
+    fused_bytes.extend_from_slice(&read_tensor_bytes(&block.k));
+    fused_bytes.extend_from_slice(&read_tensor_bytes(&block.v));
+    let fused_w = MetalTensor::from_bytes(
+        &ctx,
+        &fused_bytes,
+        vec![h as u64, fused_out as u64],
+        GgmlType::Q8_0,
+    )?;
+
+    let q_out = MetalTensor::zeros_f32(&ctx, vec![(rows * 2 * q_dim) as u64])?;
+    let k_out = MetalTensor::zeros_f32(&ctx, vec![(rows * kv_dim) as u64])?;
+    let v_out = MetalTensor::zeros_f32(&ctx, vec![(rows * kv_dim) as u64])?;
+    let fused_out_t = MetalTensor::zeros_f32(&ctx, vec![(rows * fused_out) as u64])?;
+
+    let t = Instant::now();
+    {
+        let cmd = ctx.queue.commandBuffer().context("separate cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_mat_mat_dispatch(&ctx, &enc, &block.q, &x_t, &q_out, h, 2 * q_dim, rows)?;
+        encode_mat_mat_dispatch(&ctx, &enc, &block.k, &x_t, &k_out, h, kv_dim, rows)?;
+        encode_mat_mat_dispatch(&ctx, &enc, &block.v, &x_t, &v_out, h, kv_dim, rows)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+    let separate_ms = t.elapsed().as_secs_f64() * 1e3;
+
+    let t = Instant::now();
+    {
+        let cmd = ctx.queue.commandBuffer().context("fused cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_mat_mat_dispatch(&ctx, &enc, &fused_w, &x_t, &fused_out_t, h, fused_out, rows)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+    let fused_ms = t.elapsed().as_secs_f64() * 1e3;
+
+    let read_back = |t: &MetalTensor| -> Vec<f32> {
+        let n = t.n_elements() as usize;
+        let mut out = vec![0.0f32; n];
+        unsafe {
+            let src = (t.buffer.contents().as_ptr() as *const f32).add((t.offset / 4) as usize);
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+        }
+        out
+    };
+    let q = read_back(&q_out);
+    let k = read_back(&k_out);
+    let v = read_back(&v_out);
+    let fused = read_back(&fused_out_t);
+    let row_q = 2 * q_dim;
+    let row_kv = kv_dim;
+    let row_f = fused_out;
+    let mut max_abs = 0.0f32;
+    for row in 0..rows {
+        let q_off = row * row_q;
+        let k_off = row * row_kv;
+        let f_off = row * row_f;
+        for i in 0..row_q {
+            max_abs = max_abs.max((q[q_off + i] - fused[f_off + i]).abs());
+        }
+        for i in 0..row_kv {
+            max_abs = max_abs.max((k[k_off + i] - fused[f_off + row_q + i]).abs());
+            max_abs = max_abs.max((v[k_off + i] - fused[f_off + row_q + row_kv + i]).abs());
+        }
+    }
+    println!(
+        "[attn-front-micro] rows={} separate_ms={:.2} fused_ms={:.2} speedup={:.3} max|Δ|={:.2e}",
+        rows,
+        separate_ms,
+        fused_ms,
+        separate_ms / fused_ms,
+        max_abs
+    );
+    Ok(())
+}
+
+fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
+    let AttnPrefillMicroArgs {
+        model,
+        base_pos,
+        rows,
+        nwg,
+    } = args;
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    const HD: usize = 256;
+    let N_Q: usize = m.arch.n_q_heads as usize;
+    let N_KV: usize = m.arch.n_kv_heads as usize;
+    let group_tile = match (N_Q, N_KV) {
+        (16, 2) => 2,
+        (32, 2) => 4,
+        _ => 0,
+    };
+    if group_tile == 0 {
+        anyhow::bail!(
+            "attn-prefill-micro unsupported shape n_q={} n_kv={}",
+            N_Q,
+            N_KV
+        );
+    }
+    if m.arch.attn_head_dim as usize != HD {
+        anyhow::bail!(
+            "attn-prefill-micro only supports head_dim=256, got {}",
+            m.arch.attn_head_dim
+        );
+    }
+    const TILE_C: usize = 64;
+    let kv_dim = N_KV * HD;
+    let n_pos = base_pos + rows;
+
+    let q_rows: Vec<f32> = (0..rows * N_Q * HD)
+        .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+        .collect();
+    let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+        .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+        .collect();
+    let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+        .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+        .collect();
+
+    let as_bytes = |xs: &[f32]| unsafe {
+        std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs))
+    };
+
+    let q_t = MetalTensor::from_bytes(
+        &ctx,
+        as_bytes(&q_rows),
+        vec![(rows * N_Q * HD) as u64],
+        GgmlType::F32,
+    )?;
+    let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64])?;
+    let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64])?;
+    for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+        let src_t = MetalTensor::from_bytes(
+            &ctx,
+            as_bytes(src_f32.as_slice()),
+            vec![src_f32.len() as u64],
+            GgmlType::F32,
+        )?;
+        let cmd = ctx.queue.commandBuffer().context("prep cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_scatter_offset_f32_to_f16(&ctx, &enc, &src_t, dst, 0, src_f32.len())?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+
+    let out_baseline = MetalTensor::zeros_f32(&ctx, vec![(rows * N_Q * HD) as u64])?;
+    let out_packed = MetalTensor::zeros_f32(&ctx, vec![(rows * N_Q * HD) as u64])?;
+    let o_partial_row =
+        MetalTensor::zeros_f32(&ctx, vec![(N_KV * nwg * (N_Q / N_KV) * HD) as u64])?;
+    let ml_partial_row =
+        MetalTensor::zeros_f32(&ctx, vec![(N_KV * nwg * (N_Q / N_KV) * 2) as u64])?;
+    let o_partial_packed =
+        MetalTensor::zeros_f32(&ctx, vec![(rows * N_KV * nwg * (N_Q / N_KV) * HD) as u64])?;
+    let ml_partial_packed =
+        MetalTensor::zeros_f32(&ctx, vec![(rows * N_KV * nwg * (N_Q / N_KV) * 2) as u64])?;
+
+    let t = Instant::now();
+    {
+        let cmd = ctx.queue.commandBuffer().context("baseline cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        with_attn_v4_group_tile_override(group_tile, || {
+            for row in 0..rows {
+                let q_row = q_t.view_subrange((row * N_Q * HD) as u64, vec![(N_Q * HD) as u64]);
+                let out_row =
+                    out_baseline.view_subrange((row * N_Q * HD) as u64, vec![(N_Q * HD) as u64]);
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    &enc,
+                    &q_row,
+                    &k_cache,
+                    &v_cache,
+                    &o_partial_row,
+                    &ml_partial_row,
+                    &out_row,
+                    N_Q,
+                    N_KV,
+                    HD,
+                    base_pos + row + 1,
+                    nwg,
+                    TILE_C,
+                )
+                .expect("decode-shaped oracle attention");
+            }
+        });
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+    let baseline_wall = t.elapsed().as_secs_f64() * 1e3;
+
+    let t = Instant::now();
+    {
+        let cmd = ctx.queue.commandBuffer().context("packed cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        match (N_Q, N_KV) {
+            (16, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
+                &ctx,
+                &enc,
+                &q_t,
+                &k_cache,
+                &v_cache,
+                &o_partial_packed,
+                &ml_partial_packed,
+                &out_packed,
+                rows,
+                base_pos,
+                nwg,
+            )?,
+            (32, 2) => encode_attn_prefill_v4_g16_t4_q2_c64_f32(
+                &ctx,
+                &enc,
+                &q_t,
+                &k_cache,
+                &v_cache,
+                &o_partial_packed,
+                &ml_partial_packed,
+                &out_packed,
+                rows,
+                base_pos,
+                nwg,
+            )?,
+            _ => anyhow::bail!(
+                "attn-prefill-micro unsupported shape n_q={} n_kv={}",
+                N_Q,
+                N_KV
+            ),
+        }
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+    let packed_wall = t.elapsed().as_secs_f64() * 1e3;
+
+    let read_back = |t: &MetalTensor| -> Vec<f32> {
+        let n = t.n_elements() as usize;
+        let mut out = vec![0.0f32; n];
+        unsafe {
+            let src = (t.buffer.contents().as_ptr() as *const f32).add((t.offset / 4) as usize);
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+        }
+        out
+    };
+    let baseline = read_back(&out_baseline);
+    let packed = read_back(&out_packed);
+    let max_abs = packed
+        .iter()
+        .zip(baseline.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    let dot: f64 = packed
+        .iter()
+        .zip(baseline.iter())
+        .map(|(a, b)| (*a as f64) * (*b as f64))
+        .sum();
+    let na: f64 = packed
+        .iter()
+        .map(|x| (*x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let nb: f64 = baseline
+        .iter()
+        .map(|x| (*x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let cos = dot / (na * nb);
+    println!(
+        "[attn-prefill-micro] base_pos={} rows={} nwg={} decode_loop_ms={:.2} packed_ms={:.2} speedup={:.3} max|Δ|={:.2e} cos={:.6}",
+        base_pos,
+        rows,
+        nwg,
+        baseline_wall,
+        packed_wall,
+        baseline_wall / packed_wall,
+        max_abs,
+        cos
+    );
+    Ok(())
 }
 
 fn run_tok(args: TokArgs) -> Result<()> {
@@ -2693,7 +3059,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
         };
         // Wrap in an array to match `llama-bench -o json`.
         let arr = vec![row];
-        let json = serde_json::to_string_pretty(&arr).context("serialize pp bench row")?;
+        let json = serde_json::to_string(&arr).context("serialize pp bench row")?;
         println!("{json}");
     } else {
         eprintln!();

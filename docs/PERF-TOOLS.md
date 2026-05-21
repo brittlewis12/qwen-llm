@@ -419,6 +419,32 @@ Rules for pp sweeps:
   `QWEN_PP_RESIDENCY_SET=1` removes expert-bank first-touch outliers. Report those
   knobs explicitly and do not claim them as steady-state throughput wins.
 
+When long-prompt variants are close enough that run-order drift or thermal sag
+can flip the ranking, use the cooled sweep harness instead of ad hoc shell
+loops:
+
+```sh
+uv run scripts/profile/prefill_sweep.py \
+  --model "$MODEL" \
+  --n-prompt 19591 \
+  --runs 1 \
+  --no-warmup \
+  --cooldown-seconds 15 \
+  --variant baseline-a \
+  --variant packed-r4:QWEN_PREFILL_ATTN_PACKED_G16=1,QWEN_PREFILL_ATTN_PACKED_G16_ROWS=4 \
+  --variant baseline-b \
+  --output target/profiles/prefill-sweep.json
+```
+
+Rules for the cooled harness:
+
+- Keep one or more repeated baseline anchors in the same batch.
+- Use fresh processes per variant; that keeps env identity simple and captures
+  model-load / residency side effects in the outer wall.
+- Treat `pmset -g therm` and `memory_pressure -Q` as supporting probes only;
+  on this box they stayed flat even when long A10B rankings drifted.
+- Split long sweeps into smaller batches instead of relying on one giant timeout.
+
 ### Real rollout prompt lane
 
 Synthetic `pp<N>` remains the fast scoreboard harness, but it is not the only

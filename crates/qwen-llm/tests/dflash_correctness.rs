@@ -2334,6 +2334,135 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
 }
 
 #[test]
+#[ignore]
+fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_shapes() {
+    let model_path = "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf";
+    if !std::path::Path::new(model_path).exists() {
+        eprintln!("[prefill-vs-single-a10b-packed] skipped — target GGUF missing");
+        return;
+    }
+    let ctx = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[prefill-vs-single-a10b-packed] loading 122B A10B…");
+    let g = GgufFile::open(model_path).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
+    let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+    let mf = MetalForward::new(&ctx, &mm);
+    let arch = &mm.arch;
+
+    let run_scenario = |label: &str, total_n: usize, p: usize, prefix_len: usize| {
+        let n_total_with_prefix = prefix_len + total_n;
+        let all_tokens: Vec<i32> = (0..n_total_with_prefix)
+            .map(|i| ((i * 19 + 7) % (arch.vocab_size as usize - 1)) as i32 + 1)
+            .collect();
+        let prefix_tokens = &all_tokens[..prefix_len];
+        let token_ids = &all_tokens[prefix_len..];
+        let cap = n_total_with_prefix + 16;
+
+        eprintln!(
+            "[prefill-vs-single-a10b-packed] {label}: prefix={prefix_len} T={total_n} P={p} chunks={}",
+            total_n.div_ceil(p)
+        );
+
+        let mut sess_a = MetalSession::fresh(&ctx, &mm, cap).expect("sess A");
+        for (i, &tid) in prefix_tokens.iter().enumerate() {
+            mf.single_token(tid, i as u32, &mut sess_a)
+                .expect("oracle prefix advance");
+        }
+        let mut last_a = Vec::new();
+        for (i, &tid) in token_ids.iter().enumerate() {
+            last_a = mf
+                .single_token(tid, (prefix_len + i) as u32, &mut sess_a)
+                .expect("oracle forward");
+        }
+
+        let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
+        for (i, &tid) in prefix_tokens.iter().enumerate() {
+            mf.single_token(tid, i as u32, &mut sess_b)
+                .expect("experimental prefix advance");
+        }
+        let mut layer_scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+        let last_b = prefill_tokens_with_multi_hidden(
+            &mf,
+            token_ids,
+            prefix_len as u32,
+            &mut sess_b,
+            &mut layer_scratch,
+            &[],
+            None,
+        )
+        .expect("prefill");
+
+        assert_eq!(last_a.len(), last_b.len(), "{label}: logits len mismatch");
+        let cos_logits = cosine_27b(&last_a, &last_b);
+        eprintln!("[prefill-vs-single-a10b-packed] {label}: cos(logits)={cos_logits:.6}");
+        assert!(
+            cos_logits >= 0.999,
+            "{label}: logits cos={cos_logits} < 0.999"
+        );
+
+        assert_eq!(sess_a.gdn_state.len(), sess_b.gdn_state.len());
+        let mut gdn_state_min_cos = f64::INFINITY;
+        let mut gdn_conv_min_cos = f64::INFINITY;
+        for gi in 0..sess_a.gdn_state.len() {
+            let a_state = read_tensor_f32_27b(&sess_a.gdn_state[gi]);
+            let b_state = read_tensor_f32_27b(&sess_b.gdn_state[gi]);
+            gdn_state_min_cos = gdn_state_min_cos.min(cosine_27b(&a_state, &b_state));
+            let a_conv = read_tensor_f32_27b(&sess_a.gdn_conv[gi]);
+            let b_conv = read_tensor_f32_27b(&sess_b.gdn_conv[gi]);
+            gdn_conv_min_cos = gdn_conv_min_cos.min(cosine_27b(&a_conv, &b_conv));
+        }
+        assert!(
+            gdn_state_min_cos >= 0.999,
+            "{label}: GDN state cos_min={gdn_state_min_cos} < 0.999"
+        );
+        assert!(
+            gdn_conv_min_cos >= 0.999,
+            "{label}: GDN conv cos_min={gdn_conv_min_cos} < 0.999"
+        );
+
+        assert_eq!(sess_a.kv_n_pos.len(), sess_b.kv_n_pos.len());
+        let kv_prefix_elems =
+            n_total_with_prefix * (arch.n_kv_heads as usize * arch.attn_head_dim as usize);
+        let mut kv_k_min_cos = f64::INFINITY;
+        let mut kv_v_min_cos = f64::INFINITY;
+        for ai in 0..sess_a.kv_k.len() {
+            assert_eq!(
+                sess_a.kv_n_pos[ai], sess_b.kv_n_pos[ai],
+                "{label}: kv_n_pos[{ai}] mismatch ({} vs {})",
+                sess_a.kv_n_pos[ai], sess_b.kv_n_pos[ai]
+            );
+            let a_k = read_kv_prefix_f16_to_f32(&sess_a.kv_k[ai], kv_prefix_elems);
+            let b_k = read_kv_prefix_f16_to_f32(&sess_b.kv_k[ai], kv_prefix_elems);
+            let a_v = read_kv_prefix_f16_to_f32(&sess_a.kv_v[ai], kv_prefix_elems);
+            let b_v = read_kv_prefix_f16_to_f32(&sess_b.kv_v[ai], kv_prefix_elems);
+            kv_k_min_cos = kv_k_min_cos.min(cosine_27b(&a_k, &b_k));
+            kv_v_min_cos = kv_v_min_cos.min(cosine_27b(&a_v, &b_v));
+        }
+        assert!(
+            kv_k_min_cos >= 0.999,
+            "{label}: KV K cos_min={kv_k_min_cos} < 0.999"
+        );
+        assert!(
+            kv_v_min_cos >= 0.999,
+            "{label}: KV V cos_min={kv_v_min_cos} < 0.999"
+        );
+    };
+
+    run_scenario("active-shape prefix4096 T4 P8", 4, 8, 4096);
+    run_scenario("threshold-cross prefix4095 T2 P8", 2, 8, 4095);
+    run_scenario("single-row prefix4096 T1 P8", 1, 8, 4096);
+    run_scenario("full-tile prefix4096 T8 P8", 8, 8, 4096);
+    run_scenario("multi-chunk prefix4096 T12 P8", 12, 8, 4096);
+}
+
+#[test]
 fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
     let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
     if !std::path::Path::new(model_path).exists() {

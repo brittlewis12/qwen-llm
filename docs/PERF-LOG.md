@@ -6,6 +6,104 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-21 — Default Long-Prefill Packed Attention For A3B/A10B, And Re-Rank The Residual Gap
+
+Status: the prompt-native packed prefill path is now default-on for the proven
+long-prefill MoE attention shapes (`group=8` / `group=16`, `head_dim=256`,
+`n_pos >= 4096`) with default packed row groups set to `4`.
+
+### What Changed
+
+- Defaulted the packed prefill attention selector in `metal_dflash` for the
+  proven long-context MoE shapes instead of keeping both A3B/group-8 and
+  A10B/group-16 behind env-only gates.
+- Fixed the scratch-allocation bug that appeared once the auto path became live:
+  packed-attention partial scratch can no longer stay `[1]` when the auto path
+  is eligible.
+- Added A10B packed-attention active-shape correctness coverage in
+  `crates/qwen-llm/tests/dflash_correctness.rs` and generalized the per-layer
+  packed-vs-old oracle plumbing to group-16.
+- Added `scripts/profile/prefill_sweep.py`, a cooled sequential sweep harness
+  that records per-variant thermal / memory snapshots and repeated baseline
+  anchors so long-prompt row-group comparisons are less vulnerable to run-order
+  drift.
+- Split the packed prefill kernels into main-only and reduce-only entry points
+  for attribution, then added `attn_prefill_v4_main_reduce_breakdown_moe_shapes`.
+
+### Measurements
+
+Coarse system signals stayed flat even when benchmark rankings drifted:
+
+- `pmset -g therm`: still reported no thermal/performance warning state
+- `memory_pressure -Q`: stayed around `94-95%` free
+
+That is now an explicit negative result: on this box, those coarse OS probes are
+too weak to catch the long-prompt run-order drift that can still move A10B by
+double-digit percent. Repeated baseline anchors matter more.
+
+Cooled A10B synthetic sweep (`19,591` tok, `--no-warmup`, fresh process per
+variant, `15s` cooldown, sequential):
+
+- baseline-a: `189.21 t/s`
+- packed rows=`2`: `206.36 t/s`
+- packed rows=`4`: `224.54 t/s`
+- packed rows=`8`: `198.46 t/s`
+- baseline-b: `196.05 t/s`
+
+So the first clean A10B row-group ranking is:
+
+- `rows=4` best
+- `rows=2` positive but smaller
+- `rows=8` roughly noise / mildly positive
+
+Real same-fixture A10B long replay (`v02_reva`, `25` messages, strip replay)
+also converts with the same row-group choice:
+
+- baseline: `195.18 t/s`
+- packed rows=`4`: `204.86 t/s`
+
+Residual long synthetic gap versus `llama.cpp` after the packed-attention wins:
+
+- A3B `34,502 tok`: qwen default packed `~507.8 t/s` vs llama `~820.3 t/s`
+  (`~0.62x`)
+- A10B `19,591 tok`: qwen default packed `~221.7 t/s` vs llama `~324.7 t/s`
+  (`~0.68x`)
+
+Packed-attention main/reduce attribution now says the remaining residual is not
+primarily the standalone reduce pass:
+
+- A3B rows=`4`, base_pos=`32768`: main `~0.469 ms/call`, reduce `~0.022 ms/call`
+- A3B rows=`8`, base_pos=`32768`: main `~1.362 ms/call`, reduce `~0.028 ms/call`
+- A10B rows=`4`, base_pos=`32768`: main `~1.985 ms/call`, reduce `~0.026 ms/call`
+- A10B rows=`8`, base_pos=`32768`: main `~2.971 ms/call`, reduce `~0.034 ms/call`
+
+This is the key negative result for the next kernel branch: the explicit
+reduce-only reread is tiny. The remaining packed-attention wall is dominated by
+the main pass, which still includes the partial writes, KV reads, online
+softmax, and execution-shape costs.
+
+### Validation
+
+- `cargo test -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke --release -- --nocapture`
+- `QWEN_PREFILL_ATTN_PACKED_G16=1 QWEN_PREFILL_ATTN_PACKED_G16_ORACLE=1 cargo test -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_shapes --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm attn_prefill_v4_main_reduce_breakdown_moe_shapes --release -- --ignored --nocapture`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `uv run scripts/profile/prefill_sweep.py ...`
+- sequential `qwen-bench pp` long synthetic / real-lane spot checks
+- sequential `llama-bench -p <N> -n 0 -r 1 --no-warmup -o json` long synthetic spot checks
+
+### Current Read
+
+- The prompt-native packed path is now a banked production win for the proven
+  long-prefill MoE attention envelopes, not just an experiment.
+- A10B is no longer blocked on correctness or row-group uncertainty; `rows=4`
+  is the keeper default until a new main-pass kernel proves otherwise.
+- The next attention-side kernel branch should target the packed **main pass**,
+  not the standalone reduce kernel.
+- The strongest remaining systems lesson is methodological: long-prompt run-order
+  drift is real even when coarse thermal/memory probes look flat, so repeated
+  baselines and cooled sequential sweeps need to stay in the standard harness.
+
 ## 2026-05-21 — Real Rollout Prompt Lane And A3B Group-8 Long-Prefill Attention Breakthrough
 
 Status: new prompt-benchmarking and attention-diagnostic work is landed as

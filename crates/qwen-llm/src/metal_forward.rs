@@ -218,6 +218,7 @@ pub struct MetalAttnBlock {
     pub q: MetalTensor, // outputs 2x q_dim — Q + gate
     pub k: MetalTensor,
     pub v: MetalTensor,
+    pub qkv_fused: Option<MetalTensor>,
     pub o: MetalTensor,
     pub q_norm: MetalTensor,
     pub k_norm: MetalTensor,
@@ -311,6 +312,57 @@ impl MetalModel {
             })
         };
 
+        let load_attn_qkv_fused = |q: &MetalTensor,
+                                   k: &MetalTensor,
+                                   v: &MetalTensor|
+         -> Result<Option<MetalTensor>, MfError> {
+            let enabled = matches!(
+                std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            );
+            if !enabled {
+                return Ok(None);
+            }
+            if !(q.dtype == k.dtype
+                && q.dtype == v.dtype
+                && q.dtype == GgmlType::Q8_0
+                && q.shape.len() == 2
+                && k.shape.len() == 2
+                && v.shape.len() == 2
+                && q.shape[0] == k.shape[0]
+                && q.shape[0] == v.shape[0])
+            {
+                return Ok(None);
+            }
+            let read_bytes = |t: &MetalTensor| -> Vec<u8> {
+                let n = t.n_bytes() as usize;
+                let mut out = vec![0u8; n];
+                unsafe {
+                    let src = (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize);
+                    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+                }
+                out
+            };
+            let qb = read_bytes(q);
+            let kb = read_bytes(k);
+            let vb = read_bytes(v);
+            let mut bytes = Vec::with_capacity(qb.len() + kb.len() + vb.len());
+            bytes.extend_from_slice(&qb);
+            bytes.extend_from_slice(&kb);
+            bytes.extend_from_slice(&vb);
+            let out_dim = checked_u64_add(
+                checked_u64_add(q.shape[1], k.shape[1], "attn q+k out dim overflow")?,
+                v.shape[1],
+                "attn qkv fused out dim overflow",
+            )?;
+            Ok(Some(MetalTensor::from_bytes(
+                ctx,
+                &bytes,
+                vec![q.shape[0], out_dim],
+                q.dtype,
+            )?))
+        };
+
         let mut blocks = Vec::with_capacity(model.blocks.len());
         for b in &model.blocks {
             match b {
@@ -334,15 +386,19 @@ impl MetalModel {
                     }));
                 }
                 Block::Attn(a) => {
+                    let q = load_weight(a.q)?;
+                    let k = load_weight(a.k)?;
+                    let v = load_weight(a.v)?;
                     blocks.push(MetalBlock::Attn(MetalAttnBlock {
                         attn_norm: load_f32(a.attn_norm)?,
                         post_attn_norm: load_f32(a.post_attention_norm)?,
                         ffn_gate: load_weight(a.ffn_gate)?,
                         ffn_up: load_weight(a.ffn_up)?,
                         ffn_down: load_weight(a.ffn_down)?,
-                        q: load_weight(a.q)?,
-                        k: load_weight(a.k)?,
-                        v: load_weight(a.v)?,
+                        qkv_fused: load_attn_qkv_fused(&q, &k, &v)?,
+                        q,
+                        k,
+                        v,
                         o: load_weight(a.o)?,
                         q_norm: load_f32(a.q_norm)?,
                         k_norm: load_f32(a.k_norm)?,

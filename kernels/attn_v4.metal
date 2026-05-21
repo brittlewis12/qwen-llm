@@ -822,6 +822,379 @@ ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c64_f32,   2, 64)
 ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c128_f32,  2, 128)
 
 // ============================================================================
+// Packed prefill microproof: A3B/group8 prompt-native attention over QT rows.
+//
+// This is intentionally narrow and specialized:
+// - GROUP_TOTAL = 8, GROUP_TILE = 2
+// - C = 64
+// - F16 KV cache
+// - Q rows are already packed, normed, and RoPE'd
+// - keys 0..base_pos+q_row are causally visible for each packed query row
+//
+// Grid: (n_kv_heads, n_q_tiles * (GROUP_TOTAL/GROUP_TILE), n_partitions)
+// where n_q_tiles = ceil(n_rows / QT).
+//
+// Partial output shape:
+//   o_partial  [n_rows, n_kv_heads, NWG, GROUP_TOTAL, DV]
+//   ml_partial [n_rows, n_kv_heads, NWG, GROUP_TOTAL, 2]
+//
+// Reduce kernel grid: (n_q_heads, n_rows, 1)
+// ============================================================================
+
+struct attn_v4_prefill_args {
+    uint  n_rows;
+    uint  n_q_heads;
+    uint  n_kv_heads;
+    uint  head_dim;
+    uint  n_pos;
+    uint  kv_stride;
+    uint  n_partitions;
+    uint  rows_per_partition;
+    uint  base_pos;
+    float scale;
+};
+
+template <ushort GROUP_TOTAL, ushort GROUP_TILE, ushort QT>
+inline void attn_v4_prefill_main_subgroup_c64_body(
+        constant attn_v4_prefill_args & args,
+        device const float    * q,
+        device const half     * k_cache,
+        device const half     * v_cache,
+        device       float    * o_partial,
+        device       float    * ml_partial,
+        threadgroup  half     * sq,
+        threadgroup  float    * ss,
+        uint3  tgpig,
+        ushort tiisg) {
+    constexpr ushort C = 64;
+
+    const uint kvh = tgpig.x;
+    const uint subgroup_idx = tgpig.y % (GROUP_TOTAL / GROUP_TILE);
+    const uint q_tile = tgpig.y / (GROUP_TOTAL / GROUP_TILE);
+    const uint iwg = tgpig.z;
+    if (kvh >= args.n_kv_heads || iwg >= args.n_partitions) return;
+
+    const ushort g_base = (ushort)(subgroup_idx * GROUP_TILE);
+    const uint row_base = q_tile * QT;
+    if (row_base >= args.n_rows) return;
+
+    const uint p_start = iwg * args.rows_per_partition;
+    const uint p_end_raw = p_start + args.rows_per_partition;
+    const uint p_end = p_end_raw < args.n_pos ? p_end_raw : args.n_pos;
+
+    threadgroup half4 * sq4 = (threadgroup half4 *)sq;
+    for (ushort qr = 0; qr < QT; ++qr) {
+        const uint row = row_base + qr;
+        const bool row_active = row < args.n_rows;
+        device const float4 * q4_base = row_active
+            ? (device const float4 *)(q + ((ulong)row * args.n_q_heads + (ulong)kvh * GROUP_TOTAL + (ulong)g_base) * DK)
+            : nullptr;
+        for (ushort g = 0; g < GROUP_TILE; ++g) {
+            for (ushort ii = 0; ii < DK4_PER_LANE; ++ii) {
+                const ushort idx = (qr * GROUP_TILE + g) * DK4 + ii * NW + tiisg;
+                float4 qv = row_active ? q4_base[g * DK4 + ii * NW + tiisg] : float4(0.0f);
+                sq4[idx] = half4(qv * args.scale);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float  m_state[QT][GROUP_TILE];
+    float  l_state[QT][GROUP_TILE];
+    float4 o_acc  [QT][GROUP_TILE][DV4_PER_LANE];
+    for (ushort qr = 0; qr < QT; ++qr) {
+        for (ushort g = 0; g < GROUP_TILE; ++g) {
+            m_state[qr][g] = -INFINITY;
+            l_state[qr][g] = 0.0f;
+            for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
+                o_acc[qr][g][ii] = float4(0.0f);
+            }
+        }
+    }
+
+    if (p_start >= p_end) {
+        for (ushort qr = 0; qr < QT; ++qr) {
+            const uint row = row_base + qr;
+            if (row >= args.n_rows) continue;
+            device float4 * o_out_base = (device float4 *)(
+                o_partial + ((((ulong)row * args.n_kv_heads + kvh) * args.n_partitions + iwg) * GROUP_TOTAL + g_base) * DV
+            );
+            for (ushort g = 0; g < GROUP_TILE; ++g) {
+                for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
+                    o_out_base[g * DV4 + ii * NW + tiisg] = float4(0.0f);
+                }
+            }
+            if (tiisg == 0) {
+                device float * ml_base = ml_partial
+                    + ((((ulong)row * args.n_kv_heads + kvh) * args.n_partitions + iwg) * GROUP_TOTAL + g_base) * 2;
+                for (ushort g = 0; g < GROUP_TILE; ++g) {
+                    ml_base[g * 2 + 0] = -INFINITY;
+                    ml_base[g * 2 + 1] = 0.0f;
+                }
+            }
+        }
+        return;
+    }
+
+    for (uint tile_start = p_start; tile_start < p_end; tile_start += C) {
+        const uint tile_end_raw = tile_start + C;
+        const uint tile_end = tile_end_raw < p_end ? tile_end_raw : p_end;
+        const ushort tile_count = (ushort)(tile_end - tile_start);
+
+        for (ushort cc = 0; cc < C; ++cc) {
+            float partial[QT][GROUP_TILE];
+            float qk_sum[QT][GROUP_TILE];
+            for (ushort qr = 0; qr < QT; ++qr) {
+                for (ushort g = 0; g < GROUP_TILE; ++g) {
+                    partial[qr][g] = 0.0f;
+                }
+            }
+
+            const uint k_pos = tile_start + cc;
+            if (cc < tile_count) {
+                device const half4 * pk4 = (device const half4 *)(
+                    k_cache + (ulong)k_pos * args.kv_stride + (ulong)kvh * DK
+                );
+                for (ushort ii = 0; ii < DK4_PER_LANE; ++ii) {
+                    const half4 k_chunk = pk4[ii * NW + tiisg];
+                    const float4 k_f32 = float4(k_chunk);
+                    for (ushort qr = 0; qr < QT; ++qr) {
+                        for (ushort g = 0; g < GROUP_TILE; ++g) {
+                            const ushort idx = (qr * GROUP_TILE + g) * DK4 + ii * NW + tiisg;
+                            const float4 q_f32 = float4(sq4[idx]);
+                            partial[qr][g] += dot(k_f32, q_f32);
+                        }
+                    }
+                }
+            }
+
+            for (ushort qr = 0; qr < QT; ++qr) {
+                for (ushort g = 0; g < GROUP_TILE; ++g) {
+                    qk_sum[qr][g] = simd_sum(partial[qr][g]);
+                }
+            }
+
+            if (tiisg == 0) {
+                for (ushort qr = 0; qr < QT; ++qr) {
+                    const uint row = row_base + qr;
+                    const bool row_active = row < args.n_rows;
+                    const uint q_pos = args.base_pos + row;
+                    for (ushort g = 0; g < GROUP_TILE; ++g) {
+                        const bool allowed = row_active && cc < tile_count && k_pos <= q_pos;
+                        ss[(qr * GROUP_TILE + g) * C + cc] = allowed ? qk_sum[qr][g] : -INFINITY;
+                    }
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (ushort qr = 0; qr < QT; ++qr) {
+            for (ushort g = 0; g < GROUP_TILE; ++g) {
+                float scores[(C + NW - 1) / NW];
+                float weights[(C + NW - 1) / NW];
+                float per_lane_max = -INFINITY;
+                float per_lane_sum = 0.0f;
+
+                for (ushort k = 0; k < (C + NW - 1) / NW; ++k) {
+                    const ushort col = k * NW + tiisg;
+                    scores[k] = (col < C) ? ss[(qr * GROUP_TILE + g) * C + col] : -INFINITY;
+                    per_lane_max = max(per_lane_max, scores[k]);
+                }
+
+                const float tile_max = simd_max(per_lane_max);
+                const float new_m = max(m_state[qr][g], tile_max);
+                const float factor = (m_state[qr][g] == -INFINITY) ? 0.0f
+                                                                     : exp2(m_state[qr][g] - new_m);
+
+                for (ushort k = 0; k < (C + NW - 1) / NW; ++k) {
+                    weights[k] = (scores[k] == -INFINITY) ? 0.0f : exp2(scores[k] - new_m);
+                    per_lane_sum += weights[k];
+                }
+                const float tile_l = simd_sum(per_lane_sum);
+
+                for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
+                    o_acc[qr][g][ii] *= factor;
+                }
+                for (ushort k = 0; k < (C + NW - 1) / NW; ++k) {
+                    const ushort col = k * NW + tiisg;
+                    if (col < C) {
+                        ss[(qr * GROUP_TILE + g) * C + col] = weights[k];
+                    }
+                }
+
+                l_state[qr][g] = l_state[qr][g] * factor + tile_l;
+                m_state[qr][g] = new_m;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (ushort cc = 0; cc < tile_count; ++cc) {
+            device const half4 * pv4 = (device const half4 *)(
+                v_cache + (ulong)(tile_start + cc) * args.kv_stride + (ulong)kvh * DV
+            );
+            for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
+                const half4 v_chunk = pv4[ii * NW + tiisg];
+                const float4 v_f32 = float4(v_chunk);
+                for (ushort qr = 0; qr < QT; ++qr) {
+                    for (ushort g = 0; g < GROUP_TILE; ++g) {
+                        const float w = ss[(qr * GROUP_TILE + g) * C + cc];
+                        o_acc[qr][g][ii] += w * v_f32;
+                    }
+                }
+            }
+        }
+    }
+
+    for (ushort qr = 0; qr < QT; ++qr) {
+        const uint row = row_base + qr;
+        if (row >= args.n_rows) continue;
+        device float4 * o_out_base = (device float4 *)(
+            o_partial + ((((ulong)row * args.n_kv_heads + kvh) * args.n_partitions + iwg) * GROUP_TOTAL + g_base) * DV
+        );
+        for (ushort g = 0; g < GROUP_TILE; ++g) {
+            for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
+                o_out_base[g * DV4 + ii * NW + tiisg] = o_acc[qr][g][ii];
+            }
+        }
+        if (tiisg == 0) {
+            device float * ml_base = ml_partial
+                + ((((ulong)row * args.n_kv_heads + kvh) * args.n_partitions + iwg) * GROUP_TOTAL + g_base) * 2;
+            for (ushort g = 0; g < GROUP_TILE; ++g) {
+                ml_base[g * 2 + 0] = m_state[qr][g];
+                ml_base[g * 2 + 1] = l_state[qr][g];
+            }
+        }
+    }
+}
+
+kernel void kernel_attn_prefill_v4_g8_t2_q2_c64_f32(
+        constant attn_v4_prefill_args & args [[buffer(0)]],
+        device const float    * q          [[buffer(1)]],
+        device const half     * k_cache    [[buffer(2)]],
+        device const half     * v_cache    [[buffer(3)]],
+        device       float    * o_partial  [[buffer(4)]],
+        device       float    * ml_partial [[buffer(5)]],
+        threadgroup  half     * sq         [[threadgroup(0)]],
+        threadgroup  float    * ss         [[threadgroup(1)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_prefill_main_subgroup_c64_body<8, 2, 2>(args, q, k_cache, v_cache, o_partial, ml_partial,
+                                                    sq, ss, tgpig, tiisg);
+}
+
+kernel void kernel_attn_prefill_v4_g16_t4_q2_c64_f32(
+        constant attn_v4_prefill_args & args [[buffer(0)]],
+        device const float    * q          [[buffer(1)]],
+        device const half     * k_cache    [[buffer(2)]],
+        device const half     * v_cache    [[buffer(3)]],
+        device       float    * o_partial  [[buffer(4)]],
+        device       float    * ml_partial [[buffer(5)]],
+        threadgroup  half     * sq         [[threadgroup(0)]],
+        threadgroup  float    * ss         [[threadgroup(1)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_prefill_main_subgroup_c64_body<16, 4, 2>(args, q, k_cache, v_cache, o_partial, ml_partial,
+                                                     sq, ss, tgpig, tiisg);
+}
+
+struct attn_v4_prefill_reduce_args {
+    uint n_rows;
+    uint n_q_heads;
+    uint n_kv_heads;
+    uint head_dim;
+    uint n_partitions;
+};
+
+template <ushort GROUP>
+inline void attn_v4_prefill_reduce_rows_body(
+        constant attn_v4_prefill_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint qh = tgpig.x;
+    const uint row = tgpig.y;
+    if (qh >= args.n_q_heads || row >= args.n_rows) return;
+    const uint kvh = qh / GROUP;
+    const uint g = qh % GROUP;
+    const uint nwg = args.n_partitions;
+
+    for (ushort pass = 0; pass < 2; ++pass) {
+        const uint part = tiisg + pass * 32;
+        if (part < nwg) {
+            device const float * ml_base = ml_partial
+                + ((((ulong)row * args.n_kv_heads + kvh) * nwg + part) * GROUP + g) * 2;
+            sh_m[part] = ml_base[0];
+            sh_l[part] = ml_base[1];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float m_local = -INFINITY;
+    for (uint part = tiisg; part < nwg; part += 32) {
+        m_local = max(m_local, sh_m[part]);
+    }
+    const float m_global = simd_max(m_local);
+
+    float l_local = 0.0f;
+    for (uint part = tiisg; part < nwg; part += 32) {
+        const float ef = (sh_m[part] == -INFINITY || m_global == -INFINITY)
+            ? 0.0f
+            : exp2(sh_m[part] - m_global);
+        sh_ef[part] = ef;
+        l_local += sh_l[part] * ef;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float l_global = simd_sum(l_local);
+    const float inv_l = (l_global > 0.0f) ? (1.0f / l_global) : 0.0f;
+
+    for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
+        float4 acc = float4(0.0f);
+        for (uint i = 0; i < nwg; ++i) {
+            const float ef = sh_ef[i];
+            const ulong off = ((((ulong)row * args.n_kv_heads + kvh) * nwg + i) * GROUP + g) * DV
+                            + (ulong)(ii * NW + tiisg) * 4;
+            const device float4 * src4 = (device const float4 *)(o_partial + off);
+            acc += (*src4) * ef;
+        }
+        device float4 * out4 = (device float4 *)
+            (out + ((ulong)row * args.n_q_heads + qh) * DV + (ulong)(ii * NW + tiisg) * 4);
+        *out4 = acc * inv_l;
+    }
+}
+
+kernel void kernel_attn_prefill_v4_reduce_rows_g8_f32(
+        constant attn_v4_prefill_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_prefill_reduce_rows_body<8>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
+}
+
+kernel void kernel_attn_prefill_v4_reduce_rows_g16_f32(
+        constant attn_v4_prefill_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_prefill_reduce_rows_body<16>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
+}
+
+// ============================================================================
 // Reduce kernel: combines NWG partials per Q head, normalizes by global l.
 //
 // Grid: (n_q_heads, 1, 1).  Threadgroup: 32 lanes (one simdgroup).

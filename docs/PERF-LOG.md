@@ -6,6 +6,88 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-21 — Packed Main-Pass Knob Attack: QT=4 And NWG=32 Both Fail To Promote
+
+Status: investigation-only follow-up after `v0.103`. No new default path change.
+
+### What Changed
+
+- Added experimental packed-prefill `QT=4` kernel variants for both A3B/group-8
+  and A10B/group-16, plus hidden microbench support in `qwen-bench
+  attn-prefill-micro --qt {2,4}`.
+- Added packed-prefill `NWG` override envs:
+  - `QWEN_PREFILL_ATTN_PACKED_G8_NWG`
+  - `QWEN_PREFILL_ATTN_PACKED_G16_NWG`
+- Warmed the hidden packed-prefill microbench so first-use pipeline compilation
+  does not masquerade as kernel time.
+- Added a first-pass Metal System Trace comparison for A3B packed prefill so the
+  next branch is grounded in end-to-end timeline evidence rather than more body
+  microbench optimism.
+
+### Measurements
+
+The obvious “align host row pack with kernel query tile” hypothesis is now
+falsified.
+
+Warmed packed-body microbench at `base_pos=32768`:
+
+- A3B rows=`4`:
+  - `qt=2`: packed `~0.97 ms`
+  - `qt=4`: packed `~1.80 ms`
+- A3B rows=`8`:
+  - `qt=2`: packed `~1.88 ms`
+  - `qt=4`: packed `~1.95 ms`
+- A10B rows=`4`:
+  - `qt=2`: packed `~2.61 ms`
+  - `qt=4`: packed `~6.28 ms`
+- A10B rows=`8`:
+  - `qt=2`: packed `~3.48 ms`
+  - `qt=4`: packed `~9.58 ms`
+
+So `QT=4` is exact but not promising; it loses across both proven MoE shapes.
+
+The first packed `NWG` sweep produced a more subtle trap.
+
+Body-only warmed microbench, rows=`4`, `qt=2`:
+
+- A3B packed body at `base_pos={8192,16384,32768}` favored `NWG=32` over `64`
+  every time.
+- A10B packed body at the same positions also favored `NWG=32` over `64`.
+
+But that body-only win does **not** convert end-to-end on long prompts.
+
+Long synthetic prompt spot checks:
+
+- A3B `34,502 tok`:
+  - packed `NWG=32`: `~432.2 t/s`
+  - packed `NWG=64`: `~515.3 t/s`
+- A10B `19,591 tok`:
+  - packed `NWG=32`: `~194.7 t/s`
+  - packed `NWG=64`: `~220.9 t/s`
+
+That is the clearest negative result in this phase: packed-body timing alone can
+positively mislead on `NWG`.
+
+A3B `pp4100` Metal System Trace (`NWG=64` vs `32`) did **not** reveal a clean
+queue-gap or command-buffer smoking gun:
+
+- both landed around `~625 t/s`
+- both used `5` command buffers and `15` encoders in the summarized trace
+- `NWG=32` showed somewhat larger long compute gaps in the coarse parser, but the
+  short active-shape prompt itself stayed basically flat
+
+### Current Read
+
+- The next packed-attention branch should **not** be another obvious knob retune.
+- `QT=4` is already falsified enough to stop touching for now.
+- `NWG=32` is a real example of a body-only micro win that fails the real board.
+- The remaining high-EV lens is now either:
+  - richer end-to-end Metal counters/capture on the packed path, or
+  - a more faithful one-layer full-attention-stack microbench that mirrors the
+    live dispatch sequence (`qkv/norm/rope/scatter/body/reduce/gate/o-proj`)
+- Until one of those exists, packed main-pass tuning should be treated as a
+  hypothesis generator, not a promotion gate.
+
 ## 2026-05-21 — Default Long-Prefill Packed Attention For A3B/A10B, And Re-Rank The Residual Gap
 
 Status: the prompt-native packed prefill path is now default-on for the proven

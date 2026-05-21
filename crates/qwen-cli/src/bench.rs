@@ -30,7 +30,8 @@ use qwen_llm::{
     loader::{Model, open_dflash_drafter},
     metal::{
         KernelEncoder, MetalContext, MetalTensor, encode_attn_decode_v4_f32,
-        encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
+        encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
+        encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
         encode_scatter_offset_f32_to_f16, encode_touch_bytes_f32, with_attn_v4_group_tile_override,
     },
     metal_dflash::{
@@ -1008,6 +1009,9 @@ struct AttnPrefillMicroArgs {
     /// Split-K partitions.
     #[arg(long, default_value = "64")]
     nwg: usize,
+    /// Query rows processed per packed main-pass threadgroup.
+    #[arg(long, default_value = "2")]
+    qt: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1172,6 +1176,7 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         base_pos,
         rows,
         nwg,
+        qt,
     } = args;
     let ctx = MetalContext::new().context("init MetalContext")?;
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
@@ -1249,8 +1254,7 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     let ml_partial_packed =
         MetalTensor::zeros_f32(&ctx, vec![(rows * N_KV * nwg * (N_Q / N_KV) * 2) as u64])?;
 
-    let t = Instant::now();
-    {
+    let run_baseline = || -> Result<()> {
         let cmd = ctx.queue.commandBuffer().context("baseline cmd")?;
         let enc = KernelEncoder::begin(&cmd);
         with_attn_v4_group_tile_override(group_tile, || {
@@ -1280,15 +1284,18 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
-    }
+        Ok(())
+    };
+    run_baseline()?;
+    let t = Instant::now();
+    run_baseline()?;
     let baseline_wall = t.elapsed().as_secs_f64() * 1e3;
 
-    let t = Instant::now();
-    {
+    let run_packed = || -> Result<()> {
         let cmd = ctx.queue.commandBuffer().context("packed cmd")?;
         let enc = KernelEncoder::begin(&cmd);
-        match (N_Q, N_KV) {
-            (16, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
+        match (N_Q, N_KV, qt) {
+            (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,
                 &enc,
                 &q_t,
@@ -1301,7 +1308,33 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
                 base_pos,
                 nwg,
             )?,
-            (32, 2) => encode_attn_prefill_v4_g16_t4_q2_c64_f32(
+            (16, 2, 4) => encode_attn_prefill_v4_g8_t2_q4_c64_f32(
+                &ctx,
+                &enc,
+                &q_t,
+                &k_cache,
+                &v_cache,
+                &o_partial_packed,
+                &ml_partial_packed,
+                &out_packed,
+                rows,
+                base_pos,
+                nwg,
+            )?,
+            (32, 2, 2) => encode_attn_prefill_v4_g16_t4_q2_c64_f32(
+                &ctx,
+                &enc,
+                &q_t,
+                &k_cache,
+                &v_cache,
+                &o_partial_packed,
+                &ml_partial_packed,
+                &out_packed,
+                rows,
+                base_pos,
+                nwg,
+            )?,
+            (32, 2, 4) => encode_attn_prefill_v4_g16_t4_q4_c64_f32(
                 &ctx,
                 &enc,
                 &q_t,
@@ -1315,15 +1348,20 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
                 nwg,
             )?,
             _ => anyhow::bail!(
-                "attn-prefill-micro unsupported shape n_q={} n_kv={}",
+                "attn-prefill-micro unsupported shape n_q={} n_kv={} qt={}",
                 N_Q,
-                N_KV
+                N_KV,
+                qt
             ),
         }
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
-    }
+        Ok(())
+    };
+    run_packed()?;
+    let t = Instant::now();
+    run_packed()?;
     let packed_wall = t.elapsed().as_secs_f64() * 1e3;
 
     let read_back = |t: &MetalTensor| -> Vec<f32> {
@@ -1359,10 +1397,11 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         .sqrt();
     let cos = dot / (na * nb);
     println!(
-        "[attn-prefill-micro] base_pos={} rows={} nwg={} decode_loop_ms={:.2} packed_ms={:.2} speedup={:.3} max|Δ|={:.2e} cos={:.6}",
+        "[attn-prefill-micro] base_pos={} rows={} nwg={} qt={} decode_loop_ms={:.2} packed_ms={:.2} speedup={:.3} max|Δ|={:.2e} cos={:.6}",
         base_pos,
         rows,
         nwg,
+        qt,
         baseline_wall,
         packed_wall,
         baseline_wall / packed_wall,

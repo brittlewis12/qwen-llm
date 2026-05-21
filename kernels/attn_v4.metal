@@ -1082,6 +1082,21 @@ kernel void kernel_attn_prefill_v4_g8_t2_q2_c64_f32(
                                                     sq, ss, tgpig, tiisg);
 }
 
+kernel void kernel_attn_prefill_v4_g8_t2_q4_c64_f32(
+        constant attn_v4_prefill_args & args [[buffer(0)]],
+        device const float    * q          [[buffer(1)]],
+        device const half     * k_cache    [[buffer(2)]],
+        device const half     * v_cache    [[buffer(3)]],
+        device       float    * o_partial  [[buffer(4)]],
+        device       float    * ml_partial [[buffer(5)]],
+        threadgroup  half     * sq         [[threadgroup(0)]],
+        threadgroup  float    * ss         [[threadgroup(1)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_prefill_main_subgroup_c64_body<8, 2, 4>(args, q, k_cache, v_cache, o_partial, ml_partial,
+                                                    sq, ss, tgpig, tiisg);
+}
+
 kernel void kernel_attn_prefill_v4_g16_t4_q2_c64_f32(
         constant attn_v4_prefill_args & args [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -1094,6 +1109,21 @@ kernel void kernel_attn_prefill_v4_g16_t4_q2_c64_f32(
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]]) {
     attn_v4_prefill_main_subgroup_c64_body<16, 4, 2>(args, q, k_cache, v_cache, o_partial, ml_partial,
+                                                     sq, ss, tgpig, tiisg);
+}
+
+kernel void kernel_attn_prefill_v4_g16_t4_q4_c64_f32(
+        constant attn_v4_prefill_args & args [[buffer(0)]],
+        device const float    * q          [[buffer(1)]],
+        device const half     * k_cache    [[buffer(2)]],
+        device const half     * v_cache    [[buffer(3)]],
+        device       float    * o_partial  [[buffer(4)]],
+        device       float    * ml_partial [[buffer(5)]],
+        threadgroup  half     * sq         [[threadgroup(0)]],
+        threadgroup  float    * ss         [[threadgroup(1)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_prefill_main_subgroup_c64_body<16, 4, 4>(args, q, k_cache, v_cache, o_partial, ml_partial,
                                                      sq, ss, tgpig, tiisg);
 }
 

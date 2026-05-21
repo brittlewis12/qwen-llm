@@ -5951,6 +5951,148 @@ pub fn encode_attn_prefill_v4_g8_t2_q2_c64_f32(
     Ok(())
 }
 
+pub fn encode_attn_prefill_v4_g8_t2_q4_c64_main_only_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_rows: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    nwg: usize,
+) -> Result<(), MetalError> {
+    const N_Q_HEADS: usize = 16;
+    const N_KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 256;
+    const GROUP: usize = 8;
+    const GROUP_TILE: usize = 2;
+    const QT: usize = 4;
+    const TILE_C: usize = 64;
+
+    if n_rows == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g8_t2_q4_c64",
+            detail: "n_rows must be > 0".into(),
+        });
+    }
+    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g8_t2_q4_c64",
+            detail: format!(
+                "expected F16 KV cache, got {:?}/{:?}",
+                k_cache.dtype, v_cache.dtype
+            ),
+        });
+    }
+    if nwg == 0 || nwg > 64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g8_t2_q4_c64",
+            detail: format!("nwg={nwg} out of range [1, 64]"),
+        });
+    }
+    let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
+    if q_rows.n_elements() != want_q {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g8_t2_q4_c64",
+            detail: format!("q expected {want_q} elements"),
+        });
+    }
+    let want_o_partial = (n_rows * N_KV_HEADS * nwg * GROUP * HEAD_DIM) as u64;
+    let want_ml_partial = (n_rows * N_KV_HEADS * nwg * GROUP * 2) as u64;
+    if o_partial.n_elements() < want_o_partial || ml_partial.n_elements() < want_ml_partial {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g8_t2_q4_c64",
+            detail: format!(
+                "partials too small: o have {} need >= {want_o_partial}, ml have {} need >= {want_ml_partial}",
+                o_partial.n_elements(),
+                ml_partial.n_elements()
+            ),
+        });
+    }
+
+    let n_pos = base_pos + n_rows;
+    let rows_per_partition = n_pos.div_ceil(nwg.max(1));
+    let kv_stride = N_KV_HEADS * HEAD_DIM;
+    let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct MainArgs {
+        n_rows: u32,
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        n_partitions: u32,
+        rows_per_partition: u32,
+        base_pos: u32,
+        scale: f32,
+    }
+    let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g8_t2_q4_c64_f32")?;
+    enc.set_pipeline(&pso_main);
+    enc.set_bytes(
+        0,
+        &MainArgs {
+            n_rows: n_rows as u32,
+            n_q_heads: N_Q_HEADS as u32,
+            n_kv_heads: N_KV_HEADS as u32,
+            head_dim: HEAD_DIM as u32,
+            n_pos: n_pos as u32,
+            kv_stride: kv_stride as u32,
+            n_partitions: nwg as u32,
+            rows_per_partition: rows_per_partition as u32,
+            base_pos: base_pos as u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q_rows);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, o_partial);
+    enc.set_tensor(5, ml_partial);
+    enc.set_threadgroup_memory(0, QT * GROUP_TILE * HEAD_DIM * 2);
+    enc.set_threadgroup_memory(1, QT * GROUP_TILE * TILE_C * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: N_KV_HEADS,
+            height: n_rows.div_ceil(QT) * (GROUP / GROUP_TILE),
+            depth: nwg,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    Ok(())
+}
+
+pub fn encode_attn_prefill_v4_g8_t2_q4_c64_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_rows: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    nwg: usize,
+) -> Result<(), MetalError> {
+    encode_attn_prefill_v4_g8_t2_q4_c64_main_only_f32(
+        ctx, enc, q_rows, k_cache, v_cache, o_partial, ml_partial, n_rows, base_pos, nwg,
+    )?;
+    encode_attn_prefill_v4_g8_t2_q2_c64_reduce_only_f32(
+        ctx, enc, o_partial, ml_partial, out, n_rows, nwg,
+    )?;
+    Ok(())
+}
+
 pub fn encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -6167,6 +6309,148 @@ pub fn encode_attn_prefill_v4_g16_t4_q2_c64_f32(
     nwg: usize,
 ) -> Result<(), MetalError> {
     encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
+        ctx, enc, q_rows, k_cache, v_cache, o_partial, ml_partial, n_rows, base_pos, nwg,
+    )?;
+    encode_attn_prefill_v4_g16_t4_q2_c64_reduce_only_f32(
+        ctx, enc, o_partial, ml_partial, out, n_rows, nwg,
+    )?;
+    Ok(())
+}
+
+pub fn encode_attn_prefill_v4_g16_t4_q4_c64_main_only_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_rows: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    nwg: usize,
+) -> Result<(), MetalError> {
+    const N_Q_HEADS: usize = 32;
+    const N_KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 256;
+    const GROUP: usize = 16;
+    const GROUP_TILE: usize = 4;
+    const QT: usize = 4;
+    const TILE_C: usize = 64;
+
+    if n_rows == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g16_t4_q4_c64",
+            detail: "n_rows must be > 0".into(),
+        });
+    }
+    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g16_t4_q4_c64",
+            detail: format!(
+                "expected F16 KV cache, got {:?}/{:?}",
+                k_cache.dtype, v_cache.dtype
+            ),
+        });
+    }
+    if nwg == 0 || nwg > 64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g16_t4_q4_c64",
+            detail: format!("nwg={nwg} out of range [1, 64]"),
+        });
+    }
+    let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
+    if q_rows.n_elements() != want_q {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g16_t4_q4_c64",
+            detail: format!("q expected {want_q} elements"),
+        });
+    }
+    let want_o_partial = (n_rows * N_KV_HEADS * nwg * GROUP * HEAD_DIM) as u64;
+    let want_ml_partial = (n_rows * N_KV_HEADS * nwg * GROUP * 2) as u64;
+    if o_partial.n_elements() < want_o_partial || ml_partial.n_elements() < want_ml_partial {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g16_t4_q4_c64",
+            detail: format!(
+                "partials too small: o have {} need >= {want_o_partial}, ml have {} need >= {want_ml_partial}",
+                o_partial.n_elements(),
+                ml_partial.n_elements()
+            ),
+        });
+    }
+
+    let n_pos = base_pos + n_rows;
+    let rows_per_partition = n_pos.div_ceil(nwg.max(1));
+    let kv_stride = N_KV_HEADS * HEAD_DIM;
+    let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct MainArgs {
+        n_rows: u32,
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        n_partitions: u32,
+        rows_per_partition: u32,
+        base_pos: u32,
+        scale: f32,
+    }
+    let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g16_t4_q4_c64_f32")?;
+    enc.set_pipeline(&pso_main);
+    enc.set_bytes(
+        0,
+        &MainArgs {
+            n_rows: n_rows as u32,
+            n_q_heads: N_Q_HEADS as u32,
+            n_kv_heads: N_KV_HEADS as u32,
+            head_dim: HEAD_DIM as u32,
+            n_pos: n_pos as u32,
+            kv_stride: kv_stride as u32,
+            n_partitions: nwg as u32,
+            rows_per_partition: rows_per_partition as u32,
+            base_pos: base_pos as u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q_rows);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, o_partial);
+    enc.set_tensor(5, ml_partial);
+    enc.set_threadgroup_memory(0, QT * GROUP_TILE * HEAD_DIM * 2);
+    enc.set_threadgroup_memory(1, QT * GROUP_TILE * TILE_C * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: N_KV_HEADS,
+            height: n_rows.div_ceil(QT) * (GROUP / GROUP_TILE),
+            depth: nwg,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    Ok(())
+}
+
+pub fn encode_attn_prefill_v4_g16_t4_q4_c64_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_rows: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    nwg: usize,
+) -> Result<(), MetalError> {
+    encode_attn_prefill_v4_g16_t4_q4_c64_main_only_f32(
         ctx, enc, q_rows, k_cache, v_cache, o_partial, ml_partial, n_rows, base_pos, nwg,
     )?;
     encode_attn_prefill_v4_g16_t4_q2_c64_reduce_only_f32(

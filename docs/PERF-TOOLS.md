@@ -519,6 +519,21 @@ PY
 
 This prints the prompt / generation throughput summary and then exits.
 
+### Hidden packed-attention micros
+
+`qwen-bench attn-prefill-micro` is useful for packed-attention shape triage, but
+it is **not** a ship gate by itself.
+
+Rules:
+
+- Warm both baseline and packed variants before timing; first-use pipeline
+  compilation can swamp the real kernel signal.
+- Treat body-only wins as hypothesis generators only. We already have a concrete
+  counterexample where packed body `NWG=32` beat `64` at multiple contexts in the
+  microbench, then regressed badly in full long-prompt prefill.
+- Prefer end-to-end `pp` confirmation or a more faithful one-layer stack micro
+  before promoting any packed main-pass knob.
+
 ## Allocation and leak profiling
 
 Record Allocations when the question is heap/VM churn or unexpected allocation

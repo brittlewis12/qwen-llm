@@ -279,6 +279,19 @@ xcrun xctrace record --no-prompt \
     -m "$MODEL" --tokens 64 --no-warmup
 ```
 
+For big models where load time would consume most of the trace window, use the
+attach helper instead so recording starts after the bench prints its ready line:
+
+```sh
+uv run scripts/profile/trace_attach.py \
+  --trace target/profiles/metal-attach.trace \
+  --stdout /tmp/qwen-attach.out \
+  --stderr /tmp/qwen-attach.err \
+  --time-limit 45s \
+  --env QWEN_PREFILL_TRACE_LABELS=1 \
+  -- target/release/qwen-bench pp -m "$MODEL" -p 4100 --runs 1 --no-warmup
+```
+
 Inspect available tables before parsing:
 
 ```sh
@@ -444,6 +457,9 @@ Rules for the cooled harness:
 - Treat `pmset -g therm` and `memory_pressure -Q` as supporting probes only;
   on this box they stayed flat even when long A10B rankings drifted.
 - Split long sweeps into smaller batches instead of relying on one giant timeout.
+- When changing packed-attention activation thresholds, require exactness at the
+  first newly activated chunk size (for example `pp512` before promoting
+  `min_pos=512`). Do not infer safety from later-context oracles alone.
 
 ### Real rollout prompt lane
 

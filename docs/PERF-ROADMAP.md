@@ -46,30 +46,36 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
 - `qwen-llm` 9B dense packed pp: `~711.8 t/s`; `llama-bench`: `~824.0 t/s`
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
-- `qwen-llm` 35B A3B grouped MoE default now allowlists fused route+bucket plus
-  hot-expert `n32` and the `E8xP32` router-logits kernel when `chunk_p >= 512`:
-  about `690 t/s` at `pp256`, `798 t/s` at `pp512`, and `815 t/s` at `pp1024`;
-  `llama-bench pp320` anchor is still `~1222.4 t/s`
-- `qwen-llm` 122B A10B grouped MoE default now allowlists the same combo when
-  `chunk_p >= 512`: about `264 t/s` at `pp256`, `316 t/s` at `pp512`, and
-  `325 t/s` at `pp1024`; `llama-bench pp320` anchor is still `~393.3 t/s`
-- Experimental `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL=1` branch on the same
-  exact grouped backend currently measures about `816 t/s` on 35B A3B `pp512`
-  and `335 t/s` on warmed 122B A10B `pp512`, but only small additional gains by
-  `pp1024` (`~822 t/s`, `~333 t/s`). Treat it as a likely keeper branch for the
-  `pp512` regime, not as proof that the main MoE prompt gap is solved.
-- Experimental A3B group-8 long-context attention subgrouping now clears a much
-  bigger bar than the MoE-only prompt branches: with `QWEN_ATTN_V4_G8_TILE=2`,
-  long synthetic A3B prompt throughput improves from about `520 -> 577 t/s` at
-  `7.8k` tokens and `214 -> 308 t/s` at `34.5k`, while a real same-fixture
-  TheCurrent endpoint improves from about `208 -> 308 t/s`. Treat this as the
-  first real structural crack in the long-prompt A3B beast, not as a final
-  default yet.
+- `qwen-llm` 35B A3B MoE prompt default now includes prompt-native packed
+  attention for the proven `group=8`, `head_dim=256` shape with family-specific
+  `NWG=64` and packed activation at `n_pos >= 512`: about `674 t/s` at `pp256`,
+  `875 t/s` at `pp512`, and `952 t/s` at `pp1024`; long synthetic is about
+  `580 t/s` at `34.5k` tokens.
+- `qwen-llm` 122B A10B MoE prompt default now includes prompt-native packed
+  attention for the proven `group=16`, `head_dim=256` shape with family-specific
+  `NWG=32` and packed activation at `n_pos >= 512`: about `233 t/s` at `pp256`,
+  `341 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic is about
+  `241 t/s` at `19.6k` tokens and the same-fixture real rollout is about
+  `224 t/s`.
+- `llama-bench` anchors are still roughly `~1222.4 t/s` for A3B `pp320` and
+  `~393.3 t/s` for A10B `pp320`, so the medium/long-prompt board has moved a lot
+  but is not closed yet.
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
   `~22.5 t/s` generation
 
 Recent confirmed wins:
+
+- Prompt-native packed MoE attention is now a production default for the proven
+  long/medium prompt shapes, not an experiment. The important details are now
+  known and banked:
+  - family-specific packed `NWG` (`g8=64`, `g16=32`)
+  - packed activation at `n_pos >= 512`
+  - per-layer packed-vs-old oracle green at the first newly activated prompt
+    sizes (`pp512`, `pp768`) and at active long-context chunk shapes.
+- The medium-prompt board moved substantially once the packed-attention threshold
+  dropped from `4096` to `512`: A3B `pp512/pp1024` now lands around
+  `~875 / ~952 t/s`, and A10B `pp512/pp1024` around `~341 / ~418 t/s`.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
   used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel
@@ -254,7 +260,41 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: A3B long-prompt prefill is still decode-shaped attention in disguise
+### 1. Hypothesis: the remaining MoE prompt gap is now multi-layer packed-attention systems behavior, not another local packed-kernel knob
+
+Optimizes: the remaining A3B/A10B prompt gap after prompt-native packed
+attention, family-specific `NWG`, and `min_pos=512` are already defaulted.
+
+Why it moves to the top:
+
+- Prompt-native packed attention is no longer hypothetical; it is the default for
+  the proven MoE prompt shapes and it materially moves `pp512`, `pp1024`, and the
+  long-rollout lanes.
+- The next obvious packed-kernel knobs already produced hard negative lessons:
+  `QT=4` is exact but slower, and body-only `NWG=32` microbench wins were a false
+  promotion signal until cooled end-to-end sweeps re-ranked the family defaults.
+- Even a more faithful one-layer attention-stack microbench is still not a safe
+  promotion oracle for A10B. That points at multi-layer interactions, scratch /
+  residency behavior, or queue/scheduling effects rather than another easy kernel
+  retune.
+
+Current design rule:
+
+- Promotion decisions for A10B packed variants must come from cooled end-to-end
+  sweeps with repeated baseline anchors, not from body-only or one-layer micros.
+- Use the attach-mode tracing helper and the packed per-layer oracle only to
+  explain or falsify a candidate, not to outrank the end-to-end board.
+- Treat further packed-kernel knobs as hypothesis generators until a systems-level
+  capture says what the next real bottleneck is.
+
+Acceptance gates:
+
+- Show a systems-level explanation for any new packed-attention variant that beats
+  the current default on repeated cooled sweeps for A3B and/or A10B.
+- Keep per-layer packed-vs-old oracle green on the first newly activated prompt
+  regime and at the active long-context chunk shape.
+
+### 2. Hypothesis: A3B long-prompt prefill is still decode-shaped attention in disguise
 
 Optimizes: the now-clearest structural prompt gap after the A3B group-8 long-
 context subgroup fix.

@@ -6,6 +6,131 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-22 — Default Packed Min-Pos 512 Unlocks The Medium-Prompt Board
+
+Status: local branch only so far. Prompt-native packed attention now appears safe
+and profitable from `n_pos >= 512` on the proven MoE attention shapes.
+
+### What Changed
+
+- Added `QWEN_PREFILL_ATTN_PACKED_G{8,16}_MIN_POS` overrides and probed the
+  activation threshold directly instead of assuming `4096` was the right floor.
+- Proved exactness with the existing per-layer packed-vs-old oracle at:
+  - `pp512` for both A3B and A10B
+  - `pp768` for both A3B and A10B
+  - `pp4100` early chunks for both A3B and A10B
+- Re-measured warmed `pp512` / `pp1024` plus cooled long-prompt sweeps to decide
+  whether lowering the threshold actually converts on the real board.
+
+### Measurements
+
+Warm `pp512` gains with `min_pos=512`:
+
+- A3B: `~788.35 -> ~890.87 t/s`
+- A10B: `~309.83 -> ~348.98 t/s`
+
+Warm `pp1024` gains with `min_pos=1024` (which `min_pos=512` also implies):
+
+- A3B: `~806.11 -> ~952.50 t/s`
+- A10B: `~317.38 -> ~417.93 t/s`
+
+Cooled long-prompt sweeps also stay positive once the early chunks are packed:
+
+- A3B `34,502 tok`: `~579.66 -> ~592.72 t/s`
+- A10B `19,591 tok`: `~235-246 -> ~265.17 t/s`
+
+Using the old family-baseline llama.cpp anchors, the new warmed medium-prompt
+position is now roughly:
+
+- A3B `pp512`: `~0.62x`
+- A3B `pp1024`: `~0.67x`
+- A10B `pp512`: `~0.76x`
+- A10B `pp1024`: `~0.96x`
+
+That A10B `pp1024` row is the big regime shift: the packed-attention path is no
+longer just a long-context niche; it materially changes the medium-prompt board.
+
+### Current Read
+
+- `min_pos=4096` was leaving a lot of real value on the table.
+- `min_pos=512` looks like the right default for the proven MoE packed-attention
+  families because it captures the large `pp512`/`pp1024` gains while staying in
+  an exactness envelope we actually validated.
+- The ambiguous zone is now below `512` (`pp256` / possibly `pp320` for A10B),
+  which should stay experimental until separately re-characterized.
+
+## 2026-05-22 — Family-Specific Packed NWG Defaults Beat The Universal Setting
+
+Status: packed long-prefill attention now has a family-specific `NWG` default:
+
+- A3B / group-8 packed prefill keeps `NWG=64`
+- A10B / group-16 packed prefill now defaults to `NWG=32`
+
+### What Changed
+
+- Added a more faithful hidden one-layer stack microbench,
+  `qwen-bench attn-layer-micro`, that runs the real attention-layer front + body
+  + tail (`qkv -> split -> norms -> rope -> KV scatter -> attention -> gate/o`).
+- Added a small attach-mode trace helper in `scripts/profile/trace_attach.py` so
+  `xctrace` can start after model load instead of wasting the whole window on
+  launch/load.
+- Re-ran the packed `NWG=32 vs 64` question with cooled end-to-end sweeps and
+  repeated baseline anchors instead of one-off spot checks.
+- Defaulted packed `NWG` by family in `metal_dflash`:
+  - `prefill_attn_packed_g8_nwg() -> 64`
+  - `prefill_attn_packed_g16_nwg() -> 32`
+
+### Measurements
+
+The one-layer stack microbench helped, but it still was not a safe promotion
+oracle for A10B.
+
+- A3B rows=`4`: the one-layer stack now agreed with end-to-end that `NWG=64`
+  beats `32`.
+- A10B rows=`4`: the one-layer stack could still make `NWG=32` look attractive,
+  even when the prior one-off end-to-end checks were contradictory.
+
+The cooled end-to-end sweeps resolved the conflict.
+
+A10B `19,591`-token cooled sweep (`--no-warmup`, repeated baselines):
+
+- baseline-a (`NWG=64`): `229.68 t/s`
+- `NWG=32`: `253.67 t/s`
+- baseline-b (`NWG=64`): `230.73 t/s`
+
+A3B `34,502`-token cooled sweep:
+
+- baseline-a (`NWG=64`): `583.35 t/s`
+- `NWG=32`: `482.45 t/s`
+- baseline-b (`NWG=64`): `583.47 t/s`
+
+So the correct packed default is explicitly family-specific, not universal.
+
+Post-default spot checks:
+
+- A3B synthetic `34,502 tok`: `~580.53 t/s`
+- A10B synthetic `19,591 tok`: `~240.94 t/s`
+- A10B real same-fixture rollout (`v02_reva`, `25` msgs, strip replay):
+  `~224.08 t/s`
+
+Correctness remained green after the A10B default switch:
+
+- `prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke`
+- packed per-layer oracle at `pp4100` with `QWEN_PREFILL_ATTN_PACKED_G16_ORACLE=1`
+
+### Current Read
+
+- The earlier “NWG32 regresses A10B” read was a measurement artifact. The cooled
+  sweeps overruled the one-off spots.
+- Packed `NWG` should be treated as a family/shape parameter, not a global MoE
+  knob.
+- A10B promotion decisions should keep using cooled end-to-end sweeps with
+  repeated anchors; even the improved one-layer stack microbench is still only a
+  debugging aid.
+- The next high-EV unknown is no longer the coarse packed `NWG` default. It is
+  the systems-level reason A10B can disagree with increasingly faithful
+  microbenches.
+
 ## 2026-05-21 — Packed Main-Pass Knob Attack: QT=4 And NWG=32 Both Fail To Promote
 
 Status: investigation-only follow-up after `v0.103`. No new default path change.

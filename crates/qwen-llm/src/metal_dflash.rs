@@ -292,7 +292,7 @@ fn flush_prefill_phase(
 
 fn prefill_attn_packed_g8_enabled(n_pos: usize, group: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
-    if group != 8 || n_pos < 4096 {
+    if group != 8 || n_pos < prefill_attn_packed_g8_min_pos() {
         return false;
     }
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_PACKED_G8")) {
@@ -304,7 +304,7 @@ fn prefill_attn_packed_g8_enabled(n_pos: usize, group: usize) -> bool {
 
 fn prefill_attn_packed_g16_enabled(n_pos: usize, group: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
-    if group != 16 || n_pos < 4096 {
+    if group != 16 || n_pos < prefill_attn_packed_g16_min_pos() {
         return false;
     }
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_PACKED_G16")) {
@@ -312,6 +312,26 @@ fn prefill_attn_packed_g16_enabled(n_pos: usize, group: usize) -> bool {
         PrefillEnvMode::ForceOff => false,
         PrefillEnvMode::Auto => true,
     }
+}
+
+fn prefill_attn_packed_g8_min_pos() -> usize {
+    static MIN_POS: OnceLock<usize> = OnceLock::new();
+    *MIN_POS.get_or_init(|| {
+        std::env::var("QWEN_PREFILL_ATTN_PACKED_G8_MIN_POS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(512)
+    })
+}
+
+fn prefill_attn_packed_g16_min_pos() -> usize {
+    static MIN_POS: OnceLock<usize> = OnceLock::new();
+    *MIN_POS.get_or_init(|| {
+        std::env::var("QWEN_PREFILL_ATTN_PACKED_G16_MIN_POS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(512)
+    })
 }
 
 fn prefill_attn_fused_qkv_g8_enabled(n_pos: usize, group: usize) -> bool {
@@ -388,7 +408,7 @@ fn prefill_attn_packed_g16_nwg() -> usize {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| matches!(n, 8 | 16 | 32 | 64))
-            .unwrap_or(64)
+            .unwrap_or(32)
     })
 }
 

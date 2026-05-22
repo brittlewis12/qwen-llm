@@ -320,7 +320,7 @@ fn prefill_attn_packed_g8_min_pos() -> usize {
         std::env::var("QWEN_PREFILL_ATTN_PACKED_G8_MIN_POS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(256)
+            .unwrap_or(128)
     })
 }
 

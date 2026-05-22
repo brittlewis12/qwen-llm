@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-22 — A3B Packed Threshold Drops Again: `min_pos=128`
+
+Status: local branch only so far. The sub-`256` probe was only worth promoting
+for A3B/group-8; A10B/group-16 remains capped at `320`.
+
+### What Changed
+
+- Re-ran the A3B sub-`256` threshold question with exactness-first oracles and a
+  cooled repeated-anchor `pp128` sweep.
+- Promoted only the A3B/group-8 packed threshold from `256` to `128`.
+
+### Measurements
+
+Correctness:
+
+- A3B `min_pos=128` is green at `pp128` and `pp256` via the per-layer
+  packed-vs-old oracle.
+
+Disciplined `pp128` sweep:
+
+- baseline-a: `559.40 t/s`
+- `min128`: `592.08 t/s`
+- baseline-b: `559.55 t/s`
+
+Warm no-env spot checks after promotion:
+
+- A3B `pp128`: `~584.14 t/s`
+- A3B `pp256`: `~689.52 t/s`
+
+### Current Read
+
+- A3B/group-8 still had a real medium-short prompt win left below `256`.
+- A10B/group-16 does not yet have the same evidence below `320`, so the family
+  split is now:
+  - A3B packed from `128`
+  - A10B packed from `320`
+- Threshold tuning below these points should now stop unless a new scoreboard or
+  user-regime need specifically points back at the sub-`128` / sub-`320` zone.
+
 ## 2026-05-22 — Family-Specific Sub-512 Packed Thresholds Beat The Uniform 512 Floor
 
 Status: local branch only so far. Packed MoE attention now appears promotable

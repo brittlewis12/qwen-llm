@@ -48,15 +48,15 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
 - `qwen-llm` 35B A3B MoE prompt default now includes prompt-native packed
   attention for the proven `group=8`, `head_dim=256` shape with family-specific
-  `NWG=64` and packed activation at `n_pos >= 512`: about `674 t/s` at `pp256`,
-  `875 t/s` at `pp512`, and `952 t/s` at `pp1024`; long synthetic is about
-  `580 t/s` at `34.5k` tokens.
+  `NWG=64` and packed activation at `n_pos >= 256`: about `775 t/s` at `pp320`,
+  `881 t/s` at `pp512`, and `952 t/s` at `pp1024`; long synthetic is about
+  `591 t/s` at `34.5k` tokens.
 - `qwen-llm` 122B A10B MoE prompt default now includes prompt-native packed
   attention for the proven `group=16`, `head_dim=256` shape with family-specific
-  `NWG=32` and packed activation at `n_pos >= 512`: about `233 t/s` at `pp256`,
-  `341 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic is about
-  `241 t/s` at `19.6k` tokens and the same-fixture real rollout is about
-  `224 t/s`.
+  `NWG=32` and packed activation at `n_pos >= 320`: about `276 t/s` at `pp320`,
+  `355 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic remains noisy
+  per run but cooled long-prompt sweeps still favor `NWG32`, and the warmed
+  same-fixture real rollout is about `224 t/s`.
 - `llama-bench` anchors are still roughly `~1222.4 t/s` for A3B `pp320` and
   `~393.3 t/s` for A10B `pp320`, so the medium/long-prompt board has moved a lot
   but is not closed yet.
@@ -70,12 +70,14 @@ Recent confirmed wins:
   long/medium prompt shapes, not an experiment. The important details are now
   known and banked:
   - family-specific packed `NWG` (`g8=64`, `g16=32`)
-  - packed activation at `n_pos >= 512`
+  - family-specific packed activation thresholds (`g8 >= 256`, `g16 >= 320`)
   - per-layer packed-vs-old oracle green at the first newly activated prompt
-    sizes (`pp512`, `pp768`) and at active long-context chunk shapes.
+    sizes (`pp320/pp512` for A3B, `pp320/pp512` for A10B) and at active
+    long-context chunk shapes.
 - The medium-prompt board moved substantially once the packed-attention threshold
-  dropped from `4096` to `512`: A3B `pp512/pp1024` now lands around
-  `~875 / ~952 t/s`, and A10B `pp512/pp1024` around `~341 / ~418 t/s`.
+  dropped from `4096` into the medium-prompt regime: A3B `pp320/pp512/pp1024`
+  now lands around `~775 / ~881 / ~952 t/s`, and A10B
+  `pp320/pp512/pp1024` around `~276 / ~355 / ~418 t/s`.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
   used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel

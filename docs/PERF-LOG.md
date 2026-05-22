@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-22 — Family-Specific Sub-512 Packed Thresholds Beat The Uniform 512 Floor
+
+Status: local branch only so far. Packed MoE attention now appears promotable
+below `512`, but not with one universal threshold.
+
+### What Changed
+
+- Re-characterized the previously-ambiguous sub-`512` zone with exactness-first
+  per-layer packed-vs-old oracles plus cooled repeated-anchor sweeps.
+- Proved exactness at the first newly activated prompt sizes:
+  - A3B `min_pos=256` green at `pp256` and `pp320`
+  - A10B `min_pos=320` green at `pp320`
+- Defaulted the activation threshold locally to:
+  - A3B / `group=8`: `n_pos >= 256`
+  - A10B / `group=16`: `n_pos >= 320`
+
+### Measurements
+
+Disciplined `pp320` sweeps resolved the next threshold split:
+
+- A3B `pp320` cooled anchors:
+  - baseline-a: `698.70 t/s`
+  - `min256`: `765.90 t/s`
+  - baseline-b: `695.39 t/s`
+- A10B `pp320` cooled anchors:
+  - baseline-a: `109.91 t/s`
+  - `min320`: `291.76 t/s`
+  - baseline-b: `259.75 t/s`
+
+Post-default warmed no-env prompt anchors:
+
+- A3B:
+  - `pp320`: `~774.68 t/s`
+  - `pp512`: `~880.51 t/s`
+  - `pp1024`: `~952.50 t/s`
+  - `34.5k`: `~590.74 t/s`
+- A10B:
+  - `pp320`: `~275.51 t/s`
+  - `pp512`: `~355.18 t/s`
+  - `pp1024`: `~417.93 t/s`
+  - `19.6k`: one warmed spot `~202.00 t/s` (keep cooled long sweeps as the real
+    promotion oracle for this row)
+
+### Current Read
+
+- The packed-attention threshold should be family-specific just like packed
+  `NWG`.
+- A3B benefits cleanly from activating packed attention at `256`.
+- A10B benefits cleanly from activating packed attention at `320`, while `256`
+  remains too ambiguous/noisy to bank as a default.
+- Threshold tuning should stop here until a real user or scoreboard need forces
+  the `pp256` A10B question back onto the board.
+
 ## 2026-05-22 — Default Packed Min-Pos 512 Unlocks The Medium-Prompt Board
 
 Status: local branch only so far. Prompt-native packed attention now appears safe

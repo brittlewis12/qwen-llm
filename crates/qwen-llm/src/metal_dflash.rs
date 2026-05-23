@@ -451,6 +451,21 @@ fn prefill_attn_fused_qkv_g8_enabled(n_pos: usize, group: usize) -> bool {
     }
 }
 
+fn prefill_attn_matrix_g8_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_MATRIX_G8"))
+}
+
+fn prefill_attn_matrix_max_pos() -> Option<usize> {
+    static MAX_POS: OnceLock<Option<usize>> = OnceLock::new();
+    *MAX_POS.get_or_init(|| {
+        std::env::var("QWEN_PREFILL_ATTN_MATRIX_MAX_POS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+    })
+}
+
 fn prefill_attn_packed_g8_rows() -> usize {
     static ROWS: OnceLock<usize> = OnceLock::new();
     *ROWS.get_or_init(|| {
@@ -1655,6 +1670,12 @@ pub struct MetalDFlashLayerMajorScratch {
     /// `[R, n_kv, NWG, group, 2]` F32 — packed-prompt attention `(m, l)`
     /// partials for the same microproof.
     pub attn_prefill_v4_ml_partial_pack: MetalTensor,
+    /// `[N * n_q_heads, matrix_max_pos]` F32 — experimental non-flash matrix
+    /// attention score/prob scratch for the A3B/group-8 sidecar.
+    pub attn_matrix_scores_pack: MetalTensor,
+    /// `[n_kv_heads, head_dim, matrix_max_pos]` F16 — transposed V-cache view
+    /// used by the experimental non-flash matrix attention sidecar.
+    pub attn_matrix_vt_pack: MetalTensor,
 
     // FFN scratch.
     /// `[N, F]` F32 — FFN gate output (skipped when fused Q4_K SwiGLU is used).
@@ -1765,6 +1786,9 @@ pub struct MetalDFlashLayerMajorScratch {
     pub q_dim: u64,
     pub kv_dim: u64,
     pub vocab_size: u64,
+    /// Maximum `n_pos` covered by the experimental matrix-attention scratch.
+    /// Zero when the sidecar is not allocated.
+    pub attn_matrix_max_pos: u64,
     /// GDN conv_dim = (2*n_k + n_v) * head_dim. Cached for layer-major
     /// GDN batching (v0.73a). Zero on architectures without GDN.
     pub gdn_conv_dim: u64,
@@ -1858,6 +1882,35 @@ impl MetalDFlashLayerMajorScratch {
             std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
         );
+        let enable_attn_matrix_g8 = prefill_attn_matrix_g8_enabled()
+            && head_dim as usize == 256
+            && arch.n_q_heads == 16
+            && arch.n_kv_heads == 2;
+        let attn_matrix_max_pos = if enable_attn_matrix_g8 {
+            prefill_attn_matrix_max_pos().unwrap_or(block_size as usize) as u64
+        } else {
+            0
+        };
+        let attn_matrix_scores_elems = if enable_attn_matrix_g8 {
+            checked_u64_mul3(
+                n,
+                arch.n_q_heads as u64,
+                attn_matrix_max_pos,
+                "layer-major attn matrix scores size overflow",
+            )?
+        } else {
+            1
+        };
+        let attn_matrix_vt_elems = if enable_attn_matrix_g8 {
+            checked_u64_mul3(
+                arch.n_kv_heads as u64,
+                head_dim,
+                attn_matrix_max_pos,
+                "layer-major attn matrix vt size overflow",
+            )?
+        } else {
+            1
+        };
 
         // GDN dims. Sized at 1 element when the arch has no GDN to keep
         // the buffers allocatable; the GDN layer-major path is gated on
@@ -1928,6 +1981,8 @@ impl MetalDFlashLayerMajorScratch {
                     vec![1]
                 },
             )?,
+            attn_matrix_scores_pack: MetalTensor::zeros_f32(ctx, vec![attn_matrix_scores_elems])?,
+            attn_matrix_vt_pack: MetalTensor::zeros_f16(ctx, vec![attn_matrix_vt_elems])?,
             ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
@@ -1971,6 +2026,7 @@ impl MetalDFlashLayerMajorScratch {
             vocab_size: v,
             q_dim,
             kv_dim,
+            attn_matrix_max_pos,
             gdn_conv_dim,
             gdn_v_dim,
             gdn_n_v,
@@ -3951,6 +4007,19 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             ),
         }));
     }
+    let attn_matrix_g8_shape =
+        arch.attn_head_dim as usize == 256 && arch.n_q_heads == 16 && arch.n_kv_heads == 2;
+    if prefill_attn_matrix_g8_enabled() && attn_matrix_g8_shape {
+        if layer_scratch.attn_matrix_max_pos < last_pos as u64 {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "prefill_attn_matrix_g8",
+                detail: format!(
+                    "matrix scratch max_pos={} < required last_pos={last_pos}; set QWEN_PREFILL_ATTN_MATRIX_MAX_POS before scratch allocation",
+                    layer_scratch.attn_matrix_max_pos
+                ),
+            }));
+        }
+    }
     for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
         if kp != start_position as usize {
             return Err(DFlashError::Metal(MetalError::BadShape {
@@ -4785,6 +4854,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 } else {
                                     prefill_attn_packed_g16_nwg()
                                 };
+                                let use_matrix_g8 =
+                                    use_packed_g8 && prefill_attn_matrix_g8_enabled();
                                 if trace_attn_phases {
                                     let row_groups = chunk_p.div_ceil(packed_rows);
                                     let partial_bytes = chunk_p
@@ -4806,47 +4877,117 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         nwg,
                                         (partial_bytes as f64 * 2.0) / (1024.0 * 1024.0),
                                     );
+                                    if use_matrix_g8 {
+                                        let n_pos = chunk_start as usize + chunk_p;
+                                        let scores_bytes =
+                                            chunk_p * n_q * n_pos * std::mem::size_of::<f32>();
+                                        let vt_bytes =
+                                            n_kv * head_dim * n_pos * std::mem::size_of::<u16>();
+                                        eprintln!(
+                                            "[prefill-attn-matrix-g8-shape] layer={} chunk_start={} chunk_p={} n_pos={} scores_mib={:.2} vt_mib={:.2}",
+                                            il,
+                                            chunk_start,
+                                            chunk_p,
+                                            n_pos,
+                                            scores_bytes as f64 / (1024.0 * 1024.0),
+                                            vt_bytes as f64 / (1024.0 * 1024.0),
+                                        );
+                                    }
                                 }
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 label_prefill_encoder(
                                     &enc,
                                     il,
-                                    if use_packed_g8 {
+                                    if use_matrix_g8 {
+                                        "attn-prefill-g8-matrix"
+                                    } else if use_packed_g8 {
                                         "attn-prefill-g8-packed"
                                     } else {
                                         "attn-prefill-g16-packed"
                                     },
                                 );
-                                for row_base in (0..chunk_p).step_by(packed_rows) {
-                                    let rows_n = (chunk_p - row_base).min(packed_rows);
-                                    let q_rows = q_normed_pack_p.view_subrange(
-                                        (row_base * q_dim) as u64,
-                                        vec![(rows_n * q_dim) as u64],
-                                    );
-                                    let attn_o_rows = attn_o_pack_p.view_subrange(
-                                        (row_base * q_dim) as u64,
-                                        vec![(rows_n * q_dim) as u64],
-                                    );
-                                    let o_partial_rows =
-                                        layer_scratch.attn_prefill_v4_o_partial_pack.view_subrange(
-                                            0,
-                                            vec![
-                                                (rows_n * n_kv * ATTN_V4_MAX_NWG * group * head_dim)
-                                                    as u64,
-                                            ],
+                                if use_matrix_g8 {
+                                    let n_pos = chunk_start as usize + chunk_p;
+                                    let scores = layer_scratch
+                                        .attn_matrix_scores_pack
+                                        .view_subrange(0, vec![(chunk_p * n_q * n_pos) as u64]);
+                                    let v_t = layer_scratch
+                                        .attn_matrix_vt_pack
+                                        .view_subrange(0, vec![(n_kv * head_dim * n_pos) as u64]);
+                                    crate::metal::encode_attn_matrix_g8_transpose_v_f16(
+                                        base.ctx,
+                                        &enc,
+                                        &target_session.kv_v[ai],
+                                        &v_t,
+                                        n_pos,
+                                        n_kv * head_dim,
+                                    )?;
+                                    crate::metal::encode_attn_matrix_g8_kq_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_pack_p,
+                                        &target_session.kv_k[ai],
+                                        &scores,
+                                        chunk_p,
+                                        chunk_start as usize,
+                                        n_pos,
+                                        n_kv * head_dim,
+                                    )?;
+                                    crate::metal::encode_attn_matrix_g8_softmax_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &scores,
+                                        chunk_p,
+                                        chunk_start as usize,
+                                        n_pos,
+                                    )?;
+                                    crate::metal::encode_attn_matrix_g8_kqv_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &scores,
+                                        &v_t,
+                                        &attn_o_pack_p,
+                                        chunk_p,
+                                        chunk_start as usize,
+                                        n_pos,
+                                        n_kv * head_dim,
+                                    )?;
+                                } else {
+                                    for row_base in (0..chunk_p).step_by(packed_rows) {
+                                        let rows_n = (chunk_p - row_base).min(packed_rows);
+                                        let q_rows = q_normed_pack_p.view_subrange(
+                                            (row_base * q_dim) as u64,
+                                            vec![(rows_n * q_dim) as u64],
                                         );
-                                    let ml_partial_rows = layer_scratch
-                                        .attn_prefill_v4_ml_partial_pack
-                                        .view_subrange(
-                                            0,
-                                            vec![
-                                                (rows_n * n_kv * ATTN_V4_MAX_NWG * group * 2)
-                                                    as u64,
-                                            ],
+                                        let attn_o_rows = attn_o_pack_p.view_subrange(
+                                            (row_base * q_dim) as u64,
+                                            vec![(rows_n * q_dim) as u64],
                                         );
-                                    if use_packed_g8 {
-                                        if packed_qt == 4 {
-                                            crate::metal::encode_attn_prefill_v4_g8_t2_q4_c64_f32(
+                                        let o_partial_rows = layer_scratch
+                                            .attn_prefill_v4_o_partial_pack
+                                            .view_subrange(
+                                                0,
+                                                vec![
+                                                    (rows_n
+                                                        * n_kv
+                                                        * ATTN_V4_MAX_NWG
+                                                        * group
+                                                        * head_dim)
+                                                        as u64,
+                                                ],
+                                            );
+                                        let ml_partial_rows = layer_scratch
+                                            .attn_prefill_v4_ml_partial_pack
+                                            .view_subrange(
+                                                0,
+                                                vec![
+                                                    (rows_n * n_kv * ATTN_V4_MAX_NWG * group * 2)
+                                                        as u64,
+                                                ],
+                                            );
+                                        if use_packed_g8 {
+                                            if packed_qt == 4 {
+                                                crate::metal::encode_attn_prefill_v4_g8_t2_q4_c64_f32(
                                                 base.ctx,
                                                 &enc,
                                                 &q_rows,
@@ -4859,8 +5000,24 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 chunk_start as usize + row_base,
                                                 nwg,
                                             )?;
+                                            } else {
+                                                crate::metal::encode_attn_prefill_v4_g8_t2_q2_c64_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &q_rows,
+                                                &target_session.kv_k[ai],
+                                                &target_session.kv_v[ai],
+                                                &o_partial_rows,
+                                                &ml_partial_rows,
+                                                &attn_o_rows,
+                                                rows_n,
+                                                chunk_start as usize + row_base,
+                                                nwg,
+                                            )?;
+                                            }
                                         } else {
-                                            crate::metal::encode_attn_prefill_v4_g8_t2_q2_c64_f32(
+                                            if packed_qt == 4 {
+                                                crate::metal::encode_attn_prefill_v4_g16_t4_q4_c64_f32(
                                                 base.ctx,
                                                 &enc,
                                                 &q_rows,
@@ -4873,10 +5030,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 chunk_start as usize + row_base,
                                                 nwg,
                                             )?;
-                                        }
-                                    } else {
-                                        if packed_qt == 4 {
-                                            crate::metal::encode_attn_prefill_v4_g16_t4_q4_c64_f32(
+                                            } else {
+                                                crate::metal::encode_attn_prefill_v4_g16_t4_q2_c64_f32(
                                                 base.ctx,
                                                 &enc,
                                                 &q_rows,
@@ -4889,20 +5044,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 chunk_start as usize + row_base,
                                                 nwg,
                                             )?;
-                                        } else {
-                                            crate::metal::encode_attn_prefill_v4_g16_t4_q2_c64_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &q_rows,
-                                                &target_session.kv_k[ai],
-                                                &target_session.kv_v[ai],
-                                                &o_partial_rows,
-                                                &ml_partial_rows,
-                                                &attn_o_rows,
-                                                rows_n,
-                                                chunk_start as usize + row_base,
-                                                nwg,
-                                            )?;
+                                            }
                                         }
                                     }
                                 }
@@ -4975,6 +5117,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     let packed = cpu_read_f32buf(&attn_o_pack_p);
                                     let oracle = cpu_read_f32buf(&attn_oracle_pack);
                                     let cos = cosine_f32_slices(&packed, &oracle);
+                                    let packed_nonfinite =
+                                        packed.iter().filter(|v| !v.is_finite()).count();
+                                    let oracle_nonfinite =
+                                        oracle.iter().filter(|v| !v.is_finite()).count();
                                     let mut max_abs = 0.0f32;
                                     let mut worst = 0usize;
                                     for i in 0..packed.len() {
@@ -4985,10 +5131,25 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         }
                                     }
                                     eprintln!(
-                                        "[prefill-attn-packed-g{}-oracle] layer={} chunk_start={} chunk_p={} cos={:.6} max_abs={:.3e} worst_idx={}",
-                                        group, il, chunk_start, chunk_p, cos, max_abs, worst,
+                                        "[prefill-attn-packed-g{}-oracle] layer={} chunk_start={} chunk_p={} cos={:.6} max_abs={:.3e} worst_idx={} nonfinite={}/{}",
+                                        group,
+                                        il,
+                                        chunk_start,
+                                        chunk_p,
+                                        cos,
+                                        max_abs,
+                                        worst,
+                                        packed_nonfinite,
+                                        oracle_nonfinite,
                                     );
-                                    if cos < 0.99999 || max_abs > 2e-3 {
+                                    let cos_limit = if use_matrix_g8 { 0.9999 } else { 0.99999 };
+                                    let max_abs_limit = if use_matrix_g8 { 2e-2 } else { 2e-3 };
+                                    if packed_nonfinite != 0
+                                        || oracle_nonfinite != 0
+                                        || !cos.is_finite()
+                                        || cos < cos_limit
+                                        || max_abs > max_abs_limit
+                                    {
                                         return Err(DFlashError::Metal(MetalError::BadShape {
                                             kernel: if use_packed_g8 {
                                                 "prefill_attn_packed_g8_oracle"
@@ -4996,7 +5157,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 "prefill_attn_packed_g16_oracle"
                                             },
                                             detail: format!(
-                                                "layer={il} chunk_start={chunk_start} chunk_p={chunk_p} cos={cos:.6} max_abs={max_abs:.3e}"
+                                                "layer={il} chunk_start={chunk_start} chunk_p={chunk_p} cos={cos:.6} max_abs={max_abs:.3e} nonfinite={packed_nonfinite}/{oracle_nonfinite}"
                                             ),
                                         }));
                                     }

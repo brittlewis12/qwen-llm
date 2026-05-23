@@ -428,6 +428,11 @@ Rules for pp sweeps:
   `moe_gpu_token_loop`) with any result.
 - Treat experimental MoE flags such as `QWEN_PREFILL_MOE_PACKED_ROUTED` as part of
   the benchmark identity and report them explicitly.
+- Treat experimental attention flags such as `QWEN_PREFILL_ATTN_MATRIX_G8=1` as
+  diagnostic-only unless the roadmap says otherwise. Long matrix-sidecar runs also
+  need `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>` so scratch is sized explicitly.
+- When comparing against `llama-bench`, remember that bench-tool `-fa 0` disables
+  flash attention; it is not the library's auto flash-attention setting.
 - For cold A10B `pp128` methodology, `QWEN_PP_WARM_MOE_BANKS=1` or
   `QWEN_PP_RESIDENCY_SET=1` removes expert-bank first-touch outliers. Report those
   knobs explicitly and do not claim them as steady-state throughput wins.

@@ -6,6 +6,72 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — A3B Matrix-Attention Sidecar Wins Medium, Fails Long
+
+Status: env-only diagnostic branch; not a default candidate. GPU measurements were
+run sequentially.
+
+### What Changed
+
+- Corrected the `llama-bench` attention target: for `tools/llama-bench`, `-fa 0`
+  means flash attention disabled, not auto. The A3B long target rows we have been
+  chasing are therefore `llama.cpp`'s non-flash Metal graph.
+- Added a gated A3B/group-8 matrix-attention sidecar behind
+  `QWEN_PREFILL_ATTN_MATRIX_G8=1`. Long runs must also set
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>` because the sidecar allocates
+  `[N * n_q_heads, max_pos]` score scratch and V-transpose scratch.
+- The sidecar is deliberately close to the high-level non-flash graph shape:
+  transpose V, compute KQ, softmax, then KQV.
+
+### `llama.cpp` Flash-Attention Sanity
+
+| Prompt | `llama.cpp -fa 0` | `llama.cpp -fa 1` | Read |
+| ---: | ---: | ---: | --- |
+| `1024` | `1423.84 t/s` | `1429.92 t/s` | flat |
+| `16384` | `1103.80 t/s` | `1097.20 t/s` | flash slightly slower |
+
+Interpretation: copying the `llama.cpp` flash path is not the missing A3B long
+lever. The stronger comparison is its non-flash `KQ -> softmax -> KQV` path plus
+its cache/layout/kernel implementation details.
+
+### Matrix-Sidecar Measurements
+
+| Prompt | Current default | Matrix sidecar | Delta |
+| ---: | ---: | ---: | ---: |
+| `128` | `661.32 t/s` | `680.79 t/s` | `+2.9%` |
+| `512` | `902.93 t/s` | `936.35 t/s` | `+3.7%` |
+| `1024` | `963.65 t/s` | `1003.75 t/s` | `+4.2%` |
+| `2048` | `946.60 t/s` | `961.88 t/s` | `+1.6%` |
+| `4096` | `922.44 t/s` | `892.00 t/s` | `-3.3%` |
+| `4096`, chunk `512` | `858.44 t/s` | `756.87 t/s` | `-11.8%` |
+| `8192` | `864.97 t/s` | `771.60 t/s` | `-10.8%` |
+
+Correctness:
+
+- Active `pp128` packed-oracle run is finite and passes with `cos=1.0`; max_abs is
+  looser than the default packed path (`~1.4e-2`) because this sidecar currently
+  casts softmax probabilities through half for the KQV simdgroup path.
+- Active small A3B prefill-vs-single test passes with final-logits cosine
+  `0.999985` and all tracked state cosines above `0.9997`.
+
+Negative side probe:
+
+- A3B packed `GROUP_TILE=4` was exact at `pp128` but slower at `pp1024`, `pp4096`,
+  and `pp16384`; the code was reverted.
+
+### Current Read
+
+- This sidecar falsifies the easy version of “just make qwen attention look like
+  `llama.cpp` non-flash.” The high-level graph shape alone wins only medium
+  prompts and crosses over negative by `4k/8k`.
+- Keep `QWEN_PREFILL_ATTN_MATRIX_G8=1` as an env-only diagnostic. Do not promote it
+  without repeated cooled `pp512/1024` wins, no `pp2048` fade, and explicit long
+  disable logic.
+- The highest-EV long branch is now a tighter `llama.cpp -fa 0` differential:
+  kernel/layout trace, persistent V-transposed cache behavior, KQV layout, and
+  score/partial traffic. Do not continue blind packed-kernel knob sweeps without
+  that explanation.
+
 ## 2026-05-23 — Calibrated A3B True-Long Gap Against `llama.cpp`
 
 Status: same-shape sparse rows, measured sequentially after `v0.109`.

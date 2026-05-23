@@ -1127,6 +1127,303 @@ kernel void kernel_attn_prefill_v4_g16_t4_q4_c64_f32(
                                                      sq, ss, tgpig, tiisg);
 }
 
+// ============================================================================
+// Experimental A3B non-flash matrix-attention sidecar.
+//
+// This mirrors llama.cpp's default non-flash graph shape: KQ matmul, rowwise
+// softmax, then KQV matmul. It is intentionally narrow: group=8, n_q=16,
+// n_kv=2, head_dim=256, F16 KV cache.
+// ============================================================================
+
+struct attn_matrix_g8_args {
+    uint  n_rows;
+    uint  n_pos;
+    uint  base_pos;
+    uint  kv_stride;
+    float scale;
+};
+
+constant constexpr int AM_G8_GROUP       = 8;
+constant constexpr int AM_G8_N_Q_HEADS   = 16;
+constant constexpr int AM_G8_N_KV_HEADS  = 2;
+constant constexpr int AM_HEAD_DIM       = 256;
+constant constexpr int AM_NR0            = 64;
+constant constexpr int AM_NR1            = 32;
+constant constexpr int AM_NK             = 32;
+constant constexpr int AM_NL0            = AM_NK / 16;
+constant constexpr int AM_NL1            = AM_NK / 8;
+
+kernel void kernel_attn_matrix_g8_transpose_v_f16(
+        constant attn_matrix_g8_args & args [[buffer(0)]],
+        device const half * v_cache [[buffer(1)]],
+        device       half * v_t     [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    const uint total = AM_G8_N_KV_HEADS * AM_HEAD_DIM * args.n_pos;
+    if (tid >= total) return;
+    const uint pos = tid % args.n_pos;
+    const uint tmp = tid / args.n_pos;
+    const uint d = tmp % AM_HEAD_DIM;
+    const uint kvh = tmp / AM_HEAD_DIM;
+    v_t[tid] = v_cache[(ulong)pos * args.kv_stride + (ulong)kvh * AM_HEAD_DIM + d];
+}
+
+kernel void kernel_attn_matrix_g8_kq_f32(
+        constant attn_matrix_g8_args & args [[buffer(0)]],
+        device const float * q       [[buffer(1)]],
+        device const half  * k_cache [[buffer(2)]],
+        device       float * scores  [[buffer(3)]],
+        threadgroup  uchar * shmem   [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const uint kvh = tgpig.z;
+    const int M = (int)args.n_pos;
+    const int N = (int)(args.n_rows * AM_G8_GROUP);
+    const int K = AM_HEAD_DIM;
+    const int r0 = (int)tgpig.y * AM_NR0;
+    const int r1 = (int)tgpig.x * AM_NR1;
+    const short nr0 = (M - r0 < AM_NR0) ? (short)(M - r0) : AM_NR0;
+    const short nr1 = (N - r1 < AM_NR1) ? (short)(N - r1) : AM_NR1;
+    const short lr0 = ((short)tiitg / AM_NL0) < nr0 ? ((short)tiitg / AM_NL0) : nr0 - 1;
+    const short lr1 = ((short)tiitg / AM_NL1) < nr1 ? ((short)tiitg / AM_NL1) : nr1 - 1;
+    const short il0 = tiitg % AM_NL0;
+    const short iy = 8 * (tiitg % AM_NL1);
+
+    simdgroup_half8x8  ma[4];
+    simdgroup_half8x8  mb[2];
+    simdgroup_float8x8 mc[8];
+    for (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < K; loop_k += AM_NK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short i = 0; i < 16; ++i) {
+            const short sx = 2 * il0 + i / 8;
+            const short sy = (tiitg / AM_NL0) / 8;
+            const short lx = (tiitg / AM_NL0) % 8;
+            const short ly = i % 8;
+            const short ib = 8 * sx + sy;
+            const uint kk = loop_k + 16 * il0 + i;
+            const uint pos = (uint)(r0 + lr0);
+            sa[64 * ib + 8 * ly + lx] = (pos < args.n_pos && kk < K)
+                ? k_cache[(ulong)pos * args.kv_stride + (ulong)kvh * AM_HEAD_DIM + kk]
+                : (half)0.0f;
+        }
+
+        for (short i = 0; i < 8; ++i) {
+            const short sx = tiitg % AM_NL1;
+            const short sy = (tiitg / AM_NL1) / 8;
+            const short lx = i;
+            const short ly = (tiitg / AM_NL1) % 8;
+            const short ib = 4 * sx + sy;
+            const uint local_q = (uint)(r1 + lr1);
+            const uint row = local_q / AM_G8_GROUP;
+            const uint g = local_q % AM_G8_GROUP;
+            const uint kk = loop_k + iy + i;
+            sb[64 * ib + 8 * ly + lx] = (local_q < (uint)N && kk < K)
+                ? half(q[((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + kk])
+                : (half)0.0f;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = sa + 4 * 64 * (sgitg % 2);
+        threadgroup const half * lsmb = sb + 2 * 64 * (sgitg / 2);
+        for (short ik = 0; ik < AM_NK / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 4 * 64;
+        }
+    }
+
+    const ulong batch = (ulong)kvh * (ulong)N * (ulong)M;
+    if (r0 + AM_NR0 <= M && r1 + AM_NR1 <= N) {
+        device float * C = scores + batch + (r0 + 32 * (sgitg & 1))
+                         + (r1 + 16 * (sgitg >> 1)) * M;
+        for (short i = 0; i < 8; ++i) {
+            simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * M * (i / 4), M, 0, false);
+        }
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float * temp = ((threadgroup float *)shmem)
+            + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * AM_NR0;
+        for (short i = 0; i < 8; ++i) {
+            simdgroup_store(mc[i], temp + 8 * (i % 4) + 8 * AM_NR0 * (i / 4), AM_NR0, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0) {
+            for (int j = tiitg; j < nr1; j += AM_NR1) {
+                device float * Dst = scores + batch + r0 + (r1 + j) * M;
+                threadgroup float * Src = temp + j * AM_NR0;
+                for (int i = 0; i < nr0; ++i) {
+                    Dst[i] = Src[i];
+                }
+            }
+        }
+    }
+}
+
+kernel void kernel_attn_matrix_g8_softmax_f32(
+        constant attn_matrix_g8_args & args [[buffer(0)]],
+        device float * scores [[buffer(1)]],
+        threadgroup float * sh [[threadgroup(0)]],
+        uint qid [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    const uint n_local_q = args.n_rows * AM_G8_GROUP;
+    const uint n_query = AM_G8_N_KV_HEADS * n_local_q;
+    if (qid >= n_query) return;
+    const uint local_q = qid % n_local_q;
+    const uint row = local_q / AM_G8_GROUP;
+    const uint visible = min(args.n_pos, args.base_pos + row + 1);
+    device float * s = scores + (ulong)qid * args.n_pos;
+
+    float local_max = -INFINITY;
+    for (uint p = tid; p < visible; p += ntg) {
+        local_max = max(local_max, s[p] * args.scale);
+    }
+    local_max = simd_max(local_max);
+    if (tiisg == 0) sh[sgitg] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    local_max = (tiisg < (ntg + 31) / 32) ? sh[tiisg] : -INFINITY;
+    const float max_all = simd_max(local_max);
+
+    float local_sum = 0.0f;
+    for (uint p = tid; p < visible; p += ntg) {
+        local_sum += exp2(s[p] * args.scale - max_all);
+    }
+    local_sum = simd_sum(local_sum);
+    if (tiisg == 0) sh[sgitg] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    local_sum = (tiisg < (ntg + 31) / 32) ? sh[tiisg] : 0.0f;
+    const float sum_all = simd_sum(local_sum);
+    const float inv_sum = sum_all > 0.0f ? 1.0f / sum_all : 0.0f;
+
+    for (uint p = tid; p < args.n_pos; p += ntg) {
+        s[p] = (p < visible) ? exp2(s[p] * args.scale - max_all) * inv_sum : 0.0f;
+    }
+}
+
+kernel void kernel_attn_matrix_g8_kqv_f32(
+        constant attn_matrix_g8_args & args [[buffer(0)]],
+        device const float * probs [[buffer(1)]],
+        device const half  * v_t   [[buffer(2)]],
+        device       float * out   [[buffer(3)]],
+        threadgroup  uchar * shmem [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const uint kvh = tgpig.z;
+    const int M = AM_HEAD_DIM;
+    const int N = (int)(args.n_rows * AM_G8_GROUP);
+    const int K = (int)args.n_pos;
+    const int r0 = (int)tgpig.y * AM_NR0;
+    const int r1 = (int)tgpig.x * AM_NR1;
+    const short nr0 = (M - r0 < AM_NR0) ? (short)(M - r0) : AM_NR0;
+    const short nr1 = (N - r1 < AM_NR1) ? (short)(N - r1) : AM_NR1;
+    const short lr0 = ((short)tiitg / AM_NL0) < nr0 ? ((short)tiitg / AM_NL0) : nr0 - 1;
+    const short lr1 = ((short)tiitg / AM_NL1) < nr1 ? ((short)tiitg / AM_NL1) : nr1 - 1;
+    const short il0 = tiitg % AM_NL0;
+    const short iy = 8 * (tiitg % AM_NL1);
+
+    simdgroup_half8x8  ma[4];
+    simdgroup_half8x8  mb[2];
+    simdgroup_float8x8 mc[8];
+    for (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.n_pos; loop_k += AM_NK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short i = 0; i < 16; ++i) {
+            const short sx = 2 * il0 + i / 8;
+            const short sy = (tiitg / AM_NL0) / 8;
+            const short lx = (tiitg / AM_NL0) % 8;
+            const short ly = i % 8;
+            const short ib = 8 * sx + sy;
+            const uint kk = loop_k + 16 * il0 + i;
+            const uint d = (uint)(r0 + lr0);
+            sa[64 * ib + 8 * ly + lx] = (d < AM_HEAD_DIM && kk < args.n_pos)
+                ? v_t[((ulong)kvh * AM_HEAD_DIM + d) * args.n_pos + kk]
+                : (half)0.0f;
+        }
+
+        for (short i = 0; i < 8; ++i) {
+            const short sx = tiitg % AM_NL1;
+            const short sy = (tiitg / AM_NL1) / 8;
+            const short lx = i;
+            const short ly = (tiitg / AM_NL1) % 8;
+            const short ib = 4 * sx + sy;
+            const uint local_q = (uint)(r1 + lr1);
+            const uint kk = loop_k + iy + i;
+            sb[64 * ib + 8 * ly + lx] = (local_q < (uint)N && kk < args.n_pos)
+                ? half(probs[((ulong)kvh * (ulong)N + local_q) * args.n_pos + kk])
+                : (half)0.0f;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = sa + 4 * 64 * (sgitg % 2);
+        threadgroup const half * lsmb = sb + 2 * 64 * (sgitg / 2);
+        for (short ik = 0; ik < AM_NK / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 4 * 64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp = ((threadgroup float *)shmem)
+        + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * AM_NR0;
+    for (short i = 0; i < 8; ++i) {
+        simdgroup_store(mc[i], temp + 8 * (i % 4) + 8 * AM_NR0 * (i / 4), AM_NR0, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgitg == 0) {
+        for (int j = tiitg; j < nr1; j += AM_NR1) {
+            const uint local_q = (uint)(r1 + j);
+            const uint row = local_q / AM_G8_GROUP;
+            const uint g = local_q % AM_G8_GROUP;
+            device float * Dst = out + ((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + r0;
+            threadgroup float * Src = temp + j * AM_NR0;
+            for (int i = 0; i < nr0; ++i) {
+                Dst[i] = Src[i];
+            }
+        }
+    }
+}
+
 struct attn_v4_prefill_reduce_args {
     uint n_rows;
     uint n_q_heads;

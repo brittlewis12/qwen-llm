@@ -66,6 +66,14 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   (`0.69x`), `pp34502` `596.88 / 897.64 t/s` (`0.66x`). `llama.cpp` also
   declines at true long context; qwen's issue is a broad `~1.45-1.52x` gap plus
   a worse attention-body slope, not real-rollout prompt shape alone.
+- `llama-bench -fa 0` is not auto for the bench tool: it disables flash attention.
+  A3B `llama.cpp` `-fa 0` and `-fa 1` are flat at `pp1024` and `-fa 1` is slightly
+  slower at `pp16384`, so the current A3B long target is the non-flash
+  `KQ -> softmax -> KQV` Metal path and its cache/layout implementation details.
+- An env-only A3B/group-8 matrix-attention sidecar
+  (`QWEN_PREFILL_ATTN_MATRIX_G8=1`) wins `pp512/1024` by about `3.7-4.2%`, fades
+  at `pp2048`, and regresses by `pp4096/8192`. Treat it as diagnostic evidence,
+  not a default candidate.
 - `llama-bench` anchors are still roughly `~1222.4 t/s` for A3B `pp320` and
   `~393.3 t/s` for A10B `pp320`, so the medium/long-prompt board has moved a lot
   but is not closed yet.
@@ -97,6 +105,11 @@ Recent confirmed wins:
   says attention-body cost is the long-context lever (`pp16384` `767.64 ->
   1101.72 t/s` with attention body skipped; routed-MoE skip only reaches
   `913.73 t/s`).
+- The A3B matrix-attention sidecar is a useful falsifier, not a keeper: it proves
+  that the high-level `llama.cpp` non-flash graph shape can help medium prompts,
+  but qwen's current scratch/layout/KQV implementation loses by true-long shapes.
+  The next long-context attack should be a `llama.cpp -fa 0` kernel/layout
+  differential, especially V-cache transposition and KQV memory traffic.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
   used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel
@@ -342,6 +355,14 @@ Why it moves up:
   goes `767.64 -> 1101.72 t/s` with attention body skipped, nearly matching
   lcpp full prefill (`1112.03 t/s`), while routed-MoE skip reaches only
   `913.73 t/s`.
+- `llama-bench -fa 0` disables flash attention rather than selecting auto, and
+  `-fa 1` is flat/slightly slower for A3B at the checked prompt lengths. The
+  relevant lcpp target is therefore the non-flash Metal path, not
+  `GGML_OP_FLASH_ATTN_EXT`.
+- A deliberately matrix-shaped A3B sidecar (`V^T`, `KQ`, softmax, `KQV`) wins
+  `pp512/1024` but regresses by `pp4096/8192`, so high-level graph is not enough;
+  the unresolved questions are cache layout, KQV write/read traffic, scratch
+  pressure, and mature matmul-kernel details.
 
 Current design rule:
 
@@ -352,6 +373,9 @@ Current design rule:
   main-pass execution shape, KV reads, partial writes, and online-softmax work.
 - Compare against `llama.cpp` at the same prompt length before claiming long
   scaling progress.
+- Do not promote the current matrix sidecar as-is. Use it as a differential probe
+  and next inspect lcpp's persistent V-transposed cache / KQV layout before adding
+  more local packed-attention knobs.
 
 Acceptance gates:
 
@@ -359,6 +383,8 @@ Acceptance gates:
   just medium prompt rows.
 - Target at least `>=1.20x` at `pp16384` or a clear path to closing the current
   `~0.66-0.69x` qwen/lcpp ratio.
+- Any matrix/non-flash branch must be positive at `pp4096` and `pp8192` before it
+  gets long-run time at `16k+`; `pp512/1024` wins alone are not a promotion signal.
 - Keep A3B packed-attention oracle/correctness green at the first activated
   long-context chunk shape.
 
@@ -375,6 +401,9 @@ Why it moves to the top:
 - The next obvious packed-kernel knobs already produced hard negative lessons:
   `QT=4` is exact but slower, and body-only `NWG=32` microbench wins were a false
   promotion signal until cooled end-to-end sweeps re-ranked the family defaults.
+- The A3B matrix-attention sidecar is another systems-level warning: a plausible
+  lcpp-shaped graph can win medium prompts and still lose once score/V-transpose
+  scratch and KQV traffic scale with context.
 - Even a more faithful one-layer attention-stack microbench is still not a safe
   promotion oracle for A10B. That points at multi-layer interactions, scratch /
   residency behavior, or queue/scheduling effects rather than another easy kernel

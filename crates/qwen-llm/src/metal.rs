@@ -6685,6 +6685,283 @@ pub fn encode_attn_prefill_v4_g16_t4_q4_c64_f32(
     Ok(())
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AttnMatrixG8Args {
+    n_rows: u32,
+    n_pos: u32,
+    base_pos: u32,
+    kv_stride: u32,
+    scale: f32,
+}
+
+fn validate_attn_matrix_g8_common(
+    kernel: &'static str,
+    n_rows: usize,
+    n_pos: usize,
+    base_pos: usize,
+) -> Result<(), MetalError> {
+    if n_rows == 0 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: "n_rows must be > 0".into(),
+        });
+    }
+    if n_pos < base_pos + n_rows {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("n_pos={n_pos} < base_pos+n_rows={}", base_pos + n_rows),
+        });
+    }
+    Ok(())
+}
+
+pub fn encode_attn_matrix_g8_transpose_v_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    v_cache: &MetalTensor,
+    v_t: &MetalTensor,
+    n_pos: usize,
+    kv_stride: usize,
+) -> Result<(), MetalError> {
+    const N_KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 256;
+    if v_cache.dtype != GgmlType::F16 || v_t.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_transpose_v",
+            detail: format!(
+                "expected F16 tensors, got {:?}/{:?}",
+                v_cache.dtype, v_t.dtype
+            ),
+        });
+    }
+    let want_vt = N_KV_HEADS * HEAD_DIM * n_pos;
+    if v_t.n_elements() < want_vt as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_transpose_v",
+            detail: format!("v_t has {} elements, need >= {want_vt}", v_t.n_elements()),
+        });
+    }
+    let pso = ctx.pipeline("kernel_attn_matrix_g8_transpose_v_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &AttnMatrixG8Args {
+            n_rows: 0,
+            n_pos: n_pos as u32,
+            base_pos: 0,
+            kv_stride: kv_stride as u32,
+            scale: 0.0,
+        },
+    );
+    enc.set_tensor(1, v_cache);
+    enc.set_tensor(2, v_t);
+    enc.dispatch(
+        MTLSize {
+            width: want_vt,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_attn_matrix_g8_kq_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_rows: &MetalTensor,
+    k_cache: &MetalTensor,
+    scores: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+    kv_stride: usize,
+) -> Result<(), MetalError> {
+    const N_Q_HEADS: usize = 16;
+    const N_KV_HEADS: usize = 2;
+    const GROUP: usize = 8;
+    const HEAD_DIM: usize = 256;
+    validate_attn_matrix_g8_common("attn_matrix_g8_kq", n_rows, n_pos, base_pos)?;
+    if q_rows.dtype != GgmlType::F32
+        || scores.dtype != GgmlType::F32
+        || k_cache.dtype != GgmlType::F16
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_kq",
+            detail: format!(
+                "expected q/scores F32 and k F16, got {:?}/{:?}/{:?}",
+                q_rows.dtype, scores.dtype, k_cache.dtype
+            ),
+        });
+    }
+    let want_q = n_rows * N_Q_HEADS * HEAD_DIM;
+    let want_scores = N_KV_HEADS * n_rows * GROUP * n_pos;
+    if q_rows.n_elements() != want_q as u64 || scores.n_elements() < want_scores as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_kq",
+            detail: format!(
+                "bad q/scores sizes: q have {} need {want_q}, scores have {} need >= {want_scores}",
+                q_rows.n_elements(),
+                scores.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_attn_matrix_g8_kq_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &AttnMatrixG8Args {
+            n_rows: n_rows as u32,
+            n_pos: n_pos as u32,
+            base_pos: base_pos as u32,
+            kv_stride: kv_stride as u32,
+            scale: 0.0,
+        },
+    );
+    enc.set_tensor(1, q_rows);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, scores);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: (n_rows * GROUP).div_ceil(32),
+            height: n_pos.div_ceil(64),
+            depth: N_KV_HEADS,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_attn_matrix_g8_softmax_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+) -> Result<(), MetalError> {
+    const N_Q_HEADS: usize = 16;
+    const HEAD_DIM: usize = 256;
+    validate_attn_matrix_g8_common("attn_matrix_g8_softmax", n_rows, n_pos, base_pos)?;
+    let want_scores = n_rows * N_Q_HEADS * n_pos;
+    if scores.dtype != GgmlType::F32 || scores.n_elements() < want_scores as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_softmax",
+            detail: format!("scores have {} need >= {want_scores}", scores.n_elements()),
+        });
+    }
+    let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
+    let pso = ctx.pipeline("kernel_attn_matrix_g8_softmax_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &AttnMatrixG8Args {
+            n_rows: n_rows as u32,
+            n_pos: n_pos as u32,
+            base_pos: base_pos as u32,
+            kv_stride: 0,
+            scale,
+        },
+    );
+    enc.set_tensor(1, scores);
+    enc.set_threadgroup_memory(0, 8 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_rows * N_Q_HEADS,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_attn_matrix_g8_kqv_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    probs: &MetalTensor,
+    v_t: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+    kv_stride: usize,
+) -> Result<(), MetalError> {
+    const N_Q_HEADS: usize = 16;
+    const N_KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 256;
+    validate_attn_matrix_g8_common("attn_matrix_g8_kqv", n_rows, n_pos, base_pos)?;
+    let want_probs = n_rows * N_Q_HEADS * n_pos;
+    let want_vt = N_KV_HEADS * HEAD_DIM * n_pos;
+    let want_out = n_rows * N_Q_HEADS * HEAD_DIM;
+    if probs.dtype != GgmlType::F32 || out.dtype != GgmlType::F32 || v_t.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_kqv",
+            detail: format!(
+                "expected probs/out F32 and v_t F16, got {:?}/{:?}/{:?}",
+                probs.dtype, out.dtype, v_t.dtype
+            ),
+        });
+    }
+    if probs.n_elements() < want_probs as u64
+        || v_t.n_elements() < want_vt as u64
+        || out.n_elements() != want_out as u64
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_kqv",
+            detail: format!(
+                "bad sizes: probs {} need >= {want_probs}, v_t {} need >= {want_vt}, out {} need {want_out}",
+                probs.n_elements(),
+                v_t.n_elements(),
+                out.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_attn_matrix_g8_kqv_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &AttnMatrixG8Args {
+            n_rows: n_rows as u32,
+            n_pos: n_pos as u32,
+            base_pos: base_pos as u32,
+            kv_stride: kv_stride as u32,
+            scale: 0.0,
+        },
+    );
+    enc.set_tensor(1, probs);
+    enc.set_tensor(2, v_t);
+    enc.set_tensor(3, out);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: (n_rows * 8).div_ceil(32),
+            height: HEAD_DIM.div_ceil(64),
+            depth: N_KV_HEADS,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Scatter F32 source bytes into a F16 destination buffer at offset.
 /// Used for KV cache append when the cache is F16. Counterpart of
 /// `encode_scatter_offset_f32` (F32 → F32).

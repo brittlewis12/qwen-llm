@@ -6,6 +6,66 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — Fused Gate/Up Does Not Survive Full Routed Tail
+
+Status: diagnostic checkpoint after adding full-tail fused-bank attribution to the
+ignored grouped `SwiGLU+down` profile. GPU workloads were run sequentially.
+
+### What Changed
+
+- Extended `run_grouped_swiglu_down_backend_profile` to compare the live grouped
+  routed tail against an exact interleaved gate/up bank through grouped SwiGLU,
+  grouped Q5 down, and weighted sum.
+- Added `chunk_p=1024` A3B/A10B profile gates so the fused-bank question is no
+  longer inferred from isolated SwiGLU microprofiles.
+- Tried and reverted an lcpp-shaped grouped-down final-store probe that spread
+  writes across all four simdgroups and used `float4` stores.
+
+### Measurements
+
+Full grouped routed tail with fused gate/up bank:
+
+| Model | Chunk | Live Tail | Fused Tail | Speedup | Correctness |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A3B | `320` | `3.74 ms` | `2.96 ms` | `1.264x` | exact |
+| A3B | `512` | `4.05 ms` | `3.77 ms` | `1.074x` | exact |
+| A3B | `1024` | `6.73 ms` | `6.67 ms` | `1.008x` | exact |
+| A10B | `320` | `7.11 ms` | `6.96 ms` | `1.022x` | exact |
+| A10B | `512` | `9.61 ms` | `9.55 ms` | `1.006x` | exact |
+| A10B | `1024` | `16.79 ms` | `16.66 ms` | `1.008x` | exact |
+
+Down final-store vectorization falsifier:
+
+- A3B `chunk_p=512` exact output, but `split_down_reduce` regressed from
+  `1.38 ms` to `1.57 ms` (`0.875x`). The probe was reverted.
+
+Grouped Q5 down `n16` falsifier:
+
+- A3B `chunk_p=512` exact output, but all-`n16` grouped Q5 down regressed
+  `split_down_reduce` from `1.37 ms` to `1.70 ms` (`0.807x`). The probe was
+  reverted.
+
+Down/reduce split after reverting the vecstore probe:
+
+- A3B `chunk_p=512`: `active=109`, `p50=28`, `p90=70`, `max=165`,
+  `ge16/ge32/ge48=74/44/25`, `split_down=1.36 ms`, `split_reduce=0.07 ms`.
+- A10B `chunk_p=512`: `active=94`, `p50=28`, `p90=92`, `max=177`,
+  `ge16/ge32/ge48=65/44/29`, `split_down=3.38 ms`, `split_reduce=0.11 ms`.
+- Read: the reducer is not the meaningful bucket; the grouped Q5 down matmul is.
+
+### Current Read
+
+- Interleaved gate/up remains a narrow A3B `chunk320` win, but it is killed as a
+  general/default expert-bank ABI. The old duplicate-resident end-to-end proof
+  converting only `~1.02x` now has a causal explanation: the isolated SwiGLU win
+  mostly evaporates once grouped down, weighted sum, and real bucket geometry are
+  included.
+- Do not spend loader/ABI complexity on fused gate/up replacement unless a future
+  product target is explicitly A3B medium-short prompts.
+- The next exact MoE prefill work should target grouped Q5 down itself or a truly
+  different `SwiGLU+down` dataflow that preserves grouped-down locality. Local
+  lcpp-like final-store vectorization and weighted-sum cleanup are not enough.
+
 ## 2026-05-23 — Matrix Attention Is No Longer The Main A3B `pp4096` Gap
 
 Status: diagnostic checkpoint after the A3B/group-8 matrix sidecar. GPU workloads

@@ -335,13 +335,26 @@ Why it is back at the top:
   correctness-passed but failed hard end-to-end on rebuilt sequential A3B `pp320`
   (`775.67 -> 478.84 t/s`). Removing grouped `out` / weighted-sum passes is not
   worth giving up grouped-down locality.
-- Interleaved gate/up fused-bank grouped-`SwiGLU` is exact and still strong in
-  microprofiles: prior `pp320` was `1.280x` A3B / `1.376x` A10B, and fresh
-  `chunk_p=1024` reads are `1.271x` A3B / `1.106x` A10B. It remains an
-  expert-bank ABI candidate, not a runtime mirror default.
+- Interleaved gate/up fused-bank grouped-`SwiGLU` is exact and can look strong in
+  isolated SwiGLU microprofiles, but a full-tail diagnostic now kills it as a
+  general expert-bank ABI: A3B `chunk320/512/1024` is `1.264x/1.074x/1.008x`,
+  and A10B `chunk320/512/1024` is only `1.022x/1.006x/1.008x` once grouped down
+  and weighted sum are included.
 - A runtime duplicate fused-bank proof is already killed as a production path: A3B
   correctness passed, but it cost `11.25 GiB` extra resident memory and converted
   only `775.25 -> 790.38 t/s` at `pp320` (`~1.02x`).
+- A down-only lcpp-shaped final-store probe that spread grouped Q5 down stores
+  across all simdgroups was exact but slower on A3B `chunk512` (`1.38 -> 1.57 ms`
+  for `split_down_reduce`), so final-store vectorization alone is not the crack.
+- An all-`n16` grouped Q5 down probe was also exact but slower on A3B `chunk512`
+  (`1.37 -> 1.70 ms` for `split_down_reduce`), so the current `n32` down tile is
+  not obviously oversized despite diffuse bucket counts.
+- Splitting `down+reduce` shows weighted sum is tiny at the key `chunk512` gate:
+  A3B `split_down=1.36 ms`, `split_reduce=0.07 ms`; A10B `split_down=3.38 ms`,
+  `split_reduce=0.11 ms`. The actionable bucket is grouped Q5 down, not reduce.
+  Fresh bucket histograms are not sharply cold-biased enough to explain the gap by
+  tile waste alone: both A3B and A10B have `p50_count=28`, `ge32=44` experts at
+  `chunk512`, and the all-`n16` down probe still lost.
 
 Current design rule:
 
@@ -350,10 +363,10 @@ Current design rule:
 - Do not repeat local `grouped_swiglu` knob sweeps unless a new phase ladder shows
   a new mechanism. The next exact proof must reduce the combined
   `grouped_swiglu + grouped_down` routed-tail bucket.
-- Treat offline/interleaved expert-bank ABI as the next serious medium-prompt FFN
-  branch only if it replaces the original banks instead of duplicating them; keep
-  true `SwiGLU+down` fusion as a follow-on only if it preserves down locality and
-  beats the banked layout proof.
+- Demote offline/interleaved gate+up ABI to a narrow A3B `chunk320` branch. The
+  next serious exact FFN branch should attack grouped Q5 down locality/dequant or
+  a true `SwiGLU+down` fusion that preserves grouped-down locality and beats the
+  full-tail fused-bank diagnostic, not the isolated SwiGLU microprofile.
 - Keep grouped routed zero-fill default-off as small cleanup, not a main roadmap
   lever.
 
@@ -362,7 +375,9 @@ Acceptance gates:
 - Any expert-bank ABI / interleaved layout branch must be exact on A3B and A10B
   small gates, improve end-to-end A3B `pp320` by at least `~1.12x` and A10B
   `pp320` by at least `~1.15x`, and be no worse than `-2%` at `pp512` with no
-  material `pp1024` regression.
+  material `pp1024` regression. After the full-tail diagnostic, it also must beat
+  the live grouped routed tail by `>=1.15x` at A3B/A10B `chunk512`, not merely the
+  isolated grouped-SwiGLU kernel.
 - Any true fused `SwiGLU+down` branch must preserve grouped-down locality and beat
   the offline-bank path, not just the old baseline.
 - Any structural routed-tail branch must show at least `>=1.15x` routed-tail

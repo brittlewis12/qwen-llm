@@ -10870,6 +10870,14 @@ mod tests {
             .expect("live_grouped_slot_out");
         let live_grouped_reduced =
             MetalTensor::zeros_f32(&ctx, vec![(chunk_p * h) as u64]).expect("live_grouped_reduced");
+        let fused_gate_up =
+            fuse_q4k_gate_up_expert_banks(&ctx, &moe.gate_exps, &moe.up_exps, h, f_exp, n_expert);
+        let fused_grouped_inner = MetalTensor::zeros_f32(&ctx, vec![(slot_count * f_exp) as u64])
+            .expect("fused_grouped_inner");
+        let fused_grouped_slot_out = MetalTensor::zeros_f32(&ctx, vec![(slot_count * h) as u64])
+            .expect("fused_grouped_slot_out");
+        let fused_grouped_reduced = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * h) as u64])
+            .expect("fused_grouped_reduced");
         let grouped_gate =
             MetalTensor::zeros_f32(&ctx, vec![(slot_count * f_exp) as u64]).expect("grouped_gate");
         let grouped_up =
@@ -10886,14 +10894,23 @@ mod tests {
 
         let mut packed_tail_ms = 0.0f64;
         let mut live_grouped_tail_ms = 0.0f64;
+        let mut fused_grouped_tail_ms = 0.0f64;
         let mut map_ms = 0.0f64;
         let mut grouped_swiglu_gpu_ms = 0.0f64;
         let mut grouped_down_ms = 0.0f64;
+        let mut grouped_reduce_ms = 0.0f64;
         let mut grouped_total_wall_ms = 0.0f64;
         let mut cos_min = f64::INFINITY;
         let mut max_abs = 0.0f32;
+        let mut fused_cos_min = f64::INFINITY;
+        let mut fused_max_abs = 0.0f32;
         let mut active_experts = 0usize;
         let mut max_count = 0usize;
+        let mut p50_count = 0usize;
+        let mut p90_count = 0usize;
+        let mut experts_ge16 = 0usize;
+        let mut experts_ge32 = 0usize;
+        let mut experts_ge48 = 0usize;
 
         for _ in 0..n_runs {
             write_tensor_f32(&x_pack, &x_init);
@@ -11092,11 +11109,132 @@ mod tests {
                 .expect("live grouped reduce");
             });
 
+            fused_grouped_tail_ms += timed_gpu_cmd(&ctx, |enc| {
+                encode_fill_f32(&ctx, enc, &fused_grouped_inner, 0.0)
+                    .expect("zero fused grouped inner");
+                if prefill_moe_grouped_hot_q4_n32_enabled(chunk_p) {
+                    if let Some(hot_threshold) = prefill_moe_hot_expert_min_slots() {
+                        crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n32_range(
+                            &ctx,
+                            enc,
+                            &fused_gate_up,
+                            &h_pack,
+                            &counts,
+                            &ids,
+                            &fused_grouped_inner,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                            hot_threshold as u32,
+                            i32::MAX as u32,
+                        )
+                        .expect("fused grouped hot n32");
+                        if hot_threshold > 0 {
+                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n16_range(
+                                &ctx,
+                                enc,
+                                &fused_gate_up,
+                                &h_pack,
+                                &counts,
+                                &ids,
+                                &fused_grouped_inner,
+                                h,
+                                f_exp,
+                                n_expert,
+                                topk,
+                                chunk_p,
+                                0,
+                                hot_threshold.saturating_sub(1) as u32,
+                            )
+                            .expect("fused grouped cold n16");
+                        }
+                    } else {
+                        crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n16_range(
+                            &ctx,
+                            enc,
+                            &fused_gate_up,
+                            &h_pack,
+                            &counts,
+                            &ids,
+                            &fused_grouped_inner,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                            0,
+                            i32::MAX as u32,
+                        )
+                        .expect("fused grouped n16 fallback");
+                    }
+                } else {
+                    crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n16_range(
+                        &ctx,
+                        enc,
+                        &fused_gate_up,
+                        &h_pack,
+                        &counts,
+                        &ids,
+                        &fused_grouped_inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                        0,
+                        i32::MAX as u32,
+                    )
+                    .expect("fused grouped n16");
+                }
+                encode_fill_f32(&ctx, enc, &fused_grouped_slot_out, 0.0)
+                    .expect("zero fused grouped slot out");
+                crate::metal::encode_moe_down_q5_K_f32_grouped_slots(
+                    &ctx,
+                    enc,
+                    &moe.down_exps,
+                    &fused_grouped_inner,
+                    &counts,
+                    &ids,
+                    &fused_grouped_slot_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    chunk_p,
+                )
+                .expect("fused grouped down");
+                crate::metal::encode_moe_weighted_sum_packed_f32(
+                    &ctx,
+                    enc,
+                    &fused_grouped_slot_out,
+                    &topk_weight_pack,
+                    &fused_grouped_reduced,
+                    h,
+                    topk,
+                    chunk_p,
+                )
+                .expect("fused grouped reduce");
+            });
+
             let wall = Instant::now();
             let counts_cpu = read_tensor_i32_f32buf(&counts);
             let ids_cpu = read_tensor_i32_f32buf(&ids);
-            active_experts = counts_cpu.iter().filter(|&&c| c > 0).count();
+            let mut active_counts: Vec<usize> = counts_cpu
+                .iter()
+                .filter_map(|&c| (c > 0).then_some(c as usize))
+                .collect();
+            active_counts.sort_unstable();
+            active_experts = active_counts.len();
             max_count = counts_cpu.iter().copied().max().unwrap_or(0).max(0) as usize;
+            if !active_counts.is_empty() {
+                p50_count = active_counts[active_counts.len() / 2];
+                p90_count =
+                    active_counts[(active_counts.len() * 9 / 10).min(active_counts.len() - 1)];
+            }
+            experts_ge16 = active_counts.iter().filter(|&&c| c >= 16).count();
+            experts_ge32 = active_counts.iter().filter(|&&c| c >= 32).count();
+            experts_ge48 = active_counts.iter().filter(|&&c| c >= 48).count();
             let _ = ids_cpu;
 
             grouped_swiglu_gpu_ms += timed_gpu_cmd(&ctx, |enc| {
@@ -11256,6 +11394,8 @@ mod tests {
                     chunk_p,
                 )
                 .expect("grouped down slots");
+            });
+            grouped_reduce_ms += timed_gpu_cmd(&ctx, |enc| {
                 crate::metal::encode_moe_weighted_sum_packed_f32(
                     &ctx,
                     enc,
@@ -11276,23 +11416,40 @@ mod tests {
             for i in 0..cur.len() {
                 max_abs = max_abs.max((cur[i] - grp[i]).abs());
             }
+            let fus = read_tensor_f32(&fused_grouped_reduced);
+            fused_cos_min = fused_cos_min.min(cosine_f32(&cur, &fus));
+            for i in 0..cur.len() {
+                fused_max_abs = fused_max_abs.max((cur[i] - fus[i]).abs());
+            }
         }
 
         let denom = n_runs as f64;
+        let split_down_reduce_ms = (grouped_down_ms + grouped_reduce_ms) / denom;
         eprintln!(
-            "[grouped-swiglu-down-{label}] chunk_p={chunk_p} active_experts={} max_count={} packed_tail={:.2} ms live_grouped_tail={:.2} ms map={:.2} ms split_gate_up={:.2} ms split_down_reduce={:.2} ms split_wall={:.2} ms vs_live={:.3} vs_packed={:.3} cos_min={:.6} max_abs={:.3e}",
+            "[grouped-swiglu-down-{label}] chunk_p={chunk_p} active_experts={} p50_count={} p90_count={} max_count={} experts_ge16={} experts_ge32={} experts_ge48={} packed_tail={:.2} ms live_grouped_tail={:.2} ms fused_grouped_tail={:.2} ms map={:.2} ms split_gate_up={:.2} ms split_down={:.2} ms split_reduce={:.2} ms split_down_reduce={:.2} ms split_wall={:.2} vs_live={:.3} vs_fused_live={:.3} vs_packed={:.3} cos_min={:.6} max_abs={:.3e} fused_cos_min={:.6} fused_max_abs={:.3e}",
             active_experts,
+            p50_count,
+            p90_count,
             max_count,
+            experts_ge16,
+            experts_ge32,
+            experts_ge48,
             packed_tail_ms / denom,
             live_grouped_tail_ms / denom,
+            fused_grouped_tail_ms / denom,
             map_ms / denom,
             grouped_swiglu_gpu_ms / denom,
             grouped_down_ms / denom,
+            grouped_reduce_ms / denom,
+            split_down_reduce_ms,
             grouped_total_wall_ms / denom,
             (live_grouped_tail_ms / denom) / (grouped_total_wall_ms / denom),
+            (live_grouped_tail_ms / denom) / (fused_grouped_tail_ms / denom),
             (packed_tail_ms / denom) / (grouped_total_wall_ms / denom),
             cos_min,
             max_abs,
+            fused_cos_min,
+            fused_max_abs,
         );
     }
 
@@ -11336,6 +11493,28 @@ mod tests {
             "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
             "122b-512",
             512,
+            2,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_grouped_swiglu_down_backend_profile_1024() {
+        run_grouped_swiglu_down_backend_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-1024",
+            1024,
+            2,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_grouped_swiglu_down_backend_profile_1024() {
+        run_grouped_swiglu_down_backend_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-1024",
+            1024,
             2,
         );
     }

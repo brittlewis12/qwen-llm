@@ -48,9 +48,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
 - `qwen-llm` 35B A3B MoE prompt default now includes prompt-native packed
   attention for the proven `group=8`, `head_dim=256` shape with family-specific
-  `NWG=64` and packed activation at `n_pos >= 128`: about `584 t/s` at `pp128`,
-  `690 t/s` at `pp256`, `775 t/s` at `pp320`, `881 t/s` at `pp512`, and
-  `952 t/s` at `pp1024`; long synthetic is about `591 t/s` at `34.5k` tokens.
+  `NWG=64`, packed activation at `n_pos >= 128`, and A3B-sized router `E8xP32`
+  from `pp128`: about `652 t/s` at `pp128`, `783 t/s` at `pp256`, `816 t/s` at
+  `pp320`, `899 t/s` at `pp512`, and `~952-966 t/s` at `pp1024`; long synthetic
+  is about `591 t/s` at `34.5k` tokens. Real-rollout sanity on the same branch:
+  `855.3 t/s` for the `7,986`-token Reva short fixture and `587.6 t/s` for the
+  `34,502`-token `v02_reva` full rollout.
 - `qwen-llm` 122B A10B MoE prompt default now includes prompt-native packed
   attention for the proven `group=16`, `head_dim=256` shape with family-specific
   `NWG=32` and packed activation at `n_pos >= 320`: about `276 t/s` at `pp320`,
@@ -74,9 +77,14 @@ Recent confirmed wins:
   - per-layer packed-vs-old oracle green at the first newly activated prompt
     sizes (`pp128/pp320` for A3B, `pp320/pp512` for A10B) and at active
     long-context chunk shapes.
+- A3B-sized route-logits `E8xP32` now activates from `pp128`; the old `512` floor
+  left a cheap medium/short-prompt win on the table. A10B stays conservative at
+  `512` for route logits until a cooled `pp320` promotion sweep resolves the
+  mixed signal there.
 - The medium-prompt board moved substantially once the packed-attention threshold
-  dropped from `4096` into the medium-prompt regime: A3B
-  `pp128/pp320/pp512/pp1024` now lands around `~584 / ~775 / ~881 / ~952 t/s`, and A10B
+  dropped from `4096` into the medium-prompt regime and the A3B route threshold
+  followed: A3B `pp128/pp320/pp512/pp1024` now lands around
+  `~652 / ~816 / ~899 / ~952-966 t/s`, and A10B
   `pp320/pp512/pp1024` around `~276 / ~355 / ~418 t/s`.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
@@ -262,7 +270,52 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: the remaining MoE prompt gap is now multi-layer packed-attention systems behavior, not another local packed-kernel knob
+### 1. Hypothesis: the remaining MoE prompt gap is routed FFN dataflow, not attention
+
+Optimizes: the residual A3B/A10B MoE prompt gap after prompt-native packed
+attention moved the medium/long prompt board.
+
+Why it is back at the top:
+
+- Current no-op ceilings show routed FFN dominates shared FFN on the default path:
+  A3B `pp320` moves from about `765 -> 1136 t/s` with routed off, while shared
+  off only reaches about `790 t/s`; A10B `pp320` moves from about `305 -> 648 t/s`
+  with routed off, while shared off only reaches about `309 t/s`.
+- Post-route-threshold A3B `chunk_p=320` live grouped-tail profile still puts
+  `grouped_swiglu` first (`4.06 ms`, `57.2%`) and `grouped_down` second
+  (`1.60 ms`, `22.5%`); route logits are now `0.27 ms` (`3.8%`).
+- A cheap hybrid falsifier, grouped `SwiGLU` into packed `down+weighted_sum`,
+  correctness-passed but failed hard end-to-end on rebuilt sequential A3B `pp320`
+  (`775.67 -> 478.84 t/s`). Removing grouped `out` / weighted-sum passes is not
+  worth giving up grouped-down locality.
+- Interleaved gate/up fused-bank grouped-`SwiGLU` is exact and strong at `pp320`
+  (`1.280x` A3B, `1.376x` A10B), but tapers by `pp1024`, so it is an expert-bank
+  layout candidate rather than a universal kernel-default proof.
+- A runtime duplicate fused-bank proof is already killed as a production path: A3B
+  correctness passed, but it cost `11.25 GiB` extra resident memory and converted
+  only `775.25 -> 790.38 t/s` at `pp320` (`~1.02x`).
+
+Current design rule:
+
+- Do not pursue dataflow branches that sacrifice grouped-down locality unless they
+  first show parity on rebuilt sequential `pp320`/`pp512` gates.
+- Treat offline/interleaved expert-bank ABI as the next serious medium-prompt FFN
+  branch only if it replaces the original banks instead of duplicating them; keep
+  true `SwiGLU+down` fusion as a follow-on only if it preserves down locality and
+  beats the banked layout proof.
+- Keep grouped routed zero-fill default-off as small cleanup, not a main roadmap
+  lever.
+
+Acceptance gates:
+
+- Any expert-bank ABI / interleaved layout branch must be exact on A3B and A10B
+  small gates, improve end-to-end A3B `pp320` by at least `~1.12x` and A10B
+  `pp320` by at least `~1.15x`, and be no worse than `-2%` at `pp512` with no
+  material `pp1024` regression.
+- Any true fused `SwiGLU+down` branch must preserve grouped-down locality and beat
+  the offline-bank path, not just the old baseline.
+
+### 2. Hypothesis: remaining packed-attention variants need end-to-end systems evidence, not local kernel knobs
 
 Optimizes: the remaining A3B/A10B prompt gap after prompt-native packed
 attention, family-specific `NWG`, and `min_pos=512` are already defaulted.

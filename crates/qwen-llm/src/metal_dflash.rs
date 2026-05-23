@@ -43,7 +43,7 @@ use crate::metal::{
     encode_topk_logits_softmax_dot_sigmoid_packed_f32,
 };
 use crate::metal_forward::{
-    ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalSession, RMS_EPS, checked_u64_add,
+    ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalMoeFfn, MetalSession, RMS_EPS, checked_u64_add,
     checked_u64_double, checked_u64_mul, checked_u64_mul3, checked_u64_mul4,
     encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
     weight_dtype_kept_native,
@@ -197,12 +197,7 @@ fn prefill_moe_fused_finalizer_enabled() -> bool {
 
 fn prefill_moe_grouped_zero_fill_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_MOE_GROUPED_ZERO_FILL").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_MOE_GROUPED_ZERO_FILL"))
 }
 
 fn prefill_moe_grouped_concurrent_tail_enabled(chunk_p: usize) -> bool {
@@ -214,6 +209,113 @@ fn prefill_moe_grouped_concurrent_tail_enabled(chunk_p: usize) -> bool {
         PrefillEnvMode::ForceOn => true,
         PrefillEnvMode::ForceOff => false,
         PrefillEnvMode::Auto => false,
+    }
+}
+
+fn encode_prefill_moe_grouped_swiglu_q4(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    moe: &MetalMoeFfn,
+    h_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    h: usize,
+    f_exp: usize,
+    n_expert: usize,
+    topk: usize,
+    chunk_p: usize,
+    grouped_q4_n32_all: bool,
+    hot_expert_min_slots: Option<usize>,
+) -> Result<(), MetalError> {
+    if grouped_q4_n32_all {
+        crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32(
+            ctx,
+            enc,
+            &moe.gate_exps,
+            &moe.up_exps,
+            h_pack,
+            counts,
+            ids,
+            inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+            chunk_p,
+        )
+    } else if prefill_moe_grouped_hot_q4_n32_enabled(chunk_p) {
+        if let Some(hot_threshold) = hot_expert_min_slots {
+            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                hot_threshold as u32,
+                i32::MAX as u32,
+            )?;
+            if hot_threshold > 0 {
+                crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
+                    ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &moe.up_exps,
+                    h_pack,
+                    counts,
+                    ids,
+                    inner,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                    chunk_p,
+                    0,
+                    hot_threshold.saturating_sub(1) as u32,
+                )?;
+            }
+            Ok(())
+        } else {
+            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+            )
+        }
+    } else {
+        crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
+            ctx,
+            enc,
+            &moe.gate_exps,
+            &moe.up_exps,
+            h_pack,
+            counts,
+            ids,
+            inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+            chunk_p,
+        )
     }
 }
 
@@ -456,7 +558,10 @@ fn encode_moe_route_logits_dispatch(
     let enabled = match prefill_moe_route_logits_e8p32_mode() {
         PrefillEnvMode::ForceOn => true,
         PrefillEnvMode::ForceOff => false,
-        PrefillEnvMode::Auto => n_query >= 512,
+        PrefillEnvMode::Auto => {
+            let min_query = if n_in <= 2048 { 128 } else { 512 };
+            n_query >= min_query
+        }
     };
     if enabled && weight.dtype == GgmlType::F32 && n_in % 4 == 0 && n_out % 8 == 0 && n_query >= 32
     {
@@ -5295,94 +5400,22 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
                         }
-                        if grouped_q4_n32_all {
-                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32(
-                                base.ctx,
-                                &enc,
-                                &moe.gate_exps,
-                                &moe.up_exps,
-                                &h_pack_p,
-                                &moe_group_count_pack,
-                                &moe_group_ids_pack,
-                                &moe_group_inner_pack_p,
-                                h,
-                                f_exp,
-                                n_expert,
-                                topk,
-                                chunk_p,
-                            )?;
-                        } else if prefill_moe_grouped_hot_q4_n32_enabled(chunk_p) {
-                            if let Some(hot_threshold) = hot_expert_min_slots {
-                                crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
-                                    base.ctx,
-                                    &enc,
-                                    &moe.gate_exps,
-                                    &moe.up_exps,
-                                    &h_pack_p,
-                                    &moe_group_count_pack,
-                                    &moe_group_ids_pack,
-                                    &moe_group_inner_pack_p,
-                                    h,
-                                    f_exp,
-                                    n_expert,
-                                    topk,
-                                    chunk_p,
-                                    hot_threshold as u32,
-                                    i32::MAX as u32,
-                                )?;
-                                if hot_threshold > 0 {
-                                    crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
-                                        base.ctx,
-                                        &enc,
-                                        &moe.gate_exps,
-                                        &moe.up_exps,
-                                        &h_pack_p,
-                                        &moe_group_count_pack,
-                                        &moe_group_ids_pack,
-                                        &moe_group_inner_pack_p,
-                                        h,
-                                        f_exp,
-                                        n_expert,
-                                        topk,
-                                        chunk_p,
-                                        0,
-                                        hot_threshold.saturating_sub(1) as u32,
-                                    )?;
-                                }
-                            } else {
-                                crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
-                                    base.ctx,
-                                    &enc,
-                                    &moe.gate_exps,
-                                    &moe.up_exps,
-                                    &h_pack_p,
-                                    &moe_group_count_pack,
-                                    &moe_group_ids_pack,
-                                    &moe_group_inner_pack_p,
-                                    h,
-                                    f_exp,
-                                    n_expert,
-                                    topk,
-                                    chunk_p,
-                                )?;
-                            }
-                        } else {
-                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
-                                base.ctx,
-                                &enc,
-                                &moe.gate_exps,
-                                &moe.up_exps,
-                                &h_pack_p,
-                                &moe_group_count_pack,
-                                &moe_group_ids_pack,
-                                &moe_group_inner_pack_p,
-                                h,
-                                f_exp,
-                                n_expert,
-                                topk,
-                                chunk_p,
-                            )?;
-                        }
+                        encode_prefill_moe_grouped_swiglu_q4(
+                            base.ctx,
+                            &enc,
+                            moe,
+                            &h_pack_p,
+                            &moe_group_count_pack,
+                            &moe_group_ids_pack,
+                            &moe_group_inner_pack_p,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                            grouped_q4_n32_all,
+                            hot_expert_min_slots,
+                        )?;
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
                         }
@@ -5487,94 +5520,22 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
                         }
-                        if grouped_q4_n32_all {
-                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32(
-                                base.ctx,
-                                &enc,
-                                &moe.gate_exps,
-                                &moe.up_exps,
-                                &h_pack_p,
-                                &moe_group_count_pack,
-                                &moe_group_ids_pack,
-                                &moe_group_inner_pack_p,
-                                h,
-                                f_exp,
-                                n_expert,
-                                topk,
-                                chunk_p,
-                            )?;
-                        } else if prefill_moe_grouped_hot_q4_n32_enabled(chunk_p) {
-                            if let Some(hot_threshold) = hot_expert_min_slots {
-                                crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
-                                    base.ctx,
-                                    &enc,
-                                    &moe.gate_exps,
-                                    &moe.up_exps,
-                                    &h_pack_p,
-                                    &moe_group_count_pack,
-                                    &moe_group_ids_pack,
-                                    &moe_group_inner_pack_p,
-                                    h,
-                                    f_exp,
-                                    n_expert,
-                                    topk,
-                                    chunk_p,
-                                    hot_threshold as u32,
-                                    i32::MAX as u32,
-                                )?;
-                                if hot_threshold > 0 {
-                                    crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
-                                        base.ctx,
-                                        &enc,
-                                        &moe.gate_exps,
-                                        &moe.up_exps,
-                                        &h_pack_p,
-                                        &moe_group_count_pack,
-                                        &moe_group_ids_pack,
-                                        &moe_group_inner_pack_p,
-                                        h,
-                                        f_exp,
-                                        n_expert,
-                                        topk,
-                                        chunk_p,
-                                        0,
-                                        hot_threshold.saturating_sub(1) as u32,
-                                    )?;
-                                }
-                            } else {
-                                crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
-                                    base.ctx,
-                                    &enc,
-                                    &moe.gate_exps,
-                                    &moe.up_exps,
-                                    &h_pack_p,
-                                    &moe_group_count_pack,
-                                    &moe_group_ids_pack,
-                                    &moe_group_inner_pack_p,
-                                    h,
-                                    f_exp,
-                                    n_expert,
-                                    topk,
-                                    chunk_p,
-                                )?;
-                            }
-                        } else {
-                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
-                                base.ctx,
-                                &enc,
-                                &moe.gate_exps,
-                                &moe.up_exps,
-                                &h_pack_p,
-                                &moe_group_count_pack,
-                                &moe_group_ids_pack,
-                                &moe_group_inner_pack_p,
-                                h,
-                                f_exp,
-                                n_expert,
-                                topk,
-                                chunk_p,
-                            )?;
-                        }
+                        encode_prefill_moe_grouped_swiglu_q4(
+                            base.ctx,
+                            &enc,
+                            moe,
+                            &h_pack_p,
+                            &moe_group_count_pack,
+                            &moe_group_ids_pack,
+                            &moe_group_inner_pack_p,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                            grouped_q4_n32_all,
+                            hot_expert_min_slots,
+                        )?;
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
                         }
@@ -8817,6 +8778,28 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_320() {
+        run_live_grouped_moe_tail_phase_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-320",
+            320,
+            2,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_live_grouped_moe_tail_phase_profile_320() {
+        run_live_grouped_moe_tail_phase_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-320",
+            320,
+            2,
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn metal_35b_a3b_live_grouped_moe_tail_phase_profile_512() {
         run_live_grouped_moe_tail_phase_profile(
             "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
@@ -9364,6 +9347,26 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn metal_35b_a3b_moe_route_logits_e8p32_oracle_128() {
+        run_moe_route_logits_e8p32_oracle(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-128",
+            128,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_moe_route_logits_e8p32_oracle_320() {
+        run_moe_route_logits_e8p32_oracle(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-320",
+            320,
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn metal_35b_a3b_moe_route_logits_e8p32_oracle_512() {
         run_moe_route_logits_e8p32_oracle(
             "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
@@ -9379,6 +9382,16 @@ mod tests {
             "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
             "a3b-1024",
             1024,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_moe_route_logits_e8p32_oracle_320() {
+        run_moe_route_logits_e8p32_oracle(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-320",
+            320,
         );
     }
 
@@ -10934,6 +10947,325 @@ mod tests {
             "122b-512",
             512,
             2,
+        );
+    }
+
+    fn run_grouped_swiglu_fused_bank_profile(
+        model_path: &str,
+        label: &str,
+        chunk_p: usize,
+        n_runs: usize,
+    ) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[grouped-swiglu-fused-{label}] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let arch = &mm.arch;
+        assert_eq!(arch.kind, crate::model::ArchKind::Moe);
+        let h = arch.hidden_size as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let n_expert = arch.expert_count as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let block = &mf.model.blocks[0];
+        let (post_norm, moe) = match block {
+            crate::metal_forward::MetalBlock::Gdn(g) => {
+                (&g.post_attn_norm, g.ffn_moe.as_ref().expect("moe block"))
+            }
+            crate::metal_forward::MetalBlock::Attn(a) => {
+                (&a.post_attn_norm, a.ffn_moe.as_ref().expect("moe block"))
+            }
+        };
+        assert_eq!(moe.gate_exps.dtype, GgmlType::Q4_K);
+        assert_eq!(moe.up_exps.dtype, GgmlType::Q4_K);
+
+        let scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, chunk_p as u32).expect("scratch");
+        let x_pack = scratch.x_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+        let h_pack = scratch.h_pack.view_subrange(0, vec![(chunk_p * h) as u64]);
+        let router_probs_pack = scratch
+            .moe_router_probs_pack
+            .view_subrange(0, vec![(chunk_p * n_expert) as u64]);
+        let topk_idx_pack = scratch
+            .moe_topk_idx_pack
+            .view_subrange(0, vec![(chunk_p * topk) as u64]);
+        let topk_weight_pack = scratch
+            .moe_topk_weight_pack
+            .view_subrange(0, vec![(chunk_p * topk) as u64]);
+        let shared_gate_pack = scratch
+            .moe_shared_gate_pack
+            .view_subrange(0, vec![chunk_p as u64]);
+        let counts = MetalTensor::zeros_f32(&ctx, vec![n_expert as u64]).expect("counts");
+        let ids = MetalTensor::zeros_f32(&ctx, vec![(n_expert * chunk_p) as u64]).expect("ids");
+        let current_inner = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * topk * f_exp) as u64])
+            .expect("current_inner");
+        let fused_inner = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * topk * f_exp) as u64])
+            .expect("fused_inner");
+        let x_init: Vec<f32> = (0..chunk_p * h)
+            .map(|i| ((i % 37) as f32 - 18.0) * 1e-2)
+            .collect();
+        let hot_threshold = prefill_moe_hot_expert_min_slots().unwrap_or(1) as u32;
+        let fused_gate_up =
+            fuse_q4k_gate_up_expert_banks(&ctx, &moe.gate_exps, &moe.up_exps, h, f_exp, n_expert);
+
+        let mut current_ms = 0.0f64;
+        let mut fused_ms = 0.0f64;
+        let mut cos_min = f64::INFINITY;
+        let mut max_abs = 0.0f32;
+        let mut hot_experts = 0usize;
+        let mut hot_slots = 0usize;
+        let mut max_count = 0usize;
+
+        for _ in 0..n_runs {
+            write_tensor_f32(&x_pack, &x_init);
+            let _ = timed_gpu_cmd(&ctx, |enc| {
+                encode_rms_norm_batched_f32(
+                    &ctx,
+                    enc,
+                    &x_pack,
+                    post_norm,
+                    &h_pack,
+                    chunk_p,
+                    h,
+                    crate::metal_forward::RMS_EPS,
+                )
+                .expect("postnorm");
+                encode_mat_mat_dispatch(
+                    &ctx,
+                    enc,
+                    &moe.gate_inp,
+                    &h_pack,
+                    &router_probs_pack,
+                    h,
+                    n_expert,
+                    chunk_p,
+                )
+                .expect("route");
+                encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                    &ctx,
+                    enc,
+                    &router_probs_pack,
+                    &moe.gate_inp_shexp,
+                    &h_pack,
+                    &topk_idx_pack,
+                    &topk_weight_pack,
+                    &shared_gate_pack,
+                    n_expert,
+                    topk,
+                    h,
+                    chunk_p,
+                )
+                .expect("topk/shared");
+            });
+            let _ = timed_gpu_cmd(&ctx, |enc| {
+                crate::metal::encode_moe_route_bucket_slots_f32(
+                    &ctx,
+                    enc,
+                    &topk_idx_pack,
+                    &counts,
+                    &ids,
+                    n_expert,
+                    chunk_p,
+                    topk,
+                )
+                .expect("bucket slots");
+            });
+
+            let counts_cpu = read_tensor_i32_f32buf(&counts);
+            hot_experts = counts_cpu
+                .iter()
+                .filter(|&&c| c >= hot_threshold as i32)
+                .count();
+            hot_slots = counts_cpu
+                .iter()
+                .filter(|&&c| c >= hot_threshold as i32)
+                .map(|&c| c as usize)
+                .sum();
+            max_count = counts_cpu.iter().copied().max().unwrap_or(0).max(0) as usize;
+            if hot_experts == 0 {
+                eprintln!(
+                    "[grouped-swiglu-fused-{label}] no experts above threshold={hot_threshold}"
+                );
+                return;
+            }
+
+            current_ms += timed_gpu_cmd(&ctx, |enc| {
+                encode_fill_f32(&ctx, enc, &current_inner, 0.0).expect("zero current inner");
+                crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
+                    &ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &moe.up_exps,
+                    &h_pack,
+                    &counts,
+                    &ids,
+                    &current_inner,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                    chunk_p,
+                    hot_threshold,
+                    i32::MAX as u32,
+                )
+                .expect("current hot n32");
+                if hot_threshold > 0 {
+                    crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
+                        &ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        &h_pack,
+                        &counts,
+                        &ids,
+                        &current_inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                        0,
+                        hot_threshold.saturating_sub(1),
+                    )
+                    .expect("current cold n16");
+                }
+            });
+
+            fused_ms += timed_gpu_cmd(&ctx, |enc| {
+                encode_fill_f32(&ctx, enc, &fused_inner, 0.0).expect("zero fused inner");
+                crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n32_range(
+                    &ctx,
+                    enc,
+                    &fused_gate_up,
+                    &h_pack,
+                    &counts,
+                    &ids,
+                    &fused_inner,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                    chunk_p,
+                    hot_threshold,
+                    i32::MAX as u32,
+                )
+                .expect("fused hot n32");
+                if hot_threshold > 0 {
+                    crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n16_range(
+                        &ctx,
+                        enc,
+                        &fused_gate_up,
+                        &h_pack,
+                        &counts,
+                        &ids,
+                        &fused_inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                        0,
+                        hot_threshold.saturating_sub(1),
+                    )
+                    .expect("fused cold n16");
+                }
+            });
+
+            let cur = read_tensor_f32(&current_inner);
+            let fus = read_tensor_f32(&fused_inner);
+            cos_min = cos_min.min(cosine_f32(&cur, &fus));
+            for i in 0..cur.len() {
+                max_abs = max_abs.max((cur[i] - fus[i]).abs());
+            }
+        }
+
+        let denom = n_runs as f64;
+        eprintln!(
+            "[grouped-swiglu-fused-{label}] chunk_p={chunk_p} hot_threshold={} hot_experts={} hot_slots={} max_count={} current_total={:.2} ms fused_total={:.2} ms speedup={:.3} cos_min={:.6} max_abs={:.3e}",
+            hot_threshold,
+            hot_experts,
+            hot_slots,
+            max_count,
+            current_ms / denom,
+            fused_ms / denom,
+            (current_ms / denom) / (fused_ms / denom),
+            cos_min,
+            max_abs,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_320() {
+        run_grouped_swiglu_fused_bank_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-320",
+            320,
+            3,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_320() {
+        run_grouped_swiglu_fused_bank_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-320",
+            320,
+            3,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_512() {
+        run_grouped_swiglu_fused_bank_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-512",
+            512,
+            3,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_512() {
+        run_grouped_swiglu_fused_bank_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-512",
+            512,
+            3,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_grouped_swiglu_fused_bank_profile_1024() {
+        run_grouped_swiglu_fused_bank_profile(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-1024",
+            1024,
+            3,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_grouped_swiglu_fused_bank_profile_1024() {
+        run_grouped_swiglu_fused_bank_profile(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-1024",
+            1024,
+            3,
         );
     }
 
@@ -16901,6 +17233,50 @@ mod tests {
             std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
         }
         out
+    }
+
+    fn read_tensor_bytes(t: &MetalTensor) -> Vec<u8> {
+        let n = t.n_bytes() as usize;
+        let mut out = vec![0u8; n];
+        unsafe {
+            let src = (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize);
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+        }
+        out
+    }
+
+    fn fuse_q4k_gate_up_expert_banks(
+        ctx: &MetalContext,
+        gate: &MetalTensor,
+        up: &MetalTensor,
+        n_hidden: usize,
+        n_ffn: usize,
+        n_expert: usize,
+    ) -> MetalTensor {
+        const Q4K_BYTES: usize = 144;
+        let gate_bytes = read_tensor_bytes(gate);
+        let up_bytes = read_tensor_bytes(up);
+        let row_bytes = (n_hidden / 256) * Q4K_BYTES;
+        let blocks_per_row = row_bytes / Q4K_BYTES;
+        let per_expert_bytes = row_bytes * n_ffn;
+        assert_eq!(gate_bytes.len(), per_expert_bytes * n_expert);
+        assert_eq!(up_bytes.len(), per_expert_bytes * n_expert);
+        let mut fused = Vec::with_capacity(gate_bytes.len() * 2);
+        for expert in 0..n_expert {
+            let g_exp = &gate_bytes[expert * per_expert_bytes..(expert + 1) * per_expert_bytes];
+            let u_exp = &up_bytes[expert * per_expert_bytes..(expert + 1) * per_expert_bytes];
+            for row in 0..n_ffn {
+                let row_off = row * row_bytes;
+                for block in 0..blocks_per_row {
+                    let off = row_off + block * Q4K_BYTES;
+                    fused.extend_from_slice(&g_exp[off..off + Q4K_BYTES]);
+                    fused.extend_from_slice(&u_exp[off..off + Q4K_BYTES]);
+                }
+            }
+        }
+        let fused_elems = (fused.len() / Q4K_BYTES) * 256;
+        MetalTensor::from_bytes(ctx, &fused, vec![fused_elems as u64], GgmlType::Q4_K)
+            .expect("fused q4k gate/up")
     }
 }
 const ATTN_PREFILL_V4_PACKED_ROWS: usize = 8;

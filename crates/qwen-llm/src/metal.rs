@@ -1621,6 +1621,119 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n16_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_fused: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
+    if n_hidden % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n16",
+            detail: format!("n_hidden={n_hidden} not divisible by 256"),
+        });
+    }
+    if n_ffn % 64 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n16",
+            detail: format!("n_ffn={n_ffn} not divisible by 64"),
+        });
+    }
+    if topk == 0 || n_expert == 0 || n_tokens == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n16",
+            detail: "topk/n_expert/n_tokens must all be > 0".into(),
+        });
+    }
+    if w_fused.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n16",
+            detail: format!("expected fused Q4_K expert bank, got {:?}", w_fused.dtype),
+        });
+    }
+    if x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n16",
+            detail: format!(
+                "shape mismatch x={} counts={} ids={} inner={} expected x={} counts={} ids={} inner={}",
+                x_pack.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                inner.n_elements(),
+                n_tokens * n_hidden,
+                n_expert,
+                n_expert * n_tokens,
+                n_tokens * topk * n_ffn
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_q4_K_f32_grouped_slots_fused_n16")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        ffn: u32,
+        hidden: u32,
+        n_expert: u32,
+        topk: u32,
+        n_tokens: u32,
+        nb01: u32,
+        stride_b: u32,
+        min_count: u32,
+        max_count: u32,
+    }
+    let nb01 = ((n_hidden / 256) * 144) as u32;
+    enc.set_bytes(
+        0,
+        &Args {
+            ffn: n_ffn as u32,
+            hidden: n_hidden as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+            n_tokens: n_tokens as u32,
+            nb01,
+            stride_b: n_hidden as u32,
+            min_count,
+            max_count,
+        },
+    );
+    enc.set_tensor(1, w_fused);
+    enc.set_tensor(2, x_pack);
+    enc.set_tensor(3, counts);
+    enc.set_tensor(4, ids);
+    enc.set_tensor(5, inner);
+    enc.set_threadgroup_memory(0, 12288);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(16),
+            height: n_ffn.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1745,6 +1858,119 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
     enc.set_tensor(4, counts);
     enc.set_tensor(5, ids);
     enc.set_tensor(6, inner);
+    enc.set_threadgroup_memory(0, 16384);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
+            height: n_ffn.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n32_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_fused: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
+    if n_hidden % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n32",
+            detail: format!("n_hidden={n_hidden} not divisible by 256"),
+        });
+    }
+    if n_ffn % 64 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n32",
+            detail: format!("n_ffn={n_ffn} not divisible by 64"),
+        });
+    }
+    if topk == 0 || n_expert == 0 || n_tokens == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n32",
+            detail: "topk/n_expert/n_tokens must all be > 0".into(),
+        });
+    }
+    if w_fused.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n32",
+            detail: format!("expected fused Q4_K expert bank, got {:?}", w_fused.dtype),
+        });
+    }
+    if x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_q4_K_grouped_slots_fused_n32",
+            detail: format!(
+                "shape mismatch x={} counts={} ids={} inner={} expected x={} counts={} ids={} inner={}",
+                x_pack.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                inner.n_elements(),
+                n_tokens * n_hidden,
+                n_expert,
+                n_expert * n_tokens,
+                n_tokens * topk * n_ffn
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_q4_K_f32_grouped_slots_fused_n32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        ffn: u32,
+        hidden: u32,
+        n_expert: u32,
+        topk: u32,
+        n_tokens: u32,
+        nb01: u32,
+        stride_b: u32,
+        min_count: u32,
+        max_count: u32,
+    }
+    let nb01 = ((n_hidden / 256) * 144) as u32;
+    enc.set_bytes(
+        0,
+        &Args {
+            ffn: n_ffn as u32,
+            hidden: n_hidden as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+            n_tokens: n_tokens as u32,
+            nb01,
+            stride_b: n_hidden as u32,
+            min_count,
+            max_count,
+        },
+    );
+    enc.set_tensor(1, w_fused);
+    enc.set_tensor(2, x_pack);
+    enc.set_tensor(3, counts);
+    enc.set_tensor(4, ids);
+    enc.set_tensor(5, inner);
     enc.set_threadgroup_memory(0, 16384);
     enc.dispatch(
         MTLSize {

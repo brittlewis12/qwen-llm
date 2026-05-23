@@ -6,6 +6,135 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — A3B Route-Logits E8P32 Drops To `pp128`
+
+Status: local branch evidence. GPU runs were sequential.
+
+### What Changed
+
+- The `pp320` grouped-tail profile exposed a stale threshold: route logits were
+  still using the generic mat-mat below `512`, costing A3B `3.64 ms` in a single
+  live MoE tail at `chunk_p=320`.
+- Lowered the route-logits `E8xP32` auto threshold for the A3B-sized router
+  (`hidden <= 2048`) from `512` to `128`.
+- Kept larger MoE routers at the old `512` threshold for now: A10B `pp256` forced
+  `E8xP32` regressed badly, and A10B `pp320` needs a cooled repeated-anchor pass
+  before promotion.
+
+### Measurements
+
+A3B forced/default `E8xP32` route-logits wins:
+
+- `pp128`: baseline `624.12 t/s`, new default `651.64 t/s`.
+- `pp256`: baseline `748.85 t/s`, forced `E8xP32` `783.48 t/s`.
+- `pp320`: baseline `775.25 t/s`, new default `815.75 t/s`.
+
+Real-rollout sanity on the same branch:
+
+- A3B `current-reva-short-qwen36` preserve replay: `7,986` tokens at
+  `855.33 t/s`.
+- A3B `v02_reva.json` preserve full rollout: `34,502` tokens at `587.60 t/s`.
+- These real-rollout rows are mainly no-regression coverage for the branch: the
+  route-threshold change is a short/medium synthetic win, while normal real
+  rollout chunks were already above the old `512` router threshold.
+
+Post-threshold A3B `chunk_p=320` grouped-tail profile:
+
+- `route_logits`: `0.27 ms` (`3.8%`), down from the stale-threshold `3.64 ms` row.
+- `grouped_swiglu`: `4.06 ms` (`57.2%`).
+- `grouped_down`: `1.60 ms` (`22.5%`).
+- Route-side is now back below the real routed-FFN wall at this shape.
+
+Correctness:
+
+- A3B `pp128` route-logits `E8xP32` oracle is exact:
+  `probs_cos=1.0`, `topk_mismatches=0`, `w_cos=1.0`, `gate_cos=1.0`.
+- A10B `pp320` oracle is also exact, but perf promotion is not yet clean.
+- A10B default smoke remains green after the zero-fill default-off and route
+  threshold cleanup.
+
+Negative / not promoted:
+
+- A10B `pp256`: forced `E8xP32` `219.21 t/s` vs baseline `248.99 t/s`; keep the
+  larger-router auto threshold above this regime.
+- A10B `pp320`: one forced run looked positive and one no-env run after heavy
+  probes looked bad; do not default until a cooled repeated-anchor sweep resolves
+  it.
+
+### Current Read
+
+- A3B medium/short MoE prompt still had a cheap route-side threshold win after
+  packed attention moved the board.
+- The remaining A3B `pp320` gap is now smaller, but routed FFN still dominates the
+  no-op ceiling.
+- A10B route thresholding must stay conservative; do not generalize the A3B
+  threshold by prompt size alone.
+
+## 2026-05-23 — Routed MoE FFN Residual: Hybrid Down-Sum Killed, Fused-Bank Evidence Strengthens
+
+Status: local branch evidence. All GPU measurements below were run sequentially;
+one stale pre-rebuild bench spot was discarded.
+
+### What Changed
+
+- Re-centered the residual MoE prompt gap after packed attention on routed FFN:
+  routed-noop ceilings dwarf shared-noop ceilings on the current default path.
+- Implemented and then removed a narrow hybrid falsifier:
+  grouped `SwiGLU` feeding the existing packed `down+weighted_sum` kernel, to test
+  whether skipping grouped `out` materialization was worth losing grouped-down
+  locality.
+- Added `pp320` exact fused-bank grouped-`SwiGLU` profiles to test whether the
+  interleaved gate/up expert-bank signal survives on the medium-prompt board.
+- Defaulted grouped routed `inner/out` zero-fill to off locally after prior
+  coverage/poison oracles proved full slot coverage.
+
+### Measurements
+
+Current no-op ceilings on default packed-attention MoE prompt path:
+
+- A3B `pp320`: base `~765 t/s`, routed-noop `~1136 t/s`, shared-noop `~790 t/s`.
+- A10B `pp320`: base `~305 t/s`, routed-noop `~648 t/s`, shared-noop `~309 t/s`.
+
+Hybrid grouped-`SwiGLU` -> packed `down+weighted_sum` falsifier:
+
+- Correctness passed the small A3B prefill-vs-single gate.
+- Correctness passed the small A10B smoke gate.
+- Rebuilt sequential A3B `pp320` killed the idea:
+  - baseline: `775.67 t/s`
+  - hybrid: `478.84 t/s`
+- Interpretation: removing grouped `out` / weighted-sum passes is not worth giving
+  up grouped-down locality. Do not revive this path without a new dataflow premise.
+
+Fused interleaved gate/up expert-bank grouped-`SwiGLU` profiles:
+
+- A3B `chunk_p=320`: `5.61 -> 4.38 ms`, `1.280x`, exact.
+- A10B `chunk_p=320`: `8.56 -> 6.22 ms`, `1.376x`, exact.
+- Prior context:
+  - A3B `512`: `1.078x`; A3B `1024`: `1.023x`
+  - A10B `512`: `1.226x`; A10B `1024`: `1.015x`
+
+Runtime duplicate fused-bank proof:
+
+- A3B small correctness passed with fused gate/up banks in the real grouped path.
+- Memory cost was severe: `40 * 288 MiB = 11.25 GiB` extra resident for A3B.
+- Rebuilt sequential A3B `pp320` only moved `775.25 -> 790.38 t/s` (`~1.02x`).
+- Interpretation: the duplicate-bank proof is not a production optimization path;
+  if this direction returns, it must be a replacement/offline ABI or a deeper
+  fusion that avoids duplicate residency.
+
+### Current Read
+
+- Routed FFN, not attention, is the dominant remaining MoE prompt residual.
+- The hybrid falsifier says the next dataflow branch must preserve grouped-down
+  locality; naive packed-token down-sum is dead.
+- Fused/interleaved gate-up layout is now strong evidence at `pp320`, but the
+  taper by `pp1024` means it should be treated as a medium-prompt expert-bank ABI
+  candidate, not a universal production shape yet.
+- The runtime duplicate fused-bank path is killed as an optimization branch: too
+  much resident memory for too little end-to-end conversion.
+- Zero-fill default-off is a small cleanup keeper; it is not the board-closing
+  branch.
+
 ## 2026-05-22 — A3B Packed Threshold Drops Again: `min_pos=128`
 
 Status: local branch only so far. The sub-`256` probe was only worth promoting

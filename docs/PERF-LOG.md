@@ -49,6 +49,21 @@ Grouped routed-tail microprofiles remain consistent with the old MoE read:
 | A3B | `512` | `3.84` | `2.31` | `1.55` |
 | A10B | `512` | `10.30` | `6.81` | `4.25` |
 
+Additional negative after this checkpoint: distributing the hot `n32` grouped
+SwiGLU/down final scatter across all 128 threads improved the down sub-bucket but
+regressed A3B `chunk_p=512` live routed tail overall (`3.84 -> 3.97 ms`), so it
+was reverted.
+
+Fused grouped finalizer also failed as a quick cleanup lever at matrix `pp4096`:
+`QWEN_PREFILL_MOE_FUSED_FINALIZER=1` measured `892.60 t/s` between `933.51` and
+`941.87 t/s` baselines, so the extra-pass cleanup is not the current crack.
+
+The offline expert-bank hypothesis remains alive: the existing duplicate-bank
+microprofile still shows fused gate/up bank wins at `chunk_p=1024` (`1.271x` on
+A3B, `1.106x` on A10B). The runtime duplicate version remains a production no-go
+because of prior residency cost; any next version must replace the source banks
+or prove a near-zero-residency ABI.
+
 ### Current Read
 
 - The next exact sprint should pivot back to routed FFN/MoE structure. With the

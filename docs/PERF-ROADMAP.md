@@ -335,9 +335,10 @@ Why it is back at the top:
   correctness-passed but failed hard end-to-end on rebuilt sequential A3B `pp320`
   (`775.67 -> 478.84 t/s`). Removing grouped `out` / weighted-sum passes is not
   worth giving up grouped-down locality.
-- Interleaved gate/up fused-bank grouped-`SwiGLU` is exact and strong at `pp320`
-  (`1.280x` A3B, `1.376x` A10B), but tapers by `pp1024`, so it is an expert-bank
-  layout candidate rather than a universal kernel-default proof.
+- Interleaved gate/up fused-bank grouped-`SwiGLU` is exact and still strong in
+  microprofiles: prior `pp320` was `1.280x` A3B / `1.376x` A10B, and fresh
+  `chunk_p=1024` reads are `1.271x` A3B / `1.106x` A10B. It remains an
+  expert-bank ABI candidate, not a runtime mirror default.
 - A runtime duplicate fused-bank proof is already killed as a production path: A3B
   correctness passed, but it cost `11.25 GiB` extra resident memory and converted
   only `775.25 -> 790.38 t/s` at `pp320` (`~1.02x`).

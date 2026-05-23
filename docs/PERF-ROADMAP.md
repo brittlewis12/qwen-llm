@@ -120,6 +120,12 @@ Recent confirmed wins:
   `pp34502` row to `725.7 t/s` at chunk `1024` and `736.9 t/s` at chunk `2048`,
   but `pp16384` is still noisy and chunk `4096` loses. Treat chunk `2048` as the
   current matrix-long candidate, not a default.
+- Post-matrix `pp4096` no-op budgeting changes the next-priority read: with
+  matrix attention held fixed, attention-body skip is only a `~3-7%` lever
+  (`929/972 -> 997 t/s`), while routed-MoE skip reaches `1270 t/s` and broad
+  FFN skip reaches `2498 t/s`. Direct KQV stores, vectorized KQV final copies,
+  and F16 probability scratch were all falsified as local attention keepers.
+  The next exact sprint should target routed FFN/MoE structure again.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
   used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel
@@ -315,9 +321,16 @@ Why it is back at the top:
   A3B `pp320` moves from about `765 -> 1136 t/s` with routed off, while shared
   off only reaches about `790 t/s`; A10B `pp320` moves from about `305 -> 648 t/s`
   with routed off, while shared off only reaches about `309 t/s`.
+- The matrix-attention branch shifts the clean `pp4096` budget back toward MoE:
+  attention-body skip is only `~3-7%`, while routed-MoE skip reaches `1270 t/s`
+  and broad FFN skip reaches `2498 t/s` against `~929-972 t/s` matrix baselines.
 - Post-route-threshold A3B `chunk_p=320` live grouped-tail profile still puts
   `grouped_swiglu` first (`4.06 ms`, `57.2%`) and `grouped_down` second
   (`1.60 ms`, `22.5%`); route logits are now `0.27 ms` (`3.8%`).
+- Fresh routed-tail microprofiles at `chunk_p=512` keep the same shape: A3B tail
+  is `3.84 ms` (`2.31 ms` grouped gate/up/SwiGLU, `1.55 ms` down+reduce), and
+  A10B tail is `10.30 ms` (`6.81 ms` grouped gate/up/SwiGLU, `4.25 ms`
+  down+reduce).
 - A cheap hybrid falsifier, grouped `SwiGLU` into packed `down+weighted_sum`,
   correctness-passed but failed hard end-to-end on rebuilt sequential A3B `pp320`
   (`775.67 -> 478.84 t/s`). Removing grouped `out` / weighted-sum passes is not
@@ -333,6 +346,9 @@ Current design rule:
 
 - Do not pursue dataflow branches that sacrifice grouped-down locality unless they
   first show parity on rebuilt sequential `pp320`/`pp512` gates.
+- Do not repeat local `grouped_swiglu` knob sweeps unless a new phase ladder shows
+  a new mechanism. The next exact proof must reduce the combined
+  `grouped_swiglu + grouped_down` routed-tail bucket.
 - Treat offline/interleaved expert-bank ABI as the next serious medium-prompt FFN
   branch only if it replaces the original banks instead of duplicating them; keep
   true `SwiGLU+down` fusion as a follow-on only if it preserves down locality and
@@ -348,13 +364,17 @@ Acceptance gates:
   material `pp1024` regression.
 - Any true fused `SwiGLU+down` branch must preserve grouped-down locality and beat
   the offline-bank path, not just the old baseline.
+- Any structural routed-tail branch must show at least `>=1.15x` routed-tail
+  speedup on both A3B and A10B at `pp512`, stay positive/neutral at `pp1024`, and
+  improve A3B `pp4096` with matrix attention fixed by `>=1.10x` before default
+  consideration.
 
-### 2. Hypothesis: the true-long A3B gap is packed-attention main-pass/context-growth, not prompt shape
+### 2. Hypothesis: true-long A3B still needs matrix-attention productionization, but it is no longer the next pp4096 lever
 
 Optimizes: A3B `16k/32k+` prefill where qwen now falls from the medium-prompt
 plateau faster than `llama.cpp`.
 
-Why it moves up:
+Why it remains live but demoted:
 
 - Same-shape sparse rows show `llama.cpp` also declines after the medium-prompt
   peak, but remains much faster: qwen/lcpp is `0.67x` at `pp1024`, `0.68x` at
@@ -375,6 +395,10 @@ Why it moves up:
   it wins real long rows: about `1042 t/s` at `pp4096`, `997 t/s` at `pp8192`,
   noisy `~864-904 t/s` at `pp16384`, and `725.7-736.9 t/s` at `pp34502`
   depending on chunk size.
+- After those matrix wins, local attention follow-ons did not convert: direct KQV
+  final stores regressed, vectorized KQV temp copies regressed, and F16
+  probability scratch was flat/slower while failing the current matrix oracle
+  max-abs limit.
 
 Current design rule:
 
@@ -391,7 +415,8 @@ Current design rule:
 - Treat chunk `2048` as the current matrix-long candidate for `34.5k` rows;
   chunk `4096` loses despite the larger query batch.
 - Next inspect/copy deeper lcpp `mul_mm_f16_f32` KQ/KQV tiling and score layout
-  before adding more local packed-attention knobs.
+  only after routed-tail work has a fresh phase ladder; do not spend the next
+  sprint on more local KQV store/probability variants.
 
 Acceptance gates:
 

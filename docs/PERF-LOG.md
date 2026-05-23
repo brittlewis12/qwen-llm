@@ -6,6 +6,62 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — Matrix Attention Is No Longer The Main A3B `pp4096` Gap
+
+Status: diagnostic checkpoint after the A3B/group-8 matrix sidecar. GPU workloads
+were run sequentially; true-long rows showed order/sag noise and should not be
+used as promotion evidence.
+
+### What Changed
+
+- Re-checked the remaining A3B prefill budget with matrix attention held fixed
+  (`QWEN_PREFILL_ATTN_MATRIX_G8=1`, `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=4096`).
+- Falsified three local attention follow-ons and reverted their code:
+  direct KQV stores into qwen's row-major output, vectorized temp-to-output KQV
+  copies, and F16 probability scratch for matrix KQV.
+
+### Measurements
+
+Cooled `pp4096`, chunk `1024`, one-run variants:
+
+| Variant | Tokens/s | Read |
+| --- | ---: | --- |
+| baseline-a | `929.47` | matrix sidecar anchor |
+| noop-attn | `997.19` | attention body now only `+3-7%` |
+| noop-routed | `1270.08` | routed MoE is a much larger lever |
+| noop-ffn | `2497.99` | broad FFN upper bound remains enormous |
+| baseline-b | `971.90` | run-order drift still visible |
+
+Attention follow-on probes:
+
+- Direct KQV final stores were correctness-sensitive and regressed `pp4096`
+  materially (`~1042 -> ~970 t/s` spot read), so the row-major write cannot be
+  fixed by a naive accumulator-store rewrite.
+- Vectorized KQV temp copy also regressed (`~972 t/s` spot read).
+- F16 probability scratch failed the current matrix oracle max-abs limit
+  (`~4.6e-2` with `cos=1.0`) and was flat/slightly slower in a cooled `pp4096`
+  sweep (`926.40` vs `933.30` / `929.91` baselines).
+
+Grouped routed-tail microprofiles remain consistent with the old MoE read:
+
+| Model | Chunk | Tail ms | `grouped_swiglu` | `grouped_down+reduce` |
+| --- | ---: | ---: | ---: | ---: |
+| A3B | `512` | `3.84` | `2.31` | `1.55` |
+| A10B | `512` | `10.30` | `6.81` | `4.25` |
+
+### Current Read
+
+- The next exact sprint should pivot back to routed FFN/MoE structure. With the
+  matrix sidecar active, more attention micro-knobs do not have enough measured
+  headroom at `pp4096`.
+- The strongest exact hypothesis is still a structural routed-tail proof that
+  reduces the combined `grouped_swiglu + grouped_down` bucket, not another local
+  tile/threshold variant inside `grouped_swiglu` alone.
+- `pp34502` matrix/no-op sweeps need better methodology: a four-variant run sagged
+  from `688.85` to `561.45 t/s` baseline while `pmset -g therm` and
+  `memory_pressure -Q` reported no warning. Treat true-long spot rows as sparse
+  anchors unless repeated/cooled with interleaved baselines.
+
 ## 2026-05-23 — Vector B-Tile Loads Lift A3B Matrix True-Long Row
 
 Status: env-only A3B/group-8 matrix sidecar; not defaulted. GPU measurements were

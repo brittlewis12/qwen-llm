@@ -6,6 +6,61 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — Vector B-Tile Loads Lift A3B Matrix True-Long Row
+
+Status: env-only A3B/group-8 matrix sidecar; not defaulted. GPU measurements were
+run sequentially; rows are spot checks, not cooled promotion sweeps.
+
+### What Changed
+
+- Matched another `ggml-metal` `mul_mm_f16_f32` detail in the matrix sidecar:
+  vector-load the F32 B tile (`q` for `KQ`, softmax probabilities for `KQV`) as
+  `float2x4` and cast to `half2x4` in threadgroup memory instead of scalar-loading
+  eight floats one by one.
+- Kept the existing scalar fallback for ragged/non-aligned score rows.
+
+### Correctness
+
+- A3B two-chunk packed oracle remains green with the vector-load path:
+  `pp256 --prefill-chunk 128`, `QWEN_PREFILL_ATTN_MATRIX_G8=1`,
+  `QWEN_PREFILL_ATTN_PACKED_G8_ORACLE=1`.
+- All oracle rows are finite, `cos=1.0`, and max_abs remains within the existing
+  matrix tolerance (`<= 2e-2`).
+
+### Measurements
+
+Current vector-load matrix sidecar spot rows:
+
+| Prompt | Chunk | Tokens/s | Read |
+| ---: | ---: | ---: | --- |
+| `4096` | `1024` | `1042.04` | flat/slightly up vs prior `1039.09` |
+| `8192` | `1024` | `996.51` | up vs prior `956.61` |
+| `16384` | `1024` | `863.79`, `903.99` | mixed/noisy around prior `892.45` |
+| `34502` | `1024` | `725.67` | up vs prior `658.79` |
+
+True-long chunk-size probe on the same current branch:
+
+| Prompt | Chunk | Tokens/s | Read |
+| ---: | ---: | ---: | --- |
+| `34502` | `1024` | `725.67` | stale default cap is not obviously optimal |
+| `34502` | `2048` | `736.90` | best spot row so far |
+| `34502` | `4096` | `718.18` | loses despite larger query batch |
+
+### Current Read
+
+- The old `1024` prompt chunk cap is not principled for true-long matrix attention;
+  it was a pragmatic cap from the `pp1024` feedback-loop era.
+- Larger chunks trade better KQ/KQV shape and fewer chunk boundaries against score
+  scratch (`chunk * n_q_heads * max_pos * 4` bytes) and heavier long-context matrix
+  traffic. At `34.5k`, `2048` currently looks better than `1024`, while `4096`
+  loses.
+- Against the prior `llama.cpp -fa 0` `pp34502` anchor (`897.64 t/s`), the current
+  best qwen matrix row is about `0.82x`, up from the earlier `0.66x` default and
+  `0.73x` fused-V_T sidecar anchors.
+- Next leverage is still KQ/KQV kernel parity and score/KQV traffic. Do not promote
+  the matrix path until chunk sizing, max-pos allocation, and half-probability KQV
+  correctness are production-shaped.
+
 ## 2026-05-23 — Fused V_T Scatter Converts A3B Matrix Attention At Long Context
 
 Status: env-only A3B/group-8 matrix sidecar; not defaulted. GPU measurements were

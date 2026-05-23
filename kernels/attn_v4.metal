@@ -1217,19 +1217,28 @@ kernel void kernel_attn_matrix_g8_kq_f32(
                 : (half)0.0f;
         }
 
-        for (short i = 0; i < 8; ++i) {
+        {
             const short sx = tiitg % AM_NL1;
             const short sy = (tiitg / AM_NL1) / 8;
-            const short lx = i;
             const short ly = (tiitg / AM_NL1) % 8;
             const short ib = 4 * sx + sy;
             const uint local_q = (uint)(r1 + lr1);
             const uint row = local_q / AM_G8_GROUP;
             const uint g = local_q % AM_G8_GROUP;
-            const uint kk = loop_k + iy + i;
-            sb[64 * ib + 8 * ly + lx] = (local_q < (uint)N && kk < K)
-                ? half(q[((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + kk])
-                : (half)0.0f;
+            const uint kk = loop_k + iy;
+            threadgroup half * dst = sb + 64 * ib + 8 * ly;
+            if (local_q < (uint)N && kk + 7 < (uint)K) {
+                device const float * q_ptr =
+                    q + ((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + kk;
+                *(threadgroup half2x4 *)dst = (half2x4)(*((device const float2x4 *)q_ptr));
+            } else {
+                for (short i = 0; i < 8; ++i) {
+                    const uint kki = kk + i;
+                    dst[i] = (local_q < (uint)N && kki < (uint)K)
+                        ? half(q[((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + kki])
+                        : (half)0.0f;
+                }
+            }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1371,17 +1380,27 @@ kernel void kernel_attn_matrix_g8_kqv_f32(
                 : (half)0.0f;
         }
 
-        for (short i = 0; i < 8; ++i) {
+        {
             const short sx = tiitg % AM_NL1;
             const short sy = (tiitg / AM_NL1) / 8;
-            const short lx = i;
             const short ly = (tiitg / AM_NL1) % 8;
             const short ib = 4 * sx + sy;
             const uint local_q = (uint)(r1 + lr1);
-            const uint kk = loop_k + iy + i;
-            sb[64 * ib + 8 * ly + lx] = (local_q < (uint)N && kk < args.n_pos)
-                ? half(probs[((ulong)kvh * (ulong)N + local_q) * args.n_pos + kk])
-                : (half)0.0f;
+            const uint kk = loop_k + iy;
+            threadgroup half * dst = sb + 64 * ib + 8 * ly;
+            const bool aligned_scores = (args.n_pos & 7u) == 0u;
+            if (aligned_scores && local_q < (uint)N && kk + 7 < args.n_pos) {
+                device const float * p_ptr =
+                    probs + ((ulong)kvh * (ulong)N + local_q) * args.n_pos + kk;
+                *(threadgroup half2x4 *)dst = (half2x4)(*((device const float2x4 *)p_ptr));
+            } else {
+                for (short i = 0; i < 8; ++i) {
+                    const uint kki = kk + i;
+                    dst[i] = (local_q < (uint)N && kki < args.n_pos)
+                        ? half(probs[((ulong)kvh * (ulong)N + local_q) * args.n_pos + kki])
+                        : (half)0.0f;
+                }
+            }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);

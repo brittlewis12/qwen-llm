@@ -72,11 +72,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `KQ -> softmax -> KQV` Metal path and its cache/layout implementation details.
 - An env-only A3B/group-8 matrix-attention sidecar
   (`QWEN_PREFILL_ATTN_MATRIX_G8=1`) became a real long-context branch after V_T
-  writes moved to fused cache-fill time: spot rows are about `1039 t/s` at
-  `pp4096`, `957 t/s` at `pp8192`, `892 t/s` at `pp16384`, and `659 t/s` at
-  `pp34502`. It is still not defaulted because allocation is manual via
-  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS` and KQV uses the looser half-probability
-  correctness tolerance.
+  writes moved to fused cache-fill time and the KQ/KQV B tile started using
+  lcpp-like vector loads: spot rows are about `1042 t/s` at `pp4096`, `997 t/s`
+  at `pp8192`, noisy `~864-904 t/s` at `pp16384`, and `725.7 t/s` at `pp34502`
+  with chunk `1024`. A true-long chunk probe puts `pp34502` chunk `2048` at
+  `736.9 t/s` and chunk `4096` at `718.2 t/s`. It is still not defaulted because
+  allocation is manual via `QWEN_PREFILL_ATTN_MATRIX_MAX_POS` and KQV uses the
+  looser half-probability correctness tolerance.
 - `llama-bench` anchors are still roughly `~1222.4 t/s` for A3B `pp320` and
   `~393.3 t/s` for A10B `pp320`, so the medium/long-prompt board has moved a lot
   but is not closed yet.
@@ -113,6 +115,11 @@ Recent confirmed wins:
   turns the prior long regression into a `~10-18%` spot win from `pp1024` through
   `pp34502`, but the remaining gap is now KQ/KQV/score traffic and mature
   `mul_mm_f16_f32` behavior.
+- The next lcpp-like `mul_mm_f16_f32` detail, vector-loading the F32 B tile into
+  `half2x4`, is now in the matrix sidecar. It improves the current true-long
+  `pp34502` row to `725.7 t/s` at chunk `1024` and `736.9 t/s` at chunk `2048`,
+  but `pp16384` is still noisy and chunk `4096` loses. Treat chunk `2048` as the
+  current matrix-long candidate, not a default.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
   used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel
@@ -364,9 +371,10 @@ Why it moves up:
   `GGML_OP_FLASH_ATTN_EXT`.
 - A deliberately matrix-shaped A3B sidecar (`V^T`, `KQ`, softmax, `KQV`) first
   regressed long prompts because it re-transposed the full V prefix in the body.
-  After moving V_T writes into fused cache fill, it wins real long rows: about
-  `1039 t/s` at `pp4096`, `957 t/s` at `pp8192`, `892 t/s` at `pp16384`, and
-  `659 t/s` at `pp34502`.
+  After moving V_T writes into fused cache fill and vector-loading the F32 B tile,
+  it wins real long rows: about `1042 t/s` at `pp4096`, `997 t/s` at `pp8192`,
+  noisy `~864-904 t/s` at `pp16384`, and `725.7-736.9 t/s` at `pp34502`
+  depending on chunk size.
 
 Current design rule:
 
@@ -380,8 +388,10 @@ Current design rule:
 - Treat fused V_T scatter as the first lcpp-derived mechanism worth
   productionizing, but do not promote the current sidecar as-is. It still needs a
   non-manual max-pos allocation policy and a tighter KQV correctness story.
-- Next inspect/copy lcpp `mul_mm_f16_f32` KQ/KQV tiling and score layout before
-  adding more local packed-attention knobs.
+- Treat chunk `2048` as the current matrix-long candidate for `34.5k` rows;
+  chunk `4096` loses despite the larger query batch.
+- Next inspect/copy deeper lcpp `mul_mm_f16_f32` KQ/KQV tiling and score layout
+  before adding more local packed-attention knobs.
 
 Acceptance gates:
 
@@ -394,6 +404,8 @@ Acceptance gates:
 - Defaulting the fused V_T matrix path requires repeated cooled wins at
   `pp1024/2048/4096/8192/16384`, a clear max-pos scratch policy, and no dense or
   decode regression from extra V_T memory/writes.
+- Any matrix chunk-size change must include memory accounting for score scratch and
+  at least one true-long row; `pp1024` is no longer a sufficient chunk oracle.
 - Keep A3B packed-attention oracle/correctness green at the first activated
   long-context chunk shape.
 

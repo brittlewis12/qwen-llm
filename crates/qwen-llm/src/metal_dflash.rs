@@ -324,11 +324,14 @@ fn prefill_moe_route_bucket_fused_mode() -> PrefillEnvMode {
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_ROUTE_BUCKET_FUSED"))
 }
 
-fn prefill_moe_route_bucket_fused_enabled(chunk_p: usize) -> bool {
+fn prefill_moe_route_bucket_fused_auto_enabled(h: usize, chunk_p: usize) -> bool {
     match prefill_moe_route_bucket_fused_mode() {
         PrefillEnvMode::ForceOn => true,
         PrefillEnvMode::ForceOff => false,
-        PrefillEnvMode::Auto => chunk_p >= 512,
+        PrefillEnvMode::Auto => {
+            let min_chunk = if h <= 2048 { 128 } else { 512 };
+            chunk_p >= min_chunk
+        }
     }
 }
 
@@ -5217,7 +5220,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         && (skip_moe_shared || packed_shared_path);
                     let fused_route_bucket = grouped_routed_path
                         && packed_route_path
-                        && prefill_moe_route_bucket_fused_enabled(chunk_p);
+                        && prefill_moe_route_bucket_fused_auto_enabled(h, chunk_p);
                     let moe_topk_idx_pack_p = layer_scratch
                         .moe_topk_idx_pack
                         .view_subrange(0, vec![(chunk_p * topk) as u64]);
@@ -8491,7 +8494,7 @@ mod tests {
         let x_init: Vec<f32> = (0..chunk_p * h)
             .map(|i| ((i % 37) as f32 - 18.0) * 1e-2)
             .collect();
-        let fused_route_bucket = prefill_moe_route_bucket_fused_enabled(chunk_p);
+        let fused_route_bucket = prefill_moe_route_bucket_fused_auto_enabled(h, chunk_p);
 
         let mut postnorm_ms = 0.0f64;
         let mut route_logits_ms = 0.0f64;
@@ -9323,6 +9326,26 @@ mod tests {
         );
         assert!(w_cos > 0.999999, "topk weight cos too low: {w_cos}");
         assert!(gate_cos > 0.999999, "shared gate cos too low: {gate_cos}");
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_moe_route_bucket_fused_oracle_128() {
+        run_moe_route_bucket_fused_oracle(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-128",
+            128,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_35b_a3b_moe_route_bucket_fused_oracle_320() {
+        run_moe_route_bucket_fused_oracle(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "a3b-320",
+            320,
+        );
     }
 
     #[test]

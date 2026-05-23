@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — A3B Route+Bucket Fusion Drops To `pp128`
+
+Status: local branch evidence. GPU runs were sequential.
+
+### What Changed
+
+- After dropping A3B route-logits `E8xP32` to `pp128`, route bucket itself became
+  visible at A3B `chunk_p=320` (`0.58 ms`, `8.2%` in the live grouped-tail
+  profile).
+- Lowered fused route+bucket auto activation for A3B-sized hidden states
+  (`hidden <= 2048`) from `512` to `128`; larger MoE shapes stay at `512`.
+
+### Measurements
+
+A3B default prompt anchors after lowering route+bucket fusion:
+
+- `pp128`: `651.64 -> 655.48 t/s`.
+- `pp256`: `783.48 -> 800.99 t/s`.
+- `pp320`: `815.75 -> 830.37 t/s`.
+
+Correctness:
+
+- A3B `pp128` route+bucket fused oracle is exact:
+  `cos(topk_w)=1.0`, `cos(shared_gate)=1.0`, `cos(reduced)=1.0`.
+
+### Current Read
+
+- This is a small but clean A3B medium/short-prompt follow-on to the route-logits
+  threshold win.
+- It does not materially change real long-rollout rows because those already use
+  chunk sizes above the previous `512` fusion threshold.
+- Do not generalize to A10B without cooled anchors; larger-router route-logits
+  thresholding already showed shape-specific regressions.
+
 ## 2026-05-23 — A3B Route-Logits E8P32 Drops To `pp128`
 
 Status: local branch evidence. GPU runs were sequential.

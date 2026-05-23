@@ -49,8 +49,8 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 - `qwen-llm` 35B A3B MoE prompt default now includes prompt-native packed
   attention for the proven `group=8`, `head_dim=256` shape with family-specific
   `NWG=64`, packed activation at `n_pos >= 128`, and A3B-sized router `E8xP32`
-  from `pp128`: about `652 t/s` at `pp128`, `783 t/s` at `pp256`, `816 t/s` at
-  `pp320`, `899 t/s` at `pp512`, and `~952-966 t/s` at `pp1024`; long synthetic
+  plus fused route+bucket from `pp128`: about `655 t/s` at `pp128`, `801 t/s` at
+  `pp256`, `830 t/s` at `pp320`, `899 t/s` at `pp512`, and `~952-966 t/s` at `pp1024`; long synthetic
   is about `591 t/s` at `34.5k` tokens. Real-rollout sanity on the same branch:
   `855.3 t/s` for the `7,986`-token Reva short fixture and `587.6 t/s` for the
   `34,502`-token `v02_reva` full rollout.
@@ -77,14 +77,14 @@ Recent confirmed wins:
   - per-layer packed-vs-old oracle green at the first newly activated prompt
     sizes (`pp128/pp320` for A3B, `pp320/pp512` for A10B) and at active
     long-context chunk shapes.
-- A3B-sized route-logits `E8xP32` now activates from `pp128`; the old `512` floor
-  left a cheap medium/short-prompt win on the table. A10B stays conservative at
-  `512` for route logits until a cooled `pp320` promotion sweep resolves the
-  mixed signal there.
+- A3B-sized route-logits `E8xP32` and fused route+bucket now activate from
+  `pp128`; the old `512` floors left cheap medium/short-prompt wins on the table.
+  A10B stays conservative at `512` for route work until cooled promotion sweeps
+  resolve the mixed signal there.
 - The medium-prompt board moved substantially once the packed-attention threshold
   dropped from `4096` into the medium-prompt regime and the A3B route threshold
   followed: A3B `pp128/pp320/pp512/pp1024` now lands around
-  `~652 / ~816 / ~899 / ~952-966 t/s`, and A10B
+  `~655 / ~830 / ~899 / ~952-966 t/s`, and A10B
   `pp320/pp512/pp1024` around `~276 / ~355 / ~418 t/s`.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU

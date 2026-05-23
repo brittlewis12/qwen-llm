@@ -71,9 +71,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   slower at `pp16384`, so the current A3B long target is the non-flash
   `KQ -> softmax -> KQV` Metal path and its cache/layout implementation details.
 - An env-only A3B/group-8 matrix-attention sidecar
-  (`QWEN_PREFILL_ATTN_MATRIX_G8=1`) wins `pp512/1024` by about `3.7-4.2%`, fades
-  at `pp2048`, and regresses by `pp4096/8192`. Treat it as diagnostic evidence,
-  not a default candidate.
+  (`QWEN_PREFILL_ATTN_MATRIX_G8=1`) became a real long-context branch after V_T
+  writes moved to fused cache-fill time: spot rows are about `1039 t/s` at
+  `pp4096`, `957 t/s` at `pp8192`, `892 t/s` at `pp16384`, and `659 t/s` at
+  `pp34502`. It is still not defaulted because allocation is manual via
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS` and KQV uses the looser half-probability
+  correctness tolerance.
 - `llama-bench` anchors are still roughly `~1222.4 t/s` for A3B `pp320` and
   `~393.3 t/s` for A10B `pp320`, so the medium/long-prompt board has moved a lot
   but is not closed yet.
@@ -105,11 +108,11 @@ Recent confirmed wins:
   says attention-body cost is the long-context lever (`pp16384` `767.64 ->
   1101.72 t/s` with attention body skipped; routed-MoE skip only reaches
   `913.73 t/s`).
-- The A3B matrix-attention sidecar is a useful falsifier, not a keeper: it proves
-  that the high-level `llama.cpp` non-flash graph shape can help medium prompts,
-  but qwen's current scratch/layout/KQV implementation loses by true-long shapes.
-  The next long-context attack should be a `llama.cpp -fa 0` kernel/layout
-  differential, especially V-cache transposition and KQV memory traffic.
+- The A3B matrix-attention sidecar found a real lcpp-like mechanism: V must be
+  written in KQV-ready transposed layout at cache-fill time. Fused V_T scatter
+  turns the prior long regression into a `~10-18%` spot win from `pp1024` through
+  `pp34502`, but the remaining gap is now KQ/KQV/score traffic and mature
+  `mul_mm_f16_f32` behavior.
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
   used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel
@@ -359,10 +362,11 @@ Why it moves up:
   `-fa 1` is flat/slightly slower for A3B at the checked prompt lengths. The
   relevant lcpp target is therefore the non-flash Metal path, not
   `GGML_OP_FLASH_ATTN_EXT`.
-- A deliberately matrix-shaped A3B sidecar (`V^T`, `KQ`, softmax, `KQV`) wins
-  `pp512/1024` but regresses by `pp4096/8192`, so high-level graph is not enough;
-  the unresolved questions are cache layout, KQV write/read traffic, scratch
-  pressure, and mature matmul-kernel details.
+- A deliberately matrix-shaped A3B sidecar (`V^T`, `KQ`, softmax, `KQV`) first
+  regressed long prompts because it re-transposed the full V prefix in the body.
+  After moving V_T writes into fused cache fill, it wins real long rows: about
+  `1039 t/s` at `pp4096`, `957 t/s` at `pp8192`, `892 t/s` at `pp16384`, and
+  `659 t/s` at `pp34502`.
 
 Current design rule:
 
@@ -373,9 +377,11 @@ Current design rule:
   main-pass execution shape, KV reads, partial writes, and online-softmax work.
 - Compare against `llama.cpp` at the same prompt length before claiming long
   scaling progress.
-- Do not promote the current matrix sidecar as-is. Use it as a differential probe
-  and next inspect lcpp's persistent V-transposed cache / KQV layout before adding
-  more local packed-attention knobs.
+- Treat fused V_T scatter as the first lcpp-derived mechanism worth
+  productionizing, but do not promote the current sidecar as-is. It still needs a
+  non-manual max-pos allocation policy and a tighter KQV correctness story.
+- Next inspect/copy lcpp `mul_mm_f16_f32` KQ/KQV tiling and score layout before
+  adding more local packed-attention knobs.
 
 Acceptance gates:
 
@@ -385,6 +391,9 @@ Acceptance gates:
   `~0.66-0.69x` qwen/lcpp ratio.
 - Any matrix/non-flash branch must be positive at `pp4096` and `pp8192` before it
   gets long-run time at `16k+`; `pp512/1024` wins alone are not a promotion signal.
+- Defaulting the fused V_T matrix path requires repeated cooled wins at
+  `pp1024/2048/4096/8192/16384`, a clear max-pos scratch policy, and no dense or
+  decode regression from extra V_T memory/writes.
 - Keep A3B packed-attention oracle/correctness green at the first activated
   long-context chunk shape.
 
@@ -401,9 +410,10 @@ Why it moves to the top:
 - The next obvious packed-kernel knobs already produced hard negative lessons:
   `QT=4` is exact but slower, and body-only `NWG=32` microbench wins were a false
   promotion signal until cooled end-to-end sweeps re-ranked the family defaults.
-- The A3B matrix-attention sidecar is another systems-level warning: a plausible
-  lcpp-shaped graph can win medium prompts and still lose once score/V-transpose
-  scratch and KQV traffic scale with context.
+- The A3B matrix-attention sidecar is now a systems-level lesson rather than a
+  warning only: high-level graph copying was insufficient, but moving V_T writes
+  to cache-fill time converted the long rows. Further attention work needs this
+  kind of dataflow evidence, not row-kernel knob sweeps.
 - Even a more faithful one-layer attention-stack microbench is still not a safe
   promotion oracle for A10B. That points at multi-layer interactions, scratch /
   residency behavior, or queue/scheduling effects rather than another easy kernel

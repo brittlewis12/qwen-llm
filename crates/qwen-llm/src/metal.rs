@@ -6692,6 +6692,7 @@ struct AttnMatrixG8Args {
     n_pos: u32,
     base_pos: u32,
     kv_stride: u32,
+    vt_stride: u32,
     scale: f32,
 }
 
@@ -6721,8 +6722,11 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     enc: &KernelEncoder,
     v_cache: &MetalTensor,
     v_t: &MetalTensor,
+    base_pos: usize,
+    n_rows: usize,
     n_pos: usize,
     kv_stride: usize,
+    vt_stride: usize,
 ) -> Result<(), MetalError> {
     const N_KV_HEADS: usize = 2;
     const HEAD_DIM: usize = 256;
@@ -6735,11 +6739,35 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
             ),
         });
     }
-    let want_vt = N_KV_HEADS * HEAD_DIM * n_pos;
+    if n_rows == 0 || base_pos + n_rows > n_pos {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_transpose_v",
+            detail: format!(
+                "invalid V transpose span base_pos={base_pos} n_rows={n_rows} n_pos={n_pos}"
+            ),
+        });
+    }
+    if vt_stride < n_pos {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_transpose_v",
+            detail: format!("vt_stride={vt_stride} < n_pos={n_pos}"),
+        });
+    }
+    let want_vt = N_KV_HEADS * HEAD_DIM * vt_stride;
     if v_t.n_elements() < want_vt as u64 {
         return Err(MetalError::BadShape {
             kernel: "attn_matrix_g8_transpose_v",
             detail: format!("v_t has {} elements, need >= {want_vt}", v_t.n_elements()),
+        });
+    }
+    let want_cache = (base_pos + n_rows) * kv_stride;
+    if v_cache.n_elements() < want_cache as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_transpose_v",
+            detail: format!(
+                "v_cache has {} elements, need >= {want_cache}",
+                v_cache.n_elements()
+            ),
         });
     }
     let pso = ctx.pipeline("kernel_attn_matrix_g8_transpose_v_f16")?;
@@ -6747,10 +6775,11 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     enc.set_bytes(
         0,
         &AttnMatrixG8Args {
-            n_rows: 0,
+            n_rows: n_rows as u32,
             n_pos: n_pos as u32,
-            base_pos: 0,
+            base_pos: base_pos as u32,
             kv_stride: kv_stride as u32,
+            vt_stride: vt_stride as u32,
             scale: 0.0,
         },
     );
@@ -6758,7 +6787,7 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     enc.set_tensor(2, v_t);
     enc.dispatch(
         MTLSize {
-            width: want_vt,
+            width: N_KV_HEADS * HEAD_DIM * n_rows,
             height: 1,
             depth: 1,
         },
@@ -6820,6 +6849,7 @@ pub fn encode_attn_matrix_g8_kq_f32(
             n_pos: n_pos as u32,
             base_pos: base_pos as u32,
             kv_stride: kv_stride as u32,
+            vt_stride: 0,
             scale: 0.0,
         },
     );
@@ -6870,6 +6900,7 @@ pub fn encode_attn_matrix_g8_softmax_f32(
             n_pos: n_pos as u32,
             base_pos: base_pos as u32,
             kv_stride: 0,
+            vt_stride: 0,
             scale,
         },
     );
@@ -6899,14 +6930,20 @@ pub fn encode_attn_matrix_g8_kqv_f32(
     n_rows: usize,
     base_pos: usize,
     n_pos: usize,
-    kv_stride: usize,
+    vt_stride: usize,
 ) -> Result<(), MetalError> {
     const N_Q_HEADS: usize = 16;
     const N_KV_HEADS: usize = 2;
     const HEAD_DIM: usize = 256;
     validate_attn_matrix_g8_common("attn_matrix_g8_kqv", n_rows, n_pos, base_pos)?;
+    if vt_stride < n_pos {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_g8_kqv",
+            detail: format!("vt_stride={vt_stride} < n_pos={n_pos}"),
+        });
+    }
     let want_probs = n_rows * N_Q_HEADS * n_pos;
-    let want_vt = N_KV_HEADS * HEAD_DIM * n_pos;
+    let want_vt = N_KV_HEADS * HEAD_DIM * vt_stride;
     let want_out = n_rows * N_Q_HEADS * HEAD_DIM;
     if probs.dtype != GgmlType::F32 || out.dtype != GgmlType::F32 || v_t.dtype != GgmlType::F16 {
         return Err(MetalError::BadShape {
@@ -6939,7 +6976,8 @@ pub fn encode_attn_matrix_g8_kqv_f32(
             n_rows: n_rows as u32,
             n_pos: n_pos as u32,
             base_pos: base_pos as u32,
-            kv_stride: kv_stride as u32,
+            kv_stride: 0,
+            vt_stride: vt_stride as u32,
             scale: 0.0,
         },
     );
@@ -7112,6 +7150,166 @@ pub fn encode_scatter_offset_f32_to_f16_kv(
     enc.set_tensor(2, v_src);
     enc.set_tensor(3, k_dst);
     enc.set_tensor(4, v_dst);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_tg = n.div_ceil(tg_threads);
+    enc.dispatch(
+        MTLSize {
+            width: n_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Fused K+V scatter plus transposed-V sidecar write. This is intentionally
+/// narrow support for the experimental non-flash matrix attention path: it keeps
+/// the canonical `[pos, kv]` V cache intact while also filling a fixed-stride
+/// `[kvh, d, pos]` V_T bank for KQV.
+pub fn encode_scatter_offset_f32_to_f16_kv_vt(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    k_src: &MetalTensor,
+    v_src: &MetalTensor,
+    k_dst: &MetalTensor,
+    v_dst: &MetalTensor,
+    v_t: &MetalTensor,
+    dst_off: usize,
+    n: usize,
+    base_pos: usize,
+    kv_dim: usize,
+    head_dim: usize,
+    vt_stride: usize,
+) -> Result<(), MetalError> {
+    if k_src.dtype != GgmlType::F32 || v_src.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!(
+                "expected F32 sources, got k={:?} v={:?}",
+                k_src.dtype, v_src.dtype
+            ),
+        });
+    }
+    if k_dst.dtype != GgmlType::F16 || v_dst.dtype != GgmlType::F16 || v_t.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!(
+                "expected F16 dests, got k={:?} v={:?} vt={:?}",
+                k_dst.dtype, v_dst.dtype, v_t.dtype
+            ),
+        });
+    }
+    if kv_dim == 0 || head_dim == 0 || !kv_dim.is_multiple_of(head_dim) {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!("bad kv_dim/head_dim: kv_dim={kv_dim} head_dim={head_dim}"),
+        });
+    }
+    if n == 0 || !n.is_multiple_of(kv_dim) {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!("n={n} must be a positive multiple of kv_dim={kv_dim}"),
+        });
+    }
+    if k_src.n_elements() as usize != n || v_src.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!(
+                "src lengths k={} v={} != n={n}",
+                k_src.n_elements(),
+                v_src.n_elements()
+            ),
+        });
+    }
+    let dst_end = dst_off.checked_add(n).ok_or_else(|| MetalError::BadShape {
+        kernel: "scatter_offset_f32_to_f16_kv_vt",
+        detail: format!("dst_off={dst_off} + n={n} overflows usize"),
+    })?;
+    if dst_end as u64 > k_dst.n_elements() || dst_end as u64 > v_dst.n_elements() {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!(
+                "dst_off+n={} exceeds k.n={} or v.n={}",
+                dst_end,
+                k_dst.n_elements(),
+                v_dst.n_elements()
+            ),
+        });
+    }
+    let n_rows = n / kv_dim;
+    if vt_stride < base_pos + n_rows {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!(
+                "vt_stride={vt_stride} < base_pos+n_rows={}",
+                base_pos + n_rows
+            ),
+        });
+    }
+    let want_vt = kv_dim
+        .checked_mul(vt_stride)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!("kv_dim={kv_dim} * vt_stride={vt_stride} overflows usize"),
+        })?;
+    if v_t.n_elements() < want_vt as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_kv_vt",
+            detail: format!("v_t has {} elements, need >= {want_vt}", v_t.n_elements()),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        dst_off: u32,
+        base_pos: u32,
+        kv_dim: u32,
+        head_dim: u32,
+        vt_stride: u32,
+    }
+    let pso = ctx.pipeline("kernel_scatter_offset_f32_to_f16_kv_vt")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: u32::try_from(n).map_err(|_| MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_kv_vt",
+                detail: format!("n={n} does not fit u32"),
+            })?,
+            dst_off: u32::try_from(dst_off).map_err(|_| MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_kv_vt",
+                detail: format!("dst_off={dst_off} does not fit u32"),
+            })?,
+            base_pos: u32::try_from(base_pos).map_err(|_| MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_kv_vt",
+                detail: format!("base_pos={base_pos} does not fit u32"),
+            })?,
+            kv_dim: u32::try_from(kv_dim).map_err(|_| MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_kv_vt",
+                detail: format!("kv_dim={kv_dim} does not fit u32"),
+            })?,
+            head_dim: u32::try_from(head_dim).map_err(|_| MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_kv_vt",
+                detail: format!("head_dim={head_dim} does not fit u32"),
+            })?,
+            vt_stride: u32::try_from(vt_stride).map_err(|_| MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_kv_vt",
+                detail: format!("vt_stride={vt_stride} does not fit u32"),
+            })?,
+        },
+    );
+    enc.set_tensor(1, k_src);
+    enc.set_tensor(2, v_src);
+    enc.set_tensor(3, k_dst);
+    enc.set_tensor(4, v_dst);
+    enc.set_tensor(5, v_t);
     let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
     enc.dispatch(

@@ -430,7 +430,8 @@ Rules for pp sweeps:
   the benchmark identity and report them explicitly.
 - Treat experimental attention flags such as `QWEN_PREFILL_ATTN_MATRIX_G8=1` as
   diagnostic-only unless the roadmap says otherwise. Long matrix-sidecar runs also
-  need `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>` so scratch is sized explicitly.
+  need `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>` so score/V_T scratch is sized
+  explicitly; report that value with every row.
 - When comparing against `llama-bench`, remember that bench-tool `-fa 0` disables
   flash attention; it is not the library's auto flash-attention setting.
 - For cold A10B `pp128` methodology, `QWEN_PP_WARM_MOE_BANKS=1` or

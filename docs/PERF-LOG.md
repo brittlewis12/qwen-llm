@@ -6,6 +6,72 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — Fused V_T Scatter Converts A3B Matrix Attention At Long Context
+
+Status: env-only A3B/group-8 matrix sidecar; not defaulted. GPU measurements were
+run sequentially; rows are spot checks, not cooled promotion sweeps.
+
+### What Changed
+
+- Replaced the matrix sidecar's body-time V transpose with a persistent
+  per-attention-layer V_T bank using fixed `vt_stride=max_pos`.
+- Added fused K/V cache scatter plus V_T sidecar write, so V_T is populated at
+  cache-fill time from `v_now_pack` instead of re-reading canonical V in the
+  attention body.
+- Kept canonical `[pos, kv]` V cache intact; the V_T bank is still sidecar scratch
+  behind `QWEN_PREFILL_ATTN_MATRIX_G8=1` and
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>`.
+
+### Correctness
+
+- Two-chunk oracle is green: A3B `pp256 --prefill-chunk 128` with
+  `QWEN_PREFILL_ATTN_PACKED_G8_ORACLE=1` passes both chunks for all attention
+  layers.
+- Oracle rows remain finite with `cos=1.0`; max_abs stays within the existing
+  matrix tolerance (`<= 2e-2`) that accounts for the half-probability KQV path.
+
+### Measurements
+
+Fused V_T scatter sidecar versus same-session default spot rows:
+
+| Prompt | Matrix sidecar | Default anchor | Delta |
+| ---: | ---: | ---: | ---: |
+| `1024` | `972.29 t/s` | `880.15 t/s` | `+10.5%` |
+| `2048` | `953.29 t/s` | `868.46 t/s` | `+9.8%` |
+| `4096` | `1039.09 t/s` | `905.81 t/s` | `+14.7%` |
+| `8192` | `956.61 t/s` | `829.31 t/s` | `+15.3%` |
+| `16384` | `892.45 t/s` | `753.03 t/s` | `+18.5%` |
+
+True-long single row against prior anchors:
+
+- A3B `pp34502` matrix sidecar: `658.79 t/s`.
+- Prior same-shape qwen default anchor: `596.88 t/s`.
+- Prior same-shape `llama.cpp -fa 0` anchor: `897.64 t/s`.
+- Read: the branch recovers real true-long ground (`~1.10x` at `34.5k`) but still
+  leaves qwen at about `0.73x` of lcpp on that row.
+
+Phase trace at `pp4096` after fused V_T scatter:
+
+- The body-time `body_matrix_vt` phase disappears for fresh prompts.
+- `rope_scatter` remains tiny (`~0.05 ms/layer` in the traced run), so the V_T
+  write is cheap when fused with cache fill.
+- Remaining matrix body cost scales through `KQ`, softmax, and especially `KQV`:
+  near `n_pos=4096`, per layer is roughly `KQ ~3.3 ms`, softmax `~1.0-1.5 ms`,
+  `KQV ~4.0-4.7 ms`.
+
+### Current Read
+
+- The lcpp-copyable mechanism was not just “matrix attention”; it was writing V in
+  KQV-ready transposed layout at cache-fill time. Body-time transpose, even
+  incremental, was the wrong shape.
+- This is the first A3B long-context attention branch that materially improves
+  `4k/8k/16k+` instead of only `pp512/1024`.
+- Do not default yet: the sidecar still needs an allocation policy that does not
+  rely on manual `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`, a stricter correctness story
+  for the half-probability KQV path, and repeated cooled sweeps.
+- Next leverage is lcpp `mul_mm_f16_f32` parity for KQ/KQV and a production V_T
+  cache/scratch ABI, not more packed-attention row tiling.
+
 ## 2026-05-23 — A3B Matrix-Attention Sidecar Wins Medium, Fails Long
 
 Status: env-only diagnostic branch; not a default candidate. GPU measurements were

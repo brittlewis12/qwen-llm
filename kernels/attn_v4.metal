@@ -1140,6 +1140,7 @@ struct attn_matrix_g8_args {
     uint  n_pos;
     uint  base_pos;
     uint  kv_stride;
+    uint  vt_stride;
     float scale;
 };
 
@@ -1158,13 +1159,15 @@ kernel void kernel_attn_matrix_g8_transpose_v_f16(
         device const half * v_cache [[buffer(1)]],
         device       half * v_t     [[buffer(2)]],
         uint tid [[thread_position_in_grid]]) {
-    const uint total = AM_G8_N_KV_HEADS * AM_HEAD_DIM * args.n_pos;
+    const uint total = AM_G8_N_KV_HEADS * AM_HEAD_DIM * args.n_rows;
     if (tid >= total) return;
-    const uint pos = tid % args.n_pos;
-    const uint tmp = tid / args.n_pos;
+    const uint pos_rel = tid % args.n_rows;
+    const uint pos = args.base_pos + pos_rel;
+    const uint tmp = tid / args.n_rows;
     const uint d = tmp % AM_HEAD_DIM;
     const uint kvh = tmp / AM_HEAD_DIM;
-    v_t[tid] = v_cache[(ulong)pos * args.kv_stride + (ulong)kvh * AM_HEAD_DIM + d];
+    v_t[(ulong)tmp * args.vt_stride + pos] =
+        v_cache[(ulong)pos * args.kv_stride + (ulong)kvh * AM_HEAD_DIM + d];
 }
 
 kernel void kernel_attn_matrix_g8_kq_f32(
@@ -1364,7 +1367,7 @@ kernel void kernel_attn_matrix_g8_kqv_f32(
             const uint kk = loop_k + 16 * il0 + i;
             const uint d = (uint)(r0 + lr0);
             sa[64 * ib + 8 * ly + lx] = (d < AM_HEAD_DIM && kk < args.n_pos)
-                ? v_t[((ulong)kvh * AM_HEAD_DIM + d) * args.n_pos + kk]
+                ? v_t[((ulong)kvh * AM_HEAD_DIM + d) * args.vt_stride + kk]
                 : (half)0.0f;
         }
 

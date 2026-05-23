@@ -345,6 +345,15 @@ struct scatter_offset_args {
     uint dst_off;
 };
 
+struct scatter_kv_vt_args {
+    uint n;
+    uint dst_off;
+    uint base_pos;
+    uint kv_dim;
+    uint head_dim;
+    uint vt_stride;
+};
+
 struct scatter_q8_args {
     uint n_blocks;
     uint dst_block_off;
@@ -389,6 +398,32 @@ kernel void kernel_scatter_offset_f32_to_f16_kv(
     const uint i = args.dst_off + tid;
     k_dst[i] = (half)k_src[tid];
     v_dst[i] = (half)v_src[tid];
+}
+
+// Fused K+V scatter plus transposed-V sidecar write. Used by the experimental
+// non-flash matrix attention path so the KQV-ready V_T bank is populated at
+// cache-fill time instead of re-transposing the whole prefix in the attention
+// body.
+kernel void kernel_scatter_offset_f32_to_f16_kv_vt(
+        constant scatter_kv_vt_args & args [[buffer(0)]],
+        device const float * k_src [[buffer(1)]],
+        device const float * v_src [[buffer(2)]],
+        device       half  * k_dst [[buffer(3)]],
+        device       half  * v_dst [[buffer(4)]],
+        device       half  * v_t   [[buffer(5)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const uint i = args.dst_off + tid;
+    const half v = (half)v_src[tid];
+    k_dst[i] = (half)k_src[tid];
+    v_dst[i] = v;
+
+    const uint pos_rel = tid / args.kv_dim;
+    const uint chan = tid - pos_rel * args.kv_dim;
+    const uint kvh = chan / args.head_dim;
+    const uint d = chan - kvh * args.head_dim;
+    const uint pos = args.base_pos + pos_rel;
+    v_t[((ulong)kvh * args.head_dim + d) * args.vt_stride + pos] = v;
 }
 
 // Fused K+V scatter into Q8_0 caches. Exact ggml reference quantization per

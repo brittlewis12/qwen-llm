@@ -60,6 +60,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `355 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic remains noisy
   per run but cooled long-prompt sweeps still favor `NWG32`, and the warmed
   same-fixture real rollout is about `224 t/s`.
+- Current same-shape A3B long rows against `llama.cpp` after `v0.109`:
+  `pp1024` `955.07 / 1417.24 t/s` (`0.67x`), `pp4096`
+  `919.51 / 1362.34 t/s` (`0.68x`), `pp16384` `767.64 / 1112.03 t/s`
+  (`0.69x`), `pp34502` `596.88 / 897.64 t/s` (`0.66x`). `llama.cpp` also
+  declines at true long context; qwen's issue is a broad `~1.45-1.52x` gap plus
+  a worse attention-body slope, not real-rollout prompt shape alone.
 - `llama-bench` anchors are still roughly `~1222.4 t/s` for A3B `pp320` and
   `~393.3 t/s` for A10B `pp320`, so the medium/long-prompt board has moved a lot
   but is not closed yet.
@@ -86,6 +92,11 @@ Recent confirmed wins:
   followed: A3B `pp128/pp320/pp512/pp1024` now lands around
   `~655 / ~830 / ~899 / ~952-966 t/s`, and A10B
   `pp320/pp512/pp1024` around `~276 / ~355 / ~418 t/s`.
+- The true-long A3B board is now separated from medium-prompt work: qwen synthetic
+  and real `34.5k` prompts agree (`596.88` vs `587.60 t/s`), and no-op attribution
+  says attention-body cost is the long-context lever (`pp16384` `767.64 ->
+  1101.72 t/s` with attention body skipped; routed-MoE skip only reaches
+  `913.73 t/s`).
 
 - Grouped MoE routed prefill had a real correctness bug: grouped `Q4_K` SwiGLU
   used `u32::MAX` as an open-ended expert-count sentinel while the Metal kernel
@@ -270,10 +281,10 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: the remaining MoE prompt gap is routed FFN dataflow, not attention
+### 1. Hypothesis: the medium-prompt MoE gap is routed FFN dataflow, not attention
 
-Optimizes: the residual A3B/A10B MoE prompt gap after prompt-native packed
-attention moved the medium/long prompt board.
+Optimizes: the residual A3B/A10B MoE `pp320/512/1024` prompt gap after
+prompt-native packed attention moved the board.
 
 Why it is back at the top:
 
@@ -315,7 +326,43 @@ Acceptance gates:
 - Any true fused `SwiGLU+down` branch must preserve grouped-down locality and beat
   the offline-bank path, not just the old baseline.
 
-### 2. Hypothesis: remaining packed-attention variants need end-to-end systems evidence, not local kernel knobs
+### 2. Hypothesis: the true-long A3B gap is packed-attention main-pass/context-growth, not prompt shape
+
+Optimizes: A3B `16k/32k+` prefill where qwen now falls from the medium-prompt
+plateau faster than `llama.cpp`.
+
+Why it moves up:
+
+- Same-shape sparse rows show `llama.cpp` also declines after the medium-prompt
+  peak, but remains much faster: qwen/lcpp is `0.67x` at `pp1024`, `0.68x` at
+  `pp4096`, `0.69x` at `pp16384`, and `0.66x` at `pp34502`.
+- Real rollout shape is not the first-order cause: qwen synthetic `34.5k` is
+  `596.88 t/s` and real `v02_reva` `34.5k` is `587.60 t/s`.
+- No-op attribution at true-long shapes points at attention body: A3B `pp16384`
+  goes `767.64 -> 1101.72 t/s` with attention body skipped, nearly matching
+  lcpp full prefill (`1112.03 t/s`), while routed-MoE skip reaches only
+  `913.73 t/s`.
+
+Current design rule:
+
+- Do not use `pp320/512/1024` routed-FFN wins as evidence that true-long behavior
+  is fixed; measure same-shape `16k/32k+` rows.
+- Treat packed-attention body/main-pass work as the long-context branch. The
+  explicit reduce pass was already measured tiny; the remaining attention wall is
+  main-pass execution shape, KV reads, partial writes, and online-softmax work.
+- Compare against `llama.cpp` at the same prompt length before claiming long
+  scaling progress.
+
+Acceptance gates:
+
+- A long-attention branch must improve A3B same-shape `pp16384` and `pp34502`, not
+  just medium prompt rows.
+- Target at least `>=1.20x` at `pp16384` or a clear path to closing the current
+  `~0.66-0.69x` qwen/lcpp ratio.
+- Keep A3B packed-attention oracle/correctness green at the first activated
+  long-context chunk shape.
+
+### 3. Hypothesis: remaining packed-attention variants need end-to-end systems evidence, not local kernel knobs
 
 Optimizes: the remaining A3B/A10B prompt gap after prompt-native packed
 attention, family-specific `NWG`, and `min_pos=512` are already defaulted.
@@ -349,10 +396,14 @@ Acceptance gates:
 - Keep per-layer packed-vs-old oracle green on the first newly activated prompt
   regime and at the active long-context chunk shape.
 
-### 2. Hypothesis: A3B long-prompt prefill is still decode-shaped attention in disguise
+### 4. Historical: A3B long-prompt prefill was decode-shaped attention in disguise
 
-Optimizes: the now-clearest structural prompt gap after the A3B group-8 long-
-context subgroup fix.
+Status: superseded by the packed-attention default and the calibrated true-long
+same-shape rows above. Keep this section as historical context for why the
+prompt-native packed-attention branch became the center of gravity.
+
+Optimized: the clearest structural prompt gap after the A3B group-8 long-context
+subgroup fix.
 
 Why it moves to the top:
 
@@ -364,17 +415,17 @@ Why it moves to the top:
   but the remaining slope is still strongly attention-shaped and weakly sensitive
   to larger `prefill_chunk`, which points at the decode-shaped prompt attention
   algorithm itself.
-- `llama.cpp` is prompt-native on Metal for this stage; `qwen-llm` still runs
+- `llama.cpp` was prompt-native on Metal for this stage while `qwen-llm` still ran
   per-token decode attention inside prefill chunks.
 
 Current design rule:
 
 - Keep the new A3B group-8 subgroup path as an experimental / guarded prefill
   win, not a universal decode selector.
-- Do not let more MoE-side local work outrank a prompt-native packed-attention
-  microproof.
-- The next structural proof should isolate the attention body only, not the whole
-  prefill stack.
+- The prompt-native packed-attention microproof landed and is now defaulted for
+  the proven MoE shapes.
+- The remaining true-long attention work is no longer “write packed attention”;
+  it is main-pass/context-growth optimization inside the packed path.
 
 Acceptance gates:
 

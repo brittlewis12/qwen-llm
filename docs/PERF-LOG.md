@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — Calibrated A3B True-Long Gap Against `llama.cpp`
+
+Status: same-shape sparse rows, measured sequentially after `v0.109`.
+
+### What Changed
+
+- Replaced the session-memory framing around “monotonic long prefill” with actual
+  same-shape rows.
+- Verified that `llama.cpp` also declines at true long context after the medium
+  prompt peak, but remains much faster across the sparse ladder.
+- Re-ran qwen A3B no-op attribution at `16k` and `34.5k` to separate medium-prompt
+  FFN gap from true-long attention slope.
+
+### Same-Shape Synthetic Rows
+
+| Prompt | qwen-llm | llama.cpp | qwen / llama |
+| ---: | ---: | ---: | ---: |
+| `1024` | `955.07 t/s` | `1417.24 t/s` | `0.67x` |
+| `4096` | `919.51 t/s` | `1362.34 t/s` | `0.68x` |
+| `16384` | `767.64 t/s` | `1112.03 t/s` | `0.69x` |
+| `34502` | `596.88 t/s` | `897.64 t/s` | `0.66x` |
+
+### No-Op Attribution
+
+- A3B `pp16384` baseline: `767.64 t/s`.
+- A3B `pp16384`, `QWEN_PREFILL_NOOP_ATTN_BODY=1`: `1101.72 t/s`.
+- A3B `pp16384`, `QWEN_PREFILL_NOOP_MOE_ROUTED=1`: `913.73 t/s`.
+- A3B `pp34502` baseline: `596.88 t/s`.
+- A3B `pp34502`, `QWEN_PREFILL_NOOP_ATTN_BODY=1`: `1078.49 t/s`.
+
+### Current Read
+
+- The true-long drop is not primarily real-rollout prompt shape: qwen synthetic
+  `34.5k` and real `v02_reva` `34.5k` are close (`596.88` vs `587.60 t/s`).
+- `llama.cpp` does not stay monotonically faster forever; it falls from `pp1024`
+  to `34.5k`, but from a much higher baseline.
+- The same-shape qwen/lcpp ratio is broadly `~0.66-0.69x`, so the gap is not only
+  a special long-rollout cliff.
+- At true-long shapes, attention-body cost is the main slope lever: no-oping qwen
+  attention at `16k` nearly reaches lcpp full prefill (`1101.72` vs
+  `1112.03 t/s`).
+- Medium prompt work should stay routed-FFN/layout focused; true-long work should
+  target packed attention main-pass/context-growth behavior.
+
 ## 2026-05-23 — A3B Route+Bucket Fusion Drops To `pp128`
 
 Status: local branch evidence. GPU runs were sequential.

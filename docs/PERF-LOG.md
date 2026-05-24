@@ -6,6 +6,229 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-23 — A3B Q6 Down No Longer Falls Off Grouped MoE
+
+Status: major A3B MoE prefill fix. GPU workloads were run sequentially on AC
+power; raw compact rows are in `docs/bench/2026-05-23-q6-grouped-down/`.
+
+### What Changed
+
+- Added `kernel_moe_down_q6_K_f32_grouped_slots`, using the existing grouped Q5
+  down execution shape with Q6_K dequant and 210-byte block stride.
+- Added a Rust encoder for grouped Q6_K down and changed the grouped routed MoE
+  gate to accept down experts in either `Q5_K` or `Q6_K`.
+- Routed grouped prefill now dispatches the down stage by dtype, so A3B layers
+  `blk.34`, `blk.38`, and `blk.39` no longer fall through to the per-token MoE
+  fallback.
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test --release -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe -- --ignored --nocapture`
+  - full ignored A3B gate passed; logits cosine `0.999985-1.000000`, worst GDN
+    cosine `0.999611` across the packed-attention active cases.
+- `cargo test --release -p qwen-llm prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke -- --nocapture`
+  - A10B smoke passed; final-logits cosine `0.999934`, KV K/V minima
+    `0.999567` / `0.999414`.
+- Metal trace label count on A3B `pp512` now reports `moe-route-fused:40`,
+  `moe-routed-grouped:40`, `moe-shared-packed:40`; the prior trace clue was
+  `37` grouped routed layers.
+
+### Measurements
+
+| Model | Shape | Before Anchor | After | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B | `pp128`, chunk `128`, runs `3` | `~655 t/s` recent default | `783.11 t/s` | `1.20x` |
+| A3B | `pp256`, chunk `256`, runs `3` | `~801 t/s` recent default | `1000.57 t/s` | `1.25x` |
+| A3B | `pp320`, chunk `320`, runs `3` | `~830 t/s` recent default | `1061.45 t/s` | `1.28x` |
+| A3B | `pp512`, chunk `512`, runs `3` | `824.46 t/s` recent default | `1172.07 t/s` | `1.42x` |
+| A3B | `pp1024`, chunk `1024`, runs `3` | `910.43 t/s` recent default | `1287.43 t/s` | `1.41x` |
+| A3B | `pp2048`, chunk `1024`, runs `3` | n/a | `1265.48 t/s` | medium win holds |
+| A3B | `pp4096`, chunk `1024`, runs `2` | n/a | `1198.11 t/s` | noisy `1178-1218` |
+| A3B | `v02_reva`, `34,502` tok, chunk `1024` | `587.60 t/s` same fixture | `674.28 t/s` | `1.15x` true-long |
+| A10B | warmed `pp512`, chunk `512`, runs `2` | `~385.13 t/s` | `385.56 t/s` | neutral |
+| A10B | warmed `pp1024`, chunk `1024`, runs `2` | `~418 t/s` | `424.99 t/s` | neutral/slightly up |
+
+Read: the A3B medium-prompt gap was not just a bad grouped-SwiGLU tile; three
+late Q6_K down-expert layers were silently escaping the optimized grouped routed
+path. This validates the path-coverage lens and weakens conclusions drawn from
+older A3B grouped-kernel microsearches that were running around a mixed fast/slow
+layer set. It does not prove Q6 grouped down is now optimal; it proves the gross
+fallback is gone. The next lcpp sprint should start with strict qwen-vs-llama
+per-layer/per-op differential attribution and a dtype/layer fast-path coverage
+gate, not another local Q4/Q5 knob sweep.
+
+Fresh post-Q6 no-op ceilings keep routed MoE in the high-EV set, but attention is
+also large enough to cover the residual lcpp gap at medium/4K prompts:
+
+| Shape | Baseline | No-op Attention Body | No-op Routed MoE | No-op Shared MoE |
+| --- | ---: | ---: | ---: | ---: |
+| A3B `pp1024` | `1287.43 t/s` | `1578.34 t/s` | `1979.46 t/s` | `1332.52 t/s` |
+| A3B `pp4096` | `1198.11 t/s` | `1583.70 t/s` | `1816.71 t/s` | n/a |
+
+Read: shared MoE is not the next lever. At `pp1024`, both attention body and
+routed MoE have enough budget to explain the remaining lcpp delta; at `pp4096`,
+the same is true but routed remains the larger no-op ceiling. Attribution, not
+another blind kernel branch, should pick the next attack.
+
+Fresh same-session llama.cpp anchors with `-fa 0`, `n_batch=2048`,
+`n_ubatch=512`, and `has tensor = false` shrink the calibrated gap a lot versus
+older lcpp rows:
+
+| Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| A3B `pp320` | `1061.45 t/s` | `1174.57 t/s` | `0.90x` |
+| A3B `pp512` | `1172.07 t/s` | `1347.79 t/s` | `0.87x` |
+| A3B `pp1024` | `1287.43 t/s` | `1345.07 t/s` | `0.96x` |
+| A3B `pp4096` | `1198.11 t/s` | `1259.21 t/s` | `0.95x` |
+| A3B `pp34502` / `v02_reva` | `674.28 t/s` | `865.50 t/s` | `0.78x` |
+
+Read: after the Q6 escape fix, medium A3B is close enough that the next win must
+be chosen by paired attribution, not scoreboard intuition. True-long is still the
+largest remaining A3B prefill gap.
+
+The existing env-only A3B matrix-attention sidecar composes with the Q6 fix and
+changes the true-long picture again. Correctness was rerun with matrix attention
+enabled (`QWEN_PREFILL_ATTN_MATRIX_G8=1`, `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8193`)
+through the full ignored A3B prefill-vs-single gate; it passed with the same
+looser matrix tolerance envelope (`0.999984-1.000000` logits cosine, worst GDN
+cosine `0.999611`).
+
+| Shape | qwen default | qwen matrix sidecar | llama.cpp | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B `pp320` | `1061.45 t/s` | `1190.45 t/s` | `1174.57 t/s` | beats lcpp spot |
+| A3B `pp512` | `1172.07 t/s` | `1340.82 t/s` | `1347.79 t/s` | parity |
+| A3B `pp1024` | `1287.43 t/s` | `1484.98 t/s` | `1345.07 t/s` | beats lcpp spot |
+| A3B `pp4096` | `1198.11 t/s` | `1434.39 t/s` | `1259.21 t/s` | beats lcpp spot |
+| A3B synthetic `pp34502` | `691.12 t/s` | `878.72 t/s` | `865.50 t/s` | beats lcpp spot |
+| A3B real `v02_reva` `34502` | `674.28 t/s` | `870.94 t/s` | n/a | real rollout holds |
+
+Read: the highest-EV next production branch is no longer speculative. It is to
+turn the matrix-attention sidecar into a safe default candidate for A3B/group-8:
+remove/manualize less of the `MAX_POS` scratch policy, tighten or explicitly own
+the matrix correctness tolerance, repeat cooled rows, and check dense/A10B no-
+regression. Routed MoE remains a large no-op ceiling, but matrix attention plus
+Q6 already cracks the lcpp A3B prefill board in spot rows.
+
+## 2026-05-23 — llama.cpp MoE Win Is Not Metal Tensor API On This Box
+
+Status: differential recon after the atomic-bucket falsifier. GPU workloads were
+run sequentially on AC power.
+
+### What Changed
+
+- Checked llama.cpp's `kernel_mul_mm_id` tensor path. On this M4 Max,
+  `llama-bench` reports `has tensor = false`; even `GGML_METAL_TENSOR_ENABLE=1`
+  cannot make the Metal4 tensor branch live because the device family gate is
+  not satisfied.
+- Ran the same A3B `pp512` shape through llama.cpp and qwen under Metal System
+  Trace. The traces are saved under `target/profiles/`:
+  - `llama-a3b-pp512-metal.trace`
+  - `qwen-a3b-pp512-metal.trace`
+  - `qwen-a3b-pp512-metal-counters.trace`
+- Used `~/code/gguf` to verify the A3B/A10B files contain separate
+  `ffn_gate_exps` and `ffn_up_exps` tensors, not `ffn_gate_up_exps`, so
+  llama.cpp is taking the separate gate/up MoE graph path for these files.
+
+### Measurements
+
+- llama.cpp A3B `pp512`, `-fa 0`, `--no-warmup`: `1242.44 t/s`, with
+  `has tensor = false`.
+- qwen A3B `pp512`, chunk `512`, same AC session: `739.89-745.93 t/s` on the
+  trace runs, `build_dirty=1` because local diagnostics/docs were present.
+- Default `Metal System Trace` produced timeline tables, but useful hardware
+  counters were not available: default capture only exposed `RT Unit Active`,
+  and adding `--instrument "Metal GPU Counters"` warned that the selected
+  counter profile is unsupported on this target device and produced empty
+  counter tables.
+
+Read: llama.cpp's remaining A3B MoE prefill advantage on this machine is not a
+hidden Metal tensor-API advantage and not a fused gate/up tensor ABI. The exact
+target is the non-tensor simdgroup `mul_mm_id` / graph execution shape, plus
+whatever memory-system behavior falls out of that shape. For stable ALU/bandwidth
+counters, `xctrace` CLI is not enough here; use Xcode GPU capture or add an
+in-process `MTLCounterSampleBuffer` path before making counter-driven claims.
+
+### All-`n32` Recheck
+
+Rechecked the closest local proxy to llama.cpp's `NR1=32` `mul_mm_id` tile:
+full-tail grouped-Q4 all-`n32` versus all-`n16` remains a strong isolated win,
+but forcing all-`n32` still does not convert end-to-end over the current default
+hot-`n32` path.
+
+| Model | Gate | Default | All-`n32` | Read |
+| --- | --- | ---: | ---: | --- |
+| A3B | grouped-tail proof `chunk512` | `8.50 ms` all-`n16` | `4.74 ms` all-`n32` | `1.792x`, exact |
+| A10B | grouped-tail proof `chunk512` | `13.95 ms` all-`n16` | `10.08 ms` all-`n32` | `1.384x`, exact |
+| A3B | pp512 E2E | `824.46 t/s` | `826.40 t/s` | flat |
+| A3B | pp1024 E2E | `910.43 t/s` | `903.06 t/s` | slight regression |
+| A10B | warmed pp512 E2E | `385.13 t/s` | `369.31 t/s` | regression |
+
+Read: the old all-`n32` kill is still valid after rerun. The default hot-`n32`
+gate already captures the high-count win; applying `n32` to cold buckets adds
+overhead and/or loses occupancy. Do not retread all-`n32` as the lcpp crack.
+
+## 2026-05-23 — Atomic Bucket Order Is Not The MoE Tail Crack
+
+Status: exact routed-tail diagnostic after the Q5-down parity audit. GPU workloads
+were run sequentially on AC power.
+
+### What Changed
+
+- Extended `run_grouped_swiglu_down_backend_profile` to build a second exact route
+  ledger with the fused atomic top-k bucketer, then run the same grouped
+  `SwiGLU -> Q5 down -> weighted_sum` tail against both ledgers.
+- Added bucket-order diagnostics for scan/atomic ledgers by counting expert-ID
+  back edges in the packed token stream.
+
+### Measurements
+
+| Model | Chunk | Scan Back Edges | Atomic Back Edges | Live Tail | Atomic Tail | Atomic Speedup | Correctness |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| A3B | `512` | `0/3987` | `1451/3987` | `3.99 ms` | `4.01 ms` | `0.994x` | exact |
+| A10B | `512` | `0/4002` | `1568/4002` | `10.90 ms` | `10.45 ms` | `1.043x` | exact |
+
+Split attribution stayed familiar: A3B was `split_gate_up=2.60 ms`,
+`split_down=1.35 ms`, `split_reduce=0.08 ms`; A10B was
+`split_gate_up=6.89 ms`, `split_down=3.78 ms`, `split_reduce=0.14 ms`.
+
+Read: the fused atomic ledger is much less expert-sorted, but the grouped routed
+tail is flat to slightly faster. Bucket ordering/locality in the route ledger is
+therefore not the missing MoE prefill lever. The remaining exact Q5-down gap is
+more likely inside the grouped projection/dequant/dataflow itself, not in scan
+versus atomic bucket construction.
+
+## 2026-05-23 — Bench Rows Capture Power Context
+
+Status: methodology cleanup after discovering routed-tail rows had been run while
+the machine was on low battery. GPU reruns below were on AC power.
+
+### What Changed
+
+- `qwen-bench` now records a lightweight macOS `pmset` power snapshot in JSON
+  rows and prints the same summary in text mode for `pp`, `tg`, `pp-wait`, and
+  `decode` benches.
+- Perf docs now treat battery power, battery warnings, and thermal/performance
+  warnings as benchmark identity/confounds unless an AC rerun confirms the row.
+- The old `prefill_chunk=1024` cap is documented as a safe default, not a
+  principled long-context optimum; keeper long-prompt work should sweep larger
+  chunks when scratch allows.
+
+### AC Rerun Sanity
+
+`pmset`: AC power, charging, no recorded thermal/performance/CPU-power warning.
+
+| Model | Chunk | Live Tail | Fused Tail | Speedup | `split_gate_up` | `split_down` | `split_reduce` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A3B | `512` | `3.87 ms` | `3.83 ms` | `1.010x` | `2.47 ms` | `1.39 ms` | `0.07 ms` |
+| A3B | `1024` | `6.14 ms` | `6.31 ms` | `0.972x` | `4.62 ms` | `2.53 ms` | `0.14 ms` |
+| A10B | `512` | `10.75 ms` | `10.15 ms` | `1.059x` | `6.47 ms` | `3.58 ms` | `0.14 ms` |
+| A10B | `1024` | `17.97 ms` | `17.69 ms` | `1.016x` | `11.84 ms` | `6.56 ms` | `0.27 ms` |
+
+Read: AC power confirms the main conclusion. Fused gate/up is not a general ABI
+winner, weighted sum is tiny, and grouped Q5 down remains the secondary routed
+tail bucket after grouped gate/up/SwiGLU.
+
 ## 2026-05-23 — Fused Gate/Up Does Not Survive Full Routed Tail
 
 Status: diagnostic checkpoint after adding full-tail fused-bank attribution to the

@@ -319,6 +319,33 @@ fn encode_prefill_moe_grouped_swiglu_q4(
     }
 }
 
+fn encode_prefill_moe_grouped_down(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    down_exps: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    f_exp: usize,
+    h: usize,
+    n_expert: usize,
+    chunk_p: usize,
+) -> Result<(), MetalError> {
+    match down_exps.dtype {
+        GgmlType::Q5_K => crate::metal::encode_moe_down_q5_K_f32_grouped_slots(
+            ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
+        ),
+        GgmlType::Q6_K => crate::metal::encode_moe_down_q6_K_f32_grouped_slots(
+            ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
+        ),
+        other => Err(MetalError::BadShape {
+            kernel: "prefill_moe_grouped_down",
+            detail: format!("unsupported grouped down dtype {other:?}"),
+        }),
+    }
+}
+
 fn prefill_moe_route_bucket_fused_mode() -> PrefillEnvMode {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_ROUTE_BUCKET_FUSED"))
@@ -5557,10 +5584,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     && moe.gate_exps.dtype == GgmlType::Q4_K
                     && moe.up_exps.dtype == GgmlType::Q4_K
                     && moe.down_exps.dtype == GgmlType::Q5_K;
+                let grouped_down_dtype_eligible =
+                    matches!(moe.down_exps.dtype, GgmlType::Q5_K | GgmlType::Q6_K);
                 let grouped_routed_path = prefill_moe_grouped_enabled()
                     && moe.gate_exps.dtype == GgmlType::Q4_K
                     && moe.up_exps.dtype == GgmlType::Q4_K
-                    && moe.down_exps.dtype == GgmlType::Q5_K
+                    && grouped_down_dtype_eligible
                     && h % 256 == 0
                     && arch.expert_feed_forward_length as usize % 256 == 0;
 
@@ -5789,7 +5818,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
                         }
-                        crate::metal::encode_moe_down_q5_K_f32_grouped_slots(
+                        encode_prefill_moe_grouped_down(
                             base.ctx,
                             &enc,
                             &moe.down_exps,
@@ -5909,7 +5938,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
                         }
-                        crate::metal::encode_moe_down_q5_K_f32_grouped_slots(
+                        encode_prefill_moe_grouped_down(
                             base.ctx,
                             &enc,
                             &moe.down_exps,
@@ -10857,6 +10886,12 @@ mod tests {
         let shared_gate_pack = scratch
             .moe_shared_gate_pack
             .view_subrange(0, vec![chunk_p as u64]);
+        let atomic_topk_idx_pack = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * topk) as u64])
+            .expect("atomic_topk_idx_pack");
+        let atomic_topk_weight_pack = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * topk) as u64])
+            .expect("atomic_topk_weight_pack");
+        let atomic_shared_gate_pack =
+            MetalTensor::zeros_f32(&ctx, vec![chunk_p as u64]).expect("atomic_shared_gate_pack");
         let moe_inner_pack = scratch
             .moe_inner_pack
             .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
@@ -10864,12 +10899,22 @@ mod tests {
             MetalTensor::zeros_f32(&ctx, vec![(chunk_p * h) as u64]).expect("packed_reduced");
         let counts = MetalTensor::zeros_f32(&ctx, vec![n_expert as u64]).expect("counts");
         let ids = MetalTensor::zeros_f32(&ctx, vec![(n_expert * chunk_p) as u64]).expect("ids");
+        let atomic_counts =
+            MetalTensor::zeros_f32(&ctx, vec![n_expert as u64]).expect("atomic_counts");
+        let atomic_ids =
+            MetalTensor::zeros_f32(&ctx, vec![(n_expert * chunk_p) as u64]).expect("atomic_ids");
         let live_grouped_inner = MetalTensor::zeros_f32(&ctx, vec![(slot_count * f_exp) as u64])
             .expect("live_grouped_inner");
         let live_grouped_slot_out = MetalTensor::zeros_f32(&ctx, vec![(slot_count * h) as u64])
             .expect("live_grouped_slot_out");
         let live_grouped_reduced =
             MetalTensor::zeros_f32(&ctx, vec![(chunk_p * h) as u64]).expect("live_grouped_reduced");
+        let atomic_grouped_inner = MetalTensor::zeros_f32(&ctx, vec![(slot_count * f_exp) as u64])
+            .expect("atomic_grouped_inner");
+        let atomic_grouped_slot_out = MetalTensor::zeros_f32(&ctx, vec![(slot_count * h) as u64])
+            .expect("atomic_grouped_slot_out");
+        let atomic_grouped_reduced = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * h) as u64])
+            .expect("atomic_grouped_reduced");
         let fused_gate_up =
             fuse_q4k_gate_up_expert_banks(&ctx, &moe.gate_exps, &moe.up_exps, h, f_exp, n_expert);
         let fused_grouped_inner = MetalTensor::zeros_f32(&ctx, vec![(slot_count * f_exp) as u64])
@@ -10894,6 +10939,7 @@ mod tests {
 
         let mut packed_tail_ms = 0.0f64;
         let mut live_grouped_tail_ms = 0.0f64;
+        let mut atomic_grouped_tail_ms = 0.0f64;
         let mut fused_grouped_tail_ms = 0.0f64;
         let mut map_ms = 0.0f64;
         let mut grouped_swiglu_gpu_ms = 0.0f64;
@@ -10902,6 +10948,8 @@ mod tests {
         let mut grouped_total_wall_ms = 0.0f64;
         let mut cos_min = f64::INFINITY;
         let mut max_abs = 0.0f32;
+        let mut atomic_cos_min = f64::INFINITY;
+        let mut atomic_max_abs = 0.0f32;
         let mut fused_cos_min = f64::INFINITY;
         let mut fused_max_abs = 0.0f32;
         let mut active_experts = 0usize;
@@ -10911,6 +10959,10 @@ mod tests {
         let mut experts_ge16 = 0usize;
         let mut experts_ge32 = 0usize;
         let mut experts_ge48 = 0usize;
+        let mut scan_back_edges = 0usize;
+        let mut scan_edges = 0usize;
+        let mut atomic_back_edges = 0usize;
+        let mut atomic_edges = 0usize;
 
         for _ in 0..n_runs {
             write_tensor_f32(&x_pack, &x_init);
@@ -10952,6 +11004,24 @@ mod tests {
                     chunk_p,
                 )
                 .expect("topk/shared");
+                encode_fill_f32(&ctx, enc, &atomic_counts, 0.0).expect("zero atomic counts");
+                crate::metal::encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
+                    &ctx,
+                    enc,
+                    &router_probs_pack,
+                    &moe.gate_inp_shexp,
+                    &h_pack,
+                    &atomic_topk_idx_pack,
+                    &atomic_topk_weight_pack,
+                    &atomic_shared_gate_pack,
+                    &atomic_counts,
+                    &atomic_ids,
+                    n_expert,
+                    topk,
+                    h,
+                    chunk_p,
+                )
+                .expect("topk/shared fused bucket");
             });
 
             packed_tail_ms += timed_gpu_cmd(&ctx, |enc| {
@@ -11109,6 +11179,114 @@ mod tests {
                 .expect("live grouped reduce");
             });
 
+            atomic_grouped_tail_ms += timed_gpu_cmd(&ctx, |enc| {
+                encode_fill_f32(&ctx, enc, &atomic_grouped_inner, 0.0)
+                    .expect("zero atomic grouped inner");
+                if prefill_moe_grouped_hot_q4_n32_enabled(chunk_p) {
+                    if let Some(hot_threshold) = prefill_moe_hot_expert_min_slots() {
+                        crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
+                            &ctx,
+                            enc,
+                            &moe.gate_exps,
+                            &moe.up_exps,
+                            &h_pack,
+                            &atomic_counts,
+                            &atomic_ids,
+                            &atomic_grouped_inner,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                            hot_threshold as u32,
+                            i32::MAX as u32,
+                        )
+                        .expect("atomic grouped hot n32");
+                        if hot_threshold > 0 {
+                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
+                                &ctx,
+                                enc,
+                                &moe.gate_exps,
+                                &moe.up_exps,
+                                &h_pack,
+                                &atomic_counts,
+                                &atomic_ids,
+                                &atomic_grouped_inner,
+                                h,
+                                f_exp,
+                                n_expert,
+                                topk,
+                                chunk_p,
+                                0,
+                                hot_threshold.saturating_sub(1) as u32,
+                            )
+                            .expect("atomic grouped cold n16");
+                        }
+                    } else {
+                        crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
+                            &ctx,
+                            enc,
+                            &moe.gate_exps,
+                            &moe.up_exps,
+                            &h_pack,
+                            &atomic_counts,
+                            &atomic_ids,
+                            &atomic_grouped_inner,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                            chunk_p,
+                        )
+                        .expect("atomic grouped n16 fallback");
+                    }
+                } else {
+                    crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16(
+                        &ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        &h_pack,
+                        &atomic_counts,
+                        &atomic_ids,
+                        &atomic_grouped_inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                        chunk_p,
+                    )
+                    .expect("atomic grouped n16");
+                }
+                encode_fill_f32(&ctx, enc, &atomic_grouped_slot_out, 0.0)
+                    .expect("zero atomic grouped slot out");
+                crate::metal::encode_moe_down_q5_K_f32_grouped_slots(
+                    &ctx,
+                    enc,
+                    &moe.down_exps,
+                    &atomic_grouped_inner,
+                    &atomic_counts,
+                    &atomic_ids,
+                    &atomic_grouped_slot_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    chunk_p,
+                )
+                .expect("atomic grouped down");
+                crate::metal::encode_moe_weighted_sum_packed_f32(
+                    &ctx,
+                    enc,
+                    &atomic_grouped_slot_out,
+                    &atomic_topk_weight_pack,
+                    &atomic_grouped_reduced,
+                    h,
+                    topk,
+                    chunk_p,
+                )
+                .expect("atomic grouped reduce");
+            });
+
             fused_grouped_tail_ms += timed_gpu_cmd(&ctx, |enc| {
                 encode_fill_f32(&ctx, enc, &fused_grouped_inner, 0.0)
                     .expect("zero fused grouped inner");
@@ -11220,6 +11398,8 @@ mod tests {
             let wall = Instant::now();
             let counts_cpu = read_tensor_i32_f32buf(&counts);
             let ids_cpu = read_tensor_i32_f32buf(&ids);
+            let atomic_counts_cpu = read_tensor_i32_f32buf(&atomic_counts);
+            let atomic_ids_cpu = read_tensor_i32_f32buf(&atomic_ids);
             let mut active_counts: Vec<usize> = counts_cpu
                 .iter()
                 .filter_map(|&c| (c > 0).then_some(c as usize))
@@ -11235,7 +11415,29 @@ mod tests {
             experts_ge16 = active_counts.iter().filter(|&&c| c >= 16).count();
             experts_ge32 = active_counts.iter().filter(|&&c| c >= 32).count();
             experts_ge48 = active_counts.iter().filter(|&&c| c >= 48).count();
-            let _ = ids_cpu;
+            let bucket_back_edges = |counts: &[i32], ids: &[i32]| -> (usize, usize) {
+                let mut back = 0usize;
+                let mut edges = 0usize;
+                for expert in 0..n_expert {
+                    let count = counts[expert].max(0) as usize;
+                    let mut prev_token = None;
+                    for j in 0..count.min(chunk_p) {
+                        let slot = ids[expert * chunk_p + j].max(0) as usize;
+                        let token = slot / topk;
+                        if let Some(prev) = prev_token {
+                            edges += 1;
+                            if token < prev {
+                                back += 1;
+                            }
+                        }
+                        prev_token = Some(token);
+                    }
+                }
+                (back, edges)
+            };
+            (scan_back_edges, scan_edges) = bucket_back_edges(&counts_cpu, &ids_cpu);
+            (atomic_back_edges, atomic_edges) =
+                bucket_back_edges(&atomic_counts_cpu, &atomic_ids_cpu);
 
             grouped_swiglu_gpu_ms += timed_gpu_cmd(&ctx, |enc| {
                 if prefill_moe_grouped_hot_q4_n32_enabled(chunk_p) {
@@ -11416,6 +11618,11 @@ mod tests {
             for i in 0..cur.len() {
                 max_abs = max_abs.max((cur[i] - grp[i]).abs());
             }
+            let atomic = read_tensor_f32(&atomic_grouped_reduced);
+            atomic_cos_min = atomic_cos_min.min(cosine_f32(&cur, &atomic));
+            for i in 0..cur.len() {
+                atomic_max_abs = atomic_max_abs.max((cur[i] - atomic[i]).abs());
+            }
             let fus = read_tensor_f32(&fused_grouped_reduced);
             fused_cos_min = fused_cos_min.min(cosine_f32(&cur, &fus));
             for i in 0..cur.len() {
@@ -11426,7 +11633,7 @@ mod tests {
         let denom = n_runs as f64;
         let split_down_reduce_ms = (grouped_down_ms + grouped_reduce_ms) / denom;
         eprintln!(
-            "[grouped-swiglu-down-{label}] chunk_p={chunk_p} active_experts={} p50_count={} p90_count={} max_count={} experts_ge16={} experts_ge32={} experts_ge48={} packed_tail={:.2} ms live_grouped_tail={:.2} ms fused_grouped_tail={:.2} ms map={:.2} ms split_gate_up={:.2} ms split_down={:.2} ms split_reduce={:.2} ms split_down_reduce={:.2} ms split_wall={:.2} vs_live={:.3} vs_fused_live={:.3} vs_packed={:.3} cos_min={:.6} max_abs={:.3e} fused_cos_min={:.6} fused_max_abs={:.3e}",
+            "[grouped-swiglu-down-{label}] chunk_p={chunk_p} active_experts={} p50_count={} p90_count={} max_count={} experts_ge16={} experts_ge32={} experts_ge48={} scan_back_edges={}/{} atomic_back_edges={}/{} packed_tail={:.2} ms live_grouped_tail={:.2} ms atomic_grouped_tail={:.2} ms fused_grouped_tail={:.2} ms map={:.2} ms split_gate_up={:.2} ms split_down={:.2} ms split_reduce={:.2} ms split_down_reduce={:.2} ms split_wall={:.2} vs_live={:.3} vs_atomic_live={:.3} vs_fused_live={:.3} vs_packed={:.3} cos_min={:.6} max_abs={:.3e} atomic_cos_min={:.6} atomic_max_abs={:.3e} fused_cos_min={:.6} fused_max_abs={:.3e}",
             active_experts,
             p50_count,
             p90_count,
@@ -11434,8 +11641,13 @@ mod tests {
             experts_ge16,
             experts_ge32,
             experts_ge48,
+            scan_back_edges,
+            scan_edges,
+            atomic_back_edges,
+            atomic_edges,
             packed_tail_ms / denom,
             live_grouped_tail_ms / denom,
+            atomic_grouped_tail_ms / denom,
             fused_grouped_tail_ms / denom,
             map_ms / denom,
             grouped_swiglu_gpu_ms / denom,
@@ -11444,10 +11656,13 @@ mod tests {
             split_down_reduce_ms,
             grouped_total_wall_ms / denom,
             (live_grouped_tail_ms / denom) / (grouped_total_wall_ms / denom),
+            (live_grouped_tail_ms / denom) / (atomic_grouped_tail_ms / denom),
             (live_grouped_tail_ms / denom) / (fused_grouped_tail_ms / denom),
             (packed_tail_ms / denom) / (grouped_total_wall_ms / denom),
             cos_min,
             max_abs,
+            atomic_cos_min,
+            atomic_max_abs,
             fused_cos_min,
             fused_max_abs,
         );
@@ -17552,11 +17767,10 @@ mod tests {
         }
     }
 
-    /// **MoE prefill correctness gate** (Qwen3.6-35B-A3B-UD-Q4_K_M, the
-    /// gate=Q4_K / up=Q4_K / down=Q5_K combo that satisfies BOTH the
-    /// packed-routed and grouped-routed prefill dtype guards at
-    /// `metal_dflash.rs:4102-4111`). Oracle: a sequential `single_token`
-    /// loop. Experimental: one `prefill_tokens_with_multi_hidden` call
+    /// **MoE prefill correctness gate** (Qwen3.6-35B-A3B-UD-Q4_K_M, with
+    /// gate/up expert banks in Q4_K and down expert banks in a mixed Q5_K/Q6_K
+    /// set). Oracle: a sequential `single_token` loop. Experimental: one
+    /// `prefill_tokens_with_multi_hidden` call
     /// (with empty capture-layers since the per-layer hidden-capture
     /// helper returns `UnsupportedMoe` on MoE arches; the lr1 / packed
     /// MoE bugs we're guarding against still propagate to final logits

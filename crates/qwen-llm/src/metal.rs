@@ -2612,6 +2612,97 @@ pub fn encode_moe_down_q5_K_f32_grouped_slots(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_down_q6_K_f32_grouped_slots(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q6_K_grouped_slots",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::Q6_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q6_K_grouped_slots",
+            detail: format!("expected Q6_K expert down, got {:?}", weight.dtype),
+        });
+    }
+    let slot_count = out.n_elements() as usize / n_out;
+    if inner.n_elements() as usize != slot_count * n_in
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || out.n_elements() as usize != slot_count * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q6_K_grouped_slots",
+            detail: format!(
+                "shape mismatch: inner={} counts={} ids={} out={} expected inner={} counts={} ids={} out={}",
+                inner.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                out.n_elements(),
+                slot_count * n_in,
+                n_expert,
+                n_expert * n_tokens,
+                slot_count * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_q6_K_f32_grouped_slots")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let nb01 = ((n_in / 256) * 210) as u32;
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_tokens as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b: n_in as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, counts);
+    enc.set_tensor(4, ids);
+    enc.set_tensor(5, out);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
     ctx: &MetalContext,
     enc: &KernelEncoder,

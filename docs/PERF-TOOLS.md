@@ -371,6 +371,11 @@ Counter guidance:
   `metal-gpu-counter-intervals` before using the result.
 - Treat empty counter tables as "unsupported or not captured for this run", not
   as evidence that the GPU did no work.
+- On this M4 Max, default `Metal System Trace` has produced timeline tables but
+  only the unhelpful `RT Unit Active` counter; adding `--instrument "Metal GPU
+  Counters"` can warn `Selected counter profile is not supported on target
+  device` and produce empty counter tables. Treat that as a tooling miss, not a
+  kernel conclusion.
 - For autonomous GPU efficiency and memory bandwidth, prefer in-process
   `MTLCounterSampleBuffer` support behind a feature or bench flag once the
   project needs stable counter data.
@@ -416,10 +421,16 @@ norm / `lm_head` / logits tail.
 Rules for pp sweeps:
 
 - Do not run pp benchmarks in parallel with any other repo build/bench workload.
+- Run promotion/kill sweeps on AC power. `qwen-bench` records a `pmset` power
+  snapshot in JSON rows and prints it in text mode; treat battery, battery
+  warnings, or thermal/performance warnings as benchmark identity/confounds.
 - Treat `pp320` as the llama-bench scoreboard anchor, not as the sole
   representative prompt. For keeper/regression decisions, sweep at least
   `64,128,320,512,1024` when model size allows; for 122B-class runs, `128,320,512`
   is the minimum useful range.
+- Treat `--prefill-chunk 1024` as a safe historical cap, not a principled
+  long-context optimum. For true-long keeper decisions, sweep `512/1024/2048/4096`
+  when scratch and wall-clock budget allow.
 - Prefer synthetic token ids for parity with `llama-bench`; use `--prompt` only
   when the question is tokenizer/template dependent.
 - Keep `--with-tail` off for pure `llama-bench pp<N>` comparison; use it only to
@@ -437,6 +448,40 @@ Rules for pp sweeps:
 - For cold A10B `pp128` methodology, `QWEN_PP_WARM_MOE_BANKS=1` or
   `QWEN_PP_RESIDENCY_SET=1` removes expert-bank first-touch outliers. Report those
   knobs explicitly and do not claim them as steady-state throughput wins.
+
+### MoE fast-path coverage lane
+
+Correct logits do not prove the intended fast path ran. The A3B Q6-down fix came
+from noticing that A3B has `40` MoE layers but a trace showed only `37` grouped
+routed labels; three late `Q6_K` down-expert layers had silently fallen to the
+per-token fallback. When changing MoE dtype gates, router paths, packed/grouped
+thresholds, or loader tensor formats, run a coverage check before trusting the
+throughput row.
+
+Minimal trace-label coverage check:
+
+```sh
+TRACE="target/profiles/qwen-a3b-pp512-coverage-$(date +%Y%m%d-%H%M%S).trace"
+QWEN_PREFILL_TRACE_LABELS=1 xcrun xctrace record --no-prompt \
+  --template "Metal System Trace" \
+  --output "$TRACE" \
+  --launch -- ./target/release/qwen-bench pp \
+    -m "$MODEL" -p 512 --prefill-chunk 512 --runs 1 --no-warmup -o json
+
+uv run scripts/profile/trace-metal.py "$TRACE" --process-prefix qwen-bench
+```
+
+Rules:
+
+- Compare label counts with model metadata, not vibes. For A3B, expect `40`
+  `moe-route-fused`, `40` `moe-routed-grouped`, and `40` `moe-shared-packed`
+  labels on the default grouped path.
+- Pair trace coverage with `~/code/gguf/target/debug/gguf <model> --tensors` when
+  auditing dtype support. Expert `gate/up/down` dtypes can vary by layer.
+- Treat any unexpected `moe-routed-token-loop`, `moe-route-token-loop`, or missing
+  layer label as a higher-EV bug candidate than local kernel retuning.
+- Keep this separate from throughput timing; traced runs are attribution and
+  coverage evidence, not promotion numbers.
 
 When long-prompt variants are close enough that run-order drift or thermal sag
 can flip the ranking, use the cooled sweep harness instead of ad hoc shell
@@ -521,6 +566,12 @@ Important:
 - `llama-cli` is interactive by default even when `-p` is provided.
 - Do not rely on `-no-cnv` / `--no-conversation` with `llama-cli`; current builds
   reject it and tell you to use `llama-completion` instead.
+- For MoE Metal attribution, record llama.cpp's startup line `has tensor = ...`.
+  On the current M4 Max, `has tensor = false`; forcing
+  `GGML_METAL_TENSOR_ENABLE=1` does not make the Metal4 tensor path live.
+- Use `~/code/gguf/target/debug/gguf <model> --tensors` when you need quick GGUF
+  tensor-name/type confirmation, for example whether a model has separate
+  `ffn_gate_exps` / `ffn_up_exps` or a fused `ffn_gate_up_exps` tensor.
 - The bounded `llama-cli` shape for this repo is:
 
 ```sh

@@ -24,6 +24,10 @@ Primary guardrails:
 - MoE A3B: `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`
 - MoE A10B: `Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf`
 - Never run performance benchmarks in parallel.
+- Treat battery power, battery warnings, and thermal/performance warnings as
+  benchmark confounds unless an AC-power rerun confirms the result.
+- Treat `prefill_chunk=1024` as a safe default cap, not a long-context optimum;
+  candidate long-prompt branches need larger chunk sweeps when feasible.
 - Always keep dense 27B in perf analysis while optimizing MoE.
 
 ## Latest Baseline Snapshot
@@ -48,24 +52,32 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
 - `qwen-llm` 35B A3B MoE prompt default now includes prompt-native packed
   attention for the proven `group=8`, `head_dim=256` shape with family-specific
-  `NWG=64`, packed activation at `n_pos >= 128`, and A3B-sized router `E8xP32`
-  plus fused route+bucket from `pp128`: about `655 t/s` at `pp128`, `801 t/s` at
-  `pp256`, `830 t/s` at `pp320`, `899 t/s` at `pp512`, and `~952-966 t/s` at `pp1024`; long synthetic
-  is about `591 t/s` at `34.5k` tokens. Real-rollout sanity on the same branch:
-  `855.3 t/s` for the `7,986`-token Reva short fixture and `587.6 t/s` for the
-  `34,502`-token `v02_reva` full rollout.
+  `NWG=64`, packed activation at `n_pos >= 128`, A3B-sized router `E8xP32`, fused
+  route+bucket from `pp128`, and grouped routed down for both `Q5_K` and `Q6_K`
+  expert-down layers. Latest post-Q6 rows: `783.1 t/s` at `pp128`,
+  `1000.6 t/s` at `pp256`, `1061.5 t/s` at `pp320`, `1172.1 t/s` at `pp512`,
+  `1287.4 t/s` at `pp1024`, `1265.5 t/s` at `pp2048`, noisy `1198.1 t/s` at
+  `pp4096`, and `674.3 t/s` for the `34,502`-token `v02_reva` full rollout.
 - `qwen-llm` 122B A10B MoE prompt default now includes prompt-native packed
   attention for the proven `group=16`, `head_dim=256` shape with family-specific
   `NWG=32` and packed activation at `n_pos >= 320`: about `276 t/s` at `pp320`,
   `355 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic remains noisy
   per run but cooled long-prompt sweeps still favor `NWG32`, and the warmed
   same-fixture real rollout is about `224 t/s`.
-- Current same-shape A3B long rows against `llama.cpp` after `v0.109`:
-  `pp1024` `955.07 / 1417.24 t/s` (`0.67x`), `pp4096`
-  `919.51 / 1362.34 t/s` (`0.68x`), `pp16384` `767.64 / 1112.03 t/s`
-  (`0.69x`), `pp34502` `596.88 / 897.64 t/s` (`0.66x`). `llama.cpp` also
-  declines at true long context; qwen's issue is a broad `~1.45-1.52x` gap plus
-  a worse attention-body slope, not real-rollout prompt shape alone.
+- Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
+  after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
+  now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
+  (`0.87x`), `pp1024` is `1287.43 / 1345.07 t/s` (`0.96x`), `pp4096` is
+  `1198.11 / 1259.21 t/s` (`0.95x`), and `pp34502` is `674.28 / 865.50 t/s`
+  (`0.78x`). `pp16384` needs a post-Q6 rerun. `llama.cpp` also declines at true
+  long context; medium A3B is now close, while true-long remains the largest A3B
+  prefill gap.
+- The existing env-only A3B/group-8 matrix-attention sidecar composes with the Q6
+  fix and reaches/surpasses those lcpp anchors in spot rows: `1190.45 t/s` at
+  `pp320`, `1340.82 t/s` at `pp512`, `1484.98 t/s` at `pp1024`, `1434.39 t/s` at
+  `pp4096`, `878.72 t/s` at synthetic `pp34502`, and `870.94 t/s` on the real
+  `v02_reva` `34,502`-token rollout. It remains env-only because max-pos scratch
+  policy and matrix correctness tolerance still need productionization.
 - `llama-bench -fa 0` is not auto for the bench tool: it disables flash attention.
   A3B `llama.cpp` `-fa 0` and `-fa 1` are flat at `pp1024` and `-fa 1` is slightly
   slower at `pp16384`, so the current A3B long target is the non-flash
@@ -79,15 +91,24 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `736.9 t/s` and chunk `4096` at `718.2 t/s`. It is still not defaulted because
   allocation is manual via `QWEN_PREFILL_ATTN_MATRIX_MAX_POS` and KQV uses the
   looser half-probability correctness tolerance.
-- `llama-bench` anchors are still roughly `~1222.4 t/s` for A3B `pp320` and
-  `~393.3 t/s` for A10B `pp320`, so the medium/long-prompt board has moved a lot
-  but is not closed yet.
+- Fresh `llama-bench` A3B anchors on the current local build are `1174.6 t/s` at
+  `pp320`, `1347.8 t/s` at `pp512`, `1345.1 t/s` at `pp1024`, `1259.2 t/s` at
+  `pp4096`, and `865.5 t/s` at `pp34502` (`-fa 0`, `has tensor = false`). A10B
+  `pp320` still needs a fresh same-session lcpp rerun.
 - prior repeated-prompt `qwen-llm` 27B dense packed prefill: `~205.4-205.9 t/s`
 - current `llama.cpp` bounded `llama-cli -st` baseline: `~206.7 t/s` prompt,
   `~22.5 t/s` generation
 
 Recent confirmed wins:
 
+- A3B had a silent optimized-path escape: three late routed down-expert layers
+  (`blk.34`, `blk.38`, `blk.39`) are `Q6_K`, while grouped routed prefill only
+  accepted `Q5_K` down. Adding grouped Q6_K down and dtype dispatch moves trace
+  coverage from `37/40` to `40/40` grouped routed layers and lifts A3B `pp320`
+  `~830 -> 1061.45 t/s`, `pp512` `824.46 -> 1172.07 t/s`, `pp1024`
+  `910.43 -> 1287.43 t/s`, and same-fixture `34,502`-token real rollout
+  `587.60 -> 674.28 t/s`. This is now the canonical
+  example for why fast-path coverage must be asserted, not inferred from logits.
 - Prompt-native packed MoE attention is now a production default for the proven
   long/medium prompt shapes, not an experiment. The important details are now
   known and banked:
@@ -120,6 +141,10 @@ Recent confirmed wins:
   `pp34502` row to `725.7 t/s` at chunk `1024` and `736.9 t/s` at chunk `2048`,
   but `pp16384` is still noisy and chunk `4096` loses. Treat chunk `2048` as the
   current matrix-long candidate, not a default.
+- After the Q6 grouped-down fix, that same matrix sidecar becomes the first A3B
+  prefill branch to crack lcpp spot rows from medium through true-long. The next
+  work is productionization and repeated promotion gates, not more proof that the
+  mechanism exists.
 - Post-matrix `pp4096` no-op budgeting changes the next-priority read: with
   matrix attention held fixed, attention-body skip is only a `~3-7%` lever
   (`929/972 -> 997 t/s`), while routed-MoE skip reaches `1270 t/s` and broad
@@ -310,14 +335,39 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: the medium-prompt MoE gap is routed FFN dataflow, not attention
+### 1. Hypothesis: A3B matrix attention plus grouped Q6 is the lcpp-cracking prefill candidate
 
-Optimizes: the residual A3B/A10B MoE `pp320/512/1024` prompt gap after
-prompt-native packed attention moved the board.
+Optimizes: A3B MoE prompt prefill from `pp320` through true-long after the Q6-down
+grouped-path escape fix moved the board.
 
 Why it is back at the top:
 
-- Current no-op ceilings show routed FFN dominates shared FFN on the default path:
+- The existing env-only matrix-attention sidecar plus grouped Q6 reaches or beats
+  fresh same-session llama.cpp spot rows: `1190.45 / 1174.57 t/s` at `pp320`,
+  `1340.82 / 1347.79 t/s` at `pp512`, `1484.98 / 1345.07 t/s` at `pp1024`,
+  `1434.39 / 1259.21 t/s` at `pp4096`, and `878.72 / 865.50 t/s` at synthetic
+  `pp34502`. The real `v02_reva` long rollout also holds at `870.94 t/s`.
+- Matrix attention with `QWEN_PREFILL_ATTN_MATRIX_G8=1` now passes the full ignored
+  A3B prefill-vs-single gate when `MAX_POS` is provisioned for the test, but it
+  still uses the matrix branch's looser tolerance envelope and manual max-pos
+  scratch sizing. Those are productionization tasks, not proof-of-mechanism tasks.
+- The biggest A3B prompt win in this sprint came from a silent fast-path miss, not
+  from another grouped-SwiGLU tile: A3B had `40` MoE layers but only `37` grouped
+  routed trace labels because three late expert-down tensors are `Q6_K`. Closing
+  that escape moved `pp320` `~830 -> 1061.45 t/s`, `pp512`
+  `824.46 -> 1172.07 t/s`, and `pp1024` `910.43 -> 1287.43 t/s` while leaving
+  warmed A10B neutral.
+- Therefore, the next exact sprint should make the lcpp-cracking matrix path safe
+  to promote while keeping the fast-path coverage matrix in the gate. Do not infer
+  coverage from final-logit correctness alone.
+- Post-Q6 no-op ceilings still leave routed MoE as a major lever, but not the only
+  plausible lcpp delta: A3B `pp1024` baseline `1287.43 t/s` rises to
+  `1578.34 t/s` with attention body skipped and `1979.46 t/s` with routed MoE
+  skipped; A3B `pp4096` rises from `1198.11 t/s` to `1583.70 t/s` no-op
+  attention and `1816.71 t/s` no-op routed. Shared MoE is small (`1332.52 t/s` at
+  `pp1024`).
+- Earlier no-op ceilings also showed routed FFN dominating shared FFN on the
+  then-current default path:
   A3B `pp320` moves from about `765 -> 1136 t/s` with routed off, while shared
   off only reaches about `790 t/s`; A10B `pp320` moves from about `305 -> 648 t/s`
   with routed off, while shared off only reaches about `309 t/s`.
@@ -355,14 +405,52 @@ Why it is back at the top:
   Fresh bucket histograms are not sharply cold-biased enough to explain the gap by
   tile waste alone: both A3B and A10B have `p50_count=28`, `ge32=44` experts at
   `chunk512`, and the all-`n16` down probe still lost.
+- A scan-ledger versus atomic-ledger falsifier now kills bucket order as the
+  obvious Q5-down locality crack. The atomic ledger introduced many expert-ID
+  back edges (A3B `1451/3987`, A10B `1568/4002`) while preserving exact output,
+  but grouped routed-tail time was flat to slightly faster (`0.994x` A3B,
+  `1.043x` A10B). Do not spend a branch on route-ledger ordering unless counters
+  show a new locality mechanism.
+- llama.cpp's remaining A3B MoE advantage on this M4 Max is not a hidden Metal
+  tensor-API win: `llama-bench` reports `has tensor = false`, and forcing
+  `GGML_METAL_TENSOR_ENABLE=1` does not satisfy the device-family gate. The same
+  A3B/A10B GGUFs also have separate `ffn_gate_exps` / `ffn_up_exps`, not a fused
+  `ffn_gate_up_exps` tensor, so the relevant external target is non-tensor
+  simdgroup `mul_mm_id`, not a tensor-API or fused-bank path.
+- A fresh all-`n32` rerun keeps the subtle point straight: all-`n32` is much
+  faster than all-`n16` in the isolated grouped-tail proof (`1.792x` A3B,
+  `1.384x` A10B at `chunk512`), but forcing all-`n32` does not beat the current
+  default hot-`n32` path end-to-end (A3B `pp512` flat, A3B `pp1024` slightly
+  negative, warmed A10B `pp512` negative). The default hot gate already captures
+  the high-count tile win.
 
 Current design rule:
 
+- Do not start another local routed-MoE kernel sprint until the matrix-attention
+  default gates have either passed or failed. The current env branch already
+  cracks the A3B lcpp board in spot rows.
+- Productionize matrix max-pos scratch before defaulting: avoid manual env sizing,
+  account for score/V_T memory, and define behavior for prompts that exceed the
+  allocated max position.
+- Either tighten the matrix correctness tolerance or document why the current
+  looser envelope is acceptable for this branch; do not hide that difference.
+- Before adding another local grouped kernel variant, prove the remaining lcpp gap
+  with matched per-layer/per-op attribution on the same GGUF, prompt length,
+  chunk/batch shape, warmup policy, power state, and flash-attention setting.
+- Add/keep a coverage gate that asserts expected routed-layer counts and flags any
+  fallback by dtype/role. The A3B `37/40` miss is the failure mode to prevent.
 - Do not pursue dataflow branches that sacrifice grouped-down locality unless they
   first show parity on rebuilt sequential `pp320`/`pp512` gates.
 - Do not repeat local `grouped_swiglu` knob sweeps unless a new phase ladder shows
   a new mechanism. The next exact proof must reduce the combined
   `grouped_swiglu + grouped_down` routed-tail bucket.
+- Do not chase bucket-order rewrites as the next grouped-down lever; scan versus
+  atomic ordering is exact and essentially flat despite very different ID order.
+- Do not defer the next branch waiting for llama.cpp Metal tensor-path parity on
+  this hardware. The live llama.cpp path is the regular simdgroup `mul_mm_id`
+  path for these files.
+- Do not retread all-`n32` as a default path; use it only as a diagnostic for
+  tile-count sensitivity unless a new distribution changes the cold-bucket trade.
 - Demote offline/interleaved gate+up ABI to a narrow A3B `chunk320` branch. The
   next serious exact FFN branch should attack grouped Q5 down locality/dequant or
   a true `SwiGLU+down` fusion that preserves grouped-down locality and beats the
@@ -372,6 +460,18 @@ Current design rule:
 
 Acceptance gates:
 
+- Matrix-attention promotion requires repeated cooled A3B wins at `pp320/512/1024`,
+  at least one `pp4096` row, and one true-long synthetic plus one true-long real
+  rollout row. It must stay at least neutral against fresh llama anchors and not
+  regress the current default outside expected scratch overhead.
+- Matrix-attention promotion also requires the full A3B prefill-vs-single gate with
+  matrix enabled, explicit max-pos scratch policy, and trace labels showing all
+  expected attention/MoE paths.
+- For the next commit/default promotion in this lane, require trace-label or
+  equivalent in-process coverage showing all expected MoE layers use the intended
+  route, grouped routed, and shared packed paths for A3B and A10B.
+- Before claiming llama parity, require paired qwen/llama rows plus attribution on
+  identical fixtures. Throughput alone is not enough after the Q6 escape lesson.
 - Any expert-bank ABI / interleaved layout branch must be exact on A3B and A10B
   small gates, improve end-to-end A3B `pp320` by at least `~1.12x` and A10B
   `pp320` by at least `~1.15x`, and be no worse than `-2%` at `pp512` with no
@@ -385,18 +485,19 @@ Acceptance gates:
   improve A3B `pp4096` with matrix attention fixed by `>=1.10x` before default
   consideration.
 
-### 2. Hypothesis: true-long A3B still needs matrix-attention productionization, but it is no longer the next pp4096 lever
+### 2. Historical: true-long A3B matrix-attention branch is now folded into #1
 
 Optimizes: A3B `16k/32k+` prefill where qwen now falls from the medium-prompt
 plateau faster than `llama.cpp`.
 
-Why it remains live but demoted:
+Why this section is retained:
 
 - Same-shape sparse rows show `llama.cpp` also declines after the medium-prompt
-  peak, but remains much faster: qwen/lcpp is `0.67x` at `pp1024`, `0.68x` at
-  `pp4096`, `0.69x` at `pp16384`, and `0.66x` at `pp34502`.
-- Real rollout shape is not the first-order cause: qwen synthetic `34.5k` is
-  `596.88 t/s` and real `v02_reva` `34.5k` is `587.60 t/s`.
+  peak, but remains faster: post-Q6 qwen/lcpp is `0.96x` at `pp1024`, `0.95x` at
+  `pp4096`, and `0.78x` at `pp34502`; `pp16384` needs a post-Q6 rerun.
+- Real rollout shape is not the first-order cause: the post-Q6 real `v02_reva`
+  `34.5k` row is `674.28 t/s`, still below the latest lcpp synthetic long anchor
+  but far above the old `587.60 t/s` same-fixture row.
 - No-op attribution at true-long shapes points at attention body: A3B `pp16384`
   goes `767.64 -> 1101.72 t/s` with attention body skipped, nearly matching
   lcpp full prefill (`1112.03 t/s`), while routed-MoE skip reaches only
@@ -411,6 +512,9 @@ Why it remains live but demoted:
   it wins real long rows: about `1042 t/s` at `pp4096`, `997 t/s` at `pp8192`,
   noisy `~864-904 t/s` at `pp16384`, and `725.7-736.9 t/s` at `pp34502`
   depending on chunk size.
+- After the grouped Q6-down fix, the same sidecar now reaches `1434.39 t/s` at
+  `pp4096`, `878.72 t/s` at synthetic `pp34502`, and `870.94 t/s` on real
+  `v02_reva`, enough to move matrix productionization to the #1 active bet.
 - After those matrix wins, local attention follow-ons did not convert: direct KQV
   final stores regressed, vectorized KQV temp copies regressed, and F16
   probability scratch was flat/slower while failing the current matrix oracle
@@ -431,15 +535,15 @@ Current design rule:
 - Treat chunk `2048` as the current matrix-long candidate for `34.5k` rows;
   chunk `4096` loses despite the larger query batch.
 - Next inspect/copy deeper lcpp `mul_mm_f16_f32` KQ/KQV tiling and score layout
-  only after routed-tail work has a fresh phase ladder; do not spend the next
-  sprint on more local KQV store/probability variants.
+  only after matrix default gates fail or plateau; do not spend the next sprint on
+  more local KQV store/probability variants before the productionization gates.
 
 Acceptance gates:
 
 - A long-attention branch must improve A3B same-shape `pp16384` and `pp34502`, not
   just medium prompt rows.
-- Target at least `>=1.20x` at `pp16384` or a clear path to closing the current
-  `~0.66-0.69x` qwen/lcpp ratio.
+- Target at least `>=1.20x` at `pp16384` or a clear path to preserving the new
+  `>=1.0x` matrix-sidecar spot rows after production gating.
 - Any matrix/non-flash branch must be positive at `pp4096` and `pp8192` before it
   gets long-run time at `16k+`; `pp512/1024` wins alone are not a promotion signal.
 - Defaulting the fused V_T matrix path requires repeated cooled wins at
@@ -753,6 +857,9 @@ Current read:
 - The obvious exact local `grouped_swiglu` variant family is now well sampled and
   mostly exhausted here: tile, threshold, queue/locality, atomic-down, and
   resident-mirror branches all went flat or negative.
+- The obvious route-ledger ordering hypothesis is also falsified: an exact atomic
+  bucket ledger creates many expert-ID back edges but leaves A3B/A10B `chunk512`
+  grouped routed-tail time essentially flat.
 - Two more exact reads now narrow the field further:
   - grouped `inner/out` zero-fill is safe to skip and slightly positive, but too
     small to change the scoreboard by itself;

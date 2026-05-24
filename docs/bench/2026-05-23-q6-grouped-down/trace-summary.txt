@@ -1,0 +1,5 @@
+QWEN_PREFILL_TRACE_LABELS=1 xcrun xctrace record --no-prompt --template "Metal System Trace" --output "target/profiles/qwen-a3b-pp512-q6grouped.trace" --launch -- ./target/release/qwen-bench pp -m "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" -p 512 --prefill-chunk 512 --runs 1 --no-warmup -o json
+
+uv run scripts/profile/trace-metal.py "target/profiles/qwen-a3b-pp512-q6grouped.trace" --process-prefix qwen-bench
+
+qwen prefill phase label counts: attn-prefill-g8-packed:10, moe-route-fused:40, moe-routed-grouped:40, moe-shared-packed:40

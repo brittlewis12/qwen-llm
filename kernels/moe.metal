@@ -21,6 +21,7 @@ using namespace metal;
 #define NSG_Q6K 2
 
 #define Q5K_NL (QK_K / 16)
+#define Q6K_NL (QK_K / 16)
 #define NR0_MM 64
 #define NR1_MM 32
 #define NK_MM 32
@@ -2121,6 +2122,14 @@ struct moe_group_q5k_args {
     uint stride_b;
 };
 
+struct moe_group_q6k_args {
+    uint M;
+    uint N;
+    uint K;
+    uint nb01;
+    uint stride_b;
+};
+
 inline void dequantize_q5_K_half_grouped(device const uchar * blk_bytes,
                                          short il,
                                          thread half4x4 & reg) {
@@ -2240,6 +2249,170 @@ kernel void kernel_moe_down_q5_K_f32_grouped_slots(
         il = (il + 2 < Q5K_NL) ? il + 2 : il % 2;
         x_ptr = (il < 2)
                   ? x_ptr + Q5K_BYTES * ((2 + Q5K_NL - 1) / Q5K_NL)
+                  : x_ptr;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
+        threadgroup const half * lsmb = (sb + 2 * 64 * (sgitg / 2));
+
+        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 4 * 64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp_str = ((threadgroup float *)shmem)
+                                   + 32 * (sgitg & 1)
+                                   + (16 * (sgitg >> 1)) * NR0_MM;
+    for (short i = 0; i < 8; ++i) {
+        simdgroup_store(mc[i], temp_str + 8 * (i % 4) + 8 * NR0_MM * (i / 4),
+                        NR0_MM, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        for (int j = tiitg; j < nr1; j += NR1_MM) {
+            const int slot = ids[(ulong)im * args.N + r1 + j];
+            device float * D = dst + (ulong)slot * args.M + r0;
+            threadgroup float * C = temp_str + (j * NR0_MM);
+            for (int i = 0; i < nr0; ++i) {
+                D[i] = C[i];
+            }
+        }
+    }
+}
+
+inline void dequantize_q6_K_half_grouped(device const uchar * blk_bytes,
+                                         short il,
+                                         thread half4x4 & reg) {
+    device const uint16_t * ql = (device const uint16_t *)(blk_bytes + 0);
+    device const uint16_t * qh = (device const uint16_t *)(blk_bytes + 128);
+    device const int8_t   * scales = (device const int8_t *)(blk_bytes + 128 + 64);
+    const half d_all = ((device const half *)(blk_bytes + 128 + 64 + 16))[0];
+
+    ql = ql + 32 * (il / 8) + 16 * ((il / 2) & 1) + 8 * (il & 1);
+    qh = qh + 16 * (il / 8) + 8 * (il & 1);
+    const float sc = scales[(il % 2) + 2 * (il / 2)];
+    const short il_inner = (il / 2) & 3;
+
+    const uint32_t kmask1 = il_inner > 1
+        ? (il_inner > 2 ? 0xC0C0C0C0 : 0x30303030)
+        : (il_inner > 0 ? 0x0C0C0C0C : 0x03030303);
+    const uint32_t kmask2 = il_inner > 1 ? 0xF0F0F0F0 : 0x0F0F0F0F;
+    const float ml  = (float)d_all * sc * 32.0f;
+    const float dl0 = (float)d_all * sc;
+    const float dl1 = dl0 / 256.0f;
+    const float dl2 = dl0 / (256.0f * 256.0f);
+    const float dl3 = dl0 / (256.0f * 256.0f * 256.0f);
+    const uint8_t shr_h = il_inner > 2 ? 2 : 0;
+    const uint8_t shl_h = il_inner > 1 ? 0 : (il_inner > 0 ? 2 : 4);
+    const uint8_t shr_l = il_inner > 1 ? 4 : 0;
+
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t low  = (ql[2 * i] | (uint32_t)(ql[2 * i + 1] << 16)) & kmask2;
+        const uint32_t high = (qh[2 * i] | (uint32_t)(qh[2 * i + 1] << 16)) & kmask1;
+        const uint32_t q = ((high << shl_h) >> shr_h) | (low >> shr_l);
+        reg[i][0] = (half)(dl0 * ((float)(q & 0xFF))         - ml);
+        reg[i][1] = (half)(dl1 * ((float)(q & 0xFF00))       - ml);
+        reg[i][2] = (half)(dl2 * ((float)(q & 0xFF0000))     - ml);
+        reg[i][3] = (half)(dl3 * ((float)(q & 0xFF000000))   - ml);
+    }
+}
+
+kernel void kernel_moe_down_q6_K_f32_grouped_slots(
+        constant moe_group_q6k_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const float * srcB         [[buffer(2)]],
+        device const int   * counts       [[buffer(3)]],
+        device const int   * ids          [[buffer(4)]],
+        device       float * dst          [[buffer(5)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const int im = tgpig.z;
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_MM;
+
+    const int count = counts[im];
+    if (r1 >= count) return;
+
+    const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
+    const short nr1 = (count - r1 < NR1_MM) ? (short)(count - r1) : NR1_MM;
+
+    const short lr0 = ((short)tiitg / NL0_MM) < nr0
+                        ? ((short)tiitg / NL0_MM)
+                        : nr0 - 1;
+    const short il0 = (tiitg % NL0_MM);
+    short il = il0;
+
+    const short lr1 = ((short)tiitg / NL1_MM) < nr1
+                        ? ((short)tiitg / NL1_MM)
+                        : nr1 - 1;
+    const short iy = 8 * (tiitg % NL1_MM);
+
+    const short offset1 = il0 / Q6K_NL;
+    const ulong expert_stride = (ulong)args.nb01 * args.M;
+    device const uchar * x_ptr = srcA + expert_stride * (ulong)im + (ulong)args.nb01 * (r0 + lr0)
+                                       + (ulong)offset1 * Q6K_BYTES;
+    const int slot_id = ids[(ulong)im * args.N + (r1 + lr1)];
+    device const float * y_ptr = srcB + (ulong)args.stride_b * slot_id + (ulong)iy;
+
+    simdgroup_half8x8   ma[4];
+    simdgroup_half8x8   mb[2];
+    simdgroup_float8x8  mc[8];
+
+    for (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        {
+            half4x4 temp_a;
+            dequantize_q6_K_half_grouped(x_ptr, il, temp_a);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+
+        {
+            const short sx = (tiitg % NL1_MM);
+            const short sy = (tiitg / NL1_MM) / 8;
+            const short ly = (tiitg / NL1_MM) % 8;
+            const short ib = 4 * sx + sy;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        il = (il + 2 < Q6K_NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2)
+                  ? x_ptr + Q6K_BYTES * ((2 + Q6K_NL - 1) / Q6K_NL)
                   : x_ptr;
         y_ptr += NK_MM;
 

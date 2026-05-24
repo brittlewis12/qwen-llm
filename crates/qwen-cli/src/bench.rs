@@ -831,6 +831,23 @@ fn default_prefill_chunk(kind: qwen_llm::model::ArchKind, prompt_len: usize) -> 
     }
 }
 
+fn fresh_prefill_scratch_for_prompt(
+    ctx: &MetalContext,
+    model: &MetalModel,
+    prefill_chunk: usize,
+    prompt_len: usize,
+) -> Result<MetalDFlashLayerMajorScratch> {
+    let block_size = u32::try_from(prefill_chunk).context("prefill chunk does not fit u32")?;
+    let matrix_max_pos = prompt_len.max(prefill_chunk);
+    MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+        ctx,
+        model,
+        block_size,
+        matrix_max_pos,
+    )
+    .context("prefill scratch")
+}
+
 /// Returns `(commit, dirty)` for stamping into JSON output.
 ///
 /// Commit comes from `build.rs` (env at compile time → git → "unknown").
@@ -3628,9 +3645,8 @@ fn run_pp(args: PpArgs) -> Result<()> {
 
     if !no_warmup {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
-        let mut scratch =
-            MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
-                .context("warmup prefill scratch")?;
+        let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
+            .context("warmup prefill scratch")?;
         if with_tail {
             let _ = prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
                 .context("warmup prefill with tail")?;
@@ -3645,9 +3661,8 @@ fn run_pp(args: PpArgs) -> Result<()> {
     let mut ts_samples = Vec::with_capacity(runs);
     for run_idx in 0..runs {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
-        let mut scratch =
-            MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
-                .context("timed prefill scratch")?;
+        let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
+            .context("timed prefill scratch")?;
 
         let t0 = Instant::now();
         let gpu_ms = if with_tail {
@@ -4089,9 +4104,8 @@ fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
 
     if !no_warmup {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
-        let mut scratch =
-            MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
-                .context("warmup prefill scratch")?;
+        let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
+            .context("warmup prefill scratch")?;
         if with_tail {
             let _ = prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
                 .context("warmup prefill with tail")?;
@@ -4128,7 +4142,7 @@ fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
     text_log!("[pp-wait] go signal received; running timed prefill");
 
     let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
-    let mut scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
+    let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
         .context("timed prefill scratch")?;
     let t0 = Instant::now();
     let gpu_ms = if with_tail {
@@ -4259,9 +4273,8 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         // One warmup pass to compile pipeline state objects + warm caches.
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
         let warmup_last_logits = if use_packed_prefill {
-            let mut scratch =
-                MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
-                    .context("packed prefill warmup scratch")?;
+            let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
+                .context("packed prefill warmup scratch")?;
             prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
                 .context("packed prefill warmup")?
         } else {
@@ -4322,9 +4335,8 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
 
         let t0 = Instant::now();
         if use_packed_prefill {
-            let mut scratch =
-                MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, prefill_chunk as u32)
-                    .context("packed prefill scratch")?;
+            let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
+                .context("packed prefill scratch")?;
             let (logits, gpu_total_ms) = prefill_tokens_with_multi_hidden_profiled(
                 &mf,
                 &ids,

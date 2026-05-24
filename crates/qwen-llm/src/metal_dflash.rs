@@ -1833,6 +1833,7 @@ impl MetalDFlashLayerMajorScratch {
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
         include_final_logits_pack: bool,
+        attn_matrix_max_pos_override: Option<usize>,
     ) -> Result<Self, MetalError> {
         let arch = &target_model.arch;
         let n = block_size as u64;
@@ -1921,7 +1922,10 @@ impl MetalDFlashLayerMajorScratch {
             && arch.n_q_heads == 16
             && arch.n_kv_heads == 2;
         let attn_matrix_max_pos = if enable_attn_matrix_g8 {
-            prefill_attn_matrix_max_pos().unwrap_or(block_size as usize) as u64
+            prefill_attn_matrix_max_pos()
+                .or(attn_matrix_max_pos_override)
+                .unwrap_or(block_size as usize)
+                .max(block_size as usize) as u64
         } else {
             0
         };
@@ -2076,7 +2080,7 @@ impl MetalDFlashLayerMajorScratch {
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, true)
+        Self::fresh_inner(ctx, target_model, block_size, true, None)
     }
 
     pub fn fresh_prefill(
@@ -2084,7 +2088,16 @@ impl MetalDFlashLayerMajorScratch {
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, false)
+        Self::fresh_inner(ctx, target_model, block_size, false, None)
+    }
+
+    pub fn fresh_prefill_with_matrix_max_pos(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+        matrix_max_pos: usize,
+    ) -> Result<Self, MetalError> {
+        Self::fresh_inner(ctx, target_model, block_size, false, Some(matrix_max_pos))
     }
 
     /// Zero-copy view of row n of `x_pack` ([H] elements).
@@ -17640,7 +17653,13 @@ mod tests {
                     .expect("experimental prefix advance");
             }
             let mut layer_scratch =
-                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+                MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+                    &ctx,
+                    &mm,
+                    p as u32,
+                    n_total_with_prefix,
+                )
+                .expect("layer scratch");
             let h_dst_b =
                 MetalTensor::zeros_f32(&ctx, vec![(total_n * k * h) as u64]).expect("h_dst_b");
             let last_b = prefill_tokens_with_multi_hidden(
@@ -17879,7 +17898,13 @@ mod tests {
                     .expect("experimental prefix advance");
             }
             let mut layer_scratch =
-                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+                MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+                    &ctx,
+                    &mm,
+                    p as u32,
+                    n_total_with_prefix,
+                )
+                .expect("layer scratch");
             let last_b = prefill_tokens_with_multi_hidden(
                 &mf,
                 token_ids,

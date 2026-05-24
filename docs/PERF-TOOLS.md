@@ -440,9 +440,10 @@ Rules for pp sweeps:
 - Treat experimental MoE flags such as `QWEN_PREFILL_MOE_PACKED_ROUTED` as part of
   the benchmark identity and report them explicitly.
 - Treat experimental attention flags such as `QWEN_PREFILL_ATTN_MATRIX_G8=1` as
-  diagnostic-only unless the roadmap says otherwise. Long matrix-sidecar runs also
-  need `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>` so score/V_T scratch is sized
-  explicitly; report that value with every row.
+  diagnostic-only unless the roadmap says otherwise. `qwen-bench pp`, `pp-wait`,
+  and packed `decode` prefill now size matrix score/V_T scratch from the prompt
+  length automatically; only lower-level/custom callers should need
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>`, and they must report it.
 - When comparing against `llama-bench`, remember that bench-tool `-fa 0` disables
   flash attention; it is not the library's auto flash-attention setting.
 - For cold A10B `pp128` methodology, `QWEN_PP_WARM_MOE_BANKS=1` or

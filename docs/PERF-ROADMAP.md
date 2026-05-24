@@ -78,6 +78,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `pp4096`, `878.72 t/s` at synthetic `pp34502`, and `870.94 t/s` on the real
   `v02_reva` `34,502`-token rollout. It remains env-only because max-pos scratch
   policy and matrix correctness tolerance still need productionization.
+- First max-pos productionization step is done: `qwen-bench pp`, `pp-wait`, and
+  packed `decode` prefill now size matrix scratch from the actual prompt length
+  when `QWEN_PREFILL_ATTN_MATRIX_G8=1`, so user-facing bench paths no longer need
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`. Auto-scratch spot rows are stronger:
+  `1237.87/1390.93/1561.06/1492.39/928.62 t/s` at
+  `pp320/512/1024/4096/34502`.
 - `llama-bench -fa 0` is not auto for the bench tool: it disables flash attention.
   A3B `llama.cpp` `-fa 0` and `-fa 1` are flat at `pp1024` and `-fa 1` is slightly
   slower at `pp16384`, so the current A3B long target is the non-flash
@@ -145,6 +151,10 @@ Recent confirmed wins:
   prefill branch to crack lcpp spot rows from medium through true-long. The next
   work is productionization and repeated promotion gates, not more proof that the
   mechanism exists.
+- The matrix sidecar no longer needs manual max-pos env sizing in `qwen-bench`
+  prompt paths; remaining promotion blockers are cooled repeatability, default
+  activation policy, scratch budget accounting, and the correctness tolerance
+  decision.
 - Post-matrix `pp4096` no-op budgeting changes the next-priority read: with
   matrix attention held fixed, attention-body skip is only a `~3-7%` lever
   (`929/972 -> 997 t/s`), while routed-MoE skip reaches `1270 t/s` and broad
@@ -348,9 +358,9 @@ Why it is back at the top:
   `1434.39 / 1259.21 t/s` at `pp4096`, and `878.72 / 865.50 t/s` at synthetic
   `pp34502`. The real `v02_reva` long rollout also holds at `870.94 t/s`.
 - Matrix attention with `QWEN_PREFILL_ATTN_MATRIX_G8=1` now passes the full ignored
-  A3B prefill-vs-single gate when `MAX_POS` is provisioned for the test, but it
-  still uses the matrix branch's looser tolerance envelope and manual max-pos
-  scratch sizing. Those are productionization tasks, not proof-of-mechanism tasks.
+  A3B prefill-vs-single gate without `QWEN_PREFILL_ATTN_MATRIX_MAX_POS` in the
+  updated scratch API, but it still uses the matrix branch's looser tolerance
+  envelope. That tolerance decision is now the main correctness production task.
 - The biggest A3B prompt win in this sprint came from a silent fast-path miss, not
   from another grouped-SwiGLU tile: A3B had `40` MoE layers but only `37` grouped
   routed trace labels because three late expert-down tensors are `Q6_K`. Closing
@@ -429,9 +439,10 @@ Current design rule:
 - Do not start another local routed-MoE kernel sprint until the matrix-attention
   default gates have either passed or failed. The current env branch already
   cracks the A3B lcpp board in spot rows.
-- Productionize matrix max-pos scratch before defaulting: avoid manual env sizing,
-  account for score/V_T memory, and define behavior for prompts that exceed the
-  allocated max position.
+- Productionize matrix scratch before defaulting: user-facing bench paths now avoid
+  manual max-pos env sizing, but production callers still need score/V_T memory
+  accounting and clear behavior for prompts that exceed the allocated max
+  position.
 - Either tighten the matrix correctness tolerance or document why the current
   looser envelope is acceptable for this branch; do not hide that difference.
 - Before adding another local grouped kernel variant, prove the remaining lcpp gap

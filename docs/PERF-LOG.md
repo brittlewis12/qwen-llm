@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-24 — Matrix Attention Scratch Uses Prompt Length In Bench Paths
+
+Status: production-shape cleanup for the A3B/group-8 matrix-attention sidecar.
+GPU workloads were run sequentially on AC power; raw rows are in
+`docs/bench/2026-05-24-matrix-auto-scratch/`.
+
+### What Changed
+
+- Added `MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos`, so
+  callers can size matrix-attention score/V_T scratch for the actual last prompt
+  position instead of relying on `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`.
+- Updated `qwen-bench pp`, `pp-wait`, and packed `decode` prefill paths to pass
+  the rendered/synthetic prompt length into prefill scratch allocation.
+- Left the matrix path opt-in via `QWEN_PREFILL_ATTN_MATRIX_G8=1`; this removes
+  the manual max-pos env wart without defaulting the branch yet.
+
+### Validation
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `QWEN_PREFILL_ATTN_MATRIX_G8=1 cargo test --release -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe -- --ignored --nocapture`
+  - passed with no `QWEN_PREFILL_ATTN_MATRIX_MAX_POS` env; logits cosine stayed
+    `0.999984-1.000000`, worst GDN cosine `0.999611`.
+
+### Measurements
+
+All rows below set `QWEN_PREFILL_ATTN_MATRIX_G8=1` and intentionally omit
+`QWEN_PREFILL_ATTN_MATRIX_MAX_POS`.
+
+| Shape | Tokens/s | Notes |
+| --- | ---: | --- |
+| A3B `pp320`, chunk `320` | `1237.87` | beats fresh lcpp `1174.57` spot |
+| A3B `pp512`, chunk `512` | `1390.93` | beats fresh lcpp `1347.79` spot |
+| A3B `pp1024`, chunk `1024` | `1561.06` | beats fresh lcpp `1345.07` spot |
+| A3B `pp4096`, chunk `1024` | `1492.39` | beats fresh lcpp `1259.21` spot |
+| A3B synthetic `pp34502`, chunk `2048` | `928.62` | beats fresh lcpp `865.50` spot |
+| A3B real `v02_reva` `34502`, chunk `2048` | `926.76` | real rollout holds |
+| A10B `pp512`, matrix flag + warm banks | `401.16` | group-16 ignores matrix-g8 path |
+
+Read: the manual max-pos env was the first production wart, and it is now gone
+for the bench/user-facing prompt paths. The branch still needs cooled repeated
+promotion rows and a decision on the looser matrix correctness envelope before it
+should become default, but the operational shape is now much closer to shippable.
+
 ## 2026-05-23 — A3B Q6 Down No Longer Falls Off Grouped MoE
 
 Status: major A3B MoE prefill fix. GPU workloads were run sequentially on AC

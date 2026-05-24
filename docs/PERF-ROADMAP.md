@@ -84,6 +84,28 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`. Auto-scratch spot rows are stronger:
   `1237.87/1390.93/1561.06/1492.39/928.62 t/s` at
   `pp320/512/1024/4096/34502`.
+- The expanded clean family sweep at
+  `docs/bench/2026-05-24-1331-matrix-pp4k16k-family/` ran
+  `QWEN_PREFILL_ATTN_MATRIX_G8=1`, `runs=1`, and
+  `pp128/512/1024/4096/16384` plus `tg32/tg128`. A3B now matches/beats lcpp at
+  every swept prompt size in that candidate branch: `879/769` (`1.14x`) at
+  `pp128`, `1387/1392` (`1.00x`) at `pp512`, `1558/1388` (`1.12x`) at `pp1024`,
+  `1492/1352` (`1.10x`) at `pp4096`, and `1212/1107` (`1.09x`) at `pp16384`.
+  Do not generalize this to the whole family: dense 27B is still only `0.67x` at
+  `pp16384`, and A10B is `0.83x/0.92x/1.00x/0.86x` at
+  `pp512/1024/4096/16384`.
+- The same family sweep makes prompt chunk policy a first-class hypothesis: every
+  qwen row drops from `pp4096` to `pp16384` under the current default
+  `prefill_chunk=1024`. Some decline is not itself a bug because llama.cpp also
+  falls at 16K in this run, but qwen's dense/A10B slope is now a likely whole-
+  family blocker.
+- A targeted clean chunk sweep falsifies chunk size as the dense 16K cure but
+  keeps it live for MoE. Dense 27B `pp16384` is flat/slightly worse at chunk
+  `2048` (`125.09 -> 124.52 t/s` repeated), while A3B `pp16384` improves at
+  chunk `2048` (`1114.61 -> 1148.52 t/s`) and A10B improves at chunk `4096` both
+  at `pp4096` (`357.87 -> 378.40 t/s`) and `pp16384` (`288.99 -> 306.46 t/s`).
+  Treat `2048` as the conservative cross-MoE default-cap candidate; treat `4096`
+  as an A10B-specific candidate until A3B/real-rollout gates say otherwise.
 - `llama-bench -fa 0` is not auto for the bench tool: it disables flash attention.
   A3B `llama.cpp` `-fa 0` and `-fa 1` are flat at `pp1024` and `-fa 1` is slightly
   slower at `pp16384`, so the current A3B long target is the non-flash
@@ -439,6 +461,9 @@ Current design rule:
 - Do not start another local routed-MoE kernel sprint until the matrix-attention
   default gates have either passed or failed. The current env branch already
   cracks the A3B lcpp board in spot rows.
+- Do not expect prompt chunk policy to close dense long-context prefill. It is now
+  a narrow MoE production knob: promote only if a `2048` or arch-specific cap keeps
+  A3B wins and A10B gains without dense changes or memory-pressure warnings.
 - Productionize matrix scratch before defaulting: user-facing bench paths now avoid
   manual max-pos env sizing, but production callers still need score/V_T memory
   accounting and clear behavior for prompts that exceed the allocated max
@@ -475,6 +500,10 @@ Acceptance gates:
   at least one `pp4096` row, and one true-long synthetic plus one true-long real
   rollout row. It must stay at least neutral against fresh llama anchors and not
   regress the current default outside expected scratch overhead.
+- A MoE chunk-cap default change requires clean-build rows showing `pp512/1024`
+  unchanged by construction, repeated A3B and A10B long-prompt wins at
+  `pp4096/16384`, one real-rollout A3B row, and no `pmset` or memory-pressure
+  confounds. Dense rows are guardrails, not expected beneficiaries.
 - Matrix-attention promotion also requires the full A3B prefill-vs-single gate with
   matrix enabled, explicit max-pos scratch policy, and trace labels showing all
   expected attention/MoE paths.

@@ -1,0 +1,44 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "2d38ed5cb",
+    "build_dirty": 0,
+    "test_time": "2026-05-24T14:01:59Z",
+    "model_filename": "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+    "model_size": 77018996736,
+    "model_n_params": 122111526912,
+    "arch_kind": "moe",
+    "test": "pp16384",
+    "n_tokens": 16384,
+    "n_repetitions": 1,
+    "avg_ts": 309.36248777704026,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      309.36248777704026
+    ],
+    "samples_ns": [
+      52960525750
+    ],
+    "avg_ns": 52960525750,
+    "avg_gpu_ns": 52858858208,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 1024,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+    }
+  }
+]

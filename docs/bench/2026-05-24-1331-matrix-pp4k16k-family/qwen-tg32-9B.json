@@ -1,0 +1,44 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "2d38ed5cb",
+    "build_dirty": 0,
+    "test_time": "2026-05-24T13:38:21Z",
+    "model_filename": "/Users/tito/models/Qwen3.5-9B-Q4_K_M.gguf",
+    "model_size": 5669554176,
+    "model_n_params": 8953803264,
+    "arch_kind": "dense",
+    "test": "tg32",
+    "n_tokens": 32,
+    "n_repetitions": 1,
+    "avg_ts": 67.10682804111237,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      67.10682804111237
+    ],
+    "samples_ns": [
+      476851625
+    ],
+    "avg_ns": 476851625,
+    "avg_gpu_ns": 464476708,
+    "decode_gb_per_s": 380.4657971586025,
+    "prefill_chunk": null,
+    "decode_mode": "apples-lcpp",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+    }
+  }
+]

@@ -6,6 +6,80 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-24 — Chunk Policy Is A MoE Lever, Not A Dense Cure
+
+Status: follow-up to the expanded matrix family sweep. All rows used clean
+`2d38ed5cb`, ran sequentially on AC power, and captured `pmset` / memory-pressure
+snapshots. Raw rows are in `docs/bench/2026-05-24-chunk-policy-matrix/` and the
+selected repeated gates are in
+`docs/bench/2026-05-24-chunk-policy-matrix-repeat/`.
+
+### Measurements
+
+Single-run chunk sweep with `QWEN_PREFILL_ATTN_MATRIX_G8=1`:
+
+| Model | Shape | Best chunk | Best vs chunk1024 | Read |
+| --- | ---: | ---: | ---: | --- |
+| 9B dense | `pp4096` | `512` | `1.01x` | larger chunks lose |
+| 9B dense | `pp16384` | `2048` | `1.00x` | flat |
+| 27B dense | `pp4096` | `1024` | `1.00x` | flat |
+| 27B dense | `pp16384` | `2048` | `1.00x` | flat |
+| 35B A3B MoE | `pp4096` | `2048` | `1.03x` | medium-long win |
+| 35B A3B MoE | `pp16384` | `4096` | `1.08x` | long win, noisy |
+| 122B A10B MoE | `pp4096` | `4096` | `1.09x` | clear long win |
+| 122B A10B MoE | `pp16384` | `2048` | `1.06x` | clear long win |
+
+Repeated selected gates (`runs=3`) sharpened the read:
+
+| Model | Shape | chunk1024 | chunk2048 | chunk4096 | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 27B dense | `pp16384` | `125.09` | `124.52` | n/a | no dense recovery |
+| 35B A3B MoE | `pp16384` | `1114.61` | `1148.52` | `1123.51` | `2048` is safest |
+| 122B A10B MoE | `pp4096` | `357.87` | `373.80` | `378.40` | larger is better |
+| 122B A10B MoE | `pp16384` | `288.99` | `302.54` | `306.46` | larger is better |
+
+Read: raising the MoE long-prompt default chunk cap is now a plausible small
+production win, especially for A10B, but it is not the whole-family answer. Dense
+prefill's 16K gap survives chunk sweeps almost unchanged, so the next dense work
+needs phase attribution / attention-dataflow evidence rather than a chunk knob.
+For MoE, `2048` is the conservative cross-MoE cap candidate; `4096` is A10B's
+best measured long-prompt point but is less stable for A3B.
+
+## 2026-05-24 — Matrix Family Sweep Adds 4K/16K
+
+Status: expanded family scoreboard for clean `2d38ed5cb` with the env-only
+group-8 matrix-attention sidecar. GPU workloads were sequential on AC power;
+post-run `pmset` reported no thermal/performance/CPU-power warning and
+`memory_pressure -Q` reported `95%` free. Raw rows are in
+`docs/bench/2026-05-24-1331-matrix-pp4k16k-family/`.
+
+### Scope
+
+- `QWEN_PREFILL_ATTN_MATRIX_G8=1`, `runs=1`; shapes were
+  `pp128/512/1024/4096/16384` plus `tg32/tg128`.
+- The sweep intentionally kept token generation rows; no `no-tg` shortcut or
+  harness behavior change was introduced.
+- `qwen-bench` build stamp was clean `2d38ed5cb`; `llama.cpp` was `14aa3d375`
+  build `9265` on the same M4 Max.
+
+### Measurements
+
+| Variant | `pp512` qwen/lcpp | `pp1024` | `pp4096` | `pp16384` | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 27B dense | `211 / 243` (`0.87x`) | `206 / 230` (`0.89x`) | `179 / 216` (`0.83x`) | `136 / 203` (`0.67x`) | dense long prefill still not cracked |
+| 35B A3B MoE | `1387 / 1392` (`1.00x`) | `1558 / 1388` (`1.12x`) | `1492 / 1352` (`1.10x`) | `1212 / 1107` (`1.09x`) | matrix candidate beats lcpp through 16K |
+| 122B A10B MoE | `369 / 444` (`0.83x`) | `410 / 445` (`0.92x`) | `408 / 408` (`1.00x`) | `309 / 360` (`0.86x`) | group-16 MoE remains open |
+
+Decode stayed won/parity at `tg128`: dense rows were `1.05-1.36x`, A3B was
+`1.04x`, and A10B was `1.00x`.
+
+Read: the A3B/G8 matrix candidate is now a real lcpp-cracking branch across the
+family sweep's prompt sizes, not just isolated spot rows. This does not prove a
+whole-family win or default readiness: dense prefill degrades badly by 16K, A10B
+still lags outside the `pp4096` parity point, and every qwen row drops from
+`pp4096` to `pp16384`. The immediate high-EV follow-up is a prompt chunk policy
+sweep (`512/1024/2048/4096`, memory permitting) before writing more kernels.
+
 ## 2026-05-24 — Matrix Attention Scratch Uses Prompt Length In Bench Paths
 
 Status: production-shape cleanup for the A3B/group-8 matrix-attention sidecar.

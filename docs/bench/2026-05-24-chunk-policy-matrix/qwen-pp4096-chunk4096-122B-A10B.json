@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-24T17:25:49.068059+00:00",
+  "base_cmd": [
+    "target/release/qwen-bench",
+    "pp",
+    "-m",
+    "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+    "--runs",
+    "1",
+    "-o",
+    "json",
+    "-p",
+    "4096",
+    "--prefill-chunk",
+    "4096"
+  ],
+  "variants": [
+    {
+      "label": "matrix",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+      },
+      "bench": {
+        "schema_version": 1,
+        "engine": "qwen-llm",
+        "build_commit": "2d38ed5cb",
+        "build_dirty": 1,
+        "test_time": "2026-05-24T17:25:48Z",
+        "model_filename": "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+        "model_size": 77018996736,
+        "model_n_params": 122111526912,
+        "arch_kind": "moe",
+        "test": "pp4096",
+        "n_tokens": 4096,
+        "n_repetitions": 1,
+        "avg_ts": 396.1831327769294,
+        "stddev_ts": 0.0,
+        "samples_ts": [
+          396.1831327769294
+        ],
+        "samples_ns": [
+          10338653166
+        ],
+        "avg_ns": 10338653166,
+        "avg_gpu_ns": 10289059875,
+        "decode_gb_per_s": null,
+        "prefill_chunk": 4096,
+        "decode_mode": null,
+        "prefill_mode": "packed",
+        "power": {
+          "source": "AC Power",
+          "battery_percent": 97,
+          "battery_state": "charging",
+          "battery_warning": null,
+          "powermode_battery": 2,
+          "powermode_ac": 2,
+          "thermal_warning_recorded": false,
+          "performance_warning_recorded": false,
+          "cpu_power_status_recorded": false
+        },
+        "qwen_env": {
+          "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+        }
+      },
+      "wall_s_outer": 101.62449445901439,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 93%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 94%"
+    }
+  ]
+}

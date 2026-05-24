@@ -1,0 +1,48 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "ef32caec5",
+    "build_dirty": 0,
+    "test_time": "2026-05-24T19:35:41Z",
+    "model_filename": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "model_size": 22123538944,
+    "model_n_params": 34660610688,
+    "arch_kind": "moe",
+    "test": "pp128",
+    "n_tokens": 128,
+    "n_repetitions": 3,
+    "avg_ts": 832.7747806470821,
+    "stddev_ts": 2.089102799813827,
+    "samples_ts": [
+      832.7758018617653,
+      830.6851674271265,
+      834.8633726523544
+    ],
+    "samples_ns": [
+      153702833,
+      154089666,
+      153318500
+    ],
+    "avg_ns": 153703666,
+    "avg_gpu_ns": 151927444,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 128,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+    }
+  }
+]

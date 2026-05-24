@@ -106,6 +106,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   at `pp4096` (`357.87 -> 378.40 t/s`) and `pp16384` (`288.99 -> 306.46 t/s`).
   Treat `2048` as the conservative cross-MoE default-cap candidate; treat `4096`
   as an A10B-specific candidate until A3B/real-rollout gates say otherwise.
+- The clean repeated A3B matrix promotion gate at
+  `docs/bench/2026-05-24-1934-35B-A3B-matrix-promotion-repeat-family/` keeps the
+  branch above lcpp at `pp128` (`1.10x`), `pp1024` (`1.11x`), `pp4096` (`1.10x`),
+  and `pp16384` (`1.07x`), with `pp512` at parity (`0.99x`) and decode `tg32/tg128`
+  both `1.13x`. A follow-up chunk-2048 interaction gate shows why the chunk cap
+  must be prompt-length gated: `2048` helps A3B at `pp4096` (`1.06x` over default)
+  and barely at `pp16384` (`1.01x`), but regresses `pp128` and `pp512`.
 - `llama-bench -fa 0` is not auto for the bench tool: it disables flash attention.
   A3B `llama.cpp` `-fa 0` and `-fa 1` are flat at `pp1024` and `-fa 1` is slightly
   slower at `pp16384`, so the current A3B long target is the non-flash
@@ -462,8 +469,10 @@ Current design rule:
   default gates have either passed or failed. The current env branch already
   cracks the A3B lcpp board in spot rows.
 - Do not expect prompt chunk policy to close dense long-context prefill. It is now
-  a narrow MoE production knob: promote only if a `2048` or arch-specific cap keeps
-  A3B wins and A10B gains without dense changes or memory-pressure warnings.
+  a narrow MoE production knob: promote only if a prompt-length-gated `2048` or
+  arch-specific cap keeps A3B wins and A10B gains without dense changes or
+  memory-pressure warnings. Do not blanket-default A3B to chunk `2048`; the repeat
+  gate regressed `pp128/512`.
 - Productionize matrix scratch before defaulting: user-facing bench paths now avoid
   manual max-pos env sizing, but production callers still need score/V_T memory
   accounting and clear behavior for prompts that exceed the allocated max

@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-24 — A3B Matrix Promotion Repeat Gate
+
+Status: clean repeated A3B promotion evidence after checkpoint `ef32caec5`.
+`qwen-bench` was rebuilt from that commit, workloads were sequential on AC power,
+and post-run `pmset` / memory-pressure checks stayed clean. Raw rows are in
+`docs/bench/2026-05-24-1934-35B-A3B-matrix-promotion-repeat-family/` and the
+chunk-2048 interaction rows are in
+`docs/bench/2026-05-24-a3b-matrix-chunk2048-repeat/`.
+
+### Measurements
+
+Repeated family gate, `QWEN_PREFILL_ATTN_MATRIX_G8=1`, `runs=3`, default chunk
+policy:
+
+| Shape | llama.cpp | qwen | qwen/lcpp | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp128` | `753.73` | `832.77` | `1.10x` | win |
+| `pp512` | `1332.61` | `1319.10` | `0.99x` | parity, not a win |
+| `pp1024` | `1325.52` | `1473.75` | `1.11x` | win |
+| `pp4096` | `1238.34` | `1365.97` | `1.10x` | win |
+| `pp16384` | `1025.47` | `1094.78` | `1.07x` | win |
+| `tg32` | `69` | `78` | `1.13x` | decode win |
+| `tg128` | `69` | `78` | `1.13x` | decode win |
+
+Chunk-2048 interaction, qwen only, `runs=3`:
+
+| Shape | default chunk qwen | chunk2048 qwen | chunk2048/default | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp128` | `832.77` | `755.36` | `0.91x` | do not blanket-default |
+| `pp512` | `1319.10` | `1276.46` | `0.97x` | do not blanket-default |
+| `pp1024` | `1473.75` | `1453.75` | `0.99x` | flat/slightly down |
+| `pp4096` | `1365.97` | `1451.14` | `1.06x` | useful long-prompt win |
+| `pp16384` | `1094.78` | `1101.85` | `1.01x` | small long-prompt win |
+
+Read: the A3B/G8 matrix sidecar now has repeated clean evidence against lcpp
+through 16K, with only `pp512` sitting at parity instead of a win. Chunk `2048`
+is a long-prompt tuning candidate, not a universal MoE default: it helps at
+`pp4096+` but regresses short/medium A3B rows in this gate. The remaining matrix
+promotion blockers are correctness/tolerance policy, production default gating,
+and coverage evidence, not proving the mechanism again.
+
 ## 2026-05-24 — Chunk Policy Is A MoE Lever, Not A Dense Cure
 
 Status: follow-up to the expanded matrix family sweep. All rows used clean

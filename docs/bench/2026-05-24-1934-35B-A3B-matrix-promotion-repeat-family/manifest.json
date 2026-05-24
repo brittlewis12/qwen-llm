@@ -1,0 +1,59 @@
+{
+  "stamp": "2026-05-24-1934",
+  "host": {
+    "hostname": "zekrom",
+    "os": "Darwin zekrom.local 24.6.0 arm64",
+    "loadavg": "3.38 3.03 2.92",
+    "top_cpu_at_start": [
+      " 40.6 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper (Renderer).app/Contents/MacOS/Browser Helper (Renderer)",
+      " 40.6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+      " 20.6 opencode",
+      " 15.4 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper.app/Contents/MacOS/Browser Helper",
+      "  8.0 /Library/SystemExtensions/A9732AD5-15C7-42F9-AC94-A2FDFB18CE0E/io.tailscale.ipn.macsys.network-extension.systemextension/Contents/MacOS/io.tailscale.ipn.macsys.network-extension"
+    ]
+  },
+  "engines": {
+    "qwen_llm": {
+      "binary": "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+      "build_commit": "ef32caec5",
+      "build_dirty": 0
+    },
+    "llama_cpp": {
+      "binary": "/Users/tito/code/llama.cpp/build/bin/llama-bench",
+      "build_commit": "14aa3d375",
+      "build_number": 9265,
+      "backends": "MTL,BLAS",
+      "gpu_info": "Apple M4 Max",
+      "cpu_info": "Accelerate, Apple M4 Max"
+    }
+  },
+  "sweep": {
+    "pp_shapes": [
+      128,
+      512,
+      1024,
+      4096,
+      16384
+    ],
+    "tg_shapes": [
+      32,
+      128
+    ],
+    "runs": 3,
+    "tag_filter": "35B-A3B",
+    "engine_order": "per_model_lcpp_then_qwen"
+  },
+  "qwen_env_at_start": {
+    "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+  },
+  "models": [
+    {
+      "tag": "35B-A3B",
+      "display": "Qwen3.6-35B-A3B",
+      "kind": "moe",
+      "quant": "Q4_K_M",
+      "path": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "file_size_bytes": 22134528992
+    }
+  ]
+}

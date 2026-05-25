@@ -122,6 +122,14 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `151.87 -> 185.85` (`1.22x`), and `pp16384` `125.21 -> 173.84` (`1.39x`). This
   is now a dense promotion candidate, not just a dirty spike, but long-prefix G6
   correctness coverage is still thin.
+- The `v0.122` dense family gate in
+  `docs/bench/2026-05-25-0246-27B-matrix-g6-v0122-family/` adds that long-prefix
+  G6 correctness coverage and compares against fresh lcpp anchors. Dense 27B is
+  now near parity but not beaten: `pp128` `198/213` (`0.93x`), `pp512` `211/222`
+  (`0.95x`), `pp1024` `202/205` (`0.99x`), `pp4096` `186/198` (`0.94x`), and
+  `pp16384` `176/188` (`0.93x`). Decode remains won at `tg32/tg128` (`1.13x` and
+  `1.12x`). Matrix-G6 is therefore a real default candidate but not the final
+  dense answer.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

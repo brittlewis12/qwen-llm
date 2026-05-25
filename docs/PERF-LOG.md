@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Dense Group-6 Matrix Family Gate
+
+Status: clean `v0.122` 27B-vs-llama.cpp family gate after adding a long-prefix
+G6 correctness test. `qwen-bench` was rebuilt from `62a9114a6`, workloads were
+sequential on AC power, and post-run `pmset` / memory-pressure checks stayed
+clean. Raw rows are in
+`docs/bench/2026-05-25-0246-27B-matrix-g6-v0122-family/`.
+
+### Measurements
+
+27B dense, `QWEN_PREFILL_ATTN_MATRIX_G6=1 QWEN_PREFILL_ATTN_MATRIX_G8=1`,
+`runs=3`, default chunk policy:
+
+| Shape | llama.cpp | qwen | qwen/lcpp | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp128` | `213` | `198` | `0.93x` | still behind |
+| `pp512` | `222` | `211` | `0.95x` | near parity |
+| `pp1024` | `205` | `202` | `0.99x` | parity |
+| `pp4096` | `198` | `186` | `0.94x` | still behind |
+| `pp16384` | `188` | `176` | `0.93x` | still behind |
+| `tg32` | `21` | `23` | `1.13x` | decode win |
+| `tg128` | `21` | `23` | `1.12x` | decode win |
+
+Correctness: the new ignored G6 prefix gate primes `4096` tokens through
+single-token decode, then compares an 8-token matrix prefill extension; first
+run passed with logits, GDN, and KV cosines at `1.000000`.
+
+Read: matrix-G6 converts dense long prefill from a catastrophic `0.67x` 16K gap
+in the earlier family sweep to a smaller `0.93x` gap, but it does not surpass
+lcpp. The next dense work should target the remaining FFN/GDN mat-mat wall and
+matrix-attention residuals rather than re-proving matrix-G6.
+
 ## 2026-05-24 — Dense Group-6 Matrix Clean Repeat
 
 Status: clean `v0.120` repeat gate after rebuilding `qwen-bench` from commit

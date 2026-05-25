@@ -1,0 +1,49 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "62a9114a6",
+    "build_dirty": 0,
+    "test_time": "2026-05-25T02:57:22Z",
+    "model_filename": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+    "model_size": 16806250496,
+    "model_n_params": 26895998464,
+    "arch_kind": "dense",
+    "test": "pp4096",
+    "n_tokens": 4096,
+    "n_repetitions": 3,
+    "avg_ts": 186.10654210605273,
+    "stddev_ts": 0.7112337752901982,
+    "samples_ts": [
+      185.41245831339643,
+      186.07340082325214,
+      186.83376718150961
+    ],
+    "samples_ns": [
+      22091287916,
+      22012818500,
+      21923231874
+    ],
+    "avg_ns": 22009112764,
+    "avg_gpu_ns": 21982112277,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 1024,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 99,
+      "battery_state": "finishing charge",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+      "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+    }
+  }
+]

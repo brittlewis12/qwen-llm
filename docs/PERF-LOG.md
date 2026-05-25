@@ -8,11 +8,12 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
 ## 2026-05-25 — Dense High-N Fused SwiGLU Q4 Spike
 
-Status: env-only high-N dense FFN fusion spike on top of `v0.124`. The new path
-adds `QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=1`, fusing dense Q4_K gate/up
-mat-mat plus SwiGLU for chunks with at least 32 rows. Raw rows are in
-`docs/bench/2026-05-25-dense-fused-ffn-q4-spike/`. Treat these as dirty spike
-rows until a clean repeat says otherwise.
+Status: env-only high-N dense FFN fusion spike on top of `v0.124`, followed by a
+clean `v0.125` long-row repeat. The new path adds
+`QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=1`, fusing dense Q4_K gate/up mat-mat plus
+SwiGLU for chunks with at least 32 rows. Dirty spike rows are in
+`docs/bench/2026-05-25-dense-fused-ffn-q4-spike/`; clean repeat rows are in
+`docs/bench/2026-05-25-dense-fused-ffn-q4-clean-v0125/`.
 
 ### Measurements
 
@@ -34,6 +35,13 @@ Read: the high-N fusion hypothesis is real enough to keep as an env candidate,
 but it does not yet clear a default gate. It helps long rows a little and may help
 `pp4096`, but it is flat/regressive at `pp512/pp1024` and remains far short of the
 `~10-12%` FFN speedup needed to beat lcpp by itself.
+
+Clean `v0.125` repeat, `runs=3`:
+
+| Shape | matrix-G6 baseline | fused-Q4 SwiGLU | fused/baseline | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp4096` | `182.05` | `191.62` | `1.05x` | confirmed long win |
+| `pp16384` | `177.22` | `179.24` | `1.01x` | confirmed small true-long win |
 
 ## 2026-05-25 — Dense Matrix-G6 FFN Attribution And Mat-Mat Pointer Spike
 

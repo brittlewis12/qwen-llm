@@ -143,6 +143,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `pp1024` (`196.97 -> 193.45`), while `pp4096` improves in one noisy pair
   (`181.08 -> 191.67`) and `pp16384` improves slightly (`177.57 -> 179.25`). Keep
   it env-only; the remaining dense gap still needs a bigger FFN mat-mat/layout win.
+- Clean `v0.125` repeats confirm the long-row fused-Q4 SwiGLU branch but also its
+  limited ceiling: `pp4096` `182.05 -> 191.62 t/s` (`1.05x`) and `pp16384`
+  `177.22 -> 179.24` (`1.01x`). It is a useful long-prompt candidate, not enough
+  to crack lcpp, and the `pp512/pp1024` dirty rows block broad defaulting.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

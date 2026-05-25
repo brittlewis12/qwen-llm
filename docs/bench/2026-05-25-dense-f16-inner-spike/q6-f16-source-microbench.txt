@@ -1,0 +1,13 @@
+Command:
+
+QWEN_PROMPT_MATMAT_N=4096 QWEN_PROMPT_MATMAT_DISPATCHES=16 \
+  cargo test --release --lib -p qwen-llm \
+  prompt_mat_mat_production_shapes_chained64 -- --ignored --nocapture
+
+Relevant output from dirty F16-source spike code:
+
+[prompt-matmat-chained] Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes N=4096 dispatches=16
+[prompt-matmat-chained] blk.0.ffn_gate.weight    dtype=Q4_K N= 4096 per-dispatch= 59.083 ms weight-throughput=    0.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_up.weight      dtype=Q4_K N= 4096 per-dispatch= 58.500 ms weight-throughput=    0.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_down.weight    dtype=Q6_K N= 4096 per-dispatch= 61.604 ms f16-src= 64.000 ms f16/f32=1.039 weight-throughput=    0.5 GiB/s
+[prompt-matmat-chained] blk.0.attn_qkv.weight    dtype=Q6_K N= 4096 per-dispatch= 35.396 ms f16-src= 35.953 ms f16/f32=1.016 weight-throughput=    0.6 GiB/s

@@ -1,0 +1,83 @@
+Legacy command:
+
+QWEN_MATMAT_QK_LEGACY_SMEM=1 QWEN_PROMPT_MATMAT_N=512 QWEN_PROMPT_MATMAT_DISPATCHES=64 \
+  cargo test --release --lib -p qwen-llm \
+  prompt_mat_mat_production_shapes_chained64 -- --ignored --nocapture
+
+Legacy N=512 relevant output:
+
+[prompt-matmat-chained] Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes N=512 dispatches=64
+[prompt-matmat-chained] blk.0.ffn_gate.weight    dtype=Q4_K N=  512 per-dispatch=  7.986 ms weight-throughput=    5.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_up.weight      dtype=Q4_K N=  512 per-dispatch=  9.527 ms weight-throughput=    4.9 GiB/s
+[prompt-matmat-chained] blk.0.ffn_down.weight    dtype=Q6_K N=  512 per-dispatch=  9.793 ms weight-throughput=    7.0 GiB/s
+[prompt-matmat-chained] blk.0.attn_qkv.weight    dtype=Q6_K N=  512 per-dispatch=  5.548 ms weight-throughput=    7.2 GiB/s
+
+New-smem command:
+
+QWEN_PROMPT_MATMAT_N=512 QWEN_PROMPT_MATMAT_DISPATCHES=64 \
+  cargo test --release --lib -p qwen-llm \
+  prompt_mat_mat_production_shapes_chained64 -- --ignored --nocapture
+
+New-smem N=512 relevant output:
+
+[prompt-matmat-chained] Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes N=512 dispatches=64
+[prompt-matmat-chained] blk.0.ffn_gate.weight    dtype=Q4_K N=  512 per-dispatch=  8.117 ms weight-throughput=    5.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_up.weight      dtype=Q4_K N=  512 per-dispatch=  9.475 ms weight-throughput=    4.9 GiB/s
+[prompt-matmat-chained] blk.0.ffn_down.weight    dtype=Q6_K N=  512 per-dispatch=  9.785 ms weight-throughput=    7.0 GiB/s
+[prompt-matmat-chained] blk.0.attn_qkv.weight    dtype=Q6_K N=  512 per-dispatch=  5.544 ms weight-throughput=    7.2 GiB/s
+
+Legacy command:
+
+QWEN_MATMAT_QK_LEGACY_SMEM=1 QWEN_PROMPT_MATMAT_N=1024 QWEN_PROMPT_MATMAT_DISPATCHES=64 \
+  cargo test --release --lib -p qwen-llm \
+  prompt_mat_mat_production_shapes_chained64 -- --ignored --nocapture
+
+Legacy N=1024 relevant output:
+
+[prompt-matmat-chained] Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes N=1024 dispatches=64
+[prompt-matmat-chained] blk.0.ffn_gate.weight    dtype=Q4_K N= 1024 per-dispatch= 19.812 ms weight-throughput=    2.4 GiB/s
+[prompt-matmat-chained] blk.0.ffn_up.weight      dtype=Q4_K N= 1024 per-dispatch= 17.617 ms weight-throughput=    2.7 GiB/s
+[prompt-matmat-chained] blk.0.ffn_down.weight    dtype=Q6_K N= 1024 per-dispatch= 19.733 ms weight-throughput=    3.5 GiB/s
+[prompt-matmat-chained] blk.0.attn_qkv.weight    dtype=Q6_K N= 1024 per-dispatch= 11.194 ms weight-throughput=    3.6 GiB/s
+
+New-smem command:
+
+QWEN_PROMPT_MATMAT_N=1024 QWEN_PROMPT_MATMAT_DISPATCHES=64 \
+  cargo test --release --lib -p qwen-llm \
+  prompt_mat_mat_production_shapes_chained64 -- --ignored --nocapture
+
+New-smem N=1024 relevant output:
+
+[prompt-matmat-chained] Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes N=1024 dispatches=64
+[prompt-matmat-chained] blk.0.ffn_gate.weight    dtype=Q4_K N= 1024 per-dispatch= 14.567 ms weight-throughput=    3.2 GiB/s
+[prompt-matmat-chained] blk.0.ffn_up.weight      dtype=Q4_K N= 1024 per-dispatch= 14.853 ms weight-throughput=    3.1 GiB/s
+[prompt-matmat-chained] blk.0.ffn_down.weight    dtype=Q6_K N= 1024 per-dispatch= 16.119 ms weight-throughput=    4.2 GiB/s
+[prompt-matmat-chained] blk.0.attn_qkv.weight    dtype=Q6_K N= 1024 per-dispatch=  9.462 ms weight-throughput=    4.2 GiB/s
+
+Legacy command:
+
+QWEN_MATMAT_QK_LEGACY_SMEM=1 QWEN_PROMPT_MATMAT_N=4096 QWEN_PROMPT_MATMAT_DISPATCHES=16 \
+  cargo test --release --lib -p qwen-llm \
+  prompt_mat_mat_production_shapes_chained64 -- --ignored --nocapture
+
+Legacy N=4096 relevant output:
+
+[prompt-matmat-chained] Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes N=4096 dispatches=16
+[prompt-matmat-chained] blk.0.ffn_gate.weight    dtype=Q4_K N= 4096 per-dispatch= 58.791 ms weight-throughput=    0.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_up.weight      dtype=Q4_K N= 4096 per-dispatch= 58.477 ms weight-throughput=    0.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_down.weight    dtype=Q6_K N= 4096 per-dispatch= 62.615 ms weight-throughput=    1.1 GiB/s
+[prompt-matmat-chained] blk.0.attn_qkv.weight    dtype=Q6_K N= 4096 per-dispatch= 38.724 ms weight-throughput=    1.0 GiB/s
+
+New-smem command:
+
+QWEN_PROMPT_MATMAT_N=4096 QWEN_PROMPT_MATMAT_DISPATCHES=16 \
+  cargo test --release --lib -p qwen-llm \
+  prompt_mat_mat_production_shapes_chained64 -- --ignored --nocapture
+
+New-smem N=4096 relevant output:
+
+[prompt-matmat-chained] Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes N=4096 dispatches=16
+[prompt-matmat-chained] blk.0.ffn_gate.weight    dtype=Q4_K N= 4096 per-dispatch= 57.504 ms weight-throughput=    0.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_up.weight      dtype=Q4_K N= 4096 per-dispatch= 57.469 ms weight-throughput=    0.8 GiB/s
+[prompt-matmat-chained] blk.0.ffn_down.weight    dtype=Q6_K N= 4096 per-dispatch= 62.236 ms weight-throughput=    1.1 GiB/s
+[prompt-matmat-chained] blk.0.attn_qkv.weight    dtype=Q6_K N= 4096 per-dispatch= 38.016 ms weight-throughput=    1.1 GiB/s

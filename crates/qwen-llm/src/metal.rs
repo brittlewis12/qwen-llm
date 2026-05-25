@@ -1090,7 +1090,8 @@ pub fn encode_mat_vec_q4_k_f32(
 ///     pass `n_query` directly (kernel handles N < 32 via partial-
 ///     output-tile path with threadgroup-mem buffered write).
 ///
-/// Threadgroup memory: 8192 bytes (4 KiB sa + 4 KiB sb).
+/// Threadgroup memory: 5120/6144 bytes for full tiles, 8192 when edge-store
+/// scratch is needed.
 /// Threadgroup size: 128 threads (4 simdgroups × 32 lanes).
 ///
 /// **NOT bit-exact** with N successive `encode_mat_vec_q4_k_f32`
@@ -1098,6 +1099,23 @@ pub fn encode_mat_vec_q4_k_f32(
 /// through half before float accumulation; cosine ≥ 0.999 vs
 /// scalar-float mat-vec is the gate (vs cos ≥ 0.9999 against a
 /// CPU mat-mat oracle that uses the same staging).
+fn mat_mat_qk_threadgroup_memory(n_out: usize, n_query: usize, nr1: usize) -> usize {
+    static LEGACY: OnceLock<bool> = OnceLock::new();
+    if *LEGACY.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_MATMAT_QK_LEGACY_SMEM").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    }) {
+        return 8192;
+    }
+    if n_out % 64 == 0 && n_query % nr1 == 0 {
+        if nr1 == 16 { 5120 } else { 6144 }
+    } else {
+        8192
+    }
+}
+
 pub fn encode_mat_mat_q4_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1179,8 +1197,8 @@ pub fn encode_mat_mat_q4_k_f32(
     enc.set_tensor(1, weight);
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
-    enc.set_threadgroup_memory(0, 8192);
     let nr1 = if n_query == 16 { 16 } else { 32 };
+    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
     enc.dispatch(
@@ -9105,9 +9123,8 @@ pub fn encode_mat_mat_q6_k_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    enc.set_threadgroup_memory(0, 8192);
-
     let nr1 = if n_query == 16 { 16 } else { 32 };
+    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
     enc.dispatch(
@@ -9226,9 +9243,8 @@ pub fn encode_mat_mat_q5_k_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    enc.set_threadgroup_memory(0, 8192);
-
     let nr1 = if n_query == 16 { 16 } else { 32 };
+    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
     enc.dispatch(
@@ -9342,9 +9358,8 @@ pub fn encode_mat_mat_q8_0_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    enc.set_threadgroup_memory(0, 8192);
-
     let nr1 = if n_query == 16 { 16 } else { 32 };
+    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
     enc.dispatch(
@@ -9649,6 +9664,15 @@ pub fn bench_q4_k_mat_mat_chained(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mat_mat_qk_threadgroup_memory_matches_full_tile_policy() {
+        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 16, 16), 5120);
+        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 32, 32), 6144);
+        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 1024, 32), 6144);
+        assert_eq!(mat_mat_qk_threadgroup_memory(5121, 32, 32), 8192);
+        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 31, 32), 8192);
+    }
 
     #[test]
     fn checked_shape_bytes_rejects_product_overflow() {

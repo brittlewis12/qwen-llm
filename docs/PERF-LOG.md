@@ -6,6 +6,69 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Mat-Mat Threadgroup-Memory Parity Spike
+
+Status: dirty-code spike after `v0.126` to match llama.cpp's classic `mul_mm`
+threadgroup-memory policy: full output tiles request `5120` bytes for NR1=16 or
+`6144` bytes for NR1=32 instead of always requesting `8192`; partial tiles still
+use `8192`. `QWEN_MATMAT_QK_LEGACY_SMEM=1` restores the old request size for A/B.
+Raw rows are in `docs/bench/2026-05-25-matmat-smem-spike/`.
+
+### Measurements
+
+27B dense with matrix-G6/G8 enabled, `runs=3`, cooled sequential variants:
+
+| Shape | legacy A | smem-new | legacy B | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp512` | `205.77` | `197.30` | `187.52` | noisy; reversed repeat puts smem around legacy |
+| `pp1024` | `188.60` | `181.58` | `156.68` | noisy; reversed repeat straddles legacy |
+| `pp4096` | `202.83` | `204.55` | `191.69` | small positive vs first anchor; late anchor drifted |
+| `pp16384` | `176.33` | `176.74` | `175.72` | small positive vs both anchors |
+
+Direct mat-mat microbench: at `N=512`, results are flat; at `N=1024`, Q4 gate/up
+improve from `19.812/17.617 ms` to `14.567/14.853 ms`, Q6 down improves
+`19.733 -> 16.119 ms`, and Q6 attn_qkv improves `11.194 -> 9.462 ms`. At
+`N=4096`, the win is smaller: Q4 gate/up `58.791/58.477 -> 57.504/57.469 ms`,
+Q6 down `62.615 -> 62.236 ms`, Q6 attn_qkv `38.724 -> 38.016 ms`.
+
+Correctness: smem policy unit test passed; Q4/Q5/Q6/Q8 mat-mat correctness tests
+passed; active 27B matrix-G6 prefill `T=32/P=32` passed logits/hidden/GDN/KV.
+
+Read: keep as low-risk llama-parity cleanup with clear microbench support and
+modest/noisy end-to-end upside. It is not the dense breakthrough; the remaining
+gap still points to larger FFN/GDN execution or layout differences.
+
+## 2026-05-25 — Dense F16-Inner/Q6-F16-Source Falsifier
+
+Status: dirty-code spike from clean `v0.126` to test whether dense 27B FFN can
+benefit from F16 inner scratch: fused Q4_K gate/up SwiGLU computed in F32, final
+inner stored as F16, then Q6_K down reading F16 source rows. Correctness passed,
+but perf did not clear the keep gate, so the production/env code was stripped and
+only the falsifier artifacts were kept. Raw rows and command notes are in
+`docs/bench/2026-05-25-dense-f16-inner-spike/`.
+
+### Measurements
+
+27B dense with matrix-G6/G8 enabled, `runs=3`, cooled sequential variants:
+
+| Shape | matrix-G6 A | fused-Q4 | F16-inner | matrix-G6 B | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `pp4096` | `196.74` | `201.66` | `202.33` | `200.16` | only `+0.3%` over fused-Q4 |
+| `pp16384` | `180.45` | `182.00` | `180.59` | `185.85` | loses to fused-Q4 and late baseline |
+
+Direct Q6_K mat-mat microbench at `N=4096`, `dispatches=16` showed F16 source is
+slower: `ffn_down` `61.604 ms -> 64.000 ms` (`1.039x` slower) and `attn_qkv`
+`35.396 ms -> 35.953 ms` (`1.016x` slower).
+
+Correctness: Q6 F16-source matched the existing F32-source half-staged path at
+N=32, fused F16 inner bytes matched `scatter(F32 inner -> F16)`, down output
+matched exactly, and active 27B prefill `T=32/P=32` passed logits/hidden/GDN/KV.
+
+Read: the useful fact is negative: halving dense FFN inner precision is not the
+next dense breakthrough on this kernel shape. Keep the existing F32-inner path;
+next dense work should isolate FFN phase deltas versus llama.cpp rather than
+retuning this F16-source branch.
+
 ## 2026-05-25 — Dense High-N Fused SwiGLU Q4 Spike
 
 Status: env-only high-N dense FFN fusion spike on top of `v0.124`, followed by a

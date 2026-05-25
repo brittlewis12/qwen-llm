@@ -147,6 +147,21 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   limited ceiling: `pp4096` `182.05 -> 191.62 t/s` (`1.05x`) and `pp16384`
   `177.22 -> 179.24` (`1.01x`). It is a useful long-prompt candidate, not enough
   to crack lcpp, and the `pp512/pp1024` dirty rows block broad defaulting.
+- A llama-parity smem cleanup for Q4/Q5/Q6/Q8 mat-mat is worth keeping but not
+  over-reading. Full output tiles now request `5120` bytes for NR1=16 or `6144`
+  bytes for NR1=32, matching llama.cpp's no-edge-scratch policy, with
+  `QWEN_MATMAT_QK_LEGACY_SMEM=1` as the A/B fallback. Microbench rows are flat at
+  `N=512`, clearly positive at `N=1024` (Q4 gate/up `19.812/17.617 ->
+  14.567/14.853 ms`, Q6 down `19.733 -> 16.119 ms`), and modest at `N=4096`.
+  Dense 27B matrix-G6 prompt rows show noisy short/medium behavior and small long
+  positives (`pp4096` `202.83 -> 204.55`, `pp16384` `176.33/175.72 -> 176.74`).
+  Keep it as resource-policy cleanup; keep hunting larger FFN/GDN execution gaps.
+- A follow-up F16-inner/Q6-F16-source dense FFN spike is falsified. Correctness was
+  clean, but cooled rows show no stable end-to-end win (`pp4096` F16-inner
+  `202.33` vs fused-Q4 `201.66`, `pp16384` `180.59` vs fused-Q4 `182.00`) and a
+  direct Q6_K mat-mat microbench shows F16 source is slower (`ffn_down` `61.604 ms`
+  F32-source vs `64.000 ms` F16-source at N=4096). Do not carry or retune this
+  branch unless future profiling proves source-read bandwidth has become the wall.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import shlex
 import subprocess
 import sys
@@ -144,8 +145,21 @@ def run_variant(base_cmd: list[str], variant: Variant, cooldown_seconds: float) 
     }
 
 
+def build_run_plan(
+    variants: list[Variant], repeat_blocks: int, shuffle_seed: int | None
+) -> list[tuple[int, int, Variant]]:
+    plan: list[tuple[int, int, Variant]] = []
+    for block_idx in range(repeat_blocks):
+        block_variants = list(variants)
+        if shuffle_seed is not None:
+            random.Random(shuffle_seed + block_idx).shuffle(block_variants)
+        for order_idx, variant in enumerate(block_variants):
+            plan.append((block_idx, order_idx, variant))
+    return plan
+
+
 def print_summary(results: list[dict]) -> None:
-    print("label\tavg_ts\tavg_ms/token\tavg_gpu_ms/token\touter_wall_s")
+    print("block\torder\tlabel\tavg_ts\tavg_ms/token\tavg_gpu_ms/token\touter_wall_s")
     for item in results:
         row = item["bench"]
         avg_ts = float(row["avg_ts"])
@@ -157,17 +171,37 @@ def print_summary(results: list[dict]) -> None:
             (avg_gpu_ns / 1e6) / max(1, n_tokens) if avg_gpu_ns else 0.0
         )
         print(
-            f"{item['label']}\t{avg_ts:.2f}\t{avg_ms_per_tok:.4f}\t{avg_gpu_ms_per_tok:.4f}\t{item['wall_s_outer']:.1f}"
+            f"{item['block']}\t{item['order']}\t{item['label']}\t"
+            f"{avg_ts:.2f}\t{avg_ms_per_tok:.4f}\t"
+            f"{avg_gpu_ms_per_tok:.4f}\t{item['wall_s_outer']:.1f}"
         )
 
 
-def build_summary(base_cmd: list[str], results: list[dict]) -> dict:
+def build_summary(
+    base_cmd: list[str],
+    args: argparse.Namespace,
+    run_plan: list[tuple[int, int, Variant]],
+    results: list[dict],
+) -> dict:
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_cmd": base_cmd,
+        "repeat_blocks": args.repeat_blocks,
+        "shuffle_seed": args.shuffle_seed,
+        "run_plan": [
+            {
+                "block": block,
+                "order": order,
+                "label": variant.label,
+                "env": variant.env,
+            }
+            for block, order, variant in run_plan
+        ],
         "variants": [
             {
+                "block": r["block"],
+                "order": r["order"],
                 "label": r["label"],
                 "env": r["env"],
                 "bench": r["bench"],
@@ -203,6 +237,17 @@ def main() -> int:
     parser.add_argument("--prefill-chunk", type=int)
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--cooldown-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--repeat-blocks",
+        type=int,
+        default=1,
+        help="Repeat the full variant list N times to expose run-order drift.",
+    )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        help="Shuffle variant order independently in each block using seed+block.",
+    )
     parser.add_argument("--with-tail", action="store_true")
     parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument(
@@ -222,6 +267,8 @@ def main() -> int:
 
     if not args.bench_bin.exists():
         raise SystemExit(f"bench binary missing: {args.bench_bin}")
+    if args.repeat_blocks < 1:
+        raise SystemExit("--repeat-blocks must be >= 1")
     if not args.variant:
         args.variant = [Variant(label="baseline", env={})]
 
@@ -235,21 +282,33 @@ def main() -> int:
         flush=True,
     )
     print(f"[prefill-sweep] cooldown_seconds: {args.cooldown_seconds}", flush=True)
+    print(f"[prefill-sweep] repeat_blocks: {args.repeat_blocks}", flush=True)
+    if args.shuffle_seed is not None:
+        print(f"[prefill-sweep] shuffle_seed: {args.shuffle_seed}", flush=True)
 
+    run_plan = build_run_plan(args.variant, args.repeat_blocks, args.shuffle_seed)
     results = []
     first = True
-    for variant in args.variant:
+    for block_idx, order_idx, variant in run_plan:
         cooldown = 0.0 if first else args.cooldown_seconds
         first = False
-        print(f"[prefill-sweep] running {variant.label} env={variant.env}", flush=True)
-        results.append(run_variant(base_cmd, variant, cooldown))
+        print(
+            f"[prefill-sweep] running block={block_idx} order={order_idx} "
+            f"{variant.label} env={variant.env}",
+            flush=True,
+        )
+        result = run_variant(base_cmd, variant, cooldown)
+        result["block"] = block_idx
+        result["order"] = order_idx
+        results.append(result)
         if output_path is not None:
             output_path.write_text(
-                json.dumps(build_summary(base_cmd, results), indent=2) + "\n"
+                json.dumps(build_summary(base_cmd, args, run_plan, results), indent=2)
+                + "\n"
             )
             print(f"[prefill-sweep] checkpointed {args.output}", flush=True)
 
-    summary = build_summary(base_cmd, results)
+    summary = build_summary(base_cmd, args, run_plan, results)
     print_summary(results)
     if output_path is not None:
         output_path.write_text(json.dumps(summary, indent=2) + "\n")

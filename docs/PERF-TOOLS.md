@@ -495,6 +495,8 @@ uv run scripts/profile/prefill_sweep.py \
   --runs 1 \
   --no-warmup \
   --cooldown-seconds 15 \
+  --repeat-blocks 2 \
+  --shuffle-seed 7 \
   --variant baseline-a \
   --variant packed-r4:QWEN_PREFILL_ATTN_PACKED_G16=1,QWEN_PREFILL_ATTN_PACKED_G16_ROWS=4 \
   --variant baseline-b \
@@ -504,6 +506,8 @@ uv run scripts/profile/prefill_sweep.py \
 Rules for the cooled harness:
 
 - Keep one or more repeated baseline anchors in the same batch.
+- Use `--repeat-blocks` plus `--shuffle-seed` when run-order drift could be as
+  large as the claimed effect; the output records block/order for every run.
 - Use fresh processes per variant; that keeps env identity simple and captures
   model-load / residency side effects in the outer wall.
 - Treat `pmset -g therm` and `memory_pressure -Q` as supporting probes only;

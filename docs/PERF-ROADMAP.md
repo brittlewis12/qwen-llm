@@ -161,6 +161,14 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   direct Q6_K mat-mat microbench shows F16 source is slower (`ffn_down` `61.604 ms`
   F32-source vs `64.000 ms` F16-source at N=4096). Do not carry or retune this
   branch unless future profiling proves source-read bandwidth has become the wall.
+- The first drift-controlled `v0.129` dense FFN rows keep both env candidates out
+  of the default path. With matrix-G6/G8 on, warmed `pp4096` rows are only
+  `g6=208.96`, `g6-smem=209.73`, `g6-fused=210.98`, and
+  `g6-fused-smem=211.09`; `pp16384` is directionally inconsistent
+  (`g6=193.46/181.14`, `g6-fused=189.70/193.60`). Treat the stable signal as
+  `~1%` and below the default gate. The next dense move is phase-local FFN/GDN
+  evidence, preferably paired in-process, not another total-throughput default
+  decision on a sub-noise row.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Interleaved Dense FFN Rows Keep Candidates Env-Only
+
+Status: clean `v0.129` follow-up using the new `prefill_sweep.py`
+`--repeat-blocks` / `--shuffle-seed` controls. Raw rows are in
+`docs/bench/2026-05-25-v0129-drift-controlled-ffn/`.
+
+### Measurements
+
+27B dense with matrix-G6/G8 enabled, sequential on AC power:
+
+| Shape | Variant rows | Read |
+| --- | --- | --- |
+| `pp4096` | block 1 warmed rows: `g6=208.96`, `g6-smem=209.73`, `g6-fused=210.98`, `g6-fused-smem=211.09` | fused/smem at most `~1%`; below promote gate |
+| `pp16384` | `g6=193.46/181.14`, `g6-fused=189.70/193.60` | directionally inconsistent; drift dominates |
+
+Read: the harness exposed exactly the confound it was built for. The first
+`pp4096` baseline row was a cold/process outlier (`193.36 t/s`) while the repeat
+baseline was `208.96 t/s`; the last `pp16384` baseline also collapsed. Keep
+`QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=1` and
+`QWEN_MATMAT_QK_LLAMA_SMEM=1` env-only. The next dense lcpp-cracking move should
+be phase-local FFN/GDN timing and same-process paired evidence, not defaulting a
+small total-throughput artifact.
+
 ## 2026-05-25 — Clean Smem A/B Flips Reduced-Smem To Opt-In
 
 Status: clean `v0.127` follow-up after the dirty mat-mat smem parity spike.

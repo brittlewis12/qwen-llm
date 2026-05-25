@@ -483,6 +483,11 @@ fn prefill_attn_matrix_g8_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_MATRIX_G8"))
 }
 
+fn prefill_attn_matrix_g6_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_MATRIX_G6"))
+}
+
 fn prefill_attn_matrix_max_pos() -> Option<usize> {
     static MAX_POS: OnceLock<Option<usize>> = OnceLock::new();
     *MAX_POS.get_or_init(|| {
@@ -1917,11 +1922,12 @@ impl MetalDFlashLayerMajorScratch {
             std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
         );
-        let enable_attn_matrix_g8 = prefill_attn_matrix_g8_enabled()
-            && head_dim as usize == 256
-            && arch.n_q_heads == 16
-            && arch.n_kv_heads == 2;
-        let attn_matrix_max_pos = if enable_attn_matrix_g8 {
+        let enable_attn_matrix = head_dim as usize == 256
+            && ((prefill_attn_matrix_g8_enabled() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
+                || (prefill_attn_matrix_g6_enabled()
+                    && arch.n_q_heads == 24
+                    && arch.n_kv_heads == 4));
+        let attn_matrix_max_pos = if enable_attn_matrix {
             prefill_attn_matrix_max_pos()
                 .or(attn_matrix_max_pos_override)
                 .unwrap_or(block_size as usize)
@@ -1929,7 +1935,7 @@ impl MetalDFlashLayerMajorScratch {
         } else {
             0
         };
-        let attn_matrix_scores_elems = if enable_attn_matrix_g8 {
+        let attn_matrix_scores_elems = if enable_attn_matrix {
             checked_u64_mul3(
                 n,
                 arch.n_q_heads as u64,
@@ -1939,7 +1945,7 @@ impl MetalDFlashLayerMajorScratch {
         } else {
             1
         };
-        let attn_matrix_vt_elems = if enable_attn_matrix_g8 {
+        let attn_matrix_vt_elems = if enable_attn_matrix {
             checked_u64_mul(
                 n_attn_layers,
                 checked_u64_mul3(
@@ -4058,12 +4064,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             ),
         }));
     }
-    let attn_matrix_g8_shape =
-        arch.attn_head_dim as usize == 256 && arch.n_q_heads == 16 && arch.n_kv_heads == 2;
-    if prefill_attn_matrix_g8_enabled() && attn_matrix_g8_shape {
+    let attn_matrix_shape = arch.attn_head_dim as usize == 256
+        && ((prefill_attn_matrix_g8_enabled() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
+            || (prefill_attn_matrix_g6_enabled() && arch.n_q_heads == 24 && arch.n_kv_heads == 4));
+    if attn_matrix_shape {
         if layer_scratch.attn_matrix_max_pos < last_pos as u64 {
             return Err(DFlashError::Metal(MetalError::BadShape {
-                kernel: "prefill_attn_matrix_g8",
+                kernel: "prefill_attn_matrix",
                 detail: format!(
                     "matrix scratch max_pos={} < required last_pos={last_pos}; set QWEN_PREFILL_ATTN_MATRIX_MAX_POS before scratch allocation",
                     layer_scratch.attn_matrix_max_pos
@@ -4837,6 +4844,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 && n_q == 32
                                 && n_kv == 2;
                             let use_matrix_g8 = use_packed_g8 && prefill_attn_matrix_g8_enabled();
+                            let use_matrix_g6 = prefill_attn_matrix_g6_enabled()
+                                && target_session.kv_k[ai].dtype == GgmlType::F16
+                                && target_session.kv_v[ai].dtype == GgmlType::F16
+                                && head_dim == 256
+                                && n_q == 24
+                                && n_kv == 4;
+                            let use_matrix = use_matrix_g8 || use_matrix_g6;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_rope_neox_f32_packed_consecutive(
@@ -4861,7 +4875,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     chunk_start,
                                     arch.rope_theta,
                                 )?;
-                                if use_matrix_g8 {
+                                if use_matrix {
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
                                     let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
@@ -4908,30 +4922,39 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 "rope_scatter",
                             );
 
-                            let mut traced_matrix_g8_subphases = false;
-                            if use_packed_g8 || use_packed_g16 {
+                            let mut traced_matrix_subphases = false;
+                            if use_packed_g8 || use_packed_g16 || use_matrix {
                                 let group = n_q / n_kv;
+                                let use_packed = use_packed_g8 || use_packed_g16;
                                 let packed_rows = if use_packed_g8 {
                                     prefill_attn_packed_g8_rows()
-                                } else {
+                                } else if use_packed_g16 {
                                     prefill_attn_packed_g16_rows()
+                                } else {
+                                    1
                                 };
                                 let packed_qt = if use_packed_g8 {
                                     prefill_attn_packed_g8_qt()
-                                } else {
+                                } else if use_packed_g16 {
                                     prefill_attn_packed_g16_qt()
+                                } else {
+                                    1
                                 };
                                 let attn_packed_oracle = if use_packed_g8 {
                                     prefill_attn_packed_g8_oracle_enabled()
-                                } else {
+                                } else if use_packed_g16 {
                                     prefill_attn_packed_g16_oracle_enabled()
+                                } else {
+                                    false
                                 };
                                 let nwg = if use_packed_g8 {
                                     prefill_attn_packed_g8_nwg()
-                                } else {
+                                } else if use_packed_g16 {
                                     prefill_attn_packed_g16_nwg()
+                                } else {
+                                    1
                                 };
-                                if trace_attn_phases {
+                                if trace_attn_phases && use_packed {
                                     let row_groups = chunk_p.div_ceil(packed_rows);
                                     let partial_bytes = chunk_p
                                         * n_kv
@@ -4952,42 +4975,40 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         nwg,
                                         (partial_bytes as f64 * 2.0) / (1024.0 * 1024.0),
                                     );
-                                    if use_matrix_g8 {
-                                        let n_pos = chunk_start as usize + chunk_p;
-                                        let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
-                                        let scores_bytes =
-                                            chunk_p * n_q * n_pos * std::mem::size_of::<f32>();
-                                        let vt_bytes = n_kv
-                                            * head_dim
-                                            * vt_stride
-                                            * std::mem::size_of::<u16>();
-                                        let (vt_base, vt_rows) =
-                                            if chunk_idx == 0 && chunk_start > 0 {
-                                                (0, n_pos)
-                                            } else {
-                                                (chunk_start as usize, chunk_p)
-                                            };
-                                        let vt_update_bytes =
-                                            n_kv * head_dim * vt_rows * std::mem::size_of::<u16>();
-                                        eprintln!(
-                                            "[prefill-attn-matrix-g8-shape] layer={} chunk_start={} chunk_p={} n_pos={} scores_mib={:.2} vt_stride={} vt_layer_mib={:.2} vt_update_base={} vt_update_rows={} vt_update_mib={:.2}",
-                                            il,
-                                            chunk_start,
-                                            chunk_p,
-                                            n_pos,
-                                            scores_bytes as f64 / (1024.0 * 1024.0),
-                                            vt_stride,
-                                            vt_bytes as f64 / (1024.0 * 1024.0),
-                                            vt_base,
-                                            vt_rows,
-                                            vt_update_bytes as f64 / (1024.0 * 1024.0),
-                                        );
-                                    }
                                 }
-                                let trace_matrix_g8_subphases =
-                                    use_matrix_g8 && trace_attn_phases && !attn_packed_oracle;
-                                traced_matrix_g8_subphases = trace_matrix_g8_subphases;
-                                if trace_matrix_g8_subphases {
+                                if trace_attn_phases && use_matrix {
+                                    let n_pos = chunk_start as usize + chunk_p;
+                                    let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
+                                    let scores_bytes =
+                                        chunk_p * n_q * n_pos * std::mem::size_of::<f32>();
+                                    let vt_bytes =
+                                        n_kv * head_dim * vt_stride * std::mem::size_of::<u16>();
+                                    let (vt_base, vt_rows) = if chunk_idx == 0 && chunk_start > 0 {
+                                        (0, n_pos)
+                                    } else {
+                                        (chunk_start as usize, chunk_p)
+                                    };
+                                    let vt_update_bytes =
+                                        n_kv * head_dim * vt_rows * std::mem::size_of::<u16>();
+                                    eprintln!(
+                                        "[prefill-attn-matrix-g{}-shape] layer={} chunk_start={} chunk_p={} n_pos={} scores_mib={:.2} vt_stride={} vt_layer_mib={:.2} vt_update_base={} vt_update_rows={} vt_update_mib={:.2}",
+                                        group,
+                                        il,
+                                        chunk_start,
+                                        chunk_p,
+                                        n_pos,
+                                        scores_bytes as f64 / (1024.0 * 1024.0),
+                                        vt_stride,
+                                        vt_bytes as f64 / (1024.0 * 1024.0),
+                                        vt_base,
+                                        vt_rows,
+                                        vt_update_bytes as f64 / (1024.0 * 1024.0),
+                                    );
+                                }
+                                let trace_matrix_subphases =
+                                    use_matrix && trace_attn_phases && !attn_packed_oracle;
+                                traced_matrix_subphases = trace_matrix_subphases;
+                                if trace_matrix_subphases {
                                     let n_pos = chunk_start as usize + chunk_p;
                                     let rebuild_vt_prefix = chunk_idx == 0 && chunk_start > 0;
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
@@ -5005,9 +5026,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            "attn-prefill-g8-matrix-vt",
+                                            if use_matrix_g6 {
+                                                "attn-prefill-g6-matrix-vt"
+                                            } else {
+                                                "attn-prefill-g8-matrix-vt"
+                                            },
                                         );
-                                        crate::metal::encode_attn_matrix_g8_transpose_v_f16(
+                                        crate::metal::encode_attn_matrix_transpose_v_f16(
                                             base.ctx,
                                             &enc,
                                             &target_session.kv_v[ai],
@@ -5017,6 +5042,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_pos,
                                             n_kv * head_dim,
                                             vt_stride,
+                                            n_kv,
+                                            head_dim,
                                         )?;
                                         enc.end();
                                         flush_prefill_phase(
@@ -5036,9 +5063,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            "attn-prefill-g8-matrix-kq",
+                                            if use_matrix_g6 {
+                                                "attn-prefill-g6-matrix-kq"
+                                            } else {
+                                                "attn-prefill-g8-matrix-kq"
+                                            },
                                         );
-                                        crate::metal::encode_attn_matrix_g8_kq_f32(
+                                        crate::metal::encode_attn_matrix_kq_f32(
                                             base.ctx,
                                             &enc,
                                             &q_normed_pack_p,
@@ -5048,6 +5079,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             chunk_start as usize,
                                             n_pos,
                                             n_kv * head_dim,
+                                            n_q,
+                                            n_kv,
+                                            group,
+                                            head_dim,
                                         )?;
                                         enc.end();
                                     }
@@ -5067,15 +5102,23 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            "attn-prefill-g8-matrix-softmax",
+                                            if use_matrix_g6 {
+                                                "attn-prefill-g6-matrix-softmax"
+                                            } else {
+                                                "attn-prefill-g8-matrix-softmax"
+                                            },
                                         );
-                                        crate::metal::encode_attn_matrix_g8_softmax_f32(
+                                        crate::metal::encode_attn_matrix_softmax_f32(
                                             base.ctx,
                                             &enc,
                                             &scores,
                                             chunk_p,
                                             chunk_start as usize,
                                             n_pos,
+                                            n_q,
+                                            n_kv,
+                                            group,
+                                            head_dim,
                                         )?;
                                         enc.end();
                                     }
@@ -5095,9 +5138,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            "attn-prefill-g8-matrix-kqv",
+                                            if use_matrix_g6 {
+                                                "attn-prefill-g6-matrix-kqv"
+                                            } else {
+                                                "attn-prefill-g8-matrix-kqv"
+                                            },
                                         );
-                                        crate::metal::encode_attn_matrix_g8_kqv_f32(
+                                        crate::metal::encode_attn_matrix_kqv_f32(
                                             base.ctx,
                                             &enc,
                                             &scores,
@@ -5107,6 +5154,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             chunk_start as usize,
                                             n_pos,
                                             vt_stride,
+                                            n_q,
+                                            n_kv,
+                                            group,
+                                            head_dim,
                                         )?;
                                         enc.end();
                                     }
@@ -5127,7 +5178,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     label_prefill_encoder(
                                         &enc,
                                         il,
-                                        if use_matrix_g8 {
+                                        if use_matrix_g6 {
+                                            "attn-prefill-g6-matrix"
+                                        } else if use_matrix_g8 {
                                             "attn-prefill-g8-matrix"
                                         } else if use_packed_g8 {
                                             "attn-prefill-g8-packed"
@@ -5135,7 +5188,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             "attn-prefill-g16-packed"
                                         },
                                     );
-                                    if use_matrix_g8 {
+                                    if use_matrix {
                                         let n_pos = chunk_start as usize + chunk_p;
                                         let rebuild_vt_prefix = chunk_idx == 0 && chunk_start > 0;
                                         let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
@@ -5148,7 +5201,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             vec![per_attn_vt as u64],
                                         );
                                         if rebuild_vt_prefix {
-                                            crate::metal::encode_attn_matrix_g8_transpose_v_f16(
+                                            crate::metal::encode_attn_matrix_transpose_v_f16(
                                                 base.ctx,
                                                 &enc,
                                                 &target_session.kv_v[ai],
@@ -5158,9 +5211,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 n_pos,
                                                 n_kv * head_dim,
                                                 vt_stride,
+                                                n_kv,
+                                                head_dim,
                                             )?;
                                         }
-                                        crate::metal::encode_attn_matrix_g8_kq_f32(
+                                        crate::metal::encode_attn_matrix_kq_f32(
                                             base.ctx,
                                             &enc,
                                             &q_normed_pack_p,
@@ -5170,16 +5225,24 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             chunk_start as usize,
                                             n_pos,
                                             n_kv * head_dim,
+                                            n_q,
+                                            n_kv,
+                                            group,
+                                            head_dim,
                                         )?;
-                                        crate::metal::encode_attn_matrix_g8_softmax_f32(
+                                        crate::metal::encode_attn_matrix_softmax_f32(
                                             base.ctx,
                                             &enc,
                                             &scores,
                                             chunk_p,
                                             chunk_start as usize,
                                             n_pos,
+                                            n_q,
+                                            n_kv,
+                                            group,
+                                            head_dim,
                                         )?;
-                                        crate::metal::encode_attn_matrix_g8_kqv_f32(
+                                        crate::metal::encode_attn_matrix_kqv_f32(
                                             base.ctx,
                                             &enc,
                                             &scores,
@@ -5189,6 +5252,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             chunk_start as usize,
                                             n_pos,
                                             vt_stride,
+                                            n_q,
+                                            n_kv,
+                                            group,
+                                            head_dim,
                                         )?;
                                     } else {
                                         for row_base in (0..chunk_p).step_by(packed_rows) {
@@ -5384,9 +5451,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             packed_nonfinite,
                                             oracle_nonfinite,
                                         );
-                                        let cos_limit =
-                                            if use_matrix_g8 { 0.9999 } else { 0.99999 };
-                                        let max_abs_limit = if use_matrix_g8 { 2e-2 } else { 2e-3 };
+                                        let cos_limit = if use_matrix { 0.9999 } else { 0.99999 };
+                                        let max_abs_limit = if use_matrix { 2e-2 } else { 2e-3 };
                                         if packed_nonfinite != 0
                                             || oracle_nonfinite != 0
                                             || !cos.is_finite()
@@ -5475,7 +5541,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     enc.end();
                                 }
                             }
-                            if !traced_matrix_g8_subphases {
+                            if !traced_matrix_subphases {
                                 flush_prefill_phase(
                                     base.ctx,
                                     &mut cmd_buf,

@@ -1128,50 +1128,50 @@ kernel void kernel_attn_prefill_v4_g16_t4_q4_c64_f32(
 }
 
 // ============================================================================
-// Experimental A3B non-flash matrix-attention sidecar.
+// Experimental non-flash matrix-attention sidecar.
 //
 // This mirrors llama.cpp's default non-flash graph shape: KQ matmul, rowwise
-// softmax, then KQV matmul. It is intentionally narrow: group=8, n_q=16,
-// n_kv=2, head_dim=256, F16 KV cache.
+// softmax, then KQV matmul. It is intentionally narrow: head_dim=256,
+// F16 KV cache, and validated group shapes only.
 // ============================================================================
 
-struct attn_matrix_g8_args {
+struct attn_matrix_args {
     uint  n_rows;
     uint  n_pos;
     uint  base_pos;
     uint  kv_stride;
     uint  vt_stride;
+    uint  n_q_heads;
+    uint  n_kv_heads;
+    uint  group;
+    uint  head_dim;
     float scale;
 };
 
-constant constexpr int AM_G8_GROUP       = 8;
-constant constexpr int AM_G8_N_Q_HEADS   = 16;
-constant constexpr int AM_G8_N_KV_HEADS  = 2;
-constant constexpr int AM_HEAD_DIM       = 256;
 constant constexpr int AM_NR0            = 64;
 constant constexpr int AM_NR1            = 32;
 constant constexpr int AM_NK             = 32;
 constant constexpr int AM_NL0            = AM_NK / 16;
 constant constexpr int AM_NL1            = AM_NK / 8;
 
-kernel void kernel_attn_matrix_g8_transpose_v_f16(
-        constant attn_matrix_g8_args & args [[buffer(0)]],
+kernel void kernel_attn_matrix_transpose_v_f16(
+        constant attn_matrix_args & args [[buffer(0)]],
         device const half * v_cache [[buffer(1)]],
         device       half * v_t     [[buffer(2)]],
         uint tid [[thread_position_in_grid]]) {
-    const uint total = AM_G8_N_KV_HEADS * AM_HEAD_DIM * args.n_rows;
+    const uint total = args.n_kv_heads * args.head_dim * args.n_rows;
     if (tid >= total) return;
     const uint pos_rel = tid % args.n_rows;
     const uint pos = args.base_pos + pos_rel;
     const uint tmp = tid / args.n_rows;
-    const uint d = tmp % AM_HEAD_DIM;
-    const uint kvh = tmp / AM_HEAD_DIM;
+    const uint d = tmp % args.head_dim;
+    const uint kvh = tmp / args.head_dim;
     v_t[(ulong)tmp * args.vt_stride + pos] =
-        v_cache[(ulong)pos * args.kv_stride + (ulong)kvh * AM_HEAD_DIM + d];
+        v_cache[(ulong)pos * args.kv_stride + (ulong)kvh * args.head_dim + d];
 }
 
-kernel void kernel_attn_matrix_g8_kq_f32(
-        constant attn_matrix_g8_args & args [[buffer(0)]],
+kernel void kernel_attn_matrix_kq_f32(
+        constant attn_matrix_args & args [[buffer(0)]],
         device const float * q       [[buffer(1)]],
         device const half  * k_cache [[buffer(2)]],
         device       float * scores  [[buffer(3)]],
@@ -1184,8 +1184,8 @@ kernel void kernel_attn_matrix_g8_kq_f32(
 
     const uint kvh = tgpig.z;
     const int M = (int)args.n_pos;
-    const int N = (int)(args.n_rows * AM_G8_GROUP);
-    const int K = AM_HEAD_DIM;
+    const int N = (int)(args.n_rows * args.group);
+    const int K = (int)args.head_dim;
     const int r0 = (int)tgpig.y * AM_NR0;
     const int r1 = (int)tgpig.x * AM_NR1;
     const short nr0 = (M - r0 < AM_NR0) ? (short)(M - r0) : AM_NR0;
@@ -1213,7 +1213,7 @@ kernel void kernel_attn_matrix_g8_kq_f32(
             const uint kk = loop_k + 16 * il0 + i;
             const uint pos = (uint)(r0 + lr0);
             sa[64 * ib + 8 * ly + lx] = (pos < args.n_pos && kk < K)
-                ? k_cache[(ulong)pos * args.kv_stride + (ulong)kvh * AM_HEAD_DIM + kk]
+                ? k_cache[(ulong)pos * args.kv_stride + (ulong)kvh * args.head_dim + kk]
                 : (half)0.0f;
         }
 
@@ -1223,19 +1223,19 @@ kernel void kernel_attn_matrix_g8_kq_f32(
             const short ly = (tiitg / AM_NL1) % 8;
             const short ib = 4 * sx + sy;
             const uint local_q = (uint)(r1 + lr1);
-            const uint row = local_q / AM_G8_GROUP;
-            const uint g = local_q % AM_G8_GROUP;
+            const uint row = local_q / args.group;
+            const uint g = local_q % args.group;
             const uint kk = loop_k + iy;
             threadgroup half * dst = sb + 64 * ib + 8 * ly;
             if (local_q < (uint)N && kk + 7 < (uint)K) {
                 device const float * q_ptr =
-                    q + ((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + kk;
+                    q + ((ulong)row * args.n_q_heads + (ulong)kvh * args.group + g) * args.head_dim + kk;
                 *(threadgroup half2x4 *)dst = (half2x4)(*((device const float2x4 *)q_ptr));
             } else {
                 for (short i = 0; i < 8; ++i) {
                     const uint kki = kk + i;
                     dst[i] = (local_q < (uint)N && kki < (uint)K)
-                        ? half(q[((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + kki])
+                        ? half(q[((ulong)row * args.n_q_heads + (ulong)kvh * args.group + g) * args.head_dim + kki])
                         : (half)0.0f;
                 }
             }
@@ -1290,8 +1290,8 @@ kernel void kernel_attn_matrix_g8_kq_f32(
     }
 }
 
-kernel void kernel_attn_matrix_g8_softmax_f32(
-        constant attn_matrix_g8_args & args [[buffer(0)]],
+kernel void kernel_attn_matrix_softmax_f32(
+        constant attn_matrix_args & args [[buffer(0)]],
         device float * scores [[buffer(1)]],
         threadgroup float * sh [[threadgroup(0)]],
         uint qid [[threadgroup_position_in_grid]],
@@ -1299,11 +1299,11 @@ kernel void kernel_attn_matrix_g8_softmax_f32(
         ushort sgitg [[simdgroup_index_in_threadgroup]],
         ushort tiisg [[thread_index_in_simdgroup]],
         uint ntg [[threads_per_threadgroup]]) {
-    const uint n_local_q = args.n_rows * AM_G8_GROUP;
-    const uint n_query = AM_G8_N_KV_HEADS * n_local_q;
+    const uint n_local_q = args.n_rows * args.group;
+    const uint n_query = args.n_kv_heads * n_local_q;
     if (qid >= n_query) return;
     const uint local_q = qid % n_local_q;
-    const uint row = local_q / AM_G8_GROUP;
+    const uint row = local_q / args.group;
     const uint visible = min(args.n_pos, args.base_pos + row + 1);
     device float * s = scores + (ulong)qid * args.n_pos;
 
@@ -1333,8 +1333,8 @@ kernel void kernel_attn_matrix_g8_softmax_f32(
     }
 }
 
-kernel void kernel_attn_matrix_g8_kqv_f32(
-        constant attn_matrix_g8_args & args [[buffer(0)]],
+kernel void kernel_attn_matrix_kqv_f32(
+        constant attn_matrix_args & args [[buffer(0)]],
         device const float * probs [[buffer(1)]],
         device const half  * v_t   [[buffer(2)]],
         device       float * out   [[buffer(3)]],
@@ -1346,8 +1346,8 @@ kernel void kernel_attn_matrix_g8_kqv_f32(
     threadgroup half * sb = (threadgroup half *)(shmem + 4096);
 
     const uint kvh = tgpig.z;
-    const int M = AM_HEAD_DIM;
-    const int N = (int)(args.n_rows * AM_G8_GROUP);
+    const int M = (int)args.head_dim;
+    const int N = (int)(args.n_rows * args.group);
     const int K = (int)args.n_pos;
     const int r0 = (int)tgpig.y * AM_NR0;
     const int r1 = (int)tgpig.x * AM_NR1;
@@ -1375,8 +1375,8 @@ kernel void kernel_attn_matrix_g8_kqv_f32(
             const short ib = 8 * sx + sy;
             const uint kk = loop_k + 16 * il0 + i;
             const uint d = (uint)(r0 + lr0);
-            sa[64 * ib + 8 * ly + lx] = (d < AM_HEAD_DIM && kk < args.n_pos)
-                ? v_t[((ulong)kvh * AM_HEAD_DIM + d) * args.vt_stride + kk]
+            sa[64 * ib + 8 * ly + lx] = (d < args.head_dim && kk < args.n_pos)
+                ? v_t[((ulong)kvh * args.head_dim + d) * args.vt_stride + kk]
                 : (half)0.0f;
         }
 
@@ -1435,9 +1435,9 @@ kernel void kernel_attn_matrix_g8_kqv_f32(
     if (sgitg == 0) {
         for (int j = tiitg; j < nr1; j += AM_NR1) {
             const uint local_q = (uint)(r1 + j);
-            const uint row = local_q / AM_G8_GROUP;
-            const uint g = local_q % AM_G8_GROUP;
-            device float * Dst = out + ((ulong)row * AM_G8_N_Q_HEADS + (ulong)kvh * AM_G8_GROUP + g) * AM_HEAD_DIM + r0;
+            const uint row = local_q / args.group;
+            const uint g = local_q % args.group;
+            device float * Dst = out + ((ulong)row * args.n_q_heads + (ulong)kvh * args.group + g) * args.head_dim + r0;
             threadgroup float * Src = temp + j * AM_NR0;
             for (int i = 0; i < nr0; ++i) {
                 Dst[i] = Src[i];

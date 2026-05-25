@@ -113,6 +113,18 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   both `1.13x`. A follow-up chunk-2048 interaction gate shows why the chunk cap
   must be prompt-length gated: `2048` helps A3B at `pp4096` (`1.06x` over default)
   and barely at `pp16384` (`1.01x`), but regresses `pp128` and `pp512`.
+- The group-8 matrix sidecar has now been generalized to runtime group-shape args
+  and an env-only 27B dense group-6 gate (`QWEN_PREFILL_ATTN_MATRIX_G6=1`). Dirty
+  spike rows from `1a211ceb5` are strong enough to keep it at the top of the dense
+  queue: `pp128` `187.84 -> 198.45 t/s`, `pp512` `197.95 -> 213.06`, `pp1024`
+  `194.01 -> 210.70`, `pp4096` `153.42 -> 187.54`, and `pp16384`
+  `125.74 -> 176.00` (`1.40x`). A post-rename smoke row at `pp4096` held
+  (`188.50 t/s`). This is not a promotion gate yet: rows are dirty/single-run,
+  and long-prefix G6 correctness coverage is still thin.
+- A 27B `pp16384` combined no-op budget confirms the dense gap is not only
+  attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
+  no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN
+  mat-mat work queued after the G6 matrix clean gate, not instead of it.
 - `llama-bench -fa 0` is not auto for the bench tool: it disables flash attention.
   A3B `llama.cpp` `-fa 0` and `-fa 1` are flat at `pp1024` and `-fa 1` is slightly
   slower at `pp16384`, so the current A3B long target is the non-flash

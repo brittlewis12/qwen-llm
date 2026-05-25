@@ -6778,20 +6778,28 @@ pub fn encode_attn_prefill_v4_g16_t4_q4_c64_f32(
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct AttnMatrixG8Args {
+struct AttnMatrixArgs {
     n_rows: u32,
     n_pos: u32,
     base_pos: u32,
     kv_stride: u32,
     vt_stride: u32,
+    n_q_heads: u32,
+    n_kv_heads: u32,
+    group: u32,
+    head_dim: u32,
     scale: f32,
 }
 
-fn validate_attn_matrix_g8_common(
+fn validate_attn_matrix_common(
     kernel: &'static str,
     n_rows: usize,
     n_pos: usize,
     base_pos: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group: usize,
+    head_dim: usize,
 ) -> Result<(), MetalError> {
     if n_rows == 0 {
         return Err(MetalError::BadShape {
@@ -6805,10 +6813,18 @@ fn validate_attn_matrix_g8_common(
             detail: format!("n_pos={n_pos} < base_pos+n_rows={}", base_pos + n_rows),
         });
     }
+    if n_kv_heads == 0 || group == 0 || n_q_heads != n_kv_heads * group || head_dim != 256 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "unsupported matrix-attn shape n_q={n_q_heads} n_kv={n_kv_heads} group={group} head_dim={head_dim}"
+            ),
+        });
+    }
     Ok(())
 }
 
-pub fn encode_attn_matrix_g8_transpose_v_f16(
+pub fn encode_attn_matrix_transpose_v_f16(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     v_cache: &MetalTensor,
@@ -6818,12 +6834,12 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     n_pos: usize,
     kv_stride: usize,
     vt_stride: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
 ) -> Result<(), MetalError> {
-    const N_KV_HEADS: usize = 2;
-    const HEAD_DIM: usize = 256;
     if v_cache.dtype != GgmlType::F16 || v_t.dtype != GgmlType::F16 {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_transpose_v",
+            kernel: "attn_matrix_transpose_v",
             detail: format!(
                 "expected F16 tensors, got {:?}/{:?}",
                 v_cache.dtype, v_t.dtype
@@ -6832,7 +6848,7 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     }
     if n_rows == 0 || base_pos + n_rows > n_pos {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_transpose_v",
+            kernel: "attn_matrix_transpose_v",
             detail: format!(
                 "invalid V transpose span base_pos={base_pos} n_rows={n_rows} n_pos={n_pos}"
             ),
@@ -6840,37 +6856,41 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     }
     if vt_stride < n_pos {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_transpose_v",
+            kernel: "attn_matrix_transpose_v",
             detail: format!("vt_stride={vt_stride} < n_pos={n_pos}"),
         });
     }
-    let want_vt = N_KV_HEADS * HEAD_DIM * vt_stride;
+    let want_vt = n_kv_heads * head_dim * vt_stride;
     if v_t.n_elements() < want_vt as u64 {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_transpose_v",
+            kernel: "attn_matrix_transpose_v",
             detail: format!("v_t has {} elements, need >= {want_vt}", v_t.n_elements()),
         });
     }
     let want_cache = (base_pos + n_rows) * kv_stride;
     if v_cache.n_elements() < want_cache as u64 {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_transpose_v",
+            kernel: "attn_matrix_transpose_v",
             detail: format!(
                 "v_cache has {} elements, need >= {want_cache}",
                 v_cache.n_elements()
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_attn_matrix_g8_transpose_v_f16")?;
+    let pso = ctx.pipeline("kernel_attn_matrix_transpose_v_f16")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
-        &AttnMatrixG8Args {
+        &AttnMatrixArgs {
             n_rows: n_rows as u32,
             n_pos: n_pos as u32,
             base_pos: base_pos as u32,
             kv_stride: kv_stride as u32,
             vt_stride: vt_stride as u32,
+            n_q_heads: 0,
+            n_kv_heads: n_kv_heads as u32,
+            group: 0,
+            head_dim: head_dim as u32,
             scale: 0.0,
         },
     );
@@ -6878,7 +6898,7 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     enc.set_tensor(2, v_t);
     enc.dispatch(
         MTLSize {
-            width: N_KV_HEADS * HEAD_DIM * n_rows,
+            width: n_kv_heads * head_dim * n_rows,
             height: 1,
             depth: 1,
         },
@@ -6891,7 +6911,7 @@ pub fn encode_attn_matrix_g8_transpose_v_f16(
     Ok(())
 }
 
-pub fn encode_attn_matrix_g8_kq_f32(
+pub fn encode_attn_matrix_kq_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     q_rows: &MetalTensor,
@@ -6901,29 +6921,38 @@ pub fn encode_attn_matrix_g8_kq_f32(
     base_pos: usize,
     n_pos: usize,
     kv_stride: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group: usize,
+    head_dim: usize,
 ) -> Result<(), MetalError> {
-    const N_Q_HEADS: usize = 16;
-    const N_KV_HEADS: usize = 2;
-    const GROUP: usize = 8;
-    const HEAD_DIM: usize = 256;
-    validate_attn_matrix_g8_common("attn_matrix_g8_kq", n_rows, n_pos, base_pos)?;
+    validate_attn_matrix_common(
+        "attn_matrix_kq",
+        n_rows,
+        n_pos,
+        base_pos,
+        n_q_heads,
+        n_kv_heads,
+        group,
+        head_dim,
+    )?;
     if q_rows.dtype != GgmlType::F32
         || scores.dtype != GgmlType::F32
         || k_cache.dtype != GgmlType::F16
     {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_kq",
+            kernel: "attn_matrix_kq",
             detail: format!(
                 "expected q/scores F32 and k F16, got {:?}/{:?}/{:?}",
                 q_rows.dtype, scores.dtype, k_cache.dtype
             ),
         });
     }
-    let want_q = n_rows * N_Q_HEADS * HEAD_DIM;
-    let want_scores = N_KV_HEADS * n_rows * GROUP * n_pos;
+    let want_q = n_rows * n_q_heads * head_dim;
+    let want_scores = n_kv_heads * n_rows * group * n_pos;
     if q_rows.n_elements() != want_q as u64 || scores.n_elements() < want_scores as u64 {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_kq",
+            kernel: "attn_matrix_kq",
             detail: format!(
                 "bad q/scores sizes: q have {} need {want_q}, scores have {} need >= {want_scores}",
                 q_rows.n_elements(),
@@ -6931,16 +6960,20 @@ pub fn encode_attn_matrix_g8_kq_f32(
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_attn_matrix_g8_kq_f32")?;
+    let pso = ctx.pipeline("kernel_attn_matrix_kq_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
-        &AttnMatrixG8Args {
+        &AttnMatrixArgs {
             n_rows: n_rows as u32,
             n_pos: n_pos as u32,
             base_pos: base_pos as u32,
             kv_stride: kv_stride as u32,
             vt_stride: 0,
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            group: group as u32,
+            head_dim: head_dim as u32,
             scale: 0.0,
         },
     );
@@ -6950,9 +6983,9 @@ pub fn encode_attn_matrix_g8_kq_f32(
     enc.set_threadgroup_memory(0, 8192);
     enc.dispatch(
         MTLSize {
-            width: (n_rows * GROUP).div_ceil(32),
+            width: (n_rows * group).div_ceil(32),
             height: n_pos.div_ceil(64),
-            depth: N_KV_HEADS,
+            depth: n_kv_heads,
         },
         MTLSize {
             width: 128,
@@ -6963,35 +6996,50 @@ pub fn encode_attn_matrix_g8_kq_f32(
     Ok(())
 }
 
-pub fn encode_attn_matrix_g8_softmax_f32(
+pub fn encode_attn_matrix_softmax_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     scores: &MetalTensor,
     n_rows: usize,
     base_pos: usize,
     n_pos: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group: usize,
+    head_dim: usize,
 ) -> Result<(), MetalError> {
-    const N_Q_HEADS: usize = 16;
-    const HEAD_DIM: usize = 256;
-    validate_attn_matrix_g8_common("attn_matrix_g8_softmax", n_rows, n_pos, base_pos)?;
-    let want_scores = n_rows * N_Q_HEADS * n_pos;
+    validate_attn_matrix_common(
+        "attn_matrix_softmax",
+        n_rows,
+        n_pos,
+        base_pos,
+        n_q_heads,
+        n_kv_heads,
+        group,
+        head_dim,
+    )?;
+    let want_scores = n_rows * n_q_heads * n_pos;
     if scores.dtype != GgmlType::F32 || scores.n_elements() < want_scores as u64 {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_softmax",
+            kernel: "attn_matrix_softmax",
             detail: format!("scores have {} need >= {want_scores}", scores.n_elements()),
         });
     }
-    let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
-    let pso = ctx.pipeline("kernel_attn_matrix_g8_softmax_f32")?;
+    let scale = (1.0f32 / (head_dim as f32).sqrt()) * std::f32::consts::LOG2_E;
+    let pso = ctx.pipeline("kernel_attn_matrix_softmax_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
-        &AttnMatrixG8Args {
+        &AttnMatrixArgs {
             n_rows: n_rows as u32,
             n_pos: n_pos as u32,
             base_pos: base_pos as u32,
             kv_stride: 0,
             vt_stride: 0,
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            group: group as u32,
+            head_dim: head_dim as u32,
             scale,
         },
     );
@@ -6999,7 +7047,7 @@ pub fn encode_attn_matrix_g8_softmax_f32(
     enc.set_threadgroup_memory(0, 8 * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
-            width: n_rows * N_Q_HEADS,
+            width: n_rows * n_q_heads,
             height: 1,
             depth: 1,
         },
@@ -7012,7 +7060,7 @@ pub fn encode_attn_matrix_g8_softmax_f32(
     Ok(())
 }
 
-pub fn encode_attn_matrix_g8_kqv_f32(
+pub fn encode_attn_matrix_kqv_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     probs: &MetalTensor,
@@ -7022,23 +7070,33 @@ pub fn encode_attn_matrix_g8_kqv_f32(
     base_pos: usize,
     n_pos: usize,
     vt_stride: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group: usize,
+    head_dim: usize,
 ) -> Result<(), MetalError> {
-    const N_Q_HEADS: usize = 16;
-    const N_KV_HEADS: usize = 2;
-    const HEAD_DIM: usize = 256;
-    validate_attn_matrix_g8_common("attn_matrix_g8_kqv", n_rows, n_pos, base_pos)?;
+    validate_attn_matrix_common(
+        "attn_matrix_kqv",
+        n_rows,
+        n_pos,
+        base_pos,
+        n_q_heads,
+        n_kv_heads,
+        group,
+        head_dim,
+    )?;
     if vt_stride < n_pos {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_kqv",
+            kernel: "attn_matrix_kqv",
             detail: format!("vt_stride={vt_stride} < n_pos={n_pos}"),
         });
     }
-    let want_probs = n_rows * N_Q_HEADS * n_pos;
-    let want_vt = N_KV_HEADS * HEAD_DIM * vt_stride;
-    let want_out = n_rows * N_Q_HEADS * HEAD_DIM;
+    let want_probs = n_rows * n_q_heads * n_pos;
+    let want_vt = n_kv_heads * head_dim * vt_stride;
+    let want_out = n_rows * n_q_heads * head_dim;
     if probs.dtype != GgmlType::F32 || out.dtype != GgmlType::F32 || v_t.dtype != GgmlType::F16 {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_kqv",
+            kernel: "attn_matrix_kqv",
             detail: format!(
                 "expected probs/out F32 and v_t F16, got {:?}/{:?}/{:?}",
                 probs.dtype, out.dtype, v_t.dtype
@@ -7050,7 +7108,7 @@ pub fn encode_attn_matrix_g8_kqv_f32(
         || out.n_elements() != want_out as u64
     {
         return Err(MetalError::BadShape {
-            kernel: "attn_matrix_g8_kqv",
+            kernel: "attn_matrix_kqv",
             detail: format!(
                 "bad sizes: probs {} need >= {want_probs}, v_t {} need >= {want_vt}, out {} need {want_out}",
                 probs.n_elements(),
@@ -7059,16 +7117,20 @@ pub fn encode_attn_matrix_g8_kqv_f32(
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_attn_matrix_g8_kqv_f32")?;
+    let pso = ctx.pipeline("kernel_attn_matrix_kqv_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
-        &AttnMatrixG8Args {
+        &AttnMatrixArgs {
             n_rows: n_rows as u32,
             n_pos: n_pos as u32,
             base_pos: base_pos as u32,
             kv_stride: 0,
             vt_stride: vt_stride as u32,
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            group: group as u32,
+            head_dim: head_dim as u32,
             scale: 0.0,
         },
     );
@@ -7078,9 +7140,9 @@ pub fn encode_attn_matrix_g8_kqv_f32(
     enc.set_threadgroup_memory(0, 8192);
     enc.dispatch(
         MTLSize {
-            width: (n_rows * 8).div_ceil(32),
-            height: HEAD_DIM.div_ceil(64),
-            depth: N_KV_HEADS,
+            width: (n_rows * group).div_ceil(32),
+            height: head_dim.div_ceil(64),
+            depth: n_kv_heads,
         },
         MTLSize {
             width: 128,
@@ -10550,8 +10612,14 @@ mod tests {
             return;
         }
         let g = crate::gguf::GgufFile::open(path).expect("open");
-        const N_QUERY: usize = 321;
-        const N_DISPATCHES: usize = 64;
+        let n_query: usize = std::env::var("QWEN_PROMPT_MATMAT_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(321);
+        let n_dispatches: usize = std::env::var("QWEN_PROMPT_MATMAT_DISPATCHES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64);
         let cases = [
             "blk.0.ffn_gate.weight",
             "blk.0.ffn_up.weight",
@@ -10559,7 +10627,10 @@ mod tests {
             "blk.0.attn_qkv.weight",
         ];
 
-        eprintln!("[prompt-matmat-chained] {}", ctx.describe());
+        eprintln!(
+            "[prompt-matmat-chained] {} N={n_query} dispatches={n_dispatches}",
+            ctx.describe()
+        );
         for name in cases {
             let Some(t) = g.find(name) else {
                 eprintln!("[prompt-matmat-chained] skip missing {name}");
@@ -10568,32 +10639,21 @@ mod tests {
             let n_in = t.shape[0] as usize;
             let n_out = t.shape[1] as usize;
             let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("w");
-            let x_vec: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
-            let x_vec_t = MetalTensor::from_bytes(
-                &ctx,
-                bytemuck::cast_slice(&x_vec),
-                vec![n_in as u64],
-                GgmlType::F32,
-            )
-            .expect("x_vec");
-            let y_vec_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y_vec");
-            let x_mat: Vec<f32> = (0..N_QUERY * n_in)
+            let x_mat: Vec<f32> = (0..n_query * n_in)
                 .map(|i| (i as f32 * 1e-3).sin())
                 .collect();
             let x_mat_t = MetalTensor::from_bytes(
                 &ctx,
                 bytemuck::cast_slice(&x_mat),
-                vec![N_QUERY as u64, n_in as u64],
+                vec![n_query as u64, n_in as u64],
                 GgmlType::F32,
             )
             .expect("x_mat");
             let y_mat_t =
-                MetalTensor::zeros_f32(&ctx, vec![n_out as u64, N_QUERY as u64]).expect("y_mat");
+                MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64]).expect("y_mat");
 
             match t.dtype {
                 GgmlType::Q4_K => {
-                    bench_q4_k_chained(&ctx, &w_t, &x_vec_t, &y_vec_t, n_in, n_out, N_QUERY)
-                        .expect("warm vec");
                     bench_q4_k_mat_mat_chained(
                         &ctx,
                         &w_t,
@@ -10601,8 +10661,8 @@ mod tests {
                         &y_mat_t,
                         n_in,
                         n_out,
-                        N_QUERY,
-                        N_DISPATCHES,
+                        n_query,
+                        n_dispatches,
                     )
                     .expect("warm mm");
                     let t0 = Instant::now();
@@ -10613,16 +10673,16 @@ mod tests {
                         &y_mat_t,
                         n_in,
                         n_out,
-                        N_QUERY,
-                        N_DISPATCHES,
+                        n_query,
+                        n_dispatches,
                     )
                     .expect("mm");
-                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / N_DISPATCHES as f64;
+                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / n_dispatches as f64;
                     let weight_gib =
-                        (t.n_bytes * N_DISPATCHES as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
+                        (t.n_bytes * n_dispatches as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
                     let gib_s = weight_gib / (t0.elapsed().as_secs_f64());
                     eprintln!(
-                        "[prompt-matmat-chained] {name:24} dtype={:?} N={N_QUERY:>3} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
+                        "[prompt-matmat-chained] {name:24} dtype={:?} N={n_query:>5} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
                         t.dtype
                     );
                 }
@@ -10634,8 +10694,8 @@ mod tests {
                         &y_mat_t,
                         n_in,
                         n_out,
-                        N_QUERY,
-                        N_DISPATCHES,
+                        n_query,
+                        n_dispatches,
                     )
                     .expect("warm mm");
                     let t0 = Instant::now();
@@ -10646,16 +10706,16 @@ mod tests {
                         &y_mat_t,
                         n_in,
                         n_out,
-                        N_QUERY,
-                        N_DISPATCHES,
+                        n_query,
+                        n_dispatches,
                     )
                     .expect("mm");
-                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / N_DISPATCHES as f64;
+                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / n_dispatches as f64;
                     let weight_gib =
-                        (t.n_bytes * N_DISPATCHES as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
+                        (t.n_bytes * n_dispatches as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
                     let gib_s = weight_gib / (t0.elapsed().as_secs_f64());
                     eprintln!(
-                        "[prompt-matmat-chained] {name:24} dtype={:?} N={N_QUERY:>3} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
+                        "[prompt-matmat-chained] {name:24} dtype={:?} N={n_query:>5} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
                         t.dtype
                     );
                 }
@@ -10667,8 +10727,8 @@ mod tests {
                         &y_mat_t,
                         n_in,
                         n_out,
-                        N_QUERY,
-                        N_DISPATCHES,
+                        n_query,
+                        n_dispatches,
                     )
                     .expect("warm mm");
                     let t0 = Instant::now();
@@ -10679,16 +10739,16 @@ mod tests {
                         &y_mat_t,
                         n_in,
                         n_out,
-                        N_QUERY,
-                        N_DISPATCHES,
+                        n_query,
+                        n_dispatches,
                     )
                     .expect("mm");
-                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / N_DISPATCHES as f64;
+                    let mm_ms = t0.elapsed().as_secs_f64() * 1e3 / n_dispatches as f64;
                     let weight_gib =
-                        (t.n_bytes * N_DISPATCHES as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
+                        (t.n_bytes * n_dispatches as u64) as f64 / (1024.0 * 1024.0 * 1024.0);
                     let gib_s = weight_gib / (t0.elapsed().as_secs_f64());
                     eprintln!(
-                        "[prompt-matmat-chained] {name:24} dtype={:?} N={N_QUERY:>3} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
+                        "[prompt-matmat-chained] {name:24} dtype={:?} N={n_query:>5} per-dispatch={mm_ms:>7.3} ms weight-throughput={gib_s:>7.1} GiB/s",
                         t.dtype
                     );
                 }

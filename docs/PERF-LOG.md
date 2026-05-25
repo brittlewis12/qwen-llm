@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-24 — Dense Group-6 Matrix Attention Spike
+
+Status: dirty-code spike from checkpoint `1a211ceb5` after generalizing the
+env-only matrix-attention sidecar from A3B/group-8 to runtime group shapes and
+adding `QWEN_PREFILL_ATTN_MATRIX_G6=1` for the 27B dense group-6 shape. Raw rows
+are in `docs/bench/2026-05-24-dense-g6-matrix-spike/`; the post-rename smoke row
+is in `docs/bench/2026-05-24-dense-g6-post-rename-smoke/`. Treat these rows as
+evidence for expected value, not as a clean promotion gate.
+
+### Measurements
+
+27B dense, synthetic prompt prefill, `runs=1`, default chunk policy:
+
+| Shape | baseline | matrix-g6 | matrix/baseline | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp128` | `187.84` | `198.45` | `1.06x` | no short-prompt harm in spike |
+| `pp512` | `197.95` | `213.06` | `1.08x` | medium win |
+| `pp1024` | `194.01` | `210.70` | `1.09x` | medium win |
+| `pp4096` | `153.42` | `187.54` | `1.22x` | long win |
+| `pp16384` | `125.74` | `176.00` | `1.40x` | large true-long win |
+
+Correctness/validation so far: `cargo fmt --check`, `git diff --check`, release
+`qwen-bench` rebuild, small 27B prefill-vs-single with
+`QWEN_PREFILL_ATTN_MATRIX_G6=1 QWEN_PREFILL_ATTN_MATRIX_MAX_POS=32`, and the
+full ignored A3B matrix correctness gate with `QWEN_PREFILL_ATTN_MATRIX_G8=1`.
+The post-rename G6 smoke row at `pp4096` was `188.50 t/s`, matching the original
+spike. Remaining blockers are clean repeated 27B rows and better long-prefix G6
+correctness coverage.
+
+Related dense budget row: `docs/bench/2026-05-24-dense-pp16k-combined-noop/`
+shows 27B `pp16384` baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
+no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Read: dense 16K is
+jointly attention and FFN/GDN limited; matrix-g6 attacks a real wall but does not
+make dense solved.
+
 ## 2026-05-24 — A3B Matrix Promotion Repeat Gate
 
 Status: clean repeated A3B promotion evidence after checkpoint `ef32caec5`.

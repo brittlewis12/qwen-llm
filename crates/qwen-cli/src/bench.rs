@@ -40,6 +40,7 @@ use qwen_llm::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
         MetalDFlashVerifyScratch, prefill_tokens_prompt_only_profiled,
         prefill_tokens_with_multi_hidden, prefill_tokens_with_multi_hidden_profiled,
+        with_prefill_dense_ffn_fused_swiglu_q4_override,
     },
     metal_forward::encode_mat_mat_dispatch,
     metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS},
@@ -236,6 +237,8 @@ enum Cmd {
     AttnFrontMicro(AttnFrontMicroArgs),
     #[command(hide = true)]
     AttnLayerMicro(AttnLayerMicroArgs),
+    #[command(hide = true)]
+    PpFfnAb(PpFfnAbArgs),
     #[command(hide = true)]
     PpWait(PpWaitArgs),
 }
@@ -1227,6 +1230,28 @@ struct AttnLayerMicroArgs {
 }
 
 #[derive(Parser, Debug)]
+struct PpFfnAbArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Synthetic prompt token count.
+    #[arg(short = 'p', long, default_value = "4096")]
+    n_prompt: usize,
+    /// Packed prefill chunk size. If omitted, uses the model-aware default.
+    #[arg(long)]
+    prefill_chunk: Option<usize>,
+    /// Number of base/fused pairs. Odd pairs run base->fused; even pairs reverse.
+    #[arg(long, default_value = "2")]
+    pairs: usize,
+    /// Skip the unmeasured base and fused warmup passes.
+    #[arg(long)]
+    no_warmup: bool,
+    /// Deterministic seed for synthetic token generation.
+    #[arg(long, default_value = "1")]
+    seed: u64,
+}
+
+#[derive(Parser, Debug)]
 struct PpWaitArgs {
     /// Path to a GGUF file.
     #[arg(short = 'm', long)]
@@ -1282,6 +1307,7 @@ fn main() -> Result<()> {
         Cmd::AttnPrefillMicro(a) => run_attn_prefill_micro(a),
         Cmd::AttnFrontMicro(a) => run_attn_front_micro(a),
         Cmd::AttnLayerMicro(a) => run_attn_layer_micro(a),
+        Cmd::PpFfnAb(a) => run_pp_ffn_ab(a),
         Cmd::PpWait(a) => run_pp_wait(a),
     }
 }
@@ -3766,6 +3792,104 @@ fn run_pp(args: PpArgs) -> Result<()> {
                 "skipped to match llama-bench pp logits policy"
             }
         );
+    }
+
+    Ok(())
+}
+
+fn run_pp_ffn_ab_once(
+    ctx: &MetalContext,
+    mm: &MetalModel,
+    mf: &MetalForward<'_>,
+    ids: &[i32],
+    prefill_chunk: usize,
+    fused: bool,
+) -> Result<(f64, f64, f64)> {
+    let mut s = MetalSession::fresh(ctx, mm, ids.len() + 16).context("session run")?;
+    let mut scratch = fresh_prefill_scratch_for_prompt(ctx, mm, prefill_chunk, ids.len())
+        .context("timed prefill scratch")?;
+
+    let t0 = Instant::now();
+    let gpu_ms = with_prefill_dense_ffn_fused_swiglu_q4_override(fused, || {
+        prefill_tokens_prompt_only_profiled(mf, ids, 0, &mut s, &mut scratch)
+    })
+    .context("timed prompt-only prefill")?;
+    let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let ts = ids.len() as f64 * 1000.0 / wall_ms;
+    Ok((wall_ms, gpu_ms, ts))
+}
+
+fn run_pp_ffn_ab(args: PpFfnAbArgs) -> Result<()> {
+    let PpFfnAbArgs {
+        model,
+        n_prompt,
+        prefill_chunk,
+        pairs,
+        no_warmup,
+        seed,
+    } = args;
+    if n_prompt == 0 {
+        return Err(anyhow!("--n-prompt must be >= 1"));
+    }
+    if pairs == 0 {
+        return Err(anyhow!("--pairs must be >= 1"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    eprintln!("[pp-ffn-ab] device: {}", ctx.describe());
+    let power = capture_power_snapshot();
+    eprintln!(
+        "[pp-ffn-ab] power: {}",
+        power_snapshot_summary(power.as_ref())
+    );
+
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
+    if m.arch.kind != qwen_llm::model::ArchKind::Dense {
+        return Err(anyhow!("pp-ffn-ab is a dense FFN harness; got MoE model"));
+    }
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
+    let mf = MetalForward::new(&ctx, &mm);
+    let ids = synthetic_prompt_ids(n_prompt, m.arch.vocab_size, seed);
+    let prefill_chunk =
+        prefill_chunk.unwrap_or_else(|| default_prefill_chunk(m.arch.kind, ids.len()));
+    if prefill_chunk == 0 {
+        return Err(anyhow!("--prefill-chunk must be >= 1"));
+    }
+
+    eprintln!(
+        "[pp-ffn-ab] model={} n_prompt={} pairs={} chunk={} warmup={}",
+        model.display(),
+        ids.len(),
+        pairs,
+        prefill_chunk,
+        if no_warmup { "skip" } else { "base+fused" }
+    );
+    print_prefill_lowering_summary(&mm);
+
+    if !no_warmup {
+        for fused in [false, true] {
+            let _ = run_pp_ffn_ab_once(&ctx, &mm, &mf, &ids, prefill_chunk, fused)
+                .with_context(|| format!("warmup fused={fused}"))?;
+        }
+    }
+
+    println!("pair\torder\tvariant\twall_ms\tgpu_ms\ttokens_s");
+    for pair_idx in 0..pairs {
+        let order = if pair_idx % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        };
+        for (order_idx, fused) in order.into_iter().enumerate() {
+            let (wall_ms, gpu_ms, ts) =
+                run_pp_ffn_ab_once(&ctx, &mm, &mf, &ids, prefill_chunk, fused)
+                    .with_context(|| format!("timed pair={pair_idx} fused={fused}"))?;
+            println!(
+                "{pair_idx}\t{order_idx}\t{}\t{wall_ms:.1}\t{gpu_ms:.1}\t{ts:.2}",
+                if fused { "fused" } else { "base" }
+            );
+        }
     }
 
     Ok(())

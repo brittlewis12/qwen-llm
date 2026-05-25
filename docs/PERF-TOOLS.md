@@ -546,6 +546,21 @@ Rules:
 - Compare phase-local sums across paired runs before defaulting a sub-noise
   total-throughput candidate such as dense fused-SwiGLU or reduced mat-mat smem.
 
+For dense fused-SwiGLU specifically, use the hidden same-process A/B harness to
+avoid model-load and first-process drift while alternating the runtime fused flag:
+
+```sh
+QWEN_PREFILL_ATTN_MATRIX_G6=1 \
+target/release/qwen-bench pp-ffn-ab \
+  -m "$MODEL" \
+  -p 4096 \
+  --pairs 2
+```
+
+Treat this as a candidate-local gate. It overrides only the dense fused-SwiGLU
+flag; other env-gated paths such as matrix attention or reduced smem still come
+from the process environment.
+
 ### Real rollout prompt lane
 
 Synthetic `pp<N>` remains the fast scoreboard harness, but it is not the only

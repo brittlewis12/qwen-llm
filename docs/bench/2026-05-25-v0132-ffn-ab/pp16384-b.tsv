@@ -1,0 +1,5 @@
+pair	order	variant	wall_ms	gpu_ms	tokens_s
+0	0	base	93719.7	93640.9	174.82
+0	1	fused	93706.0	93635.4	174.84
+1	0	fused	96158.4	96084.9	170.39
+1	1	base	96319.8	96246.5	170.10

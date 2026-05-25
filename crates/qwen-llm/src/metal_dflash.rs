@@ -52,6 +52,7 @@ use crate::tensor::{GgmlType, TensorDesc};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
+use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -77,7 +78,28 @@ fn prefill_noop_ffn_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_FFN"))
 }
 
+thread_local! {
+    static PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE: Cell<Option<bool>> = Cell::new(None);
+}
+
+pub fn with_prefill_dense_ffn_fused_swiglu_q4_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> R {
+    let previous = PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let out = f();
+    PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE.with(|slot| slot.set(previous));
+    out
+}
+
 fn prefill_dense_ffn_fused_swiglu_q4_enabled() -> bool {
+    if let Some(enabled) = PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4"))
 }

@@ -169,6 +169,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `~1%` and below the default gate. The next dense move is phase-local FFN/GDN
   evidence, preferably paired in-process, not another total-throughput default
   decision on a sub-noise row.
+- The same-process fused-SwiGLU A/B harness now exists, and it falsifies broad
+  defaulting despite one exciting long-context outlier. Fused loses paired
+  `pp4096` and `pp8192`; `pp16384-a` looks large-positive but the immediate
+  `pp16384-b` repeat is flat. Keep the branch as an env-only long-context clue,
+  not a default candidate, until a repeated same-process gate and phase-local
+  FFN mechanism agree.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

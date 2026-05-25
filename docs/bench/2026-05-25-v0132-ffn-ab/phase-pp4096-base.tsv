@@ -1,0 +1,14 @@
+source	kind	phase	count	gpu_ms	pct	avg_ms
+layer	gdn	ffn	192	9374.80	46.1	48.827
+layer	gdn	gdn_front	192	3625.07	17.8	18.881
+layer	attn	ffn	64	3136.42	15.4	49.007
+layer	attn	attn	64	1849.75	9.1	28.902
+layer	gdn	gdn_back	192	1161.01	5.7	6.047
+layer	gdn	gdn_step	192	639.86	3.1	3.333
+layer	gdn	gdn_prep	192	259.72	1.3	1.353
+layer	gdn	gdn_gated	192	192.56	0.9	1.003
+layer	gdn	pre_norm	192	28.30	0.1	0.147
+layer	gdn	mixer_resid	192	26.84	0.1	0.140
+layer	attn	mixer_resid	64	13.07	0.1	0.204
+layer	attn	pre_norm	64	8.66	0.0	0.135
+layer	gdn	gdn_alpha_beta	192	8.42	0.0	0.044

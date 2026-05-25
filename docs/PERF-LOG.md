@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Same-Process FFN A/B Keeps Fused SwiGLU Env-Only
+
+Status: dirty-code harness after `v0.131`. Added a runtime override plus hidden
+`qwen-bench pp-ffn-ab` command so dense fused-Q4 SwiGLU can be alternated inside
+one loaded process instead of comparing separate process rows. Raw artifacts are
+in `docs/bench/2026-05-25-v0132-ffn-ab/`.
+
+### Measurements
+
+27B dense with matrix-G6/G8 enabled, base/fused warmup, then alternating pairs:
+
+| Shape | Base rows | Fused rows | Read |
+| --- | ---: | ---: | --- |
+| `pp4096` | `179.14`, `187.50` | `177.88`, `185.19` | fused loses both orderings |
+| `pp8192` | `185.70`, `182.90` | `180.65`, `177.04` | fused loses both orderings |
+| `pp16384-a` | `178.25`, `183.84` | `195.67`, `194.18` | apparent large win, suspicious |
+| `pp16384-b` | `174.82`, `170.10` | `174.84`, `170.39` | repeat is flat |
+
+Read: `QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=1` remains env-only. The new
+same-process harness is a keeper, but the candidate still fails default gates:
+`pp4096/8192` regress and the large `pp16384` win did not reproduce. The paired
+phase trace also showed unrelated phases moving with the same drift as FFN, so a
+future long-context fused branch needs a repeatable phase-local mechanism.
+
 ## 2026-05-25 — Interleaved Dense FFN Rows Keep Candidates Env-Only
 
 Status: clean `v0.129` follow-up using the new `prefill_sweep.py`

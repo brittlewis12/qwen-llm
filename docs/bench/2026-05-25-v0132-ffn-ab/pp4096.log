@@ -1,0 +1,6 @@
+[pp-ffn-ab] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[pp-ffn-ab] power: source=AC Power battery=100% charged warning=none powermode_ac=2 powermode_battery=2 thermal_warning=false performance_warning=false
+[pp-ffn-ab] model=/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf n_prompt=4096 pairs=2 chunk=1024 warmup=base+fused
+[pp] lowering: gdn_batched=48/48 attn_batched=16/16 dense_ffn_batched=64/64 moe_gpu_token_loop=0/0
+[pp] dtype sample gdn: qkv=Q6_K z=Q4_K out=Q5_K
+[pp] dtype sample attn: q=Q4_K k=Q4_K v=Q6_K o=Q4_K

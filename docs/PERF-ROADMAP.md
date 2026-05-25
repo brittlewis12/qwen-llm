@@ -137,6 +137,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   Q4/Q5/Q6/Q8 mat-mat is correctness-green and gives only small dirty-spike rows
   (`188.77 t/s` at `pp4096`, `176.13 t/s` at `pp16384`), so the high-EV dense work
   remains deeper FFN mat-mat/layout/fusion evidence, not more local attention.
+- A high-N dense fused-Q4 SwiGLU spike (`QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=1`)
+  validates the mechanism but not default readiness: with matrix-G6 on, dirty
+  rows are flat/slightly down at `pp512` (`214.86 -> 214.45`) and noisy down at
+  `pp1024` (`196.97 -> 193.45`), while `pp4096` improves in one noisy pair
+  (`181.08 -> 191.67`) and `pp16384` improves slightly (`177.57 -> 179.25`). Keep
+  it env-only; the remaining dense gap still needs a bigger FFN mat-mat/layout win.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

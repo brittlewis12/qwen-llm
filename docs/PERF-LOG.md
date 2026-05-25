@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Dense High-N Fused SwiGLU Q4 Spike
+
+Status: env-only high-N dense FFN fusion spike on top of `v0.124`. The new path
+adds `QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=1`, fusing dense Q4_K gate/up
+mat-mat plus SwiGLU for chunks with at least 32 rows. Raw rows are in
+`docs/bench/2026-05-25-dense-fused-ffn-q4-spike/`. Treat these as dirty spike
+rows until a clean repeat says otherwise.
+
+### Measurements
+
+27B dense with `QWEN_PREFILL_ATTN_MATRIX_G6=1`, `runs=3`:
+
+| Shape | matrix-G6 baseline | fused-Q4 SwiGLU | fused/baseline | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp512` | `214.86` | `214.45` | `1.00x` | flat/slightly down |
+| `pp1024` | `196.97` | `193.45` | `0.98x` | noisy regression |
+| `pp4096` | `181.08` | `191.67` | `1.06x` | possible long win, baseline noisy |
+| `pp16384` | `177.57` | `179.25` | `1.01x` | small true-long win |
+
+Correctness: the generic fused kernel matches the unfused Q4_K gate/up+silu path
+at both `N=16` and `N=32` with `min_cos=1.000000`, and an active 27B prefill
+correctness run with `T=32/P=32` passed final logits, hidden captures, GDN state,
+and KV checks.
+
+Read: the high-N fusion hypothesis is real enough to keep as an env candidate,
+but it does not yet clear a default gate. It helps long rows a little and may help
+`pp4096`, but it is flat/regressive at `pp512/pp1024` and remains far short of the
+`~10-12%` FFN speedup needed to beat lcpp by itself.
+
 ## 2026-05-25 — Dense Matrix-G6 FFN Attribution And Mat-Mat Pointer Spike
 
 Status: follow-up after the clean `v0.123` 27B family gate. The no-op budget rows

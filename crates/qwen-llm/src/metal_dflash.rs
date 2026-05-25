@@ -77,6 +77,11 @@ fn prefill_noop_ffn_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_FFN"))
 }
 
+fn prefill_dense_ffn_fused_swiglu_q4_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4"))
+}
+
 fn prefill_moe_packed_routed_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -6464,33 +6469,52 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     // profiling only: leave x_pack unchanged after post-norm so a
                     // production-shape run can report the direct FFN wall delta.
                 } else if mat_mat_path {
-                    encode_mat_mat_dispatch(
-                        base.ctx,
-                        &enc,
-                        g_w,
-                        &h_pack_p,
-                        &ffn_gate_pack_p,
-                        h,
-                        f,
-                        chunk_p,
-                    )?;
-                    encode_mat_mat_dispatch(
-                        base.ctx,
-                        &enc,
-                        u_w,
-                        &h_pack_p,
-                        &ffn_up_pack_p,
-                        h,
-                        f,
-                        chunk_p,
-                    )?;
-                    encode_silu_mul_f32(
-                        base.ctx,
-                        &enc,
-                        &ffn_gate_pack_p,
-                        &ffn_up_pack_p,
-                        &ffn_inner_pack_p,
-                    )?;
+                    if prefill_dense_ffn_fused_swiglu_q4_enabled()
+                        && g_w.dtype == GgmlType::Q4_K
+                        && u_w.dtype == GgmlType::Q4_K
+                        && h % 256 == 0
+                        && chunk_p >= 32
+                    {
+                        crate::metal::encode_ffn_fused_swiglu_q4_K_mm_f32(
+                            base.ctx,
+                            &enc,
+                            g_w,
+                            u_w,
+                            &h_pack_p,
+                            &ffn_inner_pack_p,
+                            h,
+                            f,
+                            chunk_p,
+                        )?;
+                    } else {
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            g_w,
+                            &h_pack_p,
+                            &ffn_gate_pack_p,
+                            h,
+                            f,
+                            chunk_p,
+                        )?;
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            u_w,
+                            &h_pack_p,
+                            &ffn_up_pack_p,
+                            h,
+                            f,
+                            chunk_p,
+                        )?;
+                        encode_silu_mul_f32(
+                            base.ctx,
+                            &enc,
+                            &ffn_gate_pack_p,
+                            &ffn_up_pack_p,
+                            &ffn_inner_pack_p,
+                        )?;
+                    }
                     encode_mat_mat_dispatch(
                         base.ctx,
                         &enc,

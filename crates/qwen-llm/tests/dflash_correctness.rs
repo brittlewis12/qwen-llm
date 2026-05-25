@@ -1832,8 +1832,14 @@ fn prefill_tokens_matches_single_token_loop_27b() {
 
     // T=24 with P=16 → 2 chunks (T=16 + T=8). Exercises full chunk
     // AND short tail chunk.
-    let total_n: usize = 24;
-    let p: usize = 16;
+    let total_n: usize = std::env::var("QWEN_TEST_27B_PREFILL_T")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    let p: usize = std::env::var("QWEN_TEST_27B_PREFILL_P")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
     let token_ids: Vec<i32> = (0..total_n)
         .map(|i| ((i * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1)
         .collect();

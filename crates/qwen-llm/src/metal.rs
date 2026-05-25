@@ -3948,6 +3948,100 @@ pub fn encode_ffn_fused_swiglu_q4_K_mm_n16_f32(
     Ok(())
 }
 
+#[allow(non_snake_case)]
+pub fn encode_ffn_fused_swiglu_q4_K_mm_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm",
+            detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
+        });
+    }
+    if w_gate.dtype != GgmlType::Q4_K || w_up.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm",
+            detail: format!(
+                "w_gate.dtype={:?} w_up.dtype={:?}, both must be Q4_K",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm",
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={}",
+                x.n_elements(),
+                n_query * n_in
+            ),
+        });
+    }
+    if inner.n_elements() as usize != n_query * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "ffn_fused_swiglu_q4_K_mm",
+            detail: format!(
+                "inner.n_elements={} != n_query*n_out={}",
+                inner.n_elements(),
+                n_query * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_ffn_fused_swiglu_q4_K_mm_f32")?;
+    enc.set_pipeline(&pso);
+
+    let nb01 = ((n_in / 256) * 144) as u32;
+    let stride_b = n_in as u32;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_query as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, inner);
+    enc.set_threadgroup_memory(0, 16384);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_query.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 // ----- elementwise + small ops -----
 
 /// Per-element kernel arg used by silu/sigmoid/softplus/add/mul/silu_mul.
@@ -11476,6 +11570,70 @@ mod tests {
         eprintln!("[ffn-fused-mm-n16] min_cos={min_cos:.6} max|Δ|={max_abs:.3e}");
         assert!(min_cos >= 0.999, "fused FFN N=16 cos too low: {min_cos}");
         assert!(max_abs < 1e-2, "fused FFN N=16 diverged: max|Δ|={max_abs}");
+
+        const N32: usize = 32;
+        let mut x32 = vec![0.0f32; N32 * n_in];
+        for (i, v) in x32.iter_mut().enumerate() {
+            *v = ((i % 17) as f32 - 8.0) * 1e-2;
+        }
+        let x32_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x32),
+            vec![N32 as u64, n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gate32 = MetalTensor::zeros_f32(&ctx, vec![N32 as u64 * n_out as u64]).unwrap();
+        let up32 = MetalTensor::zeros_f32(&ctx, vec![N32 as u64 * n_out as u64]).unwrap();
+        let inner32_ref = MetalTensor::zeros_f32(&ctx, vec![N32 as u64 * n_out as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_mat_mat_q4_k_f32(&ctx, enc, &w_gate, &x32_t, &gate32, n_in, n_out, N32)?;
+            encode_mat_mat_q4_k_f32(&ctx, enc, &w_up, &x32_t, &up32, n_in, n_out, N32)?;
+            encode_silu_mul_f32(&ctx, enc, &gate32, &up32, &inner32_ref)
+        })
+        .unwrap();
+        let inner32_fused = MetalTensor::zeros_f32(&ctx, vec![N32 as u64 * n_out as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_ffn_fused_swiglu_q4_K_mm_f32(
+                &ctx,
+                enc,
+                &w_gate,
+                &w_up,
+                &x32_t,
+                &inner32_fused,
+                n_in,
+                n_out,
+                N32,
+            )
+        })
+        .unwrap();
+        let inner32_ref_flat = read_back_f32(&inner32_ref.buffer, N32 * n_out);
+        let inner32_fused_flat = read_back_f32(&inner32_fused.buffer, N32 * n_out);
+        let mut min_cos32 = f64::INFINITY;
+        let mut max_abs32 = 0.0f32;
+        for q in 0..N32 {
+            let mut dot = 0.0f64;
+            let mut np = 0.0f64;
+            let mut nc = 0.0f64;
+            for o in 0..n_out {
+                let p = inner32_fused_flat[o + q * n_out] as f64;
+                let c = inner32_ref_flat[o + q * n_out] as f64;
+                dot += p * c;
+                np += p * p;
+                nc += c * c;
+                max_abs32 = max_abs32.max((p - c).abs() as f32);
+            }
+            min_cos32 = min_cos32.min(dot / (np.sqrt() * nc.sqrt() + 1e-30));
+        }
+        eprintln!("[ffn-fused-mm-n32] min_cos={min_cos32:.6} max|Δ|={max_abs32:.3e}");
+        assert!(
+            min_cos32 >= 0.999,
+            "fused FFN N=32 cos too low: {min_cos32}"
+        );
+        assert!(
+            max_abs32 < 1e-2,
+            "fused FFN N=32 diverged: max|Δ|={max_abs32}"
+        );
     }
 
     /// Fused K+V scatter (one dispatch writes both caches) must produce

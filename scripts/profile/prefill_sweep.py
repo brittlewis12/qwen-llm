@@ -216,6 +216,10 @@ def main() -> int:
     parser.add_argument("--output")
     args = parser.parse_args()
 
+    output_path = Path(args.output) if args.output else None
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
     if not args.bench_bin.exists():
         raise SystemExit(f"bench binary missing: {args.bench_bin}")
     if not args.variant:
@@ -239,16 +243,16 @@ def main() -> int:
         first = False
         print(f"[prefill-sweep] running {variant.label} env={variant.env}", flush=True)
         results.append(run_variant(base_cmd, variant, cooldown))
-        if args.output:
-            Path(args.output).write_text(
+        if output_path is not None:
+            output_path.write_text(
                 json.dumps(build_summary(base_cmd, results), indent=2) + "\n"
             )
             print(f"[prefill-sweep] checkpointed {args.output}", flush=True)
 
     summary = build_summary(base_cmd, results)
     print_summary(results)
-    if args.output:
-        Path(args.output).write_text(json.dumps(summary, indent=2) + "\n")
+    if output_path is not None:
+        output_path.write_text(json.dumps(summary, indent=2) + "\n")
         print(f"[prefill-sweep] wrote {args.output}", flush=True)
     return 0
 

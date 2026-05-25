@@ -146,7 +146,7 @@ kernel void kernel_mat_mat_q8_0_f32(
                 const short lx = (tiitg / NL0_MM) % 8;
                 const short ly = i % 8;
                 const short ib = 8 * sx + sy;
-                sa[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
             }
         }
 
@@ -300,7 +300,7 @@ kernel void kernel_mat_mat_q8_0_f32_n16(
                 const short lx = (tiitg / NL0_MM) % 8;
                 const short ly = i % 8;
                 const short ib = 8 * sx + sy;
-                sa[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
             }
         }
 

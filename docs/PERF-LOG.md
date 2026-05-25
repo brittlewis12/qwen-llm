@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Dense Matrix-G6 FFN Attribution And Mat-Mat Pointer Spike
+
+Status: follow-up after the clean `v0.123` 27B family gate. The no-op budget rows
+used the clean `v0.123` build; pointer-store rows are a dirty spike after changing
+Q4/Q5/Q6/Q8 mat-mat threadgroup writes from `sa[idx]` to `*(sa + idx)`, matching
+the spelling llama.cpp explicitly comments as faster. Raw rows are in
+`docs/bench/2026-05-25-dense-g6-noop-budget/` and
+`docs/bench/2026-05-25-matmat-pointer-sa-spike/`.
+
+### Measurements
+
+Matrix-G6 no-op budget, `runs=1`:
+
+| Shape | baseline | no-FFN | no-GDN | no-attn | no-FFN-attn | Read |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `pp4096` | `180.50` | `541.59` | `193.30` | `193.93` | `600.26` | FFN dominates |
+| `pp16384` | `173.12` | `421.55` | `192.37` | `192.25` | `552.30` | FFN dominates |
+
+Pointer-store spike with `QWEN_PREFILL_ATTN_MATRIX_G6=1`, `runs=3`:
+
+| Shape | pointer-store qwen | clean v0.123 family qwen | Read |
+| --- | ---: | ---: | --- |
+| `pp4096` | `188.77` | `186` | small possible win |
+| `pp16384` | `176.13` | `176` | flat/small possible win |
+
+Correctness: Q4_K, Q5_K, Q6_K, and Q8_0 mat-mat correctness tests all passed.
+
+Read: the no-op budget sharpens the next dense priority to FFN mat-mat/kernel
+layout rather than more attention work. The pointer-store spelling is worth
+keeping because it aligns with llama.cpp and is semantics-preserving, but it is
+only a small spike, not the FFN breakthrough.
+
 ## 2026-05-25 — Dense Group-6 Matrix Family Gate
 
 Status: clean `v0.122` 27B-vs-llama.cpp family gate after adding a long-prefix

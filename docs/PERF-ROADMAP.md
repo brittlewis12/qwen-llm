@@ -130,6 +130,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `pp16384` `176/188` (`0.93x`). Decode remains won at `tg32/tg128` (`1.13x` and
   `1.12x`). Matrix-G6 is therefore a real default candidate but not the final
   dense answer.
+- With matrix-G6 enabled, fresh no-op rows move the dense residual priority to
+  FFN: at `pp4096`, no-FFN is `180.50 -> 541.59 t/s` while no-GDN/no-attn are only
+  `193.30/193.93`; at `pp16384`, no-FFN is `173.12 -> 421.55` while no-GDN/no-attn
+  are `192.37/192.25`. A llama-like threadgroup pointer-store spelling for
+  Q4/Q5/Q6/Q8 mat-mat is correctness-green and gives only small dirty-spike rows
+  (`188.77 t/s` at `pp4096`, `176.13 t/s` at `pp16384`), so the high-EV dense work
+  remains deeper FFN mat-mat/layout/fusion evidence, not more local attention.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

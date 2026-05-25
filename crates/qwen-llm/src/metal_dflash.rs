@@ -403,6 +403,11 @@ fn prefill_trace_attn_phases_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_ATTN_PHASES"))
 }
 
+fn prefill_trace_layer_phases_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_LAYER_PHASES"))
+}
+
 fn flush_prefill_phase(
     ctx: &MetalContext,
     cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -423,6 +428,31 @@ fn flush_prefill_phase(
     eprintln!(
         "[prefill-attn-phase] chunk={} start={} layer={} phase={} gpu_ms={:.2}",
         chunk_idx, chunk_start, layer_idx, phase, gpu_ms
+    );
+    *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+}
+
+fn flush_prefill_layer_phase(
+    ctx: &MetalContext,
+    cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    prefill_gpu_total_ms: &mut f64,
+    enabled: bool,
+    chunk_idx: usize,
+    chunk_start: u32,
+    layer_idx: usize,
+    kind: &str,
+    phase: &str,
+) {
+    if !enabled {
+        return;
+    }
+    cmd_buf.commit();
+    cmd_buf.waitUntilCompleted();
+    let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+    *prefill_gpu_total_ms += gpu_ms;
+    eprintln!(
+        "[prefill-layer-phase] chunk={} start={} layer={} kind={} phase={} gpu_ms={:.2}",
+        chunk_idx, chunk_start, layer_idx, kind, phase, gpu_ms
     );
     *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
 }
@@ -4213,6 +4243,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         // before each commit must be ordered behind GPU reads of prior
         // commits (codex Q3 hazard), and (b) layer_scratch is reused.
         let mut cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
+        let trace_layer_phases = prefill_trace_layer_phases_enabled();
 
         // Sized views of layer_scratch sliced to chunk_p. Every encoder
         // dispatch's host-side n_elements() validation is against the
@@ -4249,6 +4280,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         let mut attn_idx = 0usize;
         for (il, block) in base.model.blocks.iter().enumerate() {
             let mut apply_mixer_residual = true;
+            let block_kind = match block {
+                MetalBlock::Gdn(_) => "gdn",
+                MetalBlock::Attn(_) => "attn",
+            };
             // 2a: pre-mixer norm batched across chunk_p rows.
             let attn_norm = match block {
                 MetalBlock::Gdn(g) => &g.attn_norm,
@@ -4261,6 +4296,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 )?;
                 enc.end();
             }
+            flush_prefill_layer_phase(
+                base.ctx,
+                &mut cmd_buf,
+                &mut prefill_gpu_total_ms,
+                trace_layer_phases,
+                chunk_idx,
+                chunk_start,
+                il,
+                block_kind,
+                "pre_norm",
+            );
 
             // 2b: mixer (GDN or Attn). NO ckpt blits (prefill is
             // final-commit; no rollback machinery).
@@ -4354,6 +4400,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                             enc.end();
                         }
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "gdn",
+                            "gdn_front",
+                        );
 
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -4370,6 +4427,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                             enc.end();
                         }
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "gdn",
+                            "gdn_alpha_beta",
+                        );
 
                         if matches!(gdn_split, PrefillGdnSplitMode::SkipAll) {
                             apply_mixer_residual = false;
@@ -4409,6 +4477,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     RMS_EPS,
                                 )?;
                                 enc.end();
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "gdn",
+                                    "gdn_prep",
+                                );
                             }
 
                             if gdn_split.run_step() {
@@ -4429,6 +4508,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     head_dim_u,
                                 )?;
                                 enc.end();
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "gdn",
+                                    "gdn_step",
+                                );
                             }
 
                             if gdn_split.run_gated() {
@@ -4445,6 +4535,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     RMS_EPS,
                                 )?;
                                 enc.end();
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "gdn",
+                                    "gdn_gated",
+                                );
                             } else if gdn_split.needs_zero_normed() {
                                 zero_f32_tensor(&gdn_normed_pack_p);
                             }
@@ -4478,6 +4579,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 )?;
                                 enc.end();
                             }
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "gdn",
+                                "gdn_tail",
+                            );
                         }
 
                         if apply_mixer_residual {
@@ -4493,6 +4605,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 chunk_p,
                             )?;
                             enc.end();
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "gdn",
+                                "gdn_back",
+                            );
                         }
                     } else {
                         // F32 oracle / mixed-dtype fallback: per-token
@@ -4521,6 +4644,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 )?;
                                 enc.end();
                             }
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "gdn",
+                                "gdn_fallback",
+                            );
                         }
                     }
                 }
@@ -5579,6 +5713,21 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 chunk_p,
                             )?;
                             enc.end();
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "attn",
+                                if trace_attn_phases {
+                                    "attn_back"
+                                } else {
+                                    "attn"
+                                },
+                            );
                         }
                     } else {
                         // F32 oracle / fallback: per-token encode_attn.
@@ -5608,6 +5757,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 )?;
                                 enc.end();
                             }
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "attn",
+                                "attn_fallback",
+                            );
                         }
                     }
                 }
@@ -5618,6 +5778,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 let enc = KernelEncoder::begin(&cmd_buf);
                 encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &mixer_out_pack_p)?;
                 enc.end();
+                flush_prefill_layer_phase(
+                    base.ctx,
+                    &mut cmd_buf,
+                    &mut prefill_gpu_total_ms,
+                    trace_layer_phases,
+                    chunk_idx,
+                    chunk_start,
+                    il,
+                    block_kind,
+                    "mixer_resid",
+                );
             }
 
             // 2e/f/g: post-norm + FFN/MoE tail + residual #2 + hidden_capture.
@@ -6567,6 +6738,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 }
 
                 enc.end();
+                flush_prefill_layer_phase(
+                    base.ctx,
+                    &mut cmd_buf,
+                    &mut prefill_gpu_total_ms,
+                    trace_layer_phases,
+                    chunk_idx,
+                    chunk_start,
+                    il,
+                    block_kind,
+                    "ffn",
+                );
             }
         } // end per-layer loop
 

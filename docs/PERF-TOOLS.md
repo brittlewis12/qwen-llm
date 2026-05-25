@@ -517,6 +517,35 @@ Rules for the cooled harness:
   first newly activated chunk size (for example `pp512` before promoting
   `min_pos=512`). Do not infer safety from later-context oracles alone.
 
+### Prefill phase trace lane
+
+Use phase traces when total-throughput drift is as large as the candidate win.
+The trace path commits/waits at phase boundaries, so it is attribution evidence,
+not a promotion throughput number.
+
+```sh
+QWEN_PREFILL_TRACE_LAYER_PHASES=1 \
+QWEN_PREFILL_TRACE_ATTN_PHASES=1 \
+target/release/qwen-bench pp \
+  -m "$MODEL" \
+  -p 4096 \
+  --runs 1 \
+  --no-warmup \
+  2> target/profiles/prefill-phases.log
+
+uv run scripts/profile/prefill_phase_summary.py \
+  target/profiles/prefill-phases.log
+```
+
+Rules:
+
+- `QWEN_PREFILL_TRACE_LAYER_PHASES=1` emits `prefill-layer-phase` rows for dense
+  pre-norm, GDN, mixer residual, and dense FFN phases.
+- Add `QWEN_PREFILL_TRACE_ATTN_PHASES=1` when attention attribution matters; by
+  itself, layer tracing collapses attention work into one `attn` phase.
+- Compare phase-local sums across paired runs before defaulting a sub-noise
+  total-throughput candidate such as dense fused-SwiGLU or reduced mat-mat smem.
+
 ### Real rollout prompt lane
 
 Synthetic `pp<N>` remains the fast scoreboard harness, but it is not the only

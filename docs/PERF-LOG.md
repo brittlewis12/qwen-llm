@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-24 — Dense Group-6 Matrix Clean Repeat
+
+Status: clean `v0.120` repeat gate after rebuilding `qwen-bench` from commit
+`3eb923e71`. Runs were sequential on AC power; post-run `pmset` reported no
+thermal/performance/CPU-power warning and `memory_pressure -Q` reported `95%`
+free. Raw rows are in `docs/bench/2026-05-24-dense-g6-clean-repeat-v0120/`.
+The earlier accidental pre-commit clean rows are in
+`docs/bench/2026-05-24-dense-g6-clean-repeat/` and are not the canonical gate.
+
+### Measurements
+
+27B dense, `QWEN_PREFILL_ATTN_MATRIX_G6=1`, `runs=3`, default chunk policy:
+
+| Shape | baseline | matrix-g6 | matrix/baseline | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp128` | `188.33` | `198.42` | `1.05x` | short win |
+| `pp512` | `195.85` | `210.99` | `1.08x` | medium win |
+| `pp1024` | `175.66` | `188.60` | `1.07x` | medium win, noisy |
+| `pp4096` | `151.87` | `185.85` | `1.22x` | long win |
+| `pp16384` | `125.21` | `173.84` | `1.39x` | large true-long win |
+
+Read: the dense group-6 matrix-attention branch survives the clean repeat and now
+has enough evidence to be treated as a promotion candidate rather than a spike.
+It still does not close the full dense gap to lcpp, and it still needs stronger
+G6 long-prefix correctness/coverage before becoming a default.
+
 ## 2026-05-24 — Dense Group-6 Matrix Attention Spike
 
 Status: dirty-code spike from checkpoint `1a211ceb5` after generalizing the

@@ -6654,123 +6654,253 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
                     && ffn_mat_mat_eligible(u_w.dtype)
                     && ffn_mat_mat_eligible(d_w.dtype);
-                let enc = KernelEncoder::begin(&cmd_buf);
-                encode_rms_norm_batched_f32(
-                    base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
-                )?;
-                if skip_ffn {
-                    // profiling only: leave x_pack unchanged after post-norm so a
-                    // production-shape run can report the direct FFN wall delta.
-                } else if mat_mat_path {
-                    if prefill_dense_ffn_fused_swiglu_q4_enabled()
+                if trace_layer_phases && !skip_ffn && mat_mat_path {
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_rms_norm_batched_f32(
+                            base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
+                        )?;
+                        enc.end();
+                    }
+                    flush_prefill_layer_phase(
+                        base.ctx,
+                        &mut cmd_buf,
+                        &mut prefill_gpu_total_ms,
+                        trace_layer_phases,
+                        chunk_idx,
+                        chunk_start,
+                        il,
+                        block_kind,
+                        "ffn_norm",
+                    );
+
+                    let use_fused_swiglu = prefill_dense_ffn_fused_swiglu_q4_enabled()
                         && g_w.dtype == GgmlType::Q4_K
                         && u_w.dtype == GgmlType::Q4_K
                         && h % 256 == 0
-                        && chunk_p >= 32
+                        && chunk_p >= 32;
                     {
-                        crate::metal::encode_ffn_fused_swiglu_q4_K_mm_f32(
-                            base.ctx,
-                            &enc,
-                            g_w,
-                            u_w,
-                            &h_pack_p,
-                            &ffn_inner_pack_p,
-                            h,
-                            f,
-                            chunk_p,
-                        )?;
-                    } else {
-                        encode_mat_mat_dispatch(
-                            base.ctx,
-                            &enc,
-                            g_w,
-                            &h_pack_p,
-                            &ffn_gate_pack_p,
-                            h,
-                            f,
-                            chunk_p,
-                        )?;
-                        encode_mat_mat_dispatch(
-                            base.ctx,
-                            &enc,
-                            u_w,
-                            &h_pack_p,
-                            &ffn_up_pack_p,
-                            h,
-                            f,
-                            chunk_p,
-                        )?;
-                        encode_silu_mul_f32(
-                            base.ctx,
-                            &enc,
-                            &ffn_gate_pack_p,
-                            &ffn_up_pack_p,
-                            &ffn_inner_pack_p,
-                        )?;
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        if use_fused_swiglu {
+                            crate::metal::encode_ffn_fused_swiglu_q4_K_mm_f32(
+                                base.ctx,
+                                &enc,
+                                g_w,
+                                u_w,
+                                &h_pack_p,
+                                &ffn_inner_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                        } else {
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                g_w,
+                                &h_pack_p,
+                                &ffn_gate_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                u_w,
+                                &h_pack_p,
+                                &ffn_up_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                            encode_silu_mul_f32(
+                                base.ctx,
+                                &enc,
+                                &ffn_gate_pack_p,
+                                &ffn_up_pack_p,
+                                &ffn_inner_pack_p,
+                            )?;
+                        }
+                        enc.end();
                     }
-                    encode_mat_mat_dispatch(
+                    flush_prefill_layer_phase(
                         base.ctx,
-                        &enc,
-                        d_w,
-                        &ffn_inner_pack_p,
-                        &ffn_out_pack_p,
-                        f,
-                        h,
-                        chunk_p,
-                    )?;
-                    encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
-                } else {
-                    // F32 / non-mat-mat fallback: per-token mat-vec.
-                    for n_idx in 0..chunk_p {
-                        let h_n = h_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                        let gate_n =
-                            ffn_gate_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
-                        let up_n = ffn_up_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
-                        let inner_n =
-                            ffn_inner_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
-                        let out_n =
-                            ffn_out_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                        encode_mat_vec_dispatch(base.ctx, &enc, g_w, &h_n, &gate_n, h, f)?;
-                        encode_mat_vec_dispatch(base.ctx, &enc, u_w, &h_n, &up_n, h, f)?;
-                        encode_silu_mul_f32(base.ctx, &enc, &gate_n, &up_n, &inner_n)?;
-                        encode_mat_vec_dispatch(base.ctx, &enc, d_w, &inner_n, &out_n, f, h)?;
-                    }
-                    encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
-                }
+                        &mut cmd_buf,
+                        &mut prefill_gpu_total_ms,
+                        trace_layer_phases,
+                        chunk_idx,
+                        chunk_start,
+                        il,
+                        block_kind,
+                        if use_fused_swiglu {
+                            "ffn_fused_gate_up_swiglu"
+                        } else {
+                            "ffn_gate_up_swiglu"
+                        },
+                    );
 
-                // 2d-fix (matches v0.74.4 capture point): hidden capture
-                // after residual #2. Writes into the GLOBAL hidden_dst at
-                // offset ((global_idx * K + k_idx) * H), where
-                // global_idx = chunk_base + n_idx. Skipped entirely when
-                // hidden_dst is None (no-spec ref path).
-                if let Some(dst) = hidden_dst {
-                    for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
-                        if lid as usize == il {
-                            for n_idx in 0..chunk_p {
-                                let global_idx = chunk_base + n_idx;
-                                let elem_off = (global_idx * k_target + k_idx) * h;
-                                let row_view =
-                                    x_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                                encode_scatter_offset_f32(
-                                    base.ctx, &enc, &row_view, dst, elem_off, h,
-                                )?;
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            d_w,
+                            &ffn_inner_pack_p,
+                            &ffn_out_pack_p,
+                            f,
+                            h,
+                            chunk_p,
+                        )?;
+                        encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
+                        if let Some(dst) = hidden_dst {
+                            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                                if lid as usize == il {
+                                    for n_idx in 0..chunk_p {
+                                        let global_idx = chunk_base + n_idx;
+                                        let elem_off = (global_idx * k_target + k_idx) * h;
+                                        let row_view = x_pack_p
+                                            .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                        encode_scatter_offset_f32(
+                                            base.ctx, &enc, &row_view, dst, elem_off, h,
+                                        )?;
+                                    }
+                                }
+                            }
+                        }
+                        enc.end();
+                    }
+                    flush_prefill_layer_phase(
+                        base.ctx,
+                        &mut cmd_buf,
+                        &mut prefill_gpu_total_ms,
+                        trace_layer_phases,
+                        chunk_idx,
+                        chunk_start,
+                        il,
+                        block_kind,
+                        "ffn_down_resid",
+                    );
+                } else {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_rms_norm_batched_f32(
+                        base.ctx, &enc, &x_pack_p, post_norm, &h_pack_p, chunk_p, h, RMS_EPS,
+                    )?;
+                    if skip_ffn {
+                        // profiling only: leave x_pack unchanged after post-norm so a
+                        // production-shape run can report the direct FFN wall delta.
+                    } else if mat_mat_path {
+                        if prefill_dense_ffn_fused_swiglu_q4_enabled()
+                            && g_w.dtype == GgmlType::Q4_K
+                            && u_w.dtype == GgmlType::Q4_K
+                            && h % 256 == 0
+                            && chunk_p >= 32
+                        {
+                            crate::metal::encode_ffn_fused_swiglu_q4_K_mm_f32(
+                                base.ctx,
+                                &enc,
+                                g_w,
+                                u_w,
+                                &h_pack_p,
+                                &ffn_inner_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                        } else {
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                g_w,
+                                &h_pack_p,
+                                &ffn_gate_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                u_w,
+                                &h_pack_p,
+                                &ffn_up_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                            encode_silu_mul_f32(
+                                base.ctx,
+                                &enc,
+                                &ffn_gate_pack_p,
+                                &ffn_up_pack_p,
+                                &ffn_inner_pack_p,
+                            )?;
+                        }
+                        encode_mat_mat_dispatch(
+                            base.ctx,
+                            &enc,
+                            d_w,
+                            &ffn_inner_pack_p,
+                            &ffn_out_pack_p,
+                            f,
+                            h,
+                            chunk_p,
+                        )?;
+                        encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
+                    } else {
+                        // F32 / non-mat-mat fallback: per-token mat-vec.
+                        for n_idx in 0..chunk_p {
+                            let h_n = h_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                            let gate_n =
+                                ffn_gate_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                            let up_n =
+                                ffn_up_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                            let inner_n =
+                                ffn_inner_pack_p.view_subrange((n_idx * f) as u64, vec![f as u64]);
+                            let out_n =
+                                ffn_out_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                            encode_mat_vec_dispatch(base.ctx, &enc, g_w, &h_n, &gate_n, h, f)?;
+                            encode_mat_vec_dispatch(base.ctx, &enc, u_w, &h_n, &up_n, h, f)?;
+                            encode_silu_mul_f32(base.ctx, &enc, &gate_n, &up_n, &inner_n)?;
+                            encode_mat_vec_dispatch(base.ctx, &enc, d_w, &inner_n, &out_n, f, h)?;
+                        }
+                        encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
+                    }
+
+                    // 2d-fix (matches v0.74.4 capture point): hidden capture
+                    // after residual #2. Writes into the GLOBAL hidden_dst at
+                    // offset ((global_idx * K + k_idx) * H), where
+                    // global_idx = chunk_base + n_idx. Skipped entirely when
+                    // hidden_dst is None (no-spec ref path).
+                    if let Some(dst) = hidden_dst {
+                        for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                            if lid as usize == il {
+                                for n_idx in 0..chunk_p {
+                                    let global_idx = chunk_base + n_idx;
+                                    let elem_off = (global_idx * k_target + k_idx) * h;
+                                    let row_view =
+                                        x_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                    encode_scatter_offset_f32(
+                                        base.ctx, &enc, &row_view, dst, elem_off, h,
+                                    )?;
+                                }
                             }
                         }
                     }
-                }
 
-                enc.end();
-                flush_prefill_layer_phase(
-                    base.ctx,
-                    &mut cmd_buf,
-                    &mut prefill_gpu_total_ms,
-                    trace_layer_phases,
-                    chunk_idx,
-                    chunk_start,
-                    il,
-                    block_kind,
-                    "ffn",
-                );
+                    enc.end();
+                    flush_prefill_layer_phase(
+                        base.ctx,
+                        &mut cmd_buf,
+                        &mut prefill_gpu_total_ms,
+                        trace_layer_phases,
+                        chunk_idx,
+                        chunk_start,
+                        il,
+                        block_kind,
+                        "ffn",
+                    );
+                }
             }
         } // end per-layer loop
 

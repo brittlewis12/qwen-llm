@@ -561,6 +561,29 @@ Treat this as a candidate-local gate. It overrides only the dense fused-SwiGLU
 flag; other env-gated paths such as matrix attention or reduced smem still come
 from the process environment.
 
+For llama.cpp Metal node profiles, enable its serialized profile mode and digest
+the log with the local summary helper:
+
+```sh
+GGML_METAL_PROFILE_OPS=1 \
+~/code/llama.cpp/build/bin/llama-bench \
+  -m "$MODEL" \
+  -p 4096 \
+  -n 0 \
+  -r 1 \
+  --no-warmup \
+  -o json \
+  -v \
+  > target/profiles/lcpp-profile.json \
+  2> target/profiles/lcpp-profile.log
+
+uv run scripts/profile/lcpp_metal_profile_summary.py \
+  target/profiles/lcpp-profile.log
+```
+
+`GGML_METAL_PROFILE_OPS=1` serializes llama.cpp graph nodes, so compare it only
+against qwen phase traces, not normal throughput rows.
+
 ### Real rollout prompt lane
 
 Synthetic `pp<N>` remains the fast scoreboard harness, but it is not the only

@@ -175,6 +175,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `pp16384-b` repeat is flat. Keep the branch as an env-only long-context clue,
   not a default candidate, until a repeated same-process gate and phase-local
   FFN mechanism agree.
+- A serialized qwen-vs-llama.cpp dense `pp4096` differential moves the next dense
+  target away from standalone SwiGLU fusion. Qwen's split FFN buckets are only a
+  few percent slower (`gate/up/SwiGLU` `8408` vs `8106 ms`, `down/resid` `4310`
+  vs `4200 ms`), while GDN front projections are the larger local delta (`3613`
+  vs `2998 ms`) and matrix attention body still has a smaller residual delta.
+  Next dense work should inspect GDN front lowering and lcpp op shapes before
+  another FFN fusion branch.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN

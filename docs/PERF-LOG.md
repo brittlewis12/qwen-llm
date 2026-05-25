@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Dense llama.cpp Differential Moves Focus Off SwiGLU
+
+Status: dirty-code attribution after `v0.132`. Added a llama.cpp Metal profile
+summary parser and split qwen dense FFN tracing into norm, gate/up/SwiGLU, and
+down/residual buckets. Raw summaries are in
+`docs/bench/2026-05-25-v0133-dense-lcpp-diff/`.
+
+### Measurements
+
+Serialized attribution profiles at dense 27B `pp4096`:
+
+| Bucket | qwen ms | llama.cpp ms | Read |
+| --- | ---: | ---: | --- |
+| FFN gate/up/SwiGLU | `8408.19` | `8106.38` | qwen `~3.7%` slower |
+| FFN down/residual | `4309.56` | `4199.97` | qwen `~2.6%` slower |
+| GDN front projections | `3612.91` | `2997.76` | qwen `~20%` slower |
+| Attention KQ/KQV/softmax | `498.99` | `371.30` | qwen still slower in matrix body |
+
+Read: this explains why dense fused-SwiGLU kept failing total gates. The FFN
+mat-mat delta exists but is not the dominant local differential under serialized
+profiling. The next dense inspection should focus on GDN front projection lowering
+and the remaining attention-body delta, with end-to-end gates before any default.
+
 ## 2026-05-25 — Same-Process FFN A/B Keeps Fused SwiGLU Env-Only
 
 Status: dirty-code harness after `v0.131`. Added a runtime override plus hidden

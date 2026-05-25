@@ -1,0 +1,81 @@
+op	name	count	gpu_ms	pct	avg_ms
+MUL_MAT	ffn_out	512	4165.42	21.8	8.136
+MUL_MAT	ffn_up	512	4018.51	21.0	7.849
+MUL_MAT	ffn_gate	512	3954.70	20.7	7.724
+MUL_MAT	node	1152	1928.84	10.1	1.674
+MUL_MAT	linear_attn_out	384	1134.26	5.9	2.954
+MUL_MAT	z	384	1068.92	5.6	2.784
+MUL_MAT	Qcur_full-*	128	698.15	3.7	5.454
+GATED_DELTA_NET	__fgdn_ch__	384	519.91	2.7	1.354
+MUL_MAT	attn_output-*	128	351.05	1.8	2.743
+MUL_MAT	kqv-*	128	147.38	0.8	1.151
+MUL_MAT	kq-*	128	144.87	0.8	1.132
+GLU	ffn_swiglu	512	133.17	0.7	0.260
+SOFT_MAX	kq_soft_max-*	128	79.05	0.4	0.618
+CONCAT	conv_input	384	77.25	0.4	0.201
+MUL_MAT	Kcur-*	128	69.15	0.4	0.540
+MUL_MAT	Vcur-*	128	68.68	0.4	0.537
+SSM_CONV	conv_output_raw	384	65.57	0.3	0.171
+RMS_NORM	norm	1666	64.64	0.3	0.039
+MUL	node	768	45.27	0.2	0.059
+CONT	gate_reshaped-*	128	40.26	0.2	0.315
+CONT	attn_pregate-*	128	39.44	0.2	0.308
+UNARY	conv_output_silu	384	36.73	0.2	0.096
+ADD	l_out	504	34.55	0.2	0.069
+ADD	attn_residual	512	34.45	0.2	0.067
+UNARY	node	384	23.46	0.1	0.061
+CPY	cache_s_l	384	19.80	0.1	0.052
+UNARY	beta_sigmoid	384	14.79	0.1	0.039
+MUL	attn_post_norm	512	14.07	0.1	0.027
+MUL	attn_norm	512	12.75	0.1	0.025
+GET_ROWS	node	386	11.57	0.1	0.030
+L2_NORM	q_conv_predelta	384	11.38	0.1	0.030
+L2_NORM	k_conv_predelta	384	11.24	0.1	0.029
+UNARY	gate_sigmoid-*	128	8.22	0.0	0.064
+MUL	attn_gated-*	128	6.54	0.0	0.051
+ROPE	Qcur-*	128	6.24	0.0	0.049
+UNARY	a_softplus	384	5.25	0.0	0.014
+ADD	node	384	5.22	0.0	0.014
+MUL	gate-*	384	4.68	0.0	0.012
+MUL_MAT	result_output	2	4.65	0.0	2.325
+MUL	Qcur_normed-*	128	4.50	0.0	0.035
+CPY	conv_state_update	384	3.70	0.0	0.010
+GET_ROWS	conv_states-*	384	2.73	0.0	0.007
+MUL	Kcur_normed-*	128	1.42	0.0	0.011
+ROPE	Kcur-*	128	1.38	0.0	0.011
+SCALE	cache_s_l	48	1.15	0.0	0.024
+SCALE	cache_r_l	48	0.97	0.0	0.020
+SET_ROWS	cache_v_l51 (reshaped) (view)	8	0.92	0.0	0.115
+SET_ROWS	cache_v_l11 (reshaped) (view)	8	0.70	0.0	0.087
+SET_ROWS	cache_v_l43 (reshaped) (view)	8	0.61	0.0	0.076
+SET_ROWS	cache_v_l63 (reshaped) (view)	8	0.60	0.0	0.075
+ADD	h_pre_norm	8	0.56	0.0	0.070
+SET_ROWS	cache_v_l55 (reshaped) (view)	8	0.44	0.0	0.055
+SET_ROWS	cache_v_l19 (reshaped) (view)	8	0.43	0.0	0.054
+SET_ROWS	cache_v_l39 (reshaped) (view)	8	0.29	0.0	0.037
+SET_ROWS	cache_v_l47 (reshaped) (view)	8	0.29	0.0	0.037
+SET_ROWS	cache_v_l31 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_v_l3 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_v_l23 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_v_l15 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_v_l27 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_v_l7 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_v_l35 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_v_l59 (reshaped) (view)	8	0.29	0.0	0.036
+SET_ROWS	cache_k_l55 (view)	8	0.20	0.0	0.025
+SET_ROWS	cache_k_l35 (view)	8	0.20	0.0	0.025
+SET_ROWS	cache_k_l27 (view)	8	0.19	0.0	0.024
+SET_ROWS	cache_k_l23 (view)	8	0.17	0.0	0.021
+SET_ROWS	cache_k_l3 (view)	8	0.16	0.0	0.020
+SET_ROWS	cache_k_l39 (view)	8	0.16	0.0	0.019
+SET_ROWS	cache_k_l51 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l43 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l63 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l11 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l31 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l19 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l15 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l59 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l47 (view)	8	0.15	0.0	0.019
+SET_ROWS	cache_k_l7 (view)	8	0.15	0.0	0.019
+MUL	result_norm	2	0.01	0.0	0.004

@@ -1100,13 +1100,27 @@ pub fn encode_mat_vec_q4_k_f32(
 /// scalar-float mat-vec is the gate (vs cos ≥ 0.9999 against a
 /// CPU mat-mat oracle that uses the same staging).
 fn mat_mat_qk_threadgroup_memory(n_out: usize, n_query: usize, nr1: usize) -> usize {
-    static LEGACY: OnceLock<bool> = OnceLock::new();
-    if *LEGACY.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_MATMAT_QK_LEGACY_SMEM").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    }) {
+    static LLAMA_SMEM: OnceLock<bool> = OnceLock::new();
+    mat_mat_qk_threadgroup_memory_with_policy(
+        n_out,
+        n_query,
+        nr1,
+        *LLAMA_SMEM.get_or_init(|| {
+            matches!(
+                std::env::var("QWEN_MATMAT_QK_LLAMA_SMEM").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        }),
+    )
+}
+
+fn mat_mat_qk_threadgroup_memory_with_policy(
+    n_out: usize,
+    n_query: usize,
+    nr1: usize,
+    llama_smem: bool,
+) -> usize {
+    if !llama_smem {
         return 8192;
     }
     if n_out % 64 == 0 && n_query % nr1 == 0 {
@@ -1115,7 +1129,6 @@ fn mat_mat_qk_threadgroup_memory(n_out: usize, n_query: usize, nr1: usize) -> us
         8192
     }
 }
-
 pub fn encode_mat_mat_q4_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -9667,11 +9680,30 @@ mod tests {
 
     #[test]
     fn mat_mat_qk_threadgroup_memory_matches_full_tile_policy() {
-        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 16, 16), 5120);
-        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 32, 32), 6144);
-        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 1024, 32), 6144);
-        assert_eq!(mat_mat_qk_threadgroup_memory(5121, 32, 32), 8192);
-        assert_eq!(mat_mat_qk_threadgroup_memory(5120, 31, 32), 8192);
+        assert_eq!(
+            mat_mat_qk_threadgroup_memory_with_policy(5120, 16, 16, false),
+            8192
+        );
+        assert_eq!(
+            mat_mat_qk_threadgroup_memory_with_policy(5120, 16, 16, true),
+            5120
+        );
+        assert_eq!(
+            mat_mat_qk_threadgroup_memory_with_policy(5120, 32, 32, true),
+            6144
+        );
+        assert_eq!(
+            mat_mat_qk_threadgroup_memory_with_policy(5120, 1024, 32, true),
+            6144
+        );
+        assert_eq!(
+            mat_mat_qk_threadgroup_memory_with_policy(5121, 32, 32, true),
+            8192
+        );
+        assert_eq!(
+            mat_mat_qk_threadgroup_memory_with_policy(5120, 31, 32, true),
+            8192
+        );
     }
 
     #[test]

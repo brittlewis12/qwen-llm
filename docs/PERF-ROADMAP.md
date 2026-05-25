@@ -148,14 +148,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `177.22 -> 179.24` (`1.01x`). It is a useful long-prompt candidate, not enough
   to crack lcpp, and the `pp512/pp1024` dirty rows block broad defaulting.
 - A llama-parity smem cleanup for Q4/Q5/Q6/Q8 mat-mat is worth keeping but not
-  over-reading. Full output tiles now request `5120` bytes for NR1=16 or `6144`
-  bytes for NR1=32, matching llama.cpp's no-edge-scratch policy, with
-  `QWEN_MATMAT_QK_LEGACY_SMEM=1` as the A/B fallback. Microbench rows are flat at
-  `N=512`, clearly positive at `N=1024` (Q4 gate/up `19.812/17.617 ->
-  14.567/14.853 ms`, Q6 down `19.733 -> 16.119 ms`), and modest at `N=4096`.
-  Dense 27B matrix-G6 prompt rows show noisy short/medium behavior and small long
-  positives (`pp4096` `202.83 -> 204.55`, `pp16384` `176.33/175.72 -> 176.74`).
-  Keep it as resource-policy cleanup; keep hunting larger FFN/GDN execution gaps.
+  over-reading. Dirty microbench rows are flat at `N=512`, clearly positive at
+  `N=1024` (Q4 gate/up `19.812/17.617 -> 14.567/14.853 ms`, Q6 down
+  `19.733 -> 16.119 ms`), and modest at `N=4096`, but a clean v0.127 matrix-G6
+  end-to-end A/B does not prove a default win (`pp4096` new/legacy/new =
+  `189.00/204.65/204.51`, `pp16384` `190.83/191.68/188.44`). Keep legacy 8192B
+  requests as default; use `QWEN_MATMAT_QK_LLAMA_SMEM=1` only as an opt-in
+  diagnostic while hunting larger FFN/GDN execution gaps.
 - A follow-up F16-inner/Q6-F16-source dense FFN spike is falsified. Correctness was
   clean, but cooled rows show no stable end-to-end win (`pp4096` F16-inner
   `202.33` vs fused-Q4 `201.66`, `pp16384` `180.59` vs fused-Q4 `182.00`) and a

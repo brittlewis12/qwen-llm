@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — Clean Smem A/B Flips Reduced-Smem To Opt-In
+
+Status: clean `v0.127` follow-up after the dirty mat-mat smem parity spike.
+`qwen-bench` was rebuilt from `fcab600`, then matrix-G6 27B dense prompt sweeps
+compared the new reduced-smem policy against `QWEN_MATMAT_QK_LEGACY_SMEM=1`.
+Clean end-to-end rows did not prove a default win, so the code now keeps legacy
+`8192`-byte mat-mat threadgroup-memory requests by default and exposes the
+llama-style full-tile policy only through `QWEN_MATMAT_QK_LLAMA_SMEM=1`. Raw rows
+are in `docs/bench/2026-05-25-matmat-smem-clean-v0127/`.
+
+### Measurements
+
+27B dense with matrix-G6/G8 enabled, `runs=3`, clean rebuilt binary:
+
+| Shape | smem-new A | legacy | smem-new B | Read |
+| --- | ---: | ---: | ---: | --- |
+| `pp1024` | `221.09` | `210.26` | `202.98` | high drift; no robust win |
+| `pp4096` | `189.00` | `204.65` | `204.51` | first new run bad, second equals legacy |
+| `pp16384` | `190.83` | `191.68` | `188.44` | flat/slightly worse |
+
+Read: the reduced-smem policy is microbench-positive but system-level unproven.
+Defaulting it would be optimizing from kernel intuition rather than end-to-end
+evidence, so it is now opt-in only. The bigger lesson is measurement hygiene:
+run-order drift is large enough that fresh qwen-vs-lcpp claims need interleaved
+or repeated anchors.
+
 ## 2026-05-25 — Mat-Mat Threadgroup-Memory Parity Spike
 
 Status: dirty-code spike after `v0.126` to match llama.cpp's classic `mul_mm`

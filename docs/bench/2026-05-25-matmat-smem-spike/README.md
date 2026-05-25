@@ -66,3 +66,5 @@ Conclusion:
 - The branch is correctness-preserving, reduces resource requests on full tiles, and has small microbench support.
 - Short/medium end-to-end rows are noisy enough that they should not be used as a promotion claim.
 - The end-to-end effect is below the threshold needed to close dense 27B by itself.
+- Clean follow-up in `docs/bench/2026-05-25-matmat-smem-clean-v0127/` failed the
+  default gate, so the reduced-smem policy is opt-in via `QWEN_MATMAT_QK_LLAMA_SMEM=1`.

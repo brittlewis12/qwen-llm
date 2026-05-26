@@ -6357,82 +6357,202 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             "routed_skip",
                         );
                     } else if grouped_routed_path {
-                        let enc = KernelEncoder::begin(&cmd_buf);
-                        label_prefill_encoder(&enc, il, "moe-routed-grouped");
                         let zero_grouped_buffers = prefill_moe_grouped_zero_fill_enabled();
                         let grouped_q4_n32_all =
                             prefill_moe_grouped_q4_n32_all_enabled(arch, chunk_p);
-                        if !fused_route_bucket {
-                            crate::metal::encode_moe_route_bucket_slots_f32(
+                        if trace_layer_phases {
+                            if !fused_route_bucket {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                crate::metal::encode_moe_route_bucket_slots_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &moe_topk_idx_pack_p,
+                                    &moe_group_count_pack,
+                                    &moe_group_ids_pack,
+                                    n_expert,
+                                    chunk_p,
+                                    topk,
+                                )?;
+                                enc.end();
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "moe",
+                                    "route_bucket",
+                                );
+                            }
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                label_prefill_encoder(&enc, il, "moe-routed-grouped-swiglu");
+                                if zero_grouped_buffers {
+                                    encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
+                                }
+                                encode_prefill_moe_grouped_swiglu_q4(
+                                    base.ctx,
+                                    &enc,
+                                    moe,
+                                    &h_pack_p,
+                                    &moe_group_count_pack,
+                                    &moe_group_ids_pack,
+                                    &moe_group_inner_pack_p,
+                                    h,
+                                    f_exp,
+                                    n_expert,
+                                    topk,
+                                    chunk_p,
+                                    grouped_q4_n32_all,
+                                    hot_expert_min_slots,
+                                )?;
+                                enc.end();
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "moe",
+                                    "routed_swiglu",
+                                );
+                            }
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                label_prefill_encoder(&enc, il, "moe-routed-grouped-down");
+                                if zero_grouped_buffers {
+                                    encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
+                                }
+                                encode_prefill_moe_grouped_down(
+                                    base.ctx,
+                                    &enc,
+                                    &moe.down_exps,
+                                    &moe_group_inner_pack_p,
+                                    &moe_group_count_pack,
+                                    &moe_group_ids_pack,
+                                    &moe_group_out_pack_p,
+                                    f_exp,
+                                    h,
+                                    n_expert,
+                                    chunk_p,
+                                )?;
+                                enc.end();
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "moe",
+                                    "routed_down",
+                                );
+                            }
+                            if !fused_grouped_finalizer {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                crate::metal::encode_moe_weighted_sum_packed_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &moe_group_out_pack_p,
+                                    &moe_topk_weight_pack_p,
+                                    &moe_mixer_out_pack_p,
+                                    h,
+                                    topk,
+                                    chunk_p,
+                                )?;
+                                enc.end();
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "moe",
+                                    "routed_reduce",
+                                );
+                            }
+                        } else {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            label_prefill_encoder(&enc, il, "moe-routed-grouped");
+                            if !fused_route_bucket {
+                                crate::metal::encode_moe_route_bucket_slots_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &moe_topk_idx_pack_p,
+                                    &moe_group_count_pack,
+                                    &moe_group_ids_pack,
+                                    n_expert,
+                                    chunk_p,
+                                    topk,
+                                )?;
+                            }
+                            if zero_grouped_buffers {
+                                encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
+                            }
+                            encode_prefill_moe_grouped_swiglu_q4(
                                 base.ctx,
                                 &enc,
-                                &moe_topk_idx_pack_p,
+                                moe,
+                                &h_pack_p,
                                 &moe_group_count_pack,
                                 &moe_group_ids_pack,
+                                &moe_group_inner_pack_p,
+                                h,
+                                f_exp,
                                 n_expert,
-                                chunk_p,
                                 topk,
+                                chunk_p,
+                                grouped_q4_n32_all,
+                                hot_expert_min_slots,
                             )?;
-                        }
-                        if zero_grouped_buffers {
-                            encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
-                        }
-                        encode_prefill_moe_grouped_swiglu_q4(
-                            base.ctx,
-                            &enc,
-                            moe,
-                            &h_pack_p,
-                            &moe_group_count_pack,
-                            &moe_group_ids_pack,
-                            &moe_group_inner_pack_p,
-                            h,
-                            f_exp,
-                            n_expert,
-                            topk,
-                            chunk_p,
-                            grouped_q4_n32_all,
-                            hot_expert_min_slots,
-                        )?;
-                        if zero_grouped_buffers {
-                            encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
-                        }
-                        encode_prefill_moe_grouped_down(
-                            base.ctx,
-                            &enc,
-                            &moe.down_exps,
-                            &moe_group_inner_pack_p,
-                            &moe_group_count_pack,
-                            &moe_group_ids_pack,
-                            &moe_group_out_pack_p,
-                            f_exp,
-                            h,
-                            n_expert,
-                            chunk_p,
-                        )?;
-                        if !fused_grouped_finalizer {
-                            crate::metal::encode_moe_weighted_sum_packed_f32(
+                            if zero_grouped_buffers {
+                                encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
+                            }
+                            encode_prefill_moe_grouped_down(
                                 base.ctx,
                                 &enc,
+                                &moe.down_exps,
+                                &moe_group_inner_pack_p,
+                                &moe_group_count_pack,
+                                &moe_group_ids_pack,
                                 &moe_group_out_pack_p,
-                                &moe_topk_weight_pack_p,
-                                &moe_mixer_out_pack_p,
+                                f_exp,
                                 h,
-                                topk,
+                                n_expert,
                                 chunk_p,
                             )?;
+                            if !fused_grouped_finalizer {
+                                crate::metal::encode_moe_weighted_sum_packed_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &moe_group_out_pack_p,
+                                    &moe_topk_weight_pack_p,
+                                    &moe_mixer_out_pack_p,
+                                    h,
+                                    topk,
+                                    chunk_p,
+                                )?;
+                            }
+                            enc.end();
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "moe",
+                                "routed_grouped",
+                            );
                         }
-                        enc.end();
-                        flush_prefill_layer_phase(
-                            base.ctx,
-                            &mut cmd_buf,
-                            &mut prefill_gpu_total_ms,
-                            trace_layer_phases,
-                            chunk_idx,
-                            chunk_start,
-                            il,
-                            "moe",
-                            "routed_grouped",
-                        );
                     } else if let Some(hot_threshold) = hot_expert_min_slots {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-cpu-hot");

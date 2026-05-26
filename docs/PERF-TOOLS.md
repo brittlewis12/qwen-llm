@@ -439,11 +439,13 @@ Rules for pp sweeps:
   `moe_gpu_token_loop`) with any result.
 - Treat experimental MoE flags such as `QWEN_PREFILL_MOE_PACKED_ROUTED` as part of
   the benchmark identity and report them explicitly.
-- Treat experimental attention flags such as `QWEN_PREFILL_ATTN_MATRIX_G8=1` as
-  diagnostic-only unless the roadmap says otherwise. `qwen-bench pp`, `pp-wait`,
-  and packed `decode` prefill now size matrix score/V_T scratch from the prompt
-  length automatically; only lower-level/custom callers should need
-  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=<tokens>`, and they must report it.
+- `QWEN_PREFILL_ATTN_MATRIX_G8` is tri-state on the proven A3B/group-8 shape:
+  unset means auto, `0` forces packed-attention rollback, and `1` force-enables
+  matrix with strict scratch checks. `qwen-bench pp`, `pp-wait`, and packed
+  `decode` prefill size matrix score/V_T scratch from the prompt length
+  automatically; lower-level/custom callers should use prompt-sized scratch or
+  rely on auto fallback. Dense G6 matrix attention remains env-only via
+  `QWEN_PREFILL_ATTN_MATRIX_G6=1`.
 - When comparing against `llama-bench`, remember that bench-tool `-fa 0` disables
   flash attention; it is not the library's auto flash-attention setting.
 - For cold A10B `pp128` methodology, `QWEN_PP_WARM_MOE_BANKS=1` or

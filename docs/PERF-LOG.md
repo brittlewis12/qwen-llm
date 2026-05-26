@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — A3B Matrix Attention Promotes To Default
+
+Status: dirty-code promotion after `v0.136`. The group-8 matrix-attention path is
+now auto-on for the proven A3B attention shape, with
+`QWEN_PREFILL_ATTN_MATRIX_G8=0` as rollback. Dense group-6 matrix attention stays
+env-only. Raw rows are in `docs/bench/2026-05-26-v0137-a3b-matrix-default/`.
+
+### Measurements
+
+A3B current HEAD, sequential AC-power rows, base packed attention vs matrix:
+
+| Shape | Packed/default rows | Matrix rows | Read |
+| --- | ---: | ---: | --- |
+| `pp128` | `671.33`, `676.27` | `726.81`, `719.09` | `~+7%` |
+| `pp512` | `1095.23`, `1099.98` | `1249.47`, `1233.00` | `~+13%` |
+| `pp1024` | `1239.69`, `1241.49` | `1421.72`, `1433.08` | `~+15%` |
+| `pp4096` | `1192.95`, `1191.45` | `1411.38`, `1406.32` | `~+18%` |
+| `pp16384` | `890.94`, `905.04` | `1185.98`, `1121.63` | `~+25-33%` |
+| real `v02_reva` `34.5k` | `655.34` | `837.18` | `~+28%` |
+
+Auto/rollback canary at `pp512`: default auto rows are `1234.35`, `1249.46`, while
+`QWEN_PREFILL_ATTN_MATRIX_G8=0` rolls back to `1098.21`, `1098.93`.
+
+Correctness/coverage: the full ignored A3B prefill-vs-single gate passed with
+matrix auto/default, including prefix `4096` / `8191` active shapes; worst active
+row was prefix `4096`, `T=8`, `P=8` with logits `0.999984` and GDN min `0.999611`.
+Trace-label coverage at default `pp512` showed `10/10` matrix attention layers and
+`40/40` route, grouped routed, and shared MoE labels. Power/thermal/memory probes
+stayed clean.
+
+Read: this clears the matrix production gate for A3B. The local matrix oracle keeps
+its documented numeric envelope (`cos >= 0.9999`, `max_abs <= 2e-2`), while the
+production gate is prefill-vs-single model-state equivalence. Auto mode falls back
+to packed attention when scratch is undersized; force-on remains strict.
+
 ## 2026-05-26 — RMSNorm Vec4 Falsifier Does Not Move A3B Matrix Prefill
 
 Status: dirty-code negative spike after `v0.135`, stripped before commit. Raw

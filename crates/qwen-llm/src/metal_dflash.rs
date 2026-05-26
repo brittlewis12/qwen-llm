@@ -545,9 +545,13 @@ fn prefill_attn_fused_qkv_g8_enabled(n_pos: usize, group: usize) -> bool {
     }
 }
 
-fn prefill_attn_matrix_g8_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_MATRIX_G8"))
+fn prefill_attn_matrix_g8_mode() -> PrefillEnvMode {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G8"))
+}
+
+fn prefill_attn_matrix_g8_may_use() -> bool {
+    !matches!(prefill_attn_matrix_g8_mode(), PrefillEnvMode::ForceOff)
 }
 
 fn prefill_attn_matrix_g6_enabled() -> bool {
@@ -1990,7 +1994,7 @@ impl MetalDFlashLayerMajorScratch {
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
         );
         let enable_attn_matrix = head_dim as usize == 256
-            && ((prefill_attn_matrix_g8_enabled() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
+            && ((prefill_attn_matrix_g8_may_use() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
                 || (prefill_attn_matrix_g6_enabled()
                     && arch.n_q_heads == 24
                     && arch.n_kv_heads == 4));
@@ -4131,10 +4135,15 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             ),
         }));
     }
-    let attn_matrix_shape = arch.attn_head_dim as usize == 256
-        && ((prefill_attn_matrix_g8_enabled() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
-            || (prefill_attn_matrix_g6_enabled() && arch.n_q_heads == 24 && arch.n_kv_heads == 4));
-    if attn_matrix_shape {
+    let attn_matrix_g8_force_on = prefill_attn_matrix_g8_mode() == PrefillEnvMode::ForceOn
+        && arch.attn_head_dim as usize == 256
+        && arch.n_q_heads == 16
+        && arch.n_kv_heads == 2;
+    let attn_matrix_g6_force_on = prefill_attn_matrix_g6_enabled()
+        && arch.attn_head_dim as usize == 256
+        && arch.n_q_heads == 24
+        && arch.n_kv_heads == 4;
+    if attn_matrix_g8_force_on || attn_matrix_g6_force_on {
         if layer_scratch.attn_matrix_max_pos < last_pos as u64 {
             return Err(DFlashError::Metal(MetalError::BadShape {
                 kernel: "prefill_attn_matrix",
@@ -5109,13 +5118,18 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 && head_dim == 256
                                 && n_q == 32
                                 && n_kv == 2;
-                            let use_matrix_g8 = use_packed_g8 && prefill_attn_matrix_g8_enabled();
+                            let matrix_scratch_covers_chunk = layer_scratch.attn_matrix_max_pos
+                                >= chunk_start as u64 + chunk_p as u64;
+                            let use_matrix_g8 = use_packed_g8
+                                && prefill_attn_matrix_g8_may_use()
+                                && matrix_scratch_covers_chunk;
                             let use_matrix_g6 = prefill_attn_matrix_g6_enabled()
                                 && target_session.kv_k[ai].dtype == GgmlType::F16
                                 && target_session.kv_v[ai].dtype == GgmlType::F16
                                 && head_dim == 256
                                 && n_q == 24
-                                && n_kv == 4;
+                                && n_kv == 4
+                                && matrix_scratch_covers_chunk;
                             let use_matrix = use_matrix_g8 || use_matrix_g6;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);

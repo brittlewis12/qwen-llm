@@ -463,15 +463,15 @@ grouped-path escape fix moved the board.
 
 Why it is back at the top:
 
-- The existing env-only matrix-attention sidecar plus grouped Q6 reaches or beats
-  fresh same-session llama.cpp spot rows: `1190.45 / 1174.57 t/s` at `pp320`,
-  `1340.82 / 1347.79 t/s` at `pp512`, `1484.98 / 1345.07 t/s` at `pp1024`,
-  `1434.39 / 1259.21 t/s` at `pp4096`, and `878.72 / 865.50 t/s` at synthetic
-  `pp34502`. The real `v02_reva` long rollout also holds at `870.94 t/s`.
-- Matrix attention with `QWEN_PREFILL_ATTN_MATRIX_G8=1` now passes the full ignored
-  A3B prefill-vs-single gate without `QWEN_PREFILL_ATTN_MATRIX_MAX_POS` in the
-  updated scratch API, but it still uses the matrix branch's looser tolerance
-  envelope. That tolerance decision is now the main correctness production task.
+- Matrix attention is now default-on for the proven A3B group-8 shape, with
+  `QWEN_PREFILL_ATTN_MATRIX_G8=0` as rollback. Fresh current-HEAD rows show the
+  auto/default promotion materially beats the previous packed-attention default:
+  `pp128` `~+7%`, `pp512` `~+13%`, `pp1024` `~+15%`, `pp4096` `~+18%`, `pp16384`
+  `~+25-33%`, and real `v02_reva` `34.5k` `655.34 -> 837.18 t/s`.
+- Matrix attention passes the full ignored A3B prefill-vs-single gate with auto
+  default, including prefix `4096` / `8191` active shapes. The local matrix oracle
+  keeps its documented numeric envelope (`cos >= 0.9999`, `max_abs <= 2e-2`), and
+  the production gate is the stronger final logits / GDN / KV model-state check.
 - The biggest A3B prompt win in this sprint came from a silent fast-path miss, not
   from another grouped-SwiGLU tile: A3B had `40` MoE layers but only `37` grouped
   routed trace labels because three late expert-down tensors are `Q6_K`. Closing
@@ -547,20 +547,18 @@ Why it is back at the top:
 
 Current design rule:
 
-- Do not start another local routed-MoE kernel sprint until the matrix-attention
-  default gates have either passed or failed. The current env branch already
-  cracks the A3B lcpp board in spot rows.
+- The A3B matrix-attention default gate has passed. Resume routed-MoE work only
+  after preserving the new matrix default in coverage gates, because it changes
+  the denominator for future A3B routed-tail claims.
 - Do not expect prompt chunk policy to close dense long-context prefill. It is now
   a narrow MoE production knob: promote only if a prompt-length-gated `2048` or
   arch-specific cap keeps A3B wins and A10B gains without dense changes or
   memory-pressure warnings. Do not blanket-default A3B to chunk `2048`; the repeat
   gate regressed `pp128/512`.
-- Productionize matrix scratch before defaulting: user-facing bench paths now avoid
-  manual max-pos env sizing, but production callers still need score/V_T memory
-  accounting and clear behavior for prompts that exceed the allocated max
-  position.
-- Either tighten the matrix correctness tolerance or document why the current
-  looser envelope is acceptable for this branch; do not hide that difference.
+- Matrix scratch policy is now explicit: prompt-aware callers should allocate with
+  the actual last position; auto mode falls back to packed attention if scratch is
+  undersized; force-on keeps the hard error. Keep the looser matrix oracle envelope
+  documented and rely on prefill-vs-single as the production correctness gate.
 - Before adding another local grouped kernel variant, prove the remaining lcpp gap
   with matched per-layer/per-op attribution on the same GGUF, prompt length,
   chunk/batch shape, warmup policy, power state, and flash-attention setting.
@@ -592,17 +590,16 @@ Current design rule:
 
 Acceptance gates:
 
-- Matrix-attention promotion requires repeated cooled A3B wins at `pp320/512/1024`,
-  at least one `pp4096` row, and one true-long synthetic plus one true-long real
-  rollout row. It must stay at least neutral against fresh llama anchors and not
-  regress the current default outside expected scratch overhead.
+- Matrix-attention promotion is complete for A3B/group-8. Any future change to this
+  path requires preserving default/rollback rows, a full A3B prefill-vs-single
+  gate, and trace-label coverage showing `10/10` matrix attention layers plus
+  `40/40` MoE fast-path labels.
 - A MoE chunk-cap default change requires clean-build rows showing `pp512/1024`
   unchanged by construction, repeated A3B and A10B long-prompt wins at
   `pp4096/16384`, one real-rollout A3B row, and no `pmset` or memory-pressure
   confounds. Dense rows are guardrails, not expected beneficiaries.
-- Matrix-attention promotion also requires the full A3B prefill-vs-single gate with
-  matrix enabled, explicit max-pos scratch policy, and trace labels showing all
-  expected attention/MoE paths.
+- Dense G6, A10B/G16, non-F16 KV, or different attention shapes are not covered by
+  the A3B default promotion; they need separate gates before any auto-on policy.
 - For the next commit/default promotion in this lane, require trace-label or
   equivalent in-process coverage showing all expected MoE layers use the intended
   route, grouped routed, and shared packed paths for A3B and A10B.

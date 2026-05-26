@@ -1878,8 +1878,10 @@ fn prefill_tokens_matches_single_token_loop_27b() {
         total_n.div_ceil(p)
     );
     let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
-    let mut layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+    let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+        &ctx, &mm, p as u32, total_n,
+    )
+    .expect("layer scratch");
     let h_dst_b = MetalTensor::zeros_f32(&ctx, vec![(total_n * k * h) as u64]).expect("h_dst_b");
     let exp_t = std::time::Instant::now();
     let last_b = prefill_tokens_with_multi_hidden(
@@ -2177,8 +2179,10 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         total_n.div_ceil(p)
     );
     let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
-    let mut layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+    let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+        &ctx, &mm, p as u32, total_n,
+    )
+    .expect("layer scratch");
     let exp_t = std::time::Instant::now();
     let last_b = prefill_tokens_with_multi_hidden(
         &mf,
@@ -2291,8 +2295,10 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
         total_n.div_ceil(p)
     );
     let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
-    let mut layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+    let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+        &ctx, &mm, p as u32, total_n,
+    )
+    .expect("layer scratch");
     let exp_t = std::time::Instant::now();
     let last_b = prefill_tokens_with_multi_hidden(
         &mf,
@@ -2406,8 +2412,10 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
         total_n.div_ceil(p)
     );
     let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
-    let mut layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+    let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+        &ctx, &mm, p as u32, total_n,
+    )
+    .expect("layer scratch");
     let exp_t = std::time::Instant::now();
     let last_b = prefill_tokens_with_multi_hidden(
         &mf,
@@ -2528,8 +2536,13 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_sha
             mf.single_token(tid, i as u32, &mut sess_b)
                 .expect("experimental prefix advance");
         }
-        let mut layer_scratch =
-            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("layer scratch");
+        let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+            &ctx,
+            &mm,
+            p as u32,
+            n_total_with_prefix,
+        )
+        .expect("layer scratch");
         let last_b = prefill_tokens_with_multi_hidden(
             &mf,
             token_ids,
@@ -2636,7 +2649,9 @@ fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
 
     eprintln!("[prefill-hidden-a3b] running P=1 packed oracle…");
     let mut sess_a = MetalSession::fresh(&ctx, &mm, cap).expect("sess A");
-    let mut scratch_a = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 1).expect("scratch A");
+    let mut scratch_a =
+        MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(&ctx, &mm, 1, total_n)
+            .expect("scratch A");
     let h_dst_a = MetalTensor::zeros_f32(&ctx, vec![(k * h) as u64]).expect("h_dst_a");
     let mut accum_a = vec![0.0f32; total_n * k * h];
     let oracle_t = std::time::Instant::now();
@@ -2669,8 +2684,10 @@ fn prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b() {
         total_n.div_ceil(p)
     );
     let mut sess_b = MetalSession::fresh(&ctx, &mm, cap).expect("sess B");
-    let mut scratch_b =
-        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, p as u32).expect("scratch B");
+    let mut scratch_b = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
+        &ctx, &mm, p as u32, total_n,
+    )
+    .expect("scratch B");
     let h_dst_b = MetalTensor::zeros_f32(&ctx, vec![(total_n * k * h) as u64]).expect("h_dst_b");
     let exp_t = std::time::Instant::now();
     let last_b = prefill_tokens_with_multi_hidden(

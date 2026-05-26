@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — A10B G16 Smoke No Longer Needs Manual Matrix Scratch
+
+Status: code/test follow-up after `v0.142`. Multi-chunk prefill correctness tests
+now allocate matrix scratch for the total/prefix position they exercise instead of
+implicitly capping matrix scratch at the chunk size.
+
+Validation: bare `QWEN_PREFILL_ATTN_MATRIX_G16=1 cargo test --release -p qwen-llm
+prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke -- --nocapture`
+passes on AC power with no thermal/performance/CPU-power warnings and `96%` free
+memory. The smoke reports final logits `0.999934`, GDN state `0.999809`, conv
+`0.999657`, KV K `0.999567`, and KV V `0.999414`. `cargo fmt --check` passed.
+
+Read: the G16 matrix branch still remains env-only, but the immediate scratch
+correctness wart is gone for the A10B smoke. The next promotion blockers are clean
+trace coverage, repeated family rows, and paired llama.cpp anchors.
+
 ## 2026-05-26 — A10B G16 Matrix Attention Becomes The Next Env Candidate
 
 Status: clean follow-up after `v0.141` (`e70eef815`). The branch adds env-only
@@ -34,19 +50,17 @@ body phases totaled about `14.3 ms` (`KQ 5.46`, softmax `3.11`, `KQV 5.76`),
 versus the prior packed-attention body bucket around `73.21 ms`; routed MoE still
 dominated (`routed_swiglu 585.07 ms`, `routed_down 317.90 ms`).
 
-Correctness: bare `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke hit a test-path
-scratch allocation error (`max_pos=4 < required last_pos=6`). Rerunning with
-`QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8` passed the existing A10B smoke: final logits
-`0.999934`, GDN state `0.999809`, conv `0.999657`, KV K `0.999567`, KV V
-`0.999414`. Numeric correctness is therefore not the smoke blocker; prompt-aware
-G16 scratch plumbing remains a promotion blocker.
+Correctness: initial bare `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke hit a
+test-path scratch allocation error (`max_pos=4 < required last_pos=6`). A follow-
+up test-scratch fix now makes the same bare-env smoke pass without
+`QWEN_PREFILL_ATTN_MATRIX_MAX_POS`: final logits `0.999934`, GDN state `0.999809`,
+conv `0.999657`, KV K `0.999567`, KV V `0.999414`.
 
 Read: A10B attention is no longer just a packed-path tuning problem. The G16
 matrix branch is now the highest-EV A10B promotion candidate, especially for long
-contexts, but it remains env-only until repeated clean rows, prompt-aware G16
-scratch allocation, clean trace coverage, and paired llama.cpp anchors agree.
-After this branch, the remaining A10B gap should be re-attributed before more
-attention work.
+contexts, but it remains env-only until repeated clean rows, clean trace coverage,
+and paired llama.cpp anchors agree. After this branch, the remaining A10B gap
+should be re-attributed before more attention work.
 
 ## 2026-05-26 — A3B Matrix Attention Promotes To Default
 

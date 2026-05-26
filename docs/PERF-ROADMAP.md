@@ -71,10 +71,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   (`+16.6%`). Warmed dirty rows are also positive at `pp512/1024/4096/16384`, and
   a dirty phase trace shows `12/12` G16 matrix attention layers with attention body
   reduced from the old `~73 ms` packed bucket to `~14 ms` total matrix phases at
-  `pp512`. A10B smoke passes numerically with explicit matrix scratch
-  (`QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8`), but the bare env run exposed a test-path
-  scratch-sizing error. Keep it env-only until prompt-aware G16 scratch allocation,
-  clean coverage, repeat rows, and paired llama.cpp anchors land.
+  `pp512`. A follow-up test-scratch fix makes bare
+  `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke pass without manual
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`. Keep it env-only until clean coverage,
+  repeat rows, and paired llama.cpp anchors land.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -495,9 +495,8 @@ Why it moves to the top:
 
 Current design rule:
 
-- Keep `QWEN_PREFILL_ATTN_MATRIX_G16=1` env-only until prompt-aware scratch,
-  correctness without manual envs, and repeated clean family rows land; do not
-  infer default safety from the A3B/G8 promotion.
+- Keep `QWEN_PREFILL_ATTN_MATRIX_G16=1` env-only until clean coverage and repeated
+  family rows land; do not infer default safety from the A3B/G8 promotion.
 - Use warmed/interleaved methodology for A10B. Cold no-warmup A10B rows can be
   dominated by first-touch/model-residency effects and should not drive decisions.
 - Re-run A10B phase attribution after matrix gates before starting another local
@@ -507,10 +506,8 @@ Current design rule:
 
 Acceptance gates:
 
-- A10B matrix correctness must pass without manual scratch envs. Current numeric
-  smoke is green only when `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8` is set; the bare
-  env run fails because the test path allocates `max_pos=4` but reaches
-  `last_pos=6`.
+- A10B matrix smoke correctness now passes without manual scratch envs. Preserve
+  this bare-env smoke gate for future G16 matrix changes.
 - Prefer an additional long-prefix matrix-active gate if runtime is acceptable.
 - Clean trace coverage must show all expected A10B attention layers using
   `attn-prefill-g16-matrix` and all expected MoE fast paths still present.

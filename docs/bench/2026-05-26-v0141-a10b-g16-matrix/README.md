@@ -46,15 +46,14 @@ The top A10B buckets remained routed MoE: `routed_swiglu 585.07 ms` and
 
 ## Correctness / Scratch
 
-- Bare `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke exposed a scratch-allocation
-  blocker in the test path: `matrix scratch max_pos=4 < required last_pos=6`.
-- With explicit scratch sizing,
-  `QWEN_PREFILL_ATTN_MATRIX_G16=1 QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8`, the existing
-  A10B prefill-vs-single smoke passed: final logits `0.999934`, GDN state
+- Initial bare `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke exposed a test-path
+  scratch-allocation bug: `matrix scratch max_pos=4 < required last_pos=6`.
+- A follow-up test-scratch fix sizes prefill correctness scratch by total/prefix
+  position. Bare `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke now passes without
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`: final logits `0.999934`, GDN state
   `0.999809`, conv `0.999657`, KV K `0.999567`, and KV V `0.999414`.
-- Read: numeric correctness is not the current blocker for the smoke shape;
-  production-grade prompt-aware scratch allocation and a clean coverage gate still
-  are.
+- Read: numeric smoke correctness and test scratch are no longer the blocker;
+  clean coverage, repeats, and paired llama.cpp anchors still are.
 
 ## Current Read
 
@@ -62,8 +61,8 @@ The top A10B buckets remained routed MoE: `routed_swiglu 585.07 ms` and
   evidence, and it changes the A10B long-context slope materially.
 - The mechanism is not a chunk-size artifact: larger chunks help the packed base,
   but the G16 matrix path still carries the larger long-context win.
-- The branch remains env-only until it has repeated clean rows, prompt-aware G16
-  scratch allocation, clean trace coverage, and paired llama.cpp anchors.
+- The branch remains env-only until it has repeated clean rows, clean trace
+  coverage, and paired llama.cpp anchors.
 - After G16 matrix, the next A10B gap should be re-attributed; routed MoE is likely
   back on top, not packed attention.
 

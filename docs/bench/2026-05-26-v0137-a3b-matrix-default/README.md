@@ -38,8 +38,8 @@ Post-promotion auto/rollback canary at `pp512`:
 
 | Mode | Rows | Read |
 | --- | ---: | --- |
-| auto/default | `1234.35`, `1249.46` | matrix active by default |
-| `QWEN_PREFILL_ATTN_MATRIX_G8=0` | `1098.21`, `1098.93` | rollback to packed |
+| auto/default | `1245.21`, `1235.93` | matrix active by default, clean `v0.137` build |
+| `QWEN_PREFILL_ATTN_MATRIX_G8=0` | `1094.59`, `1093.84` | rollback to packed, clean `v0.137` build |
 
 Power / residency support after the gate: AC power, no thermal or performance
 warning, no CPU power warning, and `95%` free memory from `memory_pressure -Q`.
@@ -71,5 +71,5 @@ warning, no CPU power warning, and `95%` free memory from `memory_pressure -Q`.
 - `v0137-a3b-pp4096-matrix-default-gate.json`
 - `v0137-a3b-pp16384-matrix-default-gate.json`
 - `v0137-a3b-v02-reva-matrix-default-gate.json`
-- `v0137-a3b-pp512-matrix-auto-vs-off.json`
+- `v0138-a3b-pp512-matrix-auto-vs-off-clean.json`
 - `v0137-a3b-matrix-auto-pp512-coverage-summary.txt`

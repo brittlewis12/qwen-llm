@@ -26,8 +26,9 @@ A3B current HEAD, sequential AC-power rows, base packed attention vs matrix:
 | `pp16384` | `890.94`, `905.04` | `1185.98`, `1121.63` | `~+25-33%` |
 | real `v02_reva` `34.5k` | `655.34` | `837.18` | `~+28%` |
 
-Auto/rollback canary at `pp512`: default auto rows are `1234.35`, `1249.46`, while
-`QWEN_PREFILL_ATTN_MATRIX_G8=0` rolls back to `1098.21`, `1098.93`.
+Post-commit auto/rollback canary at `pp512`: clean default auto rows are
+`1245.21`, `1235.93`, while `QWEN_PREFILL_ATTN_MATRIX_G8=0` rolls back to
+`1094.59`, `1093.84`.
 
 Correctness/coverage: the full ignored A3B prefill-vs-single gate passed with
 matrix auto/default, including prefix `4096` / `8191` active shapes; worst active

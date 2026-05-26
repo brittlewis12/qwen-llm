@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-26T08:06:42.660715+00:00",
+  "generated_at": "2026-05-26T08:12:52.037058+00:00",
   "base_cmd": [
     "target/release/qwen-bench",
     "pp",
@@ -15,7 +15,7 @@
     "--no-warmup"
   ],
   "repeat_blocks": 2,
-  "shuffle_seed": 101,
+  "shuffle_seed": 107,
   "run_plan": [
     {
       "block": 0,
@@ -57,9 +57,9 @@
       "bench": {
         "schema_version": 1,
         "engine": "qwen-llm",
-        "build_commit": "db553649c",
-        "build_dirty": 1,
-        "test_time": "2026-05-26T08:06:01Z",
+        "build_commit": "9d5a5de4c",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T08:12:10Z",
         "model_filename": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "model_size": 22123538944,
         "model_n_params": 34660610688,
@@ -67,18 +67,18 @@
         "test": "pp512",
         "n_tokens": 512,
         "n_repetitions": 2,
-        "avg_ts": 1098.2121487996105,
-        "stddev_ts": 105.4304029897844,
+        "avg_ts": 1094.59020955683,
+        "stddev_ts": 110.23022408163499,
         "samples_ts": [
-          1023.6615959023035,
-          1172.7627016969175
+          1016.6456706169931,
+          1172.5347484966667
         ],
         "samples_ns": [
-          500165290,
-          436575958
+          503616957,
+          436660833
         ],
-        "avg_ns": 468370624,
-        "avg_gpu_ns": 438025624,
+        "avg_ns": 470138895,
+        "avg_gpu_ns": 438867562,
         "decode_gb_per_s": null,
         "prefill_chunk": 512,
         "decode_mode": null,
@@ -98,7 +98,7 @@
           "QWEN_PREFILL_ATTN_MATRIX_G8": "0"
         }
       },
-      "wall_s_outer": 3.907332915929146,
+      "wall_s_outer": 3.926448042038828,
       "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
@@ -112,9 +112,9 @@
       "bench": {
         "schema_version": 1,
         "engine": "qwen-llm",
-        "build_commit": "db553649c",
-        "build_dirty": 1,
-        "test_time": "2026-05-26T08:06:15Z",
+        "build_commit": "9d5a5de4c",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T08:12:24Z",
         "model_filename": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "model_size": 22123538944,
         "model_n_params": 34660610688,
@@ -122,18 +122,18 @@
         "test": "pp512",
         "n_tokens": 512,
         "n_repetitions": 2,
-        "avg_ts": 1234.3482866625086,
-        "stddev_ts": 150.87672200782958,
+        "avg_ts": 1245.2141123401657,
+        "stddev_ts": 145.3831574062262,
         "samples_ts": [
-          1127.6623334075748,
-          1341.0342399174426
+          1142.412695867912,
+          1348.0155288124195
         ],
         "samples_ns": [
-          454036625,
-          381794875
+          448174291,
+          379817583
         ],
-        "avg_ns": 417915750,
-        "avg_gpu_ns": 384317604,
+        "avg_ns": 413995937,
+        "avg_gpu_ns": 382136208,
         "decode_gb_per_s": null,
         "prefill_chunk": 512,
         "decode_mode": null,
@@ -151,7 +151,7 @@
         },
         "qwen_env": {}
       },
-      "wall_s_outer": 3.6273650000803173,
+      "wall_s_outer": 3.6316302499035373,
       "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
@@ -167,9 +167,9 @@
       "bench": {
         "schema_version": 1,
         "engine": "qwen-llm",
-        "build_commit": "db553649c",
-        "build_dirty": 1,
-        "test_time": "2026-05-26T08:06:28Z",
+        "build_commit": "9d5a5de4c",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T08:12:38Z",
         "model_filename": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "model_size": 22123538944,
         "model_n_params": 34660610688,
@@ -177,18 +177,18 @@
         "test": "pp512",
         "n_tokens": 512,
         "n_repetitions": 2,
-        "avg_ts": 1098.9347209783587,
-        "stddev_ts": 101.53469439482069,
+        "avg_ts": 1093.8427340064338,
+        "stddev_ts": 112.18226495795938,
         "samples_ts": [
-          1027.1388500460773,
-          1170.7305919106402
+          1014.5178937257948,
+          1173.167574287073
         ],
         "samples_ns": [
-          498472042,
-          437333750
+          504673208,
+          436425291
         ],
-        "avg_ns": 467902896,
-        "avg_gpu_ns": 437838437,
+        "avg_ns": 470549249,
+        "avg_gpu_ns": 437888750,
         "decode_gb_per_s": null,
         "prefill_chunk": 512,
         "decode_mode": null,
@@ -208,7 +208,7 @@
           "QWEN_PREFILL_ATTN_MATRIX_G8": "0"
         }
       },
-      "wall_s_outer": 3.7091922080144286,
+      "wall_s_outer": 3.8001514580100775,
       "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
@@ -222,9 +222,9 @@
       "bench": {
         "schema_version": 1,
         "engine": "qwen-llm",
-        "build_commit": "db553649c",
-        "build_dirty": 1,
-        "test_time": "2026-05-26T08:06:42Z",
+        "build_commit": "9d5a5de4c",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T08:12:51Z",
         "model_filename": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "model_size": 22123538944,
         "model_n_params": 34660610688,
@@ -232,18 +232,18 @@
         "test": "pp512",
         "n_tokens": 512,
         "n_repetitions": 2,
-        "avg_ts": 1249.4641243605304,
-        "stddev_ts": 132.61062962186577,
+        "avg_ts": 1235.9297308556615,
+        "stddev_ts": 141.19700099141428,
         "samples_ts": [
-          1155.6942488974914,
-          1343.2339998235693
+          1136.0883739714288,
+          1335.7710877398943
         ],
         "samples_ns": [
-          443023750,
-          381169625
+          450669166,
+          383299208
         ],
-        "avg_ns": 412096687,
-        "avg_gpu_ns": 384403229,
+        "avg_ns": 416984187,
+        "avg_gpu_ns": 385507208,
         "decode_gb_per_s": null,
         "prefill_chunk": 512,
         "decode_mode": null,
@@ -261,7 +261,7 @@
         },
         "qwen_env": {}
       },
-      "wall_s_outer": 3.6027028750395402,
+      "wall_s_outer": 3.634141333051957,
       "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
       "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",

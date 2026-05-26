@@ -624,6 +624,11 @@ Acceptance gates:
   long-context A3B/state sanity row and a real prompt/top-k check when convenient,
   and audit any future GGUF with new F32 GDN alpha/beta shapes before assuming the
   default is risk-free.
+- A3B matrix `pp4096` phase traces make `pre_norm` look large, but a llama-style
+  float4 spelling of batched RMSNorm is correctness-green and end-to-end flat
+  (`1408.70/1409.10` baseline vs `1408.64/1407.07` vec4). Do not pursue local
+  RMSNorm vector spelling; revisit norm only as fused norm+projection or after a
+  direct llama norm-node differential proves a real gap.
 
 ### 2. Historical: true-long A3B matrix-attention branch is now folded into #1
 

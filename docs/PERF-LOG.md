@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — RMSNorm Vec4 Falsifier Does Not Move A3B Matrix Prefill
+
+Status: dirty-code negative spike after `v0.135`, stripped before commit. Raw
+artifacts are in `docs/bench/2026-05-26-v0136-rmsnorm-vec4-negative/`.
+
+### Measurements
+
+A3B matrix `pp4096`, default GDN skinny active in both variants:
+
+| Variant | Rows | Read |
+| --- | ---: | --- |
+| matrix | `1408.70`, `1409.10` | baseline |
+| matrix + `QWEN_PREFILL_RMSNORM_VEC4=1` | `1408.64`, `1407.07` | flat/slightly negative |
+
+Phase tracing also stayed flat: GDN `pre_norm` moved only `957.96 -> 952.99 ms`,
+and attn `pre_norm` only `328.00 -> 324.51 ms`. Correctness passed 0.8B and A3B
+prefill-vs-single with the spike enabled.
+
+Read: the A3B phase trace makes `pre_norm` look large, but simple float4 spelling
+is not the missing lcpp mechanism. Do not carry the env branch. If norm remains a
+suspect, require either fused norm+projection, a direct llama norm-node
+differential, or a trace-methodology fix before more local RMSNorm kernel work.
+
 ## 2026-05-26 — GDN Skinny E8xP32 Promotes To Default
 
 Status: clean follow-up after `v0.134`. Promoted the dense GDN skinny E8xP32 path

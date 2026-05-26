@@ -75,8 +75,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke pass without manual
   `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`. A clean current-commit `pp512` trace shows
   `12/12` G16 matrix attention layers, expected routed MoE/GDN counts, and matrix
-  body phases totaling `14.53 ms`. Keep it env-only until repeat rows and paired
-  llama.cpp anchors land.
+  body phases totaling `14.53 ms`. The clean repeat packet is positive at
+  `pp512/1024/4096/16384`; paired same-session llama.cpp default anchors put G16
+  at `0.90x/1.02x/1.08x/1.03x`. Defaulting A10B/G16 is now the immediate code
+  move, with routed MoE next because `pp512` remains a lcpp gap.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -497,9 +499,9 @@ Why it moves to the top:
 
 Current design rule:
 
-- Keep `QWEN_PREFILL_ATTN_MATRIX_G16=1` env-only until repeated family rows and
-  paired llama.cpp anchors land; do not infer default safety from the A3B/G8
-  promotion.
+- Default A10B/G16 matrix attention narrowly, with a rollback env, now that repeat
+  rows and paired llama.cpp anchors have landed. Do not infer any other group
+  shape from the A3B/G8 or A10B/G16 evidence.
 - Use warmed/interleaved methodology for A10B. Cold no-warmup A10B rows can be
   dominated by first-touch/model-residency effects and should not drive decisions.
 - Re-run A10B phase attribution after matrix gates before starting another local
@@ -515,10 +517,10 @@ Acceptance gates:
 - Clean `pp512` trace coverage now shows `12/12` A10B attention layers using
   `attn-prefill-g16-matrix` and expected MoE/GDN fast-path counts. Preserve this
   coverage gate and prefer an additional long-prefix trace before defaulting.
-- Repeated clean rows must cover `pp512/1024/4096/16384`, with AC power, no thermal
-  or performance warnings, and stable memory pressure.
-- Before claiming lcpp parity, add paired llama.cpp anchors on the same model,
-  prompt lengths, warmup policy, and power state.
+- Repeated clean rows now cover `pp512/1024/4096/16384`, with AC power and no
+  thermal/performance warnings. Preserve this as the rollback/default canary.
+- Paired llama.cpp anchors now cover the same prompt lengths. Do not claim complete
+  A10B lcpp parity because `pp512` remains `0.90x`; route-MoE work owns that gap.
 - A default policy must include a rollback env and prove no dense or A3B regression
   from the group-specific auto gate.
 

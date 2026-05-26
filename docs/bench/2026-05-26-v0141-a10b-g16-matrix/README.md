@@ -15,6 +15,20 @@ power warnings, and `96%` free memory before/after.
 | `pp1024` | `411.86` | `430.67` | `+4.6%` |
 | `pp16384` | `289.97` | `338.07` | `+16.6%` |
 
+Clean current-build repeat packet after `v0.144`, with paired llama.cpp anchors:
+
+| Shape | Qwen base rows | Qwen G16 rows | G16/base | llama.cpp default | G16/lcpp |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `pp512` | `367.61`, `368.77` | `382.72`, `383.36` | `+4.0%` | `427.24` | `0.90x` |
+| `pp1024` | `413.23`, `414.49` | `435.08`, `428.02` | `+4.3%` | `422.34` | `1.02x` |
+| `pp4096` | `380.16`, `373.43` | `408.67`, `402.29` | `+7.6%` | `374.29` | `1.08x` |
+| `pp16384` | `289.36`, `293.28` | `340.41`, `340.14` | `+16.8%` | `331.58` | `1.03x` |
+
+The paired llama.cpp default packet reports `flash_attn=false`. An explicit
+`-fa 0` packet also reports `flash_attn=false` and lands at `427.54`, `413.45`,
+`352.21`, and `320.18 t/s` for `pp512/1024/4096/16384`; use the default packet as
+the same-session target because it is at least as fast on the longer rows.
+
 ## Warmed Dirty Spike Rows
 
 These rows were pre-commit spikes and should be treated as EV evidence, not as a
@@ -76,8 +90,10 @@ serialization/IO overhead. Use this row for coverage and attribution only.
   evidence, and it changes the A10B long-context slope materially.
 - The mechanism is not a chunk-size artifact: larger chunks help the packed base,
   but the G16 matrix path still carries the larger long-context win.
-- The branch remains env-only until it has repeated clean rows, optional long-
-  prefix coverage, and paired llama.cpp anchors.
+- The branch clears the qwen default performance gate: every repeated qwen shape is
+  positive, and same-session llama.cpp is beaten from `pp1024` through `pp16384`.
+- `pp512` remains a lcpp gap despite the G16 win over qwen base, so the next
+  scoreboard work after defaulting should return to routed MoE.
 - After G16 matrix, the next A10B gap should be re-attributed; routed MoE is likely
   back on top, not packed attention.
 
@@ -95,3 +111,9 @@ serialization/IO overhead. Use this row for coverage and attribution only.
 - `v0143-clean-a10b-pp512-g16-matrix-phase.out`
 - `v0143-clean-a10b-pp512-g16-matrix-phase-summary.tsv`
 - `v0143-clean-a10b-pp512-g16-matrix-coverage.txt`
+- `v0144-clean-a10b-pp512-g16-matrix-repeat.json`
+- `v0144-clean-a10b-pp1024-g16-matrix-repeat.json`
+- `v0144-clean-a10b-pp4096-g16-matrix-repeat.json`
+- `v0144-clean-a10b-pp16384-g16-matrix-repeat.json`
+- `v0144-lcpp-a10b-pp512-1024-4096-16384-default-fa.json`
+- `v0144-lcpp-a10b-pp512-1024-4096-16384-fa0.json`

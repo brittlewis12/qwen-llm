@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — A10B G16 Promotion Packet Clears The Qwen Default Gate
+
+Status: clean current-build repeat packet after `v0.144`, plus paired llama.cpp
+anchors. Raw artifacts are in `docs/bench/2026-05-26-v0141-a10b-g16-matrix/`.
+
+| Shape | Qwen base rows | Qwen G16 rows | G16/base | llama.cpp default | G16/lcpp |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A10B `pp512` | `367.61`, `368.77` | `382.72`, `383.36` | `+4.0%` | `427.24` | `0.90x` |
+| A10B `pp1024` | `413.23`, `414.49` | `435.08`, `428.02` | `+4.3%` | `422.34` | `1.02x` |
+| A10B `pp4096` | `380.16`, `373.43` | `408.67`, `402.29` | `+7.6%` | `374.29` | `1.08x` |
+| A10B `pp16384` | `289.36`, `293.28` | `340.41`, `340.14` | `+16.8%` | `331.58` | `1.03x` |
+
+The paired llama.cpp default packet reports `flash_attn=false`; an explicit
+`-fa 0` packet also reports `flash_attn=false` and lands at `427.54/413.45/352.21/320.18 t/s`.
+Power/thermal probes stayed clean. Memory pressure stayed warning-free; the final
+llama.cpp default packet ended with `57%` free memory, likely from file cache /
+residency, so do not over-read tiny lcpp deltas versus older family sweeps.
+
+Read: G16 matrix is positive for qwen at every repeated A10B prompt size and beats
+same-session llama.cpp from `pp1024` through `pp16384`. `pp512` remains a lcpp gap
+despite the qwen-side win, which points back to routed MoE after defaulting G16.
+The next code move is a narrow A10B/G16 auto-on policy with a rollback env, not
+more attention microsearch.
+
 ## 2026-05-26 — A10B G16 Clean Coverage Trace Confirms The Mechanism
 
 Status: clean trace after rebuilding `qwen-bench` from `b78a5d167` (`build_dirty=0`).

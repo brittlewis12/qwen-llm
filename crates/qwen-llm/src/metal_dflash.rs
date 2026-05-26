@@ -5965,6 +5965,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     )?;
                     enc.end();
                 }
+                flush_prefill_layer_phase(
+                    base.ctx,
+                    &mut cmd_buf,
+                    &mut prefill_gpu_total_ms,
+                    trace_layer_phases,
+                    chunk_idx,
+                    chunk_start,
+                    il,
+                    "moe",
+                    "post_norm",
+                );
 
                 let router_mat_mat_eligible = |dtype: GgmlType| {
                     matches!(
@@ -6168,6 +6179,24 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         }
                     }
 
+                    flush_prefill_layer_phase(
+                        base.ctx,
+                        &mut cmd_buf,
+                        &mut prefill_gpu_total_ms,
+                        trace_layer_phases,
+                        chunk_idx,
+                        chunk_start,
+                        il,
+                        "moe",
+                        if fused_route_bucket {
+                            "route_fused"
+                        } else if packed_route_path {
+                            "route_packed"
+                        } else {
+                            "route_token_loop"
+                        },
+                    );
+
                     let concurrent_grouped_shared = grouped_routed_path
                         && packed_shared_path
                         && !skip_moe_routed
@@ -6275,6 +6304,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             chunk_p,
                         )?;
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "tail_concurrent",
+                        );
 
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-tail-concurrent-final");
@@ -6289,11 +6329,33 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         )?;
                         encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &moe_mixer_out_pack_p)?;
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "tail_concurrent_final",
+                        );
                     } else if skip_moe_routed {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-skip");
                         encode_fill_f32(base.ctx, &enc, &moe_mixer_out_pack_p, 0.0)?;
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "routed_skip",
+                        );
                     } else if grouped_routed_path {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-grouped");
@@ -6360,6 +6422,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                         }
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "routed_grouped",
+                        );
                     } else if let Some(hot_threshold) = hot_expert_min_slots {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-cpu-hot");
@@ -6476,6 +6549,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             &moe_shared_ffn_out_pack_p,
                         )?;
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "routed_cpu_hot_down",
+                        );
                     } else if prefill_moe_packed_down_sum_enabled() {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-packed-down-sum");
@@ -6508,6 +6592,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             chunk_p,
                         )?;
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "routed_packed_down_sum",
+                        );
                     } else {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-token-loop");
@@ -6561,6 +6656,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                         }
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "routed_token_loop",
+                        );
                     }
 
                     if concurrent_grouped_shared {
@@ -6590,6 +6696,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                         }
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "shared_skip",
+                        );
                     } else if packed_shared_path {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-shared-packed");
@@ -6661,6 +6778,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                         }
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "shared_packed",
+                        );
                     } else {
                         for n_idx in 0..chunk_p {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -6718,6 +6846,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                             enc.end();
                         }
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "shared_token_loop",
+                        );
                     }
                 } else if !skip_ffn {
                     for n_idx in 0..chunk_p {

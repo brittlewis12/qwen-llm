@@ -1,9 +1,9 @@
 # v0.141 A10B G16 Matrix Attention
 
-Status: env-only candidate after `v0.141` (`e70eef815`). The branch enables the
-matrix-attention sidecar for the A10B group-16 shape with
-`QWEN_PREFILL_ATTN_MATRIX_G16=1`. It is not defaulted; base A10B still uses the
-current packed-attention path.
+Status: default promotion after `v0.145`. The branch enables the matrix-attention
+sidecar for the A10B group-16 shape by default when the existing packed G16
+prompt path is active. `QWEN_PREFILL_ATTN_MATRIX_G16=0` rolls back to packed
+attention; `QWEN_PREFILL_ATTN_MATRIX_G16=1` force-enables strict matrix behavior.
 
 ## Clean Gates
 
@@ -84,6 +84,17 @@ serialization/IO overhead. Use this row for coverage and attribution only.
 - Read: numeric smoke correctness and test scratch are no longer the blocker;
   clean coverage, repeats, and paired llama.cpp anchors still are.
 
+Default-promotion validation:
+
+- `cargo fmt --check` and release `qwen-bench` rebuild passed after the policy
+  change.
+- Active matrix smoke passed with no `QWEN_PREFILL_ATTN_MATRIX_G16` env by lowering
+  only the packed activation threshold for the smoke:
+  `QWEN_PREFILL_ATTN_PACKED_G16_MIN_POS=1 QWEN_PREFILL_TRACE_ATTN_PHASES=1 cargo test --release -p qwen-llm prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke -- --nocapture`.
+- The trace showed `prefill-attn-matrix-g16-shape` for all 12 A10B attention layers
+  in both smoke chunks. Final logits were `0.999934`, GDN state `0.999810`, conv
+  `0.999657`, KV K `0.999567`, and KV V `0.999413`.
+
 ## Current Read
 
 - This is the first A10B-specific attention branch with strong medium and long
@@ -91,7 +102,8 @@ serialization/IO overhead. Use this row for coverage and attribution only.
 - The mechanism is not a chunk-size artifact: larger chunks help the packed base,
   but the G16 matrix path still carries the larger long-context win.
 - The branch clears the qwen default performance gate: every repeated qwen shape is
-  positive, and same-session llama.cpp is beaten from `pp1024` through `pp16384`.
+  positive, same-session llama.cpp is beaten from `pp1024` through `pp16384`, and
+  active matrix correctness is green for the G16 shape.
 - `pp512` remains a lcpp gap despite the G16 win over qwen base, so the next
   scoreboard work after defaulting should return to routed MoE.
 - After G16 matrix, the next A10B gap should be re-attributed; routed MoE is likely

@@ -64,11 +64,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `355 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic remains noisy
   per run but cooled long-prompt sweeps still favor `NWG32`, and the warmed
   same-fixture real rollout is about `224 t/s`.
-- Env-only A10B/G16 matrix attention (`QWEN_PREFILL_ATTN_MATRIX_G16=1`) is now the
-  active A10B promotion candidate. Clean `v0.141` rows with `build_dirty=0`, AC
-  power, no thermal/perf warnings, and `96%` free memory show `pp1024`
-  `411.86 -> 430.67 t/s` (`+4.6%`) and `pp16384` `289.97 -> 338.07 t/s`
-  (`+16.6%`). Warmed dirty rows are also positive at `pp512/1024/4096/16384`, and
+- A10B/G16 matrix attention is now the default for the proven group-16 prompt
+  shape, with `QWEN_PREFILL_ATTN_MATRIX_G16=0` as rollback. Clean `v0.141` rows
+  with `build_dirty=0`, AC power, no thermal/perf warnings, and `96%` free memory
+  show `pp1024` `411.86 -> 430.67 t/s` (`+4.6%`) and `pp16384`
+  `289.97 -> 338.07 t/s` (`+16.6%`). Warmed dirty rows are also positive at
+  `pp512/1024/4096/16384`, and
   a dirty phase trace shows `12/12` G16 matrix attention layers with attention body
   reduced from the old `~73 ms` packed bucket to `~14 ms` total matrix phases at
   `pp512`. A follow-up test-scratch fix makes bare
@@ -77,8 +78,9 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `12/12` G16 matrix attention layers, expected routed MoE/GDN counts, and matrix
   body phases totaling `14.53 ms`. The clean repeat packet is positive at
   `pp512/1024/4096/16384`; paired same-session llama.cpp default anchors put G16
-  at `0.90x/1.02x/1.08x/1.03x`. Defaulting A10B/G16 is now the immediate code
-  move, with routed MoE next because `pp512` remains a lcpp gap.
+  at `0.90x/1.02x/1.08x/1.03x`. Active G16 matrix correctness is green under the
+  default auto policy when the packed threshold is lowered for the smoke. Routed
+  MoE is next because `pp512` remains a lcpp gap.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -499,9 +501,9 @@ Why it moves to the top:
 
 Current design rule:
 
-- Default A10B/G16 matrix attention narrowly, with a rollback env, now that repeat
-  rows and paired llama.cpp anchors have landed. Do not infer any other group
-  shape from the A3B/G8 or A10B/G16 evidence.
+- A10B/G16 matrix attention is default-on narrowly, with
+  `QWEN_PREFILL_ATTN_MATRIX_G16=0` as rollback. Do not infer any other group shape
+  from the A3B/G8 or A10B/G16 evidence.
 - Use warmed/interleaved methodology for A10B. Cold no-warmup A10B rows can be
   dominated by first-touch/model-residency effects and should not drive decisions.
 - Re-run A10B phase attribution after matrix gates before starting another local
@@ -523,6 +525,9 @@ Acceptance gates:
   A10B lcpp parity because `pp512` remains `0.90x`; route-MoE work owns that gap.
 - A default policy must include a rollback env and prove no dense or A3B regression
   from the group-specific auto gate.
+- Post-default clean canaries should compare auto/default against
+  `QWEN_PREFILL_ATTN_MATRIX_G16=0`, then the next optimization sprint should move
+  to routed MoE rather than attention.
 
 ### 2. Hypothesis: A3B matrix attention plus grouped Q6 is the lcpp-cracking prefill candidate
 

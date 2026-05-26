@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — A10B G16 Matrix Attention Promotes To Default
+
+Status: code promotion after `v0.145`. `QWEN_PREFILL_ATTN_MATRIX_G16` now uses the
+same env-mode policy as A3B/G8: auto/default may use matrix attention for the
+proven A10B group-16 prompt shape, `QWEN_PREFILL_ATTN_MATRIX_G16=0` rolls back to
+packed attention, and `=1` force-enables strict matrix behavior.
+
+Validation: `cargo fmt --check` and release `qwen-bench` rebuild passed. Active
+G16 matrix correctness passed without setting `QWEN_PREFILL_ATTN_MATRIX_G16` by
+lowering only the packed activation threshold for the smoke:
+`QWEN_PREFILL_ATTN_PACKED_G16_MIN_POS=1 QWEN_PREFILL_TRACE_ATTN_PHASES=1 cargo test --release -p qwen-llm prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke -- --nocapture`.
+The trace showed all `12` A10B attention layers using `prefill-attn-matrix-g16-shape`
+in both chunks. Final logits were `0.999934`, GDN state `0.999810`, conv
+`0.999657`, KV K `0.999567`, and KV V `0.999413`; AC power, thermal, performance,
+and memory probes stayed clean.
+
+Read: this is a narrow default, not a new universal matrix policy. It should not
+change dense/G6 or other attention groups. Next gate is a clean post-commit
+default-vs-rollback canary, then attention work should yield to A10B routed MoE.
+
 ## 2026-05-26 — A10B G16 Promotion Packet Clears The Qwen Default Gate
 
 Status: clean current-build repeat packet after `v0.144`, plus paired llama.cpp

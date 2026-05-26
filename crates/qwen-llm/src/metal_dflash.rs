@@ -559,9 +559,13 @@ fn prefill_attn_matrix_g6_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_MATRIX_G6"))
 }
 
-fn prefill_attn_matrix_g16_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_MATRIX_G16"))
+fn prefill_attn_matrix_g16_mode() -> PrefillEnvMode {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G16"))
+}
+
+fn prefill_attn_matrix_g16_may_use() -> bool {
+    !matches!(prefill_attn_matrix_g16_mode(), PrefillEnvMode::ForceOff)
 }
 
 fn prefill_attn_matrix_max_pos() -> Option<usize> {
@@ -2003,7 +2007,7 @@ impl MetalDFlashLayerMajorScratch {
                 || (prefill_attn_matrix_g6_enabled()
                     && arch.n_q_heads == 24
                     && arch.n_kv_heads == 4)
-                || (prefill_attn_matrix_g16_enabled()
+                || (prefill_attn_matrix_g16_may_use()
                     && arch.n_q_heads == 32
                     && arch.n_kv_heads == 2));
         let attn_matrix_max_pos = if enable_attn_matrix {
@@ -4151,7 +4155,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         && arch.attn_head_dim as usize == 256
         && arch.n_q_heads == 24
         && arch.n_kv_heads == 4;
-    let attn_matrix_g16_force_on = prefill_attn_matrix_g16_enabled()
+    let attn_matrix_g16_force_on = prefill_attn_matrix_g16_mode() == PrefillEnvMode::ForceOn
         && arch.attn_head_dim as usize == 256
         && arch.n_q_heads == 32
         && arch.n_kv_heads == 2;
@@ -5143,7 +5147,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 && n_kv == 4
                                 && matrix_scratch_covers_chunk;
                             let use_matrix_g16 = use_packed_g16
-                                && prefill_attn_matrix_g16_enabled()
+                                && prefill_attn_matrix_g16_may_use()
                                 && matrix_scratch_covers_chunk;
                             let use_matrix = use_matrix_g8 || use_matrix_g6 || use_matrix_g16;
                             {

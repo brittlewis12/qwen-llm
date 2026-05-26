@@ -1,0 +1,12 @@
+[prefill-attn-matrix-g16-shape] layer=3 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=7 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=11 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=15 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=19 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=23 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=27 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=31 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=35 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=39 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=43 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50
+[prefill-attn-matrix-g16-shape] layer=47 chunk_start=0 chunk_p=512 n_pos=512 scores_mib=32.00 vt_stride=512 vt_layer_mib=0.50 vt_update_base=0 vt_update_rows=512 vt_update_mib=0.50

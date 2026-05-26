@@ -73,8 +73,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   reduced from the old `~73 ms` packed bucket to `~14 ms` total matrix phases at
   `pp512`. A follow-up test-scratch fix makes bare
   `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke pass without manual
-  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`. Keep it env-only until clean coverage,
-  repeat rows, and paired llama.cpp anchors land.
+  `QWEN_PREFILL_ATTN_MATRIX_MAX_POS`. A clean current-commit `pp512` trace shows
+  `12/12` G16 matrix attention layers, expected routed MoE/GDN counts, and matrix
+  body phases totaling `14.53 ms`. Keep it env-only until repeat rows and paired
+  llama.cpp anchors land.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -495,8 +497,9 @@ Why it moves to the top:
 
 Current design rule:
 
-- Keep `QWEN_PREFILL_ATTN_MATRIX_G16=1` env-only until clean coverage and repeated
-  family rows land; do not infer default safety from the A3B/G8 promotion.
+- Keep `QWEN_PREFILL_ATTN_MATRIX_G16=1` env-only until repeated family rows and
+  paired llama.cpp anchors land; do not infer default safety from the A3B/G8
+  promotion.
 - Use warmed/interleaved methodology for A10B. Cold no-warmup A10B rows can be
   dominated by first-touch/model-residency effects and should not drive decisions.
 - Re-run A10B phase attribution after matrix gates before starting another local
@@ -509,8 +512,9 @@ Acceptance gates:
 - A10B matrix smoke correctness now passes without manual scratch envs. Preserve
   this bare-env smoke gate for future G16 matrix changes.
 - Prefer an additional long-prefix matrix-active gate if runtime is acceptable.
-- Clean trace coverage must show all expected A10B attention layers using
-  `attn-prefill-g16-matrix` and all expected MoE fast paths still present.
+- Clean `pp512` trace coverage now shows `12/12` A10B attention layers using
+  `attn-prefill-g16-matrix` and expected MoE/GDN fast-path counts. Preserve this
+  coverage gate and prefer an additional long-prefix trace before defaulting.
 - Repeated clean rows must cover `pp512/1024/4096/16384`, with AC power, no thermal
   or performance warnings, and stable memory pressure.
 - Before claiming lcpp parity, add paired llama.cpp anchors on the same model,

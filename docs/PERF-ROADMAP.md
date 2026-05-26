@@ -64,6 +64,17 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `355 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic remains noisy
   per run but cooled long-prompt sweeps still favor `NWG32`, and the warmed
   same-fixture real rollout is about `224 t/s`.
+- Env-only A10B/G16 matrix attention (`QWEN_PREFILL_ATTN_MATRIX_G16=1`) is now the
+  active A10B promotion candidate. Clean `v0.141` rows with `build_dirty=0`, AC
+  power, no thermal/perf warnings, and `96%` free memory show `pp1024`
+  `411.86 -> 430.67 t/s` (`+4.6%`) and `pp16384` `289.97 -> 338.07 t/s`
+  (`+16.6%`). Warmed dirty rows are also positive at `pp512/1024/4096/16384`, and
+  a dirty phase trace shows `12/12` G16 matrix attention layers with attention body
+  reduced from the old `~73 ms` packed bucket to `~14 ms` total matrix phases at
+  `pp512`. A10B smoke passes numerically with explicit matrix scratch
+  (`QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8`), but the bare env run exposed a test-path
+  scratch-sizing error. Keep it env-only until prompt-aware G16 scratch allocation,
+  clean coverage, repeat rows, and paired llama.cpp anchors land.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -456,7 +467,61 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: A3B matrix attention plus grouped Q6 is the lcpp-cracking prefill candidate
+### 1. Hypothesis: A10B/G16 matrix attention is the next MoE promotion candidate
+
+Optimizes: Qwen3.5 122B A10B prompt prefill, especially `pp1024+` and long
+contexts where packed group-16 attention had remained a scoreboard blocker.
+
+Why it moves to the top:
+
+- The `v0.141` env branch generalizes the matrix-attention sidecar to the A10B
+  group-16 shape (`n_q=32`, `n_kv=2`, `head_dim=256`) without changing the default
+  packed path.
+- Clean rows already clear a meaningful gate: `pp1024` improves
+  `411.86 -> 430.67 t/s` (`+4.6%`) and `pp16384` improves
+  `289.97 -> 338.07 t/s` (`+16.6%`) on a clean build, AC power, no warnings, and
+  stable memory pressure.
+- Warmed dirty spikes were positive across the broader family: `pp512` `+5.2%`,
+  `pp1024` `+4.3%`, `pp4096` `+7.5%`, and `pp16384` `+17.1%`.
+- The mechanism is phase-local and not just a scoreboard artifact: a dirty `pp512`
+  trace shows all `12/12` A10B attention layers on the G16 matrix path, with matrix
+  `KQ+softmax+KQV` about `14.3 ms` total versus the prior packed attention body
+  around `73.21 ms`.
+- Chunk policy does not explain the branch away. Chunk `4096` helps the packed
+  base, especially at `pp4096`, but G16 matrix remains ahead and is essentially
+  chunk-flat at `pp16384`.
+- If G16 matrix holds under clean gates, the next A10B gap likely shifts back to
+  routed MoE (`routed_swiglu` / `routed_down`) rather than attention body.
+
+Current design rule:
+
+- Keep `QWEN_PREFILL_ATTN_MATRIX_G16=1` env-only until prompt-aware scratch,
+  correctness without manual envs, and repeated clean family rows land; do not
+  infer default safety from the A3B/G8 promotion.
+- Use warmed/interleaved methodology for A10B. Cold no-warmup A10B rows can be
+  dominated by first-touch/model-residency effects and should not drive decisions.
+- Re-run A10B phase attribution after matrix gates before starting another local
+  attention branch.
+- Do not couple G16 matrix defaulting to a chunk-cap default. They are related
+  long-context levers but currently show different behavior.
+
+Acceptance gates:
+
+- A10B matrix correctness must pass without manual scratch envs. Current numeric
+  smoke is green only when `QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8` is set; the bare
+  env run fails because the test path allocates `max_pos=4` but reaches
+  `last_pos=6`.
+- Prefer an additional long-prefix matrix-active gate if runtime is acceptable.
+- Clean trace coverage must show all expected A10B attention layers using
+  `attn-prefill-g16-matrix` and all expected MoE fast paths still present.
+- Repeated clean rows must cover `pp512/1024/4096/16384`, with AC power, no thermal
+  or performance warnings, and stable memory pressure.
+- Before claiming lcpp parity, add paired llama.cpp anchors on the same model,
+  prompt lengths, warmup policy, and power state.
+- A default policy must include a rollback env and prove no dense or A3B regression
+  from the group-specific auto gate.
+
+### 2. Hypothesis: A3B matrix attention plus grouped Q6 is the lcpp-cracking prefill candidate
 
 Optimizes: A3B MoE prompt prefill from `pp320` through true-long after the Q6-down
 grouped-path escape fix moved the board.

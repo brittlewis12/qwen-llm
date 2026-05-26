@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — A10B G16 Matrix Attention Becomes The Next Env Candidate
+
+Status: clean follow-up after `v0.141` (`e70eef815`). The branch adds env-only
+`QWEN_PREFILL_ATTN_MATRIX_G16=1` for the A10B group-16 attention shape. It is not
+defaulted; raw artifacts are in `docs/bench/2026-05-26-v0141-a10b-g16-matrix/`.
+
+### Measurements
+
+Clean rows used `build_dirty=0`, AC power, no thermal/performance/CPU-power
+warnings, and `96%` free memory before/after:
+
+| Shape | Base | G16 matrix | Read |
+| --- | ---: | ---: | --- |
+| A10B `pp1024` | `411.86` | `430.67` | `+4.6%` |
+| A10B `pp16384` | `289.97` | `338.07` | `+16.6%` |
+
+Warmed dirty spikes also pointed the same way: `pp512` `361.09 -> 379.78`,
+`pp1024` `410.32 -> 428.08`, `pp4096` `376.47 -> 404.63`, and `pp16384`
+`281.09 -> 329.29`. A chunk-4096 spike helped the packed base at `pp4096`
+(`376.47 -> 403.52`) but left G16 matrix still ahead (`412.26`); at `pp16384`,
+G16 matrix was essentially chunk-flat (`329.29 -> 329.68`) while base stayed far
+behind (`293.72`).
+
+Dirty phase trace at `pp512` showed `12/12` G16 matrix attention layers. Matrix
+body phases totaled about `14.3 ms` (`KQ 5.46`, softmax `3.11`, `KQV 5.76`),
+versus the prior packed-attention body bucket around `73.21 ms`; routed MoE still
+dominated (`routed_swiglu 585.07 ms`, `routed_down 317.90 ms`).
+
+Correctness: bare `QWEN_PREFILL_ATTN_MATRIX_G16=1` A10B smoke hit a test-path
+scratch allocation error (`max_pos=4 < required last_pos=6`). Rerunning with
+`QWEN_PREFILL_ATTN_MATRIX_MAX_POS=8` passed the existing A10B smoke: final logits
+`0.999934`, GDN state `0.999809`, conv `0.999657`, KV K `0.999567`, KV V
+`0.999414`. Numeric correctness is therefore not the smoke blocker; prompt-aware
+G16 scratch plumbing remains a promotion blocker.
+
+Read: A10B attention is no longer just a packed-path tuning problem. The G16
+matrix branch is now the highest-EV A10B promotion candidate, especially for long
+contexts, but it remains env-only until repeated clean rows, prompt-aware G16
+scratch allocation, clean trace coverage, and paired llama.cpp anchors agree.
+After this branch, the remaining A10B gap should be re-attributed before more
+attention work.
+
 ## 2026-05-26 — A3B Matrix Attention Promotes To Default
 
 Status: dirty-code promotion after `v0.136`. The group-8 matrix-attention path is

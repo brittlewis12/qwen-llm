@@ -104,6 +104,11 @@ fn prefill_dense_ffn_fused_swiglu_q4_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4"))
 }
 
+fn prefill_gdn_skinny_f32_e8p32_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_GDN_SKINNY_E8P32"))
+}
+
 fn prefill_moe_packed_routed_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4216,6 +4221,27 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         )
     };
     let ffn_mat_mat_eligible = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+    let gdn_skinny_mat_mat = |enc: &KernelEncoder,
+                              weight: &MetalTensor,
+                              x: &MetalTensor,
+                              y: &MetalTensor,
+                              n_in: usize,
+                              n_out: usize,
+                              n_query: usize|
+     -> Result<(), DFlashError> {
+        if prefill_gdn_skinny_f32_e8p32_enabled()
+            && weight.dtype == GgmlType::F32
+            && n_in % 4 == 0
+            && n_out % 8 == 0
+        {
+            crate::metal::encode_mat_mat_f32_router_e8p32(
+                base.ctx, enc, weight, x, y, n_in, n_out, n_query,
+            )?;
+        } else {
+            encode_mat_mat_dispatch(base.ctx, enc, weight, x, y, n_in, n_out, n_query)?;
+        }
+        Ok(())
+    };
 
     // Per-call ids buffer. P=16 i32 = 64 bytes; trivial alloc cost.
     // (Same "F32-typed buffer holding i32" convention as
@@ -4378,7 +4404,91 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             .view_subrange(0, vec![(chunk_p * v_dim) as u64]);
 
                         // Step A: batched front-end QKV / Z projections.
-                        {
+                        if trace_layer_phases {
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &g.in_proj_qkv,
+                                    &h_pack_p,
+                                    &gdn_qkv_pack_p,
+                                    h,
+                                    conv_dim,
+                                    chunk_p,
+                                )?;
+                                enc.end();
+                            }
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "gdn",
+                                "gdn_qkv",
+                            );
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &g.in_proj_z,
+                                    &h_pack_p,
+                                    &gdn_z_pack_p,
+                                    h,
+                                    v_dim,
+                                    chunk_p,
+                                )?;
+                                enc.end();
+                            }
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "gdn",
+                                "gdn_z",
+                            );
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                gdn_skinny_mat_mat(
+                                    &enc,
+                                    &g.beta_proj,
+                                    &h_pack_p,
+                                    &gdn_beta_pack_p,
+                                    h,
+                                    n_v_u,
+                                    chunk_p,
+                                )?;
+                                gdn_skinny_mat_mat(
+                                    &enc,
+                                    &g.alpha_proj,
+                                    &h_pack_p,
+                                    &gdn_alpha_pack_p,
+                                    h,
+                                    n_v_u,
+                                    chunk_p,
+                                )?;
+                                enc.end();
+                            }
+                            flush_prefill_layer_phase(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                trace_layer_phases,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "gdn",
+                                "gdn_beta_alpha",
+                            );
+                        } else {
                             let enc = KernelEncoder::begin(&cmd_buf);
                             encode_mat_mat_dispatch(
                                 base.ctx,
@@ -4400,8 +4510,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 v_dim,
                                 chunk_p,
                             )?;
-                            encode_mat_mat_dispatch(
-                                base.ctx,
+                            gdn_skinny_mat_mat(
                                 &enc,
                                 &g.beta_proj,
                                 &h_pack_p,
@@ -4410,8 +4519,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 n_v_u,
                                 chunk_p,
                             )?;
-                            encode_mat_mat_dispatch(
-                                base.ctx,
+                            gdn_skinny_mat_mat(
                                 &enc,
                                 &g.alpha_proj,
                                 &h_pack_p,
@@ -4422,17 +4530,6 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                             enc.end();
                         }
-                        flush_prefill_layer_phase(
-                            base.ctx,
-                            &mut cmd_buf,
-                            &mut prefill_gpu_total_ms,
-                            trace_layer_phases,
-                            chunk_idx,
-                            chunk_start,
-                            il,
-                            "gdn",
-                            "gdn_front",
-                        );
 
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);

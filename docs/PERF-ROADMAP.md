@@ -182,6 +182,14 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   vs `2998 ms`) and matrix attention body still has a smaller residual delta.
   Next dense work should inspect GDN front lowering and lcpp op shapes before
   another FFN fusion branch.
+- That GDN-front inspection found one real dispatch-class mismatch: dense GDN
+  `beta_proj` / `alpha_proj` are F32 skinny projections that benefit from the
+  router-style E8xP32 kernel. Env-only `QWEN_PREFILL_GDN_SKINNY_E8P32=1` drops
+  traced `gdn_beta_alpha` from `672.45 -> 105.96 ms` at 27B `pp4096` and improves
+  repeated 27B matrix-G6/G8 rows by about `+2-4%` at `pp512/1024/8192/16384`
+  (`pp4096` warmed is only `~+0.8%`). Correctness is green on 0.8B, active 27B
+  prefill, and 27B matrix-prefix gates. Keep env-only until a tight family/shape
+  promotion gate proves the predicate is not overbroad.
 - A 27B `pp16384` combined no-op budget confirms the dense gap is not only
   attention: baseline `127.57 t/s`, no-FFN `208.71`, no-attn `193.48`,
   no-FFN+no-attn `580.91`, and no-FFN+no-attn+no-GDN `845.88`. Keep dense FFN/GDN
@@ -573,6 +581,11 @@ Current design rule:
   next serious exact FFN branch should attack grouped Q5 down locality/dequant or
   a true `SwiGLU+down` fusion that preserves grouped-down locality and beats the
   full-tail fused-bank diagnostic, not the isolated SwiGLU microprofile.
+- Keep dense `QWEN_PREFILL_GDN_SKINNY_E8P32=1` env-only until default promotion
+  proves the fast path is tied to GDN `beta_proj` / `alpha_proj`, is positive or
+  neutral across dense family shapes, and does not regress small/awkward prompt
+  sizes. The discovery raises the EV of searching for other F32 skinny projection
+  dispatcher mismatches.
 - Keep grouped routed zero-fill default-off as small cleanup, not a main roadmap
   lever.
 
@@ -606,6 +619,10 @@ Acceptance gates:
   speedup on both A3B and A10B at `pp512`, stay positive/neutral at `pp1024`, and
   improve A3B `pp4096` with matrix attention fixed by `>=1.10x` before default
   consideration.
+- Dense GDN skinny default promotion requires trace or explicit role coverage that
+  proves only intended GDN F32 skinny projections use E8xP32, repeated rows across
+  `pp512/1024/4096/8192/16384` with no row worse than about `-1%`, at least one
+  smaller dense guardrail, and a decode-after-prefill correctness/state check.
 
 ### 2. Historical: true-long A3B matrix-attention branch is now folded into #1
 

@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-25 — GDN Skinny E8xP32 Finds A Dense Projection Mismatch
+
+Status: dirty-code env-only spike after `v0.133`. Added
+`QWEN_PREFILL_GDN_SKINNY_E8P32=1`, which routes eligible F32 dense GDN
+`beta_proj` and `alpha_proj` skinny projections through the existing E8xP32
+router mat-mat kernel instead of the generic dense dispatcher. Raw rows are in
+`docs/bench/2026-05-25-v0134-gdn-skinny-e8p32/`.
+
+### Measurements
+
+27B dense with matrix-G6/G8 enabled:
+
+| Shape | Baseline rows | Skinny rows | Read |
+| --- | ---: | ---: | --- |
+| `pp512` | `212.31`, `212.93` | `216.34`, `218.34` | `~+2-3%` |
+| `pp1024` | `205.48`, `200.13` | `213.56`, `208.98` | `~+4%` |
+| `pp4096` | `176.29`, `191.45` | `195.25`, `193.02` | cold first baseline; warmed `~+0.8%` |
+| `pp8192` | `185.67`, `185.64` | `191.09`, `190.65` | `~+2.7%` |
+| `pp16384` | `175.48`, `176.08` | `180.34`, `178.87` | `~+1.6-2.8%` |
+
+Phase trace attribution at `pp4096` localizes the mechanism:
+`gdn_beta_alpha` drops from `672.45 ms` to `105.96 ms`, while `gdn_qkv` and
+`gdn_z` are roughly unchanged. Correctness passed 0.8B prefill-vs-single, 27B
+prefill-vs-single with matrix-G6/G8 at `T=32/P=32`, and the ignored 27B
+matrix-G6 prefix gate at prefix `4096`.
+
+Read: this is a real dispatch-class mismatch, not another fused-SwiGLU mirage.
+Keep it env-only for this checkpoint because the total gain is single-digit and
+the shape predicate must stay semantically tight before default-on. The next
+dense inspection should search for other F32 skinny projections using the wrong
+dispatcher, then run a narrow promotion gate rather than a broad benchmark matrix.
+
 ## 2026-05-25 — Dense llama.cpp Differential Moves Focus Off SwiGLU
 
 Status: dirty-code attribution after `v0.132`. Added a llama.cpp Metal profile

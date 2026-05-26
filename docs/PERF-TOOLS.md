@@ -541,6 +541,9 @@ Rules:
 
 - `QWEN_PREFILL_TRACE_LAYER_PHASES=1` emits `prefill-layer-phase` rows for dense
   pre-norm, GDN, mixer residual, and dense FFN phases.
+- Dense GDN front traces split the projection bucket into `gdn_qkv`, `gdn_z`, and
+  `gdn_beta_alpha`; use that split to catch dispatcher-class mismatches before
+  returning to broad FFN or attention hypotheses.
 - Add `QWEN_PREFILL_TRACE_ATTN_PHASES=1` when attention attribution matters; by
   itself, layer tracing collapses attention work into one `attn` phase.
 - Compare phase-local sums across paired runs before defaulting a sub-noise

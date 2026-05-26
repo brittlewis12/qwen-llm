@@ -94,6 +94,9 @@ Default-promotion validation:
 - The trace showed `prefill-attn-matrix-g16-shape` for all 12 A10B attention layers
   in both smoke chunks. Final logits were `0.999934`, GDN state `0.999810`, conv
   `0.999657`, KV K `0.999567`, and KV V `0.999413`.
+- Post-commit clean canary on rebuilt `0ee9c45d4` confirms the rollback wire at
+  `pp512`: `QWEN_PREFILL_ATTN_MATRIX_G16=0` gives `365.14 t/s`, while auto/default
+  gives `379.23 t/s`; power, thermal, and memory probes stayed clean.
 
 ## Current Read
 
@@ -129,3 +132,4 @@ Default-promotion validation:
 - `v0144-clean-a10b-pp16384-g16-matrix-repeat.json`
 - `v0144-lcpp-a10b-pp512-1024-4096-16384-default-fa.json`
 - `v0144-lcpp-a10b-pp512-1024-4096-16384-fa0.json`
+- `v0146-clean-a10b-pp512-g16-default-rollback.json`

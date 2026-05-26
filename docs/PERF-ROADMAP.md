@@ -525,8 +525,9 @@ Acceptance gates:
   A10B lcpp parity because `pp512` remains `0.90x`; route-MoE work owns that gap.
 - A default policy must include a rollback env and prove no dense or A3B regression
   from the group-specific auto gate.
-- Post-default clean canaries should compare auto/default against
-  `QWEN_PREFILL_ATTN_MATRIX_G16=0`, then the next optimization sprint should move
+- Post-default clean canary is green at A10B `pp512`: rollback
+  `QWEN_PREFILL_ATTN_MATRIX_G16=0` gives `365.14 t/s`, while auto/default gives
+  `379.23 t/s` on rebuilt `0ee9c45d4`. The next optimization sprint should move
   to routed MoE rather than attention.
 
 ### 2. Hypothesis: A3B matrix attention plus grouped Q6 is the lcpp-cracking prefill candidate

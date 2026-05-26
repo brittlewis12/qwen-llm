@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — A10B G16 Default/Rollback Canary Is Green
+
+Status: clean post-commit canary after rebuilding `qwen-bench` from `0ee9c45d4`
+(`build_dirty=0`). Artifact:
+`docs/bench/2026-05-26-v0141-a10b-g16-matrix/v0146-clean-a10b-pp512-g16-default-rollback.json`.
+
+At A10B `pp512`, `QWEN_PREFILL_ATTN_MATRIX_G16=0` rolls back to `365.14 t/s`,
+while auto/default with no env reaches `379.23 t/s`. Power source was AC, no
+thermal/performance/CPU-power warnings were recorded, and memory stayed at `95%`
+free before/after each row.
+
+Read: the default and rollback wiring works on the most conservative swept prompt
+shape. A10B attention should stop being the active branch; the next optimization
+frontier is routed MoE, especially because `pp512` still trails llama.cpp despite
+the G16 default win over qwen base.
+
 ## 2026-05-26 — A10B G16 Matrix Attention Promotes To Default
 
 Status: code promotion after `v0.145`. `QWEN_PREFILL_ATTN_MATRIX_G16` now uses the

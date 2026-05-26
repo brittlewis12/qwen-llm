@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — Post-G16 A10B Budget Pivots Back To Routed MoE
+
+Status: clean no-op attribution after A10B/G16 matrix attention became default.
+Raw artifacts are in `docs/bench/2026-05-26-v0147-a10b-post-g16-routed-budget/`.
+
+The tight repeated `pp512` gate shows base/default G16 at `383.26`, `382.87 t/s`;
+no-attention-body at `389.39`, `390.08 t/s`; and no-routed-MoE at `764.19`,
+`764.46 t/s`. A broader one-block sweep agreed directionally (`no-routed 763.40`,
+`no-attn 390.26`, `no-shared 402.04`, `no-gdn 446.97`, `no-FFN 1051.66`) but had a
+bad late baseline (`328.50`), so do not ratio against that broad baseline.
+
+Read: after G16 default, A10B attention body is only low-single-digit headroom at
+`pp512`; routed MoE is about a `2x` no-op ceiling and owns the remaining lcpp gap.
+The next optimization sprint should start from `routed_swiglu` and `routed_down`
+subphase evidence, with GDN tracked as secondary.
+
 ## 2026-05-26 — A10B G16 Default/Rollback Canary Is Green
 
 Status: clean post-commit canary after rebuilding `qwen-bench` from `0ee9c45d4`

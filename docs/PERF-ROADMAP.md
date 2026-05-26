@@ -81,6 +81,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   at `0.90x/1.02x/1.08x/1.03x`. Active G16 matrix correctness is green under the
   default auto policy when the packed threshold is lowered for the smoke. Routed
   MoE is next because `pp512` remains a lcpp gap.
+- Post-default A10B `pp512` no-op budget confirms that pivot: base/default G16 is
+  `383.26/382.87 t/s`, no-attention-body is only `389.39/390.08`, and no-routed-
+  MoE is `764.19/764.46`. Stop opening attention branches for A10B until routed
+  `SwiGLU/down` has had a fresh structural pass.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`

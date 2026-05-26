@@ -106,7 +106,12 @@ fn prefill_dense_ffn_fused_swiglu_q4_enabled() -> bool {
 
 fn prefill_gdn_skinny_f32_e8p32_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_GDN_SKINNY_E8P32"))
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_PREFILL_GDN_SKINNY_E8P32").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
 }
 
 fn prefill_moe_packed_routed_enabled() -> bool {
@@ -4221,6 +4226,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         )
     };
     let ffn_mat_mat_eligible = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+    // Callsite-scoped specialization for GDN beta/alpha prompt prefill. Do not
+    // reuse this helper as a generic F32 skinny mat-mat dispatcher without a new
+    // shape/correctness gate.
     let gdn_skinny_mat_mat = |enc: &KernelEncoder,
                               weight: &MetalTensor,
                               x: &MetalTensor,

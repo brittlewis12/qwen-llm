@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-26T06:40:16.117853+00:00",
+  "base_cmd": [
+    "target/release/qwen-bench",
+    "pp",
+    "-m",
+    "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+    "--runs",
+    "3",
+    "-o",
+    "json",
+    "-p",
+    "128",
+    "--no-warmup"
+  ],
+  "repeat_blocks": 2,
+  "shuffle_seed": 53,
+  "run_plan": [
+    {
+      "block": 0,
+      "order": 0,
+      "label": "g6-skinny",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1",
+        "QWEN_PREFILL_GDN_SKINNY_E8P32": "1"
+      }
+    },
+    {
+      "block": 0,
+      "order": 1,
+      "label": "g6",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+      }
+    },
+    {
+      "block": 1,
+      "order": 0,
+      "label": "g6-skinny",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1",
+        "QWEN_PREFILL_GDN_SKINNY_E8P32": "1"
+      }
+    },
+    {
+      "block": 1,
+      "order": 1,
+      "label": "g6",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+      }
+    }
+  ],
+  "variants": [
+    {
+      "block": 0,
+      "order": 0,
+      "label": "g6-skinny",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1",
+        "QWEN_PREFILL_GDN_SKINNY_E8P32": "1"
+      },
+      "bench": {
+        "schema_version": 1,
+        "engine": "qwen-llm",
+        "build_commit": "9c08a0762",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T06:39:46Z",
+        "model_filename": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+        "model_size": 16806250496,
+        "model_n_params": 26895998464,
+        "arch_kind": "dense",
+        "test": "pp128",
+        "n_tokens": 128,
+        "n_repetitions": 3,
+        "avg_ts": 199.08130217467837,
+        "stddev_ts": 13.685631983454563,
+        "samples_ts": [
+          183.27898982417008,
+          206.8742175568595,
+          207.09069914300545
+        ],
+        "samples_ns": [
+          698388834,
+          618733458,
+          618086667
+        ],
+        "avg_ns": 645069653,
+        "avg_gpu_ns": 619683777,
+        "decode_gb_per_s": null,
+        "prefill_chunk": 128,
+        "decode_mode": null,
+        "prefill_mode": "packed",
+        "power": {
+          "source": "AC Power",
+          "battery_percent": 100,
+          "battery_state": "charged",
+          "battery_warning": null,
+          "powermode_battery": 2,
+          "powermode_ac": 2,
+          "thermal_warning_recorded": false,
+          "performance_warning_recorded": false,
+          "cpu_power_status_recorded": false
+        },
+        "qwen_env": {
+          "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+          "QWEN_PREFILL_ATTN_MATRIX_G8": "1",
+          "QWEN_PREFILL_GDN_SKINNY_E8P32": "1"
+        }
+      },
+      "wall_s_outer": 4.76247775007505,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%"
+    },
+    {
+      "block": 0,
+      "order": 1,
+      "label": "g6",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+      },
+      "bench": {
+        "schema_version": 1,
+        "engine": "qwen-llm",
+        "build_commit": "9c08a0762",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T06:39:56Z",
+        "model_filename": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+        "model_size": 16806250496,
+        "model_n_params": 26895998464,
+        "arch_kind": "dense",
+        "test": "pp128",
+        "n_tokens": 128,
+        "n_repetitions": 3,
+        "avg_ts": 193.80434776056825,
+        "stddev_ts": 13.378654248932111,
+        "samples_ts": [
+          178.35675601109295,
+          201.39653296466398,
+          201.65975430594776
+        ],
+        "samples_ns": [
+          717662750,
+          635562083,
+          634732500
+        ],
+        "avg_ns": 662652444,
+        "avg_gpu_ns": 637596374,
+        "decode_gb_per_s": null,
+        "prefill_chunk": 128,
+        "decode_mode": null,
+        "prefill_mode": "packed",
+        "power": {
+          "source": "AC Power",
+          "battery_percent": 100,
+          "battery_state": "charged",
+          "battery_warning": null,
+          "powermode_battery": 2,
+          "powermode_ac": 2,
+          "thermal_warning_recorded": false,
+          "performance_warning_recorded": false,
+          "cpu_power_status_recorded": false
+        },
+        "qwen_env": {
+          "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+          "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+        }
+      },
+      "wall_s_outer": 4.840912624960765,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%"
+    },
+    {
+      "block": 1,
+      "order": 0,
+      "label": "g6-skinny",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1",
+        "QWEN_PREFILL_GDN_SKINNY_E8P32": "1"
+      },
+      "bench": {
+        "schema_version": 1,
+        "engine": "qwen-llm",
+        "build_commit": "9c08a0762",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T06:40:06Z",
+        "model_filename": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+        "model_size": 16806250496,
+        "model_n_params": 26895998464,
+        "arch_kind": "dense",
+        "test": "pp128",
+        "n_tokens": 128,
+        "n_repetitions": 3,
+        "avg_ts": 198.87151429758896,
+        "stddev_ts": 14.316623089686498,
+        "samples_ts": [
+          182.34054370380247,
+          207.24166626859,
+          207.03233292037447
+        ],
+        "samples_ns": [
+          701983209,
+          617636415,
+          618260917
+        ],
+        "avg_ns": 645960180,
+        "avg_gpu_ns": 620261680,
+        "decode_gb_per_s": null,
+        "prefill_chunk": 128,
+        "decode_mode": null,
+        "prefill_mode": "packed",
+        "power": {
+          "source": "AC Power",
+          "battery_percent": 100,
+          "battery_state": "charged",
+          "battery_warning": null,
+          "powermode_battery": 2,
+          "powermode_ac": 2,
+          "thermal_warning_recorded": false,
+          "performance_warning_recorded": false,
+          "cpu_power_status_recorded": false
+        },
+        "qwen_env": {
+          "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+          "QWEN_PREFILL_ATTN_MATRIX_G8": "1",
+          "QWEN_PREFILL_GDN_SKINNY_E8P32": "1"
+        }
+      },
+      "wall_s_outer": 4.839583582943305,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%"
+    },
+    {
+      "block": 1,
+      "order": 1,
+      "label": "g6",
+      "env": {
+        "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+        "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+      },
+      "bench": {
+        "schema_version": 1,
+        "engine": "qwen-llm",
+        "build_commit": "9c08a0762",
+        "build_dirty": 0,
+        "test_time": "2026-05-26T06:40:15Z",
+        "model_filename": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+        "model_size": 16806250496,
+        "model_n_params": 26895998464,
+        "arch_kind": "dense",
+        "test": "pp128",
+        "n_tokens": 128,
+        "n_repetitions": 3,
+        "avg_ts": 193.79317139390454,
+        "stddev_ts": 13.325024394187515,
+        "samples_ts": [
+          178.40995611184772,
+          201.75642364671975,
+          201.2131344231461
+        ],
+        "samples_ns": [
+          717448750,
+          634428375,
+          636141375
+        ],
+        "avg_ns": 662672833,
+        "avg_gpu_ns": 637562388,
+        "decode_gb_per_s": null,
+        "prefill_chunk": 128,
+        "decode_mode": null,
+        "prefill_mode": "packed",
+        "power": {
+          "source": "AC Power",
+          "battery_percent": 100,
+          "battery_state": "charged",
+          "battery_warning": null,
+          "powermode_battery": 2,
+          "powermode_ac": 2,
+          "thermal_warning_recorded": false,
+          "performance_warning_recorded": false,
+          "cpu_power_status_recorded": false
+        },
+        "qwen_env": {
+          "QWEN_PREFILL_ATTN_MATRIX_G6": "1",
+          "QWEN_PREFILL_ATTN_MATRIX_G8": "1"
+        }
+      },
+      "wall_s_outer": 4.8596949580824,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%"
+    }
+  ]
+}

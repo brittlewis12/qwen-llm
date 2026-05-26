@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-26 — GDN Skinny E8xP32 Promotes To Default
+
+Status: clean follow-up after `v0.134`. Promoted the dense GDN skinny E8xP32 path
+to default-on for eligible F32 prompt-prefill `beta_proj` / `alpha_proj`
+projections, with `QWEN_PREFILL_GDN_SKINNY_E8P32=0` as rollback. Raw canaries are
+in `docs/bench/2026-05-26-v0135-gdn-skinny-default/`.
+
+### Measurements
+
+Shape audit: Qwen3.6 27B has F32 `[5120,48]` alpha/beta; Qwen3.6 35B A3B has F32
+`[2048,32]`; sampled Qwen3.5 0.8B/4B/9B/27B and 122B A10B use Q8_0 alpha/beta
+and fall back.
+
+Additional repeated canaries:
+
+| Model / branch | Shape | Baseline rows | Skinny rows | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B default | `pp128` | `642.32`, `663.98` | `678.86`, `675.24` | positive |
+| A3B default | `pp1024` | `1226.11`, `1226.55` | `1237.35`, `1240.68` | positive |
+| A3B matrix-G8 | `pp4096` | `1386.19`, `1386.24` | `1407.17`, `1410.67` | positive |
+| 27B matrix-G6/G8 | `pp128` | `193.80`, `193.79` | `199.08`, `198.87` | positive |
+
+Correctness: A3B prefill-vs-single with skinny enabled passed at `T=12/P=8`
+with final logits `0.999985`, GDN state `0.999735`, conv `0.999811`, and KV K/V
+`>=0.999873`. This is lower than the 27B cosines but above the established gate.
+Power/thermal/memory probes stayed clean.
+
+Read: defaulting is now justified because the fast path is callsite-scoped to GDN
+alpha/beta prompt prefill, both eligible F32 shape families are positive, and
+non-F32 sampled families fall back. Monitor future GGUFs with new F32 GDN shapes
+and use `QWEN_PREFILL_GDN_SKINNY_E8P32=0` for rollback.
+
 ## 2026-05-25 — GDN Skinny E8xP32 Finds A Dense Projection Mismatch
 
 Status: dirty-code env-only spike after `v0.133`. Added

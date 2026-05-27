@@ -1,0 +1,19 @@
+warning: llama-cpp-sys-2@0.1.139: In file included from wrapper_oai.cpp:10:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/chat.h:7:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/jinja/parser.h:3:
+warning: llama-cpp-sys-2@0.1.139: ./llama.cpp/common/jinja/lexer.h:49:20: warning: unused function 'type_to_string' [-Wunused-function]
+warning: llama-cpp-sys-2@0.1.139:    49 | static std::string type_to_string(token::type t) {
+warning: llama-cpp-sys-2@0.1.139:       |                    ^~~~~~~~~~~~~~
+warning: llama-cpp-sys-2@0.1.139: In file included from wrapper_oai.cpp:10:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/chat.h:7:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/jinja/parser.h:4:
+warning: llama-cpp-sys-2@0.1.139: ./llama.cpp/common/jinja/runtime.h:614:20: warning: unused function 'render_string_parts' [-Wunused-function]
+warning: llama-cpp-sys-2@0.1.139:   614 | static std::string render_string_parts(const value_string & parts) {
+warning: llama-cpp-sys-2@0.1.139:       |                    ^~~~~~~~~~~~~~~~~~~
+warning: llama-cpp-sys-2@0.1.139: 2 warnings generated.
+   Compiling qwen-llm v0.0.1 (/Users/tito/code/qwen-llm/crates/qwen-llm)
+    Finished `release` profile [optimized + debuginfo] target(s) in 24.64s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-730db625e36cfbfd)
+[grouped-q5-swiglu-oracle-122b-layer46] layer=46 chunk_p=64 experts=13 slots=512 cos=1.000000 max_abs=0.000e0 poison_count=0
+     Running tests/dflash_correctness.rs (target/release/deps/dflash_correctness-11684a1a47526d72)
+     Running tests/eos_gap.rs (target/release/deps/eos_gap-740953917a76a928)

@@ -1,0 +1,26 @@
+warning: llama-cpp-sys-2@0.1.139: In file included from wrapper_oai.cpp:10:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/chat.h:7:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/jinja/parser.h:3:
+warning: llama-cpp-sys-2@0.1.139: ./llama.cpp/common/jinja/lexer.h:49:20: warning: unused function 'type_to_string' [-Wunused-function]
+warning: llama-cpp-sys-2@0.1.139:    49 | static std::string type_to_string(token::type t) {
+warning: llama-cpp-sys-2@0.1.139:       |                    ^~~~~~~~~~~~~~
+warning: llama-cpp-sys-2@0.1.139: In file included from wrapper_oai.cpp:10:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/chat.h:7:
+warning: llama-cpp-sys-2@0.1.139: In file included from ./llama.cpp/common/jinja/parser.h:4:
+warning: llama-cpp-sys-2@0.1.139: ./llama.cpp/common/jinja/runtime.h:614:20: warning: unused function 'render_string_parts' [-Wunused-function]
+warning: llama-cpp-sys-2@0.1.139:   614 | static std::string render_string_parts(const value_string & parts) {
+warning: llama-cpp-sys-2@0.1.139:       |                    ^~~~~~~~~~~~~~~~~~~
+warning: llama-cpp-sys-2@0.1.139: 2 warnings generated.
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-730db625e36cfbfd)
+     Running tests/dflash_correctness.rs (target/release/deps/dflash_correctness-11684a1a47526d72)
+[prefill-vs-single-a10b] loading 122B A10B…
+[prefill-vs-single-a10b] running oracle…
+[prefill-vs-single-a10b] oracle wall: 9230.7 ms
+[prefill-vs-single-a10b] running prefill_tokens (P=4, chunks=2)…
+[prefill-vs-single-a10b] prefill wall: 248.6 ms
+[prefill-vs-single-a10b] SPEEDUP: 37.13×
+[prefill-vs-single-a10b] cos(final logits)=0.999934
+[prefill-vs-single-a10b] GDN state cos_min=0.999809 conv cos_min=0.999657
+[prefill-vs-single-a10b] KV K cos_min=0.999567 V cos_min=0.999414
+     Running tests/eos_gap.rs (target/release/deps/eos_gap-740953917a76a928)

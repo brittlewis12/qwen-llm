@@ -174,6 +174,15 @@ fn prefill_moe_grouped_enabled() -> bool {
     })
 }
 
+fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => h == 3072 && f_exp == 1024 && n_expert == 256,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrefillEnvMode {
     Auto,
@@ -353,6 +362,63 @@ fn encode_prefill_moe_grouped_swiglu_q4(
             topk,
             chunk_p,
         )
+    }
+}
+
+fn encode_prefill_moe_grouped_swiglu(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    moe: &MetalMoeFfn,
+    h_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    h: usize,
+    f_exp: usize,
+    n_expert: usize,
+    topk: usize,
+    chunk_p: usize,
+    grouped_q4_n32_all: bool,
+    hot_expert_min_slots: Option<usize>,
+) -> Result<(), MetalError> {
+    match (moe.gate_exps.dtype, moe.up_exps.dtype) {
+        (GgmlType::Q4_K, GgmlType::Q4_K) => encode_prefill_moe_grouped_swiglu_q4(
+            ctx,
+            enc,
+            moe,
+            h_pack,
+            counts,
+            ids,
+            inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+            chunk_p,
+            grouped_q4_n32_all,
+            hot_expert_min_slots,
+        ),
+        (GgmlType::Q5_K, GgmlType::Q5_K) => {
+            crate::metal::encode_moe_swiglu_q5_K_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+            )
+        }
+        other => Err(MetalError::BadShape {
+            kernel: "prefill_moe_grouped_swiglu",
+            detail: format!("unsupported grouped gate/up dtypes {other:?}"),
+        }),
     }
 }
 
@@ -6022,18 +6088,22 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     && moe.down_exps.dtype == GgmlType::Q5_K;
                 let grouped_down_dtype_eligible =
                     matches!(moe.down_exps.dtype, GgmlType::Q5_K | GgmlType::Q6_K);
+                let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+                let n_expert = arch.expert_count as usize;
+                let f_exp = arch.expert_feed_forward_length as usize;
+                let f_shared = arch.expert_shared_feed_forward_length as usize;
+                let grouped_gate_up_dtype_eligible = matches!(
+                    (moe.gate_exps.dtype, moe.up_exps.dtype),
+                    (GgmlType::Q4_K, GgmlType::Q4_K) | (GgmlType::Q5_K, GgmlType::Q5_K)
+                ) && (moe.gate_exps.dtype != GgmlType::Q5_K
+                    || prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert));
                 let grouped_routed_path = prefill_moe_grouped_enabled()
-                    && moe.gate_exps.dtype == GgmlType::Q4_K
-                    && moe.up_exps.dtype == GgmlType::Q4_K
+                    && grouped_gate_up_dtype_eligible
                     && grouped_down_dtype_eligible
                     && h % 256 == 0
-                    && arch.expert_feed_forward_length as usize % 256 == 0;
+                    && f_exp % 256 == 0;
 
                 if !skip_ffn && (packed_routed_path || grouped_routed_path) {
-                    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
-                    let n_expert = arch.expert_count as usize;
-                    let f_exp = arch.expert_feed_forward_length as usize;
-                    let f_shared = arch.expert_shared_feed_forward_length as usize;
                     let skip_moe_routed = prefill_noop_moe_routed_enabled();
                     let skip_moe_shared = prefill_noop_moe_shared_enabled();
                     let hot_expert_min_slots = prefill_moe_hot_expert_min_slots();
@@ -6253,7 +6323,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
                         }
-                        encode_prefill_moe_grouped_swiglu_q4(
+                        encode_prefill_moe_grouped_swiglu(
                             base.ctx,
                             &enc,
                             moe,
@@ -6421,7 +6491,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 if zero_grouped_buffers {
                                     encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
                                 }
-                                encode_prefill_moe_grouped_swiglu_q4(
+                                encode_prefill_moe_grouped_swiglu(
                                     base.ctx,
                                     &enc,
                                     moe,
@@ -6525,7 +6595,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             if zero_grouped_buffers {
                                 encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
                             }
-                            encode_prefill_moe_grouped_swiglu_q4(
+                            encode_prefill_moe_grouped_swiglu(
                                 base.ctx,
                                 &enc,
                                 moe,
@@ -11371,6 +11441,169 @@ mod tests {
         }
     }
 
+    fn run_grouped_q5_swiglu_vs_matmat_oracle(
+        model_path: &str,
+        label: &str,
+        layer_idx: usize,
+        chunk_p: usize,
+    ) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[grouped-q5-swiglu-oracle-{label}] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let arch = &mm.arch;
+        let h = arch.hidden_size as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let n_expert = arch.expert_count as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+
+        let block = mf.model.blocks.get(layer_idx).expect("layer exists");
+        let moe = match block {
+            crate::metal_forward::MetalBlock::Gdn(g) => g.ffn_moe.as_ref().expect("moe block"),
+            crate::metal_forward::MetalBlock::Attn(a) => a.ffn_moe.as_ref().expect("moe block"),
+        };
+        assert_eq!(moe.gate_exps.dtype, GgmlType::Q5_K, "gate dtype");
+        assert_eq!(moe.up_exps.dtype, GgmlType::Q5_K, "up dtype");
+
+        let slot_count = chunk_p * topk;
+        let mut count_plan = vec![1usize, 15, 16, 17, 31, 32, 33, 48, 64, 64, 64, 64];
+        let used: usize = count_plan.iter().sum();
+        assert!(used <= slot_count, "count plan too large");
+        count_plan.push(slot_count - used);
+        assert!(
+            count_plan.iter().all(|&c| c <= chunk_p),
+            "count plan exceeds grouped id stride"
+        );
+
+        let selected_experts: Vec<usize> = (0..count_plan.len())
+            .map(|i| (17 * i + 3) % n_expert)
+            .collect();
+        let mut counts = vec![0i32; n_expert];
+        let mut ids = vec![-1i32; n_expert * chunk_p];
+        let slots: Vec<i32> = (0..slot_count)
+            .map(|i| ((i * 37) % slot_count) as i32)
+            .collect();
+        let mut cursor = 0usize;
+        let mut expert_slots: Vec<(usize, Vec<i32>)> = Vec::new();
+        for (&expert, &count) in selected_experts.iter().zip(count_plan.iter()) {
+            counts[expert] = count as i32;
+            let mut group_slots = Vec::with_capacity(count);
+            for j in 0..count {
+                let slot = slots[cursor + j];
+                ids[expert * chunk_p + j] = slot;
+                group_slots.push(slot);
+            }
+            cursor += count;
+            expert_slots.push((expert, group_slots));
+        }
+        assert_eq!(cursor, slot_count);
+
+        let h_pack = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * h) as u64]).expect("h_pack");
+        let counts_t = MetalTensor::zeros_f32(&ctx, vec![n_expert as u64]).expect("counts");
+        let ids_t = MetalTensor::zeros_f32(&ctx, vec![(n_expert * chunk_p) as u64]).expect("ids");
+        let actual_inner =
+            MetalTensor::zeros_f32(&ctx, vec![(slot_count * f_exp) as u64]).expect("actual_inner");
+        let h_init: Vec<f32> = (0..chunk_p * h)
+            .map(|i| (((i * 13 + 7) % 97) as f32 - 48.0) * 0.0075)
+            .collect();
+        write_tensor_f32(&h_pack, &h_init);
+        cpu_write_i32_f32buf(&counts_t, &counts);
+        cpu_write_i32_f32buf(&ids_t, &ids);
+
+        let _ = timed_gpu_cmd(&ctx, |enc| {
+            encode_fill_f32(&ctx, enc, &actual_inner, -777.0).expect("poison actual");
+            crate::metal::encode_moe_swiglu_q5_K_f32_grouped_slots_n16(
+                &ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &h_pack,
+                &counts_t,
+                &ids_t,
+                &actual_inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+            )
+            .expect("grouped q5 swiglu");
+        });
+
+        let gate_bytes = moe.gate_exps.n_bytes() / n_expert as u64;
+        let up_bytes = moe.up_exps.n_bytes() / n_expert as u64;
+        let mut expected = vec![0.0f32; slot_count * f_exp];
+        for (expert, group_slots) in &expert_slots {
+            if group_slots.is_empty() {
+                continue;
+            }
+            let n = group_slots.len();
+            let token_ids: Vec<i32> = group_slots.iter().map(|slot| slot / topk as i32).collect();
+            let token_ids_t = MetalTensor::zeros_f32(&ctx, vec![n as u64]).expect("token_ids");
+            let h_group = MetalTensor::zeros_f32(&ctx, vec![(n * h) as u64]).expect("h_group");
+            let gate_out =
+                MetalTensor::zeros_f32(&ctx, vec![(n * f_exp) as u64]).expect("gate_out");
+            let up_out = MetalTensor::zeros_f32(&ctx, vec![(n * f_exp) as u64]).expect("up_out");
+            let inner_group =
+                MetalTensor::zeros_f32(&ctx, vec![(n * f_exp) as u64]).expect("inner_group");
+            cpu_write_i32_f32buf(&token_ids_t, &token_ids);
+            let gate_w = moe
+                .gate_exps
+                .view_bytes(*expert as u64 * gate_bytes, vec![(h * f_exp) as u64]);
+            let up_w = moe
+                .up_exps
+                .view_bytes(*expert as u64 * up_bytes, vec![(h * f_exp) as u64]);
+            let _ = timed_gpu_cmd(&ctx, |enc| {
+                encode_get_rows_f32(&ctx, enc, &h_pack, &token_ids_t, &h_group, n, h)
+                    .expect("gather h");
+                encode_mat_mat_dispatch(&ctx, enc, &gate_w, &h_group, &gate_out, h, f_exp, n)
+                    .expect("gate oracle");
+                encode_mat_mat_dispatch(&ctx, enc, &up_w, &h_group, &up_out, h, f_exp, n)
+                    .expect("up oracle");
+                encode_silu_mul_f32(&ctx, enc, &gate_out, &up_out, &inner_group)
+                    .expect("silu oracle");
+            });
+            let group_cpu = read_tensor_f32(&inner_group);
+            for (j, &slot) in group_slots.iter().enumerate() {
+                let dst = slot as usize * f_exp;
+                let src = j * f_exp;
+                expected[dst..dst + f_exp].copy_from_slice(&group_cpu[src..src + f_exp]);
+            }
+        }
+
+        let actual = read_tensor_f32(&actual_inner);
+        let cos = cosine_f32(&actual, &expected);
+        let mut max_abs = 0.0f32;
+        let mut poison_count = 0usize;
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            max_abs = max_abs.max((a - e).abs());
+            if *a == -777.0 {
+                poison_count += 1;
+            }
+        }
+        eprintln!(
+            "[grouped-q5-swiglu-oracle-{label}] layer={layer_idx} chunk_p={chunk_p} experts={} slots={} cos={cos:.6} max_abs={max_abs:.3e} poison_count={poison_count}",
+            expert_slots.len(),
+            slot_count,
+        );
+        assert_eq!(poison_count, 0, "grouped q5 swiglu left poisoned slots");
+        assert!(cos > 0.999, "grouped q5 swiglu cos too low: {cos}");
+        assert!(
+            max_abs < 2.5e-1,
+            "grouped q5 swiglu max_abs too high: {max_abs}"
+        );
+    }
+
     #[test]
     #[ignore]
     fn metal_122b_a10b_grouped_q5_down_vs_matmat_oracle() {
@@ -11379,6 +11612,17 @@ mod tests {
             "122b",
             320,
             32,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_122b_a10b_grouped_q5_swiglu_vs_matmat_oracle_layer46() {
+        run_grouped_q5_swiglu_vs_matmat_oracle(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf",
+            "122b-layer46",
+            46,
+            64,
         );
     }
 

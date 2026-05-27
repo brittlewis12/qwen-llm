@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-27 — A10B Q5 Gate/Up Coverage Fix Clears Layer 46
+
+Status: dirty-code exact dtype-coverage fix for A10B routed MoE. Raw artifacts are
+in `docs/bench/2026-05-27-v0149-a10b-q5-gateup/`.
+
+The A10B post-G16 trace had only `47/48` grouped routed MoE layers because layer
+`46` uses `Q5_K/Q5_K/Q6_K` gate/up/down and fell off the grouped path. The new
+grouped `Q5_K` gate/up SwiGLU kernel restores `48/48` `route_fused`,
+`routed_swiglu`, `routed_down`, `routed_reduce`, and `shared_packed` coverage at
+`pp512`. Auto mode is intentionally scoped to the proven A10B shape
+(`hidden=3072`, `f_exp=1024`, `n_expert=256`); rollback is
+`QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP=0`.
+
+Validation: the dedicated layer-46 Q5 SwiGLU oracle passes against per-expert
+mat-mat (`cos=1.000000`, `max_abs=0.000e0`, `poison_count=0`), and both default
+and rollback A10B prefill-vs-single smokes pass with final logits `0.999934` and
+unchanged GDN/KV cosine envelopes. Warmed perf rows show `pp512` `377.53 ->
+448.31 t/s` (`1.19x`), `pp1024` `400.11 -> 513.66 t/s` (`1.28x`), and `pp4096`
+`440.08 -> 484.54 t/s` (`1.10x`, runs=1 directional). Discard the no-warmup rows;
+they measured cold first-run residency effects, not the steady scoreboard protocol.
+
+Read: this is the A10B analogue of the A3B Q6-down coverage miss: exact, narrow,
+and high leverage. After this lands, stop revisiting attention for A10B and move
+to routed down/dequant locality or a SwiGLU+down locality-preserving sidecar.
+
 ## 2026-05-26 — Post-G16 A10B Budget Pivots Back To Routed MoE
 
 Status: clean no-op attribution after A10B/G16 matrix attention became default.

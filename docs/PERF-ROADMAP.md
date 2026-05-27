@@ -58,12 +58,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `1000.6 t/s` at `pp256`, `1061.5 t/s` at `pp320`, `1172.1 t/s` at `pp512`,
   `1287.4 t/s` at `pp1024`, `1265.5 t/s` at `pp2048`, noisy `1198.1 t/s` at
   `pp4096`, and `674.3 t/s` for the `34,502`-token `v02_reva` full rollout.
-- `qwen-llm` 122B A10B MoE prompt default now includes prompt-native packed
-  attention for the proven `group=16`, `head_dim=256` shape with family-specific
-  `NWG=32` and packed activation at `n_pos >= 320`: about `276 t/s` at `pp320`,
-  `355 t/s` at `pp512`, and `418 t/s` at `pp1024`; long synthetic remains noisy
-  per run but cooled long-prompt sweeps still favor `NWG32`, and the warmed
-  same-fixture real rollout is about `224 t/s`.
+- `qwen-llm` 122B A10B MoE prompt default now includes prompt-native group-16
+  matrix attention plus the grouped Q5 gate/up layer-46 coverage fix. Warmed Q5
+  gate/up rows move rollback/default from `377.53 -> 448.31 t/s` at `pp512`,
+  `400.11 -> 513.66 t/s` at `pp1024`, and `440.08 -> 484.54 t/s` at `pp4096`
+  (single directional long row). The default now has `48/48` grouped routed MoE
+  phase coverage at `pp512`; rollback is `QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP=0`.
 - A10B/G16 matrix attention is now the default for the proven group-16 prompt
   shape, with `QWEN_PREFILL_ATTN_MATRIX_G16=0` as rollback. Clean `v0.141` rows
   with `build_dirty=0`, AC power, no thermal/perf warnings, and `96%` free memory
@@ -85,6 +85,11 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `383.26/382.87 t/s`, no-attention-body is only `389.39/390.08`, and no-routed-
   MoE is `764.19/764.46`. Stop opening attention branches for A10B until routed
   `SwiGLU/down` has had a fresh structural pass.
+- The first routed-MoE structural pass found the same class of issue as A3B Q6
+  down: A10B layer `46` escaped the grouped path because gate/up are `Q5_K`.
+  Grouped Q5 gate/up SwiGLU fixes coverage and is now the A10B default candidate;
+  the remaining exact A10B work should attack grouped down/dequant locality, not
+  route/reduce/finalizer.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -477,62 +482,49 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: A10B/G16 matrix attention is the next MoE promotion candidate
+### 1. Hypothesis: A10B grouped routed down/dequant locality is the next exact lever
 
-Optimizes: Qwen3.5 122B A10B prompt prefill, especially `pp1024+` and long
-contexts where packed group-16 attention had remained a scoreboard blocker.
+Optimizes: Qwen3.5 122B A10B prompt prefill after the G16 matrix-attention default
+and the layer-46 Q5 gate/up coverage fix.
 
-Why it moves to the top:
+Why it is at the top:
 
-- The `v0.141` env branch generalizes the matrix-attention sidecar to the A10B
-  group-16 shape (`n_q=32`, `n_kv=2`, `head_dim=256`) without changing the default
-  packed path.
-- Clean rows already clear a meaningful gate: `pp1024` improves
-  `411.86 -> 430.67 t/s` (`+4.6%`) and `pp16384` improves
-  `289.97 -> 338.07 t/s` (`+16.6%`) on a clean build, AC power, no warnings, and
-  stable memory pressure.
-- Warmed dirty spikes were positive across the broader family: `pp512` `+5.2%`,
-  `pp1024` `+4.3%`, `pp4096` `+7.5%`, and `pp16384` `+17.1%`.
-- The mechanism is phase-local and not just a scoreboard artifact: a dirty `pp512`
-  trace shows all `12/12` A10B attention layers on the G16 matrix path, with matrix
-  `KQ+softmax+KQV` about `14.3 ms` total versus the prior packed attention body
-  around `73.21 ms`.
-- Chunk policy does not explain the branch away. Chunk `4096` helps the packed
-  base, especially at `pp4096`, but G16 matrix remains ahead and is essentially
-  chunk-flat at `pp16384`.
-- If G16 matrix holds under clean gates, the next A10B gap likely shifts back to
-  routed MoE (`routed_swiglu` / `routed_down`) rather than attention body.
+- A10B/G16 matrix attention is already default-on for the proven group-16 shape;
+  post-default no-op rows made attention body a low-single-digit `pp512` lever.
+- The first routed-MoE structural pass found and fixed the layer-46 fast-path escape:
+  `Q5_K/Q5_K/Q6_K` gate/up/down now uses grouped Q5 gate/up SwiGLU and grouped Q6
+  down, restoring `48/48` grouped routed MoE coverage.
+- Warmed rows for that fix are large enough to be real: `pp512` `377.53 -> 448.31
+  t/s`, `pp1024` `400.11 -> 513.66 t/s`, and `pp4096` `440.08 -> 484.54 t/s`
+  directionally.
+- After coverage is fixed, traces still point at routed projection/dataflow:
+  `routed_swiglu` and `routed_down` dominate, while route/reduce/finalizer remain
+  much smaller.
+- cx adversarial review agrees the next exact branch should target grouped down
+  locality/dequant or a locality-preserving `SwiGLU+down` sidecar, not another
+  attention or route-side branch.
 
 Current design rule:
 
-- A10B/G16 matrix attention is default-on narrowly, with
-  `QWEN_PREFILL_ATTN_MATRIX_G16=0` as rollback. Do not infer any other group shape
-  from the A3B/G8 or A10B/G16 evidence.
+- Keep `QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP=0` as the rollback path and keep the
+  dedicated layer-46 Q5 SwiGLU oracle in the gate.
 - Use warmed/interleaved methodology for A10B. Cold no-warmup A10B rows can be
   dominated by first-touch/model-residency effects and should not drive decisions.
-- Re-run A10B phase attribution after matrix gates before starting another local
-  attention branch.
-- Do not couple G16 matrix defaulting to a chunk-cap default. They are related
-  long-context levers but currently show different behavior.
+- Require fast-path coverage assertions for MoE dtype variants. A3B `37/40` and
+  A10B `47/48` are now canonical failure modes.
+- Do not open new A10B attention branches until routed `SwiGLU/down` gets a fresh
+  structural pass on the new 48/48 baseline.
 
 Acceptance gates:
 
-- A10B matrix smoke correctness now passes without manual scratch envs. Preserve
-  this bare-env smoke gate for future G16 matrix changes.
-- Prefer an additional long-prefix matrix-active gate if runtime is acceptable.
-- Clean `pp512` trace coverage now shows `12/12` A10B attention layers using
-  `attn-prefill-g16-matrix` and expected MoE/GDN fast-path counts. Preserve this
-  coverage gate and prefer an additional long-prefix trace before defaulting.
-- Repeated clean rows now cover `pp512/1024/4096/16384`, with AC power and no
-  thermal/performance warnings. Preserve this as the rollback/default canary.
-- Paired llama.cpp anchors now cover the same prompt lengths. Do not claim complete
-  A10B lcpp parity because `pp512` remains `0.90x`; route-MoE work owns that gap.
-- A default policy must include a rollback env and prove no dense or A3B regression
-  from the group-specific auto gate.
-- Post-default clean canary is green at A10B `pp512`: rollback
-  `QWEN_PREFILL_ATTN_MATRIX_G16=0` gives `365.14 t/s`, while auto/default gives
-  `379.23 t/s` on rebuilt `0ee9c45d4`. The next optimization sprint should move
-  to routed MoE rather than attention.
+- Dedicated Q5 grouped-SwiGLU oracle on layer 46 must remain green, including
+  poison/partial/zero-count bucket coverage.
+- Default and rollback A10B prefill-vs-single smokes must stay green.
+- A10B `pp512` phase coverage must show `48/48` route/grouped-routed/shared labels.
+- Promote broader claims only from warmed AC-power rows with no thermal/performance
+  warnings; prefer `pp512`, `pp1024`, `pp4096`, and at least one real rollout.
+- For the next branch, require a combined routed-tail win, not just a standalone
+  down-kernel or SwiGLU microbench win.
 
 ### 2. Hypothesis: A3B matrix attention plus grouped Q6 is the lcpp-cracking prefill candidate
 

@@ -59,13 +59,24 @@ use crate::tensor::{GgmlType, TensorDesc};
 /// in sync. If you add a new native quant kernel, list its dtype here.
 ///
 /// Q8_0 added v0.73b.1 — DFlash drafter switches from F32-dequant
-/// resident (~7.4 GB) to native Q8_0 (~1.85 GB). Q8_0 was the only
-/// non-K-quant in production use; the rest are K-quants from the
-/// 27B-Q4_K_M target.
+/// resident (~7.4 GB) to native Q8_0 (~1.85 GB). F16/BF16 stay native once
+/// their primitive mat-vec/mat-mat/get_rows kernels are available.
 pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
     matches!(
         dtype,
-        GgmlType::F32 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+        GgmlType::F32
+            | GgmlType::F16
+            | GgmlType::BF16
+            | GgmlType::Q2_K
+            | GgmlType::Q3_K
+            | GgmlType::Q4_0
+            | GgmlType::Q4_1
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS
     )
 }
 
@@ -273,9 +284,9 @@ impl MetalModel {
                 )?)
             }
         };
-        // Helper: load a tensor that's a mat_vec weight. Keeps native
-        // dtype for Q4_K, Q5_K, Q6_K, Q8_0; falls back to F32 conversion
-        // for other types we don't have native kernels for yet.
+        // Helper: load a tensor that's a mat_vec/mat_mat weight. Keeps native
+        // dtype for dtypes covered by the primitive dispatchers; falls back to
+        // F32 conversion for types we don't have native kernels for yet.
         let load_weight = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
             if weight_dtype_kept_native(desc.dtype) {
                 Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
@@ -287,13 +298,19 @@ impl MetalModel {
                 load_f32(desc)
             }
         };
+        let load_embedding = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
+            if matches!(desc.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) {
+                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
+            } else {
+                load_f32(desc)
+            }
+        };
         // Existing alias for the call sites below.
         let load_tensor = load_f32;
 
-        // Embedding + lm_head are mat_vec weights (well, embed is a
-        // get_rows index, but for now we dequant it to F32 since we
-        // don't have a native quant get_rows kernel yet — TODO).
-        let token_embd = load_f32(model.token_embd)?; // get_rows wants f32 source
+        // Embedding has native get_rows kernels for F32/F16/BF16. Quantized
+        // embeddings still dequant to F32 until they get native get_rows.
+        let token_embd = load_embedding(model.token_embd)?;
         let output_norm = load_f32(model.output_norm)?;
         let lm_head = load_weight(model.lm_head)?;
 
@@ -4138,6 +4155,24 @@ pub fn encode_mat_vec_dispatch(
 ) -> Result<(), MfError> {
     match weight.dtype {
         GgmlType::F32 => Ok(encode_mat_vec_f32(ctx, enc, weight, x, y, n_in, n_out)?),
+        GgmlType::F16 => Ok(crate::metal::encode_mat_vec_f16_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::BF16 => Ok(crate::metal::encode_mat_vec_bf16_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::Q2_K => Ok(crate::metal::encode_mat_vec_q2_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::Q3_K => Ok(crate::metal::encode_mat_vec_q3_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::Q4_0 => Ok(crate::metal::encode_mat_vec_q4_0_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::Q4_1 => Ok(crate::metal::encode_mat_vec_q4_1_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
         GgmlType::Q4_K => Ok(encode_mat_vec_q4_k_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
@@ -4148,6 +4183,12 @@ pub fn encode_mat_vec_dispatch(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
         GgmlType::Q8_0 => Ok(crate::metal::encode_mat_vec_q8_0_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::IQ4_NL => Ok(crate::metal::encode_mat_vec_iq4_nl_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::IQ4_XS => Ok(crate::metal::encode_mat_vec_iq4_xs_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
         other => Err(MfError::UnsupportedDtype {
@@ -4163,14 +4204,15 @@ pub fn encode_mat_vec_dispatch(
 /// the col-major framing in the lifted llama kernels is bit-identical
 /// to row-major storage at this stride).
 ///
-/// Production 27B Q4_K_M reaches three weight dtypes via mat-mat:
+/// Production 27B Q4_K_M reaches several weight dtypes via mat-mat:
+///   * F32/F16/BF16 (full-precision and mixed GGUF variants)
+///   * Q2_K/Q3_K (low-bit K-quant compatibility)
+///   * Q4_0/Q4_1 (legacy quant compatibility)
 ///   * Q4_K (ffn_gate, ffn_up, attn projections)
 ///   * Q5_K (GDN out_proj — added by v0.73a.0)
 ///   * Q6_K (ffn_down, lm_head)
 ///   * Q8_0 (DFlash drafter projections, lm_head — added by v0.73b.0)
-///
-/// F32 / other dtypes return `UnsupportedDtype`; layer-major
-/// callers fall back to per-token `encode_mat_vec_dispatch` for those.
+///   * IQ4_NL/IQ4_XS (IQ quant compatibility)
 pub fn encode_mat_mat_dispatch(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -4188,6 +4230,24 @@ pub fn encode_mat_mat_dispatch(
         GgmlType::F32 => Ok(crate::metal::encode_mat_mat_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
+        GgmlType::F16 => Ok(crate::metal::encode_mat_mat_f16_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::BF16 => Ok(crate::metal::encode_mat_mat_bf16_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::Q2_K => Ok(crate::metal::encode_mat_mat_q2_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::Q3_K => Ok(crate::metal::encode_mat_mat_q3_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::Q4_0 => Ok(crate::metal::encode_mat_mat_q4_0_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::Q4_1 => Ok(crate::metal::encode_mat_mat_q4_1_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
         GgmlType::Q5_K => Ok(crate::metal::encode_mat_mat_q5_k_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
@@ -4195,6 +4255,12 @@ pub fn encode_mat_mat_dispatch(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         GgmlType::Q8_0 => Ok(crate::metal::encode_mat_mat_q8_0_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::IQ4_NL => Ok(crate::metal::encode_mat_mat_iq4_nl_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::IQ4_XS => Ok(crate::metal::encode_mat_mat_iq4_xs_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         other => Err(MfError::UnsupportedDtype {

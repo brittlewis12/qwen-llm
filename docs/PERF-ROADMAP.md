@@ -29,6 +29,9 @@ Primary guardrails:
 - Treat `prefill_chunk=1024` as a safe default cap, not a long-context optimum;
   candidate long-prompt branches need larger chunk sweeps when feasible.
 - Always keep dense 27B in perf analysis while optimizing MoE.
+- `scripts/profile/prefill_sweep.py` runs the static GGUF fast-path audit by
+  default; use `--require-fastpath-clean` for scoreboard runs where unexplained
+  coverage misses should invalidate the comparison.
 
 ## Latest Baseline Snapshot
 
@@ -90,6 +93,18 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   Grouped Q5 gate/up SwiGLU fixes coverage and is now the A10B default candidate;
   the remaining exact A10B work should attack grouped down/dequant locality, not
   route/reduce/finalizer.
+- Static fast-path audit is now part of the workflow. Current target coverage is
+  `A3B 40/40` grouped MoE, `A10B 48/48` grouped MoE, and dense `27B 64/64` FFN +
+  `48/48` GDN + `16/16` attention. The dense/GDN/attention/lm-tail predicates
+  now use every dtype with primitive mat-mat support (`F32`, `F16`, `BF16`,
+  `Q2_K`, `Q3_K`, `Q4_0`, `Q4_1`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ4_NL`,
+  `IQ4_XS`), so the local 0.8B quant family is clean across dense FFN, GDN,
+  attention, and lm-tail coverage. Remaining explicit coverage gaps are MoE
+  grouped expert-bank variants outside target quants and UD low-bit `IQ2/IQ3`
+  dense tensors. The newly added Q2/Q3/IQ4 kernels are coverage-first, not yet
+  tuned parity kernels; one-row `pp128` anchors put Q2/Q3 at about `0.83x`
+  llama.cpp and IQ4 at about `0.54x`, so do not treat clean audit rows as
+  performance parity.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`

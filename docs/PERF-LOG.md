@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-27 — Static Quant Audit Closes 0.8B Dense Coverage
+
+Status: dtype/shape audit harness plus primitive quant coverage after the A3B
+Q6-down and A10B Q5-gate/up misses proved that one uncovered tensor class can
+dominate prefill. Artifact summary:
+`docs/bench/2026-05-27-v0154-quant-coverage/README.md`.
+
+`scripts/profile/gguf_fastpath_audit.py` inspects GGUF tensor dtypes and shapes
+with the local `gguf --tensors` parser and reports current prefill fast-path
+eligibility for dense FFN, GDN, standard attention, MoE grouped routed FFN, and
+lm-head tail.
+This is a static guardrail, not a replacement for phase traces: it answers "can
+this model hit the native path everywhere we think it should?" before a kernel
+experiment starts. The dense/GDN/attention/lm-tail prefill predicates now accept
+every dtype supported by the primitive mat-mat dispatcher: `F32`, `F16`, `BF16`,
+`Q2_K`, `Q3_K`, `Q4_0`, `Q4_1`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ4_NL`, and
+`IQ4_XS`.
+`scripts/profile/prefill_sweep.py` now runs this audit by default and stores the
+row in sweep JSON; `--require-fastpath-clean` turns any reported gap into a
+pre-benchmark failure. Audit tool failures warn by default but fail under
+`--require-fastpath-clean`.
+
+The 0.8B quant sweep now says dense/GDN/attention/lm-tail prefill is fully
+covered for every local 0.8B file: `F32`, `F16`, `BF16`, `Q2_K`, `Q3_K_M`,
+`Q4_0`, `Q4_1`, `Q4_K_S`, `Q4_K_M`, `Q6_K`, `Q8_0`, `IQ4_NL`, `IQ4_XS`, and
+mixed `UD-Q8_K_XL`. Half coverage added native `F16`/`BF16` mat-vec, mat-mat,
+and embedding get-rows kernels; low-bit/legacy/IQ coverage added native
+`Q2_K`/`Q3_K`/`Q4_0`/`Q4_1`/`IQ4_NL`/`IQ4_XS` mat-vec and mat-mat primitives.
+These new kernels are coverage-first scalar primitives, not tuned llama.cpp
+parity kernels. Paired one-row `pp128` anchors make that explicit: Q2/Q3 are
+about `0.83x` llama.cpp (`932/1120`, `1202/1444 t/s`), while IQ4_NL/IQ4_XS are
+about `0.54x` (`883/1643`, `896/1650 t/s`). Treat IQ4 as a future optimization
+gap, not a completed performance win.
+
+Target-family audit after the A10B Q5 fix remains clean: `A3B 40/40` grouped MoE,
+`A10B 48/48` grouped MoE, and dense `27B 64/64` FFN + `48/48` GDN + `16/16`
+attention. Wider local inventory shows dense 2B/4B/9B/27B Q2/Q3/Q4/Q6/Q8/BF16/
+IQ4 variants clean; remaining gaps are alternate MoE expert bank quants
+(`Q6_K/Q8_0` or `IQ3_*` gate/up with `IQ4_XS` down) and UD low-bit dense files
+with `IQ2_*`/`IQ3_*` tensors. Validation: release `qwen-bench` builds, 0.8B F32
+prefill-vs-single passes, Q5_K/Q8_0 mat-mat oracle tests pass, half/Q4/Q3/Q2/IQ4
+primitive oracle tests pass, pp128 `--require-fastpath-clean` smokes pass for
+`Q2_K`/`Q3_K_M`/`IQ4_NL`/`IQ4_XS`, and tg8 smokes pass for the same low-bit/IQ
+0.8B models on AC power.
+
 ## 2026-05-27 — A10B Q5 Gate/Up Coverage Fix Clears Layer 46
 
 Status: dirty-code exact dtype-coverage fix for A10B routed MoE. Raw artifacts are

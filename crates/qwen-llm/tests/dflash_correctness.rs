@@ -864,7 +864,24 @@ fn packed_verify_phase_profile_27b() {
                 MetalBlock::Gdn(gg) => (&gg.ffn_gate, &gg.ffn_up, &gg.ffn_down),
                 MetalBlock::Attn(aa) => (&aa.ffn_gate, &aa.ffn_up, &aa.ffn_down),
             };
-            let mat_mat_eligible = |dt: GgmlType| matches!(dt, GgmlType::Q4_K | GgmlType::Q6_K);
+            let mat_mat_eligible = |dt: GgmlType| {
+                matches!(
+                    dt,
+                    GgmlType::F32
+                        | GgmlType::F16
+                        | GgmlType::BF16
+                        | GgmlType::Q2_K
+                        | GgmlType::Q3_K
+                        | GgmlType::Q4_0
+                        | GgmlType::Q4_1
+                        | GgmlType::Q4_K
+                        | GgmlType::Q5_K
+                        | GgmlType::Q6_K
+                        | GgmlType::Q8_0
+                        | GgmlType::IQ4_NL
+                        | GgmlType::IQ4_XS
+                )
+            };
             let mat_mat_path = mat_mat_eligible(g_w.dtype)
                 && mat_mat_eligible(u_w.dtype)
                 && mat_mat_eligible(d_w.dtype);
@@ -939,7 +956,22 @@ fn packed_verify_phase_profile_27b() {
             let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
             let lm_dtype = mm.lm_head.dtype;
-            let lm_mat_mat_path = matches!(lm_dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+            let lm_mat_mat_path = matches!(
+                lm_dtype,
+                GgmlType::F32
+                    | GgmlType::F16
+                    | GgmlType::BF16
+                    | GgmlType::Q2_K
+                    | GgmlType::Q3_K
+                    | GgmlType::Q4_0
+                    | GgmlType::Q4_1
+                    | GgmlType::Q4_K
+                    | GgmlType::Q5_K
+                    | GgmlType::Q6_K
+                    | GgmlType::Q8_0
+                    | GgmlType::IQ4_NL
+                    | GgmlType::IQ4_XS
+            );
             if lm_mat_mat_path {
                 encode_rms_norm_batched_f32(
                     &ctx_metal,

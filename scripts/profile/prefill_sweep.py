@@ -62,6 +62,41 @@ def sample_memory_pressure() -> str:
     return capture_text(["memory_pressure", "-Q"])
 
 
+def run_fastpath_audit(model: str) -> dict:
+    script = Path(__file__).with_name("gguf_fastpath_audit.py")
+    if not script.exists():
+        raise RuntimeError(f"fast-path audit script missing: {script}")
+    proc = subprocess.run(
+        [sys.executable, "-B", str(script), "--json", model],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise RuntimeError(f"fast-path audit failed: {msg}")
+    payload = json.loads(proc.stdout)
+    rows = payload.get("models")
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("fast-path audit produced unexpected JSON payload")
+    return rows[0]
+
+
+def print_fastpath_audit(row: dict) -> None:
+    print(
+        "[prefill-sweep] fastpath audit: "
+        f"dense_ffn={row.get('dense_ffn_fast')} "
+        f"gdn={row.get('gdn_matrix_fast')} "
+        f"attn={row.get('attn_matrix_fast')} "
+        f"moe={row.get('moe_grouped_fast')} "
+        f"lm={row.get('lm_fast')}",
+        flush=True,
+    )
+    gaps = row.get("gaps")
+    if gaps and gaps != "-":
+        print(f"[prefill-sweep] fastpath gaps: {gaps}", flush=True)
+
+
 def build_bench_cmd(args: argparse.Namespace) -> list[str]:
     cmd = [
         str(args.bench_bin),
@@ -182,11 +217,13 @@ def build_summary(
     args: argparse.Namespace,
     run_plan: list[tuple[int, int, Variant]],
     results: list[dict],
+    fastpath_audit: dict | None,
 ) -> dict:
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_cmd": base_cmd,
+        "fastpath_audit": fastpath_audit,
         "repeat_blocks": args.repeat_blocks,
         "shuffle_seed": args.shuffle_seed,
         "run_plan": [
@@ -258,6 +295,16 @@ def main() -> int:
         help="label[:KEY=VALUE,KEY2=VALUE2]",
     )
     parser.add_argument("--extra-arg", action="append", default=[])
+    parser.add_argument(
+        "--no-fastpath-audit",
+        action="store_true",
+        help="Skip the default static GGUF fast-path coverage audit.",
+    )
+    parser.add_argument(
+        "--require-fastpath-clean",
+        action="store_true",
+        help="Fail before benchmarking if the static audit reports gaps.",
+    )
     parser.add_argument("--output")
     args = parser.parse_args()
 
@@ -271,6 +318,27 @@ def main() -> int:
         raise SystemExit("--repeat-blocks must be >= 1")
     if not args.variant:
         args.variant = [Variant(label="baseline", env={})]
+
+    fastpath_audit = None
+    if not args.no_fastpath_audit:
+        try:
+            fastpath_audit = run_fastpath_audit(args.model)
+        except Exception as exc:
+            if args.require_fastpath_clean:
+                raise SystemExit(
+                    f"fast-path audit failed; use --no-fastpath-audit to skip: {exc}"
+                )
+            print(
+                f"[prefill-sweep] fastpath audit failed; continuing without audit: {exc}",
+                flush=True,
+            )
+        else:
+            print_fastpath_audit(fastpath_audit)
+            if args.require_fastpath_clean and fastpath_audit.get("gaps") not in (
+                None,
+                "-",
+            ):
+                raise SystemExit("fast-path audit has gaps; refusing to benchmark")
 
     base_cmd = build_bench_cmd(args)
     print(
@@ -303,12 +371,15 @@ def main() -> int:
         results.append(result)
         if output_path is not None:
             output_path.write_text(
-                json.dumps(build_summary(base_cmd, args, run_plan, results), indent=2)
+                json.dumps(
+                    build_summary(base_cmd, args, run_plan, results, fastpath_audit),
+                    indent=2,
+                )
                 + "\n"
             )
             print(f"[prefill-sweep] checkpointed {args.output}", flush=True)
 
-    summary = build_summary(base_cmd, args, run_plan, results)
+    summary = build_summary(base_cmd, args, run_plan, results, fastpath_audit)
     print_summary(results)
     if output_path is not None:
         output_path.write_text(json.dumps(summary, indent=2) + "\n")

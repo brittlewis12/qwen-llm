@@ -104,6 +104,25 @@ fn prefill_dense_ffn_fused_swiglu_q4_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4"))
 }
 
+fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
+    matches!(
+        dtype,
+        GgmlType::F32
+            | GgmlType::F16
+            | GgmlType::BF16
+            | GgmlType::Q2_K
+            | GgmlType::Q3_K
+            | GgmlType::Q4_0
+            | GgmlType::Q4_1
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS
+    )
+}
+
 fn prefill_gdn_skinny_f32_e8p32_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -3266,20 +3285,14 @@ pub fn encode_packed_verify_layer_major_inner(
                 // v0.73a.1: GDN projection batching eligibility. Mirrors
                 // the FFN dtype dispatch pattern at 2f. We batch
                 // in_proj_qkv, in_proj_z, and out_proj as mat-mat across
-                // N=16 when each is in {Q4_K, Q5_K, Q6_K} (codex review:
-                // mirror FFN's eligibility set, not Q4_K-only). Production
-                // 27B Q4_K_M is Q6_K/Q4_K/Q5_K respectively; F32 oracle
-                // (0.8B) falls back per-token. beta_proj and alpha_proj
+                // N=16 when each dtype is supported by encode_mat_mat_dispatch.
+                // Production 27B Q4_K_M is Q6_K/Q4_K/Q5_K respectively.
+                // beta_proj and alpha_proj
                 // stay per-token mat-vec because production stores them
                 // as F32 [hidden, n_v=48] — small, mat-mat dispatch
                 // overhead exceeds BW savings (see docs/H5-DFLASH.md
                 // rev 10).
-                let gdn_mat_mat_eligible = |dtype: GgmlType| {
-                    matches!(
-                        dtype,
-                        GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
-                    )
-                };
+                let gdn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
                 let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
                     && gdn_mat_mat_eligible(g.in_proj_z.dtype)
                     && gdn_mat_mat_eligible(g.out_proj.dtype);
@@ -3477,12 +3490,7 @@ pub fn encode_packed_verify_layer_major_inner(
                 // across N=16 in step A/C; per-token loop only does
                 // RoPE + KV-scatter + attn-v4 + gate-sigmoid-mul (which
                 // we batch into step C as a flat elementwise pair).
-                let attn_mat_mat_eligible = |dtype: GgmlType| {
-                    matches!(
-                        dtype,
-                        GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
-                    )
-                };
+                let attn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
                 let attn_batched = attn_mat_mat_eligible(a.q.dtype)
                     && attn_mat_mat_eligible(a.k.dtype)
                     && attn_mat_mat_eligible(a.v.dtype)
@@ -3829,13 +3837,12 @@ pub fn encode_packed_verify_layer_major_inner(
         };
         // Per-weight dtype dispatch (codex Q5: dispatch INSIDE the
         // function so rollback bugs stay localizable). Layer-major
-        // wins via mat-mat for Q4_K and Q6_K weights; falls back to
-        // the per-token mat-vec loop for F32 (0.8B oracle) or any
-        // mixed/unsupported dtype.
+        // wins via mat-mat for all dtypes supported by encode_mat_mat_dispatch;
+        // unsupported dtypes fall back to the per-token mat-vec loop.
         //
         // Production 27B Q4_K_M: ffn_gate / ffn_up are Q4_K, ffn_down
         // is Q6_K. Both legs hit the mat-mat fast path.
-        let mat_mat_eligible = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+        let mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
         let mat_mat_path = mat_mat_eligible(g_w.dtype)
             && mat_mat_eligible(u_w.dtype)
             && mat_mat_eligible(d_w.dtype);
@@ -3939,10 +3946,9 @@ pub fn encode_packed_verify_layer_major_inner(
     //      debug_logits_dst when provided — same shape, saves a copy)
     //   3. Batched argmax across all N rows → verify_argmax [N]
     //
-    // Falls back to per-token mat-vec for non-mat-mat-eligible
-    // lm_head dtypes (F32 0.8B oracle path).
+    // Falls back to per-token mat-vec for dtypes without a mat-mat kernel.
     let lm_dtype = base.model.lm_head.dtype;
-    let lm_mat_mat_path = matches!(lm_dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+    let lm_mat_mat_path = prefill_mat_mat_dispatch_eligible(lm_dtype);
     {
         let enc = KernelEncoder::begin(&cmd_buf);
         if lm_mat_mat_path {
@@ -4304,19 +4310,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
     }
 
     // Cache mat-mat-eligible predicates once.
-    let gdn_mat_mat_eligible = |dtype: GgmlType| {
-        matches!(
-            dtype,
-            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
-        )
-    };
-    let attn_mat_mat_eligible = |dtype: GgmlType| {
-        matches!(
-            dtype,
-            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
-        )
-    };
-    let ffn_mat_mat_eligible = |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+    let gdn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
+    let attn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
+    let ffn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
     // Callsite-scoped specialization for GDN beta/alpha prompt prefill. Do not
     // reuse this helper as a generic F32 skinny mat-mat dispatcher without a new
     // shape/correctness gate.
@@ -8033,12 +8029,7 @@ impl<'a> DFlashDecoder<'a> {
             //     preserved for any non-batchable dtype (currently nothing
             //     in production hits it, but kept for the F32 oracle and
             //     future drafter quants).
-            let drafter_mat_mat_eligible = |dtype: GgmlType| {
-                matches!(
-                    dtype,
-                    GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
-                )
-            };
+            let drafter_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
             let phase3_batched = drafter_mat_mat_eligible(layer.o.dtype)
                 && drafter_mat_mat_eligible(layer.ffn_gate.dtype)
                 && drafter_mat_mat_eligible(layer.ffn_up.dtype)
@@ -8230,7 +8221,7 @@ impl<'a> DFlashDecoder<'a> {
             RMS_EPS,
         )?;
         let lm_dtype = self.base.model.lm_head.dtype;
-        let lm_mat_mat_path = matches!(lm_dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+        let lm_mat_mat_path = prefill_mat_mat_dispatch_eligible(lm_dtype);
         if lm_mat_mat_path {
             encode_mat_mat_dispatch(
                 ctx_metal,
@@ -16007,20 +15998,9 @@ mod tests {
             .map_err(crate::metal_forward::MfError::from)
         });
 
-        let gdn_mat_mat_eligible = |dtype: GgmlType| {
-            matches!(
-                dtype,
-                GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
-            )
-        };
-        let attn_mat_mat_eligible = |dtype: GgmlType| {
-            matches!(
-                dtype,
-                GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
-            )
-        };
-        let ffn_mat_mat_eligible =
-            |dtype: GgmlType| matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K);
+        let gdn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
+        let attn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
+        let ffn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
 
         let mut gdn_idx = 0usize;
         let mut attn_idx = 0usize;
@@ -18631,12 +18611,10 @@ mod tests {
     ///   * accumulated per-token multi-hidden capture
     ///   * GDN state + conv tensors per layer
     ///
-    /// 0.8B-F32 has 36 GDN layers and ZERO attn layers, so this gates
-    /// the GDN recurrence, FFN mat-mat (mat-mat-dispatch fall-through
-    /// for F32 weights uses per-token mat-vec, but layer-major batched
-    /// norms still cover their bookkeeping), and tail. Attn-path
-    /// correctness is gated by a separate 27B integration test in
-    /// `tests/dflash_correctness.rs` (slow; not in lib loop).
+    /// 0.8B-F32 has both GDN and attention blocks, so this gates the GDN
+    /// recurrence, dense FFN mat-mat, attention projection mat-mat, and tail.
+    /// The larger 27B integration test in `tests/dflash_correctness.rs` still
+    /// gates production-shape attention profiling.
     ///
     /// Edge cases tested via subroutine: T<P, T==P, T==P+r, T==2P.
     #[test]

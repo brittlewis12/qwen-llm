@@ -477,6 +477,11 @@ struct get_rows_args {
     uint n_rows;
     uint n_cols;
 };
+
+static inline float bf16_to_float(ushort v) {
+    return as_type<float>(((uint)v) << 16);
+}
+
 kernel void kernel_get_rows_f32(
         constant get_rows_args & args [[buffer(0)]],
         device const float * embed [[buffer(1)]],
@@ -488,6 +493,32 @@ kernel void kernel_get_rows_f32(
     if (r >= args.n_rows || i >= args.n_cols) return;
     const int row = ids[r];
     y[r * args.n_cols + i] = embed[(uint)row * args.n_cols + i];
+}
+
+kernel void kernel_get_rows_f16(
+        constant get_rows_args & args [[buffer(0)]],
+        device const half  * embed [[buffer(1)]],
+        device const int   * ids   [[buffer(2)]],
+        device       float * y     [[buffer(3)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint r = gid.y;
+    const uint i = gid.x;
+    if (r >= args.n_rows || i >= args.n_cols) return;
+    const int row = ids[r];
+    y[r * args.n_cols + i] = float(embed[(uint)row * args.n_cols + i]);
+}
+
+kernel void kernel_get_rows_bf16(
+        constant get_rows_args & args [[buffer(0)]],
+        device const ushort * embed [[buffer(1)]],
+        device const int    * ids   [[buffer(2)]],
+        device       float  * y     [[buffer(3)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint r = gid.y;
+    const uint i = gid.x;
+    if (r >= args.n_rows || i >= args.n_cols) return;
+    const int row = ids[r];
+    y[r * args.n_cols + i] = bf16_to_float(embed[(uint)row * args.n_cols + i]);
 }
 
 // GDN α-chain fusion (replaces 3 dispatches: add_inplace + softplus + mul).

@@ -53,9 +53,9 @@ but it closes the phase-local gap that the subphase trace found: at 27B `pp4096`
 timed FFN subphases move from qwen/lcpp `4063/3878 ms` gate, `4068/3932 ms` up,
 and `4199/4099 ms` down to `3959/3878`, `3964/3932`, and `4090/4099`. GDN mat-mat
 buckets move similarly (`gdn_qkv` `1817 -> 1769 ms`, `gdn_z` `1088 -> 1057 ms`,
-`gdn_back` `1177 -> 1135 ms`). Current dirty end-to-end rows after the unroll pass:
-27B `pp512=233.87`, `pp1024=230.36`, `pp4096=204.50`, `pp16384=192.46`; A10B
-`pp1024=501.23`; A3B `pp1024=1581.17`. Correctness is green on the default 27B
+`gdn_back` `1177 -> 1135 ms`). Post-commit clean rows on AC power:
+27B `pp512=234.38`, `pp1024=226.63`, `pp4096=207.34`, `pp16384=193.41`; A10B
+`pp1024=499.83`; A3B `pp1024=1584.48`. Correctness is green on the default 27B
 prefill-vs-single gate and ignored 27B G6 prefix gate.
 The analogous GDN recurrence-loop unroll was tested and removed: the `pp4096`
 phase trace was neutral/slightly worse (`gdn_step` `593.40 -> 597.17 ms`) and also

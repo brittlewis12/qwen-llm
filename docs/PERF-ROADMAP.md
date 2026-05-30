@@ -123,8 +123,9 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   llama.cpp-style full-unroll pragmas to Q4/Q5/Q6/Q8 mat-mat kernels moves 27B
   timed `pp4096` gate/up/down from `4063/4068/4199 ms` to `3959/3964/4090 ms`,
   near the lcpp `3878/3932/4099 ms` buckets; GDN QKV/Z/back also drop `2-4%`.
-  Current dirty rows are 27B `pp512=233.87`, `pp1024=230.36`, `pp4096=204.50`,
-  `pp16384=192.46`, plus A10B `pp1024=501.23` and A3B `pp1024=1581.17` smokes.
+  Post-commit clean rows on AC power are 27B `pp512=234.38`, `pp1024=226.63`,
+  `pp4096=207.34`, `pp16384=193.41`, plus A10B `pp1024=499.83` and A3B
+  `pp1024=1584.48` smokes.
   A same-principle GDN recurrence-loop unroll was falsified and removed
   (`gdn_step` `593.40 -> 597.17 ms` at `pp4096`).
   The remaining exact dense gap is now smaller and distributed: residual FFN

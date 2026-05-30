@@ -525,6 +525,65 @@ fn prefill_trace_layer_phases_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_LAYER_PHASES"))
 }
 
+fn prefill_trace_ffn_subphases_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_FFN_SUBPHASES"))
+}
+
+fn prefill_trace_moe_buckets_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_MOE_BUCKETS"))
+}
+
+fn trace_prefill_moe_bucket_stats(
+    enabled: bool,
+    chunk_idx: usize,
+    chunk_start: u32,
+    layer_idx: usize,
+    counts: &MetalTensor,
+    n_expert: usize,
+    chunk_p: usize,
+    topk: usize,
+    hot_expert_min_slots: Option<usize>,
+) {
+    if !enabled {
+        return;
+    }
+    let counts_cpu = cpu_read_i32_f32buf(counts);
+    let mut active: Vec<usize> = counts_cpu
+        .iter()
+        .take(n_expert)
+        .filter_map(|&c| (c > 0).then_some(c as usize))
+        .collect();
+    active.sort_unstable();
+    let total: usize = active.iter().sum();
+    let p50 = active
+        .get(active.len().saturating_sub(1) / 2)
+        .copied()
+        .unwrap_or(0);
+    let p90 = if active.is_empty() {
+        0
+    } else {
+        active[(active.len() * 9 / 10).min(active.len() - 1)]
+    };
+    let max = active.last().copied().unwrap_or(0);
+    let ge16 = active.iter().filter(|&&c| c >= 16).count();
+    let ge32 = active.iter().filter(|&&c| c >= 32).count();
+    let ge48 = active.iter().filter(|&&c| c >= 48).count();
+    let (hot_min, hot_experts, hot_slots) = if let Some(min_slots) = hot_expert_min_slots {
+        let hot_experts = active.iter().filter(|&&c| c >= min_slots).count();
+        let hot_slots = active.iter().filter(|&&c| c >= min_slots).sum::<usize>();
+        (min_slots as isize, hot_experts, hot_slots)
+    } else {
+        (-1, 0, 0)
+    };
+    eprintln!(
+        "[prefill-moe-buckets] chunk={chunk_idx} start={chunk_start} layer={layer_idx} total={total}/{} active={} p50={p50} p90={p90} max={max} ge16={ge16} ge32={ge32} ge48={ge48} hot_min={hot_min} hot_experts={hot_experts} hot_slots={hot_slots}",
+        chunk_p * topk,
+        active.len(),
+    );
+}
+
 fn flush_prefill_phase(
     ctx: &MetalContext,
     cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -639,9 +698,13 @@ fn prefill_attn_matrix_g8_may_use() -> bool {
     !matches!(prefill_attn_matrix_g8_mode(), PrefillEnvMode::ForceOff)
 }
 
-fn prefill_attn_matrix_g6_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_MATRIX_G6"))
+fn prefill_attn_matrix_g6_mode() -> PrefillEnvMode {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G6"))
+}
+
+fn prefill_attn_matrix_g6_may_use() -> bool {
+    !matches!(prefill_attn_matrix_g6_mode(), PrefillEnvMode::ForceOff)
 }
 
 fn prefill_attn_matrix_g16_mode() -> PrefillEnvMode {
@@ -2089,7 +2152,7 @@ impl MetalDFlashLayerMajorScratch {
         );
         let enable_attn_matrix = head_dim as usize == 256
             && ((prefill_attn_matrix_g8_may_use() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
-                || (prefill_attn_matrix_g6_enabled()
+                || (prefill_attn_matrix_g6_may_use()
                     && arch.n_q_heads == 24
                     && arch.n_kv_heads == 4)
                 || (prefill_attn_matrix_g16_may_use()
@@ -4223,7 +4286,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         && arch.attn_head_dim as usize == 256
         && arch.n_q_heads == 16
         && arch.n_kv_heads == 2;
-    let attn_matrix_g6_force_on = prefill_attn_matrix_g6_enabled()
+    let attn_matrix_g6_force_on = prefill_attn_matrix_g6_mode() == PrefillEnvMode::ForceOn
         && arch.attn_head_dim as usize == 256
         && arch.n_q_heads == 24
         && arch.n_kv_heads == 4;
@@ -4387,6 +4450,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         // commits (codex Q3 hazard), and (b) layer_scratch is reused.
         let mut cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
         let trace_layer_phases = prefill_trace_layer_phases_enabled();
+        let trace_moe_buckets = trace_layer_phases && prefill_trace_moe_buckets_enabled();
 
         // Sized views of layer_scratch sliced to chunk_p. Every encoder
         // dispatch's host-side n_elements() validation is against the
@@ -5201,7 +5265,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             let use_matrix_g8 = use_packed_g8
                                 && prefill_attn_matrix_g8_may_use()
                                 && matrix_scratch_covers_chunk;
-                            let use_matrix_g6 = prefill_attn_matrix_g6_enabled()
+                            let use_matrix_g6 = prefill_attn_matrix_g6_may_use()
                                 && target_session.kv_k[ai].dtype == GgmlType::F16
                                 && target_session.kv_v[ai].dtype == GgmlType::F16
                                 && head_dim == 256
@@ -6291,6 +6355,19 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             "route_token_loop"
                         },
                     );
+                    if grouped_routed_path && fused_route_bucket {
+                        trace_prefill_moe_bucket_stats(
+                            trace_moe_buckets,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            &moe_group_count_pack,
+                            n_expert,
+                            chunk_p,
+                            topk,
+                            hot_expert_min_slots,
+                        );
+                    }
 
                     let concurrent_grouped_shared = grouped_routed_path
                         && packed_shared_path
@@ -6479,6 +6556,17 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     il,
                                     "moe",
                                     "route_bucket",
+                                );
+                                trace_prefill_moe_bucket_stats(
+                                    trace_moe_buckets,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    &moe_group_count_pack,
+                                    n_expert,
+                                    chunk_p,
+                                    topk,
+                                    hot_expert_min_slots,
                                 );
                             }
                             {
@@ -7152,7 +7240,84 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         && u_w.dtype == GgmlType::Q4_K
                         && h % 256 == 0
                         && chunk_p >= 32;
-                    {
+                    let split_ffn_subphases =
+                        prefill_trace_ffn_subphases_enabled() && !use_fused_swiglu && !skip_ffn;
+                    if split_ffn_subphases {
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                g_w,
+                                &h_pack_p,
+                                &ffn_gate_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                            enc.end();
+                        }
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            block_kind,
+                            "ffn_gate",
+                        );
+
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                u_w,
+                                &h_pack_p,
+                                &ffn_up_pack_p,
+                                h,
+                                f,
+                                chunk_p,
+                            )?;
+                            enc.end();
+                        }
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            block_kind,
+                            "ffn_up",
+                        );
+
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_silu_mul_f32(
+                                base.ctx,
+                                &enc,
+                                &ffn_gate_pack_p,
+                                &ffn_up_pack_p,
+                                &ffn_inner_pack_p,
+                            )?;
+                            enc.end();
+                        }
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            block_kind,
+                            "ffn_swiglu",
+                        );
+                    } else {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         if use_fused_swiglu {
                             crate::metal::encode_ffn_fused_swiglu_q4_K_mm_f32(
@@ -7196,22 +7361,22 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             )?;
                         }
                         enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            block_kind,
+                            if use_fused_swiglu {
+                                "ffn_fused_gate_up_swiglu"
+                            } else {
+                                "ffn_gate_up_swiglu"
+                            },
+                        );
                     }
-                    flush_prefill_layer_phase(
-                        base.ctx,
-                        &mut cmd_buf,
-                        &mut prefill_gpu_total_ms,
-                        trace_layer_phases,
-                        chunk_idx,
-                        chunk_start,
-                        il,
-                        block_kind,
-                        if use_fused_swiglu {
-                            "ffn_fused_gate_up_swiglu"
-                        } else {
-                            "ffn_gate_up_swiglu"
-                        },
-                    );
 
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);

@@ -36,6 +36,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
+
 constant constexpr int   QK_K           = 256;
 constant constexpr int   Q6K_BYTES      = 210;
 constant constexpr int   Q6K_NL         = QK_K / 16;     // 16 dequant calls per super-block
@@ -97,7 +99,7 @@ inline void dequantize_q6_K_half(device const uchar * blk_bytes,
     const uint8_t shl_h = il_inner > 1 ? 0 : (il_inner > 0 ? 2 : 4);
     const uint8_t shr_l = il_inner > 1 ? 4 : 0;
 
-    for (int i = 0; i < 4; ++i) {
+    FOR_UNROLL (int i = 0; i < 4; ++i) {
         const uint32_t low  = (ql[2 * i] | (uint32_t)(ql[2 * i + 1] << 16)) & kmask2;
         const uint32_t high = (qh[2 * i] | (uint32_t)(qh[2 * i + 1] << 16)) & kmask1;
         const uint32_t q = ((high << shl_h) >> shr_h) | (low >> shr_l);
@@ -150,7 +152,7 @@ kernel void kernel_mat_mat_q6_K_f32(
     simdgroup_half8x8   mb[2];
     simdgroup_float8x8  mc[8];
 
-    for (short i = 0; i < 8; ++i) {
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
     }
 
@@ -162,7 +164,7 @@ kernel void kernel_mat_mat_q6_K_f32(
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            for (short i = 0; i < 16; ++i) {
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
                 const short sx = 2 * il0 + i / 8;
                 const short sy = (tiitg / NL0_MM) / 8;
                 const short lx = (tiitg / NL0_MM) % 8;
@@ -197,17 +199,17 @@ kernel void kernel_mat_mat_q6_K_f32(
         threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
         threadgroup const half * lsmb = (sb + 2 * 64 * (sgitg / 2));
 
-        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+        FOR_UNROLL (short ik = 0; ik < NK_MM / 8; ++ik) {
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 4; ++i) {
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
                 simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 2; ++i) {
+            FOR_UNROLL (short i = 0; i < 2; ++i) {
                 simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
             }
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 8; ++i) {
+            FOR_UNROLL (short i = 0; i < 8; ++i) {
                 simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
             }
             lsma += 8 * 64;
@@ -219,7 +221,7 @@ kernel void kernel_mat_mat_q6_K_f32(
     if (r0 + NR0_MM <= (int)args.M && r1 + NR1_MM <= (int)args.N) {
         device float * C = dst + (r0 + 32 * (sgitg & 1))
                                + (r1 + 16 * (sgitg >> 1)) * args.M;
-        for (short i = 0; i < 8; ++i) {
+        FOR_UNROLL (short i = 0; i < 8; ++i) {
             simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * args.M * (i / 4),
                             args.M, 0, false);
         }
@@ -228,7 +230,7 @@ kernel void kernel_mat_mat_q6_K_f32(
         threadgroup float * temp_str = ((threadgroup float *)shmem)
                                        + 32 * (sgitg & 1)
                                        + (16 * (sgitg >> 1)) * NR0_MM;
-        for (short i = 0; i < 8; ++i) {
+        FOR_UNROLL (short i = 0; i < 8; ++i) {
             simdgroup_store(mc[i], temp_str + 8 * (i % 4) + 8 * NR0_MM * (i / 4),
                             NR0_MM, 0, false);
         }
@@ -299,7 +301,7 @@ kernel void kernel_mat_mat_q6_K_f32_n16(
     simdgroup_half8x8   mb;
     simdgroup_float8x8  mc[4];
 
-    for (short i = 0; i < 4; ++i) {
+    FOR_UNROLL (short i = 0; i < 4; ++i) {
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
     }
 
@@ -311,7 +313,7 @@ kernel void kernel_mat_mat_q6_K_f32_n16(
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            for (short i = 0; i < 16; ++i) {
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
                 const short sx = 2 * il0 + i / 8;
                 const short sy = (tiitg / NL0_MM) / 8;
                 const short lx = (tiitg / NL0_MM) % 8;
@@ -343,15 +345,15 @@ kernel void kernel_mat_mat_q6_K_f32_n16(
         threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
         threadgroup const half * lsmb = (sb + 1 * 64 * (sgitg / 2));
 
-        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+        FOR_UNROLL (short ik = 0; ik < NK_MM / 8; ++ik) {
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 4; ++i) {
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
                 simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
             }
             simdgroup_barrier(mem_flags::mem_none);
             simdgroup_load(mb, lsmb, 8, 0, false);
             simdgroup_barrier(mem_flags::mem_none);
-            for (short i = 0; i < 4; ++i) {
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
                 simdgroup_multiply_accumulate(mc[i], mb, ma[i], mc[i]);
             }
             lsma += 8 * 64;
@@ -363,7 +365,7 @@ kernel void kernel_mat_mat_q6_K_f32_n16(
     if (r0 + NR0_MM <= (int)args.M) {
         device float * C = dst + (r0 + 32 * (sgitg & 1))
                                + (r1 + 8 * (sgitg >> 1)) * args.M;
-        for (short i = 0; i < 4; ++i) {
+        FOR_UNROLL (short i = 0; i < 4; ++i) {
             simdgroup_store(mc[i], C + 8 * i, args.M, 0, false);
         }
     } else {
@@ -371,7 +373,7 @@ kernel void kernel_mat_mat_q6_K_f32_n16(
         threadgroup float * temp_str = ((threadgroup float *)shmem)
                                        + 32 * (sgitg & 1)
                                        + (8 * (sgitg >> 1)) * NR0_MM;
-        for (short i = 0; i < 4; ++i) {
+        FOR_UNROLL (short i = 0; i < 4; ++i) {
             simdgroup_store(mc[i], temp_str + 8 * i, NR0_MM, 0, false);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

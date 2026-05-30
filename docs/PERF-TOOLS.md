@@ -528,14 +528,16 @@ not a promotion throughput number.
 ```sh
 QWEN_PREFILL_TRACE_LAYER_PHASES=1 \
 QWEN_PREFILL_TRACE_ATTN_PHASES=1 \
+QWEN_PREFILL_TRACE_FFN_SUBPHASES=1 \
 target/release/qwen-bench pp \
   -m "$MODEL" \
   -p 4096 \
   --runs 1 \
-  --no-warmup \
   2> target/profiles/prefill-phases.log
 
 uv run scripts/profile/prefill_phase_summary.py \
+  --last-pass \
+  --stats \
   target/profiles/prefill-phases.log
 ```
 
@@ -543,11 +545,22 @@ Rules:
 
 - `QWEN_PREFILL_TRACE_LAYER_PHASES=1` emits `prefill-layer-phase` rows for dense
   pre-norm, GDN, mixer residual, and dense FFN phases.
+- Prefer default warmup plus `prefill_phase_summary.py --last-pass` when comparing
+  against llama.cpp; no-warm traces are useful for debugging but have produced
+  misleading first-pass residency conclusions.
+- `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` splits dense FFN into `ffn_gate`, `ffn_up`,
+  and `ffn_swiglu` trace buckets. It is trace-only and intentionally not a
+  production execution shape.
 - Dense GDN front traces split the projection bucket into `gdn_qkv`, `gdn_z`, and
   `gdn_beta_alpha`; use that split to catch dispatcher-class mismatches before
   returning to broad FFN or attention hypotheses.
 - Add `QWEN_PREFILL_TRACE_ATTN_PHASES=1` when attention attribution matters; by
   itself, layer tracing collapses attention work into one `attn` phase.
+- `prefill_phase_summary.py --by-layer --stats` is the preferred way to find
+  layer-local outliers; `--json` emits compact automation-friendly output.
+- `QWEN_PREFILL_TRACE_MOE_BUCKETS=1` can be combined with layer tracing for MoE
+  routed bucket geometry, but it reads synchronized counters and should remain a
+  diagnostic lane, not a throughput row.
 - Compare phase-local sums across paired runs before defaulting a sub-noise
   total-throughput candidate such as dense fused-SwiGLU or reduced mat-mat smem.
 

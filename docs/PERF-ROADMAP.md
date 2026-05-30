@@ -105,6 +105,31 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   tuned parity kernels; one-row `pp128` anchors put Q2/Q3 at about `0.83x`
   llama.cpp and IQ4 at about `0.54x`, so do not treat clean audit rows as
   performance parity.
+- A10B routed MoE is no longer the active top bet after the warmed re-anchor. A
+  default-warmup `pp512` phase trace has qwen timed-pass
+  `routed_swiglu+routed_down = 600.52 ms` versus llama.cpp profile
+  `ffn_moe_gate+up+GLU+down = 654.98 ms`, and current end-to-end anchors are
+  qwen/lcpp `446/440` at `pp512`, `488/436` at `pp1024`, `481/401` at `pp4096`,
+  and `394/354` at `pp16384`. Keep A10B MoE in monitoring unless a fresh matched
+  trace shows a real warmed routed-tail deficit or coverage drops below `48/48`.
+- Dense group-6 matrix attention is now default-on for the proven 27B shape, with
+  `QWEN_PREFILL_ATTN_MATRIX_G6=0` as rollback. It moves current 27B default from
+  rollback-level rows to `~229-231 t/s` at `pp512`, `~202-205 t/s` at `pp4096`,
+  and `190.9 t/s` at `pp16384`; current llama.cpp is still `235.7/211.8/199.8`,
+  so dense FFN/GDN after G6 is the cleanest remaining exact scoreboard gap.
+- The first dense FFN/GDN pass is phase-positive but not yet scoreboard-complete.
+  `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` plus timed-only summaries showed the FFN
+  residual was mat-mat throughput, not SwiGLU epilogue or chunk policy. Adding
+  llama.cpp-style full-unroll pragmas to Q4/Q5/Q6/Q8 mat-mat kernels moves 27B
+  timed `pp4096` gate/up/down from `4063/4068/4199 ms` to `3959/3964/4090 ms`,
+  near the lcpp `3878/3932/4099 ms` buckets; GDN QKV/Z/back also drop `2-4%`.
+  Current dirty rows are 27B `pp512=233.87`, `pp1024=230.36`, `pp4096=204.50`,
+  `pp16384=192.46`, plus A10B `pp1024=501.23` and A3B `pp1024=1581.17` smokes.
+  A same-principle GDN recurrence-loop unroll was falsified and removed
+  (`gdn_step` `593.40 -> 597.17 ms` at `pp4096`).
+  The remaining exact dense gap is now smaller and distributed: residual FFN
+  mat-mat, GDN mat-mat/step, and long-context attention body, not another G6
+  promotion or chunk-size change.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -497,12 +522,52 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: A10B grouped routed down/dequant locality is the next exact lever
+### 1. Hypothesis: Dense 27B FFN/GDN is the next exact lever after G6 default
+
+Optimizes: Qwen3.6 27B dense prompt prefill after group-6 matrix attention became
+the default for the proven shape.
+
+Why it is at the top:
+
+- Defaulting G6 matrix attention closes the obvious dense attention miss, but
+  current qwen still trails llama.cpp at `pp512`, `pp4096`, and `pp16384`.
+- A10B routed MoE no longer explains a scoreboard gap under warmed methodology;
+  qwen's warmed routed tail is faster/equal to llama.cpp and end-to-end is
+  parity-or-better from `pp512` through `pp16384`.
+- A3B matrix default plus Q6 coverage already wins most synthetic anchors; true
+  long/real-rollout work stays live but is less clean than dense 27B.
+
+Current design rule:
+
+- Keep `QWEN_PREFILL_ATTN_MATRIX_G6=0` as the rollback path and preserve the
+  ignored G6 prefix correctness gate plus `16/16` matrix phase coverage.
+- Do not open another dense attention branch until a fresh phase/no-op ladder says
+  attention is again the largest residual gap.
+- The matched qwen-vs-llama dense differential has now been run at `pp4096` and
+  `pp16384`. Keep using timed-only `--last-pass` summaries and
+  `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: after the unroll pass, a new
+  branch should target a residual bucket that is both stable across `pp4096/16384`
+  and large enough to move end-to-end rows.
+- Chunk-size `2048` is not the dense cure: randomized `1024` vs `2048` rows favored
+  `1024` at both `pp4096` and `pp16384`.
+
+Acceptance gates:
+
+- 27B `pp512/4096/16384` must improve without decode regression.
+- A3B and A10B prompt defaults must remain neutral, with MoE coverage still
+  `40/40` and `48/48` respectively.
+- Promote only from AC-power rows with no thermal/performance warnings and a
+  paired llama.cpp comparison on the same GGUF.
+
+### Monitoring: A10B grouped routed down/dequant locality is not currently active
 
 Optimizes: Qwen3.5 122B A10B prompt prefill after the G16 matrix-attention default
 and the layer-46 Q5 gate/up coverage fix.
 
-Why it is at the top:
+Current status: superseded by the `v0.155` warmed re-anchor. Keep this section as
+the reopen criteria and historical rationale, not as the active top queue.
+
+Why it was at the top / reopen criteria:
 
 - A10B/G16 matrix attention is already default-on for the proven group-16 shape;
   post-default no-op rows made attention body a low-single-digit `pp512` lever.

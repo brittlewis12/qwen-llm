@@ -6,6 +6,61 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-29 — G6 Matrix Defaults And A10B MoE Re-Anchors
+
+Status: post-`v0.154` re-anchor plus dense default promotion and first dense
+mat-mat parity pass. Raw artifacts are in `target/profiles/v0155-*` and
+`target/profiles/v0156-*` until the next bench packet is curated.
+
+The A10B routed-MoE premise changed under a warmed trace. A diagnostic
+`QWEN_PREFILL_TRACE_MOE_BUCKETS=1` path now prints per-layer routed bucket geometry
+when layer phase tracing is enabled. With default warmup, the timed A10B `pp512`
+pass has `routed_swiglu=371.23 ms` and `routed_down=229.29 ms`; the paired
+llama.cpp Metal profile reports `ffn_moe_gate+up+GLU=428.47 ms` and
+`ffn_moe_down=226.51 ms`. The earlier no-warm trace was therefore a first-pass
+confound, not proof that qwen's warmed routed kernels trail llama.cpp.
+
+The split gate/up sidecar was re-tested as the smallest llama-shaped falsifier:
+separate grouped Q4 matmuls plus `silu_mul` into the existing grouped down path.
+Correctness passed, but A3B `pp512` regressed slightly (`1397.82/1402.25` base vs
+`1389.25/1384.96` split), so the branch was removed and remains a negative result.
+
+Current A10B anchors now put qwen at parity-or-better against same-session
+llama.cpp: `pp512` qwen `446.22` vs lcpp `440.44`, `pp1024` `488.38` vs
+`435.75`, `pp4096` `480.92` vs `401.27`, and `pp16384` `393.89` vs `354.22`.
+Keep A10B routed MoE frozen unless a fresh matched warm trace shows a combined
+`routed_swiglu+routed_down` deficit or fast-path coverage drops below `48/48`.
+
+Dense 27B was the real default miss: `QWEN_PREFILL_ATTN_MATRIX_G6=1` was still
+env-only. It is now auto/default for the proven group-6 shape, with
+`QWEN_PREFILL_ATTN_MATRIX_G6=0` as rollback and force-on strict scratch behavior
+preserved. Default/rollback rows: `pp512` `230.27/228.65` vs `213.32/213.44`,
+`pp4096` `202.09/204.72` vs `175.86/175.97`, and `pp16384` `190.93` vs
+`136.58`. Correctness: release build, default 27B prefill-vs-single, ignored G6
+prefix gate, and phase coverage showing `16/16` matrix-G6 attention layers.
+Against current llama.cpp, dense 27B is still short at `pp512/4096/16384`, so the
+next exact lever is dense FFN/GDN after the G6 default, not more A10B MoE.
+
+The dense differential is now timed-only enough to act on. `prefill_phase_summary.py`
+grew `--last-pass`, `--by-layer`, and `--stats`; `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1`
+splits dense FFN tracing into `ffn_gate`, `ffn_up`, and `ffn_swiglu` without changing
+the production path. The chunk-size hypothesis was mostly falsified for dense 27B:
+randomized `pp4096` and `pp16384` rows kept `prefill_chunk=1024` ahead of `2048`.
+
+The first dense mat-mat parity pass copies llama.cpp's explicit full-unroll pragma
+onto the Q4_K/Q5_K/Q6_K/Q8_0 mat-mat kernels. This is not a giant scoreboard move,
+but it closes the phase-local gap that the subphase trace found: at 27B `pp4096`,
+timed FFN subphases move from qwen/lcpp `4063/3878 ms` gate, `4068/3932 ms` up,
+and `4199/4099 ms` down to `3959/3878`, `3964/3932`, and `4090/4099`. GDN mat-mat
+buckets move similarly (`gdn_qkv` `1817 -> 1769 ms`, `gdn_z` `1088 -> 1057 ms`,
+`gdn_back` `1177 -> 1135 ms`). Current dirty end-to-end rows after the unroll pass:
+27B `pp512=233.87`, `pp1024=230.36`, `pp4096=204.50`, `pp16384=192.46`; A10B
+`pp1024=501.23`; A3B `pp1024=1581.17`. Correctness is green on the default 27B
+prefill-vs-single gate and ignored 27B G6 prefix gate.
+The analogous GDN recurrence-loop unroll was tested and removed: the `pp4096`
+phase trace was neutral/slightly worse (`gdn_step` `593.40 -> 597.17 ms`) and also
+nudged neighboring mat-mat buckets the wrong way.
+
 ## 2026-05-27 — Static Quant Audit Closes 0.8B Dense Coverage
 
 Status: dtype/shape audit harness plus primitive quant coverage after the A3B

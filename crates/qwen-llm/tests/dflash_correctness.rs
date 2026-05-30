@@ -2039,10 +2039,10 @@ fn prefill_tokens_matches_single_token_loop_27b_matrix_g6_prefix_gate() {
     }
     if std::env::var("QWEN_PREFILL_ATTN_MATRIX_G6")
         .as_deref()
-        .map(|v| !matches!(v, "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(true)
+        .map(|v| matches!(v, "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(false)
     {
-        eprintln!("[prefill-vs-single-27b-g6-prefix] skipped — set QWEN_PREFILL_ATTN_MATRIX_G6=1");
+        eprintln!("[prefill-vs-single-27b-g6-prefix] skipped — G6 matrix force-disabled");
         return;
     }
 

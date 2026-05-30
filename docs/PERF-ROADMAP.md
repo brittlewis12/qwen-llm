@@ -117,7 +117,8 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   rollback-level rows to `~229-231 t/s` at `pp512`, `~202-205 t/s` at `pp4096`,
   and `190.9 t/s` at `pp16384`; current llama.cpp is still `235.7/211.8/199.8`,
   so dense FFN/GDN after G6 is the cleanest remaining exact scoreboard gap.
-- The first dense FFN/GDN pass is phase-positive but not yet scoreboard-complete.
+- The first dense FFN/GDN pass is phase-positive but not scoreboard-complete by
+  itself.
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` plus timed-only summaries showed the FFN
   residual was mat-mat throughput, not SwiGLU epilogue or chunk policy. Adding
   llama.cpp-style full-unroll pragmas to Q4/Q5/Q6/Q8 mat-mat kernels moves 27B
@@ -128,9 +129,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `pp1024=1584.48` smokes.
   A same-principle GDN recurrence-loop unroll was falsified and removed
   (`gdn_step` `593.40 -> 597.17 ms` at `pp4096`).
-  The remaining exact dense gap is now smaller and distributed: residual FFN
-  mat-mat, GDN mat-mat/step, and long-context attention body, not another G6
-  promotion or chunk-size change.
+  A timed-pass v0.157 differential makes attention body the next active branch:
+  at `pp4096`, FFN and GDN projections are parity-or-faster while attention body
+  is `~115 ms` slower than llama.cpp and GDN step is `~82 ms` slower; at
+  `pp16384`, attention body is `~0.85 s` slower, GDN step `~0.36 s`, and FFN
+  `~1.0 s`. No-op ceilings are large (`pp16384` attention body `194.35 ->
+  217.23 t/s`, GDN body `194.35 -> 215.10`), but the first generic attention
+  loop-unroll probe was negative and removed.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -523,15 +528,18 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: Dense 27B FFN/GDN is the next exact lever after G6 default
+### 1. Hypothesis: Dense 27B G6 attention body is the next exact lever
 
 Optimizes: Qwen3.6 27B dense prompt prefill after group-6 matrix attention became
-the default for the proven shape.
+the default for the proven shape and FFN/GDN projection parity mostly closed.
 
 Why it is at the top:
 
-- Defaulting G6 matrix attention closes the obvious dense attention miss, but
-  current qwen still trails llama.cpp at `pp512`, `pp4096`, and `pp16384`.
+- The v0.157 timed-pass differential says `pp4096` residuals are attention body
+  and GDN step, not FFN/GDN projection mat-mat. At `pp16384`, attention body is
+  the largest clean structural deficit after excluding projection parity/noise.
+- Attention body has a real no-op ceiling at both lengths: `207.5 -> 218.4 t/s`
+  at `pp4096` and `194.35 -> 217.23 t/s` at `pp16384`.
 - A10B routed MoE no longer explains a scoreboard gap under warmed methodology;
   qwen's warmed routed tail is faster/equal to llama.cpp and end-to-end is
   parity-or-better from `pp512` through `pp16384`.
@@ -542,13 +550,16 @@ Current design rule:
 
 - Keep `QWEN_PREFILL_ATTN_MATRIX_G6=0` as the rollback path and preserve the
   ignored G6 prefix correctness gate plus `16/16` matrix phase coverage.
-- Do not open another dense attention branch until a fresh phase/no-op ladder says
-  attention is again the largest residual gap.
+- Keep the branch scoped to KQ/KQV/softmax body. Projections are not the target
+  unless a fresh phase trace says they regressed.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
-  `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: after the unroll pass, a new
-  branch should target a residual bucket that is both stable across `pp4096/16384`
-  and large enough to move end-to-end rows.
+  `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate
+  must first reduce `body_matrix_kq`, `body_matrix_kqv`, or `body_matrix_softmax`
+  by at least `~60 ms` at `pp4096` and `~0.45 s` at `pp16384` before a full
+  scoreboard run.
+- Do not revive generic matrix-body loop unroll; it built and passed the short 27B
+  correctness gate, but `body_matrix_kq` regressed and the probe was removed.
 - Chunk-size `2048` is not the dense cure: randomized `1024` vs `2048` rows favored
   `1024` at both `pp4096` and `pp16384`.
 

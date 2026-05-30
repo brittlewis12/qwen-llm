@@ -589,18 +589,24 @@ GGML_METAL_PROFILE_OPS=1 \
   -p 4096 \
   -n 0 \
   -r 1 \
-  --no-warmup \
   -o json \
   -v \
   > target/profiles/lcpp-profile.json \
   2> target/profiles/lcpp-profile.log
 
 uv run scripts/profile/lcpp_metal_profile_summary.py \
+  --prompt-tokens 4096 \
+  --last-pass \
+  --stats \
   target/profiles/lcpp-profile.log
 ```
 
 `GGML_METAL_PROFILE_OPS=1` serializes llama.cpp graph nodes, so compare it only
 against qwen phase traces, not normal throughput rows.
+Use `--prompt-tokens` with `--last-pass` for default warmup+timed `llama-bench`
+logs; the helper infers pass boundaries from node-0 chunk widths. `--no-warmup`
+is still useful for one-pass debugging, but it should not be the default matched
+differential lane.
 
 ### Real rollout prompt lane
 

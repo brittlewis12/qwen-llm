@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-29 — Dense Residual Attribution Points To Attention Body
+
+Status: post-`v0.156` residual-attribution checkpoint. Raw artifacts are in
+`target/profiles/v0157-*`.
+
+`lcpp_metal_profile_summary.py` now supports `--prompt-tokens`, `--last-pass`,
+and `--stats`, so llama.cpp's serialized Metal op profiles can be compared against
+qwen timed-pass phase logs instead of warmup+timed totals. With that normalization,
+27B `pp4096` no longer points at FFN/GDN mat-mat: qwen FFN and GDN projection rows
+are parity-or-faster, while the residual named deficits are attention body
+(`~115 ms`) and GDN step (`~82 ms`). At `pp16384`, the residual is distributed but
+ordered as FFN mat-mat (`~1.0 s`), attention body (`~0.85 s`), and GDN step
+(`~0.36 s`); GDN QKV/Z/back remain parity.
+
+No-op ceilings agree that the remaining body work is high leverage: at `pp4096`,
+base `207.5 t/s` moves to `218.4` with `QWEN_PREFILL_NOOP_ATTN_BODY=1` and
+`~232-233` with `QWEN_PREFILL_NOOP_GDN_BODY=1`; at `pp16384`, base `194.35` moves
+to `217.23` with attention body skipped and `215.10` with GDN body skipped. This
+does not mean skip bodies in production; it means the next exact branch should name
+one body sub-bucket and clear a phase gate before scoreboard testing.
+
+The first obvious attention-body microprobe was falsified and removed. Adding
+full-unroll pragmas to the existing matrix KQ/KQV small loops built and passed the
+default 27B prefill-vs-single gate, but the `pp4096` phase row regressed/netted out
+wrong (`body_matrix_kq` `216.15 -> 230.78 ms`, `body_matrix_kqv` `215.88 ->
+210.91 ms`, softmax flat), with neighboring phases also noisier/slower. Do not
+revive generic loop-unroll as the attention v2 plan.
+
+Current recommendation: open a 27B G6 matrix-attention body v2 branch only if it
+targets KQ/KQV/softmax structure directly. The strongest exact bets are a G6-shaped
+body kernel or a more llama-like fused online-softmax/PV body; simple unroll,
+chunk-size policy, and projection scheduling are not the next branch.
+
 ## 2026-05-29 — G6 Matrix Defaults And A10B MoE Re-Anchors
 
 Status: post-`v0.154` re-anchor plus dense default promotion and first dense

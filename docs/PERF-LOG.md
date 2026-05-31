@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-31 — Producer-Side Compact-Q Upper Bound Falsified
+
+Status: dense 27B G6 matrix-attention Q-layout upper-bound probe. Source change
+was removed; raw artifacts are in `target/profiles/v0162-*compact-q-producer*`.
+
+The cheapest "free compact Q" production shape was tested without adding a runtime
+pack: replace in-place Q RoPE with an out-of-place RoPE producer that writes Q into
+the compact `[kv_head, token*group+g, dim]` view, reusing the old pre-norm Q scratch,
+then use a compact-Q KQ kernel. This preserves correctness and avoids the previous
+`~309 ms` runtime pack bill.
+
+It still fails the phase gate. At 27B `pp4096`, compact-Q producer phase rows were
+`body_matrix_kq=174.66 ms`, `body_matrix_kqv=177.58 ms`, `softmax=60.96 ms`, and
+`rope_scatter=8.03 ms`. Relative to the post-causal baseline, KQ/KQV only move by a
+few milliseconds while RoPE/scatter gets a small extra copy cost. That is far below
+the required `~60 ms` `pp4096` attention-body movement and does not justify carrying
+another sidecar or moving Q projection/norm layout.
+
+Updated read: Q layout contributes some KQ friction, but it is not the missing
+llama.cpp-scale delta by itself. Demote compact-Q layout work unless a future branch
+changes the whole attention dataflow. The next exact attention bet is a mechanical
+llama.cpp `mul_mat` differential or a narrow fused online-softmax/PV body; GDN-step
+state/layout remains the parallel non-attention lever.
+
 ## 2026-05-31 — Selective Attention Unroll Probe Falsified
 
 Status: dense 27B G6 matrix-attention KQ/KQV microprobe. Source change was

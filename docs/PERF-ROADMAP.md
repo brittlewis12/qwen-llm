@@ -567,6 +567,10 @@ Current design rule:
   compact Q reduces KQ/KQV locally but its copy cost overwhelms the win, while
   q-head-major regresses KQ and leaves KQV flat. Revive only if Q is produced in a
   compact layout for free or a true llama.cpp-kernel clone needs the layout.
+- Producer-side compact-Q was also tested as the cheapest "free Q layout" upper
+  bound by making Q RoPE write the compact KQ view directly. It is correctness-safe
+  but only moves KQ/KQV by a few milliseconds at `pp4096` while adding a small
+  RoPE/scatter copy cost, far below the phase gate. Demote Q-layout-only work.
 - Loop-pragma attention tweaks are falsified. A selective inner-loop-only unroll
   probe improved dirty phase rows but failed the clean gate: tiny/noisy long wins
   and clear `pp512/1024` regressions. Do not carry a duplicate env-gated kernel for
@@ -582,14 +586,11 @@ Current design rule:
 
 Next branch order:
 
-- First, test a free-Q-layout upper bound before touching production graph wiring:
-  if compact/llama-like Q is not worth at least several percent end-to-end at
-  `pp4096/16384`, do not move Q projection/norm/RoPE output layout.
-- Second, audit one llama.cpp `mul_mat` mechanical difference per patch: tile
+- First, audit one llama.cpp `mul_mat` mechanical difference per patch: tile
   ownership, vector-load alignment, barrier placement, half-conversion points, and
   K/V transpose timing. Require `>=3%` KQ or KQV phase improvement at both
   `pp4096` and `pp16384`, neutral at `pp512/1024`.
-- Third, prototype fused online-softmax/PV only as a narrow G6/head_dim=256 body
+- Second, prototype fused online-softmax/PV only as a narrow G6/head_dim=256 body
   that is judged on total attention-body time, not softmax-only wins.
 - In parallel, inspect GDN-step state/read-write layout. The earlier recurrence
   unroll was negative, but the `gdn_step` residual is still large enough to matter.

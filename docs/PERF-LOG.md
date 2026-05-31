@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-29 — Default G6 Matrix Causal-Tail Skip
+
+Status: exact dense 27B attention-body cleanup after the v0.157 attribution pass.
+Raw artifacts are in `target/profiles/v0158-*`.
+
+The G6 matrix KQ/KQV body now skips wholly future causal tiles inside the current
+prefill chunk, with `QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0` as rollback. This is
+scoped to the default 27B group-6 matrix path; G8/G16 matrix paths and packed MoE
+attention are unchanged. Correctness is green on the default 27B prefill-vs-single
+gate and the long-prefix G6 gate with the candidate path active.
+
+Phase impact is exactly where expected. At 27B `pp4096`, `body_matrix_kq` moves
+`216.15 -> 179.26 ms` and `body_matrix_kqv` moves `215.88 -> 180.01 ms`, with
+softmax flat. At `pp16384`, KQ/KQV move `2937.39 -> 2822.60 ms` and `3057.11 ->
+2971.57 ms`. A follow-up attempt to skip softmax future-zero writes was removed:
+it saved only about `5 ms` in softmax at `pp4096` but pushed KQV backward enough
+to lose the net phase gain.
+
+End-to-end is positive but small, so this is a cleanup/default, not the final lcpp
+crack: randomized rows show `pp4096` `~208.55 -> ~209.58 t/s` and `pp16384`
+`~194.20 -> ~195.27 t/s`. Short prompts are neutral-to-noisy (`pp512` slightly
+positive, `pp1024` within noise/slightly negative), below the `>1%` regression
+guardrail. The next attention work must be structural beyond causal-tile skipping,
+most likely a fused online-softmax/PV body or another shape-specific body kernel.
+
 ## 2026-05-29 — Dense Residual Attribution Points To Attention Body
 
 Status: post-`v0.156` residual-attribution checkpoint. Raw artifacts are in

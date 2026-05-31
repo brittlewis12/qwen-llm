@@ -551,6 +551,8 @@ Rules:
 - `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` splits dense FFN into `ffn_gate`, `ffn_up`,
   and `ffn_swiglu` trace buckets. It is trace-only and intentionally not a
   production execution shape.
+- `QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0` disables the default 27B G6 matrix
+  causal-tail tile skip when bisecting dense attention-body changes.
 - Dense GDN front traces split the projection bucket into `gdn_qkv`, `gdn_z`, and
   `gdn_beta_alpha`; use that split to catch dispatcher-class mismatches before
   returning to broad FFN or attention hypotheses.

@@ -707,6 +707,14 @@ fn prefill_attn_matrix_g6_may_use() -> bool {
     !matches!(prefill_attn_matrix_g6_mode(), PrefillEnvMode::ForceOff)
 }
 
+fn prefill_attn_matrix_causal_skip_enabled() -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    !matches!(
+        *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP")),
+        PrefillEnvMode::ForceOff
+    )
+}
+
 fn prefill_attn_matrix_g16_mode() -> PrefillEnvMode {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G16"))
@@ -5512,6 +5520,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
+                                            prefill_attn_matrix_causal_skip_enabled()
+                                                && use_matrix_g6,
                                         )?;
                                         enc.end();
                                     }
@@ -5591,6 +5601,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
+                                            prefill_attn_matrix_causal_skip_enabled()
+                                                && use_matrix_g6,
                                         )?;
                                         enc.end();
                                     }
@@ -5664,6 +5676,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
+                                            prefill_attn_matrix_causal_skip_enabled()
+                                                && use_matrix_g6,
                                         )?;
                                         crate::metal::encode_attn_matrix_softmax_f32(
                                             base.ctx,
@@ -5691,6 +5705,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
+                                            prefill_attn_matrix_causal_skip_enabled()
+                                                && use_matrix_g6,
                                         )?;
                                     } else {
                                         for row_base in (0..chunk_p).step_by(packed_rows) {

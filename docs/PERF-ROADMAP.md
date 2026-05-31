@@ -136,6 +136,12 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `~1.0 s`. No-op ceilings are large (`pp16384` attention body `194.35 ->
   217.23 t/s`, GDN body `194.35 -> 215.10`), but the first generic attention
   loop-unroll probe was negative and removed.
+- A first exact attention-body cleanup is now default for the 27B G6 matrix path:
+  causal-tail KQ/KQV tile skip with `QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0`
+  rollback. It improves 27B `pp4096` by about `0.5%` and `pp16384` by about
+  `0.55%`, is neutral/noisy at `pp512/1024`, and passes the default plus long-prefix
+  27B correctness gates. This does not close the llama.cpp gap; it just removes
+  avoidable future-tile work from the current matrix body.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`
@@ -539,7 +545,9 @@ Why it is at the top:
   and GDN step, not FFN/GDN projection mat-mat. At `pp16384`, attention body is
   the largest clean structural deficit after excluding projection parity/noise.
 - Attention body has a real no-op ceiling at both lengths: `207.5 -> 218.4 t/s`
-  at `pp4096` and `194.35 -> 217.23 t/s` at `pp16384`.
+  at `pp4096` and `194.35 -> 217.23 t/s` at `pp16384`. The first causal-tail skip
+  recovers only about half a percent end-to-end, so the next branch must change
+  the body structure rather than just skipping obviously future tiles.
 - A10B routed MoE no longer explains a scoreboard gap under warmed methodology;
   qwen's warmed routed tail is faster/equal to llama.cpp and end-to-end is
   parity-or-better from `pp512` through `pp16384`.
@@ -552,6 +560,8 @@ Current design rule:
   ignored G6 prefix correctness gate plus `16/16` matrix phase coverage.
 - Keep the branch scoped to KQ/KQV/softmax body. Projections are not the target
   unless a fresh phase trace says they regressed.
+- Preserve `QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0` as rollback for the current
+  default cleanup.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate

@@ -7678,6 +7678,7 @@ struct AttnMatrixArgs {
     group: u32,
     head_dim: u32,
     scale: f32,
+    causal_skip: u32,
 }
 
 fn validate_attn_matrix_common(
@@ -7781,6 +7782,7 @@ pub fn encode_attn_matrix_transpose_v_f16(
             group: 0,
             head_dim: head_dim as u32,
             scale: 0.0,
+            causal_skip: 0,
         },
     );
     enc.set_tensor(1, v_cache);
@@ -7814,6 +7816,7 @@ pub fn encode_attn_matrix_kq_f32(
     n_kv_heads: usize,
     group: usize,
     head_dim: usize,
+    causal_skip: bool,
 ) -> Result<(), MetalError> {
     validate_attn_matrix_common(
         "attn_matrix_kq",
@@ -7864,6 +7867,7 @@ pub fn encode_attn_matrix_kq_f32(
             group: group as u32,
             head_dim: head_dim as u32,
             scale: 0.0,
+            causal_skip: causal_skip as u32,
         },
     );
     enc.set_tensor(1, q_rows);
@@ -7930,6 +7934,7 @@ pub fn encode_attn_matrix_softmax_f32(
             group: group as u32,
             head_dim: head_dim as u32,
             scale,
+            causal_skip: 0,
         },
     );
     enc.set_tensor(1, scores);
@@ -7963,6 +7968,7 @@ pub fn encode_attn_matrix_kqv_f32(
     n_kv_heads: usize,
     group: usize,
     head_dim: usize,
+    causal_skip: bool,
 ) -> Result<(), MetalError> {
     validate_attn_matrix_common(
         "attn_matrix_kqv",
@@ -8021,6 +8027,7 @@ pub fn encode_attn_matrix_kqv_f32(
             group: group as u32,
             head_dim: head_dim as u32,
             scale: 0.0,
+            causal_skip: causal_skip as u32,
         },
     );
     enc.set_tensor(1, probs);

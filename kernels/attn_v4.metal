@@ -1146,6 +1146,7 @@ struct attn_matrix_args {
     uint  group;
     uint  head_dim;
     float scale;
+    uint  causal_skip;
 };
 
 constant constexpr int AM_NR0            = 64;
@@ -1190,6 +1191,10 @@ kernel void kernel_attn_matrix_kq_f32(
     const int r1 = (int)tgpig.x * AM_NR1;
     const short nr0 = (M - r0 < AM_NR0) ? (short)(M - r0) : AM_NR0;
     const short nr1 = (N - r1 < AM_NR1) ? (short)(N - r1) : AM_NR1;
+    const uint local_q_last = (uint)(r1 + nr1 - 1);
+    const uint row_last = local_q_last / args.group;
+    const uint max_visible = min(args.n_pos, args.base_pos + row_last + 1);
+    if (args.causal_skip != 0u && (uint)r0 >= max_visible) return;
     const short lr0 = ((short)tiitg / AM_NL0) < nr0 ? ((short)tiitg / AM_NL0) : nr0 - 1;
     const short lr1 = ((short)tiitg / AM_NL1) < nr1 ? ((short)tiitg / AM_NL1) : nr1 - 1;
     const short il0 = tiitg % AM_NL0;
@@ -1353,6 +1358,9 @@ kernel void kernel_attn_matrix_kqv_f32(
     const int r1 = (int)tgpig.x * AM_NR1;
     const short nr0 = (M - r0 < AM_NR0) ? (short)(M - r0) : AM_NR0;
     const short nr1 = (N - r1 < AM_NR1) ? (short)(N - r1) : AM_NR1;
+    const uint local_q_last = (uint)(r1 + nr1 - 1);
+    const uint row_last = local_q_last / args.group;
+    const uint max_visible = min(args.n_pos, args.base_pos + row_last + 1);
     const short lr0 = ((short)tiitg / AM_NL0) < nr0 ? ((short)tiitg / AM_NL0) : nr0 - 1;
     const short lr1 = ((short)tiitg / AM_NL1) < nr1 ? ((short)tiitg / AM_NL1) : nr1 - 1;
     const short il0 = tiitg % AM_NL0;
@@ -1366,6 +1374,7 @@ kernel void kernel_attn_matrix_kqv_f32(
     }
 
     for (uint loop_k = 0; loop_k < args.n_pos; loop_k += AM_NK) {
+        if (args.causal_skip != 0u && loop_k >= max_visible) continue;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (short i = 0; i < 16; ++i) {
             const short sx = 2 * il0 + i / 8;

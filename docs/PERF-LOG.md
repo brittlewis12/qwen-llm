@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-29 — G6 Matrix KQ/KQV Layout Probes Falsified
+
+Status: post-`v0.159` attention-body structural probes. Raw artifacts are in
+`target/profiles/v0160-*`.
+
+The next suspected lcpp delta was KQ/KQV layout rather than softmax: llama.cpp has
+flash attention disabled on the matched profile and wins KQ/KQV with generic
+`mul_mat`, while qwen's softmax is already much faster. Two narrow exact probes did
+not clear the gate and were removed.
+
+First, compacting Q into `[kvh, token*group+g, d]` before KQ improved the KQ/KQV
+sub-buckets (`pp4096` KQ/KQV about `179/180 -> 170/173 ms` after vectorizing the
+copy), but the required pack itself cost `~309 ms` per timed pass. The initial
+scalar pack was catastrophically worse (`~4795 ms` per timed pass). This rules out
+runtime compact-Q staging as a production path unless Q is produced in that layout
+directly.
+
+Second, a q-head-major score/body layout to mimic llama.cpp's per-Q-head batch
+shape was correctness-safe but regressed KQ (`pp4096` `~179 -> ~196 ms`) and left
+KQV flat. The current grouped-by-KV-head score layout is therefore not the obvious
+KQ/KQV loss by itself.
+
+Updated read: the remaining attention-body gap is not solved by cheap staging or
+axis reorder. The next exact branch should either copy the actual llama.cpp generic
+`mul_mat` kernel mechanics more directly, or jump to a fused online-softmax/PV body
+with a real phase gate. Do not keep runtime compact-Q or q-head-major sidecars.
+
 ## 2026-05-29 — Default G6 Matrix Causal-Tail Skip
 
 Status: exact dense 27B attention-body cleanup after the v0.157 attribution pass.

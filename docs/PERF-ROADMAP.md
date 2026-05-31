@@ -563,6 +563,10 @@ Current design rule:
   unless a fresh phase trace says they regressed.
 - Preserve `QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0` as rollback for the current
   default cleanup.
+- Runtime compact-Q staging and q-head-major score/body layout are falsified:
+  compact Q reduces KQ/KQV locally but its copy cost overwhelms the win, while
+  q-head-major regresses KQ and leaves KQV flat. Revive only if Q is produced in a
+  compact layout for free or a true llama.cpp-kernel clone needs the layout.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate

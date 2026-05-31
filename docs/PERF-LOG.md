@@ -25,8 +25,9 @@ it saved only about `5 ms` in softmax at `pp4096` but pushed KQV backward enough
 to lose the net phase gain.
 
 End-to-end is positive but small, so this is a cleanup/default, not the final lcpp
-crack: randomized rows show `pp4096` `~208.55 -> ~209.58 t/s` and `pp16384`
-`~194.20 -> ~195.27 t/s`. Short prompts are neutral-to-noisy (`pp512` slightly
+crack: randomized A/B rows show `pp4096` `~208.55 -> ~209.58 t/s` and `pp16384`
+`~194.20 -> ~195.27 t/s`; clean post-commit anchors are `pp4096=208.06` and
+`pp16384=194.80` on AC power. Short prompts are neutral-to-noisy (`pp512` slightly
 positive, `pp1024` within noise/slightly negative), below the `>1%` regression
 guardrail. The next attention work must be structural beyond causal-tile skipping,
 most likely a fused online-softmax/PV body or another shape-specific body kernel.

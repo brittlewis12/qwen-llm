@@ -139,9 +139,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 - A first exact attention-body cleanup is now default for the 27B G6 matrix path:
   causal-tail KQ/KQV tile skip with `QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0`
   rollback. It improves 27B `pp4096` by about `0.5%` and `pp16384` by about
-  `0.55%`, is neutral/noisy at `pp512/1024`, and passes the default plus long-prefix
-  27B correctness gates. This does not close the llama.cpp gap; it just removes
-  avoidable future-tile work from the current matrix body.
+  `0.55%` in randomized A/B, with clean post-commit anchors at `pp4096=208.06`
+  and `pp16384=194.80`; it is neutral/noisy at `pp512/1024` and passes the default
+  plus long-prefix 27B correctness gates. This does not close the llama.cpp gap;
+  it just removes avoidable future-tile work from the current matrix body.
 - Current same-shape A3B rows against recent `llama.cpp` anchors changed sharply
   after the Q6-down grouped fix and fresh same-session lcpp anchors: `pp320` is
   now `1061.45 / 1174.57 t/s` (`0.90x`), `pp512` is `1172.07 / 1347.79 t/s`

@@ -23,11 +23,13 @@ they move from `2822.60/2971.57 ms` to `2516.18/2660.00 ms`. Softmax remains fla
 and still much faster than llama.cpp, so the remaining dense attention deficit is
 now narrower and more clearly KQ/KQV kernel mechanics, not score softmax.
 
-Clean end-to-end rows are positive but still small because dense FFN/GDN dominate:
-27B `pp512=234.96`, `pp1024=233.88`, `pp4096=209.91` on rerun after an initial
-`207.08` noisy row, and `pp16384=196.36`. MoE smoke rows are neutral/noisy:
-A3B `pp1024=1584.12` and A10B `pp1024=497.03`, with fast-path coverage still
-`40/40` and `48/48`.
+Clean end-to-end rows are positive but still small/noisy because dense FFN/GDN
+dominate: dirty-code 27B anchors were `pp512=234.96`, `pp1024=233.88`,
+`pp4096=209.91` on rerun after an initial `207.08` noisy row, and
+`pp16384=196.36`. Post-commit build-clean reruns landed at `pp4096=211.61` and
+`pp16384=195.96` after an initial cooler/variance packet of `206.18/194.08`.
+MoE smoke rows are neutral/noisy: A3B `pp1024=1584.12` and A10B `pp1024=497.03`,
+with fast-path coverage still `40/40` and `48/48`.
 
 Updated read: the lcpp gap is sensitive to boring integer/address lowering inside
 the matrix body, not just tile shape. Continue the llama.cpp-mechanics audit with

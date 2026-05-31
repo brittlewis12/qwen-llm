@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-31 — Selective Attention Unroll Probe Falsified
+
+Status: dense 27B G6 matrix-attention KQ/KQV microprobe. Source change was
+removed; raw artifacts are in `target/profiles/v0161-*attn-selective-unroll*` and
+`target/profiles/v0161-clean-27b-*`.
+
+The probe copied llama.cpp-style full-unroll pragmas only onto the existing matrix
+KQ/KQV inner loops, leaving the outer K loop alone after the earlier broad-unroll
+regression. It built and passed the default 27B prefill-vs-single correctness gate.
+Dirty phase rows looked locally promising: at `pp4096`, KQ/KQV were about
+`172.89/172.45 ms`; at `pp16384`, KQ/KQV were about `2722.76/2772.77 ms`.
+
+The clean scoreboard gate did not clear. Against the post-causal-skip anchors, the
+long rows were only tiny wins/noise (`pp4096` `208.06 -> 210.21 t/s`, `pp16384`
+`194.80 -> 195.46 t/s`), while short contexts regressed versus the current dense
+anchors (`pp512` `234.38 -> 226.48 t/s`, `pp1024` `226.63 -> 222.71 t/s`). This is
+not a default-worthy trade, and an env-gated duplicate kernel is not justified for
+sub-1% long-context movement.
+
+Updated read: stop treating loop pragmas as the likely llama.cpp delta. The next
+attention work should test either free/producer-side compact-Q layout, one isolated
+llama.cpp `mul_mat` mechanical difference at a time, or a narrow fused online-
+softmax/PV prototype. Keep GDN-step state/layout auditing as the parallel exact
+scoreboard lever; do not spend a branch on chunk policy alone.
+
 ## 2026-05-29 — G6 Matrix KQ/KQV Layout Probes Falsified
 
 Status: post-`v0.159` attention-body structural probes. Raw artifacts are in

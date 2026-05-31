@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-05-31 — Dense G6 Matrix KQ/KQV Pointer Hoist
+
+Status: exact dense 27B G6 matrix-attention indexing cleanup. Raw artifacts are
+in `target/profiles/v0163-*pointer-hoist*` and `target/profiles/v0163-clean-*`.
+
+The existing KQ/KQV matrix kernels recomputed row/head/division and base-address
+math inside the hot K loop. Hoisting the invariant K/Q/V/prob base pointers per
+thread is the first llama.cpp-mechanics probe that cleared a real phase gate.
+Correctness is green on the default 27B prefill-vs-single gate and the ignored
+long-prefix G6 gate.
+
+Phase impact is concentrated in attention body. At 27B `pp4096`, KQ/KQV move from
+the post-causal baseline `179.26/180.01 ms` to `160.41/158.21 ms`. At `pp16384`,
+they move from `2822.60/2971.57 ms` to `2516.18/2660.00 ms`. Softmax remains flat
+and still much faster than llama.cpp, so the remaining dense attention deficit is
+now narrower and more clearly KQ/KQV kernel mechanics, not score softmax.
+
+Clean end-to-end rows are positive but still small because dense FFN/GDN dominate:
+27B `pp512=234.96`, `pp1024=233.88`, `pp4096=209.91` on rerun after an initial
+`207.08` noisy row, and `pp16384=196.36`. MoE smoke rows are neutral/noisy:
+A3B `pp1024=1584.12` and A10B `pp1024=497.03`, with fast-path coverage still
+`40/40` and `48/48`.
+
+Updated read: the lcpp gap is sensitive to boring integer/address lowering inside
+the matrix body, not just tile shape. Continue the llama.cpp-mechanics audit with
+one isolated diff at a time; do not reopen broad loop-unroll or Q-layout-only work.
+
 ## 2026-05-31 — Producer-Side Compact-Q Upper Bound Falsified
 
 Status: dense 27B G6 matrix-attention Q-layout upper-bound probe. Source change

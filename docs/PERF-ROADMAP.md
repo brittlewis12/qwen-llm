@@ -575,6 +575,11 @@ Current design rule:
   probe improved dirty phase rows but failed the clean gate: tiny/noisy long wins
   and clear `pp512/1024` regressions. Do not carry a duplicate env-gated kernel for
   sub-1% long-context movement.
+- The first positive llama.cpp-mechanics cleanup is pointer/base-address hoisting in
+  KQ/KQV. It moves 27B phase rows from `179/180 -> 160/158 ms` at `pp4096` and
+  `2823/2972 -> 2516/2660 ms` at `pp16384`, with clean rows positive at
+  `pp512/1024/16384` and noisy-positive at `pp4096`. Keep this style of isolated
+  mechanical diff alive.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate
@@ -588,8 +593,8 @@ Next branch order:
 
 - First, audit one llama.cpp `mul_mat` mechanical difference per patch: tile
   ownership, vector-load alignment, barrier placement, half-conversion points, and
-  K/V transpose timing. Require `>=3%` KQ or KQV phase improvement at both
-  `pp4096` and `pp16384`, neutral at `pp512/1024`.
+  K/V transpose timing. Require phase improvement at both `pp4096` and `pp16384`,
+  neutral `pp512/1024`, and clean end-to-end movement before promotion.
 - Second, prototype fused online-softmax/PV only as a narrow G6/head_dim=256 body
   that is judged on total attention-body time, not softmax-only wins.
 - In parallel, inspect GDN-step state/read-write layout. The earlier recurrence

@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Dense Group-4 Matrix Attention Default
+
+Status: exact prompt-attention coverage fix for dense group-4, `head_dim=256`
+models. Raw artifacts are in `target/profiles/v0172-*g4*`.
+
+The static audit said 9B attention was covered, but the runtime matrix gate only
+accepted the known G6/G8/G16 shapes. Qwen3.5 9B, 4B, 2B, and 0.8B use group-4
+attention, so they were still falling back to the older packed attention body.
+The default gate now enables matrix attention whenever `n_q == 4 * n_kv` and
+`head_dim == 256`; rollback is `QWEN_PREFILL_ATTN_MATRIX_G4=0`.
+
+The 9B `pp4096` A/B is decisive: default G4 rows are `762.49` and `771.51 t/s`,
+while force-off rows are `604.46` and `604.73 t/s` (`~+27%`). Phase attribution
+shows the attention body collapsing from the old packed `1884.93 ms` bucket to
+matrix KQ/softmax/KQV totals of `52.79/19.80/53.89 ms`.
+
+Same-session 9B rows now beat or match llama.cpp except for a noisy first long
+row: `pp512` `813.36 / 814.10` (`1.00x`), `pp1024` `820.51 / 804.64` (`1.02x`),
+`pp4096` `775.82 / 693.95` (`1.12x`), and repeat `pp16384` `690.68 / 678.06`
+(`1.02x`). Smaller group-4 smokes at `pp1024` also move sharply versus force-off:
+0.8B `7434.65 / 3726.61`, 2B `3636.43 / 2448.17`, and 4B `1463.29 / 1169.85`.
+Against llama.cpp those land at `0.98x`, `1.00x`, and `1.01x` respectively.
+
+Validation: release build is green and the default 27B prefill-vs-single gate
+still passes. The G4 path reuses the same generic matrix-attention kernels already
+covered by the G6/G8/G16 work; add a dedicated 9B oracle only if future changes
+touch group-specific matrix math rather than the runtime gate.
+
 ## 2026-06-01 — Current Short And Decode Family Gate
 
 Status: follow-up to the long `v0.170` re-anchor. Raw artifacts are in

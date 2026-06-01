@@ -689,6 +689,15 @@ fn prefill_attn_fused_qkv_g8_enabled(n_pos: usize, group: usize) -> bool {
     }
 }
 
+fn prefill_attn_matrix_g4_mode() -> PrefillEnvMode {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G4"))
+}
+
+fn prefill_attn_matrix_g4_may_use() -> bool {
+    !matches!(prefill_attn_matrix_g4_mode(), PrefillEnvMode::ForceOff)
+}
+
 fn prefill_attn_matrix_g8_mode() -> PrefillEnvMode {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G8"))
@@ -2159,7 +2168,10 @@ impl MetalDFlashLayerMajorScratch {
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
         );
         let enable_attn_matrix = head_dim as usize == 256
-            && ((prefill_attn_matrix_g8_may_use() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
+            && ((prefill_attn_matrix_g4_may_use() && arch.n_q_heads == arch.n_kv_heads * 4)
+                || (prefill_attn_matrix_g8_may_use()
+                    && arch.n_q_heads == 16
+                    && arch.n_kv_heads == 2)
                 || (prefill_attn_matrix_g6_may_use()
                     && arch.n_q_heads == 24
                     && arch.n_kv_heads == 4)
@@ -4290,6 +4302,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             ),
         }));
     }
+    let attn_matrix_g4_force_on = prefill_attn_matrix_g4_mode() == PrefillEnvMode::ForceOn
+        && arch.attn_head_dim as usize == 256
+        && arch.n_q_heads == arch.n_kv_heads * 4;
     let attn_matrix_g8_force_on = prefill_attn_matrix_g8_mode() == PrefillEnvMode::ForceOn
         && arch.attn_head_dim as usize == 256
         && arch.n_q_heads == 16
@@ -4302,7 +4317,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         && arch.attn_head_dim as usize == 256
         && arch.n_q_heads == 32
         && arch.n_kv_heads == 2;
-    if attn_matrix_g8_force_on || attn_matrix_g6_force_on || attn_matrix_g16_force_on {
+    if attn_matrix_g4_force_on
+        || attn_matrix_g8_force_on
+        || attn_matrix_g6_force_on
+        || attn_matrix_g16_force_on
+    {
         if layer_scratch.attn_matrix_max_pos < last_pos as u64 {
             return Err(DFlashError::Metal(MetalError::BadShape {
                 kernel: "prefill_attn_matrix",
@@ -5273,6 +5292,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             let use_matrix_g8 = use_packed_g8
                                 && prefill_attn_matrix_g8_may_use()
                                 && matrix_scratch_covers_chunk;
+                            let use_matrix_g4 = prefill_attn_matrix_g4_may_use()
+                                && target_session.kv_k[ai].dtype == GgmlType::F16
+                                && target_session.kv_v[ai].dtype == GgmlType::F16
+                                && head_dim == 256
+                                && n_q == n_kv * 4
+                                && matrix_scratch_covers_chunk;
                             let use_matrix_g6 = prefill_attn_matrix_g6_may_use()
                                 && target_session.kv_k[ai].dtype == GgmlType::F16
                                 && target_session.kv_v[ai].dtype == GgmlType::F16
@@ -5283,7 +5308,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             let use_matrix_g16 = use_packed_g16
                                 && prefill_attn_matrix_g16_may_use()
                                 && matrix_scratch_covers_chunk;
-                            let use_matrix = use_matrix_g8 || use_matrix_g6 || use_matrix_g16;
+                            let use_matrix =
+                                use_matrix_g4 || use_matrix_g8 || use_matrix_g6 || use_matrix_g16;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_rope_neox_f32_packed_consecutive(
@@ -5459,7 +5485,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            if use_matrix_g6 {
+                                            if use_matrix_g4 {
+                                                "attn-prefill-g4-matrix-vt"
+                                            } else if use_matrix_g6 {
                                                 "attn-prefill-g6-matrix-vt"
                                             } else if use_matrix_g16 {
                                                 "attn-prefill-g16-matrix-vt"
@@ -5498,7 +5526,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            if use_matrix_g6 {
+                                            if use_matrix_g4 {
+                                                "attn-prefill-g4-matrix-kq"
+                                            } else if use_matrix_g6 {
                                                 "attn-prefill-g6-matrix-kq"
                                             } else if use_matrix_g16 {
                                                 "attn-prefill-g16-matrix-kq"
@@ -5541,7 +5571,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            if use_matrix_g6 {
+                                            if use_matrix_g4 {
+                                                "attn-prefill-g4-matrix-softmax"
+                                            } else if use_matrix_g6 {
                                                 "attn-prefill-g6-matrix-softmax"
                                             } else if use_matrix_g16 {
                                                 "attn-prefill-g16-matrix-softmax"
@@ -5579,7 +5611,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         label_prefill_encoder(
                                             &enc,
                                             il,
-                                            if use_matrix_g6 {
+                                            if use_matrix_g4 {
+                                                "attn-prefill-g4-matrix-kqv"
+                                            } else if use_matrix_g6 {
                                                 "attn-prefill-g6-matrix-kqv"
                                             } else if use_matrix_g16 {
                                                 "attn-prefill-g16-matrix-kqv"
@@ -5623,7 +5657,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     label_prefill_encoder(
                                         &enc,
                                         il,
-                                        if use_matrix_g6 {
+                                        if use_matrix_g4 {
+                                            "attn-prefill-g4-matrix"
+                                        } else if use_matrix_g6 {
                                             "attn-prefill-g6-matrix"
                                         } else if use_matrix_g16 {
                                             "attn-prefill-g16-matrix"

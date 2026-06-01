@@ -63,7 +63,11 @@ Current short/decode guardrails:
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
-- `qwen-llm` 9B dense packed pp: `~711.8 t/s`; `llama-bench`: `~824.0 t/s`
+- Dense group-4 matrix attention is now default for `head_dim=256` shapes with
+  `QWEN_PREFILL_ATTN_MATRIX_G4=0` as rollback. Current 9B rows are `813.36/820.51/
+  775.82/690.68 t/s` at `pp512/1024/4096/16384` versus llama.cpp
+  `814.10/804.64/693.95/678.06`; 0.8B/2B/4B `pp1024` smokes land at
+  `0.98x/1.00x/1.01x` versus llama.cpp.
 - `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
 - `qwen-llm` 35B A3B MoE prompt default now includes prompt-native packed
   attention for the proven `group=8`, `head_dim=256` shape with family-specific

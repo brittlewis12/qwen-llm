@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Dense G6 Full-Tile Matrix Attention Kernels
+
+Status: exact dense 27B G6 matrix-attention full-tile specialization. Raw
+artifacts are in `target/profiles/v0165-*fulltile*` and `target/profiles/v0165-clean-*`.
+
+The pointer-hoist win made inner-loop predicates the next nearest llama.cpp-style
+mechanic. The KQ/KQV encoders now select full-tile kernels when `n_pos`,
+`chunk_p*group`, and `head_dim=256` make the standard prompt tiles exact; arbitrary
+edge shapes still use the checked kernels. Correctness is green on the default 27B
+prefill-vs-single gate and an explicit full-tile gate via
+`QWEN_TEST_27B_PREFILL_T=64 QWEN_TEST_27B_PREFILL_P=64`.
+
+Phase impact is large and finally changes the dense-attention read. At 27B
+`pp4096`, KQ/KQV move from pointer-hoist `160.41/158.21 ms` to `136.48/135.29 ms`
+(`179.26/180.01 ms` before the two address-lowering cleanups). At `pp16384`, they
+move from `2516.18/2660.00 ms` to `2169.60/2376.82 ms` (`2822.60/2971.57 ms`
+before). Softmax remains flat around `60.7 ms` at `pp4096` and `~1.03 s` at
+`pp16384`.
+
+Clean end-to-end rows are: 27B `pp512=234.50`, `pp1024=232.00`, `pp4096=208.24`,
+and `pp16384=197.57`; A3B `pp1024=1588.65`; A10B `pp1024=499.75`. Short/medium
+dense rows are still noisy because projection/GDN phases dominate, but the long row
+is now the best 27B anchor so far. Updated read: dense attention body is no longer
+the obvious lcpp-scale residual. The next exact dense work should pivot to GDN step
+state/layout and remaining FFN/GDN projection deltas, while continuing only tiny
+isolated matrix-body cleanups.
+
 ## 2026-05-31 — Dense G6 Matrix KQ/KQV Pointer Hoist
 
 Status: exact dense 27B G6 matrix-attention indexing cleanup. Raw artifacts are

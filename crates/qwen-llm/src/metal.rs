@@ -7852,7 +7852,13 @@ pub fn encode_attn_matrix_kq_f32(
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_attn_matrix_kq_f32")?;
+    let full_tiles = n_pos % 64 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let kernel = if full_tiles {
+        "kernel_attn_matrix_kq_f32_full_tiles"
+    } else {
+        "kernel_attn_matrix_kq_f32"
+    };
+    let pso = ctx.pipeline(kernel)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
@@ -8012,7 +8018,13 @@ pub fn encode_attn_matrix_kqv_f32(
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_attn_matrix_kqv_f32")?;
+    let full_tiles = n_pos % 32 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let kernel = if full_tiles {
+        "kernel_attn_matrix_kqv_f32_full_tiles"
+    } else {
+        "kernel_attn_matrix_kqv_f32"
+    };
+    let pso = ctx.pipeline(kernel)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,

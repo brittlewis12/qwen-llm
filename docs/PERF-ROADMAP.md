@@ -535,20 +535,21 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-### 1. Hypothesis: Dense 27B G6 attention body is the next exact lever
+### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 
-Optimizes: Qwen3.6 27B dense prompt prefill after group-6 matrix attention became
-the default for the proven shape and FFN/GDN projection parity mostly closed.
+Optimizes: Qwen3.6 27B dense prompt prefill after the G6 matrix-attention body
+received pointer-hoist and full-tile specializations.
 
 Why it is at the top:
 
-- The v0.157 timed-pass differential says `pp4096` residuals are attention body
-  and GDN step, not FFN/GDN projection mat-mat. At `pp16384`, attention body is
-  the largest clean structural deficit after excluding projection parity/noise.
-- Attention body has a real no-op ceiling at both lengths: `207.5 -> 218.4 t/s`
-  at `pp4096` and `194.35 -> 217.23 t/s` at `pp16384`. The first causal-tail skip
-  recovers only about half a percent end-to-end, so the next branch must change
-  the body structure rather than just skipping obviously future tiles.
+- The v0.165 full-tile KQ/KQV kernels change the dense read: at `pp4096`, KQ/KQV
+  are now `136/135 ms`; at `pp16384`, they are `2170/2377 ms`, with qwen softmax
+  still much faster than llama.cpp. Dense attention body is no longer the obvious
+  lcpp-scale residual.
+- The remaining large named buckets are GDN/FFN projections and GDN step/state
+  work. Earlier projection unrolls helped but did not finish the scoreboard; the
+  earlier GDN recurrence-loop unroll was negative, so the next GDN branch must be a
+  state/read-write/layout audit rather than another loop pragma.
 - A10B routed MoE no longer explains a scoreboard gap under warmed methodology;
   qwen's warmed routed tail is faster/equal to llama.cpp and end-to-end is
   parity-or-better from `pp512` through `pp16384`.
@@ -580,6 +581,10 @@ Current design rule:
   `2823/2972 -> 2516/2660 ms` at `pp16384`, with clean rows positive at
   `pp512/1024/16384` and noisy-positive at `pp4096`. Keep this style of isolated
   mechanical diff alive.
+- Full-tile KQ/KQV specialization is the second positive mechanics cleanup. It
+  moves phase rows to `136/135 ms` at `pp4096` and `2170/2377 ms` at `pp16384`,
+  and clean `pp16384` reaches `197.57 t/s`. Attention is now monitoring/tail-work,
+  not the default top branch.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate
@@ -591,14 +596,15 @@ Current design rule:
 
 Next branch order:
 
-- First, audit one llama.cpp `mul_mat` mechanical difference per patch: tile
-  ownership, vector-load alignment, barrier placement, half-conversion points, and
-  K/V transpose timing. Require phase improvement at both `pp4096` and `pp16384`,
-  neutral `pp512/1024`, and clean end-to-end movement before promotion.
-- Second, prototype fused online-softmax/PV only as a narrow G6/head_dim=256 body
-  that is judged on total attention-body time, not softmax-only wins.
-- In parallel, inspect GDN-step state/read-write layout. The earlier recurrence
-  unroll was negative, but the `gdn_step` residual is still large enough to matter.
+- First, inspect GDN-step state/read-write layout. Require a phase-local `>=5%`
+  `gdn_step` win at `pp4096` or `pp16384` without perturbing GDN projections.
+- Second, revisit FFN/GDN projection mat-mat only with phase evidence, especially
+  any remaining long-context gap against current llama.cpp profiles.
+- Third, keep attention to isolated mechanics only: vector-load alignment,
+  remaining pointer increments, or tile ownership, each with phase wins at both
+  `pp4096` and `pp16384` plus neutral `pp512/1024`.
+- Defer fused online-softmax/PV until a fresh differential shows attention body is
+  again the end-to-end limiter.
 
 Acceptance gates:
 

@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Q2/Q3 Prompt Mat-Mat Simdgroup Tiles
+
+Status: follow-up low-bit quant performance fix for dense Q2_K/Q3_K prefill.
+Raw artifacts are in `target/profiles/v0174-0p8b-q{2,3}-*mm-ab.json` plus
+`target/profiles/v0174-lcpp-0p8b-q{2,3}-pp4096.json`.
+
+Q2_K and Q3_K now use the same prompt-native 64x32x32 simdgroup_matrix mat-mat
+execution shape as the IQ4 fix. Rollbacks are `QWEN_MATMAT_Q2_K_MM=0` and
+`QWEN_MATMAT_Q3_K_MM=0`.
+
+Current 0.8B Q2_K A/B:
+
+| Shape | rollback | default | llama.cpp | default/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| `pp1024` | `1404.38` | `7438.40` | `7760.67` | `0.96x` |
+| `pp4096` | `1359.96` | `7351.80` | `7535.20` | `0.98x` |
+
+Current 0.8B Q3_K_M A/B:
+
+| Shape | rollback | default | llama.cpp | default/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| `pp1024` | `1999.66` | `7486.78` | `7646.85` | `0.98x` |
+| `pp4096` | `1986.95` | `7230.47` | `7381.47` | `0.98x` |
+
+Validation: release `qwen-bench` builds, `git diff --check` is clean, and the
+Q2/Q3/Q4 Metal unit-test filter passes mat-vec plus mat-mat at `n_query=1/16/32`
+for Q2/Q3. Prefill sweeps report clean fast-path coverage on AC power with no
+thermal/performance warnings. The local 0.8B Q2/Q3/IQ4 performance cliff is now
+mostly closed; next low-bit work should be clean post-commit anchors and broader
+non-0.8B quant coverage, not more coverage-audit bookkeeping.
+
 ## 2026-06-01 — IQ4 Prompt Mat-Mat Simdgroup Tiles
 
 Status: low-bit quant performance fix for dense IQ4_NL/IQ4_XS prefill. Raw
@@ -40,8 +71,8 @@ Current 0.8B IQ4_XS A/B:
 Validation: release `qwen-bench` builds, the IQ4 Metal unit test passes for
 mat-vec and mat-mat at `n_query=1/16/32`, prefill sweeps report clean fast-path
 coverage, and the recorded rows were on AC power with no thermal/performance
-warnings. Q2_K and Q3_K remain the next low-bit performance holes; their native
-kernels are correct but still coverage-first.
+warnings. At this checkpoint Q2_K and Q3_K remained the next low-bit performance
+holes; the following entry closes them with the same execution shape.
 
 ## 2026-06-01 — Dense Group-4 Matrix Attention Default
 

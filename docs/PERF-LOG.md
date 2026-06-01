@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Broader Dense Low-Bit Validation
+
+Status: bounded family validation after the clean 0.8B low-bit re-anchor. Raw
+artifacts are in `target/profiles/v0176-clean-*` and
+`target/profiles/v0176-lcpp-*`.
+
+All rows are `build_dirty=0`, `--require-fastpath-clean`, AC power, and no
+thermal/performance warnings:
+
+| Model | Quant | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 2B | Q2_K | `pp1024` | `3648.37` | `3691.12` | `0.99x` |
+| 2B | Q2_K | `pp4096` | `3593.04` | `3628.58` | `0.99x` |
+| 2B | Q3_K_M | `pp1024` | `3599.90` | `3622.57` | `0.99x` |
+| 2B | Q3_K_M | `pp4096` | `3534.15` | `3549.99` | `1.00x` |
+| 2B | IQ4_XS | `pp1024` | `3652.37` | `3762.49` | `0.97x` |
+| 2B | IQ4_XS | `pp4096` | `3591.45` | `3682.70` | `0.98x` |
+| 9B | Q2_K | `pp1024` | `820.59` | `819.20` | `1.00x` |
+| 9B | Q2_K | `pp4096` | `752.59` | `712.08` | `1.06x` |
+| 9B | Q3_K_M | `pp1024` | `794.15` | `766.43` | `1.04x` |
+| 9B | Q3_K_M | `pp4096` | `721.75` | `708.09` | `1.02x` |
+| 9B | IQ4_XS | `pp1024` | `817.12` | `824.23` | `0.99x` |
+| 9B | IQ4_XS | `pp4096` | `750.14` | `742.57` | `1.01x` |
+| 27B | Q3_K_M | `pp1024` | `232.84` | `216.42` | `1.08x` |
+
+Read: the dense low-bit tile work generalizes beyond 0.8B. The only residual
+dense low-bit gap in this bounded packet is 2B IQ4_XS at `0.97-0.98x`, which is
+not enough by itself to justify tile-tuning before broader guardrails. The audit
+did find a different low-bit issue: A3B Q3/IQ4_XS MoE has `0/40` grouped expert
+coverage because those GGUFs use `IQ3_XXS` or `IQ3_S` gate/up expert banks with
+`IQ4_XS` down. That is the next quant-family structural gap if we stay on
+low-bit MoE.
+
 ## 2026-06-01 — Clean Low-Bit Quant Re-Anchor
 
 Status: clean post-commit re-anchor after the Q2/Q3/IQ4 simdgroup mat-mat

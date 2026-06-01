@@ -118,10 +118,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   attention, and lm-tail coverage. Q2_K/Q3_K/IQ4_NL/IQ4_XS now have
   simdgroup_matrix prompt mat-mat tiles: clean local 0.8B low-bit rows move from
   `0.15-0.26x` llama.cpp at `pp1024` to `0.96-0.98x` across `pp1024/4096`.
-  Remaining explicit coverage gaps are MoE grouped expert-bank variants outside
-  target quants and UD low-bit `IQ2/IQ3` dense tensors. Remaining quant-family
-  work is broader validation and tuning beyond the local 0.8B files, not static
-  fast-path coverage for Q2/Q3/IQ4.
+  The v0176 dense validation generalizes this to 2B/9B Q2/Q3/IQ4_XS and 27B Q3:
+  2B is `0.97-1.00x`, 9B is `0.99-1.06x`, and 27B Q3 `pp1024` is `1.08x`
+  llama.cpp. Remaining explicit coverage gaps are MoE grouped expert-bank
+  variants outside target quants and UD low-bit `IQ2/IQ3` dense tensors. The
+  concrete next low-bit structural miss is A3B Q3/IQ4_XS MoE: audit reports
+  `0/40` grouped coverage because those files use `IQ3_XXS`/`IQ3_S` gate/up
+  expert banks with `IQ4_XS` down.
 - A10B routed MoE is no longer the active top bet after the warmed re-anchor. A
   default-warmup `pp512` phase trace has qwen timed-pass
   `routed_swiglu+routed_down = 600.52 ms` versus llama.cpp profile

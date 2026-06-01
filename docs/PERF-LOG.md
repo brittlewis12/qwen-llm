@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Current Short And Decode Family Gate
+
+Status: follow-up to the long `v0.170` re-anchor. Raw artifacts are in
+`target/profiles/v0171-*`.
+
+Current same-session `pp512/pp1024` rows against llama.cpp build `14aa3d375`:
+
+| Model | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| 27B dense | `pp512` | `237.37` | `240.06` | `0.99x` |
+| 27B dense | `pp1024` | `227.44` | `228.03` | `1.00x` |
+| 35B A3B | `pp512` | `1443.05` | `1380.23` | `1.05x` |
+| 35B A3B | `pp1024` | `1624.98` | `1388.41` | `1.17x` |
+| 122B A10B | `pp512` | `442.59` | `442.27` | `1.00x` |
+| 122B A10B | `pp1024` | `514.53` | `439.27` | `1.17x` |
+
+Current `tg128` decode rows:
+
+| Model | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| 27B dense | `24.17` | `22.06` | `1.10x` |
+| 35B A3B | `78.08` | `75.56` | `1.03x` |
+| 122B A10B | `35.65` | `35.19` | `1.01x` |
+
+Read: decode remains won across the primary guardrails. Short prompt prefill is
+also won or parity for MoE; the only remaining primary scoreboard blemish is
+dense 27B at `pp512/1024`, where the gap is sub-`1.2%` and close enough to demand
+repeat evidence before coding. A10B `pp512` has moved from the old gap to parity.
+
 ## 2026-06-01 — Current Long Family Re-Anchor
 
 Status: post-`v0.169` benchmark checkpoint after the dense GDN pointer-hoist win.

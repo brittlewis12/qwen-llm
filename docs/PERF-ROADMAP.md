@@ -47,6 +47,20 @@ M4 Max, release `qwen-bench`, sequential AC-power long-prefill rows after
 | 122B A10B | `pp4096` | `497.72` | `401.05` | `1.24x` | warmed qwen row |
 | 122B A10B | `pp16384` | `403.25` | `338.80` | `1.19x` | warmed qwen row |
 
+Current short/decode guardrails:
+
+| Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 27B dense | `pp512` | `237.37` | `240.06` | `0.99x` | tiny short gap |
+| 27B dense | `pp1024` | `227.44` | `228.03` | `1.00x` | parity/noise |
+| 35B A3B | `pp512` | `1443.05` | `1380.23` | `1.05x` | MoE short win |
+| 35B A3B | `pp1024` | `1624.98` | `1388.41` | `1.17x` | MoE short win |
+| 122B A10B | `pp512` | `442.59` | `442.27` | `1.00x` | MoE short parity |
+| 122B A10B | `pp1024` | `514.53` | `439.27` | `1.17x` | MoE short win |
+| 27B dense | `tg128` | `24.17` | `22.06` | `1.10x` | decode win |
+| 35B A3B | `tg128` | `78.08` | `75.56` | `1.03x` | decode win |
+| 122B A10B | `tg128` | `35.65` | `35.19` | `1.01x` | decode win |
+
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
 - `qwen-llm` 9B dense packed pp: `~711.8 t/s`; `llama-bench`: `~824.0 t/s`
@@ -598,14 +612,14 @@ Current design rule:
 
 Next branch order:
 
-- First, pivot from dense-only grinding to a full current family gate, especially
-  `pp512/1024` plus decode. Long `pp4096/16384` now beats current llama.cpp across
-  dense 27B, A3B, and A10B; the likely remaining scoreboard risk is short-prompt
-  MoE overhead, not dense GDN step.
-- Second, if A10B or A3B short prompts still trail, use routed MoE phase traces
-  before coding. Require a named routed bucket and coverage still at `48/48` or
-  `40/40`; do not revive hot-threshold or concentration-only branches without new
-  distribution evidence.
+- First, repeat the tiny dense 27B `pp512/1024` short-prefill gap before coding.
+  Current rows are only `0.99x/1.00x` versus llama.cpp, while MoE short rows and
+  decode are already parity-or-won. Treat anything below `~1%` as noise until a
+  paired repeat says otherwise.
+- Second, if A10B or A3B short prompts regress in a repeat gate, use routed MoE
+  phase traces before coding. Require a named routed bucket and coverage still at
+  `48/48` or `40/40`; do not revive hot-threshold or concentration-only branches
+  without new distribution evidence.
 - Third, keep dense FFN projection mechanics as monitoring only. A future dense
   branch needs a specific kernel/path mismatch and must beat the current
   `pp4096/16384` anchors, not just a serialized phase delta.

@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Dense 27B Post-Reanchor Falsifiers
+
+Status: immediate follow-up after the primary re-anchor to avoid chasing stale
+or cold-row artifacts. Raw artifacts are in `target/profiles/v0183-27b-*`.
+
+27B `pp4096` chunk-size probe, qwen-only:
+
+| prefill_chunk | qwen |
+| ---: | ---: |
+| `1024` | `208.79` |
+| `2048` | `210.85` |
+| `4096` | `209.53` |
+
+27B `pp16384` chunk-size probe, qwen-only:
+
+| prefill_chunk | qwen |
+| ---: | ---: |
+| `1024` | `199.97` |
+| `2048` | `199.42` |
+| `4096` | `198.05` |
+
+Read: larger chunks do not clear a default gate. `2048` is a small/noisy
+`pp4096` uptick but loses at true-long; keep `1024` as the safe default cap.
+
+Other repeated `pp4096` A/B checks:
+
+| Variant | Rows | Read |
+| --- | --- | --- |
+| `QWEN_MATMAT_QK_LLAMA_SMEM=1` | `213.95/213.39` vs base `211.97/213.65` | flat/noise |
+| `QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=1` | `214.57/214.92` vs base `214.51/213.95` | sub-1% |
+
+One `pp16384` fused-FFN row is similarly small: `200.63` vs base `199.70`.
+Do not default either branch without a stronger paired gate.
+
+No-warmup phase trace at 27B `pp4096` keeps the dense target clear: FFN gate/up/
+down dominate (`~7.66 s`, `~7.66 s`, `~7.89 s` combined across GDN+attention
+layers), while GDN projection/back is secondary (`gdn_qkv+gdn_z+gdn_back ~3.76
+s`) and attention body is small (`~0.32 s`). Next exact work remains a
+llama-shaped FFN/GDN mat-mat/dataflow differential, not chunk policy, smem policy,
+or attention-body tuning.
+
 ## 2026-06-01 — Primary Guardrail Re-Anchor After Low-Bit Decode
 
 Status: clean primary-family re-anchor after closing the local dense low-bit

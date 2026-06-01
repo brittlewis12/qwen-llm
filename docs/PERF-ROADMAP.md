@@ -626,6 +626,12 @@ Current design rule:
   residual actionable: chunk `512` loses to default `1024`, reduced mat-mat smem
   is phase-positive but not total-robust, and dense fused-Q4 FFN loses again in
   same-process A/B.
+- Fresh v0182/v0183 re-anchor tightens the rule: 27B dense is parity, not a
+  stable win, and close rows require repeated/warmed sweeps. Larger chunks do
+  not clear a default gate (`2048` is tiny/noisy at `pp4096` and loses at
+  `pp16384`), reduced QK smem is still flat/noisy, and fused dense Q4 FFN is
+  only sub-1%. The no-warmup `pp4096` phase trace still points at FFN mat-mat
+  first, GDN projection/back second, and attention body as monitoring-only.
 
 Next branch order:
 

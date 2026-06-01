@@ -219,21 +219,27 @@ kernel void kernel_gdn_step_decay_packed_f32(
 
     const ulong qk_stride = (ulong)args.n_k_heads * HEAD_DIM;
     const ulong v_stride = (ulong)args.n_v_heads * HEAD_DIM;
+    const ulong head_stride = (ulong)args.n_v_heads;
     const ulong hv_off = (ulong)hi * HEAD_DIM + dv;
     const float scale = 1.0f / sqrt((float)HEAD_DIM);
 
+    device const float * q_lane = q_pack + (ulong)hk * HEAD_DIM + dk_base;
+    device const float * k_lane = k_pack + (ulong)hk * HEAD_DIM + dk_base;
+    device const float * v_t = v_pack + hv_off;
+    device const float * decay_t = decay + hi;
+    device const float * beta_t = beta + hi;
+    device float * out_t = out_pack + hv_off;
+
     for (uint t = 0; t < args.n_tokens; ++t) {
-        device const float * q_h = q_pack + (ulong)t * qk_stride + (ulong)hk * HEAD_DIM;
-        device const float * k_h = k_pack + (ulong)t * qk_stride + (ulong)hk * HEAD_DIM;
-        const float v_dv = v_pack[(ulong)t * v_stride + hv_off];
-        const float g_exp = decay[(ulong)t * args.n_v_heads + hi];
-        const float beta_h = beta[(ulong)t * args.n_v_heads + hi];
+        const float v_dv = *v_t;
+        const float g_exp = *decay_t;
+        const float beta_h = *beta_t;
 
         float k_reg[DKS_PER_LANE];
         float q_reg[DKS_PER_LANE];
         for (ushort j = 0; j < DKS_PER_LANE; ++j) {
-            k_reg[j] = k_h[dk_base + j];
-            q_reg[j] = q_h[dk_base + j];
+            k_reg[j] = k_lane[j];
+            q_reg[j] = q_lane[j];
             s_reg[j] *= g_exp;
         }
 
@@ -254,8 +260,15 @@ kernel void kernel_gdn_step_decay_packed_f32(
         }
         const float o = simd_sum(o_partial);
         if (tiisg == 0) {
-            out_pack[(ulong)t * v_stride + hv_off] = o * scale;
+            *out_t = o * scale;
         }
+
+        q_lane += qk_stride;
+        k_lane += qk_stride;
+        v_t += v_stride;
+        decay_t += head_stride;
+        beta_t += head_stride;
+        out_t += v_stride;
     }
 
     for (ushort j = 0; j < DKS_PER_LANE; ++j) {
@@ -290,21 +303,27 @@ kernel void kernel_gdn_step_decay_packed_nsg4_f32(
 
     const ulong qk_stride = (ulong)args.n_k_heads * HEAD_DIM;
     const ulong v_stride = (ulong)args.n_v_heads * HEAD_DIM;
+    const ulong head_stride = (ulong)args.n_v_heads;
     const ulong hv_off = (ulong)hi * HEAD_DIM + dv;
     const float scale = 1.0f / sqrt((float)HEAD_DIM);
 
+    device const float * q_lane = q_pack + (ulong)hk * HEAD_DIM + dk_base;
+    device const float * k_lane = k_pack + (ulong)hk * HEAD_DIM + dk_base;
+    device const float * v_t = v_pack + hv_off;
+    device const float * decay_t = decay + hi;
+    device const float * beta_t = beta + hi;
+    device float * out_t = out_pack + hv_off;
+
     for (uint t = 0; t < args.n_tokens; ++t) {
-        device const float * q_h = q_pack + (ulong)t * qk_stride + (ulong)hk * HEAD_DIM;
-        device const float * k_h = k_pack + (ulong)t * qk_stride + (ulong)hk * HEAD_DIM;
-        const float v_dv = v_pack[(ulong)t * v_stride + hv_off];
-        const float g_exp = decay[(ulong)t * args.n_v_heads + hi];
-        const float beta_h = beta[(ulong)t * args.n_v_heads + hi];
+        const float v_dv = *v_t;
+        const float g_exp = *decay_t;
+        const float beta_h = *beta_t;
 
         float k_reg[DKS_PER_LANE];
         float q_reg[DKS_PER_LANE];
         for (ushort j = 0; j < DKS_PER_LANE; ++j) {
-            k_reg[j] = k_h[dk_base + j];
-            q_reg[j] = q_h[dk_base + j];
+            k_reg[j] = k_lane[j];
+            q_reg[j] = q_lane[j];
             s_reg[j] *= g_exp;
         }
 
@@ -325,8 +344,15 @@ kernel void kernel_gdn_step_decay_packed_nsg4_f32(
         }
         const float o = simd_sum(o_partial);
         if (lane == 0) {
-            out_pack[(ulong)t * v_stride + hv_off] = o * scale;
+            *out_t = o * scale;
         }
+
+        q_lane += qk_stride;
+        k_lane += qk_stride;
+        v_t += v_stride;
+        decay_t += head_stride;
+        beta_t += head_stride;
+        out_t += v_stride;
     }
 
     for (ushort j = 0; j < DKS_PER_LANE; ++j) {

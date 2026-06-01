@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Dense GDN Step Pointer Increments
+
+Status: exact dense GDN step address-lowering cleanup on top of the NSG4
+row-grouping baseline. Raw artifacts are in `target/profiles/v0169-*gdn-ptrinc-*`.
+
+The NSG4 kernel still recomputed token-stride addresses inside the recurrence
+loop for Q, K, V, decay, beta, and output. This branch seeds per-lane pointers
+once, hoists the `dk_base` add out of the token loop, and advances by the fixed
+Q/K, V, and per-head strides each token. The generic packed fallback receives
+the same cleanup, but the measured dense 27B path uses NSG4.
+
+Correctness is green on the default 27B prefill-vs-single gate. Phase impact
+clears the next GDN gate: at 27B `pp4096`, `gdn_step` moves from the NSG4
+baseline `551.82 ms` to `482.15 ms` (`-12.6%`). At `pp16384`, it moves from
+`2173.17 ms` to `1939.31 ms` (`-10.8%`). Relative to the pre-NSG4 full-tile
+baseline, the two GDN-step cleanups together move `595.56 -> 482.15 ms` at
+`pp4096` and `2379.00 -> 1939.31 ms` at `pp16384`.
+
+Clean 27B rows on AC power are: `pp512=237.20`, `pp1024=235.23`,
+`pp4096=222.28`, and `pp16384=203.37`. The big scoreboard movement is at
+`pp4096`; `pp1024` is below the previous clean anchor, so do not overclaim a
+uniform short-context win. Updated read: GDN step is no longer the top dense
+residual. Rebase the qwen-vs-llama phase differential before coding more GDN
+tail work; projection rows are now the higher-leverage dense target unless a
+single narrow GDN staging probe clears a phase gate.
+
 ## 2026-06-01 — Dense GDN Step NSG4 Row Grouping
 
 Status: exact dense GDN step execution-shape cleanup, modeled after llama.cpp's

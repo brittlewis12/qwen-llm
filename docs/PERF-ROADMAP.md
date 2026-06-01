@@ -585,10 +585,11 @@ Current design rule:
   moves phase rows to `136/135 ms` at `pp4096` and `2170/2377 ms` at `pp16384`,
   and post-commit clean rows reach `213.80 t/s` at `pp4096` and `200.16 t/s` at
   `pp16384`. Attention is now monitoring/tail-work, not the default top branch.
-- GDN step NSG4 row grouping is the first post-attention dense cleanup. It moves
-  `gdn_step` from `595.56 -> 551.82 ms` at `pp4096` and `2379.00 -> 2173.17 ms` at
-  `pp16384`; clean rows reach `236.25/238.33/211.23/201.75 t/s` at
-  `pp512/1024/4096/16384` after the post-commit long rerun.
+- GDN step NSG4 row grouping plus token-pointer increments are the first
+  post-attention dense cleanups. Together they move `gdn_step` from
+  `595.56 -> 482.15 ms` at `pp4096` and `2379.00 -> 1939.31 ms` at `pp16384`;
+  clean rows now sit at `237.20/235.23/222.28/203.37 t/s` for
+  `pp512/1024/4096/16384`.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate
@@ -600,12 +601,13 @@ Current design rule:
 
 Next branch order:
 
-- First, continue GDN-step mechanics from the NSG4 baseline: pointer/increment
-  hoists inside the token loop, then only if needed q/k staging or beta/decay
-  broadcast/packing. Require a phase-local `>=3%` incremental `gdn_step` win and
-  clean end-to-end movement.
-- Second, revisit FFN/GDN projection mat-mat only with phase evidence, especially
-  any remaining long-context gap against current llama.cpp profiles.
+- First, rebase the dense qwen-vs-llama phase differential against the pointer
+  increment baseline. GDN step is now only `~2.5%` of traced long-context GPU;
+  FFN/GDN projection rows are the larger exact target unless the differential
+  says otherwise.
+- Second, allow one narrow GDN-step staging or beta/decay packing falsifier only
+  with a phase-local `>=3%` incremental `gdn_step` win and clean end-to-end
+  movement. The pointer-hoist branch already paid the cheap addressing debt.
 - Third, keep attention to isolated mechanics only: vector-load alignment,
   remaining pointer increments, or tile ownership, each with phase wins at both
   `pp4096` and `pp16384` plus neutral `pp512/1024`.

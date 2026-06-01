@@ -35,31 +35,31 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, sequential AC-power long-prefill rows after
-`v0.169`. Llama.cpp is build `14aa3d375`, default `flash_attn=false`.
+M4 Max, release `qwen-bench`, sequential AC-power rows after `v0.181`.
+Llama.cpp is build `14aa3d375`, default `flash_attn=false`.
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp4096` | `222.28` | `214.22` | `1.04x` | dense now ahead |
-| 27B dense | `pp16384` | `203.37` | `200.44` | `1.01x` | narrow guardrail |
-| 35B A3B | `pp4096` | `1565.47` | `1353.70` | `1.16x` | MoE long win |
-| 35B A3B | `pp16384` | `1328.69` | `1104.07` | `1.20x` | MoE long win |
-| 122B A10B | `pp4096` | `497.72` | `401.05` | `1.24x` | warmed qwen row |
-| 122B A10B | `pp16384` | `403.25` | `338.80` | `1.19x` | warmed qwen row |
+| 27B dense | `pp4096` | `212.02` | `212.22` | `1.00x` | warmed/r3 parity |
+| 27B dense | `pp16384` | `199.57` | `199.92` | `1.00x` | long parity |
+| 35B A3B | `pp4096` | `1569.79` | `1346.36` | `1.17x` | MoE long win |
+| 35B A3B | `pp16384` | `1305.47` | `1090.81` | `1.20x` | MoE long win |
+| 122B A10B | `pp4096` | `491.22` | `390.47` | `1.26x` | MoE long win |
+| 122B A10B | `pp16384` | `408.96` | `355.22` | `1.15x` | MoE long win |
 
 Current short/decode guardrails:
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp512` | `237.37` | `240.06` | `0.99x` | tiny short gap |
-| 27B dense | `pp1024` | `227.44` | `228.03` | `1.00x` | parity/noise |
+| 27B dense | `pp512` | `237.37` | `240.06` | `0.99x` | stale tiny short gap |
+| 27B dense | `pp1024` | `236.04` | `236.91` | `1.00x` | current parity |
 | 35B A3B | `pp512` | `1443.05` | `1380.23` | `1.05x` | MoE short win |
-| 35B A3B | `pp1024` | `1624.98` | `1388.41` | `1.17x` | MoE short win |
+| 35B A3B | `pp1024` | `1624.80` | `1394.35` | `1.17x` | MoE short win |
 | 122B A10B | `pp512` | `442.59` | `442.27` | `1.00x` | MoE short parity |
-| 122B A10B | `pp1024` | `514.53` | `439.27` | `1.17x` | MoE short win |
-| 27B dense | `tg128` | `24.17` | `22.06` | `1.10x` | decode win |
-| 35B A3B | `tg128` | `78.08` | `75.56` | `1.03x` | decode win |
-| 122B A10B | `tg128` | `35.65` | `35.19` | `1.01x` | decode win |
+| 122B A10B | `pp1024` | `511.62` | `444.00` | `1.15x` | MoE short win |
+| 27B dense | `tg128` | `24.30` | `22.08` | `1.10x` | decode win |
+| 35B A3B | `tg128` | `82.82` | `75.90` | `1.09x` | decode win |
+| 122B A10B | `tg128` | `35.21` | `35.23` | `1.00x` | decode parity |
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 

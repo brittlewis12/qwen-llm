@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Primary Guardrail Re-Anchor After Low-Bit Decode
+
+Status: clean primary-family re-anchor after closing the local dense low-bit
+decode lane. Raw artifacts are in `target/profiles/v0182-primary-*` plus the
+27B no-op packet `target/profiles/v0182-27b-pp4096-noop-budget.json`.
+
+All qwen rows below are `build_dirty=0`, AC power, and no thermal/performance
+warnings:
+
+| Model | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| 27B dense | `pp1024` | `236.04` | `236.91` | `1.00x` |
+| 27B dense | `pp4096` warmed/r3 | `212.02` | `212.22` | `1.00x` |
+| 27B dense | `pp16384` | `199.57` | `199.92` | `1.00x` |
+| 35B A3B | `pp1024` | `1624.80` | `1394.35` | `1.17x` |
+| 35B A3B | `pp4096` | `1569.79` | `1346.36` | `1.17x` |
+| 35B A3B | `pp16384` | `1305.47` | `1090.81` | `1.20x` |
+| 122B A10B | `pp1024` | `511.62` | `444.00` | `1.15x` |
+| 122B A10B | `pp4096` | `491.22` | `390.47` | `1.26x` |
+| 122B A10B | `pp16384` | `408.96` | `355.22` | `1.15x` |
+| 27B dense | `tg128` | `24.30` | `22.08` | `1.10x` |
+| 35B A3B | `tg128` | `82.82` | `75.90` | `1.09x` |
+| 122B A10B | `tg128` | `35.21` | `35.23` | `1.00x` |
+
+Methodology note: the first one-run 27B `pp4096` row after the broad anchor
+sequence was `201.47 / 206.72` (`0.97x`), but a repeated warmed qwen run and
+paired lcpp repeat landed at `212.02 / 212.22`. Treat close 27B dense rows as
+requiring repeated/warmed sweeps; a single cold/residency row can mis-rank the
+work queue.
+
+27B `pp4096` no-op budget, same sweep: base `213.12`, no-attention-body
+`209.52`, no-GDN-body `230.24`, and no-FFN `644.87`. Read: primary MoE is still
+won, primary decode is held, and dense 27B prefill is now the only narrow primary
+lane. The next exact dense work should stay phase-driven and focus on FFN/GDN
+projection/body headroom, not attention-body micro-tuning.
+
 ## 2026-06-01 — Clean Low-Bit Decode Re-Anchor After Fast Mat-Vecs
 
 Status: clean post-commit 0.8B decode sentinel after the Q2/Q3/IQ4_NL/IQ4_XS

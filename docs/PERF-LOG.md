@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Dense 27B Q4 N64 Prompt Mat-Mat
+
+Status: precommit dense-prompt win after the v0.183 falsifier packet. Raw
+artifacts are in `target/profiles/v0184-*q4-n64*` plus fresh llama.cpp anchors
+`target/profiles/v0184-27b-lcpp-pp{4096,16384}.json`. The qwen rows are
+`build_dirty=1` because they were taken before this checkpoint; all were AC-power
+rows with clean fast-path audits and no thermal/performance warnings.
+
+Change: Q4_K prompt mat-mat now has a default-on `N=64` full-tile path for
+`n_query % 64 == 0` and `n_out % 64 == 0`, with
+`QWEN_MATMAT_Q4_K_N64=0` as rollback. The tile keeps the classic per-simdgroup
+`32M x 16N` work but uses 8 simdgroups per threadgroup, so each dequantized Q4_K
+weight panel is reused across 64 prompt columns instead of 32.
+
+Correctness: release `qwen-bench` builds, and the Q4_K mat-mat oracle test passes
+with the new `n_query=64` row (`min_cos=1.000000`, `max|Delta|=6.249e-5`).
+
+Dense 27B candidate/rollback rows:
+
+| Shape | Rollback/base | Q4 N64/default | Read |
+| --- | ---: | ---: | --- |
+| `pp512` | `238.56 / 238.41` | `239.40 / 239.34` | neutral-positive |
+| `pp1024` | `237.33 / 232.99` | `241.42 / 234.56` | positive, noisy |
+| `pp4096` candidate | `200.73 / 213.95` | `214.28 / 221.37` | positive |
+| `pp4096` default vs rollback | `201.99 / 205.96` | `221.75 / 222.70` | strong positive |
+| `pp16384` candidate | `200.07` | `207.84` | positive |
+| `pp16384` default | n/a | `208.01` | confirms no-env default |
+
+Fresh llama.cpp anchors (`-fa 0`, `has tensor = false`) are `213.07 t/s` at
+`pp4096` and `198.96 t/s` at `pp16384`, so the dirty precommit qwen default is
+about `1.04-1.05x` llama.cpp on both long dense rows. `pp512` remains roughly
+parity, not a claimed short win.
+
+Primary MoE smokes with the candidate enabled are neutral/positive: A3B `pp1024`
+`1622.43 -> 1624.92 t/s`; A10B `pp1024` `506.97 -> 514.63 t/s` with nearly flat
+GPU ms/token. Keep full primary re-anchor as the next clean checkpoint.
+
+Negative result captured: matching llama.cpp's dense FFN graph order by computing
+`up` before `gate` regressed 27B `pp4096` (`~203 t/s` vs base `~212 t/s`), so the
+winning lever is larger Q4 prompt tiling, not operation order.
+
 ## 2026-06-01 — Dense 27B Post-Reanchor Falsifiers
 
 Status: immediate follow-up after the primary re-anchor to avoid chasing stale

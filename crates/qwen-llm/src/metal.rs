@@ -2294,6 +2294,17 @@ fn mat_mat_qk_threadgroup_memory_with_policy(
         8192
     }
 }
+
+fn mat_mat_q4_k_n64_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_Q4_K_N64").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
 pub fn encode_mat_mat_q4_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2355,7 +2366,10 @@ pub fn encode_mat_mat_q4_k_f32(
     let nb01 = ((n_in / 256) * 144) as u32;
     let stride_b = n_in as u32;
 
-    let kernel_name = if n_query == 16 {
+    let use_n64 = mat_mat_q4_k_n64_enabled() && n_query % 64 == 0 && n_out % 64 == 0;
+    let kernel_name = if use_n64 {
+        "kernel_mat_mat_q4_K_f32_n64"
+    } else if n_query == 16 {
         "kernel_mat_mat_q4_K_f32_n16"
     } else {
         "kernel_mat_mat_q4_K_f32"
@@ -2375,10 +2389,22 @@ pub fn encode_mat_mat_q4_k_f32(
     enc.set_tensor(1, weight);
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
-    let nr1 = if n_query == 16 { 16 } else { 32 };
-    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
+    let nr1 = if use_n64 {
+        64
+    } else if n_query == 16 {
+        16
+    } else {
+        32
+    };
+    let smem = if use_n64 {
+        8192
+    } else {
+        mat_mat_qk_threadgroup_memory(n_out, n_query, nr1)
+    };
+    enc.set_threadgroup_memory(0, smem);
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
+    let threads = if use_n64 { 256 } else { 128 };
     enc.dispatch(
         MTLSize {
             width: n_tg_x,
@@ -2386,7 +2412,7 @@ pub fn encode_mat_mat_q4_k_f32(
             depth: 1,
         },
         MTLSize {
-            width: 128,
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -11742,7 +11768,12 @@ mod tests {
         let weight_f32 = crate::codec::dequant_to_f32(q4k, g.slice(q4k)).expect("dequant");
         let weight_bytes = g.slice(q4k);
 
-        for &n_query in &[1usize, 16, 32] {
+        let n_queries: &[usize] = if mat_mat_q4_k_n64_enabled() {
+            &[1, 16, 32, 64]
+        } else {
+            &[1, 16, 32]
+        };
+        for &n_query in n_queries {
             // Activation matrix [n_query, n_in] row-major, deterministic
             // pseudo-random fill.
             let mut x = vec![0.0f32; n_query * n_in];

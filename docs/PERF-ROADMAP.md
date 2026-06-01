@@ -40,8 +40,8 @@ Llama.cpp is build `14aa3d375`, default `flash_attn=false`.
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp4096` | `212.02` | `212.22` | `1.00x` | warmed/r3 parity |
-| 27B dense | `pp16384` | `199.57` | `199.92` | `1.00x` | long parity |
+| 27B dense | `pp4096` | `222.70` | `213.07` | `1.05x` | dirty precommit Q4 N64 default |
+| 27B dense | `pp16384` | `208.01` | `198.96` | `1.05x` | dirty precommit Q4 N64 default |
 | 35B A3B | `pp4096` | `1569.79` | `1346.36` | `1.17x` | MoE long win |
 | 35B A3B | `pp16384` | `1305.47` | `1090.81` | `1.20x` | MoE long win |
 | 122B A10B | `pp4096` | `491.22` | `390.47` | `1.26x` | MoE long win |
@@ -51,8 +51,8 @@ Current short/decode guardrails:
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp512` | `237.37` | `240.06` | `0.99x` | stale tiny short gap |
-| 27B dense | `pp1024` | `236.04` | `236.91` | `1.00x` | current parity |
+| 27B dense | `pp512` | `239.40` | `240.06` | `1.00x` | Q4 N64 neutral/parity |
+| 27B dense | `pp1024` | `237.99` | `236.91` | `1.00x` | Q4 N64 mixed rows average |
 | 35B A3B | `pp512` | `1443.05` | `1380.23` | `1.05x` | MoE short win |
 | 35B A3B | `pp1024` | `1624.80` | `1394.35` | `1.17x` | MoE short win |
 | 122B A10B | `pp512` | `442.59` | `442.27` | `1.00x` | MoE short parity |
@@ -141,11 +141,11 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   qwen/lcpp `446/440` at `pp512`, `488/436` at `pp1024`, `481/401` at `pp4096`,
   and `394/354` at `pp16384`. Keep A10B MoE in monitoring unless a fresh matched
   trace shows a real warmed routed-tail deficit or coverage drops below `48/48`.
-- Dense group-6 matrix attention is now default-on for the proven 27B shape, with
-  `QWEN_PREFILL_ATTN_MATRIX_G6=0` as rollback. It moves current 27B default from
-  rollback-level rows to `~229-231 t/s` at `pp512`, `~202-205 t/s` at `pp4096`,
-  and `190.9 t/s` at `pp16384`; current llama.cpp is still `235.7/211.8/199.8`,
-  so dense FFN/GDN after G6 is the cleanest remaining exact scoreboard gap.
+- Dense 27B long prefill is now a dirty precommit win after the Q4_K `N=64`
+  prompt mat-mat tile. Rollback is `QWEN_MATMAT_Q4_K_N64=0`. Current rows put
+  qwen/lcpp at `222.70/213.07` for `pp4096` and `208.01/198.96` for `pp16384`;
+  `pp512/1024` are parity-ish rather than clear wins. The next step is a clean
+  post-commit primary re-anchor, not another dense FFN/GDN branch by default.
 - The first dense FFN/GDN pass is phase-positive but not scoreboard-complete by
   itself.
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` plus timed-only summaries showed the FFN
@@ -626,25 +626,24 @@ Current design rule:
   residual actionable: chunk `512` loses to default `1024`, reduced mat-mat smem
   is phase-positive but not total-robust, and dense fused-Q4 FFN loses again in
   same-process A/B.
-- Fresh v0182/v0183 re-anchor tightens the rule: 27B dense is parity, not a
-  stable win, and close rows require repeated/warmed sweeps. Larger chunks do
-  not clear a default gate (`2048` is tiny/noisy at `pp4096` and loses at
-  `pp16384`), reduced QK smem is still flat/noisy, and fused dense Q4 FFN is
-  only sub-1%. The no-warmup `pp4096` phase trace still points at FFN mat-mat
-  first, GDN projection/back second, and attention body as monitoring-only.
+- Fresh v0184 Q4_K `N=64` prompt mat-mat changes the dense rule: 27B long
+  prefill is now a dirty precommit win at `pp4096/16384`, while `pp512/1024`
+  are still close/parity rows. Larger chunks, reduced QK smem, dense fused-Q4
+  FFN, and FFN up-before-gate have all failed promotion gates. Treat the Q4 N64
+  default as the current dense candidate and re-anchor it cleanly before opening
+  another dense kernel branch.
 
 Next branch order:
 
-- First, repeat the tiny dense 27B `pp512/1024` short-prefill gap before coding.
-  Current rows are only `0.99x/1.00x` versus llama.cpp, while MoE short rows and
-  decode are already parity-or-won. Treat anything below `~1%` as noise until a
-  paired repeat says otherwise.
-- Second, if A10B or A3B short prompts regress in a repeat gate, use routed MoE
+- First, do a clean post-commit primary re-anchor: 27B dense `pp512/1024/4096/
+  16384`, A3B/A10B `pp1024` smokes, and decode sentinels. Q4 N64 should remain
+  default unless that clean gate contradicts the precommit packet.
+- Second, if A10B or A3B short prompts regress in the re-anchor, use routed MoE
   phase traces before coding. Require a named routed bucket and coverage still at
   `48/48` or `40/40`; do not revive hot-threshold or concentration-only branches
   without new distribution evidence.
-- Third, keep dense FFN projection mechanics as monitoring only. A future dense
-  branch needs a specific kernel/path mismatch and must beat the current
+- Third, keep dense FFN/GDN projection mechanics as monitoring only. A future
+  dense branch needs a specific kernel/path mismatch and must beat the Q4 N64
   `pp4096/16384` anchors, not just a serialized phase delta.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh
   same-process or phase evidence crosses a total-throughput gate.

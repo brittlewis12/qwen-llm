@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Clean Low-Bit Decode Re-Anchor
+
+Status: clean post-commit decode sentinel after the Q2/IQ4_XS mat-vec win. Raw
+artifacts are in `target/profiles/v0178-clean-qwen-0p8b-*tg128.json`.
+
+Current 0.8B `tg128`, all `build_dirty=0`:
+
+| Quant | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| Q2_K | `309.94` | `283.37` | `1.09x` |
+| Q3_K_M | `240.87` | `257.30` | `0.94x` |
+| IQ4_NL | `261.20` | `268.79` | `0.97x` |
+| IQ4_XS | `341.86` | `281.26` | `1.22x` |
+| Q4_K_M | `335.73` | `268.05` | `1.25x` |
+
+Read: Q2_K and IQ4_XS decode are now wins, while Q4_K_M remains a large win.
+Q3_K_M is the only measured 0.8B low-bit decode miss above noise; IQ4_NL is a
+small residual and should not outrank Q3 or primary-family guardrails.
+
 ## 2026-06-01 — Q2/IQ4_XS Decode Mat-Vec Fast Kernels
 
 Status: low-bit decode follow-up after the prefill mat-mat wins. Raw artifacts

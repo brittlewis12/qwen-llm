@@ -1423,6 +1423,15 @@ pub fn encode_mat_mat_iq4_nl_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
+    static IQ4_NL_MM: OnceLock<bool> = OnceLock::new();
+    if *IQ4_NL_MM.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_IQ4_NL_MM").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_mat_iq4_nl_f32_mm(ctx, enc, weight, x, y, n_in, n_out, n_query);
+    }
     encode_mat_mat_block32_f32(
         ctx,
         enc,
@@ -1435,6 +1444,96 @@ pub fn encode_mat_mat_iq4_nl_f32(
         GgmlType::IQ4_NL,
         "kernel_mat_mat_iq4_nl_f32",
     )
+}
+
+fn encode_mat_mat_iq4_nl_f32_mm(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if n_in % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_nl_mm",
+            detail: format!("n_in={n_in} not divisible by 32"),
+        });
+    }
+    if weight.dtype != GgmlType::IQ4_NL {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_nl_mm",
+            detail: format!("weight.dtype = {:?}, expected IQ4_NL", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_nl_mm",
+            detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_nl_mm",
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={}",
+                x.n_elements(),
+                n_query * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_query * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_nl_mm",
+            detail: format!(
+                "y.n_elements={} != n_query*n_out={}",
+                y.n_elements(),
+                n_query * n_out
+            ),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let nb01 = ((n_in / 32) * 18) as u32;
+    let pso = ctx.pipeline("kernel_mat_mat_iq4_nl_f32_mm")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_query as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b: n_in as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: n_query.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 fn encode_mat_mat_block256_f32(
@@ -1527,6 +1626,15 @@ pub fn encode_mat_mat_iq4_xs_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
+    static IQ4_XS_MM: OnceLock<bool> = OnceLock::new();
+    if *IQ4_XS_MM.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_IQ4_XS_MM").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_mat_iq4_xs_f32_mm(ctx, enc, weight, x, y, n_in, n_out, n_query);
+    }
     encode_mat_mat_block256_f32(
         ctx,
         enc,
@@ -1539,6 +1647,96 @@ pub fn encode_mat_mat_iq4_xs_f32(
         GgmlType::IQ4_XS,
         "kernel_mat_mat_iq4_xs_f32",
     )
+}
+
+fn encode_mat_mat_iq4_xs_f32_mm(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_xs_mm",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::IQ4_XS {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_xs_mm",
+            detail: format!("weight.dtype = {:?}, expected IQ4_XS", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_xs_mm",
+            detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_xs_mm",
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={}",
+                x.n_elements(),
+                n_query * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_query * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_iq4_xs_mm",
+            detail: format!(
+                "y.n_elements={} != n_query*n_out={}",
+                y.n_elements(),
+                n_query * n_out
+            ),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let nb01 = ((n_in / 256) * 136) as u32;
+    let pso = ctx.pipeline("kernel_mat_mat_iq4_xs_f32_mm")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out as u32,
+            n: n_query as u32,
+            k: n_in as u32,
+            nb01,
+            stride_b: n_in as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: n_query.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 pub fn encode_mat_mat_f32_router_e8p32(
@@ -11107,7 +11305,7 @@ mod tests {
             eprintln!("[iq4 {dtype:?} mat_vec] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "{dtype:?} mat_vec max_abs={max_abs}");
 
-            for &n_query in &[1usize, 16] {
+            for &n_query in &[1usize, 16, 32] {
                 let x_pack: Vec<f32> = (0..n_query * n_in)
                     .map(|i| ((i % 17) as f32 - 8.0) * 1e-2)
                     .collect();

@@ -115,12 +115,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   now use every dtype with primitive mat-mat support (`F32`, `F16`, `BF16`,
   `Q2_K`, `Q3_K`, `Q4_0`, `Q4_1`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ4_NL`,
   `IQ4_XS`), so the local 0.8B quant family is clean across dense FFN, GDN,
-  attention, and lm-tail coverage. Remaining explicit coverage gaps are MoE
-  grouped expert-bank variants outside target quants and UD low-bit `IQ2/IQ3`
-  dense tensors. The newly added Q2/Q3/IQ4 kernels are coverage-first, not yet
-  tuned parity kernels; one-row `pp128` anchors put Q2/Q3 at about `0.83x`
-  llama.cpp and IQ4 at about `0.54x`, so do not treat clean audit rows as
-  performance parity.
+  attention, and lm-tail coverage. IQ4_NL/IQ4_XS now have simdgroup_matrix
+  prompt mat-mat tiles: 0.8B IQ4 rows move from `~0.15x` llama.cpp at `pp1024`
+  to `0.94-0.97x` across `pp1024/4096`. Remaining explicit coverage gaps are
+  MoE grouped expert-bank variants outside target quants and UD low-bit
+  `IQ2/IQ3` dense tensors. Remaining explicit performance gaps are Q2_K/Q3_K:
+  current 0.8B `pp1024` anchors are `0.15x/0.26x` llama.cpp, so clean audit rows
+  are not enough to claim quant-family parity.
 - A10B routed MoE is no longer the active top bet after the warmed re-anchor. A
   default-warmup `pp512` phase trace has qwen timed-pass
   `routed_swiglu+routed_down = 600.52 ms` versus llama.cpp profile

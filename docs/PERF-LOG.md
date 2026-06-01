@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — IQ4 Prompt Mat-Mat Simdgroup Tiles
+
+Status: low-bit quant performance fix for dense IQ4_NL/IQ4_XS prefill. Raw
+artifacts are in `target/profiles/v0173-0p8b-iq4*` and the low-bit baseline
+packet is `target/profiles/v0173-{qwen,lcpp}-0p8b-*pp1024.json`.
+
+The static fast-path audit was clean for local 0.8B low-bit files, but that was
+only coverage: direct `pp1024` anchors showed Q2/Q3/IQ4 were still far behind
+llama.cpp. Before this fix, 0.8B `pp1024` rows were Q2_K `1143.35 / 7760.67`
+(`0.15x`), Q3_K_M `1996.98 / 7646.85` (`0.26x`), IQ4_NL `1196.28 / 7928.74`
+(`0.15x`), and IQ4_XS `1197.54 / 7840.10` (`0.15x`).
+
+IQ4_NL and IQ4_XS now use prompt-native 64x32x32 simdgroup_matrix mat-mat
+tiles instead of the scalar coverage-first mat-mat kernel; rollback is
+`QWEN_MATMAT_IQ4_NL_MM=0` or `QWEN_MATMAT_IQ4_XS_MM=0`.
+
+Current 0.8B IQ4_NL A/B:
+
+| Shape | rollback | default | llama.cpp | default/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| `pp512` | `1214.28` | `7276.16` | `7635.98` | `0.95x` |
+| `pp1024` | `1196.78` | `7555.27` | `7928.74` | `0.95x` |
+| `pp4096` | `1190.26` | `7424.67` | `7656.81` | `0.97x` |
+
+Current 0.8B IQ4_XS A/B:
+
+| Shape | rollback | default | llama.cpp | default/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| `pp1024` | `1198.66` | `7397.97` | `7840.10` | `0.94x` |
+| `pp4096` | `1191.62` | `7307.61` | `7558.00` | `0.97x` |
+
+Validation: release `qwen-bench` builds, the IQ4 Metal unit test passes for
+mat-vec and mat-mat at `n_query=1/16/32`, prefill sweeps report clean fast-path
+coverage, and the recorded rows were on AC power with no thermal/performance
+warnings. Q2_K and Q3_K remain the next low-bit performance holes; their native
+kernels are correct but still coverage-first.
+
 ## 2026-06-01 — Dense Group-4 Matrix Attention Default
 
 Status: exact prompt-attention coverage fix for dense group-4, `head_dim=256`

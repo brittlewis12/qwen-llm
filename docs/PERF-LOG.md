@@ -25,13 +25,14 @@ move from `2516.18/2660.00 ms` to `2169.60/2376.82 ms` (`2822.60/2971.57 ms`
 before). Softmax remains flat around `60.7 ms` at `pp4096` and `~1.03 s` at
 `pp16384`.
 
-Clean end-to-end rows are: 27B `pp512=234.50`, `pp1024=232.00`, `pp4096=208.24`,
-and `pp16384=197.57`; A3B `pp1024=1588.65`; A10B `pp1024=499.75`. Short/medium
-dense rows are still noisy because projection/GDN phases dominate, but the long row
-is now the best 27B anchor so far. Updated read: dense attention body is no longer
-the obvious lcpp-scale residual. The next exact dense work should pivot to GDN step
-state/layout and remaining FFN/GDN projection deltas, while continuing only tiny
-isolated matrix-body cleanups.
+Clean end-to-end rows before commit were: 27B `pp512=234.50`, `pp1024=232.00`,
+`pp4096=208.24`, and `pp16384=197.57`; A3B `pp1024=1588.65`; A10B
+`pp1024=499.75`. Post-commit build-clean anchors then landed at 27B
+`pp4096=213.80` and `pp16384=200.16`, the first clean dense long-context rows above
+the recent llama.cpp anchors in the roadmap. Updated read: dense attention body is
+no longer the obvious lcpp-scale residual. The next exact dense work should pivot to
+GDN step state/layout and remaining FFN/GDN projection deltas, while continuing only
+tiny isolated matrix-body cleanups.
 
 ## 2026-05-31 — Dense G6 Matrix KQ/KQV Pointer Hoist
 

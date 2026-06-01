@@ -583,8 +583,8 @@ Current design rule:
   mechanical diff alive.
 - Full-tile KQ/KQV specialization is the second positive mechanics cleanup. It
   moves phase rows to `136/135 ms` at `pp4096` and `2170/2377 ms` at `pp16384`,
-  and clean `pp16384` reaches `197.57 t/s`. Attention is now monitoring/tail-work,
-  not the default top branch.
+  and post-commit clean rows reach `213.80 t/s` at `pp4096` and `200.16 t/s` at
+  `pp16384`. Attention is now monitoring/tail-work, not the default top branch.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate

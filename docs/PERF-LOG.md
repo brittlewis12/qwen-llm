@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Clean Low-Bit Quant Re-Anchor
+
+Status: clean post-commit re-anchor after the Q2/Q3/IQ4 simdgroup mat-mat
+sequence. Raw artifacts are in `target/profiles/v0175-clean-0p8b-*`.
+
+All rows below are `build_dirty=0`, AC power, clean fast-path audit, and no
+thermal/performance warnings:
+
+| Quant | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| Q2_K | `pp1024` | `7455.29` | `7760.67` | `0.96x` |
+| Q2_K | `pp4096` | `7324.36` | `7535.20` | `0.97x` |
+| Q3_K_M | `pp1024` | `7478.83` | `7646.85` | `0.98x` |
+| Q3_K_M | `pp4096` | `7245.10` | `7381.47` | `0.98x` |
+| IQ4_NL | `pp1024` | `7677.57` | `7928.74` | `0.97x` |
+| IQ4_NL | `pp4096` | `7430.59` | `7656.81` | `0.97x` |
+| IQ4_XS | `pp1024` | `7572.44` | `7840.10` | `0.97x` |
+| IQ4_XS | `pp4096` | `7299.96` | `7558.00` | `0.97x` |
+
+Read: the local 0.8B low-bit cliff is no longer a structural gap; all four
+audited low-bit families now sit within about `2-4%` of llama.cpp at medium and
+long synthetic prefill. The remaining quant work should be broader family/shape
+validation and targeted tuning only where a clean differential survives repeats.
+
 ## 2026-06-01 — Q2/Q3 Prompt Mat-Mat Simdgroup Tiles
 
 Status: follow-up low-bit quant performance fix for dense Q2_K/Q3_K prefill.

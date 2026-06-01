@@ -116,8 +116,8 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `Q2_K`, `Q3_K`, `Q4_0`, `Q4_1`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ4_NL`,
   `IQ4_XS`), so the local 0.8B quant family is clean across dense FFN, GDN,
   attention, and lm-tail coverage. Q2_K/Q3_K/IQ4_NL/IQ4_XS now have
-  simdgroup_matrix prompt mat-mat tiles: local 0.8B low-bit rows move from
-  `0.15-0.26x` llama.cpp at `pp1024` to `0.94-0.98x` across `pp1024/4096`.
+  simdgroup_matrix prompt mat-mat tiles: clean local 0.8B low-bit rows move from
+  `0.15-0.26x` llama.cpp at `pp1024` to `0.96-0.98x` across `pp1024/4096`.
   Remaining explicit coverage gaps are MoE grouped expert-bank variants outside
   target quants and UD low-bit `IQ2/IQ3` dense tensors. Remaining quant-family
   work is broader validation and tuning beyond the local 0.8B files, not static

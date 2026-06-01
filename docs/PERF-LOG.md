@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Dense GDN Step NSG4 Row Grouping
+
+Status: exact dense GDN step execution-shape cleanup, modeled after llama.cpp's
+multi-row gated-delta-net kernel ownership. Raw artifacts are in
+`target/profiles/v0167-*gdn-nsg4*` and `target/profiles/v0167-clean-*`.
+
+The packed GDN recurrence already amortized state read/write across the prompt
+chunk, but launched one single-simdgroup threadgroup per `(v_head, dv)` row. The
+new NSG4 kernel maps four `dv` rows into one threadgroup via four simdgroups,
+cutting threadgroup count by `4x` without changing state layout or recurrence
+math. Correctness is green on the default 27B prefill-vs-single gate.
+
+Phase impact clears the GDN gate. At 27B `pp4096`, `gdn_step` moves from the
+full-tile baseline `595.56 ms` to `551.82 ms` (`-7.3%`). At `pp16384`, it moves
+from `2379.00 ms` to `2173.17 ms` (`-8.7%`). Neighboring GDN/FFN projections are
+directionally lower in the same traces rather than paying for the step win.
+
+Clean end-to-end rows before commit are the new dense anchors: 27B `pp512=236.25`,
+`pp1024=238.33`, `pp4096=211.23`, and `pp16384=201.30`. Updated read: the lcpp
+mechanics-copy strategy keeps paying when it targets a specific ownership or
+addressing mismatch. Next GDN work should try pointer/increment hoists inside the
+NSG4 loop and only then consider q/k staging or beta/decay packing.
+
 ## 2026-06-01 — Dense G6 Full-Tile Matrix Attention Kernels
 
 Status: exact dense 27B G6 matrix-attention full-tile specialization. Raw

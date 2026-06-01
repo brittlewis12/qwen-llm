@@ -9563,7 +9563,13 @@ pub fn encode_gdn_step_decay_packed_f32(
         n_v_heads: u32,
         n_k_heads: u32,
     }
-    let pso = ctx.pipeline("kernel_gdn_step_decay_packed_f32")?;
+    let use_nsg4 = n_v_heads % 4 == 0 && head_dim == 128;
+    let kernel = if use_nsg4 {
+        "kernel_gdn_step_decay_packed_nsg4_f32"
+    } else {
+        "kernel_gdn_step_decay_packed_f32"
+    };
+    let pso = ctx.pipeline(kernel)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
@@ -9580,18 +9586,33 @@ pub fn encode_gdn_step_decay_packed_f32(
     enc.set_tensor(5, beta_pack);
     enc.set_tensor(6, state);
     enc.set_tensor(7, out_pack);
-    enc.dispatch(
-        MTLSize {
-            width: head_dim,
-            height: n_v_heads,
-            depth: 1,
-        },
-        MTLSize {
-            width: 32,
-            height: 1,
-            depth: 1,
-        },
-    );
+    if use_nsg4 {
+        enc.dispatch(
+            MTLSize {
+                width: head_dim / 4,
+                height: n_v_heads,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 4,
+                depth: 1,
+            },
+        );
+    } else {
+        enc.dispatch(
+            MTLSize {
+                width: head_dim,
+                height: n_v_heads,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
     Ok(())
 }
 

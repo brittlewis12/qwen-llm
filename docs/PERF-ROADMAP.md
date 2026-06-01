@@ -585,6 +585,10 @@ Current design rule:
   moves phase rows to `136/135 ms` at `pp4096` and `2170/2377 ms` at `pp16384`,
   and post-commit clean rows reach `213.80 t/s` at `pp4096` and `200.16 t/s` at
   `pp16384`. Attention is now monitoring/tail-work, not the default top branch.
+- GDN step NSG4 row grouping is the first post-attention dense cleanup. It moves
+  `gdn_step` from `595.56 -> 551.82 ms` at `pp4096` and `2379.00 -> 2173.17 ms` at
+  `pp16384`; pre-commit clean rows reach `236.25/238.33/211.23/201.30 t/s` at
+  `pp512/1024/4096/16384`.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate
@@ -596,8 +600,10 @@ Current design rule:
 
 Next branch order:
 
-- First, inspect GDN-step state/read-write layout. Require a phase-local `>=5%`
-  `gdn_step` win at `pp4096` or `pp16384` without perturbing GDN projections.
+- First, continue GDN-step mechanics from the NSG4 baseline: pointer/increment
+  hoists inside the token loop, then only if needed q/k staging or beta/decay
+  broadcast/packing. Require a phase-local `>=3%` incremental `gdn_step` win and
+  clean end-to-end movement.
 - Second, revisit FFN/GDN projection mat-mat only with phase evidence, especially
   any remaining long-context gap against current llama.cpp profiles.
 - Third, keep attention to isolated mechanics only: vector-load alignment,

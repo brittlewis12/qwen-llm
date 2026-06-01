@@ -35,19 +35,17 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, sequential runs.
+M4 Max, release `qwen-bench`, sequential AC-power long-prefill rows after
+`v0.169`. Llama.cpp is build `14aa3d375`, default `flash_attn=false`.
 
-| Model | Context | Total ms/token | Tokens/s | Notes |
-| --- | ---: | ---: | ---: | --- |
-| 27B dense | 4K | 42.80 | 23.4 | after dense group6 NWG64 |
-| 27B dense | 16K | 46.11 | 21.7 | attention ~14.3 ms, GDN/FFN dominates |
-| 27B dense | 32K | 51.25 | 19.5 | attention ~19.3 ms |
-| 35B A3B | 4K | 14.65 | 68.2 | NWG64 guardrail held |
-| 35B A3B | 16K | 17.12 | 58.4 | NWG64 guardrail held |
-| 35B A3B | 32K | 20.45 | 48.9 | NWG64 guardrail held |
-| 122B A10B | 4K | 31.42 | 31.8 | group16 tile4 + NWG64 |
-| 122B A10B | 16K | 33.47 | 29.9 | group16 tile4 + NWG64 |
-| 122B A10B | 32K | 35.14 | 28.5 | group16 tile4 + NWG64 |
+| Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 27B dense | `pp4096` | `222.28` | `214.22` | `1.04x` | dense now ahead |
+| 27B dense | `pp16384` | `203.37` | `200.44` | `1.01x` | narrow guardrail |
+| 35B A3B | `pp4096` | `1565.47` | `1353.70` | `1.16x` | MoE long win |
+| 35B A3B | `pp16384` | `1328.69` | `1104.07` | `1.20x` | MoE long win |
+| 122B A10B | `pp4096` | `497.72` | `401.05` | `1.24x` | warmed qwen row |
+| 122B A10B | `pp16384` | `403.25` | `338.80` | `1.19x` | warmed qwen row |
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -590,29 +588,29 @@ Current design rule:
   `595.56 -> 482.15 ms` at `pp4096` and `2379.00 -> 1939.31 ms` at `pp16384`;
   clean rows now sit at `237.20/235.23/222.28/203.37 t/s` for
   `pp512/1024/4096/16384`.
-- The matched qwen-vs-llama dense differential has now been run at `pp4096` and
-  `pp16384`. Keep using timed-only `--last-pass` summaries and
-  `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate
-  must first reduce `body_matrix_kq`, `body_matrix_kqv`, or `body_matrix_softmax`
-  by at least `~60 ms` at `pp4096` and `~0.45 s` at `pp16384` before a full
-  scoreboard run.
-- Chunk-size `2048` is not the dense cure: randomized `1024` vs `2048` rows favored
-  `1024` at both `pp4096` and `pp16384`.
+- The matched qwen-vs-llama dense differential has been rebased after the GDN
+  pointer increment cleanup. GDN step and attention body are now faster than
+  llama.cpp in the serialized comparison; the only notable dense residual is a
+  long-context FFN projection delta. Follow-up falsifiers did not make that
+  residual actionable: chunk `512` loses to default `1024`, reduced mat-mat smem
+  is phase-positive but not total-robust, and dense fused-Q4 FFN loses again in
+  same-process A/B.
 
 Next branch order:
 
-- First, rebase the dense qwen-vs-llama phase differential against the pointer
-  increment baseline. GDN step is now only `~2.5%` of traced long-context GPU;
-  FFN/GDN projection rows are the larger exact target unless the differential
-  says otherwise.
-- Second, allow one narrow GDN-step staging or beta/decay packing falsifier only
-  with a phase-local `>=3%` incremental `gdn_step` win and clean end-to-end
-  movement. The pointer-hoist branch already paid the cheap addressing debt.
-- Third, keep attention to isolated mechanics only: vector-load alignment,
-  remaining pointer increments, or tile ownership, each with phase wins at both
-  `pp4096` and `pp16384` plus neutral `pp512/1024`.
-- Defer fused online-softmax/PV until a fresh differential shows attention body is
-  again the end-to-end limiter.
+- First, pivot from dense-only grinding to a full current family gate, especially
+  `pp512/1024` plus decode. Long `pp4096/16384` now beats current llama.cpp across
+  dense 27B, A3B, and A10B; the likely remaining scoreboard risk is short-prompt
+  MoE overhead, not dense GDN step.
+- Second, if A10B or A3B short prompts still trail, use routed MoE phase traces
+  before coding. Require a named routed bucket and coverage still at `48/48` or
+  `40/40`; do not revive hot-threshold or concentration-only branches without new
+  distribution evidence.
+- Third, keep dense FFN projection mechanics as monitoring only. A future dense
+  branch needs a specific kernel/path mismatch and must beat the current
+  `pp4096/16384` anchors, not just a serialized phase delta.
+- Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh
+  same-process or phase evidence crosses a total-throughput gate.
 
 Acceptance gates:
 

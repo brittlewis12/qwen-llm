@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Current Long Family Re-Anchor
+
+Status: post-`v0.169` benchmark checkpoint after the dense GDN pointer-hoist win.
+Raw artifacts are in `target/profiles/v0170-*` plus the dense follow-up
+falsifiers in `target/profiles/v0169-*chunk512*`, `v0169-*llama-smem*`, and
+`v0169-*ffn-fused-ab*`.
+
+The dense follow-up falsifiers are now current again. Matching llama.cpp's
+`n_ubatch=512` by forcing qwen `prefill_chunk=512` loses to the default `1024`
+chunk at 27B `pp4096` (`219.64` vs `222.28 t/s`) and `pp16384` (`200.74` vs
+`203.37`). Llama-style reduced mat-mat threadgroup memory is phase-positive in
+projection buckets but not total-robust: `pp512` is slightly negative,
+`pp1024` is mixed/slightly negative, `pp4096` has one large low outlier, and
+`pp16384` is only weakly mixed-positive. Dense fused-Q4 gate/up/SwiGLU also
+remains rejected by same-process A/B: it loses on average at `pp4096` and loses
+clearly at `pp16384`.
+
+Current same-session long prefill rows against llama.cpp build `14aa3d375`:
+
+| Model | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| 27B dense | `pp4096` | `222.28` | `214.22` | `1.04x` |
+| 27B dense | `pp16384` | `203.37` | `200.44` | `1.01x` |
+| 35B A3B | `pp4096` | `1565.47` | `1353.70` | `1.16x` |
+| 35B A3B | `pp16384` | `1328.69` | `1104.07` | `1.20x` |
+| 122B A10B | `pp4096` | `497.72` | `401.05` | `1.24x` |
+| 122B A10B | `pp16384` | `403.25` | `338.80` | `1.19x` |
+
+Read: qwen now beats current llama.cpp on the long dense and MoE guardrails, with
+the dense 27B `pp16384` margin narrow enough to keep monitoring. The A10B row is
+warmed; a no-warm A10B `pp4096` row at `310.93 t/s` is a first-pass confound and
+not the scoreboard anchor. Next highest-EV work is no longer dense FFN grinding;
+run a full current family gate including `pp512/1024` and decode, then focus any
+remaining gap, likely short-prompt MoE overhead, with phase evidence.
+
 ## 2026-06-01 — Dense GDN Step Pointer Increments
 
 Status: exact dense GDN step address-lowering cleanup on top of the NSG4

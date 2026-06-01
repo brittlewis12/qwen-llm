@@ -24,7 +24,8 @@ from `2379.00 ms` to `2173.17 ms` (`-8.7%`). Neighboring GDN/FFN projections are
 directionally lower in the same traces rather than paying for the step win.
 
 Clean end-to-end rows before commit are the new dense anchors: 27B `pp512=236.25`,
-`pp1024=238.33`, `pp4096=211.23`, and `pp16384=201.30`. Updated read: the lcpp
+`pp1024=238.33`, `pp4096=211.23`, and `pp16384=201.30`; post-commit build-clean
+spot rows landed at `pp4096=210.17` and `pp16384=201.75`. Updated read: the lcpp
 mechanics-copy strategy keeps paying when it targets a specific ownership or
 addressing mismatch. Next GDN work should try pointer/increment hoists inside the
 NSG4 loop and only then consider q/k staging or beta/decay packing.

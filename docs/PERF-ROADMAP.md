@@ -587,8 +587,8 @@ Current design rule:
   `pp16384`. Attention is now monitoring/tail-work, not the default top branch.
 - GDN step NSG4 row grouping is the first post-attention dense cleanup. It moves
   `gdn_step` from `595.56 -> 551.82 ms` at `pp4096` and `2379.00 -> 2173.17 ms` at
-  `pp16384`; pre-commit clean rows reach `236.25/238.33/211.23/201.30 t/s` at
-  `pp512/1024/4096/16384`.
+  `pp16384`; clean rows reach `236.25/238.33/211.23/201.75 t/s` at
+  `pp512/1024/4096/16384` after the post-commit long rerun.
 - The matched qwen-vs-llama dense differential has now been run at `pp4096` and
   `pp16384`. Keep using timed-only `--last-pass` summaries and
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` before coding: an attention v2 candidate

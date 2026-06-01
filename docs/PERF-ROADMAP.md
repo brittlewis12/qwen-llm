@@ -130,9 +130,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B
   one-run sentinels at `1.10x/1.12x/1.13x`. IQ4_NL also has a native row-reuse
   fast mat-vec kernel and moves from the prior `~0.97x` residual to `1.25x` on
-  the only local IQ4_NL file. The measured dense low-bit local decode family is
-  now parity/win; stop harvesting this lane until a clean full re-anchor or a
-  larger-model quant file exposes a real miss.
+  the only local IQ4_NL file. Clean post-commit 0.8B decode anchors now put
+  Q2/Q3/IQ4_NL/IQ4_XS/Q4_K_M at `1.36x/1.30x/1.28x/1.26x/1.26x` llama.cpp.
+  The measured dense low-bit local decode family is now a win; stop harvesting
+  this lane until a primary re-anchor or larger quant file exposes a real miss.
 - A10B routed MoE is no longer the active top bet after the warmed re-anchor. A
   default-warmup `pp512` phase trace has qwen timed-pass
   `routed_swiglu+routed_down = 600.52 ms` versus llama.cpp profile

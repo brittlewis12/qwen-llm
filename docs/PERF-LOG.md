@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Clean Low-Bit Decode Re-Anchor After Fast Mat-Vecs
+
+Status: clean post-commit 0.8B decode sentinel after the Q2/Q3/IQ4_NL/IQ4_XS
+fast mat-vec sequence. Raw artifacts are in
+`target/profiles/v0181-{clean,lcpp}-0p8b-*tg128.json`.
+
+All qwen rows are `build_dirty=0`, AC power, and no thermal/performance
+warnings:
+
+| Quant | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| Q2_K | `378.90` | `279.50` | `1.36x` |
+| Q3_K_M | `339.43` | `260.61` | `1.30x` |
+| IQ4_NL | `341.90` | `267.80` | `1.28x` |
+| IQ4_XS | `343.51` | `271.95` | `1.26x` |
+| Q4_K_M | `341.89` | `271.43` | `1.26x` |
+
+Read: the local 0.8B dense low-bit decode lane is now a clean win across the
+measured family. Per cx's review, stop harvesting local low-bit decode tails and
+return to primary guardrail re-anchoring plus phase-driven 27B dense prefill
+work unless a larger quant file exposes a new miss.
+
 ## 2026-06-01 — IQ4_NL Decode Mat-Vec Fast Kernel
 
 Status: cheap follow-up after the Q3_K decode win to close the last measured

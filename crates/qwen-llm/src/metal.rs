@@ -1028,6 +1028,30 @@ pub fn encode_mat_vec_iq4_nl_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    static IQ4_NL_MV: OnceLock<bool> = OnceLock::new();
+    if *IQ4_NL_MV.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_IQ4_NL_FAST").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            32,
+            GgmlType::IQ4_NL,
+            "mat_vec_iq4_nl_fast",
+            "kernel_mat_vec_iq4_nl_f32_fast",
+            2,
+            2,
+            32 * std::mem::size_of::<f32>(),
+        );
+    }
     encode_mat_vec_block32_f32(
         ctx,
         enc,
@@ -1085,6 +1109,7 @@ pub fn encode_mat_vec_q3_k_f32(
             y,
             n_in,
             n_out,
+            256,
             GgmlType::Q3_K,
             "mat_vec_q3_k_fast",
             "kernel_mat_vec_q3_K_f32_fast",
@@ -1130,6 +1155,7 @@ pub fn encode_mat_vec_q2_k_f32(
             y,
             n_in,
             n_out,
+            256,
             GgmlType::Q2_K,
             "mat_vec_q2_k_fast",
             "kernel_mat_vec_q2_K_f32_fast",
@@ -1175,6 +1201,7 @@ pub fn encode_mat_vec_iq4_xs_f32(
             y,
             n_in,
             n_out,
+            256,
             GgmlType::IQ4_XS,
             "mat_vec_iq4_xs_fast",
             "kernel_mat_vec_iq4_xs_f32_fast",
@@ -1204,6 +1231,7 @@ fn encode_mat_vec_lowbit_fast_f32(
     y: &MetalTensor,
     n_in: usize,
     n_out: usize,
+    block_multiple: usize,
     expected: GgmlType,
     error_kernel: &'static str,
     metal_kernel: &'static str,
@@ -1211,10 +1239,10 @@ fn encode_mat_vec_lowbit_fast_f32(
     simdgroups: usize,
     threadgroup_bytes: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if n_in % block_multiple != 0 {
         return Err(MetalError::BadShape {
             kernel: error_kernel,
-            detail: format!("n_in={n_in} not divisible by 256"),
+            detail: format!("n_in={n_in} not divisible by {block_multiple}"),
         });
     }
     if weight.dtype != expected {

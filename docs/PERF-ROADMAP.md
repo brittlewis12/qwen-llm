@@ -126,10 +126,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `0/40` grouped coverage because those files use `IQ3_XXS`/`IQ3_S` gate/up
   expert banks with `IQ4_XS` down.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
-  before v0.177 and are now `1.09x/1.22x`. Q3_K_M decode now has a native
-  row-reuse fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B,
-  with 2B/9B/27B one-run sentinels at `1.10x/1.12x/1.13x`. IQ4_NL is the only
-  remaining measured dense low-bit decode residual at about `0.97x`.
+  before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
+  fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B
+  one-run sentinels at `1.10x/1.12x/1.13x`. IQ4_NL also has a native row-reuse
+  fast mat-vec kernel and moves from the prior `~0.97x` residual to `1.25x` on
+  the only local IQ4_NL file. The measured dense low-bit local decode family is
+  now parity/win; stop harvesting this lane until a clean full re-anchor or a
+  larger-model quant file exposes a real miss.
 - A10B routed MoE is no longer the active top bet after the warmed re-anchor. A
   default-warmup `pp512` phase trace has qwen timed-pass
   `routed_swiglu+routed_down = 600.52 ms` versus llama.cpp profile

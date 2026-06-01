@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — IQ4_NL Decode Mat-Vec Fast Kernel
+
+Status: cheap follow-up after the Q3_K decode win to close the last measured
+dense low-bit decode residual. Raw artifacts are in
+`target/profiles/v0180-iq4nl-decode-*tg128.json`.
+
+IQ4_NL decode now uses a llama-shaped row-reuse mat-vec kernel with `NR0=2` and
+`NSG=2`, default-on behind `QWEN_MATVEC_IQ4_NL_FAST=0`.
+
+Precommit 0.8B `tg128` A/B, AC power and no thermal/performance warnings:
+
+| Variant | t/s |
+| --- | ---: |
+| rollback | `267.64` |
+| default | `342.58` |
+| llama.cpp | `274.74` |
+
+Read: the local dense low-bit decode family is now parity/win in the measured
+0.8B files; IQ4_NL moves from a small `~0.97x` residual to `1.25x` llama.cpp.
+Only 0.8B IQ4_NL is available under `~/models`, so this is a local closure, not
+a broader IQ4_NL family claim.
+
+Validation: release `qwen-bench` builds and the full mat-vec/mat-mat unit-test
+filter passes for half, Q2, Q3, legacy Q4, and IQ4 weights. The helper refactor
+keeps Q2/Q3/IQ4_XS on 256-element block checks and uses a 32-element check for
+IQ4_NL.
+
 ## 2026-06-01 — Q3_K Decode Mat-Vec Fast Kernel
 
 Status: targeted low-bit decode fix for the last measured 0.8B decode miss. Raw

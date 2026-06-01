@@ -1070,6 +1070,29 @@ pub fn encode_mat_vec_q3_k_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    static Q3_K_MV: OnceLock<bool> = OnceLock::new();
+    if *Q3_K_MV.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_Q3_K_FAST").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            GgmlType::Q3_K,
+            "mat_vec_q3_k_fast",
+            "kernel_mat_vec_q3_K_f32_fast",
+            2,
+            2,
+            0,
+        );
+    }
     encode_mat_vec_block256_f32(
         ctx,
         enc,

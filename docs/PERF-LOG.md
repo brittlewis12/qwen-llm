@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Q3_K Decode Mat-Vec Fast Kernel
+
+Status: targeted low-bit decode fix for the last measured 0.8B decode miss. Raw
+artifacts are in `target/profiles/v0179-q3-decode-*tg128.json`.
+
+Q3_K decode now uses a llama-shaped row-reuse mat-vec kernel with `NR0=2` and
+`NSG=2`, replacing the scalar coverage-first path by default. Rollback is
+`QWEN_MATVEC_Q3_K_FAST=0`.
+
+Precommit 0.8B `tg128` A/B, AC power and no thermal/performance warnings:
+
+| Variant | t/s |
+| --- | ---: |
+| rollback | `245.65` |
+| default | `338.76` |
+| llama.cpp | `259.31` |
+
+Broader one-run dense Q3 decode sentinels:
+
+| Model | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| 2B | `196.13` | `178.58` | `1.10x` |
+| 9B | `65.35` | `58.59` | `1.12x` |
+| 27B | `22.56` | `20.01` | `1.13x` |
+
+Validation: release `qwen-bench` builds and the full mat-vec/mat-mat unit-test
+filter passes for half, Q2, Q3, legacy Q4, and IQ4 weights. Read: Q3_K decode
+is no longer the low-bit miss; the remaining measured dense low-bit decode
+residual is IQ4_NL at roughly `0.97x`, which should be treated as lower EV than
+primary guardrails or a fresh quant-family sweep.
+
 ## 2026-06-01 — Clean Low-Bit Decode Re-Anchor
 
 Status: clean post-commit decode sentinel after the Q2/IQ4_XS mat-vec win. Raw

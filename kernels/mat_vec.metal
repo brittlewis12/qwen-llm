@@ -441,6 +441,133 @@ kernel void kernel_mat_vec_q2_K_f32_fast(
     }
 }
 
+kernel void kernel_mat_vec_q3_K_f32_fast(
+        constant mat_vec_args & args [[buffer(0)]],
+        device const block_q3_k_local * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device float * y [[buffer(3)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 2;
+    const short NSG = 2;
+    const uint first_row = (tgpig * NSG + uint(sgitg)) * NR0;
+    if (first_row >= args.n_out) return;
+
+    const uint nb = args.n_in / 256u;
+    const short tid = tiisg / 4;
+    const short ix = tiisg % 4;
+    const short ip = tid / 4;
+    const short il = 2 * ((tid % 4) / 2);
+    const short ir = tid % 2;
+    const short l0 = 8 * ir;
+
+    const ushort4 mm[4] = {
+        ushort4(0x0001, 0x0100, 0x0002, 0x0200),
+        ushort4(0x0004, 0x0400, 0x0008, 0x0800),
+        ushort4(0x0010, 0x1000, 0x0020, 0x2000),
+        ushort4(0x0040, 0x4000, 0x0080, 0x8000),
+    };
+    const uint4 qm[2] = {
+        uint4(0x0003, 0x0300, 0x000c, 0x0c00),
+        uint4(0x0030, 0x3000, 0x00c0, 0xc000),
+    };
+
+    const ushort4 hm = mm[2 * ip + il / 2];
+    const short shift = 2 * il;
+    const float v1 = il == 0 ? 4.0f : 64.0f;
+    const float v2 = 4.0f * v1;
+    const uint s_shift1 = 4u * uint(ip);
+    const uint s_shift2 = s_shift1 + uint(il);
+    const short q_offset = 32 * ip + l0;
+    const short y_offset = 128 * ip + 32 * il + l0;
+
+    device const float * y1 = x + uint(ix) * 256u + uint(y_offset);
+    uint scales32;
+    uint aux32;
+    thread ushort * scales16 = (thread ushort *)&scales32;
+    float sumf1[2] = {0.0f, 0.0f};
+    float sumf2[2] = {0.0f, 0.0f};
+
+    for (uint ib = uint(ix); ib < nb; ib += 4u) {
+        float yl[32];
+        for (short l = 0; l < 8; ++l) {
+            yl[l +  0] = y1[l +  0];
+            yl[l +  8] = y1[l + 16];
+            yl[l + 16] = y1[l + 32];
+            yl[l + 24] = y1[l + 48];
+        }
+
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+
+            device const block_q3_k_local & b = weight[out_row * nb + ib];
+            device const ushort * q = (device const ushort *)(b.qs + q_offset);
+            device const ushort * h = (device const ushort *)(b.hmask + l0);
+            device const ushort * a = (device const ushort *)(b.scales);
+            const float d_all = float(b.d);
+
+            scales16[0] = a[4];
+            scales16[1] = a[5];
+            aux32 = ((scales32 >> s_shift2) << 4) & 0x30303030u;
+            scales16[0] = a[il + 0];
+            scales16[1] = a[il + 1];
+            scales32 = ((scales32 >> s_shift1) & 0x0f0f0f0fu) | aux32;
+
+            float s1 = 0.0f;
+            float s2 = 0.0f;
+            float s3 = 0.0f;
+            float s4 = 0.0f;
+            float s5 = 0.0f;
+            float s6 = 0.0f;
+            for (short l = 0; l < 8; l += 2) {
+                const uint qs = uint(q[l / 2]);
+                const uint hs = uint(h[l / 2]);
+                s1 += yl[l +  0] * float(qs & qm[il / 2][0]);
+                s2 += yl[l +  1] * float(qs & qm[il / 2][1]);
+                s3 += ((hs & uint(hm[0])) != 0u ? 0.0f : yl[l +  0])
+                    + ((hs & uint(hm[1])) != 0u ? 0.0f : yl[l +  1]);
+                s4 += yl[l + 16] * float(qs & qm[il / 2][2]);
+                s5 += yl[l + 17] * float(qs & qm[il / 2][3]);
+                s6 += ((hs & uint(hm[2])) != 0u ? 0.0f : yl[l + 16])
+                    + ((hs & uint(hm[3])) != 0u ? 0.0f : yl[l + 17]);
+            }
+            float d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
+            float d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
+            sumf1[row] += d1 * (float((scales32 >>  0) & 0xffu) - 32.0f);
+            sumf2[row] += d2 * (float((scales32 >> 16) & 0xffu) - 32.0f);
+
+            s1 = s2 = s3 = s4 = s5 = s6 = 0.0f;
+            for (short l = 0; l < 8; l += 2) {
+                const uint qs = uint(q[l / 2 + 8]);
+                const uint hs = uint(h[l / 2 + 8]);
+                s1 += yl[l +  8] * float(qs & qm[il / 2][0]);
+                s2 += yl[l +  9] * float(qs & qm[il / 2][1]);
+                s3 += ((hs & uint(hm[0])) != 0u ? 0.0f : yl[l +  8])
+                    + ((hs & uint(hm[1])) != 0u ? 0.0f : yl[l +  9]);
+                s4 += yl[l + 24] * float(qs & qm[il / 2][2]);
+                s5 += yl[l + 25] * float(qs & qm[il / 2][3]);
+                s6 += ((hs & uint(hm[2])) != 0u ? 0.0f : yl[l + 24])
+                    + ((hs & uint(hm[3])) != 0u ? 0.0f : yl[l + 25]);
+            }
+            d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
+            d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
+            sumf1[row] += d1 * (float((scales32 >>  8) & 0xffu) - 32.0f);
+            sumf2[row] += d2 * (float((scales32 >> 24) & 0xffu) - 32.0f);
+        }
+        y1 += 4u * 256u;
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float row_sum = (sumf1[row] + 0.25f * sumf2[row]) / float(1u << uint(shift));
+        const float total = simd_sum(row_sum);
+        if (tiisg == 0) y[out_row] = total;
+    }
+}
+
 kernel void kernel_mat_vec_iq4_nl_f32(
         constant mat_vec_args & args   [[buffer(0)]],
         device const block_iq4_nl_local * weight [[buffer(1)]],

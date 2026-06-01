@@ -1092,6 +1092,29 @@ pub fn encode_mat_vec_q2_k_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    static Q2_K_MV: OnceLock<bool> = OnceLock::new();
+    if *Q2_K_MV.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_Q2_K_FAST").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            GgmlType::Q2_K,
+            "mat_vec_q2_k_fast",
+            "kernel_mat_vec_q2_K_f32_fast",
+            4,
+            2,
+            0,
+        );
+    }
     encode_mat_vec_block256_f32(
         ctx,
         enc,
@@ -1114,6 +1137,29 @@ pub fn encode_mat_vec_iq4_xs_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    static IQ4_XS_MV: OnceLock<bool> = OnceLock::new();
+    if *IQ4_XS_MV.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_IQ4_XS_FAST").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            GgmlType::IQ4_XS,
+            "mat_vec_iq4_xs_fast",
+            "kernel_mat_vec_iq4_xs_f32_fast",
+            2,
+            2,
+            32 * std::mem::size_of::<f32>(),
+        );
+    }
     encode_mat_vec_block256_f32(
         ctx,
         enc,
@@ -1125,6 +1171,89 @@ pub fn encode_mat_vec_iq4_xs_f32(
         GgmlType::IQ4_XS,
         "kernel_mat_vec_iq4_xs_f32",
     )
+}
+
+fn encode_mat_vec_lowbit_fast_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expected: GgmlType,
+    error_kernel: &'static str,
+    metal_kernel: &'static str,
+    rows_per_simdgroup: usize,
+    simdgroups: usize,
+    threadgroup_bytes: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != expected {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!("weight.dtype = {:?}, expected {expected:?}", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_in || y.n_elements() as usize != n_out {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!(
+                "shape mismatch x={} y={} expected x={} y={}",
+                x.n_elements(),
+                y.n_elements(),
+                n_in,
+                n_out
+            ),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    let pso = ctx.pipeline(metal_kernel)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    if threadgroup_bytes > 0 {
+        enc.set_threadgroup_memory(0, threadgroup_bytes);
+    }
+    let rows_per_tg = rows_per_simdgroup * simdgroups;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(rows_per_tg),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: simdgroups * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 pub fn encode_mat_mat_f32(

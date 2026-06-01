@@ -125,6 +125,9 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   concrete next low-bit structural miss is A3B Q3/IQ4_XS MoE: audit reports
   `0/40` grouped coverage because those files use `IQ3_XXS`/`IQ3_S` gate/up
   expert banks with `IQ4_XS` down.
+  Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
+  before v0.177, and now have fast mat-vec decode kernels with Q3_K_M decode
+  left as the next low-bit decode residual to verify after clean re-anchor.
 - A10B routed MoE is no longer the active top bet after the warmed re-anchor. A
   default-warmup `pp512` phase trace has qwen timed-pass
   `routed_swiglu+routed_down = 600.52 ms` versus llama.cpp profile

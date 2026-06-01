@@ -366,6 +366,81 @@ kernel void kernel_mat_vec_q2_K_f32(
     }
 }
 
+kernel void kernel_mat_vec_q2_K_f32_fast(
+        constant mat_vec_args & args [[buffer(0)]],
+        device const block_q2_k_local * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device float * y [[buffer(3)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 4;
+    const short NSG = 2;
+    const uint first_row = (tgpig * NSG + uint(sgitg)) * NR0;
+    if (first_row >= args.n_out) return;
+
+    const uint nb = args.n_in / 256u;
+    const short ix = tiisg / 8;  // 0..3
+    const short it = tiisg % 8;
+    const short iq = it / 4;
+    const short ir = it % 4;
+    const short is = (8 * ir) / 16;
+
+    device const float * y4 = x + uint(ix) * 256u + 128u * uint(iq) + 8u * uint(ir);
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (uint ib = uint(ix); ib < nb; ib += 4u) {
+        float yl[32];
+        float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (short i = 0; i < 8; ++i) {
+            yl[i +  0] = y4[i +  0]; sumy[0] += yl[i +  0];
+            yl[i +  8] = y4[i + 32]; sumy[1] += yl[i +  8];
+            yl[i + 16] = y4[i + 64]; sumy[2] += yl[i + 16];
+            yl[i + 24] = y4[i + 96]; sumy[3] += yl[i + 24];
+        }
+
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            device const block_q2_k_local & b = weight[out_row * nb + ib];
+            device const uchar * sc = b.scales + 8 * iq + is;
+            device const ushort * qs = (device const ushort *)b.qs + 16 * iq + 4 * ir;
+
+            float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
+            float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (int i = 0; i < 8; i += 2) {
+                acc1[0] += yl[i +  0] * (qs[i / 2] & 0x0003);
+                acc2[0] += yl[i +  1] * (qs[i / 2] & 0x0300);
+                acc1[1] += yl[i +  8] * (qs[i / 2] & 0x000c);
+                acc2[1] += yl[i +  9] * (qs[i / 2] & 0x0c00);
+                acc1[2] += yl[i + 16] * (qs[i / 2] & 0x0030);
+                acc2[2] += yl[i + 17] * (qs[i / 2] & 0x3000);
+                acc1[3] += yl[i + 24] * (qs[i / 2] & 0x00c0);
+                acc2[3] += yl[i + 25] * (qs[i / 2] & 0xc000);
+            }
+
+            const float d = float(b.d);
+            const float dmin = float(b.dmin) * (1.0f / 16.0f);
+            sumf[row] += d * ((acc1[0] + (1.0f / 256.0f) * acc2[0]) * (sc[0] & 0x0f) * 1.0f
+                            + (acc1[1] + (1.0f / 256.0f) * acc2[1]) * (sc[2] & 0x0f) * (1.0f / 4.0f)
+                            + (acc1[2] + (1.0f / 256.0f) * acc2[2]) * (sc[4] & 0x0f) * (1.0f / 16.0f)
+                            + (acc1[3] + (1.0f / 256.0f) * acc2[3]) * (sc[6] & 0x0f) * (1.0f / 64.0f))
+                       - dmin * (sumy[0] * (sc[0] & 0xf0)
+                               + sumy[1] * (sc[2] & 0xf0)
+                               + sumy[2] * (sc[4] & 0xf0)
+                               + sumy[3] * (sc[6] & 0xf0));
+        }
+        y4 += 4u * 256u;
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0) y[out_row] = total;
+    }
+}
+
 kernel void kernel_mat_vec_iq4_nl_f32(
         constant mat_vec_args & args   [[buffer(0)]],
         device const block_iq4_nl_local * weight [[buffer(1)]],
@@ -419,6 +494,80 @@ kernel void kernel_mat_vec_iq4_xs_f32(
     sum = simd_sum(sum);
     if (tiisg == 0) {
         y[row] = sum;
+    }
+}
+
+kernel void kernel_mat_vec_iq4_xs_f32_fast(
+        constant mat_vec_args & args [[buffer(0)]],
+        device const block_iq4_xs_local * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device float * y [[buffer(3)]],
+        threadgroup float * lut [[threadgroup(0)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 2;
+    const short NSG = 2;
+    const uint first_row = (tgpig * NSG + uint(sgitg)) * NR0;
+    if (first_row >= args.n_out) return;
+
+    lut[tiisg] = iq4nl_values[tiisg & 15];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint nb = args.n_in / 256u;
+    const short ix = tiisg / 16;
+    const short it = tiisg % 16;
+    const short ib = it / 2;
+    const short il = it % 2;
+    device const float * yb = x + uint(ix) * 256u + uint(ib) * 32u + uint(il) * 8u;
+
+    float sumf[2] = {0.0f, 0.0f};
+    uint aux32[2];
+    thread const uchar * q8 = (thread const uchar *)aux32;
+
+    for (uint ibl = uint(ix); ibl < nb; ibl += 2u) {
+        device const float4 * y4 = (device const float4 *)yb;
+        const float4 yl0 = y4[0];
+        const float4 yl1 = y4[4];
+        const float4 yl2 = y4[1];
+        const float4 yl3 = y4[5];
+
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            device const block_iq4_xs_local & b = weight[out_row * nb + ibl];
+            device const uint * q4 = (device const uint *)(b.qs + 16 * ib + 8 * il);
+
+            float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
+            float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+
+            aux32[0] = (q4[0]     ) & 0x0f0f0f0f;
+            aux32[1] = (q4[0] >> 4) & 0x0f0f0f0f;
+            const float4 qf10 = {lut[q8[0]], lut[q8[1]], lut[q8[2]], lut[q8[3]]};
+            const float4 qf20 = {lut[q8[4]], lut[q8[5]], lut[q8[6]], lut[q8[7]]};
+            acc1 += yl0 * qf10;
+            acc2 += yl1 * qf20;
+
+            aux32[0] = (q4[1]     ) & 0x0f0f0f0f;
+            aux32[1] = (q4[1] >> 4) & 0x0f0f0f0f;
+            const float4 qf11 = {lut[q8[0]], lut[q8[1]], lut[q8[2]], lut[q8[3]]};
+            const float4 qf21 = {lut[q8[4]], lut[q8[5]], lut[q8[6]], lut[q8[7]]};
+            acc1 += yl2 * qf11;
+            acc2 += yl3 * qf21;
+            acc1 += acc2;
+
+            const int ls = int(((uint(b.scales_l[ib / 2]) >> (4 * (ib & 1))) & 0x0f)
+                         | (((uint(b.scales_h) >> (2 * ib)) & 3u) << 4)) - 32;
+            sumf[row] += float(b.d) * float(ls) * (acc1[0] + acc1[1] + acc1[2] + acc1[3]);
+        }
+        yb += 2u * 256u;
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0) y[out_row] = total;
     }
 }
 

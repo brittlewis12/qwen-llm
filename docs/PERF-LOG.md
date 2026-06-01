@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Q2/IQ4_XS Decode Mat-Vec Fast Kernels
+
+Status: low-bit decode follow-up after the prefill mat-mat wins. Raw artifacts
+are in `target/profiles/v0177-*tg128*`.
+
+Decode sentinels found that prefill parity did not imply decode parity. Clean
+baseline `tg128` rows before this branch were Q2_K `204.97 / 283.37` (`0.72x`)
+and IQ4_XS `196.92 / 281.26` (`0.70x`) versus llama.cpp. Q3_K_M was smaller
+but still behind at `240.23 / 257.30` (`0.93x`), and IQ4_NL was near parity at
+`260.87 / 268.79` (`0.97x`). Q4_K_M remained won at `335.68 / 268.05`
+(`1.25x`).
+
+Q2_K and IQ4_XS decode now use llama-shaped row-reuse mat-vec kernels instead
+of the scalar coverage-first one-row path. Rollbacks are
+`QWEN_MATVEC_Q2_K_FAST=0` and `QWEN_MATVEC_IQ4_XS_FAST=0`.
+
+Precommit A/B on 0.8B `tg128`:
+
+| Quant | rollback | default | llama.cpp | default/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| Q2_K | `203.85` | `309.21` | `283.37` | `1.09x` |
+| IQ4_XS | `196.97` | `342.64` | `281.26` | `1.22x` |
+
+Validation: release `qwen-bench` builds and the mat-vec/mat-mat unit-test filter
+passes for half, Q2, Q3, legacy Q4, and IQ4 weights. Q3_K_M decode remains the
+next measured low-bit decode gap unless a clean post-commit re-anchor changes
+the ordering.
+
 ## 2026-06-01 — Broader Dense Low-Bit Validation
 
 Status: bounded family validation after the clean 0.8B low-bit re-anchor. Raw

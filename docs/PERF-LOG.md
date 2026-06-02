@@ -56,6 +56,19 @@ small-dense `pp512` breakthrough. The next small-dense branch still needs a
 structural fix for short-prompt projection/GDN execution, not another low-threshold
 N64 expansion.
 
+Narrow pinned-b9481 scoreboard follow-up at exact `pp1024`:
+
+| Model | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | --- |
+| 0.8B | `7464` | `7798` | `0.96x` | `docs/bench/2026-06-02-2151-0.8B-v0209-q5q6-n64-pp1024-family/` |
+| 2B | `3674` | `3679` | `1.00x` | `docs/bench/2026-06-02-2151-2B-v0209-q5q6-n64-pp1024-family/` |
+| 4B | `1483` | `1451` | `1.02x` | `docs/bench/2026-06-02-2151-4B-v0209-q5q6-n64-pp1024-family/` |
+| 9B | `803` | `804` | `1.00x` | `docs/bench/2026-06-02-2151-9B-v0209-q5q6-n64-pp1024-family/` |
+
+Read: v0.208 closes 2B/9B `pp1024` to parity and keeps 4B ahead, but 0.8B
+remains the clean small-dense `pp1024` miss. The next small-dense sprint should
+use 0.8B as the primary target rather than celebrating family-average parity.
+
 ## 2026-06-02 — v0.207 Rejected Small-Hidden N64 Auto Policy
 
 Status: tried and rejected a narrow Q4_K N64 auto-policy after v0.206. The idea

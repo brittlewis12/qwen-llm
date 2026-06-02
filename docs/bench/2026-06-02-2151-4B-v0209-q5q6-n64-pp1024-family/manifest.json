@@ -1,0 +1,117 @@
+{
+  "stamp": "2026-06-02-2151",
+  "host": {
+    "hostname": "zekrom",
+    "os": "Darwin zekrom.local 24.6.0 arm64",
+    "loadavg": "6.46 6.21 5.54",
+    "top_cpu_at_start": [
+      " 39.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+      " 33.5 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper.app/Contents/MacOS/Browser Helper",
+      " 30.0 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper (Renderer).app/Contents/MacOS/Browser Helper (Renderer)",
+      " 14.5 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper (Renderer).app/Contents/MacOS/Browser Helper (Renderer)",
+      " 14.0 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper (Renderer).app/Contents/MacOS/Browser Helper (Renderer)"
+    ]
+  },
+  "engines": {
+    "qwen_llm": {
+      "binary": "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+      "build_commit": "02a46ae10",
+      "build_dirty": 0
+    },
+    "llama_cpp": {
+      "binary": "/Users/tito/.cache/qwen-llm/llama.cpp/build/bfb4308b058b/bin/llama-bench",
+      "build_commit": "bfb4308b05",
+      "build_number": 9481,
+      "backends": "MTL,BLAS",
+      "gpu_info": "Apple M4 Max",
+      "cpu_info": "Accelerate, Apple M4 Max",
+      "locked": true
+    }
+  },
+  "llama_cpp_lock": {
+    "repo": "https://github.com/ggml-org/llama.cpp.git",
+    "ref": "refs/tags/b9481",
+    "commit": "bfb4308b058b334c6e68085c661ec9eb7e3d59f4",
+    "cmake_args": [
+      "-DCMAKE_BUILD_TYPE=Release"
+    ],
+    "targets": [
+      "llama-bench",
+      "llama-tokenize",
+      "llama-cli"
+    ],
+    "expected_build_commit": "bfb4308b",
+    "expected_backends": [
+      "MTL",
+      "BLAS"
+    ]
+  },
+  "sweep": {
+    "pp_shapes": [
+      1024
+    ],
+    "tg_shapes": [],
+    "runs": 3,
+    "cooldown_seconds": 5.0,
+    "tag_filter": "4B",
+    "engine_order": "per_model_lcpp_then_qwen"
+  },
+  "qwen_env_at_start": {},
+  "command_records": [
+    {
+      "cmd": [
+        "/Users/tito/.cache/qwen-llm/llama.cpp/build/bfb4308b058b/bin/llama-bench",
+        "-m",
+        "/Users/tito/models/Qwen3.5-4B-Q4_K_M.gguf",
+        "-p",
+        "1024",
+        "-r",
+        "3",
+        "-o",
+        "json"
+      ],
+      "cooldown_seconds": 0.0,
+      "outer_wall_s": 7.182166249956936,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "engine": "llama.cpp",
+      "tag": "4B",
+      "test": "all"
+    },
+    {
+      "cmd": [
+        "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+        "pp",
+        "-m",
+        "/Users/tito/models/Qwen3.5-4B-Q4_K_M.gguf",
+        "-p",
+        "1024",
+        "--runs",
+        "3",
+        "-o",
+        "json"
+      ],
+      "cooldown_seconds": 5.0,
+      "outer_wall_s": 3.56687800004147,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 95%",
+      "engine": "qwen",
+      "tag": "4B",
+      "test": "pp1024"
+    }
+  ],
+  "models": [
+    {
+      "tag": "4B",
+      "display": "Qwen3.5-4B",
+      "kind": "dense",
+      "quant": "Q4_K_M",
+      "path": "/Users/tito/models/Qwen3.5-4B-Q4_K_M.gguf",
+      "file_size_bytes": 2740937888
+    }
+  ]
+}

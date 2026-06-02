@@ -1,0 +1,46 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "fa941aad7",
+    "build_dirty": 0,
+    "test_time": "2026-06-02T18:55:50Z",
+    "model_filename": "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf",
+    "model_size": 521555200,
+    "model_n_params": 752393024,
+    "arch_kind": "dense",
+    "test": "pp512",
+    "n_tokens": 512,
+    "n_repetitions": 3,
+    "avg_ts": 7197.302097267223,
+    "stddev_ts": 47.25292792893334,
+    "samples_ts": [
+      7182.491207515512,
+      7159.2287849433815,
+      7250.186299342775
+    ],
+    "samples_ns": [
+      71284459,
+      71516083,
+      70618875
+    ],
+    "avg_ns": 71139805,
+    "avg_gpu_ns": 68523833,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 512,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

@@ -1,0 +1,46 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "fa941aad7",
+    "build_dirty": 0,
+    "test_time": "2026-06-02T19:30:51Z",
+    "model_filename": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "model_size": 22123538944,
+    "model_n_params": 34660610688,
+    "arch_kind": "moe",
+    "test": "pp16384",
+    "n_tokens": 16384,
+    "n_repetitions": 3,
+    "avg_ts": 1182.8730516506039,
+    "stddev_ts": 24.136816027830278,
+    "samples_ts": [
+      1197.9114745090278,
+      1155.0321703488212,
+      1195.6755100939627
+    ],
+    "samples_ns": [
+      13677137542,
+      14184886292,
+      13702714375
+    ],
+    "avg_ns": 13854912736,
+    "avg_gpu_ns": 13812835444,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 1024,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

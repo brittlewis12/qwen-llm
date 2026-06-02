@@ -39,33 +39,42 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, clean family rows after `v0.199`.
-These rows used the old local llama.cpp build `14aa3d375`. v0.202 pins the
-benchmark target to upstream b9481 (`bfb4308b`); rerun the family sweep before
-making new scoreboard claims against current llama.cpp.
+M4 Max, release `qwen-bench`, clean family rows after `v0.203` against pinned
+llama.cpp b9481 (`bfb4308b`, `MTL,BLAS`). AC power, no recorded thermal or
+performance warnings.
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp4096` | `220.44` | `199.49` | `1.11x` | v0.200 family re-anchor |
-| 27B dense | `pp16384` | `207.36` | `198.45` | `1.05x` | v0.200 family re-anchor |
-| 35B A3B | `pp4096` | `1516.85` | `1336.47` | `1.14x` | v0.200 family re-anchor |
-| 35B A3B | `pp16384` | `1231.05` | `1073.76` | `1.15x` | v0.200 family re-anchor |
-| 122B A10B | `pp4096` | `485.06` | `383.00` | `1.27x` | v0.200 family re-anchor |
-| 122B A10B | `pp16384` | `406.21` | `341.45` | `1.19x` | v0.200 family re-anchor |
+| 27B dense | `pp4096` | `221.51` | `211.19` | `1.05x` | v0.203 pinned b9481 |
+| 27B dense | `pp16384` | `204.44` | `193.49` | `1.06x` | v0.203 pinned b9481 |
+| 35B A3B | `pp4096` | `1540.69` | `1319.85` | `1.17x` | v0.203 pinned b9481 |
+| 35B A3B | `pp16384` | `1182.87` | `1114.11` | `1.06x` | v0.203 pinned b9481 |
+| 122B A10B | `pp4096` | `457.25` | `393.69` | `1.16x` | v0.203 pinned b9481 |
+| 122B A10B | `pp16384` | `391.84` | `357.46` | `1.10x` | v0.203 pinned b9481 |
 
 Current short/decode guardrails:
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp512` | `239.48` | `235.54` | `1.02x` | v0.200 family re-anchor |
-| 27B dense | `pp1024` | `237.40` | `220.64` | `1.08x` | v0.200 family re-anchor |
-| 35B A3B | `pp512` | `1438.41` | `1374.55` | `1.05x` | v0.200 family re-anchor |
-| 35B A3B | `pp1024` | `1612.97` | `1385.43` | `1.16x` | v0.200 family re-anchor |
-| 122B A10B | `pp512` | `438.16` | `438.03` | `1.00x` | still narrow |
-| 122B A10B | `pp1024` | `500.11` | `433.51` | `1.15x` | v0.200 family re-anchor |
-| 27B dense | `tg128` | `24.35` | `19.41` | `1.25x` | v0.200 family re-anchor |
-| 35B A3B | `tg128` | `80.28` | `74.80` | `1.07x` | v0.200 family re-anchor |
-| 122B A10B | `tg128` | `35.30` | `34.38` | `1.03x` | decode win |
+| 27B dense | `pp512` | `236.30` | `236.25` | `1.00x` | v0.203 paired repeat |
+| 27B dense | `pp1024` | `237.93` | `217.95` | `1.09x` | v0.203 pinned b9481 |
+| 35B A3B | `pp512` | `1449.75` | `1415.12` | `1.02x` | v0.203 pinned b9481 |
+| 35B A3B | `pp1024` | `1620.35` | `1411.80` | `1.15x` | v0.203 pinned b9481 |
+| 122B A10B | `pp512` | `453.66` | `445.65` | `1.02x` | v0.203 pinned b9481 |
+| 122B A10B | `pp1024` | `504.43` | `430.68` | `1.17x` | v0.203 pinned b9481 |
+| 27B dense | `tg128` | `24.46` | `20.01` | `1.22x` | v0.203 pinned b9481 |
+| 35B A3B | `tg128` | `82.31` | `77.42` | `1.06x` | v0.203 pinned b9481 |
+| 122B A10B | `tg128` | `35.76` | `35.21` | `1.02x` | v0.203 repeat |
+
+Current caveats:
+
+- The full v0.203 family `27B pp512` row showed `0.913x`, but immediate paired
+  repeats showed `1.000x` and `1.008x`; treat that cell as parity/noise until a
+  longer repeat packet says otherwise.
+- Small dense short/medium prefill is not won across the board: 0.8B is
+  `0.925x/0.950x/0.957x` at `pp512/1024/4096`, and 2B is `0.954x` at `pp512`.
+- A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
+  `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 

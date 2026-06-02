@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.203 Pinned b9481 Family Re-Anchor
+
+Status: rebuilt `qwen-bench` at `fa941aad7` and ran the full synthetic family
+sweep against the pinned llama.cpp b9481 comparator. AC power, no recorded
+thermal/performance warnings, memory free stayed `87-96%`.
+
+Artifact: `docs/bench/2026-06-02-1855-v0203-b9481-family-family/`.
+
+| Model | pp512 | pp1024 | pp4096 | pp16384 | tg128 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0.8B dense | `0.925x` | `0.950x` | `0.957x` | `0.988x` | `1.228x` |
+| 2B dense | `0.954x` | `0.985x` | `0.987x` | `1.029x` | `1.048x` |
+| 4B dense | `1.005x` | `1.009x` | `1.111x` | `1.085x` | `1.435x` |
+| 9B dense | `1.000x` | `1.008x` | `1.056x` | `0.986x` | `1.113x` |
+| 27B dense | `0.913x` | `1.092x` | `1.049x` | `1.057x` | `1.222x` |
+| 35B A3B MoE | `1.024x` | `1.148x` | `1.167x` | `1.062x` | `1.063x` |
+| 122B A10B MoE | `1.018x` | `1.171x` | `1.161x` | `1.096x` | `0.993x` |
+
+Follow-up repeats for fragile cells:
+
+- 27B `pp512` paired repeat: `1.000x` and `1.008x`, so the full-family
+  `0.913x` row is likely drift/order noise, not a confirmed regression.
+  Artifact: `target/profiles/v0203-27b-pp512-b9481-repeat.json`.
+- A10B `tg128` repeat: `35.76/35.21 t/s` (`1.016x`). The same narrow run also
+  exposed A10B `pp128` at `0.852x`, which is outside the primary long-prompt
+  guardrails but relevant to the across-board goal.
+  Artifact: `docs/bench/2026-06-02-1953-122B-A10B-v0203-b9481-tg-repeat-family/`.
+
+Read: latest llama.cpp does not erase the MoE prefill wins; A3B and A10B are
+still ahead across `pp512+` in the fresh pinned sweep. Remaining broad gaps are
+small dense short/medium prefill, 9B/0.8B long parity cleanup, and A10B very-short
+`pp128`. Treat 27B `pp512` as parity pending more repeats, not as an active
+structural miss.
+
 ## 2026-06-02 — v0.202 Pinned llama.cpp Benchmark Target
 
 Status: moved qwen-vs-llama.cpp scripts off the ambient

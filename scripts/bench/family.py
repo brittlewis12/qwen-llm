@@ -35,11 +35,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
+from llama_cpp import (
+    LOCK_PATH as DEFAULT_LLAMA_CPP_LOCK,
+    load_lock,
+    lock_summary,
+    missing_tool_message,
+    resolve_tool,
+    validate_probe_row,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_QWEN_BENCH = ROOT / "target" / "release" / "qwen-bench"
-DEFAULT_LLAMA_BENCH = (
-    Path.home() / "code" / "llama.cpp" / "build" / "bin" / "llama-bench"
-)
 DEFAULT_MODELS_TOML = ROOT / "scripts" / "bench" / "models.toml"
 DEFAULT_DIGEST = ROOT / "scripts" / "bench" / "digest.py"
 
@@ -161,11 +167,21 @@ def write_manifest(out_dir: Path, manifest: dict) -> None:
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def probe_lcpp(llama_bench: Path, sample_model: Path) -> dict:
+def probe_lcpp(
+    llama_bench: Path,
+    sample_model: Path,
+    *,
+    lock: dict | None,
+    allow_unpinned: bool,
+) -> dict:
     rows = run_json(
         [llama_bench, "-m", sample_model, "-p", "1", "-n", "0", "-r", "1", "-o", "json"]
     )
     r = rows[0]
+    if lock is not None:
+        err = validate_probe_row(r, lock, allow_unpinned=allow_unpinned)
+        if err:
+            die(err)
     return {
         "binary": str(llama_bench),
         "build_commit": r.get("build_commit", "unknown"),
@@ -273,17 +289,33 @@ def main() -> int:
         "stamp points at the parent commit and lies about provenance)",
     )
     ap.add_argument("--qwen-bench", type=Path, default=DEFAULT_QWEN_BENCH)
-    ap.add_argument("--llama-bench", type=Path, default=DEFAULT_LLAMA_BENCH)
+    ap.add_argument(
+        "--llama-bench",
+        type=Path,
+        help="explicit llama-bench path; default resolves the pinned llama.cpp lock",
+    )
+    ap.add_argument("--llama-cpp-lock", type=Path, default=DEFAULT_LLAMA_CPP_LOCK)
+    ap.add_argument(
+        "--allow-unpinned-lcpp",
+        action="store_true",
+        help="permit a llama.cpp binary whose build_commit/backends do not match the lock",
+    )
     ap.add_argument("--models-toml", type=Path, default=DEFAULT_MODELS_TOML)
     ap.add_argument("--digest-script", type=Path, default=DEFAULT_DIGEST)
     args = ap.parse_args()
 
     qwen_bench = args.qwen_bench
-    llama_bench = args.llama_bench
+    lcpp_lock = load_lock(args.llama_cpp_lock)
+    llama_bench, llama_bench_locked = resolve_tool(
+        "llama-bench",
+        explicit=args.llama_bench,
+        env_var="LLAMA_BENCH",
+        lock=lcpp_lock,
+    )
     if not os.access(qwen_bench, os.X_OK):
         die(f"qwen-bench not built or not executable: {qwen_bench}")
     if not os.access(llama_bench, os.X_OK):
-        die(f"llama-bench missing or not executable: {llama_bench}")
+        die(missing_tool_message(llama_bench))
     if not args.models_toml.is_file():
         die(f"models registry missing: {args.models_toml}")
 
@@ -332,7 +364,13 @@ def main() -> int:
     qwen_noise = re.compile(r"^(\[(pp|bench|tg)\]|ggml_metal_|\s*$)")
     lcpp_noise = re.compile(r"^(ggml_metal_|\s*$)")
 
-    lcpp_engine = probe_lcpp(llama_bench, sample_path)
+    lcpp_engine = probe_lcpp(
+        llama_bench,
+        sample_path,
+        lock=lcpp_lock,
+        allow_unpinned=args.allow_unpinned_lcpp,
+    )
+    lcpp_engine["locked"] = llama_bench_locked
     qwen_engine = probe_qwen(qwen_bench, sample_path)
 
     # Provenance guard: a dirty qwen-llm build will stamp its rows with the
@@ -351,6 +389,7 @@ def main() -> int:
         "stamp": stamp,
         "host": capture_host(),
         "engines": {"qwen_llm": qwen_engine, "llama_cpp": lcpp_engine},
+        "llama_cpp_lock": lock_summary(lcpp_lock),
         "sweep": {
             "pp_shapes": pp_shapes,
             "tg_shapes": tg_shapes,

@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.202 Pinned llama.cpp Benchmark Target
+
+Status: moved qwen-vs-llama.cpp scripts off the ambient
+`~/code/llama.cpp/build/bin` comparator and onto a repo-pinned benchmark target.
+
+- Lock: `scripts/bench/llama-cpp.lock.json` pins upstream llama.cpp tag `b9481`
+  / commit `bfb4308b058b334c6e68085c661ec9eb7e3d59f4`.
+- Builder: `scripts/bench/ensure_llama_cpp.py` uses a shared cache under
+  `~/.cache/qwen-llm/llama.cpp`, a bare mirror plus one worktree per pinned SHA,
+  and minimal CMake args: only `-DCMAKE_BUILD_TYPE=Release`.
+- Script defaults: `scripts/bench/family.py` and
+  `scripts/profile/prefill_compare.py` now resolve the locked cache by default,
+  with explicit path/env overrides still available. They reject build-commit or
+  backend mismatches unless `--allow-unpinned-lcpp` is passed.
+- Smoke: built the pinned target, `llama-cli --version` reports `9481
+  (bfb4308b05)`, and a tiny locked comparator run completed at
+  `target/profiles/v0202-lcpp-lock-prefill-compare-smoke.json`.
+
+Read: the local fork can stay useful for source study or runtime-seam work, but
+it is no longer the scoreboard comparator. The next scoreboard action is a full
+family re-anchor against pinned b9481 before making fresh qwen/lcpp claims.
+
 ## 2026-06-02 — v0.201 A3B Q3 Real-Prompt Promotion Packet
 
 Status: ran the first repeated real-prompt promotion packet for the A3B Q3

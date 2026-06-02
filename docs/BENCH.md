@@ -10,6 +10,13 @@ For priorities: `docs/PERF-ROADMAP.md`.
 - `pp<N>` / `tg<N>` as the shape vocabulary.
 - JSON output as the machine-readable surface; stderr stays human-only.
 
+## llama.cpp comparator provenance
+
+- Scoreboard scripts default to `scripts/bench/llama-cpp.lock.json`, built by
+  `scripts/bench/ensure_llama_cpp.py` into `~/.cache/qwen-llm/llama.cpp`.
+- Ambient local llama.cpp binaries are allowed only as explicit one-offs with
+  `--allow-unpinned-lcpp`; they are not canonical family baselines.
+
 ## What we don't
 
 - `MTL,BLAS` in lcpp's `backends` is a registration artifact — BLAS does

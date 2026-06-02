@@ -68,6 +68,28 @@ uniprof --version >/dev/null
 If an optional tool is missing, use another path from the decision table instead
 of changing the environment during measurement.
 
+## Pinned llama.cpp comparator
+
+Use the repo-pinned benchmark target for qwen-vs-llama.cpp scoreboards, not an
+ambient local checkout:
+
+```sh
+uv run scripts/bench/ensure_llama_cpp.py --smoke-model "$MODEL"
+```
+
+The lock lives at `scripts/bench/llama-cpp.lock.json`. The builder uses a shared
+cache under `~/.cache/qwen-llm/llama.cpp`, reuses the local `~/code/llama.cpp`
+object store if present, and passes only `-DCMAKE_BUILD_TYPE=Release` so Metal,
+Accelerate/BLAS, ccache, and other defaults remain llama.cpp defaults at the
+pinned commit. If those defaults stop producing the expected `MTL,BLAS` backend
+string on this host, the qwen scripts fail rather than silently changing the
+comparison.
+
+`scripts/bench/family.py` and `scripts/profile/prefill_compare.py` resolve the
+locked cache by default. Explicit `--llama-bench` / `--lcpp-bin` paths and the
+`LLAMA_BENCH` / `LLAMA_TOKENIZE` env vars still work, but the scripts reject a
+build-commit or backend mismatch unless `--allow-unpinned-lcpp` is present.
+
 ## Quickstart
 
 This path gives a baseline, a model-aware phase view, and a CPU attribution trace:

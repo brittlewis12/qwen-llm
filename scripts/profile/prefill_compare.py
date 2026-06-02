@@ -18,6 +18,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+BENCH_DIR = Path(__file__).resolve().parents[1] / "bench"
+sys.path.insert(0, str(BENCH_DIR))
+
+from llama_cpp import (  # noqa: E402
+    LOCK_PATH as DEFAULT_LLAMA_CPP_LOCK,
+    load_lock,
+    lock_summary,
+    missing_tool_message,
+    resolve_tool,
+    validate_probe_row,
+)
+
+
 @dataclass(frozen=True)
 class EngineRun:
     engine: str
@@ -387,6 +400,8 @@ def build_output(
         "shuffle_seed": args.shuffle_seed,
         "qwen_cmd": qwen_cmd,
         "lcpp_cmd": lcpp_cmd,
+        "llama_cpp_lock": lock_summary(args.llama_cpp_lock_data),
+        "llama_cpp_locked": args.llama_cpp_locked,
         "fastpath_audit": fastpath_audit,
         "run_plan": [
             {
@@ -433,12 +448,18 @@ def main() -> int:
     parser.add_argument(
         "--lcpp-bin",
         type=Path,
-        default=Path("/Users/tito/code/llama.cpp/build/bin/llama-bench"),
+        help="explicit llama-bench path; default resolves the pinned llama.cpp lock",
     )
     parser.add_argument(
         "--lcpp-tokenize-bin",
         type=Path,
-        default=Path("/Users/tito/code/llama.cpp/build/bin/llama-tokenize"),
+        help="explicit llama-tokenize path; default resolves the pinned llama.cpp lock",
+    )
+    parser.add_argument("--llama-cpp-lock", type=Path, default=DEFAULT_LLAMA_CPP_LOCK)
+    parser.add_argument(
+        "--allow-unpinned-lcpp",
+        action="store_true",
+        help="permit a llama.cpp binary whose build_commit/backends do not match the lock",
     )
     parser.add_argument("--model", required=True)
 
@@ -475,14 +496,25 @@ def main() -> int:
         raise SystemExit("--runs must be >= 1")
     if args.repeat_blocks < 1:
         raise SystemExit("--repeat-blocks must be >= 1")
+    args.llama_cpp_lock_data = load_lock(args.llama_cpp_lock)
+    args.lcpp_bin, args.llama_cpp_locked = resolve_tool(
+        "llama-bench",
+        explicit=args.lcpp_bin,
+        env_var="LLAMA_BENCH",
+        lock=args.llama_cpp_lock_data,
+    )
+    args.lcpp_tokenize_bin, _ = resolve_tool(
+        "llama-tokenize",
+        explicit=args.lcpp_tokenize_bin,
+        env_var="LLAMA_TOKENIZE",
+        lock=args.llama_cpp_lock_data,
+    )
     if not args.bench_bin.exists():
         raise SystemExit(f"qwen bench binary missing: {args.bench_bin}")
     if not args.lcpp_bin.exists():
-        raise SystemExit(f"llama.cpp bench binary missing: {args.lcpp_bin}")
+        raise SystemExit(missing_tool_message(args.lcpp_bin))
     if args.n_prompt is None and not args.lcpp_tokenize_bin.exists():
-        raise SystemExit(
-            f"llama.cpp tokenizer binary missing: {args.lcpp_tokenize_bin}"
-        )
+        raise SystemExit(missing_tool_message(args.lcpp_tokenize_bin))
 
     qwen_env = dict(args.qwen_env)
     prompt_info = resolve_prompt_info(args)
@@ -542,6 +574,14 @@ def main() -> int:
             flush=True,
         )
         result = run_command(engine_run, command, cooldown)
+        if engine_run.engine == "llama.cpp":
+            err = validate_probe_row(
+                result["bench"],
+                args.llama_cpp_lock_data,
+                allow_unpinned=args.allow_unpinned_lcpp,
+            )
+            if err:
+                raise RuntimeError(err)
         result["block"] = item["block"]
         result["order"] = item["order"]
         result["discard"] = args.discard_first_block and item["block"] == 0

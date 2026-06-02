@@ -24,6 +24,10 @@ Primary guardrails:
 - MoE A3B: `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`
 - MoE A10B: `Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf`
 - Never run performance benchmarks in parallel.
+- Use the repo-pinned llama.cpp benchmark lock for scoreboard comparisons:
+  `scripts/bench/llama-cpp.lock.json`, built by
+  `scripts/bench/ensure_llama_cpp.py`. Ambient local llama.cpp binaries are
+  one-off only and require `--allow-unpinned-lcpp`.
 - Treat battery power, battery warnings, and thermal/performance warnings as
   benchmark confounds unless an AC-power rerun confirms the result.
 - Treat `prefill_chunk=1024` as a safe default cap, not a long-context optimum;
@@ -36,7 +40,9 @@ Primary guardrails:
 ## Latest Baseline Snapshot
 
 M4 Max, release `qwen-bench`, clean family rows after `v0.199`.
-Llama.cpp is build `14aa3d375`, default `flash_attn=false`, `has tensor=false`.
+These rows used the old local llama.cpp build `14aa3d375`. v0.202 pins the
+benchmark target to upstream b9481 (`bfb4308b`); rerun the family sweep before
+making new scoreboard claims against current llama.cpp.
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |

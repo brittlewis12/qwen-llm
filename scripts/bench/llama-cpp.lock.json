@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "repo": "https://github.com/ggml-org/llama.cpp.git",
+  "ref": "refs/tags/b9481",
+  "commit": "bfb4308b058b334c6e68085c661ec9eb7e3d59f4",
+  "cmake_args": ["-DCMAKE_BUILD_TYPE=Release"],
+  "targets": ["llama-bench", "llama-tokenize", "llama-cli"],
+  "expected_build_commit": "bfb4308b",
+  "expected_backends": ["MTL", "BLAS"]
+}

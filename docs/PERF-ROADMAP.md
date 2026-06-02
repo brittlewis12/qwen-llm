@@ -130,8 +130,11 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   native IQ4_XS down, so it runs instead of crashing, but audit still correctly
   reports `0/40` grouped coverage because those files use `IQ3_XXS`/`IQ3_S`
   gate/up expert banks with `IQ4_XS` down. Treat native grouped low-bit MoE as
-  the remaining structural coverage branch; grouped IQ4_XS down is the smallest
-  next kernel before taking on native IQ3 gate/up.
+  the remaining structural coverage branch. Clean v0.189 A3B Q3 `pp1024` paired
+  evidence is `90.28` qwen versus `1392.02` llama.cpp (`0.065x`), while no-FFN
+  jumps to `2858.64 t/s`; the next move is phase-split instrumentation followed
+  by a grouped F32 gate/up scaffold. Grouped IQ4_XS down remains necessary, but
+  down-only is no longer the primary bet.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
   before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B

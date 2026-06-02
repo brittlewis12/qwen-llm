@@ -28,11 +28,22 @@ Dirty-branch support smokes, AC power, no thermal/performance warnings:
 | `pp16` | `32.16 t/s` | `target/profiles/v0189-a3b-q3-pp16-f32-iq4xs-fallback.json` |
 | `pp1024` | `90.30 t/s` | `target/profiles/v0189-a3b-q3-pp1024-f32-iq4xs-fallback.json` |
 
+Post-commit clean gate after rebuilding `qwen-bench` with
+`build_commit=62797d0ed`, `build_dirty=0`:
+
+- Paired A3B Q3 `pp1024`, no warmup:
+  `qwen=90.28`, `llama.cpp=1392.02`, `qwen/lcpp=0.065x`.
+  Artifact: `target/profiles/v0189-a3b-q3-pp1024-paired-compare.json`.
+- No-FFN budget at the same shape: base `90.29 t/s`, no-FFN `2858.64 t/s`;
+  GPU time falls from `11.15 s` to `0.331 s`. Artifact:
+  `target/profiles/v0189-a3b-q3-pp1024-noffn-budget.json`.
+
 Read: this converts a crash into a measurable baseline and gives a GPU oracle for
-native low-bit MoE work. The likely next native branch is grouped IQ4_XS down as a
-smaller step, then IQ3_XXS/IQ3_S gate/up only if phase evidence says F32 gate/up
-is the real wall. Do not mark low-bit A3B grouped MoE as covered until native
-grouped expert-bank kernels exist.
+native low-bit MoE work. Clean evidence says the fallback is overwhelmingly FFN
+bound and nowhere near llama.cpp; the next step is phase-split instrumentation,
+then a grouped F32 gate/up scaffold before native IQ3 gate/up. Grouped IQ4_XS down
+is still needed, but down-only is unlikely to close the gap. Do not mark low-bit
+A3B grouped MoE as covered until native grouped expert-bank kernels exist.
 
 ## 2026-06-01 — v0.187 Paired Dense 27B Recheck
 

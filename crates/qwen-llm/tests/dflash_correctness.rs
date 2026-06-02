@@ -2168,8 +2168,9 @@ fn prefill_tokens_matches_single_token_loop_27b_matrix_g6_prefix_gate() {
 
 #[test]
 fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
-    let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
-    if !std::path::Path::new(model_path).exists() {
+    let model_path = std::env::var("QWEN_A3B_MOE_MODEL")
+        .unwrap_or_else(|_| "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf".into());
+    if !std::path::Path::new(&model_path).exists() {
         eprintln!("[prefill-vs-single-a3b] skipped — target GGUF missing");
         return;
     }
@@ -2180,15 +2181,21 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
     };
 
     eprintln!("[prefill-vs-single-a3b] loading 35B A3B…");
-    let g = GgufFile::open(model_path).expect("open target");
+    let g = GgufFile::open(&model_path).expect("open target");
     let m = Model::from_gguf(&g).expect("load target");
     assert_eq!(m.arch.kind, qwen_llm::model::ArchKind::Moe);
     let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
     let mf = MetalForward::new(&ctx, &mm);
     let arch = &mm.arch;
 
-    let total_n: usize = 12;
-    let p: usize = 8;
+    let total_n: usize = std::env::var("QWEN_A3B_MOE_TEST_TOTAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    let p: usize = std::env::var("QWEN_A3B_MOE_TEST_CHUNK")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
     let token_ids: Vec<i32> = (0..total_n)
         .map(|i| ((i * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1)
         .collect();

@@ -203,6 +203,14 @@ fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize
     }
 }
 
+fn prefill_moe_grouped_f32_gateup_enabled() -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_F32_GATEUP")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff | PrefillEnvMode::Auto => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrefillEnvMode {
     Auto,
@@ -435,6 +443,23 @@ fn encode_prefill_moe_grouped_swiglu(
                 chunk_p,
             )
         }
+        (GgmlType::F32, GgmlType::F32) => {
+            crate::metal::encode_moe_swiglu_f32_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+            )
+        }
         other => Err(MetalError::BadShape {
             kernel: "prefill_moe_grouped_swiglu",
             detail: format!("unsupported grouped gate/up dtypes {other:?}"),
@@ -460,6 +485,9 @@ fn encode_prefill_moe_grouped_down(
             ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
         ),
         GgmlType::Q6_K => crate::metal::encode_moe_down_q6_K_f32_grouped_slots(
+            ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
+        ),
+        GgmlType::IQ4_XS => crate::metal::encode_moe_down_iq4_xs_f32_grouped_slots(
             ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
         ),
         other => Err(MetalError::BadShape {
@@ -6226,17 +6254,25 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     && moe.gate_exps.dtype == GgmlType::Q4_K
                     && moe.up_exps.dtype == GgmlType::Q4_K
                     && moe.down_exps.dtype == GgmlType::Q5_K;
-                let grouped_down_dtype_eligible =
-                    matches!(moe.down_exps.dtype, GgmlType::Q5_K | GgmlType::Q6_K);
+                let grouped_down_dtype_eligible = matches!(
+                    moe.down_exps.dtype,
+                    GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::IQ4_XS
+                );
                 let topk = arch.expert_used_count.min(arch.expert_count) as usize;
                 let n_expert = arch.expert_count as usize;
                 let f_exp = arch.expert_feed_forward_length as usize;
                 let f_shared = arch.expert_shared_feed_forward_length as usize;
-                let grouped_gate_up_dtype_eligible = matches!(
-                    (moe.gate_exps.dtype, moe.up_exps.dtype),
-                    (GgmlType::Q4_K, GgmlType::Q4_K) | (GgmlType::Q5_K, GgmlType::Q5_K)
-                ) && (moe.gate_exps.dtype != GgmlType::Q5_K
-                    || prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert));
+                let grouped_gate_up_dtype_eligible = match (moe.gate_exps.dtype, moe.up_exps.dtype)
+                {
+                    (GgmlType::Q4_K, GgmlType::Q4_K) => true,
+                    (GgmlType::Q5_K, GgmlType::Q5_K) => {
+                        prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert)
+                    }
+                    (GgmlType::F32, GgmlType::F32) => {
+                        chunk_p >= 32 && prefill_moe_grouped_f32_gateup_enabled()
+                    }
+                    _ => false,
+                };
                 let grouped_routed_path = prefill_moe_grouped_enabled()
                     && grouped_gate_up_dtype_eligible
                     && grouped_down_dtype_eligible

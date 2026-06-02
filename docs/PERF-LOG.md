@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.192 A3B Q3 Grouped F32/IQ4_XS Candidate
+
+Status: added an env-gated low-bit A3B grouped routed-MoE candidate, not a new
+default. `QWEN_PREFILL_MOE_GROUPED_F32_GATEUP=1` routes the runtime
+`F32/F32/IQ4_XS` combination through grouped F32 gate/up SwiGLU and grouped
+IQ4_XS down. The gate still requires `chunk_p >= 32`; default remains the exact
+token fallback while the Q3 state-correctness gate is unresolved.
+
+Dirty validation and measurements:
+
+| Gate | Result | Artifact |
+| --- | ---: | --- |
+| Q3 short support gate | `cos(logits)=1.000000`; GDN/KV all `1.000000` | `QWEN_A3B_MOE_MODEL=...Q3_K_M cargo test ...35b_a3b_moe` |
+| `pp16` threshold | `32.21 t/s` | `target/profiles/v0192-a3b-q3-pp16-th32.json` |
+| `pp32` threshold | `66.10 t/s` | `target/profiles/v0192-a3b-q3-pp32-th32.json` |
+| `pp128` grouped/fallback | `260.59 / 86.41 t/s` | `target/profiles/v0192-a3b-q3-pp128-grouped-vs-fallback.json` |
+| `pp1024` paired | `1191.03 / 1391.98 t/s` (`0.856x`) | `target/profiles/v0192-a3b-q3-pp1024-grouped-paired-compare.json` |
+| `pp4096` paired | `1225.51 / 1371.09 t/s` (`0.894x`) | `target/profiles/v0192-a3b-q3-pp4096-grouped-paired-compare.json` |
+| Q4 regression smoke | `1445.25 t/s` at `pp1024` | `target/profiles/v0192-a3b-q4-pp1024-regression-smoke.json` |
+
+Grouped Q3 `pp1024` phase trace books routed SwiGLU/down/reduce at
+`344.96/96.51/6.12 ms`; GDN QKV and attention are next at `88.14/66.60 ms`.
+Artifact: `target/profiles/v0192-a3b-q3-pp1024-grouped-f32-iq4xs-phase-summary.tsv`.
+
+Longer Q3 prefill-vs-single (`T=40`, `chunk=32`) still fails the strict GDN state
+gate for both default and env-grouped paths: final-logit cosine is about
+`0.99931`, but GDN state/conv are about `0.99811/0.99695`. Artifacts:
+`target/profiles/v0192-a3b-q3-default-correctness.out` and
+`target/profiles/v0192-a3b-q3-grouped-f32-correctness.out`.
+
+Read: the env candidate proves the structural headroom: A3B Q3 `pp1024` can move
+from clean fallback `90.28 t/s` to dirty grouped `1191.03 t/s`, but the path is
+not defaultable while the Q3 state gate is unresolved and still trails llama.cpp
+by `10-15%` at `pp1024/4096`. The next gap is not route or down-only; it is mostly
+grouped F32 gate/up throughput and the cost of dequanting IQ3 expert banks to
+resident F32. Native grouped `IQ3_XXS/IQ3_S` gate/up is now the principled next
+low-bit MoE branch.
+
 ## 2026-06-02 — v0.191 A3B Q3 Fallback Phase Split
 
 Status: added trace-only phase splitting for the non-grouped MoE token fallback.

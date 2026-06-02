@@ -71,15 +71,13 @@ Current caveats:
 - The full v0.203 family `27B pp512` row showed `0.913x`, but immediate paired
   repeats showed `1.000x` and `1.008x`; treat that cell as parity/noise until a
   longer repeat packet says otherwise.
-- Small dense short/medium prefill is not won across the board: 0.8B is
-  `0.925x/0.950x/0.957x` at `pp512/1024/4096`, and 2B is `0.954x` at `pp512`.
-  v0.206/v0.207 say this is not attention, coverage, GDN matvec fallback, fused
-  FFN, or small-hidden Q4_K N64 rollback. v0.208 adds Q5_K/Q6_K N64 projection
-  tiles, but only for `n_query >= 1024`: clean exact-shape pinned-lcpp rows now
-  put 2B/9B `pp1024` at parity and 4B ahead, while 0.8B remains `0.96x` and
-  unrestricted low-threshold use regressed 0.8B `pp512`. The remaining high-EV
-  branch is still structural short-prompt projection/GDN execution, not another
-  N64 threshold fiddle.
+- Small dense short/medium prefill is not won across the board. v0.212's
+  shape-gated dense Q4 fused SwiGLU narrows 0.8B to `0.91-0.92x` at `pp512` and
+  `0.97-0.98x` at `pp1024`, while keeping larger dense shapes on the unfused
+  path by default. v0.206-v0.212 say this is not attention, fast-path coverage,
+  GDN matvec fallback, command-encoder coalescing, or another N64 threshold
+  fiddle. The remaining high-EV branch is structural short-prompt FFN/GDN body
+  execution, especially the 0.8B `pp512` cell.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
   `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to
@@ -713,9 +711,10 @@ Next branch order:
 - Fourth, keep A3B/A10B MoE in guardrail mode unless coverage drops below
   `40/40` or `48/48` or a warmed short-prompt row regresses. Do not revive
   hot-threshold or concentration-only branches without new distribution evidence.
-- Fifth, reopen dense FFN/GDN projection mechanics only from a specific paired
-  mismatch. It must preserve the v0.187 paired wins, not just improve a serialized
-  phase bucket.
+- Fifth, small dense is the active paired mismatch again. Start from 0.8B `pp512`
+  and require 2B plus 4B/9B/27B canaries before promotion. Recent falsifiers say
+  the next branch should target FFN/GDN body math or dataflow, not attention,
+  encoder coalescing, GDN matvec fallback, or broad low-threshold N64 policy.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh
   same-process or phase evidence crosses a total-throughput gate.
 

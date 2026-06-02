@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.212 Small-Dense Fused Q4 SwiGLU Gate
+
+Status: promoted dense Q4 fused SwiGLU only for small hidden states
+(`hidden <= 1536`). This narrows the 0.8B short/medium dense gap without taking
+the known regressions on 4B/9B/27B. Rollback/force env remains
+`QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=0|1`.
+
+Correctness and build:
+
+- `cargo test -p qwen-llm ffn_fused_swiglu_q4_K_mm_n16_matches_unfused -- --nocapture`
+- `cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_0_8b -- --nocapture`
+- `cargo build --release`
+
+Clean qwen-only rollback rows after v0.212:
+
+| Model | Shape | default | rollback | Ratio | Artifact |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 0.8B | `pp512` | `7253.98` | `7150.23` | `1.015x` | `target/profiles/v0212-clean-08b-pp512-shape-fused-rollback-sweep.json` |
+| 0.8B | `pp1024` | `7601.30` | `7451.03` | `1.020x` | `target/profiles/v0212-clean-08b-pp1024-shape-fused-rollback-sweep.json` |
+
+Clean paired pinned-b9481 rows after v0.212:
+
+| Model | Shape | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 0.8B | `pp512` | `7254.74 / 7182.30` | `7874.91 / 7878.64` | `0.921x / 0.912x` | `target/profiles/v0212-clean-08b-pp512-shape-fused-compare.json` |
+| 0.8B | `pp1024` | `7599.28 / 7593.34` | `7783.26 / 7836.44` | `0.976x / 0.969x` | `target/profiles/v0212-clean-08b-pp1024-shape-fused-compare.json` |
+
+Canary read:
+
+- Forced fused Q4 SwiGLU is not broadly safe: dirty canaries were thin-positive on
+  2B, but negative on 4B, 9B, and 27B at `pp512`.
+- The shape gate is intentionally small-dense only. Dirty default-vs-rollback rows
+  were neutral for 4B and 27B because the fused path does not select there.
+- The GDN tail encoder coalescing sidecar passed the 0.8B prefill-vs-single gate
+  but was flat/noise at `pp512` and `pp1024`; do not keep or reopen encoder-
+  coalescing as the next small-dense lever without new evidence.
+
+Read: this is a useful incremental scoreboard cleanup, not the lcpp-cracking
+branch. 0.8B `pp1024` is now close to parity, but `pp512` is still materially
+behind. No-op/split isolates still point at real FFN and GDN body work rather
+than attention or command-encoder overhead.
+
 ## 2026-06-02 — v0.208 Q5/Q6 Long-Prompt N64 Tiles
 
 Status: added large-N mat-mat tiles for Q5_K and Q6_K projections, with the

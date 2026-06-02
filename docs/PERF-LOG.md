@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.198 Real-Prompt Compare Harness
+
+Status: extended `scripts/profile/prefill_compare.py` beyond synthetic `pp<N>`
+inputs. It now accepts `--prompt`, `--file`, and `--messages` with the same
+thinking-mode controls as `prefill_sweep.py`/`qwen-bench pp`.
+
+Important methodology note: `llama-bench` still cannot consume real prompt text;
+for real-prompt sources, the harness renders/counts the prompt with
+`llama-tokenize --no-bos` and runs llama.cpp as a synthetic `pp<N>` length anchor.
+The output records `lcpp_prompt_mode=synthetic_length_anchor` so these rows are
+not overclaimed as same-token-content llama.cpp prompt runs.
+
+Smoke evidence:
+
+| Gate | Result | Artifact |
+| --- | ---: | --- |
+| `--file current-reva-short-qwen36-preserve.txt`, 0.8B Q4 | token count `7986`; harness completes and checkpoints | `target/profiles/v0198-prefill-compare-file-smoke.json` |
+| `--messages current-reva-short-qwen36.json --messages-max 2`, 0.8B Q4 | token count `6482`; harness completes and checkpoints | `target/profiles/v0198-prefill-compare-messages-smoke.json` |
+
+Read: this unblocks compact real-rollout qwen measurements with a same-length
+llama.cpp anchor and preserves the strict no-concurrent-GPU workflow. It is still
+not a substitute for a true llama.cpp real-prompt benchmark if we later repair or
+replace the broken `llama-cli`/`llama-perplexity` binaries.
+
 ## 2026-06-02 — v0.197 A3B Continuation Gate
 
 Status: replaced the A3B long continuation cosine gate with a generation-oriented

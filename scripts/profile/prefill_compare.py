@@ -24,6 +24,13 @@ class EngineRun:
     env: dict[str, str]
 
 
+@dataclass(frozen=True)
+class PromptInfo:
+    source: str
+    lcpp_n_prompt: int
+    lcpp_prompt_mode: str
+
+
 def capture_text(command: list[str]) -> str:
     proc = subprocess.run(command, capture_output=True, text=True, check=False)
     out = proc.stdout.strip()
@@ -71,6 +78,120 @@ def run_fastpath_audit(model: str) -> dict:
     return rows[0]
 
 
+def strip_think(text: str) -> str:
+    trimmed = text.lstrip()
+    if not trimmed.startswith("<think>"):
+        return text
+    rest = trimmed[len("<think>") :]
+    _head, sep, tail = rest.partition("</think>")
+    if not sep:
+        return text
+    return tail.strip()
+
+
+def load_messages_prompt(args: argparse.Namespace) -> str:
+    raw = Path(args.messages).read_text()
+    value = json.loads(raw)
+    if isinstance(value, list):
+        messages = value
+        meta: dict = {}
+    elif isinstance(value, dict):
+        if "messages" not in value:
+            raise RuntimeError("wrapped messages input must contain `messages`")
+        messages = value["messages"]
+        meta = {}
+        raw_meta = value.get("meta")
+        if isinstance(raw_meta, dict):
+            meta.update(raw_meta)
+        for key, item in value.items():
+            if key not in ("messages", "meta"):
+                meta[key] = item
+    else:
+        raise RuntimeError("messages input must be a list or wrapped object")
+    if args.messages_max is not None:
+        messages = messages[: args.messages_max]
+    if not messages:
+        raise RuntimeError("messages input contains no messages")
+    if args.messages_preserve_thinking:
+        preserve_thinking = True
+    elif args.messages_strip_thinking:
+        preserve_thinking = False
+    else:
+        preserve_thinking = (
+            bool(meta.get("preserve_thinking"))
+            or "qwen3.6" in str(meta.get("model", "")).lower()
+        )
+
+    out: list[str] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if not isinstance(role, str) or not isinstance(content, str):
+            raise RuntimeError("each message must contain string role/content")
+        if role == "assistant" and not preserve_thinking:
+            content = strip_think(content)
+        out.append(f"<|im_start|>{role}\n{content}<|im_end|>\n")
+    if not args.messages_no_generation_prompt:
+        out.append("<|im_start|>assistant\n")
+    return "".join(out)
+
+
+def prompt_text_for_count(args: argparse.Namespace) -> tuple[str, str]:
+    if args.prompt is not None:
+        return args.prompt, f"text prompt ({len(args.prompt)} chars)"
+    if args.file is not None:
+        text = Path(args.file).read_text()
+        return text, f"file prompt:{args.file} ({len(text)} chars)"
+    if args.messages is not None:
+        text = load_messages_prompt(args)
+        return text, f"messages:{args.messages} ({len(text)} chars)"
+    raise AssertionError("no real prompt source")
+
+
+def count_lcpp_prompt_tokens(args: argparse.Namespace, text: str) -> int:
+    proc = subprocess.run(
+        [
+            str(args.lcpp_tokenize_bin),
+            "-m",
+            args.model,
+            "--stdin",
+            "--show-count",
+            "--no-bos",
+            "--log-disable",
+        ],
+        input=text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise RuntimeError(f"llama-tokenize failed: {msg}")
+    marker = "Total number of tokens:"
+    for line in reversed(proc.stdout.splitlines()):
+        if marker in line:
+            return int(line.rsplit(marker, 1)[1].strip())
+    raise RuntimeError("llama-tokenize output did not include token count")
+
+
+def resolve_prompt_info(args: argparse.Namespace) -> PromptInfo:
+    if args.n_prompt is not None:
+        return PromptInfo(
+            source=f"synthetic:{args.n_prompt}",
+            lcpp_n_prompt=args.n_prompt,
+            lcpp_prompt_mode="synthetic",
+        )
+    text, source = prompt_text_for_count(args)
+    n_prompt = count_lcpp_prompt_tokens(args, text)
+    if n_prompt < 1:
+        raise RuntimeError("real prompt tokenized to an empty sequence")
+    return PromptInfo(
+        source=source,
+        lcpp_n_prompt=n_prompt,
+        lcpp_prompt_mode="synthetic_length_anchor",
+    )
+
+
 def build_qwen_cmd(args: argparse.Namespace) -> list[str]:
     cmd = [
         str(args.bench_bin),
@@ -81,9 +202,25 @@ def build_qwen_cmd(args: argparse.Namespace) -> list[str]:
         str(args.runs),
         "-o",
         "json",
-        "-p",
-        str(args.n_prompt),
     ]
+    if args.n_prompt is not None:
+        cmd.extend(["-p", str(args.n_prompt)])
+    elif args.prompt is not None:
+        cmd.extend(["--prompt", args.prompt])
+    elif args.file is not None:
+        cmd.extend(["--file", args.file])
+    elif args.messages is not None:
+        cmd.extend(["--messages", args.messages])
+        if args.messages_max is not None:
+            cmd.extend(["--messages-max", str(args.messages_max)])
+        if args.messages_preserve_thinking:
+            cmd.append("--messages-preserve-thinking")
+        if args.messages_strip_thinking:
+            cmd.append("--messages-strip-thinking")
+        if args.messages_no_generation_prompt:
+            cmd.append("--messages-no-generation-prompt")
+    else:
+        raise AssertionError("one prompt source is required")
     if args.prefill_chunk is not None:
         cmd.extend(["--prefill-chunk", str(args.prefill_chunk)])
     if args.no_warmup:
@@ -93,13 +230,13 @@ def build_qwen_cmd(args: argparse.Namespace) -> list[str]:
     return cmd
 
 
-def build_lcpp_cmd(args: argparse.Namespace) -> list[str]:
+def build_lcpp_cmd(args: argparse.Namespace, n_prompt: int) -> list[str]:
     cmd = [
         str(args.lcpp_bin),
         "-m",
         args.model,
         "-p",
-        str(args.n_prompt),
+        str(n_prompt),
         "-n",
         "0",
         "-r",
@@ -228,6 +365,7 @@ def print_summary(results: list[dict], pairs: list[dict]) -> None:
 
 def build_output(
     args: argparse.Namespace,
+    prompt_info: PromptInfo,
     qwen_cmd: list[str],
     lcpp_cmd: list[str],
     plan: list[dict],
@@ -239,7 +377,9 @@ def build_output(
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model": args.model,
-        "n_prompt": args.n_prompt,
+        "prompt_source": prompt_info.source,
+        "n_prompt": prompt_info.lcpp_n_prompt,
+        "lcpp_prompt_mode": prompt_info.lcpp_prompt_mode,
         "runs": args.runs,
         "cooldown_seconds": args.cooldown_seconds,
         "repeat_blocks": args.repeat_blocks,
@@ -295,8 +435,23 @@ def main() -> int:
         type=Path,
         default=Path("/Users/tito/code/llama.cpp/build/bin/llama-bench"),
     )
+    parser.add_argument(
+        "--lcpp-tokenize-bin",
+        type=Path,
+        default=Path("/Users/tito/code/llama.cpp/build/bin/llama-tokenize"),
+    )
     parser.add_argument("--model", required=True)
-    parser.add_argument("--n-prompt", type=int, required=True)
+
+    prompt = parser.add_mutually_exclusive_group(required=True)
+    prompt.add_argument("--n-prompt", type=int)
+    prompt.add_argument("--prompt")
+    prompt.add_argument("--file")
+    prompt.add_argument("--messages")
+
+    parser.add_argument("--messages-max", type=int)
+    parser.add_argument("--messages-preserve-thinking", action="store_true")
+    parser.add_argument("--messages-strip-thinking", action="store_true")
+    parser.add_argument("--messages-no-generation-prompt", action="store_true")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--cooldown-seconds", type=float, default=15.0)
     parser.add_argument("--repeat-blocks", type=int, default=2)
@@ -312,8 +467,10 @@ def main() -> int:
     parser.add_argument("--output")
     args = parser.parse_args()
 
-    if args.n_prompt < 1:
+    if args.n_prompt is not None and args.n_prompt < 1:
         raise SystemExit("--n-prompt must be >= 1")
+    if args.messages_preserve_thinking and args.messages_strip_thinking:
+        raise SystemExit("preserve and strip thinking modes are mutually exclusive")
     if args.runs < 1:
         raise SystemExit("--runs must be >= 1")
     if args.repeat_blocks < 1:
@@ -322,10 +479,15 @@ def main() -> int:
         raise SystemExit(f"qwen bench binary missing: {args.bench_bin}")
     if not args.lcpp_bin.exists():
         raise SystemExit(f"llama.cpp bench binary missing: {args.lcpp_bin}")
+    if args.n_prompt is None and not args.lcpp_tokenize_bin.exists():
+        raise SystemExit(
+            f"llama.cpp tokenizer binary missing: {args.lcpp_tokenize_bin}"
+        )
 
     qwen_env = dict(args.qwen_env)
+    prompt_info = resolve_prompt_info(args)
     qwen_cmd = build_qwen_cmd(args)
-    lcpp_cmd = build_lcpp_cmd(args)
+    lcpp_cmd = build_lcpp_cmd(args, prompt_info.lcpp_n_prompt)
     output_path = Path(args.output) if args.output else None
 
     fastpath_audit = None
@@ -351,6 +513,12 @@ def main() -> int:
     )
     print(
         f"[prefill-compare] lcpp: {' '.join(shlex.quote(x) for x in lcpp_cmd)}",
+        flush=True,
+    )
+    print(
+        f"[prefill-compare] prompt_source: {prompt_info.source} "
+        f"lcpp_n_prompt={prompt_info.lcpp_n_prompt} "
+        f"lcpp_prompt_mode={prompt_info.lcpp_prompt_mode}",
         flush=True,
     )
     print(f"[prefill-compare] cooldown_seconds: {args.cooldown_seconds}", flush=True)
@@ -383,7 +551,14 @@ def main() -> int:
             write_checkpoint(
                 output_path,
                 build_output(
-                    args, qwen_cmd, lcpp_cmd, plan, results, pairs, fastpath_audit
+                    args,
+                    prompt_info,
+                    qwen_cmd,
+                    lcpp_cmd,
+                    plan,
+                    results,
+                    pairs,
+                    fastpath_audit,
                 ),
             )
             print(f"[prefill-compare] checkpointed {output_path}", flush=True)
@@ -394,7 +569,14 @@ def main() -> int:
         write_checkpoint(
             output_path,
             build_output(
-                args, qwen_cmd, lcpp_cmd, plan, results, pairs, fastpath_audit
+                args,
+                prompt_info,
+                qwen_cmd,
+                lcpp_cmd,
+                plan,
+                results,
+                pairs,
+                fastpath_audit,
             ),
         )
         print(f"[prefill-compare] wrote {output_path}", flush=True)

@@ -663,6 +663,9 @@ Next branch order:
 - First, use `scripts/profile/prefill_compare.py` for any future cross-engine
   prompt claim. Stale isolated llama.cpp anchors are no longer enough, especially
   at `pp512/1024/4096` where thermal/session drift can change the conclusion.
+  The harness now accepts real `--file`/`--messages` qwen prompts; because
+  `llama-bench` cannot consume prompt text, those llama.cpp rows are explicitly
+  recorded as same-length synthetic anchors via `lcpp_prompt_mode`.
 - Second, return to breadth/generalization: primary family paired guardrails,
   real-rollout prompts, and quant coverage gaps should rank above another dense
   27B microkernel unless a paired residual appears.

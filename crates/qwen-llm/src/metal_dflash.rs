@@ -74,6 +74,34 @@ fn dense_packed_gdn_step_enabled() -> bool {
     })
 }
 
+fn prefill_gdn_batched_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_PREFILL_GDN_BATCHED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
+    static LAYERS: OnceLock<Option<Vec<usize>>> = OnceLock::new();
+    let layers = LAYERS.get_or_init(|| {
+        let raw = std::env::var("QWEN_PREFILL_GDN_PROJ_ORACLE_LAYER").ok()?;
+        if raw.trim() == "all" {
+            return Some(vec![usize::MAX]);
+        }
+        let parsed: Vec<usize> = raw
+            .split(',')
+            .filter_map(|part| part.trim().parse().ok())
+            .collect();
+        (!parsed.is_empty()).then_some(parsed)
+    });
+    layers
+        .as_ref()
+        .is_some_and(|layers| layers.contains(&usize::MAX) || layers.contains(&layer_idx))
+}
+
 fn prefill_noop_ffn_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_FFN"))
@@ -132,6 +160,47 @@ fn prefill_gdn_skinny_f32_e8p32_enabled() -> bool {
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
+}
+
+fn prefill_gdn_matvec_proj_enabled(proj: &str) -> bool {
+    static PROJS: OnceLock<Option<Vec<String>>> = OnceLock::new();
+    let projs = PROJS.get_or_init(|| {
+        let raw = std::env::var("QWEN_PREFILL_GDN_MATVEC_PROJ").ok()?;
+        let parsed: Vec<String> = raw
+            .split(',')
+            .map(|part| part.trim().to_ascii_lowercase())
+            .filter(|part| !part.is_empty())
+            .collect();
+        (!parsed.is_empty()).then_some(parsed)
+    });
+    let front = matches!(proj, "qkv" | "z" | "beta" | "alpha");
+    projs.as_ref().is_some_and(|projs| {
+        projs
+            .iter()
+            .any(|mode| mode == "all" || mode == proj || (mode == "front" && front))
+    })
+}
+
+fn prefill_gdn_matvec_layer_enabled(layer_idx: usize) -> bool {
+    static LAYERS: OnceLock<Option<Vec<usize>>> = OnceLock::new();
+    let layers = LAYERS.get_or_init(|| {
+        let raw = std::env::var("QWEN_PREFILL_GDN_MATVEC_LAYER").ok()?;
+        if raw.trim() == "all" {
+            return Some(vec![usize::MAX]);
+        }
+        let parsed: Vec<usize> = raw
+            .split(',')
+            .filter_map(|part| part.trim().parse().ok())
+            .collect();
+        (!parsed.is_empty()).then_some(parsed)
+    });
+    layers.as_ref().map_or(true, |layers| {
+        layers.contains(&usize::MAX) || layers.contains(&layer_idx)
+    })
+}
+
+fn prefill_gdn_matvec_projection_enabled(proj: &str, layer_idx: usize) -> bool {
+    prefill_gdn_matvec_proj_enabled(proj) && prefill_gdn_matvec_layer_enabled(layer_idx)
 }
 
 fn prefill_moe_packed_routed_enabled() -> bool {
@@ -698,6 +767,110 @@ fn flush_prefill_layer_phase_accum(
     *prefill_gpu_total_ms += gpu_ms;
     *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
     gpu_ms
+}
+
+fn diagnose_gdn_projection_matmat_vs_matvec(
+    ctx: &MetalContext,
+    cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    prefill_gpu_total_ms: &mut f64,
+    chunk_idx: usize,
+    chunk_start: u32,
+    layer_idx: usize,
+    proj: &str,
+    weight: &MetalTensor,
+    x_pack: &MetalTensor,
+    matmat_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), DFlashError> {
+    let matvec_out =
+        MetalTensor::zeros_f32(ctx, vec![(n_query * n_out) as u64]).map_err(DFlashError::Metal)?;
+    {
+        let enc = KernelEncoder::begin(cmd_buf);
+        for row in 0..n_query {
+            let x_row = x_pack.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+            let y_row = matvec_out.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+            encode_mat_vec_dispatch(ctx, &enc, weight, &x_row, &y_row, n_in, n_out)?;
+        }
+        enc.end();
+    }
+    let gpu_ms = flush_prefill_layer_phase_accum(ctx, cmd_buf, prefill_gpu_total_ms);
+
+    let mm = read_f32_tensor(matmat_out);
+    let mv = read_f32_tensor(&matvec_out);
+    let mut min_cos = f64::INFINITY;
+    let mut worst_row = 0usize;
+    let mut worst_max_abs = 0.0f32;
+    for row in 0..n_query {
+        let start = row * n_out;
+        let end = start + n_out;
+        let cos = cosine_f32(&mm[start..end], &mv[start..end]);
+        if cos < min_cos {
+            min_cos = cos;
+            worst_row = row;
+            worst_max_abs = max_abs_delta_f32(&mm[start..end], &mv[start..end]);
+        }
+    }
+
+    eprintln!(
+        "[prefill-gdn-proj-oracle] chunk={chunk_idx} start={chunk_start} \
+         layer={layer_idx} proj={proj} dtype={:?} rows={n_query} n_in={n_in} \
+         n_out={n_out} cos_min={min_cos:.6} worst_row={worst_row} \
+         max|Δ|={worst_max_abs:.3e} flush_gpu_ms={gpu_ms:.2}",
+        weight.dtype,
+    );
+    Ok(())
+}
+
+fn encode_packed_matvec_projection(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x_pack: &MetalTensor,
+    y_pack: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), DFlashError> {
+    for row in 0..n_query {
+        let x_row = x_pack.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+        let y_row = y_pack.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+        encode_mat_vec_dispatch(ctx, enc, weight, &x_row, &y_row, n_in, n_out)?;
+    }
+    Ok(())
+}
+
+fn read_f32_tensor(t: &MetalTensor) -> Vec<f32> {
+    assert_eq!(t.dtype, GgmlType::F32);
+    let n = t.n_elements() as usize;
+    let mut out = vec![0.0f32; n];
+    unsafe {
+        let src = (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize) as *const f32;
+        std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+    }
+    out
+}
+
+fn cosine_f32(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for i in 0..a.len() {
+        dot += a[i] as f64 * b[i] as f64;
+        na += (a[i] as f64).powi(2);
+        nb += (b[i] as f64).powi(2);
+    }
+    dot / (na.sqrt() * nb.sqrt() + 1e-30)
+}
+
+fn max_abs_delta_f32(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
 }
 
 fn emit_prefill_layer_phase(
@@ -4635,7 +4808,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     let conv_dim = (2 * n_k_u + n_v_u) * head_dim_u;
                     let v_dim = n_v_u * head_dim_u;
 
-                    let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
+                    let gdn_batched = prefill_gdn_batched_enabled()
+                        && gdn_mat_mat_eligible(g.in_proj_qkv.dtype)
                         && gdn_mat_mat_eligible(g.in_proj_z.dtype)
                         && gdn_mat_mat_eligible(g.out_proj.dtype);
                     let gdn_split = prefill_gdn_split_mode();
@@ -4674,16 +4848,29 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         if trace_layer_phases {
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_mat_mat_dispatch(
-                                    base.ctx,
-                                    &enc,
-                                    &g.in_proj_qkv,
-                                    &h_pack_p,
-                                    &gdn_qkv_pack_p,
-                                    h,
-                                    conv_dim,
-                                    chunk_p,
-                                )?;
+                                if prefill_gdn_matvec_projection_enabled("qkv", il) {
+                                    encode_packed_matvec_projection(
+                                        base.ctx,
+                                        &enc,
+                                        &g.in_proj_qkv,
+                                        &h_pack_p,
+                                        &gdn_qkv_pack_p,
+                                        h,
+                                        conv_dim,
+                                        chunk_p,
+                                    )?;
+                                } else {
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &g.in_proj_qkv,
+                                        &h_pack_p,
+                                        &gdn_qkv_pack_p,
+                                        h,
+                                        conv_dim,
+                                        chunk_p,
+                                    )?;
+                                }
                                 enc.end();
                             }
                             flush_prefill_layer_phase(
@@ -4699,16 +4886,29 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             );
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_mat_mat_dispatch(
-                                    base.ctx,
-                                    &enc,
-                                    &g.in_proj_z,
-                                    &h_pack_p,
-                                    &gdn_z_pack_p,
-                                    h,
-                                    v_dim,
-                                    chunk_p,
-                                )?;
+                                if prefill_gdn_matvec_projection_enabled("z", il) {
+                                    encode_packed_matvec_projection(
+                                        base.ctx,
+                                        &enc,
+                                        &g.in_proj_z,
+                                        &h_pack_p,
+                                        &gdn_z_pack_p,
+                                        h,
+                                        v_dim,
+                                        chunk_p,
+                                    )?;
+                                } else {
+                                    encode_mat_mat_dispatch(
+                                        base.ctx,
+                                        &enc,
+                                        &g.in_proj_z,
+                                        &h_pack_p,
+                                        &gdn_z_pack_p,
+                                        h,
+                                        v_dim,
+                                        chunk_p,
+                                    )?;
+                                }
                                 enc.end();
                             }
                             flush_prefill_layer_phase(
@@ -4724,24 +4924,50 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             );
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                gdn_skinny_mat_mat(
-                                    &enc,
-                                    &g.beta_proj,
-                                    &h_pack_p,
-                                    &gdn_beta_pack_p,
-                                    h,
-                                    n_v_u,
-                                    chunk_p,
-                                )?;
-                                gdn_skinny_mat_mat(
-                                    &enc,
-                                    &g.alpha_proj,
-                                    &h_pack_p,
-                                    &gdn_alpha_pack_p,
-                                    h,
-                                    n_v_u,
-                                    chunk_p,
-                                )?;
+                                if prefill_gdn_matvec_projection_enabled("beta", il) {
+                                    encode_packed_matvec_projection(
+                                        base.ctx,
+                                        &enc,
+                                        &g.beta_proj,
+                                        &h_pack_p,
+                                        &gdn_beta_pack_p,
+                                        h,
+                                        n_v_u,
+                                        chunk_p,
+                                    )?;
+                                } else {
+                                    gdn_skinny_mat_mat(
+                                        &enc,
+                                        &g.beta_proj,
+                                        &h_pack_p,
+                                        &gdn_beta_pack_p,
+                                        h,
+                                        n_v_u,
+                                        chunk_p,
+                                    )?;
+                                }
+                                if prefill_gdn_matvec_projection_enabled("alpha", il) {
+                                    encode_packed_matvec_projection(
+                                        base.ctx,
+                                        &enc,
+                                        &g.alpha_proj,
+                                        &h_pack_p,
+                                        &gdn_alpha_pack_p,
+                                        h,
+                                        n_v_u,
+                                        chunk_p,
+                                    )?;
+                                } else {
+                                    gdn_skinny_mat_mat(
+                                        &enc,
+                                        &g.alpha_proj,
+                                        &h_pack_p,
+                                        &gdn_alpha_pack_p,
+                                        h,
+                                        n_v_u,
+                                        chunk_p,
+                                    )?;
+                                }
                                 enc.end();
                             }
                             flush_prefill_layer_phase(
@@ -4757,9 +4983,108 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             );
                         } else {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_mat_mat_dispatch(
+                            if prefill_gdn_matvec_projection_enabled("qkv", il) {
+                                encode_packed_matvec_projection(
+                                    base.ctx,
+                                    &enc,
+                                    &g.in_proj_qkv,
+                                    &h_pack_p,
+                                    &gdn_qkv_pack_p,
+                                    h,
+                                    conv_dim,
+                                    chunk_p,
+                                )?;
+                            } else {
+                                encode_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &g.in_proj_qkv,
+                                    &h_pack_p,
+                                    &gdn_qkv_pack_p,
+                                    h,
+                                    conv_dim,
+                                    chunk_p,
+                                )?;
+                            }
+                            if prefill_gdn_matvec_projection_enabled("z", il) {
+                                encode_packed_matvec_projection(
+                                    base.ctx,
+                                    &enc,
+                                    &g.in_proj_z,
+                                    &h_pack_p,
+                                    &gdn_z_pack_p,
+                                    h,
+                                    v_dim,
+                                    chunk_p,
+                                )?;
+                            } else {
+                                encode_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &g.in_proj_z,
+                                    &h_pack_p,
+                                    &gdn_z_pack_p,
+                                    h,
+                                    v_dim,
+                                    chunk_p,
+                                )?;
+                            }
+                            if prefill_gdn_matvec_projection_enabled("beta", il) {
+                                encode_packed_matvec_projection(
+                                    base.ctx,
+                                    &enc,
+                                    &g.beta_proj,
+                                    &h_pack_p,
+                                    &gdn_beta_pack_p,
+                                    h,
+                                    n_v_u,
+                                    chunk_p,
+                                )?;
+                            } else {
+                                gdn_skinny_mat_mat(
+                                    &enc,
+                                    &g.beta_proj,
+                                    &h_pack_p,
+                                    &gdn_beta_pack_p,
+                                    h,
+                                    n_v_u,
+                                    chunk_p,
+                                )?;
+                            }
+                            if prefill_gdn_matvec_projection_enabled("alpha", il) {
+                                encode_packed_matvec_projection(
+                                    base.ctx,
+                                    &enc,
+                                    &g.alpha_proj,
+                                    &h_pack_p,
+                                    &gdn_alpha_pack_p,
+                                    h,
+                                    n_v_u,
+                                    chunk_p,
+                                )?;
+                            } else {
+                                gdn_skinny_mat_mat(
+                                    &enc,
+                                    &g.alpha_proj,
+                                    &h_pack_p,
+                                    &gdn_alpha_pack_p,
+                                    h,
+                                    n_v_u,
+                                    chunk_p,
+                                )?;
+                            }
+                            enc.end();
+                        }
+
+                        if prefill_gdn_proj_oracle_layer_enabled(il) {
+                            diagnose_gdn_projection_matmat_vs_matvec(
                                 base.ctx,
-                                &enc,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "qkv",
                                 &g.in_proj_qkv,
                                 &h_pack_p,
                                 &gdn_qkv_pack_p,
@@ -4767,9 +5092,14 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 conv_dim,
                                 chunk_p,
                             )?;
-                            encode_mat_mat_dispatch(
+                            diagnose_gdn_projection_matmat_vs_matvec(
                                 base.ctx,
-                                &enc,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "z",
                                 &g.in_proj_z,
                                 &h_pack_p,
                                 &gdn_z_pack_p,
@@ -4777,8 +5107,14 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 v_dim,
                                 chunk_p,
                             )?;
-                            gdn_skinny_mat_mat(
-                                &enc,
+                            diagnose_gdn_projection_matmat_vs_matvec(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "beta",
                                 &g.beta_proj,
                                 &h_pack_p,
                                 &gdn_beta_pack_p,
@@ -4786,8 +5122,14 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 n_v_u,
                                 chunk_p,
                             )?;
-                            gdn_skinny_mat_mat(
-                                &enc,
+                            diagnose_gdn_projection_matmat_vs_matvec(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                                chunk_idx,
+                                chunk_start,
+                                il,
+                                "alpha",
                                 &g.alpha_proj,
                                 &h_pack_p,
                                 &gdn_alpha_pack_p,
@@ -4795,7 +5137,6 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 n_v_u,
                                 chunk_p,
                             )?;
-                            enc.end();
                         }
 
                         {
@@ -4980,28 +5321,61 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
 
                         if apply_mixer_residual {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_mat_mat_dispatch(
-                                base.ctx,
-                                &enc,
-                                &g.out_proj,
-                                &gdn_normed_pack_p,
-                                &mixer_out_pack_p,
-                                v_dim,
-                                h,
-                                chunk_p,
-                            )?;
+                            if prefill_gdn_matvec_projection_enabled("out", il) {
+                                encode_packed_matvec_projection(
+                                    base.ctx,
+                                    &enc,
+                                    &g.out_proj,
+                                    &gdn_normed_pack_p,
+                                    &mixer_out_pack_p,
+                                    v_dim,
+                                    h,
+                                    chunk_p,
+                                )?;
+                            } else {
+                                encode_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &g.out_proj,
+                                    &gdn_normed_pack_p,
+                                    &mixer_out_pack_p,
+                                    v_dim,
+                                    h,
+                                    chunk_p,
+                                )?;
+                            }
                             enc.end();
-                            flush_prefill_layer_phase(
-                                base.ctx,
-                                &mut cmd_buf,
-                                &mut prefill_gpu_total_ms,
-                                trace_layer_phases,
-                                chunk_idx,
-                                chunk_start,
-                                il,
-                                "gdn",
-                                "gdn_back",
-                            );
+                            if prefill_gdn_proj_oracle_layer_enabled(il)
+                                && !prefill_gdn_matvec_projection_enabled("out", il)
+                            {
+                                diagnose_gdn_projection_matmat_vs_matvec(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "out",
+                                    &g.out_proj,
+                                    &gdn_normed_pack_p,
+                                    &mixer_out_pack_p,
+                                    v_dim,
+                                    h,
+                                    chunk_p,
+                                )?;
+                            } else {
+                                flush_prefill_layer_phase(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                    trace_layer_phases,
+                                    chunk_idx,
+                                    chunk_start,
+                                    il,
+                                    "gdn",
+                                    "gdn_back",
+                                );
+                            }
                         }
                     } else {
                         // F32 oracle / mixed-dtype fallback: per-token

@@ -2243,31 +2243,33 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
     assert_eq!(last_a.len(), last_b.len(), "logits len mismatch");
     let cos_logits = cosine_27b(&last_a, &last_b);
     eprintln!("[prefill-vs-single-a3b] cos(final logits)={cos_logits:.6}");
-    assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
 
-    assert_eq!(sess_a.gdn_state.len(), sess_b.gdn_state.len());
-    let mut gdn_state_min_cos = f64::INFINITY;
-    let mut gdn_conv_min_cos = f64::INFINITY;
-    for gi in 0..sess_a.gdn_state.len() {
-        let a_state = read_tensor_f32_27b(&sess_a.gdn_state[gi]);
-        let b_state = read_tensor_f32_27b(&sess_b.gdn_state[gi]);
-        let cs = cosine_27b(&a_state, &b_state);
-        let a_conv = read_tensor_f32_27b(&sess_a.gdn_conv[gi]);
-        let b_conv = read_tensor_f32_27b(&sess_b.gdn_conv[gi]);
-        let cc = cosine_27b(&a_conv, &b_conv);
-        gdn_state_min_cos = gdn_state_min_cos.min(cs);
-        gdn_conv_min_cos = gdn_conv_min_cos.min(cc);
-    }
+    let gdn_blocks: Vec<usize> = mm
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, block)| matches!(block, MetalBlock::Gdn(_)).then_some(i))
+        .collect();
+    let gdn_cos = compare_gdn_state_conv_27b(&sess_a, &sess_b);
+    let state_block = gdn_blocks
+        .get(gdn_cos.state_worst_layer)
+        .copied()
+        .unwrap_or(gdn_cos.state_worst_layer);
+    let conv_block = gdn_blocks
+        .get(gdn_cos.conv_worst_layer)
+        .copied()
+        .unwrap_or(gdn_cos.conv_worst_layer);
     eprintln!(
-        "[prefill-vs-single-a3b] GDN state cos_min={gdn_state_min_cos:.6} conv cos_min={gdn_conv_min_cos:.6}"
-    );
-    assert!(
-        gdn_state_min_cos >= 0.999,
-        "GDN state cos_min={gdn_state_min_cos} < 0.999"
-    );
-    assert!(
-        gdn_conv_min_cos >= 0.999,
-        "GDN conv cos_min={gdn_conv_min_cos} < 0.999"
+        "[prefill-vs-single-a3b] GDN state cos_min={:.6} worst_gdn={} blk={} max|Δ|={:.3e} \
+         conv cos_min={:.6} worst_gdn={} blk={} max|Δ|={:.3e}",
+        gdn_cos.state_min_cos,
+        gdn_cos.state_worst_layer,
+        state_block,
+        gdn_cos.state_max_abs,
+        gdn_cos.conv_min_cos,
+        gdn_cos.conv_worst_layer,
+        conv_block,
+        gdn_cos.conv_max_abs,
     );
 
     assert_eq!(sess_a.kv_k.len(), sess_b.kv_k.len());
@@ -2285,6 +2287,23 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         kv_v_min_cos = kv_v_min_cos.min(cosine_27b(&a_v, &b_v));
     }
     eprintln!("[prefill-vs-single-a3b] KV K cos_min={kv_k_min_cos:.6} V cos_min={kv_v_min_cos:.6}");
+    assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
+    assert!(
+        gdn_cos.state_min_cos >= 0.999,
+        "GDN state cos_min={} < 0.999 (worst_gdn={} blk={} max_abs={})",
+        gdn_cos.state_min_cos,
+        gdn_cos.state_worst_layer,
+        state_block,
+        gdn_cos.state_max_abs,
+    );
+    assert!(
+        gdn_cos.conv_min_cos >= 0.999,
+        "GDN conv cos_min={} < 0.999 (worst_gdn={} blk={} max_abs={})",
+        gdn_cos.conv_min_cos,
+        gdn_cos.conv_worst_layer,
+        conv_block,
+        gdn_cos.conv_max_abs,
+    );
     assert!(kv_k_min_cos >= 0.999, "KV K cos_min={kv_k_min_cos} < 0.999");
     assert!(kv_v_min_cos >= 0.999, "KV V cos_min={kv_v_min_cos} < 0.999");
 }
@@ -2799,6 +2818,59 @@ fn cosine_27b(a: &[f32], b: &[f32]) -> f64 {
         nb += (b[i] as f64).powi(2);
     }
     dot / (na.sqrt() * nb.sqrt() + 1e-30)
+}
+
+struct GdnCosSummary {
+    state_min_cos: f64,
+    state_worst_layer: usize,
+    state_max_abs: f32,
+    conv_min_cos: f64,
+    conv_worst_layer: usize,
+    conv_max_abs: f32,
+}
+
+fn compare_gdn_state_conv_27b(sess_a: &MetalSession, sess_b: &MetalSession) -> GdnCosSummary {
+    assert_eq!(sess_a.gdn_state.len(), sess_b.gdn_state.len());
+    assert_eq!(sess_a.gdn_conv.len(), sess_b.gdn_conv.len());
+
+    let mut summary = GdnCosSummary {
+        state_min_cos: f64::INFINITY,
+        state_worst_layer: 0,
+        state_max_abs: 0.0,
+        conv_min_cos: f64::INFINITY,
+        conv_worst_layer: 0,
+        conv_max_abs: 0.0,
+    };
+
+    for gi in 0..sess_a.gdn_state.len() {
+        let a_state = read_tensor_f32_27b(&sess_a.gdn_state[gi]);
+        let b_state = read_tensor_f32_27b(&sess_b.gdn_state[gi]);
+        let state_cos = cosine_27b(&a_state, &b_state);
+        if state_cos < summary.state_min_cos {
+            summary.state_min_cos = state_cos;
+            summary.state_worst_layer = gi;
+            summary.state_max_abs = max_abs_delta_27b(&a_state, &b_state);
+        }
+
+        let a_conv = read_tensor_f32_27b(&sess_a.gdn_conv[gi]);
+        let b_conv = read_tensor_f32_27b(&sess_b.gdn_conv[gi]);
+        let conv_cos = cosine_27b(&a_conv, &b_conv);
+        if conv_cos < summary.conv_min_cos {
+            summary.conv_min_cos = conv_cos;
+            summary.conv_worst_layer = gi;
+            summary.conv_max_abs = max_abs_delta_27b(&a_conv, &b_conv);
+        }
+    }
+
+    summary
+}
+
+fn max_abs_delta_27b(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
 }
 
 fn read_tensor_f32_27b(t: &MetalTensor) -> Vec<f32> {

@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.195 A3B Q3 GDN Drift Isolation
+
+Status: added env-gated GDN drift diagnostics and surgical repair oracles for the
+A3B Q3 native-IQ3 candidate. No new default yet.
+
+New diagnostic switches:
+
+- `QWEN_PREFILL_GDN_BATCHED=0`: full per-token GDN fallback oracle. It fixes the
+  T40 GDN drift but is far too slow for prefill.
+- `QWEN_PREFILL_GDN_PROJ_ORACLE_LAYER=<blk[,blk]>`: compares real-path Q8_0
+  GDN mat-mat projections against repeated Q8_0 matvec on the same activation
+  rows.
+- `QWEN_PREFILL_GDN_MATVEC_PROJ=<qkv|z|beta|alpha|out|front|all>` plus optional
+  `QWEN_PREFILL_GDN_MATVEC_LAYER=<blk[,blk]>`: replaces selected batched GDN
+  projections with repeated matvec as a surgical correctness oracle.
+
+Key dirty findings, AC power, sequential GPU runs:
+
+| Gate | Result | Artifact |
+| --- | ---: | --- |
+| baseline Q3 T40/P40 native IQ3 | fail: logits `0.999308`, GDN state/conv `0.998105/0.996946` | `target/profiles/v0195-a3b-q3-native-iq3-T40-worst-gdn.out` |
+| worst layers | state `gdn=18 blk=24`, conv `gdn=9 blk=12` | same |
+| real-proj oracle blk0 | local Q8 mat-mat vs matvec max deltas: qkv `1.97e-3`, z `1.17e-3`, out `2.02e-4`; cos prints `1.000000` | `target/profiles/v0195-a3b-q3-native-iq3-T40-gdn-proj-oracle-layer0.out` |
+| all GDN out projections as matvec | T40 passes but pp1024 collapses to `0.409x` llama.cpp | `target/profiles/v0195-a3b-q3-pp1024-native-iq3-gdn-out-matvec-paired.json` |
+| only blk0 GDN out as matvec | T34/T40/T64 pass; T112/T128 fail | `target/profiles/v0195-a3b-q3-native-iq3-T{34,64,128}-P*-gdn-out-matvec-layer0*.out` |
+| blk0 GDN out paired `pp1024` | `1529.29 / 1433.77 t/s` (`1.067x`) | `target/profiles/v0195-a3b-q3-pp1024-native-iq3-gdn-out-matvec-layer0-paired.json` |
+| blk0 GDN out paired `pp4096` | `1476.97 / 1371.75 t/s` (`1.077x`) | `target/profiles/v0195-a3b-q3-pp4096-native-iq3-gdn-out-matvec-layer0-paired.json` |
+| blk0 GDN out paired `pp16384` | `1146.08 / 1103.23 t/s` (`1.039x`) | `target/profiles/v0195-a3b-q3-pp16384-native-iq3-gdn-out-matvec-layer0-paired.json` |
+
+Read: the T40 blocker is not native IQ3 MoE. Tiny Q8_0 projection differences in
+the first GDN block can amplify through the recurrent/residual stream; replacing
+only `blk.0.ssm_out` with repeated matvec makes the strict T34/T40/T64 gates pass
+while preserving a small llama.cpp win. However, T112/T128 failures remain and
+full per-token GDN fallback does not fix T128, so there is a separate longer
+multi-chunk correctness issue. Do not default A3B Q3 native IQ3 until that long
+issue is classified or scoped with evidence. Next high-EV branch is a high-
+accuracy Q8_0 batched GDN-out kernel for blk0 plus a T112/T128 chunk-boundary
+diagnostic.
+
 ## 2026-06-02 — v0.193 A3B Q3 Native IQ3 MoE Candidate
 
 Status: added an env-gated native `IQ3_XXS` routed gate/up path for A3B Q3 MoE.

@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.193 A3B Q3 Native IQ3 MoE Candidate
+
+Status: added an env-gated native `IQ3_XXS` routed gate/up path for A3B Q3 MoE.
+`QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP=1` keeps IQ3 expert gate/up banks native at
+load time, enables native IQ3 single-token MoE matvec, and routes prefill chunks
+`>=32` through grouped IQ3 SwiGLU plus the existing grouped IQ4_XS down. Default
+still dequants IQ3 gate/up to F32; do not default until the long Q3 GDN-state gate
+is resolved or explicitly waived as unrelated.
+
+Dirty validation and measurements, AC power, no thermal/performance warnings:
+
+| Gate | Result | Artifact |
+| --- | ---: | --- |
+| IQ3 matvec oracle | `max|delta|=1.024e-7` | `target/profiles/v0193-moe-iq3-matvec-oracle.out` |
+| grouped IQ3 SwiGLU oracle | `cos=1.000000`, `max|delta|=7.958e-7` | `target/profiles/v0193-moe-iq3-grouped-swiglu-oracle.out` |
+| short A3B Q3 prefill-vs-single | passed | `target/profiles/v0193-a3b-q3-native-iq3-correctness-short.out` |
+| paired `pp1024` | `1483.11 / 1375.26 t/s` (`1.078x`) | `target/profiles/v0193-a3b-q3-pp1024-native-iq3-paired.json` |
+| paired `pp4096` | `1531.35 / 1370.66 t/s` (`1.117x`) | `target/profiles/v0193-a3b-q3-pp4096-native-iq3-paired.json` |
+| paired `pp16384` | `1334.30 / 1163.80 t/s` (`1.146x`) | `target/profiles/v0193-a3b-q3-pp16384-native-iq3-paired.json` |
+
+Phase trace at `pp1024` with the native IQ3 env books routed
+SwiGLU/down/reduce at `181.34/96.44/6.20 ms`; prior grouped F32/IQ4_XS was about
+`344.96/96.51/6.12 ms`. Artifact:
+`target/profiles/v0193-a3b-q3-pp1024-native-iq3-phase-summary.tsv`.
+
+Read: this is the discontinuous low-bit MoE catch-up branch. Native IQ3 removes
+the resident-F32 gate/up tax and moves A3B Q3 from the clean fallback `90.28 t/s`
+and the grouped-F32 candidate `1191.03 t/s` to llama.cpp-beating rows at
+`pp1024/4096/16384`. `pp16` improvement is not grouped prefill; it is native IQ3
+single-token fallback. Remaining defaultability work is the known long Q3 GDN
+state drift and a clean post-commit repeat packet.
+
 ## 2026-06-02 — v0.192 A3B Q3 Grouped F32/IQ4_XS Candidate
 
 Status: added an env-gated low-bit A3B grouped routed-MoE candidate, not a new

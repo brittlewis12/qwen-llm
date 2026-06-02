@@ -11,6 +11,7 @@ using namespace metal;
 #define Q4K_BYTES 144
 #define Q5K_BYTES 176
 #define Q6K_BYTES 210
+#define IQ3XXS_BYTES 98
 #define IQ4XS_BYTES 136
 #define Q4K_NL (QK_K / 16)
 
@@ -21,8 +22,10 @@ using namespace metal;
 #define NR0_Q6K 2
 #define NSG_Q6K 2
 #define NSG_MOE_F32 4
+#define NSG_MOE_IQ3_XXS 2
 #define NSG_MOE_IQ4_XS 4
 
+#define IQ3XXS_NL (QK_K / 16)
 #define Q5K_NL (QK_K / 16)
 #define Q6K_NL (QK_K / 16)
 #define NR0_MM 64
@@ -69,6 +72,57 @@ struct moe_iq4xs_args {
 constant float moe_iq4nl_values[16] = {
     -127.0f, -104.0f, -83.0f, -65.0f, -49.0f, -35.0f, -22.0f, -10.0f,
        1.0f,   13.0f,  25.0f,  38.0f,  53.0f,  69.0f,  89.0f, 113.0f,
+};
+
+
+constant uchar moe_kmask_iq2xs[8] = {
+    1, 2, 4, 8, 16, 32, 64, 128
+};
+
+constant uchar moe_ksigns_iq2xs[128] = {
+      0, 129, 130,   3, 132,   5,   6, 135, 136,   9,  10, 139,  12, 141, 142,  15,
+    144,  17,  18, 147,  20, 149, 150,  23,  24, 153, 154,  27, 156,  29,  30, 159,
+    160,  33,  34, 163,  36, 165, 166,  39,  40, 169, 170,  43, 172,  45,  46, 175,
+     48, 177, 178,  51, 180,  53,  54, 183, 184,  57,  58, 187,  60, 189, 190,  63,
+    192,  65,  66, 195,  68, 197, 198,  71,  72, 201, 202,  75, 204,  77,  78, 207,
+     80, 209, 210,  83, 212,  85,  86, 215, 216,  89,  90, 219,  92, 221, 222,  95,
+     96, 225, 226,  99, 228, 101, 102, 231, 232, 105, 106, 235, 108, 237, 238, 111,
+    240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
+};
+
+constant uint moe_iq3xxs_grid[256] = {
+    0x04040404, 0x04040414, 0x04040424, 0x04040c0c, 0x04040c1c, 0x04040c3e, 0x04041404, 0x04041414,
+    0x04041c0c, 0x04042414, 0x04043e1c, 0x04043e2c, 0x040c040c, 0x040c041c, 0x040c0c04, 0x040c0c14,
+    0x040c140c, 0x040c142c, 0x040c1c04, 0x040c1c14, 0x040c240c, 0x040c2c24, 0x040c3e04, 0x04140404,
+    0x04140414, 0x04140424, 0x04140c0c, 0x04141404, 0x04141414, 0x04141c0c, 0x04141c1c, 0x04141c3e,
+    0x04142c0c, 0x04142c3e, 0x04143e2c, 0x041c040c, 0x041c043e, 0x041c0c04, 0x041c0c14, 0x041c142c,
+    0x041c3e04, 0x04240c1c, 0x04241c3e, 0x04242424, 0x04242c3e, 0x04243e1c, 0x04243e2c, 0x042c040c,
+    0x042c043e, 0x042c1c14, 0x042c2c14, 0x04341c2c, 0x04343424, 0x043e0c04, 0x043e0c24, 0x043e0c34,
+    0x043e241c, 0x043e340c, 0x0c04040c, 0x0c04041c, 0x0c040c04, 0x0c040c14, 0x0c04140c, 0x0c04141c,
+    0x0c041c04, 0x0c041c14, 0x0c041c24, 0x0c04243e, 0x0c042c04, 0x0c0c0404, 0x0c0c0414, 0x0c0c0c0c,
+    0x0c0c1404, 0x0c0c1414, 0x0c14040c, 0x0c14041c, 0x0c140c04, 0x0c140c14, 0x0c14140c, 0x0c141c04,
+    0x0c143e14, 0x0c1c0404, 0x0c1c0414, 0x0c1c1404, 0x0c1c1c0c, 0x0c1c2434, 0x0c1c3434, 0x0c24040c,
+    0x0c24042c, 0x0c242c04, 0x0c2c1404, 0x0c2c1424, 0x0c2c2434, 0x0c2c3e0c, 0x0c34042c, 0x0c3e1414,
+    0x0c3e2404, 0x14040404, 0x14040414, 0x14040c0c, 0x14040c1c, 0x14041404, 0x14041414, 0x14041434,
+    0x14041c0c, 0x14042414, 0x140c040c, 0x140c041c, 0x140c042c, 0x140c0c04, 0x140c0c14, 0x140c140c,
+    0x140c1c04, 0x140c341c, 0x140c343e, 0x140c3e04, 0x14140404, 0x14140414, 0x14140c0c, 0x14140c3e,
+    0x14141404, 0x14141414, 0x14141c3e, 0x14142404, 0x14142c2c, 0x141c040c, 0x141c0c04, 0x141c0c24,
+    0x141c3e04, 0x141c3e24, 0x14241c2c, 0x14242c1c, 0x142c041c, 0x142c143e, 0x142c240c, 0x142c3e24,
+    0x143e040c, 0x143e041c, 0x143e0c34, 0x143e242c, 0x1c04040c, 0x1c040c04, 0x1c040c14, 0x1c04140c,
+    0x1c04141c, 0x1c042c04, 0x1c04342c, 0x1c043e14, 0x1c0c0404, 0x1c0c0414, 0x1c0c1404, 0x1c0c1c0c,
+    0x1c0c2424, 0x1c0c2434, 0x1c14040c, 0x1c14041c, 0x1c140c04, 0x1c14142c, 0x1c142c14, 0x1c143e14,
+    0x1c1c0c0c, 0x1c1c1c1c, 0x1c241c04, 0x1c24243e, 0x1c243e14, 0x1c2c0404, 0x1c2c0434, 0x1c2c1414,
+    0x1c2c2c2c, 0x1c340c24, 0x1c341c34, 0x1c34341c, 0x1c3e1c1c, 0x1c3e3404, 0x24040424, 0x24040c3e,
+    0x24041c2c, 0x24041c3e, 0x24042c1c, 0x24042c3e, 0x240c3e24, 0x24141404, 0x24141c3e, 0x24142404,
+    0x24143404, 0x24143434, 0x241c043e, 0x241c242c, 0x24240424, 0x24242c0c, 0x24243424, 0x242c142c,
+    0x242c241c, 0x242c3e04, 0x243e042c, 0x243e0c04, 0x243e0c14, 0x243e1c04, 0x2c040c14, 0x2c04240c,
+    0x2c043e04, 0x2c0c0404, 0x2c0c0434, 0x2c0c1434, 0x2c0c2c2c, 0x2c140c24, 0x2c141c14, 0x2c143e14,
+    0x2c1c0414, 0x2c1c2c1c, 0x2c240c04, 0x2c24141c, 0x2c24143e, 0x2c243e14, 0x2c2c0414, 0x2c2c1c0c,
+    0x2c342c04, 0x2c3e1424, 0x2c3e2414, 0x34041424, 0x34042424, 0x34042434, 0x34043424, 0x340c140c,
+    0x340c340c, 0x34140c3e, 0x34143424, 0x341c1c04, 0x341c1c34, 0x34242424, 0x342c042c, 0x342c2c14,
+    0x34341c1c, 0x343e041c, 0x343e140c, 0x3e04041c, 0x3e04042c, 0x3e04043e, 0x3e040c04, 0x3e041c14,
+    0x3e042c14, 0x3e0c1434, 0x3e0c2404, 0x3e140c14, 0x3e14242c, 0x3e142c14, 0x3e1c0404, 0x3e1c0c2c,
+    0x3e1c1c1c, 0x3e1c3404, 0x3e24140c, 0x3e24240c, 0x3e2c0404, 0x3e2c0414, 0x3e2c1424, 0x3e341c04,
 };
 
 struct block_iq4_xs_local {
@@ -122,6 +176,35 @@ static inline float moe_deq_iq4_xs(device const block_iq4_xs_local & b, uint i) 
     const uchar q = b.qs[ib32 * 16u + (lane & 15u)];
     const uint idx = (lane < 16u) ? uint(q & 0x0f) : uint(q >> 4);
     return d * moe_iq4nl_values[idx];
+}
+
+static inline float moe_deq_iq3_xxs(device const uchar * blk, uint i) {
+    const float d = float(((device const half *)blk)[0]);
+    device const uchar * qs = blk + 2;
+    const uint ib32 = i >> 5;
+    const uint lane = i & 31u;
+    const uint il = lane >> 4;
+    const uint local = lane & 15u;
+    device const uchar * q3 = qs + 8u * ib32;
+    device const ushort * gas = (device const ushort *)(qs + QK_K / 4) + 2u * ib32;
+    const uint aux32 = uint(gas[0]) | (uint(gas[1]) << 16);
+    const float dl = d * (0.5f + float(aux32 >> 28)) * 0.5f;
+    const uint grid = moe_iq3xxs_grid[q3[4u * il + (local >> 2)]];
+    const float q = float((grid >> (8u * (local & 3u))) & 0xffu);
+    const uint sign_bits = (local < 8u)
+        ? uint(moe_ksigns_iq2xs[(aux32 >> (14u * il)) & 127u])
+        : uint(moe_ksigns_iq2xs[(aux32 >> (14u * il + 7u)) & 127u]);
+    const float sign = (sign_bits & uint(moe_kmask_iq2xs[local & 7u])) ? -1.0f : 1.0f;
+    return dl * q * sign;
+}
+
+inline void dequantize_iq3_xxs_half_grouped(device const uchar * blk_bytes,
+                                            short il,
+                                            thread half4x4 & reg) {
+    const uint base = 16u * (uint)il;
+    for (int i = 0; i < 16; ++i) {
+        reg[i / 4][i % 4] = half(moe_deq_iq3_xxs(blk_bytes, base + (uint)i));
+    }
 }
 
 kernel void kernel_topk_logits_softmax_f32(
@@ -1104,6 +1187,167 @@ kernel void kernel_moe_swiglu_f32_f32_grouped_slots_n16(
         }
     }
 }
+
+kernel void kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+        constant moe_group_q4k_args & args [[buffer(0)]],
+        device const uchar * srcA_gate     [[buffer(1)]],
+        device const uchar * srcA_up       [[buffer(2)]],
+        device const float * srcB          [[buffer(3)]],
+        device const int   * counts        [[buffer(4)]],
+        device const int   * ids           [[buffer(5)]],
+        device       float * dst           [[buffer(6)]],
+        threadgroup  uchar * shmem         [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa_g = (threadgroup half *)(shmem);
+    threadgroup half * sa_u = (threadgroup half *)(shmem + 4096);
+    threadgroup half * sb   = (threadgroup half *)(shmem + 8192);
+
+    const int im = tgpig.z;
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_GROUP_Q5;
+
+    const int count = counts[im];
+    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+
+    const short nr0 = ((int)args.ffn - r0 < NR0_MM) ? (short)((int)args.ffn - r0) : NR0_MM;
+    const short nr1 = (count - r1 < NR1_GROUP_Q5) ? (short)(count - r1) : NR1_GROUP_Q5;
+
+    const short lr0 = ((short)tiitg / NL0_MM) < nr0
+                        ? ((short)tiitg / NL0_MM)
+                        : nr0 - 1;
+    const short il0 = (tiitg % NL0_MM);
+    short il = il0;
+
+    const short lr1 = ((short)tiitg / NL1_GROUP_Q5) < nr1
+                        ? ((short)tiitg / NL1_GROUP_Q5)
+                        : nr1 - 1;
+    const short iy = 8 * (tiitg % NL1_GROUP_Q5);
+
+    const short offset1 = il0 / IQ3XXS_NL;
+    const ulong expert_stride = (ulong)args.nb01 * args.ffn;
+    device const uchar * x_ptr_g = srcA_gate + expert_stride * (ulong)im + (ulong)args.nb01 * (r0 + lr0)
+                                           + (ulong)offset1 * IQ3XXS_BYTES;
+    device const uchar * x_ptr_u = srcA_up   + expert_stride * (ulong)im + (ulong)args.nb01 * (r0 + lr0)
+                                           + (ulong)offset1 * IQ3XXS_BYTES;
+    const int slot_id = ids[(ulong)im * args.n_tokens + r1 + lr1];
+    const int token = slot_id / int(args.topk);
+    device const float * y_ptr = srcB + (ulong)args.stride_b * token + (ulong)iy;
+
+    simdgroup_half8x8 ma_g[4];
+    simdgroup_half8x8 ma_u[4];
+    simdgroup_half8x8 mb;
+    simdgroup_float8x8 mc_g[4];
+    simdgroup_float8x8 mc_u[4];
+
+    for (short i = 0; i < 4; ++i) {
+        mc_g[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        mc_u[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.hidden; loop_k += NK_MM) {
+        {
+            half4x4 temp_a;
+            dequantize_iq3_xxs_half_grouped(x_ptr_g, il, temp_a);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa_g[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+        {
+            half4x4 temp_a;
+            dequantize_iq3_xxs_half_grouped(x_ptr_u, il, temp_a);
+            for (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_MM) / 8;
+                const short lx = (tiitg / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa_u[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+            }
+        }
+
+        if (tiitg < B_LOAD_THREADS_GROUP_Q5) {
+            const short sx = (tiitg % NL1_GROUP_Q5);
+            const short sy = (tiitg / NL1_GROUP_Q5) / 8;
+            const short ib = 2 * sx + sy;
+            const short ly = (tiitg / NL1_GROUP_Q5) % 8;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        il = (il + 2 < IQ3XXS_NL) ? il + 2 : il % 2;
+        x_ptr_g = (il < 2)
+                    ? x_ptr_g + IQ3XXS_BYTES * ((2 + IQ3XXS_NL - 1) / IQ3XXS_NL)
+                    : x_ptr_g;
+        x_ptr_u = (il < 2)
+                    ? x_ptr_u + IQ3XXS_BYTES * ((2 + IQ3XXS_NL - 1) / IQ3XXS_NL)
+                    : x_ptr_u;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma_g = (sa_g + 4 * 64 * (sgitg % 2));
+        threadgroup const half * lsma_u = (sa_u + 4 * 64 * (sgitg % 2));
+        threadgroup const half * lsmb   = (sb   + 1 * 64 * (sgitg / 2));
+
+        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma_g[i], lsma_g + 64 * i, 8, 0, false);
+                simdgroup_load(ma_u[i], lsma_u + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_load(mb, lsmb, 8, 0, false);
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_multiply_accumulate(mc_g[i], mb, ma_g[i], mc_g[i]);
+                simdgroup_multiply_accumulate(mc_u[i], mb, ma_u[i], mc_u[i]);
+            }
+            lsma_g += 8 * 64;
+            lsma_u += 8 * 64;
+            lsmb   += 2 * 64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    threadgroup float * temp_str_g = ((threadgroup float *)shmem)
+                                     + 32 * (sgitg & 1)
+                                     + (8 * (sgitg >> 1)) * NR0_MM;
+    threadgroup float * temp_str_u = ((threadgroup float *)(shmem + 4096))
+                                     + 32 * (sgitg & 1)
+                                     + (8 * (sgitg >> 1)) * NR0_MM;
+    for (short i = 0; i < 4; ++i) {
+        simdgroup_store(mc_g[i], temp_str_g + 8 * i, NR0_MM, 0, false);
+        simdgroup_store(mc_u[i], temp_str_u + 8 * i, NR0_MM, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const short m_off = 32 * (sgitg & 1);
+    const short n_off = 8 * (sgitg >> 1);
+    const short m_local = (short)tiitg & 31;
+    const short tile_i = m_local >> 3;
+    const short mr = m_local & 7;
+    const int global_m = r0 + m_off + m_local;
+    const bool m_in = (global_m < (int)args.ffn);
+    for (short c = 0; c < 8; ++c) {
+        const int global_n = r1 + n_off + c;
+        if (m_in && global_n < count) {
+            const float g_val = temp_str_g[(8 * tile_i + mr) + c * NR0_MM];
+            const float u_val = temp_str_u[(8 * tile_i + mr) + c * NR0_MM];
+            const int slot = ids[(ulong)im * args.n_tokens + global_n];
+            dst[global_m + (ulong)slot * args.ffn] = moe_silu_f(g_val) * u_val;
+        }
+    }
+}
+
 
 kernel void kernel_moe_swiglu_q5_K_f32_grouped_slots_n16(
         constant moe_group_q4k_args & args [[buffer(0)]],
@@ -2398,6 +2642,43 @@ kernel void kernel_moe_mat_vec_f32_f32(
     }
     for (uint i = n_in_v4 * 4 + tiisg; i < args.n_in; i += 32) {
         sum += w[i] * x[i];
+    }
+
+    const float tot = simd_sum(sum);
+    if (tiisg == 0) {
+        out[(ulong)slot * args.n_out + row] = tot;
+    }
+}
+
+kernel void kernel_moe_mat_vec_iq3_xxs_f32(
+        constant moe_q4k_args & args    [[buffer(0)]],
+        device const uchar    * weight  [[buffer(1)]],
+        device const float    * x       [[buffer(2)]],
+        device const int      * top_idx [[buffer(3)]],
+        device       float    * out     [[buffer(4)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint row = tgpig.x * NSG_MOE_IQ3_XXS + sgitg;
+    if (row >= args.n_out) return;
+
+    const uint nb = args.n_in / QK_K;
+    const ulong row_stride_bytes = (ulong)nb * IQ3XXS_BYTES;
+    const ulong expert_stride_bytes = (ulong)args.n_out * row_stride_bytes;
+    device const uchar * row_blocks = weight + (ulong)expert_i * expert_stride_bytes
+                                            + (ulong)row * row_stride_bytes;
+
+    float sum = 0.0f;
+    for (uint i = tiisg; i < args.n_in; i += 32) {
+        const uint bidx = i / QK_K;
+        const uint qidx = i - bidx * QK_K;
+        sum += moe_deq_iq3_xxs(row_blocks + (ulong)bidx * IQ3XXS_BYTES, qidx) * x[i];
     }
 
     const float tot = simd_sum(sum);

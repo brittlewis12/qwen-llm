@@ -38,12 +38,12 @@ use crate::metal::{
     encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
     encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_iq4_xs_f32,
     encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_f32,
-    encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32,
-    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_f32,
+    encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32,
+    encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
 use std::sync::OnceLock;
@@ -78,6 +78,17 @@ pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
             | GgmlType::Q8_0
             | GgmlType::IQ4_NL
             | GgmlType::IQ4_XS
+    )
+}
+
+fn moe_iq3_expert_native_enabled() -> bool {
+    let truthy = |v: &str| matches!(v, "1" | "true" | "TRUE" | "yes" | "YES");
+    if let Ok(v) = std::env::var("QWEN_MOE_IQ3_EXPERT_NATIVE") {
+        return truthy(&v);
+    }
+    matches!(
+        std::env::var("QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP").as_deref(),
+        Ok(v) if truthy(v)
     )
 }
 
@@ -315,11 +326,18 @@ impl MetalModel {
         let output_norm = load_f32(model.output_norm)?;
         let lm_head = load_weight(model.lm_head)?;
 
+        let load_moe_expert = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
+            if moe_iq3_expert_native_enabled() && matches!(desc.dtype, GgmlType::IQ3_XXS) {
+                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
+            } else {
+                load_weight(desc)
+            }
+        };
         let load_moe = |moe: &MoeFfn<'_>| -> Result<MetalMoeFfn, MfError> {
             Ok(MetalMoeFfn {
                 gate_inp: load_f32(moe.gate_inp)?,
-                gate_exps: load_weight(moe.gate_exps)?,
-                up_exps: load_weight(moe.up_exps)?,
+                gate_exps: load_moe_expert(moe.gate_exps)?,
+                up_exps: load_moe_expert(moe.up_exps)?,
                 down_exps: load_weight(moe.down_exps)?,
                 gate_inp_shexp: load_f32(moe.gate_inp_shexp)?,
                 gate_inp_cpu: crate::codec::dequant_to_f32(moe.gate_inp, gguf.slice(moe.gate_inp))?,
@@ -1004,6 +1022,7 @@ impl<'a> MetalForward<'a> {
             (moe.gate_exps.dtype, moe.up_exps.dtype),
             (GgmlType::Q4_K, GgmlType::Q4_K)
                 | (GgmlType::Q5_K, GgmlType::Q5_K)
+                | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
                 | (GgmlType::F32, GgmlType::F32)
         );
         if !gate_up_supported {
@@ -1065,6 +1084,39 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
                 encode_moe_mat_vec_q5_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.up_exps,
+                    &session.h,
+                    &topk_idx,
+                    &up_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+            }
+            GgmlType::IQ3_XXS => {
+                let gate_pack = session
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = session
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                encode_moe_mat_vec_iq3_xxs_f32(
+                    self.ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &session.h,
+                    &topk_idx,
+                    &gate_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_mat_vec_iq3_xxs_f32(
                     self.ctx,
                     enc,
                     &moe.up_exps,

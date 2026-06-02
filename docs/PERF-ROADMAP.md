@@ -128,18 +128,19 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   variants outside target quants and UD low-bit `IQ2/IQ3` dense tensors. A3B
   Q3/IQ4_XS MoE now has a generic GPU fallback for F32-dequant gate/up plus
   native IQ4_XS down, so it runs instead of crashing, but audit still correctly
-  reports `0/40` grouped coverage because those files use `IQ3_XXS`/`IQ3_S`
-  gate/up expert banks with `IQ4_XS` down. Treat native grouped low-bit MoE as
-  the remaining structural coverage branch. Clean v0.189 A3B Q3 `pp1024` paired
+  reports `0/40` grouped coverage by default because those files use `IQ3_XXS`
+  gate/up expert banks with `IQ4_XS` down. Clean v0.189 A3B Q3 `pp1024` paired
   evidence is `90.28` qwen versus `1392.02` llama.cpp (`0.065x`), while no-FFN
   jumps to `2858.64 t/s`. The v0.192 env-gated grouped F32/IQ4_XS candidate
-  (`QWEN_PREFILL_MOE_GROUPED_F32_GATEUP=1`) moves A3B Q3 from clean fallback
-  `90.28 t/s` to dirty paired `1191.03 t/s` at `pp1024` and `1225.51 t/s` at
-  `pp4096`, but still trails llama.cpp by `0.856x/0.894x`. It is not defaulted:
-  longer Q3 prefill-vs-single fails the strict GDN state gate for both default and
-  env-grouped paths. The next low-bit MoE branch is native grouped
-  `IQ3_XXS/IQ3_S` gate/up; the residual is no longer route, token-loop structure,
-  or down-only coverage.
+  (`QWEN_PREFILL_MOE_GROUPED_F32_GATEUP=1`) moves A3B Q3 to dirty paired
+  `1191.03 t/s` at `pp1024` and `1225.51 t/s` at `pp4096`, but still trails
+  llama.cpp by `0.856x/0.894x`. The v0.193 native `IQ3_XXS` candidate
+  (`QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP=1`) adds direct matvec and grouped-SwiGLU
+  oracles, then reaches paired `1483.11/1375.26`, `1531.35/1370.66`, and
+  `1334.30/1163.80 t/s` at `pp1024/4096/16384`. It is still not defaulted:
+  longer Q3 prefill-vs-single previously failed the strict GDN state gate for both
+  default and env-grouped paths. The next low-bit MoE branch is defaultability:
+  isolate or fix that Q3 state drift, then run a clean repeat packet.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
   before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B
@@ -655,10 +656,13 @@ Next branch order:
 - Second, return to breadth/generalization: primary family paired guardrails,
   real-rollout prompts, and quant coverage gaps should rank above another dense
   27B microkernel unless a paired residual appears.
-- Third, keep A3B/A10B MoE in guardrail mode unless coverage drops below
+- Third, finish A3B Q3 native IQ3 defaultability before opening another low-bit MoE
+  microbranch: direct oracles are green and env perf beats llama.cpp, but the known
+  long Q3 GDN-state drift still blocks default promotion.
+- Fourth, keep A3B/A10B MoE in guardrail mode unless coverage drops below
   `40/40` or `48/48` or a warmed short-prompt row regresses. Do not revive
   hot-threshold or concentration-only branches without new distribution evidence.
-- Fourth, reopen dense FFN/GDN projection mechanics only from a specific paired
+- Fifth, reopen dense FFN/GDN projection mechanics only from a specific paired
   mismatch. It must preserve the v0.187 paired wins, not just improve a serialized
   phase bucket.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh

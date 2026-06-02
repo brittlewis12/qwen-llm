@@ -2843,6 +2843,147 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+        ctx,
+        enc,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
+    if n_hidden % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs_grouped_slots_n16",
+            detail: format!("n_hidden={n_hidden} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::IQ3_XXS || w_up.dtype != GgmlType::IQ3_XXS {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs_grouped_slots_n16",
+            detail: format!(
+                "expected IQ3_XXS gate/up expert banks, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x_pack.n_elements() as usize != n_tokens * n_hidden
+        || counts.n_elements() as usize != n_expert
+        || ids.n_elements() as usize != n_expert * n_tokens
+        || inner.n_elements() as usize != n_tokens * topk * n_ffn
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs_grouped_slots_n16",
+            detail: format!(
+                "shape mismatch x={} counts={} ids={} inner={} expected x={} counts={} ids={} inner={}",
+                x_pack.n_elements(),
+                counts.n_elements(),
+                ids.n_elements(),
+                inner.n_elements(),
+                n_tokens * n_hidden,
+                n_expert,
+                n_expert * n_tokens,
+                n_tokens * topk * n_ffn
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_iq3_xxs_f32_grouped_slots_n16")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        ffn: u32,
+        hidden: u32,
+        n_expert: u32,
+        topk: u32,
+        n_tokens: u32,
+        nb01: u32,
+        stride_b: u32,
+        min_count: u32,
+        max_count: u32,
+    }
+    let nb01 = ((n_hidden / 256) * 98) as u32;
+    enc.set_bytes(
+        0,
+        &Args {
+            ffn: n_ffn as u32,
+            hidden: n_hidden as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+            n_tokens: n_tokens as u32,
+            nb01,
+            stride_b: n_hidden as u32,
+            min_count,
+            max_count,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x_pack);
+    enc.set_tensor(4, counts);
+    enc.set_tensor(5, ids);
+    enc.set_tensor(6, inner);
+    enc.set_threadgroup_memory(0, 16384);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(16),
+            height: n_ffn.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_swiglu_q5_K_f32_grouped_slots_n16(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -4412,6 +4553,86 @@ pub fn encode_moe_mat_vec_q5_K_f32(
     enc.dispatch(
         MTLSize {
             width: n_out.div_ceil(NR0 * NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_moe_mat_vec_iq3_xxs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    topk_idx: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_mat_vec_iq3_xxs",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::IQ3_XXS {
+        return Err(MetalError::BadShape {
+            kernel: "moe_mat_vec_iq3_xxs",
+            detail: format!("expected IQ3_XXS expert weight, got {:?}", weight.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_in
+        || topk_idx.n_elements() as usize != topk
+        || out.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_mat_vec_iq3_xxs",
+            detail: format!(
+                "shape mismatch: x={} idx={} out={} expected x={n_in} idx={topk} out={}",
+                x.n_elements(),
+                topk_idx.n_elements(),
+                out.n_elements(),
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_mat_vec_iq3_xxs_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, out);
+
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
             height: topk,
             depth: 1,
         },
@@ -11515,6 +11736,213 @@ mod tests {
             eprintln!("[mat_vec n_in={n_in} n_out={n_out}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-3);
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_mat_vec_iq3_xxs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q3_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE gate tensor");
+        let n_in = t.shape[0] as usize;
+        let n_out = t.shape[1] as usize;
+        let n_expert = t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let row_stride = (n_in / 256) * 98;
+        let expert_stride = n_out * row_stride;
+        let all_bytes = g.slice(t);
+        let expert_bytes = &all_bytes[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_gate_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_out as u64],
+            dtype: GgmlType::IQ3_XXS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_bytes.len() as u64,
+        };
+        let w_f32 = crate::codec::dequant_to_f32(&expert_desc, expert_bytes).expect("dequant");
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.0075)
+            .collect();
+        let cpu = crate::forward::mat_vec_pub(&w_f32, n_in, n_out, &x);
+
+        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, all_bytes).expect("native weight");
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let expert_i = expert as i32;
+        let topk_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert_i]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_mat_vec_iq3_xxs_f32(
+                &ctx, enc, &w_t, &x_t, &topk_t, &out_t, n_in, n_out, n_expert, 1,
+            )
+        })
+        .expect("gpu iq3 matvec");
+        let gpu = read_back_f32(&out_t.buffer, n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[moe-iq3-oracle] max|delta|={max_abs:.3e}");
+        assert!(max_abs < 2e-4, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_grouped_swiglu_iq3_xxs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q3_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let n_tokens = 32usize;
+        let topk = 1usize;
+        let row_stride = (n_in / 256) * 98;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::IQ3_XXS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_tokens * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu = vec![0.0f32; n_tokens * n_ffn];
+        for token in 0..n_tokens {
+            let x_tok = &x[token * n_in..(token + 1) * n_in];
+            let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, x_tok);
+            let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, x_tok);
+            for i in 0..n_ffn {
+                let g = gate[i];
+                cpu[token * n_ffn + i] = (g / (1.0 + (-g).exp())) * up[i];
+            }
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_tokens * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let mut counts = vec![0i32; n_expert];
+        counts[expert] = n_tokens as i32;
+        let mut ids = vec![0i32; n_expert * n_tokens];
+        for token in 0..n_tokens {
+            ids[expert * n_tokens + token] = token as i32;
+        }
+        let counts_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&counts),
+            vec![n_expert as u64],
+            GgmlType::F32,
+        )
+        .expect("counts tensor");
+        let ids_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![(n_expert * n_tokens) as u64],
+            GgmlType::F32,
+        )
+        .expect("ids tensor");
+        let out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_ffn) as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &out_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                topk,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped iq3 swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
     }
 
     #[test]

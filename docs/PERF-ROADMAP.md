@@ -35,13 +35,13 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, sequential AC-power rows after `v0.181`.
+M4 Max, release `qwen-bench`, sequential AC-power rows after `v0.184`.
 Llama.cpp is build `14aa3d375`, default `flash_attn=false`.
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp4096` | `222.70` | `213.07` | `1.05x` | dirty precommit Q4 N64 default |
-| 27B dense | `pp16384` | `208.01` | `198.96` | `1.05x` | dirty precommit Q4 N64 default |
+| 27B dense | `pp4096` | `214.62` | `213.07` | `1.01x` | postbuild A/B, flat/noisy |
+| 27B dense | `pp16384` | `208.59` | `198.96` | `1.05x` | clean Q4 N64 true-long win |
 | 35B A3B | `pp4096` | `1569.79` | `1346.36` | `1.17x` | MoE long win |
 | 35B A3B | `pp16384` | `1305.47` | `1090.81` | `1.20x` | MoE long win |
 | 122B A10B | `pp4096` | `491.22` | `390.47` | `1.26x` | MoE long win |
@@ -51,15 +51,15 @@ Current short/decode guardrails:
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp512` | `239.40` | `240.06` | `1.00x` | Q4 N64 neutral/parity |
-| 27B dense | `pp1024` | `237.99` | `236.91` | `1.00x` | Q4 N64 mixed rows average |
+| 27B dense | `pp512` | `236.73` | `240.06` | `0.99x` | postbuild A/B, short gap |
+| 27B dense | `pp1024` | `222.55` | `236.91` | `0.94x` | postbuild A/B, live gap |
 | 35B A3B | `pp512` | `1443.05` | `1380.23` | `1.05x` | MoE short win |
 | 35B A3B | `pp1024` | `1624.80` | `1394.35` | `1.17x` | MoE short win |
 | 122B A10B | `pp512` | `442.59` | `442.27` | `1.00x` | MoE short parity |
 | 122B A10B | `pp1024` | `511.62` | `444.00` | `1.15x` | MoE short win |
-| 27B dense | `tg128` | `24.30` | `22.08` | `1.10x` | decode win |
-| 35B A3B | `tg128` | `82.82` | `75.90` | `1.09x` | decode win |
-| 122B A10B | `tg128` | `35.21` | `35.23` | `1.00x` | decode parity |
+| 27B dense | `tg128` | `24.04` | `22.08` | `1.09x` | decode win |
+| 35B A3B | `tg128` | `78.46` | `75.90` | `1.03x` | decode win |
+| 122B A10B | `tg128` | `34.84` | `35.23` | `0.99x` | decode parity/monitor |
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -141,11 +141,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   qwen/lcpp `446/440` at `pp512`, `488/436` at `pp1024`, `481/401` at `pp4096`,
   and `394/354` at `pp16384`. Keep A10B MoE in monitoring unless a fresh matched
   trace shows a real warmed routed-tail deficit or coverage drops below `48/48`.
-- Dense 27B long prefill is now a dirty precommit win after the Q4_K `N=64`
-  prompt mat-mat tile. Rollback is `QWEN_MATMAT_Q4_K_N64=0`. Current rows put
-  qwen/lcpp at `222.70/213.07` for `pp4096` and `208.01/198.96` for `pp16384`;
-  `pp512/1024` are parity-ish rather than clear wins. The next step is a clean
-  post-commit primary re-anchor, not another dense FFN/GDN branch by default.
+- Dense 27B true-long prefill is now a clean win after the Q4_K `N=64` prompt
+  mat-mat tile. Rollback is `QWEN_MATMAT_Q4_K_N64=0`. Postbuild A/B puts
+  qwen/lcpp at `208.59/198.96` for `pp16384`, with rollback only
+  `199.45/202.44`. Do not overclaim `pp4096`: clean A/B is flat/noisy at
+  `212.86/216.38` default versus `215.16/211.86` rollback, near lcpp `213.07`.
+  The live dense residual is the `pp1024` short/medium gap and `pp4096`
+  variance, not whether N64 should remain default.
 - The first dense FFN/GDN pass is phase-positive but not scoreboard-complete by
   itself.
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` plus timed-only summaries showed the FFN
@@ -626,25 +628,25 @@ Current design rule:
   residual actionable: chunk `512` loses to default `1024`, reduced mat-mat smem
   is phase-positive but not total-robust, and dense fused-Q4 FFN loses again in
   same-process A/B.
-- Fresh v0184 Q4_K `N=64` prompt mat-mat changes the dense rule: 27B long
-  prefill is now a dirty precommit win at `pp4096/16384`, while `pp512/1024`
-  are still close/parity rows. Larger chunks, reduced QK smem, dense fused-Q4
-  FFN, and FFN up-before-gate have all failed promotion gates. Treat the Q4 N64
-  default as the current dense candidate and re-anchor it cleanly before opening
-  another dense kernel branch.
+- Fresh v0184 Q4_K `N=64` prompt mat-mat changes the dense rule, but only after
+  the clean re-anchor correction. `pp16384` is a real N64 win, `pp4096` is
+  flat/noisy near llama.cpp, and `pp512/1024` still expose a short/medium gap.
+  Larger chunks, reduced QK smem, dense fused-Q4 FFN, and FFN up-before-gate have
+  all failed promotion gates. Keep Q4 N64 default-on, but target the short/medium
+  dense residual next.
 
 Next branch order:
 
-- First, do a clean post-commit primary re-anchor: 27B dense `pp512/1024/4096/
-  16384`, A3B/A10B `pp1024` smokes, and decode sentinels. Q4 N64 should remain
-  default unless that clean gate contradicts the precommit packet.
-- Second, if A10B or A3B short prompts regress in the re-anchor, use routed MoE
-  phase traces before coding. Require a named routed bucket and coverage still at
-  `48/48` or `40/40`; do not revive hot-threshold or concentration-only branches
-  without new distribution evidence.
-- Third, keep dense FFN/GDN projection mechanics as monitoring only. A future
-  dense branch needs a specific kernel/path mismatch and must beat the Q4 N64
-  `pp4096/16384` anchors, not just a serialized phase delta.
+- First, characterize the 27B dense `pp1024` gap and `pp4096` variance with a
+  matched default/rollback phase trace and a fresh llama.cpp profile at the same
+  shapes. The next dense branch needs to explain why N64 helps true-long but not
+  the short/medium lane, not just add another FFN microvariant.
+- Second, keep A3B/A10B MoE in guardrail mode unless coverage drops below
+  `40/40` or `48/48` or a warmed short-prompt row regresses. Do not revive
+  hot-threshold or concentration-only branches without new distribution evidence.
+- Third, reopen dense FFN/GDN projection mechanics only from a specific
+  short/medium mismatch. It must beat the postbuild `pp1024` gap and preserve the
+  `pp16384` N64 win, not just improve a serialized phase bucket.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh
   same-process or phase evidence crosses a total-throughput gate.
 

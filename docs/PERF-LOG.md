@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — v0.184 Clean Q4 N64 Re-Anchor
+
+Status: clean post-commit re-anchor for `v0.184` after rebuilding
+`qwen-bench` so artifacts carry `build_commit=28de0d0a8` and
+`build_dirty=0`. Use the `target/profiles/v0184-postbuild-*` artifacts for
+clean claims; earlier `v0184-clean-*` files were run with the pre-commit binary
+metadata and should only be treated as same-code scratch.
+
+All postbuild rows below were AC-power rows with no recorded thermal or
+performance warnings and full fast-path coverage for the target model.
+
+Dense 27B default rows after rebuild:
+
+| Shape | Default rows | Read |
+| --- | ---: | --- |
+| `pp512` | `236.44 / 236.64` | small short gap vs lcpp `240.06` |
+| `pp1024` | `228.67 / 223.41` | noisy short/medium gap vs lcpp `236.91` |
+| `pp4096` | `207.31 / 223.35` | cold/noisy; not a strong win claim |
+| `pp16384` | `208.06 / 209.57` | stable true-long win vs lcpp `198.96` |
+
+Postbuild rollback/default A/B tightens the attribution:
+
+| Shape | Rollback | Default | Read |
+| --- | ---: | ---: | --- |
+| `pp512` | `236.10 / 233.76` | `236.70 / 236.76` | default not harmful |
+| `pp1024` | `215.09 / 215.34` | `223.97 / 221.13` | default helps, gap remains |
+| `pp4096` | `215.16 / 211.86` | `212.86 / 216.38` | flat/noise, near lcpp `213.07` |
+| `pp16384` | `199.45 / 202.44` | `208.06 / 209.11` | clear N64 true-long win |
+
+Read: keep Q4 N64 default-on because it is neutral-to-positive at short shapes
+and clearly wins at true-long, but stop overclaiming `pp4096`. The live dense
+prefill residual is now the `pp1024` short/medium gap plus `pp4096` variance;
+`pp16384` is the cleanest evidence that the larger Q4 tile is the right
+direction for long prompts.
+
+Warmed MoE smokes remain clean with full coverage: A3B `pp1024` is `1624.82 t/s`
+with `40/40` grouped MoE coverage, and A10B `pp1024` is `505.04 t/s` with
+`48/48` coverage. The cold `--no-warmup` A10B smoke produced an invalid
+`129.71 t/s` row; use warmed MoE smokes for this huge model.
+
+Decode sentinels after rebuild: 27B `tg128` is `24.04 t/s`, A3B `tg128` is
+`78.46 t/s`, and A10B `tg128` is `34.84 t/s`. That preserves dense/A3B decode
+wins and leaves A10B decode as parity/monitoring against the old `35.23 t/s`
+llama.cpp anchor.
+
 ## 2026-06-01 — Dense 27B Q4 N64 Prompt Mat-Mat
 
 Status: precommit dense-prompt win after the v0.183 falsifier packet. Raw

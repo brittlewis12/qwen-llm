@@ -1,0 +1,55 @@
+{
+  "stamp": "2026-06-02-1518",
+  "host": {
+    "hostname": "zekrom",
+    "os": "Darwin zekrom.local 24.6.0 arm64",
+    "loadavg": "4.56 4.02 4.21",
+    "top_cpu_at_start": [
+      " 41.6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+      " 35.0 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper.app/Contents/MacOS/Browser Helper",
+      " 34.0 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper (Renderer).app/Contents/MacOS/Browser Helper (Renderer)",
+      " 15.5 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper (Renderer).app/Contents/MacOS/Browser Helper (Renderer)",
+      " 13.6 /Applications/Arc.app/Contents/Frameworks/ArcCore.framework/Helpers/Browser Helper (Renderer).app/Contents/MacOS/Browser Helper (Renderer)"
+    ]
+  },
+  "engines": {
+    "qwen_llm": {
+      "binary": "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+      "build_commit": "ea2ae8d9a",
+      "build_dirty": 0
+    },
+    "llama_cpp": {
+      "binary": "/Users/tito/code/llama.cpp/build/bin/llama-bench",
+      "build_commit": "14aa3d375",
+      "build_number": 9265,
+      "backends": "MTL,BLAS",
+      "gpu_info": "Apple M4 Max",
+      "cpu_info": "Accelerate, Apple M4 Max"
+    }
+  },
+  "sweep": {
+    "pp_shapes": [
+      512,
+      1024,
+      4096,
+      16384
+    ],
+    "tg_shapes": [
+      128
+    ],
+    "runs": 1,
+    "tag_filter": "27B",
+    "engine_order": "per_model_lcpp_then_qwen"
+  },
+  "qwen_env_at_start": {},
+  "models": [
+    {
+      "tag": "27B",
+      "display": "Qwen3.6-27B",
+      "kind": "dense",
+      "quant": "Q4_K_M",
+      "path": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+      "file_size_bytes": 16817244384
+    }
+  ]
+}

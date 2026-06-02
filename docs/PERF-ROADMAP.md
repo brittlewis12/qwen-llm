@@ -35,31 +35,31 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, paired AC-power rows after `v0.187`.
+M4 Max, release `qwen-bench`, clean family rows after `v0.199`.
 Llama.cpp is build `14aa3d375`, default `flash_attn=false`, `has tensor=false`.
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp4096` | `220.81` | `212.50` | `1.04x` | paired v0.187 win |
-| 27B dense | `pp16384` | `206.27` | `193.89` | `1.06x` | paired v0.187 true-long win |
-| 35B A3B | `pp4096` | `1569.79` | `1346.36` | `1.17x` | MoE long win |
-| 35B A3B | `pp16384` | `1305.47` | `1090.81` | `1.20x` | MoE long win |
-| 122B A10B | `pp4096` | `491.22` | `390.47` | `1.26x` | MoE long win |
-| 122B A10B | `pp16384` | `408.96` | `355.22` | `1.15x` | MoE long win |
+| 27B dense | `pp4096` | `220.44` | `199.49` | `1.11x` | v0.200 family re-anchor |
+| 27B dense | `pp16384` | `207.36` | `198.45` | `1.05x` | v0.200 family re-anchor |
+| 35B A3B | `pp4096` | `1516.85` | `1336.47` | `1.14x` | v0.200 family re-anchor |
+| 35B A3B | `pp16384` | `1231.05` | `1073.76` | `1.15x` | v0.200 family re-anchor |
+| 122B A10B | `pp4096` | `485.06` | `383.00` | `1.27x` | v0.200 family re-anchor |
+| 122B A10B | `pp16384` | `406.21` | `341.45` | `1.19x` | v0.200 family re-anchor |
 
 Current short/decode guardrails:
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp512` | `236.53` | `232.41` | `1.02x` | paired v0.187 win |
-| 27B dense | `pp1024` | `222.28` | `214.08` | `1.04x` | paired v0.187 win |
-| 35B A3B | `pp512` | `1443.05` | `1380.23` | `1.05x` | MoE short win |
-| 35B A3B | `pp1024` | `1624.80` | `1394.35` | `1.17x` | MoE short win |
-| 122B A10B | `pp512` | `442.59` | `442.27` | `1.00x` | MoE short parity |
-| 122B A10B | `pp1024` | `511.62` | `444.00` | `1.15x` | MoE short win |
-| 27B dense | `tg128` | `24.04` | `22.08` | `1.09x` | decode win |
-| 35B A3B | `tg128` | `78.46` | `75.90` | `1.03x` | decode win |
-| 122B A10B | `tg128` | `34.84` | `35.23` | `0.99x` | decode parity/monitor |
+| 27B dense | `pp512` | `239.48` | `235.54` | `1.02x` | v0.200 family re-anchor |
+| 27B dense | `pp1024` | `237.40` | `220.64` | `1.08x` | v0.200 family re-anchor |
+| 35B A3B | `pp512` | `1438.41` | `1374.55` | `1.05x` | v0.200 family re-anchor |
+| 35B A3B | `pp1024` | `1612.97` | `1385.43` | `1.16x` | v0.200 family re-anchor |
+| 122B A10B | `pp512` | `438.16` | `438.03` | `1.00x` | still narrow |
+| 122B A10B | `pp1024` | `500.11` | `433.51` | `1.15x` | v0.200 family re-anchor |
+| 27B dense | `tg128` | `24.35` | `19.41` | `1.25x` | v0.200 family re-anchor |
+| 35B A3B | `tg128` | `80.28` | `74.80` | `1.07x` | v0.200 family re-anchor |
+| 122B A10B | `tg128` | `35.30` | `34.38` | `1.03x` | decode win |
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -672,7 +672,10 @@ Next branch order:
   recorded as same-length synthetic anchors via `lcpp_prompt_mode`.
 - Second, return to breadth/generalization: primary family paired guardrails,
   real-rollout prompts, and quant coverage gaps should rank above another dense
-  27B microkernel unless a paired residual appears.
+  27B microkernel unless a paired residual appears. `scripts/bench/family.py`
+  remains the synthetic breadth scoreboard and now records cooldown plus
+  thermal/memory context per command; use `prefill_compare.py` repeat blocks for
+  promotion-grade narrow cells.
 - Third, finish A3B Q3 native IQ3 defaultability before opening another low-bit MoE
   microbranch: direct oracles are green and env perf beats llama.cpp, and the G8
   matrix VT bug is fixed. Treat the blk0 `qkv+alpha` GDN matvec repair as a

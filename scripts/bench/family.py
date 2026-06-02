@@ -29,6 +29,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,6 +115,50 @@ def run_json(
     except json.JSONDecodeError as e:
         sys.stderr.write(proc.stdout)
         die(f"non-JSON output from: {shlex.join(str(c) for c in cmd)} ({e})")
+
+
+def capture_text(command: list[str]) -> str:
+    proc = subprocess.run(command, capture_output=True, text=True, check=False)
+    out = proc.stdout.strip()
+    err = proc.stderr.strip()
+    if proc.returncode != 0:
+        return err or out or f"exit {proc.returncode}"
+    return out if out else err
+
+
+def sample_run_context() -> dict:
+    return {
+        "thermal": capture_text(["pmset", "-g", "therm"]),
+        "memory_pressure": capture_text(["memory_pressure", "-Q"]),
+    }
+
+
+def run_json_measured(
+    cmd: list[str | Path],
+    *,
+    stderr_filter: re.Pattern | None = None,
+    cooldown_seconds: float = 0.0,
+) -> tuple[list[dict], dict]:
+    if cooldown_seconds > 0:
+        time.sleep(cooldown_seconds)
+    before = sample_run_context()
+    wall_start = time.perf_counter()
+    rows = run_json(cmd, stderr_filter=stderr_filter)
+    outer_wall_s = time.perf_counter() - wall_start
+    after = sample_run_context()
+    return rows, {
+        "cmd": [str(c) for c in cmd],
+        "cooldown_seconds": cooldown_seconds,
+        "outer_wall_s": outer_wall_s,
+        "thermal_before": before["thermal"],
+        "thermal_after": after["thermal"],
+        "memory_before": before["memory_pressure"],
+        "memory_after": after["memory_pressure"],
+    }
+
+
+def write_manifest(out_dir: Path, manifest: dict) -> None:
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
 def probe_lcpp(llama_bench: Path, sample_model: Path) -> dict:
@@ -206,6 +251,12 @@ def main() -> int:
     ap.add_argument("--tag", help="only run this model tag")
     ap.add_argument("--shapes", help="comma list of pp<N>/tg<N> shapes")
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument(
+        "--cooldown-seconds",
+        type=float,
+        default=0.0,
+        help="sleep before each measured engine command after the first",
+    )
     ap.add_argument("--run-tag", default="", help="suffix on the output dir name")
     ap.add_argument("--no-digest", action="store_true")
     ap.add_argument(
@@ -239,6 +290,8 @@ def main() -> int:
     pp_shapes, tg_shapes = parse_shapes(args.shapes, [128, 512, 1024], [32, 128])
     if args.runs < 1:
         die("--runs must be >= 1")
+    if args.cooldown_seconds < 0:
+        die("--cooldown-seconds must be >= 0")
 
     registry = load_registry(args.models_toml, args.tag)
     # Resolve every model up front so we fail fast on missing files.
@@ -302,6 +355,7 @@ def main() -> int:
             "pp_shapes": pp_shapes,
             "tg_shapes": tg_shapes,
             "runs": args.runs,
+            "cooldown_seconds": args.cooldown_seconds,
             "tag_filter": args.tag or "",
             # Driver runs `lcpp(model_i); qwen(model_i)` for each model so
             # crash recovery is local and lcpp's baseline for each model is
@@ -309,6 +363,7 @@ def main() -> int:
             "engine_order": "per_model_lcpp_then_qwen",
         },
         "qwen_env_at_start": capture_qwen_env(),
+        "command_records": [],
         "models": [
             {
                 "tag": row["tag"],
@@ -324,12 +379,13 @@ def main() -> int:
             for row, path, size in resolved
         ],
     }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    write_manifest(out_dir, manifest)
 
     # Sweep. lcpp first per model so a mid-sweep crash still leaves a fresh
     # baseline. Never run engines in parallel.
     lcpp_count = 0
     qwen_count = 0
+    first_measured = True
     for row, path, _size in resolved:
         tag = row["tag"]
         display = row["display"]
@@ -343,7 +399,14 @@ def main() -> int:
         for n in tg_shapes:
             cmd += ["-n", str(n)]
         cmd += ["-r", str(args.runs), "-o", "json"]
-        lcpp_rows = run_json(cmd, stderr_filter=lcpp_noise)
+        cooldown = 0.0 if first_measured else args.cooldown_seconds
+        first_measured = False
+        lcpp_rows, record = run_json_measured(
+            cmd, stderr_filter=lcpp_noise, cooldown_seconds=cooldown
+        )
+        record.update({"engine": "llama.cpp", "tag": tag, "test": "all"})
+        manifest["command_records"].append(record)
+        write_manifest(out_dir, manifest)
         lcpp_out.write_text(json.dumps(lcpp_rows, indent=2) + "\n")
         lcpp_count += 1
 
@@ -351,21 +414,28 @@ def main() -> int:
         for p in pp_shapes:
             qpp_out = out_dir / f"qwen-pp{p}-{tag}.json"
             print(f"[family] -> {qpp_out}", file=sys.stderr)
-            rows = run_json(
-                [
-                    qwen_bench,
-                    "pp",
-                    "-m",
-                    path,
-                    "-p",
-                    str(p),
-                    "--runs",
-                    str(args.runs),
-                    "-o",
-                    "json",
-                ],
+            cmd = [
+                qwen_bench,
+                "pp",
+                "-m",
+                path,
+                "-p",
+                str(p),
+                "--runs",
+                str(args.runs),
+                "-o",
+                "json",
+            ]
+            cooldown = 0.0 if first_measured else args.cooldown_seconds
+            first_measured = False
+            rows, record = run_json_measured(
+                cmd,
                 stderr_filter=qwen_noise,
+                cooldown_seconds=cooldown,
             )
+            record.update({"engine": "qwen", "tag": tag, "test": f"pp{p}"})
+            manifest["command_records"].append(record)
+            write_manifest(out_dir, manifest)
             qpp_out.write_text(json.dumps(rows, indent=2) + "\n")
             qwen_count += 1
 
@@ -373,21 +443,28 @@ def main() -> int:
         for n in tg_shapes:
             qtg_out = out_dir / f"qwen-tg{n}-{tag}.json"
             print(f"[family] -> {qtg_out}", file=sys.stderr)
-            rows = run_json(
-                [
-                    qwen_bench,
-                    "tg",
-                    "-m",
-                    path,
-                    "-n",
-                    str(n),
-                    "--runs",
-                    str(args.runs),
-                    "-o",
-                    "json",
-                ],
+            cmd = [
+                qwen_bench,
+                "tg",
+                "-m",
+                path,
+                "-n",
+                str(n),
+                "--runs",
+                str(args.runs),
+                "-o",
+                "json",
+            ]
+            cooldown = 0.0 if first_measured else args.cooldown_seconds
+            first_measured = False
+            rows, record = run_json_measured(
+                cmd,
                 stderr_filter=qwen_noise,
+                cooldown_seconds=cooldown,
             )
+            record.update({"engine": "qwen", "tag": tag, "test": f"tg{n}"})
+            manifest["command_records"].append(record)
+            write_manifest(out_dir, manifest)
             qtg_out.write_text(json.dumps(rows, indent=2) + "\n")
             qwen_count += 1
 

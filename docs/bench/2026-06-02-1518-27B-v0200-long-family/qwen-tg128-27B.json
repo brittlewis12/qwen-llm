@@ -1,0 +1,42 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "ea2ae8d9a",
+    "build_dirty": 0,
+    "test_time": "2026-06-02T15:25:52Z",
+    "model_filename": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+    "model_size": 16806250496,
+    "model_n_params": 26895998464,
+    "arch_kind": "dense",
+    "test": "tg128",
+    "n_tokens": 128,
+    "n_repetitions": 1,
+    "avg_ts": 24.34852227803456,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      24.34852227803456
+    ],
+    "samples_ns": [
+      5256992541
+    ],
+    "avg_ns": 5256992541,
+    "avg_gpu_ns": 5191855874,
+    "decode_gb_per_s": 409.20736461208537,
+    "prefill_chunk": null,
+    "decode_mode": "apples-lcpp",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

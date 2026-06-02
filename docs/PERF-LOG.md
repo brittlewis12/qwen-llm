@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.200 Family Re-Anchor And Sweep Telemetry
+
+Status: returned to script-led performance characterization after the A3B
+correctness-gate work. `scripts/bench/family.py` now supports
+`--cooldown-seconds` and records per-command thermal/memory/outer-wall metadata
+in `manifest.json` so future family sweeps do not rely on operator memory for
+power/thermal context.
+
+Clean synthetic family rows on commit `ea2ae8d9a`, AC power, qwen rows with no
+thermal/performance warnings:
+
+| Model | Shape | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 27B dense | `pp512` | `239.48` | `235.54` | `1.017x` | `docs/bench/2026-06-02-1518-27B-v0200-long-family/` |
+| 27B dense | `pp1024` | `237.40` | `220.64` | `1.076x` | same |
+| 27B dense | `pp4096` | `220.44` | `199.49` | `1.105x` | same |
+| 27B dense | `pp16384` | `207.36` | `198.45` | `1.045x` | same |
+| 27B dense | `tg128` | `24.35` | `19.41` | `1.254x` | same |
+| 35B A3B | `pp512` | `1438.41` | `1374.55` | `1.046x` | `docs/bench/2026-06-02-1502-35B-A3B-v0200-long-family/` |
+| 35B A3B | `pp1024` | `1612.97` | `1385.43` | `1.164x` | same |
+| 35B A3B | `pp4096` | `1516.85` | `1336.47` | `1.135x` | same |
+| 35B A3B | `pp16384` | `1231.05` | `1073.76` | `1.146x` | same |
+| 35B A3B | `tg128` | `80.28` | `74.80` | `1.073x` | same |
+| 122B A10B | `pp512` | `438.16` | `438.03` | `1.000x` | `docs/bench/2026-06-02-1505-122B-A10B-v0200-long-family/` |
+| 122B A10B | `pp1024` | `500.11` | `433.51` | `1.154x` | same |
+| 122B A10B | `pp4096` | `485.06` | `383.00` | `1.266x` | same |
+| 122B A10B | `pp16384` | `406.21` | `341.45` | `1.190x` | same |
+| 122B A10B | `tg128` | `35.30` | `34.38` | `1.027x` | same |
+
+Read: the current committed default is now won across the measured primary
+synthetic guardrails. The fragile cells are the narrow wins at A10B `pp512` and
+27B `pp512/pp16384`; use `prefill_compare.py` repeat blocks for promotion-grade
+claims there. The tests were used for in-process oracle correctness because they
+can inspect GDN/KV/logit state; throughput and cross-engine claims should remain
+script-led, with `prefill_compare.py` as the promotion harness and `family.py` as
+the breadth scoreboard.
+
 ## 2026-06-02 — v0.199 A3B Q3 Real-Prompt Gate Packet
 
 Status: ran the first compact real-prompt packet for the A3B Q3 native-IQ3

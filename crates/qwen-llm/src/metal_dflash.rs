@@ -125,12 +125,21 @@ pub fn with_prefill_dense_ffn_fused_swiglu_q4_override<R>(
     out
 }
 
-fn prefill_dense_ffn_fused_swiglu_q4_enabled() -> bool {
+fn prefill_dense_ffn_fused_swiglu_q4_enabled(hidden: usize) -> bool {
     if let Some(enabled) = PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE.with(|slot| slot.get()) {
         return enabled;
     }
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4"))
+    static ENV: OnceLock<Option<bool>> = OnceLock::new();
+    if let Some(enabled) = *ENV.get_or_init(|| {
+        match std::env::var("QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4").as_deref() {
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") => Some(true),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO") => Some(false),
+            _ => None,
+        }
+    }) {
+        return enabled;
+    }
+    hidden <= 1536
 }
 
 fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
@@ -8079,7 +8088,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         "ffn_norm",
                     );
 
-                    let use_fused_swiglu = prefill_dense_ffn_fused_swiglu_q4_enabled()
+                    let use_fused_swiglu = prefill_dense_ffn_fused_swiglu_q4_enabled(h)
                         && g_w.dtype == GgmlType::Q4_K
                         && u_w.dtype == GgmlType::Q4_K
                         && h % 256 == 0
@@ -8272,7 +8281,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         // profiling only: leave x_pack unchanged after post-norm so a
                         // production-shape run can report the direct FFN wall delta.
                     } else if mat_mat_path {
-                        if prefill_dense_ffn_fused_swiglu_q4_enabled()
+                        if prefill_dense_ffn_fused_swiglu_q4_enabled(h)
                             && g_w.dtype == GgmlType::Q4_K
                             && u_w.dtype == GgmlType::Q4_K
                             && h % 256 == 0

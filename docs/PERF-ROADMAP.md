@@ -637,14 +637,17 @@ Current design rule:
 
 Next branch order:
 
-- First, characterize the 27B dense `pp1024` gap and `pp4096` variance with a
-  matched default/rollback phase trace and a fresh llama.cpp profile at the same
-  shapes. The next dense branch needs to explain why N64 helps true-long but not
-  the short/medium lane, not just add another FFN microvariant.
-- Second, keep A3B/A10B MoE in guardrail mode unless coverage drops below
+- First, use `scripts/profile/prefill_compare.py` for paired cross-engine
+  `pp1024/4096` evidence before opening another dense short/medium code branch.
+  Stale cold llama.cpp anchors are no longer enough because same-session rows
+  showed large qwen per-rep drift and a much lower hot llama.cpp `pp1024` row.
+- Second, characterize any paired residual with corrected `--last-pass` qwen
+  phase traces and attribution-only llama.cpp profiles. The next dense branch
+  needs to explain a paired gap, not just add another FFN microvariant.
+- Third, keep A3B/A10B MoE in guardrail mode unless coverage drops below
   `40/40` or `48/48` or a warmed short-prompt row regresses. Do not revive
   hot-threshold or concentration-only branches without new distribution evidence.
-- Third, reopen dense FFN/GDN projection mechanics only from a specific
+- Fourth, reopen dense FFN/GDN projection mechanics only from a specific
   short/medium mismatch. It must beat the postbuild `pp1024` gap and preserve the
   `pp16384` N64 win, not just improve a serialized phase bucket.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh

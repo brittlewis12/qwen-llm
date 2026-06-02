@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Paired Cross-Engine Prefill Comparator
+
+Status: added `scripts/profile/prefill_compare.py` after the 27B `pp1024`
+investigation showed stale/cool-vs-hot llama.cpp anchors can dominate short and
+medium prompt conclusions. The comparator alternates qwen and llama.cpp within
+paired blocks, captures thermal and memory probes around each run, records
+per-engine JSON rows and stderr, and emits paired qwen/lcpp deltas. It writes
+compact checkpointed JSON so interrupted runs still leave usable evidence.
+
+Use it when making cross-engine claims at drift-prone shapes:
+
+```sh
+uv run scripts/profile/prefill_compare.py \
+  --model "$MODEL" \
+  --n-prompt 1024 \
+  --runs 3 \
+  --cooldown-seconds 15 \
+  --repeat-blocks 4 \
+  --discard-first-block \
+  --output target/profiles/prefill-compare.json
+```
+
+Smoke: `target/profiles/v0186-prefill-compare-smoke.json` ran 0.8B `pp16`
+with one qwen row and one llama.cpp row, verified JSON parsing, checkpointing,
+and paired delta output. Do not use the smoke as a performance claim.
+
 ## 2026-06-01 — Prefill Phase Summary Single-Chunk Fix
 
 Status: methodology fix found while attacking the 27B `pp1024` dense residual.

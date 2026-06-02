@@ -519,6 +519,31 @@ Rules for the cooled harness:
   first newly activated chunk size (for example `pp512` before promoting
   `min_pos=512`). Do not infer safety from later-context oracles alone.
 
+For cross-engine qwen-vs-llama prompt comparisons, use the paired comparator
+instead of comparing an old llama.cpp row to a fresh qwen row:
+
+```sh
+uv run scripts/profile/prefill_compare.py \
+  --model "$MODEL" \
+  --n-prompt 1024 \
+  --runs 3 \
+  --cooldown-seconds 15 \
+  --repeat-blocks 4 \
+  --discard-first-block \
+  --output target/profiles/prefill-compare.json
+```
+
+Rules for paired cross-engine rows:
+
+- Interpret paired block deltas first; absolute rows from different thermal
+  sessions are not promotion evidence.
+- Alternate order across blocks, or use `--shuffle-seed` when order effects are
+  part of the question.
+- Use `--discard-first-block` when the first pair is likely to be a system warmup
+  or pipeline/residency outlier.
+- Keep serialized llama.cpp `GGML_METAL_PROFILE_OPS=1` logs in the attribution
+  lane only; they can be much slower than normal throughput at short prompts.
+
 ### Prefill phase trace lane
 
 Use phase traces when total-throughput drift is as large as the candidate win.

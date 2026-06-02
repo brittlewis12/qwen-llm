@@ -405,3 +405,123 @@ kernel void kernel_mat_mat_q5_K_f32_n16(
         }
     }
 }
+
+// =============================================================================
+// kernel_mat_mat_q5_K_f32_n64 -- large-N prompt tile for Q5_K.
+//
+// Mirrors mat_mat_q4_k.metal::kernel_mat_mat_q4_K_f32_n64. Host dispatch only
+// selects this for full N/M tiles (`N % 64 == 0`, `M % 64 == 0`), so there is no
+// partial-tile store path here.
+
+constant constexpr int NR1_SPECIAL_N64_Q5 = 64;
+constant constexpr int N_SIMD_GROUPS_N64_Q5 = 8;
+constant constexpr int N_THREADS_N64_Q5 = NW_MM * N_SIMD_GROUPS_N64_Q5;
+
+kernel void kernel_mat_mat_q5_K_f32_n64(
+        constant mat_mat_q5k_args & args   [[buffer(0)]],
+        device const uchar        * srcA   [[buffer(1)]],
+        device const float        * srcB   [[buffer(2)]],
+        device       float        * dst    [[buffer(3)]],
+        threadgroup  uchar        * shmem  [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_SPECIAL_N64_Q5;
+
+    const bool load_a = tiitg < N_THREADS_MM;
+    const short a_t = (short)(tiitg & (N_THREADS_MM - 1));
+    const short lr0 = a_t / NL0_MM;
+    const short il0 = a_t % NL0_MM;
+    short il = il0;
+
+    const short lr1 = (short)tiitg / NL1_MM;
+    const short iy = 8 * (tiitg % NL1_MM);
+
+    const short offset1 = il0 / Q5K_NL;
+    device const uchar * x_ptr = srcA + (ulong)args.nb01 * (r0 + lr0)
+                                       + (ulong)offset1 * Q5K_BYTES;
+    device const float * y_ptr = srcB + (ulong)args.stride_b * (r1 + lr1)
+                                       + (ulong)iy;
+
+    simdgroup_half8x8   ma[4];
+    simdgroup_half8x8   mb[2];
+    simdgroup_float8x8  mc[8];
+
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        half4x4 temp_a;
+        if (load_a) {
+            dequantize_q5_K_half(x_ptr, il, temp_a);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (load_a) {
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (a_t / NL0_MM) / 8;
+                const short lx = (a_t / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
+            }
+        }
+
+        {
+            const short sx = (tiitg % NL1_MM);
+            const short sy = (tiitg / NL1_MM) / 8;
+            const short ly = (tiitg / NL1_MM) % 8;
+            const short ib = 8 * sx + sy;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        il = (il + 2 < Q5K_NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2)
+                  ? x_ptr + Q5K_BYTES * ((2 + Q5K_NL - 1) / Q5K_NL)
+                  : x_ptr;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = (sa + 4 * 64 * (sgitg & 1));
+        threadgroup const half * lsmb = (sb + 2 * 64 * (sgitg >> 1));
+
+        FOR_UNROLL (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+
+            lsma += 8 * 64;
+            lsmb += 8 * 64;
+        }
+    }
+
+    device float * C = dst + (r0 + 32 * (sgitg & 1))
+                           + (r1 + 16 * (sgitg >> 1)) * args.M;
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * args.M * (i / 4),
+                        args.M, 0, false);
+    }
+}

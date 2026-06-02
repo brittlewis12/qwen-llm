@@ -2305,6 +2305,48 @@ fn mat_mat_q4_k_n64_enabled() -> bool {
     })
 }
 
+fn mat_mat_q5_k_n64_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_Q5_K_N64").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn mat_mat_q5_k_n64_min_query() -> usize {
+    static MIN_N: OnceLock<usize> = OnceLock::new();
+    *MIN_N.get_or_init(|| {
+        std::env::var("QWEN_MATMAT_Q5_K_N64_MIN_N")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 64)
+            .unwrap_or(if cfg!(test) { 64 } else { 1024 })
+    })
+}
+
+fn mat_mat_q6_k_n64_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_Q6_K_N64").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn mat_mat_q6_k_n64_min_query() -> usize {
+    static MIN_N: OnceLock<usize> = OnceLock::new();
+    *MIN_N.get_or_init(|| {
+        std::env::var("QWEN_MATMAT_Q6_K_N64_MIN_N")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 64)
+            .unwrap_or(if cfg!(test) { 64 } else { 1024 })
+    })
+}
+
 pub fn encode_mat_mat_q4_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -11044,10 +11086,13 @@ pub fn encode_mat_mat_q6_k_f32(
         });
     }
 
-    // H5.3b.5.5 fast-path gate (codex retune review): same NR1=16
-    // specialization as Q4_K mat-mat. Only fires when n_query == 16
-    // exactly; otherwise generic NR1=32 kernel handles partial N.
-    let kernel_name = if n_query == 16 {
+    let use_n64 = mat_mat_q6_k_n64_enabled()
+        && n_query >= mat_mat_q6_k_n64_min_query()
+        && n_query % 64 == 0
+        && n_out % 64 == 0;
+    let kernel_name = if use_n64 {
+        "kernel_mat_mat_q6_K_f32_n64"
+    } else if n_query == 16 {
         "kernel_mat_mat_q6_K_f32_n16"
     } else {
         "kernel_mat_mat_q6_K_f32"
@@ -11082,10 +11127,22 @@ pub fn encode_mat_mat_q6_k_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    let nr1 = if n_query == 16 { 16 } else { 32 };
-    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
+    let nr1 = if use_n64 {
+        64
+    } else if n_query == 16 {
+        16
+    } else {
+        32
+    };
+    let smem = if use_n64 {
+        8192
+    } else {
+        mat_mat_qk_threadgroup_memory(n_out, n_query, nr1)
+    };
+    enc.set_threadgroup_memory(0, smem);
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
+    let threads = if use_n64 { 256 } else { 128 };
     enc.dispatch(
         MTLSize {
             width: n_tg_x,
@@ -11093,7 +11150,7 @@ pub fn encode_mat_mat_q6_k_f32(
             depth: 1,
         },
         MTLSize {
-            width: 128,
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -11164,10 +11221,13 @@ pub fn encode_mat_mat_q5_k_f32(
         });
     }
 
-    // NR1=16 fast-path gate: same specialization as Q4_K / Q6_K
-    // mat-mat. Only fires when n_query == 16 exactly; otherwise generic
-    // NR1=32 kernel handles partial N.
-    let kernel_name = if n_query == 16 {
+    let use_n64 = mat_mat_q5_k_n64_enabled()
+        && n_query >= mat_mat_q5_k_n64_min_query()
+        && n_query % 64 == 0
+        && n_out % 64 == 0;
+    let kernel_name = if use_n64 {
+        "kernel_mat_mat_q5_K_f32_n64"
+    } else if n_query == 16 {
         "kernel_mat_mat_q5_K_f32_n16"
     } else {
         "kernel_mat_mat_q5_K_f32"
@@ -11202,10 +11262,22 @@ pub fn encode_mat_mat_q5_k_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    let nr1 = if n_query == 16 { 16 } else { 32 };
-    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
+    let nr1 = if use_n64 {
+        64
+    } else if n_query == 16 {
+        16
+    } else {
+        32
+    };
+    let smem = if use_n64 {
+        8192
+    } else {
+        mat_mat_qk_threadgroup_memory(n_out, n_query, nr1)
+    };
+    enc.set_threadgroup_memory(0, smem);
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
+    let threads = if use_n64 { 256 } else { 128 };
     enc.dispatch(
         MTLSize {
             width: n_tg_x,
@@ -11213,7 +11285,7 @@ pub fn encode_mat_mat_q5_k_f32(
             depth: 1,
         },
         MTLSize {
-            width: 128,
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -12661,10 +12733,8 @@ mod tests {
         }
     }
 
-    /// H5.3b.6 gate: Q6_K mat-mat parity vs N successive mat-vec
-    /// (codex H5.3b plan rev 6 — same playbook as Q4_K mat-mat gate
-    /// in v0.63). Per-row cosine ≥ 0.999 across N_QUERY ∈ {1, 16, 32}
-    /// on real Qwen3.6-27B Q6_K production weights.
+    /// H5.3b.6 gate: Q6_K mat-mat parity vs N successive mat-vec.
+    /// Includes N_QUERY=64/128 so the large-N N64 prompt tile is exercised.
     #[test]
     fn mat_mat_q6_k_matches_cpu_and_mat_vec() {
         let ctx = match MetalContext::new() {
@@ -12672,7 +12742,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf";
         if !std::path::Path::new(path).exists() {
             eprintln!("[mat_mat_q6_k] skipped — fixture missing");
             return;
@@ -12699,7 +12769,7 @@ mod tests {
         let weight_f32 = crate::codec::dequant_to_f32(q6k, g.slice(q6k)).expect("dequant");
         let weight_bytes = g.slice(q6k);
 
-        for &n_query in &[1usize, 16, 32] {
+        for &n_query in &[1usize, 16, 32, 64, 128] {
             let mut x = vec![0.0f32; n_query * n_in];
             for (i, v) in x.iter_mut().enumerate() {
                 *v = ((i % 13) as f32 - 6.0) * 1e-2;
@@ -12785,12 +12855,7 @@ mod tests {
     }
 
     /// v0.73a.0 gate: Q5_K mat-mat parity vs N successive Q5_K mat-vec.
-    /// Same playbook as the Q4_K (v0.63) and Q6_K (v0.67) gates: per-row
-    /// cosine ≥ 0.999 across N_QUERY ∈ {1, 16, 32}, max|Δ| ≤ 1e-2,
-    /// explicit col-major dst layout sanity probe at three corner cells.
-    /// Uses real Q5_K weight from the 27B GGUF — production GDN
-    /// `ssm_out.weight` (= GDN out_proj) is the only Q5_K projection in
-    /// 27B Q4_K_M, shape [n_in=6144, n_out=5120].
+    /// Includes N_QUERY=64/128 so the large-N N64 prompt tile is exercised.
     #[test]
     fn mat_mat_q5_k_matches_cpu_and_mat_vec() {
         let ctx = match MetalContext::new() {
@@ -12798,7 +12863,7 @@ mod tests {
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let path = "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf";
         if !std::path::Path::new(path).exists() {
             eprintln!("[mat_mat_q5_k] skipped — fixture missing");
             return;
@@ -12825,7 +12890,7 @@ mod tests {
         let weight_f32 = crate::codec::dequant_to_f32(q5k, g.slice(q5k)).expect("dequant");
         let weight_bytes = g.slice(q5k);
 
-        for &n_query in &[1usize, 16, 32] {
+        for &n_query in &[1usize, 16, 32, 64, 128] {
             let mut x = vec![0.0f32; n_query * n_in];
             for (i, v) in x.iter_mut().enumerate() {
                 *v = ((i % 13) as f32 - 6.0) * 1e-2;

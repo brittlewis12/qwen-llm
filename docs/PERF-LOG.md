@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.189 A3B Q3 MoE Fallback Support
+
+Status: closed the immediate A3B low-bit MoE support hole without claiming a fast
+path. `Qwen3.5-35B-A3B-Q3_K_M.gguf` uses `IQ3_XXS/IQ3_XXS/IQ4_XS` routed expert
+banks in all 40 MoE layers. The loader dequants `IQ3_XXS` gate/up banks to F32,
+while `IQ4_XS` down stays native; before this branch the prefill token fallback
+rejected that F32/IQ4_XS combination and failed during warmup.
+
+Change: added generic GPU routed-MoE fallback kernels for F32 gate/up expert-bank
+matvec and IQ4_XS down expert-bank matvec, then routed them through
+`encode_moe_routed_ffn_gpu` and the profiler split path. This is an oracle/support
+path, not grouped MoE coverage: `gguf_fastpath_audit.py` still reports `0/40`
+grouped coverage with `IQ3_XXS/IQ3_XXS/IQ4_XS:40`.
+
+Dirty-branch support smokes, AC power, no thermal/performance warnings:
+
+| Shape | qwen row | Artifact |
+| --- | ---: | --- |
+| `pp1` | `1.90 t/s` | `target/profiles/v0189-a3b-q3-pp1-f32-iq4xs-fallback.json` |
+| `pp16` | `32.16 t/s` | `target/profiles/v0189-a3b-q3-pp16-f32-iq4xs-fallback.json` |
+| `pp1024` | `90.30 t/s` | `target/profiles/v0189-a3b-q3-pp1024-f32-iq4xs-fallback.json` |
+
+Read: this converts a crash into a measurable baseline and gives a GPU oracle for
+native low-bit MoE work. The likely next native branch is grouped IQ4_XS down as a
+smaller step, then IQ3_XXS/IQ3_S gate/up only if phase evidence says F32 gate/up
+is the real wall. Do not mark low-bit A3B grouped MoE as covered until native
+grouped expert-bank kernels exist.
+
 ## 2026-06-01 — v0.187 Paired Dense 27B Recheck
 
 Status: clean paired qwen-vs-llama dense 27B prefill recheck using

@@ -36,13 +36,14 @@ use crate::metal::{
     encode_attn_decode_v4_f32, encode_axpy_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
     encode_ffn_swiglu_q4_K_f32, encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32,
     encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32,
-    encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_iq4_xs_f32,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_f32,
+    encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32,
+    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
+    encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
 use std::sync::OnceLock;
@@ -999,15 +1000,22 @@ impl<'a> MetalForward<'a> {
         let n_expert = arch.expert_count as usize;
         let topk = arch.expert_used_count.min(arch.expert_count) as usize;
 
-        if !matches!(moe.gate_exps.dtype, GgmlType::Q4_K | GgmlType::Q5_K)
-            || moe.gate_exps.dtype != moe.up_exps.dtype
-        {
+        let gate_up_supported = matches!(
+            (moe.gate_exps.dtype, moe.up_exps.dtype),
+            (GgmlType::Q4_K, GgmlType::Q4_K)
+                | (GgmlType::Q5_K, GgmlType::Q5_K)
+                | (GgmlType::F32, GgmlType::F32)
+        );
+        if !gate_up_supported {
             return Err(MfError::UnsupportedDtype {
                 name: "MoE routed gate/up expert banks".into(),
                 dtype: moe.gate_exps.dtype,
             });
         }
-        if !matches!(moe.down_exps.dtype, GgmlType::Q5_K | GgmlType::Q6_K) {
+        if !matches!(
+            moe.down_exps.dtype,
+            GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::IQ4_XS
+        ) {
             return Err(MfError::UnsupportedDtype {
                 name: "MoE routed down expert bank".into(),
                 dtype: moe.down_exps.dtype,
@@ -1070,6 +1078,39 @@ impl<'a> MetalForward<'a> {
                 )?;
                 encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
             }
+            GgmlType::F32 => {
+                let gate_pack = session
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = session
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                encode_moe_mat_vec_f32(
+                    self.ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &session.h,
+                    &topk_idx,
+                    &gate_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_mat_vec_f32(
+                    self.ctx,
+                    enc,
+                    &moe.up_exps,
+                    &session.h,
+                    &topk_idx,
+                    &up_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+            }
             _ => unreachable!(),
         }
         match moe.down_exps.dtype {
@@ -1109,6 +1150,29 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
+            GgmlType::IQ4_XS => {
+                encode_moe_down_iq4_xs_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_weighted_sum_f32(
+                    self.ctx,
+                    enc,
+                    &moe_expert_out,
+                    &topk_w,
+                    &session.mixer_out,
+                    h,
+                    topk,
+                )?;
+            }
             _ => unreachable!(),
         }
         Ok(())
@@ -6711,6 +6775,60 @@ mod tests {
                     &mut phases,
                 )?;
             }
+            GgmlType::F32 => {
+                let gate_pack = s
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = s
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                timed(
+                    "routed_gate_f32",
+                    &|enc| {
+                        encode_moe_mat_vec_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.gate_exps,
+                            &s.h,
+                            &topk_idx,
+                            &gate_pack,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_up_f32",
+                    &|enc| {
+                        encode_moe_mat_vec_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.up_exps,
+                            &s.h,
+                            &topk_idx,
+                            &up_pack,
+                            h,
+                            f_exp,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_silu_mul",
+                    &|enc| {
+                        encode_silu_mul_f32(mf.ctx, enc, &gate_pack, &up_pack, &moe_inner)
+                            .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
             dtype => {
                 return Err(MfError::UnsupportedDtype {
                     name: "MoE routed gate/up expert banks".into(),
@@ -6772,6 +6890,43 @@ mod tests {
                             f_exp,
                             h,
                             n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
+            GgmlType::IQ4_XS => {
+                timed(
+                    "routed_down_iq4_xs",
+                    &|enc| {
+                        encode_moe_down_iq4_xs_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &moe_expert_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_weighted_sum",
+                    &|enc| {
+                        encode_moe_weighted_sum_f32(
+                            mf.ctx,
+                            enc,
+                            &moe_expert_out,
+                            &topk_w,
+                            &s.mixer_out,
+                            h,
                             topk,
                         )
                         .map_err(MfError::from)

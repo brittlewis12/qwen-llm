@@ -125,10 +125,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   The v0176 dense validation generalizes this to 2B/9B Q2/Q3/IQ4_XS and 27B Q3:
   2B is `0.97-1.00x`, 9B is `0.99-1.06x`, and 27B Q3 `pp1024` is `1.08x`
   llama.cpp. Remaining explicit coverage gaps are MoE grouped expert-bank
-  variants outside target quants and UD low-bit `IQ2/IQ3` dense tensors. The
-  concrete next low-bit structural miss is A3B Q3/IQ4_XS MoE: audit reports
-  `0/40` grouped coverage because those files use `IQ3_XXS`/`IQ3_S` gate/up
-  expert banks with `IQ4_XS` down.
+  variants outside target quants and UD low-bit `IQ2/IQ3` dense tensors. A3B
+  Q3/IQ4_XS MoE now has a generic GPU fallback for F32-dequant gate/up plus
+  native IQ4_XS down, so it runs instead of crashing, but audit still correctly
+  reports `0/40` grouped coverage because those files use `IQ3_XXS`/`IQ3_S`
+  gate/up expert banks with `IQ4_XS` down. Treat native grouped low-bit MoE as
+  the remaining structural coverage branch; grouped IQ4_XS down is the smallest
+  next kernel before taking on native IQ3 gate/up.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
   before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B

@@ -11,6 +11,7 @@ using namespace metal;
 #define Q4K_BYTES 144
 #define Q5K_BYTES 176
 #define Q6K_BYTES 210
+#define IQ4XS_BYTES 136
 #define Q4K_NL (QK_K / 16)
 
 #define NR0_Q4K 2
@@ -19,6 +20,8 @@ using namespace metal;
 #define NSG_Q5K 2
 #define NR0_Q6K 2
 #define NSG_Q6K 2
+#define NSG_MOE_F32 4
+#define NSG_MOE_IQ4_XS 4
 
 #define Q5K_NL (QK_K / 16)
 #define Q6K_NL (QK_K / 16)
@@ -47,6 +50,32 @@ struct moe_q6k_args {
     uint n_out;
     uint n_expert;
     uint topk;
+};
+
+struct moe_f32_args {
+    uint n_in;
+    uint n_out;
+    uint n_expert;
+    uint topk;
+};
+
+struct moe_iq4xs_args {
+    uint n_in;
+    uint n_out;
+    uint n_expert;
+    uint topk;
+};
+
+constant float moe_iq4nl_values[16] = {
+    -127.0f, -104.0f, -83.0f, -65.0f, -49.0f, -35.0f, -22.0f, -10.0f,
+       1.0f,   13.0f,  25.0f,  38.0f,  53.0f,  69.0f,  89.0f, 113.0f,
+};
+
+struct block_iq4_xs_local {
+    half d;
+    ushort scales_h;
+    uchar scales_l[4];
+    uchar qs[128];
 };
 
 struct moe_sum_args {
@@ -82,6 +111,17 @@ struct moe_route_bucket_args {
 
 inline float moe_silu_f(float x) {
     return x / (1.0f + exp(-x));
+}
+
+static inline float moe_deq_iq4_xs(device const block_iq4_xs_local & b, uint i) {
+    const uint ib32 = i >> 5;
+    const uint lane = i & 31u;
+    const uint scale_l = (uint(b.scales_l[ib32 >> 1]) >> (4u * (ib32 & 1u))) & 0x0fu;
+    const uint scale_h = (uint(b.scales_h) >> (2u * ib32)) & 3u;
+    const float d = float(b.d) * float(int(scale_l | (scale_h << 4)) - 32);
+    const uchar q = b.qs[ib32 * 16u + (lane & 15u)];
+    const uint idx = (lane < 16u) ? uint(q & 0x0f) : uint(q >> 4);
+    return d * moe_iq4nl_values[idx];
 }
 
 kernel void kernel_topk_logits_softmax_f32(
@@ -2172,6 +2212,83 @@ kernel void kernel_moe_down_q5_K_f32(
     const float tot = simd_sum(sumf);
     if (tiisg == 0 && first_row < args.n_out) {
         out[(ulong)slot * args.n_out + first_row] = tot;
+    }
+}
+
+kernel void kernel_moe_mat_vec_f32_f32(
+        constant moe_f32_args & args    [[buffer(0)]],
+        device const float   * weight   [[buffer(1)]],
+        device const float   * x        [[buffer(2)]],
+        device const int     * top_idx  [[buffer(3)]],
+        device       float   * out      [[buffer(4)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint row = tgpig.x * NSG_MOE_F32 + sgitg;
+    if (row >= args.n_out) return;
+
+    const ulong expert_stride = (ulong)args.n_out * args.n_in;
+    device const float * w = weight + (ulong)expert_i * expert_stride + (ulong)row * args.n_in;
+
+    float sum = 0.0f;
+    const uint n_in_v4 = args.n_in / 4;
+    device const float4 * w4 = (device const float4 *)w;
+    device const float4 * x4 = (device const float4 *)x;
+    for (uint i = tiisg; i < n_in_v4; i += 32) {
+        const float4 a = w4[i];
+        const float4 b = x4[i];
+        sum += a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    }
+    for (uint i = n_in_v4 * 4 + tiisg; i < args.n_in; i += 32) {
+        sum += w[i] * x[i];
+    }
+
+    const float tot = simd_sum(sum);
+    if (tiisg == 0) {
+        out[(ulong)slot * args.n_out + row] = tot;
+    }
+}
+
+kernel void kernel_moe_down_iq4_xs_f32(
+        constant moe_iq4xs_args & args           [[buffer(0)]],
+        device const block_iq4_xs_local * weight [[buffer(1)]],
+        device const float              * inner  [[buffer(2)]],
+        device const int                * top_idx [[buffer(3)]],
+        device       float              * out    [[buffer(4)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint row = tgpig.x * NSG_MOE_IQ4_XS + sgitg;
+    if (row >= args.n_out) return;
+
+    const uint nb = args.n_in / QK_K;
+    const ulong expert_stride = (ulong)args.n_out * nb;
+    device const block_iq4_xs_local * row_blocks =
+        weight + (ulong)expert_i * expert_stride + (ulong)row * nb;
+    device const float * x = inner + (ulong)slot * args.n_in;
+
+    float sum = 0.0f;
+    for (uint i = tiisg; i < args.n_in; i += 32) {
+        const uint bidx = i / QK_K;
+        const uint qidx = i - bidx * QK_K;
+        sum += moe_deq_iq4_xs(row_blocks[bidx], qidx) * x[i];
+    }
+
+    const float tot = simd_sum(sum);
+    if (tiisg == 0) {
+        out[(ulong)slot * args.n_out + row] = tot;
     }
 }
 

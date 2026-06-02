@@ -74,7 +74,10 @@ Current caveats:
 - Small dense short/medium prefill is not won across the board: 0.8B is
   `0.925x/0.950x/0.957x` at `pp512/1024/4096`, and 2B is `0.954x` at `pp512`.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
-  `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity.
+  `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
+  v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to
+  `~242-246 t/s` averaged, with warmed samples above `280 t/s`; it is improved
+  but not yet a cold-average pinned-lcpp win.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 

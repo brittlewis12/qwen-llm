@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.204 A10B pp128 G16 Threshold Cleanup
+
+Status: attacked the fresh pinned-b9481 A10B `pp128` miss without another broad
+family sweep. The culprit is a threshold cliff: default `pp128` skipped the G16
+matrix attention path because `QWEN_PREFILL_ATTN_PACKED_G16_MIN_POS` defaulted to
+`320`.
+
+Falsifier packet, qwen-only variants at A10B `pp128`:
+
+| Variant | Block 0 | Block 1 | Read |
+| --- | ---: | ---: | --- |
+| base | `223.30` | `219.55` | current miss |
+| `G16_MIN_POS=1` | `242.24` | `244.88` | `+9-12%` |
+| route fused | `221.95` | `222.53` | flat/slower |
+| both | `245.69` | `246.29` | attention threshold is the win |
+
+Trace attribution: default `pp128` booked attention body at `109.96 ms` across 12
+attention layers. Forced G16 matrix booked `body_matrix_kq + softmax + kqv` at
+`2.17 ms` total. The new default lowers the G16 threshold to `128`; a dirty
+post-change smoke produced `242.38 t/s` average with steady samples at
+`282.42/283.41 t/s`.
+
+Artifacts:
+
+- `target/profiles/v0204-a10b-pp128-threshold-falsifiers.json`
+- `target/profiles/v0204-a10b-pp128-default-trace-summary.tsv`
+- `target/profiles/v0204-a10b-pp128-g16min1-trace-summary.tsv`
+- `target/profiles/v0204-a10b-pp128-g16min128-default-smoke.json`
+
+Read: this does not yet prove A10B `pp128` is won in the cold averaged family
+semantics, because the pinned lcpp row is `260.27 t/s` and qwen's first measured
+sample is still cold-ish. It does remove the obvious threshold cliff and should
+be treated as a very-short prompt cleanup with rollback via
+`QWEN_PREFILL_ATTN_PACKED_G16_MIN_POS=320`.
+
 ## 2026-06-02 — v0.203 Pinned b9481 Family Re-Anchor
 
 Status: rebuilt `qwen-bench` at `fa941aad7` and ran the full synthetic family

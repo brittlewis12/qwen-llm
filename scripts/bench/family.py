@@ -8,7 +8,7 @@
 Usage:
     scripts/bench/family.py                          # full family
     scripts/bench/family.py --tag 27B                # one model
-    scripts/bench/family.py --shapes pp512,tg128     # narrow shapes
+    scripts/bench/family.py --shapes pp512,tg128     # exact narrow shapes
     scripts/bench/family.py --runs 5
     scripts/bench/family.py --no-digest              # raw json only
 
@@ -243,8 +243,8 @@ def capture_qwen_env() -> dict[str, str]:
 def parse_shapes(
     arg: str | None, pp_default: list[int], tg_default: list[int]
 ) -> tuple[list[int], list[int]]:
-    """`--shapes pp128,pp512,tg32` overrides either set; unspecified side
-    keeps the default. Bare numbers default to pp."""
+    """`--shapes pp128,pp512,tg32` runs exactly those shapes.
+    Bare numbers default to pp. Without `--shapes`, use the defaults."""
     if not arg:
         return pp_default, tg_default
     pp: list[int] = []
@@ -257,7 +257,7 @@ def parse_shapes(
             tg.append(int(s[2:]))
         else:
             pp.append(int(s))
-    return (pp or pp_default), (tg or tg_default)
+    return pp, tg
 
 
 def main() -> int:

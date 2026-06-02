@@ -16,6 +16,8 @@ For priorities: `docs/PERF-ROADMAP.md`.
   `scripts/bench/ensure_llama_cpp.py` into `~/.cache/qwen-llm/llama.cpp`.
 - Ambient local llama.cpp binaries are allowed only as explicit one-offs with
   `--allow-unpinned-lcpp`; they are not canonical family baselines.
+- In `scripts/bench/family.py`, `--shapes` is exact: `--shapes tg128` runs only
+  `tg128`; omit `--shapes` for the default family grid.
 
 ## What we don't
 

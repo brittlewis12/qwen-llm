@@ -6,6 +6,17 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.205 Exact Family Shape Selection
+
+Status: fixed a harness footgun found during the pinned-b9481 re-anchor. Before
+this change, `scripts/bench/family.py --shapes tg128` still ran default prompt
+shapes because unspecified pp/tg sides were filled from defaults. That caused the
+A10B tg repeat to run `pp128/512/1024` too.
+
+New behavior: `--shapes` is exact. No `--shapes` still uses the default family
+grid, but `--shapes tg128` runs only `tg128`, and `--shapes pp512,tg128` runs
+exactly those two cells.
+
 ## 2026-06-02 — v0.204 A10B pp128 G16 Threshold Cleanup
 
 Status: attacked the fresh pinned-b9481 A10B `pp128` miss without another broad

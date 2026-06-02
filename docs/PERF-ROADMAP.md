@@ -35,13 +35,13 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, sequential AC-power rows after `v0.184`.
-Llama.cpp is build `14aa3d375`, default `flash_attn=false`.
+M4 Max, release `qwen-bench`, paired AC-power rows after `v0.187`.
+Llama.cpp is build `14aa3d375`, default `flash_attn=false`, `has tensor=false`.
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp4096` | `214.62` | `213.07` | `1.01x` | postbuild A/B, flat/noisy |
-| 27B dense | `pp16384` | `208.59` | `198.96` | `1.05x` | clean Q4 N64 true-long win |
+| 27B dense | `pp4096` | `220.81` | `212.50` | `1.04x` | paired v0.187 win |
+| 27B dense | `pp16384` | `206.27` | `193.89` | `1.06x` | paired v0.187 true-long win |
 | 35B A3B | `pp4096` | `1569.79` | `1346.36` | `1.17x` | MoE long win |
 | 35B A3B | `pp16384` | `1305.47` | `1090.81` | `1.20x` | MoE long win |
 | 122B A10B | `pp4096` | `491.22` | `390.47` | `1.26x` | MoE long win |
@@ -51,8 +51,8 @@ Current short/decode guardrails:
 
 | Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp512` | `236.73` | `240.06` | `0.99x` | postbuild A/B, short gap |
-| 27B dense | `pp1024` | `222.55` | `236.91` | `0.94x` | postbuild A/B, live gap |
+| 27B dense | `pp512` | `236.53` | `232.41` | `1.02x` | paired v0.187 win |
+| 27B dense | `pp1024` | `222.28` | `214.08` | `1.04x` | paired v0.187 win |
 | 35B A3B | `pp512` | `1443.05` | `1380.23` | `1.05x` | MoE short win |
 | 35B A3B | `pp1024` | `1624.80` | `1394.35` | `1.17x` | MoE short win |
 | 122B A10B | `pp512` | `442.59` | `442.27` | `1.00x` | MoE short parity |
@@ -68,7 +68,11 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   775.82/690.68 t/s` at `pp512/1024/4096/16384` versus llama.cpp
   `814.10/804.64/693.95/678.06`; 0.8B/2B/4B `pp1024` smokes land at
   `0.98x/1.00x/1.01x` versus llama.cpp.
-- `qwen-llm` 27B dense packed pp: `~212.0 t/s`; `llama-bench`: `~240.9 t/s`
+- 27B dense prefill now uses paired cross-engine rows for scoreboard claims. The
+  v0.187 paired comparator puts qwen/lcpp at `236.53/232.41` for `pp512`,
+  `222.28/214.08` for `pp1024`, `220.81/212.50` for `pp4096`, and
+  `206.27/193.89` for `pp16384`. Treat older isolated `pp1024` and `pp4096`
+  rows as stale methodology artifacts unless reproduced by the paired harness.
 - `qwen-llm` 35B A3B MoE prompt default now includes prompt-native packed
   attention for the proven `group=8`, `head_dim=256` shape with family-specific
   `NWG=64`, packed activation at `n_pos >= 128`, A3B-sized router `E8xP32`, fused
@@ -141,13 +145,11 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   qwen/lcpp `446/440` at `pp512`, `488/436` at `pp1024`, `481/401` at `pp4096`,
   and `394/354` at `pp16384`. Keep A10B MoE in monitoring unless a fresh matched
   trace shows a real warmed routed-tail deficit or coverage drops below `48/48`.
-- Dense 27B true-long prefill is now a clean win after the Q4_K `N=64` prompt
-  mat-mat tile. Rollback is `QWEN_MATMAT_Q4_K_N64=0`. Postbuild A/B puts
-  qwen/lcpp at `208.59/198.96` for `pp16384`, with rollback only
-  `199.45/202.44`. Do not overclaim `pp4096`: clean A/B is flat/noisy at
-  `212.86/216.38` default versus `215.16/211.86` rollback, near lcpp `213.07`.
-  The live dense residual is the `pp1024` short/medium gap and `pp4096`
-  variance, not whether N64 should remain default.
+- Dense 27B prefill is now paired-won across the measured synthetic shapes after
+  the Q4_K `N=64` prompt mat-mat tile and the v0.187 comparator pass. Rollback is
+  `QWEN_MATMAT_Q4_K_N64=0`. The key lesson is methodological: stale cold llama
+  anchors and unpaired qwen drift made `pp1024/4096` look worse than they are.
+  Do not reopen dense 27B short/medium work without a paired residual.
 - The first dense FFN/GDN pass is phase-positive but not scoreboard-complete by
   itself.
   `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` plus timed-only summaries showed the FFN
@@ -628,28 +630,26 @@ Current design rule:
   residual actionable: chunk `512` loses to default `1024`, reduced mat-mat smem
   is phase-positive but not total-robust, and dense fused-Q4 FFN loses again in
   same-process A/B.
-- Fresh v0184 Q4_K `N=64` prompt mat-mat changes the dense rule, but only after
-  the clean re-anchor correction. `pp16384` is a real N64 win, `pp4096` is
-  flat/noisy near llama.cpp, and `pp512/1024` still expose a short/medium gap.
-  Larger chunks, reduced QK smem, dense fused-Q4 FFN, and FFN up-before-gate have
-  all failed promotion gates. Keep Q4 N64 default-on, but target the short/medium
-  dense residual next.
+- Fresh v0187 paired comparison changes the dense rule again: 27B dense prefill
+  is paired-won at `pp512/1024/4096/16384`, and the apparent short/medium gap was
+  a stale-anchor/unpaired-drift artifact. Larger chunks, reduced QK smem, dense
+  fused-Q4 FFN, and FFN up-before-gate have all failed promotion gates. Keep Q4
+  N64 default-on and move dense 27B to guardrail mode.
 
 Next branch order:
 
-- First, use `scripts/profile/prefill_compare.py` for paired cross-engine
-  `pp1024/4096` evidence before opening another dense short/medium code branch.
-  Stale cold llama.cpp anchors are no longer enough because same-session rows
-  showed large qwen per-rep drift and a much lower hot llama.cpp `pp1024` row.
-- Second, characterize any paired residual with corrected `--last-pass` qwen
-  phase traces and attribution-only llama.cpp profiles. The next dense branch
-  needs to explain a paired gap, not just add another FFN microvariant.
+- First, use `scripts/profile/prefill_compare.py` for any future cross-engine
+  prompt claim. Stale isolated llama.cpp anchors are no longer enough, especially
+  at `pp512/1024/4096` where thermal/session drift can change the conclusion.
+- Second, return to breadth/generalization: primary family paired guardrails,
+  real-rollout prompts, and quant coverage gaps should rank above another dense
+  27B microkernel unless a paired residual appears.
 - Third, keep A3B/A10B MoE in guardrail mode unless coverage drops below
   `40/40` or `48/48` or a warmed short-prompt row regresses. Do not revive
   hot-threshold or concentration-only branches without new distribution evidence.
-- Fourth, reopen dense FFN/GDN projection mechanics only from a specific
-  short/medium mismatch. It must beat the postbuild `pp1024` gap and preserve the
-  `pp16384` N64 win, not just improve a serialized phase bucket.
+- Fourth, reopen dense FFN/GDN projection mechanics only from a specific paired
+  mismatch. It must preserve the v0.187 paired wins, not just improve a serialized
+  phase bucket.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh
   same-process or phase evidence crosses a total-throughput gate.
 

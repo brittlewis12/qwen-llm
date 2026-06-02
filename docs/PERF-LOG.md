@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — v0.187 Paired Dense 27B Recheck
+
+Status: clean paired qwen-vs-llama dense 27B prefill recheck using
+`scripts/profile/prefill_compare.py` after the phase-summary and stale-anchor
+methodology fixes. Artifacts are
+`target/profiles/v0187-27b-pp{512,1024,4096,16384}-paired-compare.json`.
+Qwen rows carry `build_commit=64b7c4415`, `build_dirty=0`; llama.cpp is
+`14aa3d375`, `flash_attn=false`, `has tensor=false`. Each shape alternates
+engine order by block and discards block `0` as system warmup.
+
+Paired dense 27B results after the discard block:
+
+| Shape | Paired qwen/lcpp rows | Mean qwen/lcpp | Read |
+| --- | --- | ---: | --- |
+| `pp512` | `238.55/238.11`, `239.41/232.84`, `231.63/226.29` | `1.02x` | short won |
+| `pp1024` | `216.92/209.80`, `221.09/215.72`, `228.84/216.73` | `1.04x` | old gap invalidated |
+| `pp4096` | `220.75/212.56`, `220.95/212.29`, `220.74/212.66` | `1.04x` | stable paired win |
+| `pp16384` | `204.84/187.90`, `207.69/199.87` | `1.06x` | true-long win held |
+
+Read: dense 27B prefill should now be treated as paired-won across the measured
+synthetic shapes. The earlier `pp1024` and `pp4096` concerns were measurement
+discipline problems: stale cold llama.cpp anchors and unpaired qwen drift made
+isolated rows misleading. Keep Q4 N64 default-on; do not open another dense
+short/medium prefill branch unless a paired comparator run shows a real residual.
+
 ## 2026-06-01 — Paired Cross-Engine Prefill Comparator
 
 Status: added `scripts/profile/prefill_compare.py` after the 27B `pp1024`

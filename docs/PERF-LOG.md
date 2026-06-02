@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.206 Small Dense Short-Prefill Triage
+
+Status: investigated the pinned-b9481 0.8B/2B short-prefill gap with cheap
+qwen-only attribution. No default change.
+
+0.8B `pp512` budget sweep:
+
+- Base: `~7220 t/s`; pinned lcpp family row is `7784.60 t/s`.
+- `QWEN_PREFILL_ATTN_MATRIX_G4=0`: collapses to `~4000 t/s`; matrix attention is
+  necessary, not the gap.
+- `QWEN_PREFILL_NOOP_ATTN_BODY=1`: only `~7620 t/s`; removing attention still
+  does not catch lcpp.
+- `QWEN_PREFILL_NOOP_GDN_BODY=1`: `~10500 t/s`; GDN is a large budget bucket.
+- `QWEN_PREFILL_NOOP_FFN=1`: `~11380 t/s`; dense FFN is also a large bucket.
+
+Phase trace read: attention matrix body is already tiny (`~3.6 ms` total). Top
+0.8B `pp512` buckets are GDN projections/state (`gdn_qkv`, `gdn_step`,
+`gdn_prep`, `gdn_back`, `gdn_z`) plus FFN `gate/up/down` projections. GDN matvec
+fallbacks were catastrophic (`z` `~4700`, `qkv` `~3000`, `front` `~1500 t/s`), so
+the answer is not reverting to matvec.
+
+Existing positive toggles are real but too thin or too narrow:
+
+- In-process `pp-ffn-ab`: fused Q4 SwiGLU was `1.012x/1.014x` median on 0.8B
+  `pp512/pp1024` and `1.0085x` median on 2B `pp512`.
+- `QWEN_MATMAT_Q4_K_N64=0`: `+0.7-1.0%` on 0.8B/2B `pp512`, but not safe as a
+  broad policy.
+- Combined N64-off + fused FFN: positive on 0.8B `pp512/1024/4096` and 2B
+  `pp512`, but negative on 2B `pp1024`, 4B `pp1024`, and 9B `pp1024`.
+
+Artifacts:
+
+- `target/profiles/v0205-08b-pp512-budget-sweep.json`
+- `target/profiles/v0205-08b-pp512-phase-summary.tsv`
+- `target/profiles/v0205-08b-pp512-gdn-matvec-falsifiers.json`
+- `target/profiles/v0206-08b-pp512-ffn-ab.tsv`
+- `target/profiles/v0206-08b-pp1024-ffn-ab.tsv`
+- `target/profiles/v0206-2b-pp512-ffn-ab.tsv`
+- `target/profiles/v0206-08b-pp512-q4-n64-falsifier.json`
+- `target/profiles/v0206-2b-pp512-q4-n64-falsifier.json`
+- `target/profiles/v0206-08b-pp512-combo-falsifier.json`
+- `target/profiles/v0206-2b-pp512-combo-falsifier.json`
+- `target/profiles/v0206-4b-pp1024-combo-canary.json`
+- `target/profiles/v0206-9b-pp1024-combo-canary.json`
+
+Read: small dense short-prefill is a small-N projection execution problem, not a
+missing fast-path or attention problem. The next real branch should be structural
+and targeted: small-hidden Q4_K mat-mat/tile policy and/or fused projection work
+for GDN/FFN, with 0.8B/2B failing cells as the target and 4B/9B/27B as canaries.
+
 ## 2026-06-02 — v0.205 Exact Family Shape Selection
 
 Status: fixed a harness footgun found during the pinned-b9481 re-anchor. Before

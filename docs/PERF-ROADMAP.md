@@ -73,6 +73,11 @@ Current caveats:
   longer repeat packet says otherwise.
 - Small dense short/medium prefill is not won across the board: 0.8B is
   `0.925x/0.950x/0.957x` at `pp512/1024/4096`, and 2B is `0.954x` at `pp512`.
+  v0.206 triage says this is not attention or coverage: G4 matrix-off collapses,
+  no-attn still trails lcpp, GDN matvec fallbacks are catastrophic, and fused FFN
+  / Q4_K N64 rollback are only thin or too narrow. The next small-dense branch is
+  structural small-hidden Q4_K mat-mat/GDN-FFN projection policy, gated by 0.8B/2B
+  wins and 4B/9B/27B no-regression canaries.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
   `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to

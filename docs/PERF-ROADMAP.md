@@ -136,8 +136,9 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `1191.03 t/s` at `pp1024` and `1225.51 t/s` at `pp4096`, but still trails
   llama.cpp by `0.856x/0.894x`. The v0.193 native `IQ3_XXS` candidate
   (`QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP=1`) adds direct matvec and grouped-SwiGLU
-  oracles, then reaches paired `1483.11/1375.26`, `1531.35/1370.66`, and
-  `1334.30/1163.80 t/s` at `pp1024/4096/16384`. It is still not defaulted:
+  oracles, then reaches clean paired `1486.94-1490.63/1383.51-1384.73`,
+  `1532.84-1533.85/1367.76-1369.89`, and `1311.75/1163.09 t/s` at
+  `pp1024/4096/16384`. It is still not defaulted:
   longer Q3 prefill-vs-single previously failed the strict GDN state gate for both
   default and env-grouped paths. The next low-bit MoE branch is defaultability:
   isolate or fix that Q3 state drift, then run a clean repeat packet.

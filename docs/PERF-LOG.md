@@ -22,9 +22,17 @@ Dirty validation and measurements, AC power, no thermal/performance warnings:
 | IQ3 matvec oracle | `max|delta|=1.024e-7` | `target/profiles/v0193-moe-iq3-matvec-oracle.out` |
 | grouped IQ3 SwiGLU oracle | `cos=1.000000`, `max|delta|=7.958e-7` | `target/profiles/v0193-moe-iq3-grouped-swiglu-oracle.out` |
 | short A3B Q3 prefill-vs-single | passed | `target/profiles/v0193-a3b-q3-native-iq3-correctness-short.out` |
-| paired `pp1024` | `1483.11 / 1375.26 t/s` (`1.078x`) | `target/profiles/v0193-a3b-q3-pp1024-native-iq3-paired.json` |
-| paired `pp4096` | `1531.35 / 1370.66 t/s` (`1.117x`) | `target/profiles/v0193-a3b-q3-pp4096-native-iq3-paired.json` |
-| paired `pp16384` | `1334.30 / 1163.80 t/s` (`1.146x`) | `target/profiles/v0193-a3b-q3-pp16384-native-iq3-paired.json` |
+| dirty paired `pp1024` | `1483.11 / 1375.26 t/s` (`1.078x`) | `target/profiles/v0193-a3b-q3-pp1024-native-iq3-paired.json` |
+| dirty paired `pp4096` | `1531.35 / 1370.66 t/s` (`1.117x`) | `target/profiles/v0193-a3b-q3-pp4096-native-iq3-paired.json` |
+| dirty paired `pp16384` | `1334.30 / 1163.80 t/s` (`1.146x`) | `target/profiles/v0193-a3b-q3-pp16384-native-iq3-paired.json` |
+
+Post-commit clean repeat rows with `build_commit=0474d7d22`, `build_dirty=0`:
+
+| Shape | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | --- |
+| `pp1024` | `1486.94`, `1490.63` | `1383.51`, `1384.73` | `1.075x`, `1.076x` | `target/profiles/v0193-clean-a3b-q3-pp1024-native-iq3-paired.json` |
+| `pp4096` | `1533.85`, `1532.84` | `1369.89`, `1367.76` | `1.120x`, `1.121x` | `target/profiles/v0193-clean-a3b-q3-pp4096-native-iq3-paired.json` |
+| `pp16384` | `1311.75` | `1163.09` | `1.128x` | `target/profiles/v0193-clean-a3b-q3-pp16384-native-iq3-paired.json` |
 
 Phase trace at `pp1024` with the native IQ3 env books routed
 SwiGLU/down/reduce at `181.34/96.44/6.20 ms`; prior grouped F32/IQ4_XS was about
@@ -33,10 +41,10 @@ SwiGLU/down/reduce at `181.34/96.44/6.20 ms`; prior grouped F32/IQ4_XS was about
 
 Read: this is the discontinuous low-bit MoE catch-up branch. Native IQ3 removes
 the resident-F32 gate/up tax and moves A3B Q3 from the clean fallback `90.28 t/s`
-and the grouped-F32 candidate `1191.03 t/s` to llama.cpp-beating rows at
+and the grouped-F32 candidate `1191.03 t/s` to clean llama.cpp-beating rows at
 `pp1024/4096/16384`. `pp16` improvement is not grouped prefill; it is native IQ3
 single-token fallback. Remaining defaultability work is the known long Q3 GDN
-state drift and a clean post-commit repeat packet.
+state drift.
 
 ## 2026-06-02 — v0.192 A3B Q3 Grouped F32/IQ4_XS Candidate
 

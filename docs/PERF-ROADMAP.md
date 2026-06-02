@@ -132,9 +132,10 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   gate/up expert banks with `IQ4_XS` down. Treat native grouped low-bit MoE as
   the remaining structural coverage branch. Clean v0.189 A3B Q3 `pp1024` paired
   evidence is `90.28` qwen versus `1392.02` llama.cpp (`0.065x`), while no-FFN
-  jumps to `2858.64 t/s`; the next move is phase-split instrumentation followed
-  by a grouped F32 gate/up scaffold. Grouped IQ4_XS down remains necessary, but
-  down-only is no longer the primary bet.
+  jumps to `2858.64 t/s`. The v0.191 trace split at `pp16` books routed F32
+  gate/up and IQ4_XS down at `49.65/49.93/46.82 ms`, plus shared `34.31 ms` and
+  route `20.05 ms`; the next move is a grouped F32 gate/up scaffold with grouped
+  IQ4_XS down close behind. Down-only is no longer a plausible catch-up branch.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
   before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B

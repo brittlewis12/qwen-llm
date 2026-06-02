@@ -34,10 +34,11 @@ use crate::metal::{
     encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
     encode_fill_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
     encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_swiglu_q4_K_f32_packed_slots,
-    encode_moe_weighted_sum_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
+    encode_l2_norm_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    encode_moe_mat_vec_f32, encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
     encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_split_qkv_fused_f32,
     encode_topk_logits_softmax_dot_sigmoid_packed_f32,
@@ -631,6 +632,33 @@ fn flush_prefill_layer_phase(
         chunk_idx, chunk_start, layer_idx, kind, phase, gpu_ms
     );
     *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+}
+
+fn flush_prefill_layer_phase_accum(
+    ctx: &MetalContext,
+    cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    prefill_gpu_total_ms: &mut f64,
+) -> f64 {
+    cmd_buf.commit();
+    cmd_buf.waitUntilCompleted();
+    let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+    *prefill_gpu_total_ms += gpu_ms;
+    *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    gpu_ms
+}
+
+fn emit_prefill_layer_phase(
+    chunk_idx: usize,
+    chunk_start: u32,
+    layer_idx: usize,
+    kind: &str,
+    phase: &str,
+    gpu_ms: f64,
+) {
+    eprintln!(
+        "[prefill-layer-phase] chunk={} start={} layer={} kind={} phase={} gpu_ms={:.2}",
+        chunk_idx, chunk_start, layer_idx, kind, phase, gpu_ms
+    );
 }
 
 fn prefill_attn_packed_g8_enabled(n_pos: usize, group: usize) -> bool {
@@ -7214,35 +7242,350 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         );
                     }
                 } else if !skip_ffn {
-                    for n_idx in 0..chunk_p {
-                        let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_copy_offset_f32(
-                            base.ctx,
-                            &enc,
-                            &x_pack_p,
-                            n_idx * h,
-                            &target_session.x,
-                            h,
-                        )?;
-                        encode_copy_offset_f32(
-                            base.ctx,
-                            &enc,
-                            &h_pack_p,
-                            n_idx * h,
-                            &target_session.h,
-                            h,
-                        )?;
-                        base.encode_moe_route_prepare(&enc, target_session, moe)?;
-                        base.encode_moe_ffn_apply_gpu(&enc, target_session, g_w, u_w, d_w, moe)?;
-                        encode_scatter_offset_f32(
-                            base.ctx,
-                            &enc,
-                            &target_session.x,
-                            &x_pack_p,
-                            n_idx * h,
-                            h,
-                        )?;
-                        enc.end();
+                    if trace_layer_phases {
+                        let mut copy_ms = 0.0f64;
+                        let mut route_ms = 0.0f64;
+                        let mut routed_gate_ms = 0.0f64;
+                        let mut routed_up_ms = 0.0f64;
+                        let mut routed_silu_ms = 0.0f64;
+                        let mut routed_down_ms = 0.0f64;
+                        let mut routed_weighted_sum_ms = 0.0f64;
+                        let mut routed_other_ms = 0.0f64;
+                        let mut shared_ms = 0.0f64;
+                        let mut residual_scatter_ms = 0.0f64;
+
+                        for n_idx in 0..chunk_p {
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_copy_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &x_pack_p,
+                                    n_idx * h,
+                                    &target_session.x,
+                                    h,
+                                )?;
+                                encode_copy_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &h_pack_p,
+                                    n_idx * h,
+                                    &target_session.h,
+                                    h,
+                                )?;
+                                enc.end();
+                            }
+                            copy_ms += flush_prefill_layer_phase_accum(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                            );
+
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                base.encode_moe_route_prepare(&enc, target_session, moe)?;
+                                enc.end();
+                            }
+                            route_ms += flush_prefill_layer_phase_accum(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                            );
+
+                            if matches!(
+                                (moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype),
+                                (GgmlType::F32, GgmlType::F32, GgmlType::IQ4_XS)
+                            ) {
+                                let moe_inner = target_session
+                                    .moe_inner
+                                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                                let moe_expert_out = target_session
+                                    .moe_expert_out
+                                    .view_subrange(0, vec![(topk * h) as u64]);
+                                let gate_pack = target_session
+                                    .moe_expert_out
+                                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                                let up_pack = target_session.moe_expert_out.view_subrange(
+                                    (topk * f_exp) as u64,
+                                    vec![(topk * f_exp) as u64],
+                                );
+                                let topk_idx = target_session
+                                    .moe_topk_idx
+                                    .view_subrange(0, vec![topk as u64]);
+                                let topk_w = target_session
+                                    .moe_topk_weight
+                                    .view_subrange(0, vec![topk as u64]);
+
+                                {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    encode_moe_mat_vec_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &moe.gate_exps,
+                                        &target_session.h,
+                                        &topk_idx,
+                                        &gate_pack,
+                                        h,
+                                        f_exp,
+                                        n_expert,
+                                        topk,
+                                    )?;
+                                    enc.end();
+                                }
+                                routed_gate_ms += flush_prefill_layer_phase_accum(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                );
+
+                                {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    encode_moe_mat_vec_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &moe.up_exps,
+                                        &target_session.h,
+                                        &topk_idx,
+                                        &up_pack,
+                                        h,
+                                        f_exp,
+                                        n_expert,
+                                        topk,
+                                    )?;
+                                    enc.end();
+                                }
+                                routed_up_ms += flush_prefill_layer_phase_accum(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                );
+
+                                {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    encode_silu_mul_f32(
+                                        base.ctx, &enc, &gate_pack, &up_pack, &moe_inner,
+                                    )?;
+                                    enc.end();
+                                }
+                                routed_silu_ms += flush_prefill_layer_phase_accum(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                );
+
+                                {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    encode_moe_down_iq4_xs_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &moe.down_exps,
+                                        &moe_inner,
+                                        &topk_idx,
+                                        &moe_expert_out,
+                                        f_exp,
+                                        h,
+                                        n_expert,
+                                        topk,
+                                    )?;
+                                    enc.end();
+                                }
+                                routed_down_ms += flush_prefill_layer_phase_accum(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                );
+
+                                {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    encode_moe_weighted_sum_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &moe_expert_out,
+                                        &topk_w,
+                                        &target_session.mixer_out,
+                                        h,
+                                        topk,
+                                    )?;
+                                    enc.end();
+                                }
+                                routed_weighted_sum_ms += flush_prefill_layer_phase_accum(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                );
+                            } else {
+                                {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    base.encode_moe_routed_ffn_gpu(&enc, target_session, moe)?;
+                                    enc.end();
+                                }
+                                routed_other_ms += flush_prefill_layer_phase_accum(
+                                    base.ctx,
+                                    &mut cmd_buf,
+                                    &mut prefill_gpu_total_ms,
+                                );
+                            }
+
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                base.encode_moe_shared_ffn_gpu(
+                                    &enc,
+                                    target_session,
+                                    g_w,
+                                    u_w,
+                                    d_w,
+                                )?;
+                                enc.end();
+                            }
+                            shared_ms += flush_prefill_layer_phase_accum(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                            );
+
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                encode_add_inplace_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.x,
+                                    &target_session.mixer_out,
+                                )?;
+                                encode_scatter_offset_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.x,
+                                    &x_pack_p,
+                                    n_idx * h,
+                                    h,
+                                )?;
+                                enc.end();
+                            }
+                            residual_scatter_ms += flush_prefill_layer_phase_accum(
+                                base.ctx,
+                                &mut cmd_buf,
+                                &mut prefill_gpu_total_ms,
+                            );
+                        }
+
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_copy_token_loop",
+                            copy_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_route_token_loop",
+                            route_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_routed_gate_f32_token_loop",
+                            routed_gate_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_routed_up_f32_token_loop",
+                            routed_up_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_routed_silu_token_loop",
+                            routed_silu_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_routed_down_iq4_xs_token_loop",
+                            routed_down_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_routed_weighted_sum_token_loop",
+                            routed_weighted_sum_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_routed_other_token_loop",
+                            routed_other_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_shared_token_loop",
+                            shared_ms,
+                        );
+                        emit_prefill_layer_phase(
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            "moe",
+                            "fallback_residual_scatter_token_loop",
+                            residual_scatter_ms,
+                        );
+                    } else {
+                        for n_idx in 0..chunk_p {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &x_pack_p,
+                                n_idx * h,
+                                &target_session.x,
+                                h,
+                            )?;
+                            encode_copy_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &h_pack_p,
+                                n_idx * h,
+                                &target_session.h,
+                                h,
+                            )?;
+                            base.encode_moe_route_prepare(&enc, target_session, moe)?;
+                            base.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                target_session,
+                                g_w,
+                                u_w,
+                                d_w,
+                                moe,
+                            )?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.x,
+                                &x_pack_p,
+                                n_idx * h,
+                                h,
+                            )?;
+                            enc.end();
+                        }
                     }
                 }
 

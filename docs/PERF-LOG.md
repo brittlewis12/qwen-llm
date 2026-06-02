@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.191 A3B Q3 Fallback Phase Split
+
+Status: added trace-only phase splitting for the non-grouped MoE token fallback.
+When `QWEN_PREFILL_TRACE_LAYER_PHASES=1`, the fallback now reports aggregated
+per-layer totals for copy, route, routed gate/up/silu/down/weighted-sum, shared,
+and residual scatter instead of booking the whole path into an attribution sink.
+Default non-trace scheduling stays on the original single encoder per token.
+
+Dirty instrumentation rows on A3B Q3 `pp16`:
+
+| Phase | Total ms | Read |
+| --- | ---: | --- |
+| routed up F32 | `49.93` | major wall |
+| routed gate F32 | `49.65` | major wall |
+| routed down IQ4_XS | `46.82` | also major |
+| shared token loop | `34.31` | secondary |
+| route token loop | `20.05` | secondary |
+
+Artifact: `target/profiles/v0191-a3b-q3-pp16-fallback-phase-summary.tsv`.
+Read: grouped/batched structure is the missing primitive. Gate+up are the largest
+combined slice, but down is close enough that a complete low-bit MoE answer needs
+both grouped gate/up and grouped IQ4_XS down; down-only is not a plausible lcpp
+catch-up path.
+
 ## 2026-06-02 — v0.189 A3B Q3 MoE Fallback Support
 
 Status: closed the immediate A3B low-bit MoE support hole without claiming a fast

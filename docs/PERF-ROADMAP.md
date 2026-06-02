@@ -73,13 +73,12 @@ Current caveats:
   longer repeat packet says otherwise.
 - Small dense short/medium prefill is not won across the board: 0.8B is
   `0.925x/0.950x/0.957x` at `pp512/1024/4096`, and 2B is `0.954x` at `pp512`.
-  v0.206 triage says this is not attention or coverage: G4 matrix-off collapses,
-  no-attn still trails lcpp, GDN matvec fallbacks are catastrophic, and fused FFN
-  / Q4_K N64 rollback are only thin or too narrow. The next small-dense branch is
-  structural small-hidden Q4_K mat-mat/GDN-FFN projection policy, gated by 0.8B/2B
-  wins and 4B/9B/27B no-regression canaries. v0.207 specifically rejected the
-  conditional small-hidden `N=512` N64 rollback because the win did not reproduce
-  strongly enough.
+  v0.206/v0.207 say this is not attention, coverage, GDN matvec fallback, fused
+  FFN, or small-hidden Q4_K N64 rollback. v0.208 adds Q5_K/Q6_K N64 projection
+  tiles, but only for `n_query >= 1024`: clean rows are positive at 4B/9B/27B
+  `pp1024` and thin/mixed at 0.8B/2B, while unrestricted low-threshold use
+  regressed 0.8B `pp512`. The remaining high-EV branch is still structural
+  short-prompt projection/GDN execution, not another N64 threshold fiddle.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
   `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to

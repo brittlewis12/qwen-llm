@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.208 Q5/Q6 Long-Prompt N64 Tiles
+
+Status: added large-N mat-mat tiles for Q5_K and Q6_K projections, with the
+default gate limited to `n_query >= 1024`. This is not a 0.8B `pp512` fix; the
+unrestricted `N64` tile regressed that short-prompt cell.
+
+Why this branch was worth trying: the small-dense dtype audit showed the largest
+0.8B GDN projection bucket, `gdn_qkv`, is Q5_K, `gdn_back` is Q5_K, and half of
+`ffn_down` is Q6_K. Q4_K already had an N64 prompt tile, but Q5_K/Q6_K were still
+using the generic N32 tile at long prompt chunk sizes.
+
+Correctness:
+
+- `cargo test -p qwen-llm mat_mat_q5_k_matches_cpu_and_mat_vec`
+- `cargo test -p qwen-llm mat_mat_q6_k_matches_cpu_and_mat_vec`
+- `cargo build --release`
+
+Clean qwen-only A/B rows compare default `min1024` against rollback
+`QWEN_MATMAT_Q5_K_N64=0,QWEN_MATMAT_Q6_K_N64=0`:
+
+| Model | Shape | default | rollback | Ratio | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 0.8B | `pp512` | `6536.60` | `6611.10` | `0.989x` | guard row/noisy; N64 should not select |
+| 0.8B | `pp4096` | `7135.04` | `7098.44` | `1.005x` | thin/mixed |
+| 2B | `pp1024` | `3482.96` | `3458.00` | `1.007x` | thin positive |
+| 4B | `pp1024` | `1443.94` | `1418.41` | `1.018x` | clear positive |
+| 9B | `pp1024` | `800.66` | `791.05` | `1.012x` | clear positive |
+| 27B | `pp1024` | `229.55` | `222.18` | `1.033x` | positive but noisy |
+
+Follow-up pp512 threshold isolate (`default`, `MIN_N=2048`, rollback) did not
+show a stable dispatch-specific regression, so treat the first pp512 guard as
+noise/order until a larger packet says otherwise. The important policy result is
+that the branch is explicitly not allowed below `N=1024` by default.
+
+Artifacts:
+
+- `target/profiles/v0208-clean-08b-pp512-q5q6-n64-min1024.json`
+- `target/profiles/v0208-clean-08b-pp512-q5q6-n64-min1024-repeat.json`
+- `target/profiles/v0208-clean-08b-pp512-q5q6-n64-min-threshold-isolate.json`
+- `target/profiles/v0208-clean-08b-pp4096-q5q6-n64-min1024.json`
+- `target/profiles/v0208-clean-2b-pp1024-q5q6-n64-min1024.json`
+- `target/profiles/v0208-clean-4b-pp1024-q5q6-n64-min1024.json`
+- `target/profiles/v0208-clean-9b-pp1024-q5q6-n64-min1024.json`
+- `target/profiles/v0208-clean-27b-pp1024-q5q6-n64-min1024.json`
+
+Read: keep the long-prompt Q5/Q6 N64 policy. It is incremental, not the missing
+small-dense `pp512` breakthrough. The next small-dense branch still needs a
+structural fix for short-prompt projection/GDN execution, not another low-threshold
+N64 expansion.
+
 ## 2026-06-02 — v0.207 Rejected Small-Hidden N64 Auto Policy
 
 Status: tried and rejected a narrow Q4_K N64 auto-policy after v0.206. The idea

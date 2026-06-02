@@ -2188,10 +2188,9 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
     let mf = MetalForward::new(&ctx, &mm);
     let arch = &mm.arch;
 
-    let total_n: usize = std::env::var("QWEN_A3B_MOE_TEST_TOTAL")
+    let total_n_limit: Option<usize> = std::env::var("QWEN_A3B_MOE_TEST_TOTAL")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12);
+        .and_then(|s| s.parse().ok());
     let p: usize = std::env::var("QWEN_A3B_MOE_TEST_CHUNK")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -2203,14 +2202,40 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
     let cont_cos_gate: Option<f64> = std::env::var("QWEN_A3B_MOE_TEST_CONT_COS_MIN")
         .ok()
         .and_then(|s| s.parse().ok());
+    let logits_cos_gate: Option<f64> = std::env::var("QWEN_A3B_MOE_TEST_LOGITS_COS_MIN")
+        .ok()
+        .and_then(|s| s.parse().ok());
     let internal_cos_gate: Option<f64> = std::env::var("QWEN_A3B_MOE_TEST_INTERNAL_COS_MIN")
         .ok()
         .and_then(|s| s.parse().ok());
-    let token_ids: Vec<i32> = (0..total_n)
-        .map(|i| ((i * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1)
-        .collect();
+    let require_argmax_match_override = std::env::var("QWEN_A3B_MOE_TEST_REQUIRE_ARGMAX_MATCH")
+        .ok()
+        .map(|s| s != "0");
+    let rank_escape_gate: Option<usize> = std::env::var("QWEN_A3B_MOE_TEST_RANK_ESCAPE_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let (mut token_ids, source_label) =
+        if let Ok(path) = std::env::var("QWEN_A3B_MOE_TEST_PROMPT_FILE") {
+            let prompt = std::fs::read_to_string(&path).expect("read prompt file");
+            let tok = Tokenizer::from_gguf(&g).expect("open tokenizer");
+            let ids = tok.encode(&prompt, false).expect("tokenize prompt file");
+            (ids, format!("file:{path}"))
+        } else {
+            let total_n = total_n_limit.unwrap_or(12);
+            let ids: Vec<i32> = (0..total_n)
+                .map(|i| ((i * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1)
+                .collect();
+            (ids, format!("synthetic:{total_n}"))
+        };
+    if let Some(max_n) = total_n_limit {
+        token_ids.truncate(max_n);
+    }
+    assert!(!token_ids.is_empty(), "A3B test prompt tokenized empty");
+    let total_n = token_ids.len();
+    let require_argmax_match = require_argmax_match_override.unwrap_or(total_n <= 128);
     let cap = total_n + cont_tokens + 16;
 
+    eprintln!("[prefill-vs-single-a3b] source={source_label} tokens={total_n}");
     eprintln!("[prefill-vs-single-a3b] running oracle…");
     let mut sess_a = MetalSession::fresh(&ctx, &mm, cap).expect("sess A");
     let oracle_t = std::time::Instant::now();
@@ -2316,7 +2341,13 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
     let mut cont_worst_step = None;
     let mut cont_first_mismatch = None;
     if prefill_argmax != cont_input {
-        cont_first_mismatch = Some((usize::MAX, cont_input, prefill_argmax));
+        cont_first_mismatch = Some(ContinuationMismatch::from_logits(
+            usize::MAX,
+            cont_input,
+            prefill_argmax,
+            &last_a,
+            &last_b,
+        ));
     }
     for step in 0..cont_tokens {
         let pos = total_n + step;
@@ -2334,7 +2365,9 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         let argmax_a = argmax_i32_27b(&next_a);
         let argmax_b = argmax_i32_27b(&next_b);
         if cont_first_mismatch.is_none() && argmax_a != argmax_b {
-            cont_first_mismatch = Some((step, argmax_a, argmax_b));
+            cont_first_mismatch = Some(ContinuationMismatch::from_logits(
+                step, argmax_a, argmax_b, &next_a, &next_b,
+            ));
         }
         cont_input = argmax_a;
     }
@@ -2342,17 +2375,32 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         "[prefill-vs-single-a3b] continuation tokens={} cos_min={cont_min_cos:.6} worst_step={cont_worst_step:?} first_mismatch={cont_first_mismatch:?}",
         cont_tokens,
     );
+    let effective_logits_cos_gate = logits_cos_gate.or_else(|| (total_n <= 128).then_some(0.999));
     let effective_cont_cos_gate = cont_cos_gate.or_else(|| (cont_tokens <= 1).then_some(0.999));
     let effective_internal_cos_gate =
         internal_cos_gate.or_else(|| (total_n <= 64).then_some(0.999));
     eprintln!(
-        "[prefill-vs-single-a3b] gates continuation_cos={effective_cont_cos_gate:?} internal_cos={effective_internal_cos_gate:?}"
+        "[prefill-vs-single-a3b] gates logits_cos={effective_logits_cos_gate:?} continuation_cos={effective_cont_cos_gate:?} internal_cos={effective_internal_cos_gate:?} require_argmax_match={require_argmax_match} rank_escape={rank_escape_gate:?}"
     );
-    assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
-    assert!(
-        cont_first_mismatch.is_none(),
-        "continuation argmax mismatch: {cont_first_mismatch:?}"
-    );
+    if let Some(threshold) = effective_logits_cos_gate {
+        assert!(
+            cos_logits >= threshold,
+            "logits cos={cos_logits} < {threshold}"
+        );
+    }
+    if require_argmax_match {
+        assert!(
+            cont_first_mismatch.is_none(),
+            "continuation argmax mismatch: {cont_first_mismatch:?}"
+        );
+    }
+    if let (Some(max_rank), Some(mismatch)) = (rank_escape_gate, cont_first_mismatch) {
+        assert!(
+            mismatch.oracle_rank_in_prefill <= max_rank
+                && mismatch.prefill_rank_in_oracle <= max_rank,
+            "continuation rank escape > {max_rank}: {mismatch:?}"
+        );
+    }
     if let Some(threshold) = effective_cont_cos_gate {
         assert!(
             cont_min_cos >= threshold,
@@ -2974,6 +3022,63 @@ fn argmax_i32_27b(xs: &[f32]) -> i32 {
         }
     }
     best as i32
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+struct ContinuationMismatch {
+    step: usize,
+    oracle_argmax: i32,
+    prefill_argmax: i32,
+    oracle_rank_in_prefill: usize,
+    prefill_rank_in_oracle: usize,
+    oracle_margin_over_prefill: f32,
+    prefill_margin_over_oracle: f32,
+    oracle_top2_margin: f32,
+    prefill_top2_margin: f32,
+}
+
+impl ContinuationMismatch {
+    fn from_logits(
+        step: usize,
+        oracle_argmax: i32,
+        prefill_argmax: i32,
+        oracle_logits: &[f32],
+        prefill_logits: &[f32],
+    ) -> Self {
+        let oracle_idx = oracle_argmax as usize;
+        let prefill_idx = prefill_argmax as usize;
+        Self {
+            step,
+            oracle_argmax,
+            prefill_argmax,
+            oracle_rank_in_prefill: rank_of_token_27b(prefill_logits, oracle_idx),
+            prefill_rank_in_oracle: rank_of_token_27b(oracle_logits, prefill_idx),
+            oracle_margin_over_prefill: oracle_logits[oracle_idx] - oracle_logits[prefill_idx],
+            prefill_margin_over_oracle: prefill_logits[prefill_idx] - prefill_logits[oracle_idx],
+            oracle_top2_margin: top2_margin_27b(oracle_logits),
+            prefill_top2_margin: top2_margin_27b(prefill_logits),
+        }
+    }
+}
+
+fn rank_of_token_27b(xs: &[f32], token_idx: usize) -> usize {
+    let target = xs[token_idx];
+    1 + xs.iter().filter(|&&v| v > target).count()
+}
+
+fn top2_margin_27b(xs: &[f32]) -> f32 {
+    let mut best = f32::NEG_INFINITY;
+    let mut second = f32::NEG_INFINITY;
+    for &v in xs {
+        if v > best {
+            second = best;
+            best = v;
+        } else if v > second {
+            second = v;
+        }
+    }
+    best - second
 }
 
 struct KvCosSummary {

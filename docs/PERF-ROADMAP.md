@@ -148,9 +148,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   long internal GDN/KV cosine as diagnostic by default for multi-token probes:
   Q3 and Q4 awkward-chunk controls show no argmax divergence over 64 oracle-greedy
   continuation tokens despite sub-`0.999` internal or continuation cosine. The
-  next low-bit MoE branch is real-rollout continuation/perf evidence, then either
-  default policy for native IQ3 or a high-accuracy blk0 GDN projection kernel if
-  real prompts expose instability.
+  v0.199 real-prompt packet keeps Q3 native-IQ3 + blk0 `qkv+alpha` above
+  same-length llama.cpp anchors on Reva short, Mei medium, and Marcus long
+  (`1.018x/1.014x/1.022x`), but also proves exact long greedy parity is the wrong
+  release gate: Q4 default mismatches over 64 continuation tokens at T1024 too.
+  The next low-bit MoE branch is a top-k/rank-envelope defaultability policy, then
+  either default native IQ3 or build a high-accuracy blk0 GDN projection kernel if
+  rank escapes are materially worse than the incumbent envelope.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
   before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B

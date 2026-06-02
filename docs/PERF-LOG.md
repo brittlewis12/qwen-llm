@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.199 A3B Q3 Real-Prompt Gate Packet
+
+Status: ran the first compact real-prompt packet for the A3B Q3 native-IQ3
+candidate and replaced long exact-argmax gating with rank/margin diagnostics.
+No Q3 default yet.
+
+New A3B correctness knobs:
+
+- `QWEN_A3B_MOE_TEST_PROMPT_FILE=path`: use a rendered real prompt instead of
+  synthetic token ids.
+- `QWEN_A3B_MOE_TEST_LOGITS_COS_MIN=X`: optionally force final-logit cosine on
+  long probes.
+- `QWEN_A3B_MOE_TEST_REQUIRE_ARGMAX_MATCH=0|1`: override the default exact
+  continuation-argmax policy; default is strict only for prompts `<=128` tokens.
+- `QWEN_A3B_MOE_TEST_RANK_ESCAPE_MAX=N`: optionally gate continuation mismatches
+  by cross-rank instead of exact argmax equality.
+
+Real-prompt prefill evidence, AC power, sequential GPU runs. llama.cpp rows are
+same-length synthetic anchors from `llama-bench`, not same-token-content prompt
+runs:
+
+| Prompt | Tokens | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Reva short, strip | `7344` | `1333.62` | `1310.33` | `1.018x` | `target/profiles/v0199-a3b-q3-real-reva-short-strip-compare.json` |
+| Mei medium, strip | `11287` | `1262.46` | `1245.08` | `1.014x` | `target/profiles/v0199-a3b-q3-real-mei-medium-strip-compare.json` |
+| Marcus long, strip | `25610` | `1042.53` | `1019.71` | `1.022x` | `target/profiles/v0199-a3b-q3-real-marcus-long-strip-compare.json` |
+
+Continuation/rank diagnostics:
+
+| Probe | Result | Artifact |
+| --- | ---: | --- |
+| Q3 native IQ3 + blk0 `qkv+alpha`, Reva strip T128/P32 | pass; final logits `0.999755`, no argmax mismatch, continuation `cos_min=0.989769` | `target/profiles/v0199-a3b-q3-real-reva-strip-T128-P32-cont64.out` |
+| Q3 native IQ3 + blk0 `qkv+alpha`, Reva strip T1024/P128 | rank-diagnostic pass; final logits `0.997346`, first mismatch step `27`, cross-ranks `2/2`, margins `0.2505/0.0035` | `target/profiles/v0200-a3b-q3-real-reva-strip-T1024-P128-rankdiag.out` |
+| Q4 default, Reva preserve T1024/P128 | rank-diagnostic pass; final logits `0.994864`, first mismatch step `12`, cross-ranks `3/2`, margins `0.0448/0.4410` | `target/profiles/v0200-a3b-q4-real-reva-preserve-T1024-P128-rankdiag.out` |
+| Q4 default, synthetic T1024/P128 | rank-diagnostic pass; final logits `0.999931`, first mismatch step `30`, cross-ranks `2/2`, margins `0.1691/0.0177` | `target/profiles/v0200-a3b-q4-synth-T1024-P128-rankdiag.out` |
+
+Negative: a Q3 native-off/default same-prompt T1024 oracle did not reach the
+prefill comparison within a 30-minute cap after dequanting IQ3 expert banks to
+F32. Treat native-off long oracle comparison as impractical unless scoped much
+smaller. Artifact: `target/profiles/v0200-a3b-q3-default-real-reva-strip-T1024-P128-rankdiag.out`.
+
+Read: exact zero argmax divergence is the wrong long-prompt gate because Q4
+default misses it too, including on synthetic T1024 with excellent final-logit
+cosine. The useful signal is whether mismatches are high-rank/high-margin escapes
+or near-top alternatives under teacher-forced oracle history. The Q3 native-IQ3
+candidate remains promising on real prompt speed and its first long mismatch is a
+rank-2/rank-2 flip, but defaulting still needs a same-prompt policy decision and
+possibly a top-k/rank-envelope gate rather than strict internal cosine or exact
+greedy parity.
+
 ## 2026-06-02 — v0.198 Real-Prompt Compare Harness
 
 Status: extended `scripts/profile/prefill_compare.py` beyond synthetic `pp<N>`

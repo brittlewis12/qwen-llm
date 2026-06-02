@@ -480,7 +480,7 @@ def main() -> int:
     parser.add_argument("--discard-first-block", action="store_true")
     parser.add_argument("--prefill-chunk", type=int)
     parser.add_argument("--no-warmup", action="store_true")
-    parser.add_argument("--flash-attn", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--flash-attn", type=int, choices=(-1, 0, 1), default=-1)
     parser.add_argument("--qwen-env", type=parse_env_pair, action="append", default=[])
     parser.add_argument("--qwen-extra-arg", action="append", default=[])
     parser.add_argument("--lcpp-extra-arg", action="append", default=[])

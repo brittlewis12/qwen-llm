@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.207 Rejected Small-Hidden N64 Auto Policy
+
+Status: tried and rejected a narrow Q4_K N64 auto-policy after v0.206. The idea
+was to disable the N64 mat-mat tile only for small-hidden `N=512` chunks while
+leaving 4B/9B/27B untouched.
+
+Validation did not reproduce strongly enough to default:
+
+- 0.8B `pp512` auto-vs-force-N64 was mixed (`7224/7251`, then `7289/7246`).
+- 2B `pp512` was only mildly positive (`3534/3516`, `3530/3521`).
+- 4B/9B canaries were effectively noise and should have been unchanged by the
+  policy.
+
+Artifact packet:
+
+- `target/profiles/v0207-08b-pp512-n64-auto-policy.json`
+- `target/profiles/v0207-2b-pp512-n64-auto-policy.json`
+- `target/profiles/v0207-4b-pp512-n64-auto-policy.json`
+- `target/profiles/v0207-9b-pp512-n64-auto-policy.json`
+
+Read: keep `QWEN_MATMAT_Q4_K_N64` default unchanged. The small dense branch needs
+a stronger structural kernel/policy win than conditional rollback of an existing
+tile.
+
 ## 2026-06-02 — v0.206 Small Dense Short-Prefill Triage
 
 Status: investigated the pinned-b9481 0.8B/2B short-prefill gap with cheap

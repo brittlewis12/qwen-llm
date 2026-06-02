@@ -77,7 +77,9 @@ Current caveats:
   no-attn still trails lcpp, GDN matvec fallbacks are catastrophic, and fused FFN
   / Q4_K N64 rollback are only thin or too narrow. The next small-dense branch is
   structural small-hidden Q4_K mat-mat/GDN-FFN projection policy, gated by 0.8B/2B
-  wins and 4B/9B/27B no-regression canaries.
+  wins and 4B/9B/27B no-regression canaries. v0.207 specifically rejected the
+  conditional small-hidden `N=512` N64 rollback because the win did not reproduce
+  strongly enough.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
   `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to

@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.201 A3B Q3 Real-Prompt Promotion Packet
+
+Status: ran the first repeated real-prompt promotion packet for the A3B Q3
+native-IQ3 candidate through `scripts/profile/prefill_compare.py`, not the Rust
+test harness. No Q3 default yet, but the script-led evidence is stronger.
+
+Rows use Qwen3.5 strip prompts, AC power, `build_dirty=0`, qwen build
+`f3de886a6`, and no qwen thermal/performance warnings. llama.cpp is still a
+same-length synthetic anchor because `llama-bench` cannot consume prompt text.
+
+| Prompt | Tokens | Retained qwen/lcpp pairs | Artifact |
+| --- | ---: | ---: | --- |
+| Reva short strip | `7344` | `1.055x`, `1.025x` after discarding block 0 | `target/profiles/v0201-a3b-q3-real-reva-short-strip-promotion.json` |
+| Marcus long strip | `25610` | `1.047x` after discarding block 0 | `target/profiles/v0201-a3b-q3-real-marcus-long-strip-promotion.json` |
+
+Read: the native-IQ3 + blk0 `qkv+alpha` repair remains positive on real prompt
+content when run through the cooled, repeated script path. This answers the
+workflow concern: use tests for in-process packed-vs-single oracle state, but use
+`prefill_compare.py` for promotion-grade throughput. The remaining defaultability
+question is policy/correctness: top-k/rank envelope versus exact long greedy
+parity, not whether the perf win only exists in tests.
+
 ## 2026-06-02 — v0.200 Family Re-Anchor And Sweep Telemetry
 
 Status: returned to script-led performance characterization after the A3B

@@ -152,6 +152,9 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   same-length llama.cpp anchors on Reva short, Mei medium, and Marcus long
   (`1.018x/1.014x/1.022x`), but also proves exact long greedy parity is the wrong
   release gate: Q4 default mismatches over 64 continuation tokens at T1024 too.
+  The v0.201 promotion packet keeps the Q3 native-IQ3 + blk0 `qkv+alpha` branch
+  positive on repeated real-prompt script rows: Reva short retained pairs are
+  `1.055x/1.025x`, and Marcus long is `1.047x` after discarding block 0.
   The next low-bit MoE branch is a top-k/rank-envelope defaultability policy, then
   either default native IQ3 or build a high-accuracy blk0 GDN projection kernel if
   rank escapes are materially worse than the incumbent envelope.

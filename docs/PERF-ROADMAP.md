@@ -139,12 +139,15 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   oracles, then reaches clean paired `1486.94-1490.63/1383.51-1384.73`,
   `1532.84-1533.85/1367.76-1369.89`, and `1311.75/1163.09 t/s` at
   `pp1024/4096/16384`. It is still not defaulted. The v0.195 defaultability pass
-  proved the T40 blocker is GDN/Q8 sensitivity rather than native IQ3 MoE: replacing
-  only `blk.0.ssm_out` with repeated matvec makes T34/T40/T64 pass and preserves
-  dirty paired wins at `pp1024/4096/16384` (`1.067x/1.077x/1.039x`). But T112/T128
-  still fail, and full per-token GDN fallback does not fix T128, so the next
-  low-bit MoE branch is not more IQ3 work; it is a high-accuracy blk0 GDN-out
-  kernel plus a T112/T128 chunk-boundary diagnostic.
+  proved the T40 blocker is GDN/Q8 sensitivity rather than native IQ3 MoE. The
+  v0.196 pass then found and fixed a separate G8 matrix-attention VT-coverage bug
+  that only appeared when small chunks crossed the matrix threshold mid-call. With
+  blk0 `qkv+alpha` GDN matvec as a repair oracle, Q3 T128/P32 now passes and dirty
+  paired rows remain above llama.cpp at `pp1024/4096/16384`
+  (`1.023x/1.034x/1.108x`). T112 and Q4 T128 still show strict internal GDN/KV
+  cosine failures while final and one-step continuation logits pass, so the next
+  low-bit MoE branch is defaultability policy plus a high-accuracy blk0 GDN
+  projection kernel to recover the short/medium margin.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
   before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B
@@ -661,9 +664,11 @@ Next branch order:
   real-rollout prompts, and quant coverage gaps should rank above another dense
   27B microkernel unless a paired residual appears.
 - Third, finish A3B Q3 native IQ3 defaultability before opening another low-bit MoE
-  microbranch: direct oracles are green and env perf beats llama.cpp, but T112/T128
-  prefill-vs-single failures still block default promotion. Treat the blk0 GDN-out
-  matvec repair as a correctness oracle, not the final performance answer.
+  microbranch: direct oracles are green and env perf beats llama.cpp, and the G8
+  matrix VT bug is fixed. Treat the blk0 `qkv+alpha` GDN matvec repair as a
+  correctness oracle, not the final performance answer; decide whether long
+  default gates should be continuation/generation based before spending more
+  kernel time on strict internal-state cosine.
 - Fourth, keep A3B/A10B MoE in guardrail mode unless coverage drops below
   `40/40` or `48/48` or a warmed short-prompt row regresses. Do not revive
   hot-threshold or concentration-only branches without new distribution evidence.

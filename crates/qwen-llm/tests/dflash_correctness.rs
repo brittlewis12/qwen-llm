@@ -2272,22 +2272,48 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         gdn_cos.conv_max_abs,
     );
 
-    assert_eq!(sess_a.kv_k.len(), sess_b.kv_k.len());
+    let attn_blocks: Vec<usize> = mm
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, block)| matches!(block, MetalBlock::Attn(_)).then_some(i))
+        .collect();
     let kv_prefix_elems = total_n * (arch.n_kv_heads as usize * arch.attn_head_dim as usize);
-    let mut kv_k_min_cos = f64::INFINITY;
-    let mut kv_v_min_cos = f64::INFINITY;
-    for ai in 0..sess_a.kv_k.len() {
-        assert_eq!(sess_a.kv_n_pos[ai], total_n, "oracle kv_n_pos[{ai}] != T");
-        assert_eq!(sess_b.kv_n_pos[ai], total_n, "prefill kv_n_pos[{ai}] != T");
-        let a_k = read_kv_prefix_f16_to_f32(&sess_a.kv_k[ai], kv_prefix_elems);
-        let b_k = read_kv_prefix_f16_to_f32(&sess_b.kv_k[ai], kv_prefix_elems);
-        let a_v = read_kv_prefix_f16_to_f32(&sess_a.kv_v[ai], kv_prefix_elems);
-        let b_v = read_kv_prefix_f16_to_f32(&sess_b.kv_v[ai], kv_prefix_elems);
-        kv_k_min_cos = kv_k_min_cos.min(cosine_27b(&a_k, &b_k));
-        kv_v_min_cos = kv_v_min_cos.min(cosine_27b(&a_v, &b_v));
-    }
-    eprintln!("[prefill-vs-single-a3b] KV K cos_min={kv_k_min_cos:.6} V cos_min={kv_v_min_cos:.6}");
+    let kv_cos = compare_kv_prefix_27b(&sess_a, &sess_b, kv_prefix_elems, total_n);
+    let k_block = attn_blocks
+        .get(kv_cos.k_worst_layer)
+        .copied()
+        .unwrap_or(kv_cos.k_worst_layer);
+    let v_block = attn_blocks
+        .get(kv_cos.v_worst_layer)
+        .copied()
+        .unwrap_or(kv_cos.v_worst_layer);
+    eprintln!(
+        "[prefill-vs-single-a3b] KV K cos_min={:.6} worst_attn={} blk={} max|Δ|={:.3e} \
+         V cos_min={:.6} worst_attn={} blk={} max|Δ|={:.3e}",
+        kv_cos.k_min_cos,
+        kv_cos.k_worst_layer,
+        k_block,
+        kv_cos.k_max_abs,
+        kv_cos.v_min_cos,
+        kv_cos.v_worst_layer,
+        v_block,
+        kv_cos.v_max_abs,
+    );
+    let next_tid = ((total_n * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1;
+    let next_a = mf
+        .single_token(next_tid, total_n as u32, &mut sess_a)
+        .expect("oracle continuation");
+    let next_b = mf
+        .single_token(next_tid, total_n as u32, &mut sess_b)
+        .expect("prefill continuation");
+    let cos_next_logits = cosine_27b(&next_a, &next_b);
+    eprintln!("[prefill-vs-single-a3b] cos(next logits)={cos_next_logits:.6}");
     assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
+    assert!(
+        cos_next_logits >= 0.999,
+        "next logits cos={cos_next_logits} < 0.999"
+    );
     assert!(
         gdn_cos.state_min_cos >= 0.999,
         "GDN state cos_min={} < 0.999 (worst_gdn={} blk={} max_abs={})",
@@ -2304,8 +2330,22 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         conv_block,
         gdn_cos.conv_max_abs,
     );
-    assert!(kv_k_min_cos >= 0.999, "KV K cos_min={kv_k_min_cos} < 0.999");
-    assert!(kv_v_min_cos >= 0.999, "KV V cos_min={kv_v_min_cos} < 0.999");
+    assert!(
+        kv_cos.k_min_cos >= 0.999,
+        "KV K cos_min={} < 0.999 (worst_attn={} blk={} max_abs={})",
+        kv_cos.k_min_cos,
+        kv_cos.k_worst_layer,
+        k_block,
+        kv_cos.k_max_abs,
+    );
+    assert!(
+        kv_cos.v_min_cos >= 0.999,
+        "KV V cos_min={} < 0.999 (worst_attn={} blk={} max_abs={})",
+        kv_cos.v_min_cos,
+        kv_cos.v_worst_layer,
+        v_block,
+        kv_cos.v_max_abs,
+    );
 }
 
 #[test]
@@ -2871,6 +2911,65 @@ fn max_abs_delta_27b(a: &[f32], b: &[f32]) -> f32 {
         .zip(b)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max)
+}
+
+struct KvCosSummary {
+    k_min_cos: f64,
+    k_worst_layer: usize,
+    k_max_abs: f32,
+    v_min_cos: f64,
+    v_worst_layer: usize,
+    v_max_abs: f32,
+}
+
+fn compare_kv_prefix_27b(
+    sess_a: &MetalSession,
+    sess_b: &MetalSession,
+    kv_prefix_elems: usize,
+    expected_n_pos: usize,
+) -> KvCosSummary {
+    assert_eq!(sess_a.kv_k.len(), sess_b.kv_k.len());
+    assert_eq!(sess_a.kv_v.len(), sess_b.kv_v.len());
+
+    let mut summary = KvCosSummary {
+        k_min_cos: f64::INFINITY,
+        k_worst_layer: 0,
+        k_max_abs: 0.0,
+        v_min_cos: f64::INFINITY,
+        v_worst_layer: 0,
+        v_max_abs: 0.0,
+    };
+
+    for ai in 0..sess_a.kv_k.len() {
+        assert_eq!(
+            sess_a.kv_n_pos[ai], expected_n_pos,
+            "oracle kv_n_pos[{ai}] != T"
+        );
+        assert_eq!(
+            sess_b.kv_n_pos[ai], expected_n_pos,
+            "prefill kv_n_pos[{ai}] != T"
+        );
+
+        let a_k = read_kv_prefix_f16_to_f32(&sess_a.kv_k[ai], kv_prefix_elems);
+        let b_k = read_kv_prefix_f16_to_f32(&sess_b.kv_k[ai], kv_prefix_elems);
+        let k_cos = cosine_27b(&a_k, &b_k);
+        if k_cos < summary.k_min_cos {
+            summary.k_min_cos = k_cos;
+            summary.k_worst_layer = ai;
+            summary.k_max_abs = max_abs_delta_27b(&a_k, &b_k);
+        }
+
+        let a_v = read_kv_prefix_f16_to_f32(&sess_a.kv_v[ai], kv_prefix_elems);
+        let b_v = read_kv_prefix_f16_to_f32(&sess_b.kv_v[ai], kv_prefix_elems);
+        let v_cos = cosine_27b(&a_v, &b_v);
+        if v_cos < summary.v_min_cos {
+            summary.v_min_cos = v_cos;
+            summary.v_worst_layer = ai;
+            summary.v_max_abs = max_abs_delta_27b(&a_v, &b_v);
+        }
+    }
+
+    summary
 }
 
 fn read_tensor_f32_27b(t: &MetalTensor) -> Vec<f32> {

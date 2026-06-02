@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.196 A3B Matrix-VT Fix And Q3 Long Gate
+
+Status: fixed a real G8 matrix-attention threshold-crossing bug and sharpened
+the A3B long-context correctness read. No Q3 default yet, but the remaining
+blocker is now much narrower.
+
+Findings and gates, AC power, sequential GPU runs:
+
+| Gate | Result | Artifact |
+| --- | ---: | --- |
+| G8 matrix oracle before fix | fail at `layer=3 chunk_start=96`: `cos=0.760188`, `max_abs=3.506` | `target/profiles/v0196-a3b-q3-native-iq3-T128-P32-layer0-out-g8-oracle.out` |
+| G8 matrix oracle after fix | all 10 A3B attn layers print `cos=1.000000`; max_abs `<=1.36e-2` | `target/profiles/v0196-a3b-q3-native-iq3-T128-P32-layer0-out-g8-oracle-vtfix.out` |
+| Q4 A3B T40/P40 regression | pass; final/next logits `0.999428/0.999950` | `target/profiles/v0196-a3b-q4-default-T40-P40-vtfix-next.out` |
+| Q4 A3B T128/P32 long probe | final/next logits pass `0.999939/0.999741`, strict KV-V is `0.998817` | `target/profiles/v0196-a3b-q4-default-T128-P32-vtfix-next.out` |
+| Q3 native IQ3, blk0 `qkv+alpha` repair, T128/P32 | pass; final/next logits `0.999986/0.999990` | `target/profiles/v0196-a3b-q3-native-iq3-T128-P32-gdn-qkv-alpha-layer0-vtfix-next.out` |
+| Q3 native IQ3, blk0 `qkv+alpha` repair, T112/P112 | strict GDN state/conv fail `0.998308/0.998942`, but final/next logits pass `0.999964/0.999668` | `target/profiles/v0196-a3b-q3-native-iq3-T112-P112-qkv-alpha-layer0-next.out` |
+| Q3 `pp1024` paired, blk0 `qkv+alpha` | `1466.94 / 1434.23 t/s` (`1.023x`) | `target/profiles/v0196-a3b-q3-pp1024-native-iq3-gdn-qkv-alpha-layer0-paired.json` |
+| Q3 `pp4096` paired, blk0 `qkv+alpha` | `1420.57 / 1373.50 t/s` (`1.034x`) | `target/profiles/v0196-a3b-q3-pp4096-native-iq3-gdn-qkv-alpha-layer0-paired.json` |
+| Q3 `pp16384` paired, blk0 `qkv+alpha` | `1153.65 / 1040.77 t/s` (`1.108x`) | `target/profiles/v0196-a3b-q3-pp16384-native-iq3-gdn-qkv-alpha-layer0-paired.json` |
+
+Mechanism: G8 matrix attention became active only after the first chunks for
+small `prefill_chunk` values, but the transposed-V scratch had only been updated
+for chunks that already used matrix attention. The first matrix chunk could
+therefore read stale/uninitialized prefix V rows. The fix tracks per-attention
+VT coverage and rebuilds the prefix when matrix attention first becomes active
+mid-call.
+
+Read: this was a real correctness bug in the long/chunked harness path, not a
+MoE issue. The Q3 native-IQ3 path with a blk0 `qkv+alpha` GDN matvec oracle now
+passes T128/P32 and still beats llama.cpp at `pp1024/4096/16384`, though the
+short/medium margin is thin. T112 and Q4 T128 show that the old strict internal
+GDN/KV cosine gates can fail while final and one-step continuation logits still
+pass; the next defaultability question is whether to replace the long internal
+state gate with a continuation/generation gate, or to build a high-accuracy GDN
+projection kernel that avoids the layer0 matvec tax.
+
 ## 2026-06-02 — v0.195 A3B Q3 GDN Drift Isolation
 
 Status: added env-gated GDN drift diagnostics and surgical repair oracles for the

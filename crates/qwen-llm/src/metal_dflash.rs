@@ -4652,6 +4652,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             ),
         }));
     }
+    let n_attn_actual = base
+        .model
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, MetalBlock::Attn(_)))
+        .count();
+    let mut attn_matrix_vt_valid_until = vec![0usize; n_attn_actual];
 
     // Cache mat-mat-eligible predicates once.
     let gdn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
@@ -5765,6 +5772,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 && matrix_scratch_covers_chunk;
                             let use_matrix =
                                 use_matrix_g4 || use_matrix_g8 || use_matrix_g6 || use_matrix_g16;
+                            let n_pos = chunk_start as usize + chunk_p;
+                            let rebuild_matrix_vt_prefix =
+                                use_matrix && attn_matrix_vt_valid_until[ai] < chunk_start as usize;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_rope_neox_f32_packed_consecutive(
@@ -5891,13 +5901,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     );
                                 }
                                 if trace_attn_phases && use_matrix {
-                                    let n_pos = chunk_start as usize + chunk_p;
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let scores_bytes =
                                         chunk_p * n_q * n_pos * std::mem::size_of::<f32>();
                                     let vt_bytes =
                                         n_kv * head_dim * vt_stride * std::mem::size_of::<u16>();
-                                    let (vt_base, vt_rows) = if chunk_idx == 0 && chunk_start > 0 {
+                                    let (vt_base, vt_rows) = if rebuild_matrix_vt_prefix {
                                         (0, n_pos)
                                     } else {
                                         (chunk_start as usize, chunk_p)
@@ -5923,8 +5932,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     use_matrix && trace_attn_phases && !attn_packed_oracle;
                                 traced_matrix_subphases = trace_matrix_subphases;
                                 if trace_matrix_subphases {
-                                    let n_pos = chunk_start as usize + chunk_p;
-                                    let rebuild_vt_prefix = chunk_idx == 0 && chunk_start > 0;
+                                    let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
                                     let scores = layer_scratch
@@ -6107,6 +6115,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     );
 
                                     target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
+                                    attn_matrix_vt_valid_until[ai] = n_pos;
                                 } else {
                                     let enc = KernelEncoder::begin(&cmd_buf);
                                     label_prefill_encoder(
@@ -6127,8 +6136,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         },
                                     );
                                     if use_matrix {
-                                        let n_pos = chunk_start as usize + chunk_p;
-                                        let rebuild_vt_prefix = chunk_idx == 0 && chunk_start > 0;
+                                        let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
                                         let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                         let per_attn_vt = n_kv * head_dim * vt_stride;
                                         let scores = layer_scratch
@@ -6416,6 +6424,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             base.ctx.queue.commandBuffer().expect("command buffer");
                                     }
                                     target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
+                                    if use_matrix {
+                                        attn_matrix_vt_valid_until[ai] = n_pos;
+                                    }
                                 }
                             } else {
                                 for n_idx in 0..chunk_p {

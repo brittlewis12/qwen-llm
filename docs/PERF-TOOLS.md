@@ -547,7 +547,9 @@ Rules:
   pre-norm, GDN, mixer residual, and dense FFN phases.
 - Prefer default warmup plus `prefill_phase_summary.py --last-pass` when comparing
   against llama.cpp; no-warm traces are useful for debugging but have produced
-  misleading first-pass residency conclusions.
+  misleading first-pass residency conclusions. The summary helper infers pass
+  boundaries from `(chunk,start,layer)` rewinds so single-chunk `pp512/pp1024`
+  warmup+timed traces are handled correctly.
 - `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1` splits dense FFN into `ffn_gate`, `ffn_up`,
   and `ffn_swiglu` trace buckets. It is trace-only and intentionally not a
   production execution shape.

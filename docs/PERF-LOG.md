@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-01 — Prefill Phase Summary Single-Chunk Fix
+
+Status: methodology fix found while attacking the 27B `pp1024` dense residual.
+`prefill_phase_summary.py --last-pass` previously inferred pass boundaries only
+when chunk ids decreased, so single-chunk warmup+timed traces such as `pp512` and
+`pp1024` were summarized as warmup+timed together. The helper now increments the
+pass index on `(chunk,start,layer)` rewind, giving the expected `48/16` GDN/attn
+counts for the 27B `pp1024` trace instead of doubled `96/32` counts.
+
+Artifacts: the corrected summaries are
+`target/profiles/v0185-27b-pp1024-{default,rollback}-phase-summary.*`. The
+default corrected summary selects pass `1`, has `pass_counts={0:960,1:960}`, and
+totals `4224.8 ms`, matching the qwen trace GPU time. Treat older single-chunk
+`--last-pass` summaries as suspect unless regenerated with this fix.
+
+Methodology read: serialized llama.cpp Metal profiling at `pp1024` drops to
+`195.05 t/s`, so it is shape attribution only, not a normal-throughput anchor.
+A dirty same-session normal warmup check saw qwen `235.97/223.49 t/s` and
+llama.cpp `202.90 t/s`; rerun clean after this methodology commit before using
+it to change the scoreboard.
+
 ## 2026-06-01 — v0.184 Clean Q4 N64 Re-Anchor
 
 Status: clean post-commit re-anchor for `v0.184` after rebuilding

@@ -46,7 +46,7 @@ def main() -> int:
     parser.add_argument(
         "--pass-index",
         type=int,
-        help="Only summarize one inferred pass index. Passes increment when chunk ids reset.",
+        help="Only summarize one inferred pass index. Passes increment on chunk/start/layer rewind.",
     )
     parser.add_argument(
         "--last-pass",
@@ -70,7 +70,7 @@ def main() -> int:
 
     raw_records = []
     pass_index = 0
-    last_chunk = None
+    last_position: tuple[int, int, int] | None = None
     for line in iter_lines(args.paths):
         match = LAYER_RE.search(line)
         if match:
@@ -83,18 +83,21 @@ def main() -> int:
             source = "attn-detail"
             kind = "attn"
         chunk = int(match.group("chunk"))
-        if last_chunk is not None and chunk < last_chunk:
+        start = int(match.group("start"))
+        layer = int(match.group("layer"))
+        position = (chunk, start, layer)
+        if last_position is not None and position < last_position:
             pass_index += 1
-        last_chunk = chunk
+        last_position = position
         raw_records.append(
             {
                 "pass_index": pass_index,
                 "source": source,
                 "kind": kind,
-                "layer": int(match.group("layer")),
+                "layer": layer,
                 "phase": match.group("phase"),
                 "chunk": chunk,
-                "start": int(match.group("start")),
+                "start": start,
                 "gpu_ms": float(match.group("gpu_ms")),
             }
         )

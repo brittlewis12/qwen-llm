@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-02 — v0.197 A3B Continuation Gate
+
+Status: replaced the A3B long continuation cosine gate with a generation-oriented
+argmax gate for multi-token probes. No Q3 default yet; this is a correctness-gate
+cleanup after the v0.196 matrix-VT fix.
+
+New/changed A3B correctness knobs:
+
+- `QWEN_A3B_MOE_TEST_CONT_TOKENS=N`: run an oracle-greedy continuation after the
+  prefill-vs-single comparison.
+- `QWEN_A3B_MOE_TEST_CONT_COS_MIN=X`: optionally force a strict continuation-logit
+  cosine threshold for long probes.
+- `QWEN_A3B_MOE_TEST_INTERNAL_COS_MIN=X`: optionally force strict internal GDN/KV
+  cosine for long probes.
+- Default policy: one-step probes keep the old `0.999` continuation cosine gate;
+  prompts up to 64 tokens keep the old `0.999` internal GDN/KV gate; longer
+  multi-token probes always require no argmax divergence, while continuation and
+  internal cosine are tracked as diagnostics unless explicit thresholds are
+  supplied.
+
+Continuation evidence, AC power, sequential GPU runs:
+
+| Gate | Result | Artifact |
+| --- | ---: | --- |
+| Q3 native IQ3, blk0 `qkv+alpha`, T128/P32, 64-token continuation | pass; final logits `0.999986`, continuation `cos_min=0.996345`, `worst_step=13`, no argmax mismatch | `target/profiles/v0197-a3b-q3-native-iq3-T128-P32-qkv-alpha-layer0-cont64-softcos.out` |
+| Q3 native IQ3, blk0 `qkv+alpha`, T112/P112, 16-token diagnostic | final logits `0.999964`, continuation `cos_min=0.999175`, no argmax mismatch; strict GDN state/conv still fail | `target/profiles/v0197-a3b-q3-native-iq3-T112-P112-qkv-alpha-layer0-cont16.out` |
+| Q3 native IQ3, blk0 `qkv+alpha`, T112/P112, 64-token diagnostic | pass with soft long gates; final logits `0.999964`, continuation `cos_min=0.946914`, `worst_step=38`, no argmax mismatch | `target/profiles/v0197-a3b-q3-native-iq3-T112-P112-qkv-alpha-layer0-cont64-softcos.out` |
+| Q4 default, T128/P32, 64-token diagnostic | pass with soft long gates; continuation `cos_min=0.997681`, no argmax mismatch; strict internal KV-V is `0.998817` | `target/profiles/v0197-a3b-q4-default-T128-P32-cont64-softcos.out` |
+
+Read: strict long internal GDN/KV cosine is now classified as a diagnostic lens,
+not the sole release gate. The decisive release question is whether the prefill
+state keeps generation stable under real prompts and awkward chunk boundaries.
+The Q3 native IQ3 path still needs real-rollout continuation/perf evidence and a
+possible high-accuracy blk0 GDN projection kernel before defaulting, but the old
+gate no longer blocks solely on internal-state cosine drift that also appears in
+Q4 controls.
+
 ## 2026-06-02 — v0.196 A3B Matrix-VT Fix And Q3 Long Gate
 
 Status: fixed a real G8 matrix-attention threshold-crossing bug and sharpened

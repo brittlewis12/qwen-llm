@@ -144,10 +144,13 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   that only appeared when small chunks crossed the matrix threshold mid-call. With
   blk0 `qkv+alpha` GDN matvec as a repair oracle, Q3 T128/P32 now passes and dirty
   paired rows remain above llama.cpp at `pp1024/4096/16384`
-  (`1.023x/1.034x/1.108x`). T112 and Q4 T128 still show strict internal GDN/KV
-  cosine failures while final and one-step continuation logits pass, so the next
-  low-bit MoE branch is defaultability policy plus a high-accuracy blk0 GDN
-  projection kernel to recover the short/medium margin.
+  (`1.023x/1.034x/1.108x`). The v0.197 continuation-gate pass reclassified strict
+  long internal GDN/KV cosine as diagnostic by default for multi-token probes:
+  Q3 and Q4 awkward-chunk controls show no argmax divergence over 64 oracle-greedy
+  continuation tokens despite sub-`0.999` internal or continuation cosine. The
+  next low-bit MoE branch is real-rollout continuation/perf evidence, then either
+  default policy for native IQ3 or a high-accuracy blk0 GDN projection kernel if
+  real prompts expose instability.
   Decode sentinels also matter: Q2_K and IQ4_XS `tg128` were `0.72x/0.70x`
   before v0.177 and are now `1.09x/1.22x`. Q3_K_M now has a native row-reuse
   fast mat-vec kernel and moves from `0.94x` to `1.31x` on 0.8B, with 2B/9B/27B

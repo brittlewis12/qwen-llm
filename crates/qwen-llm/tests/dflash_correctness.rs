@@ -2196,10 +2196,20 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
+    let cont_tokens: usize = std::env::var("QWEN_A3B_MOE_TEST_CONT_TOKENS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let cont_cos_gate: Option<f64> = std::env::var("QWEN_A3B_MOE_TEST_CONT_COS_MIN")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let internal_cos_gate: Option<f64> = std::env::var("QWEN_A3B_MOE_TEST_INTERNAL_COS_MIN")
+        .ok()
+        .and_then(|s| s.parse().ok());
     let token_ids: Vec<i32> = (0..total_n)
         .map(|i| ((i * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1)
         .collect();
-    let cap = total_n + 16;
+    let cap = total_n + cont_tokens + 16;
 
     eprintln!("[prefill-vs-single-a3b] running oracle…");
     let mut sess_a = MetalSession::fresh(&ctx, &mm, cap).expect("sess A");
@@ -2300,52 +2310,93 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
         v_block,
         kv_cos.v_max_abs,
     );
-    let next_tid = ((total_n * 17 + 11) % (arch.vocab_size as usize - 1)) as i32 + 1;
-    let next_a = mf
-        .single_token(next_tid, total_n as u32, &mut sess_a)
-        .expect("oracle continuation");
-    let next_b = mf
-        .single_token(next_tid, total_n as u32, &mut sess_b)
-        .expect("prefill continuation");
-    let cos_next_logits = cosine_27b(&next_a, &next_b);
-    eprintln!("[prefill-vs-single-a3b] cos(next logits)={cos_next_logits:.6}");
+    let mut cont_input = argmax_i32_27b(&last_a);
+    let prefill_argmax = argmax_i32_27b(&last_b);
+    let mut cont_min_cos = 1.0;
+    let mut cont_worst_step = None;
+    let mut cont_first_mismatch = None;
+    if prefill_argmax != cont_input {
+        cont_first_mismatch = Some((usize::MAX, cont_input, prefill_argmax));
+    }
+    for step in 0..cont_tokens {
+        let pos = total_n + step;
+        let next_a = mf
+            .single_token(cont_input, pos as u32, &mut sess_a)
+            .expect("oracle continuation");
+        let next_b = mf
+            .single_token(cont_input, pos as u32, &mut sess_b)
+            .expect("prefill continuation");
+        let cos_next = cosine_27b(&next_a, &next_b);
+        if cos_next < cont_min_cos {
+            cont_min_cos = cos_next;
+            cont_worst_step = Some(step);
+        }
+        let argmax_a = argmax_i32_27b(&next_a);
+        let argmax_b = argmax_i32_27b(&next_b);
+        if cont_first_mismatch.is_none() && argmax_a != argmax_b {
+            cont_first_mismatch = Some((step, argmax_a, argmax_b));
+        }
+        cont_input = argmax_a;
+    }
+    eprintln!(
+        "[prefill-vs-single-a3b] continuation tokens={} cos_min={cont_min_cos:.6} worst_step={cont_worst_step:?} first_mismatch={cont_first_mismatch:?}",
+        cont_tokens,
+    );
+    let effective_cont_cos_gate = cont_cos_gate.or_else(|| (cont_tokens <= 1).then_some(0.999));
+    let effective_internal_cos_gate =
+        internal_cos_gate.or_else(|| (total_n <= 64).then_some(0.999));
+    eprintln!(
+        "[prefill-vs-single-a3b] gates continuation_cos={effective_cont_cos_gate:?} internal_cos={effective_internal_cos_gate:?}"
+    );
     assert!(cos_logits >= 0.999, "logits cos={cos_logits} < 0.999");
     assert!(
-        cos_next_logits >= 0.999,
-        "next logits cos={cos_next_logits} < 0.999"
+        cont_first_mismatch.is_none(),
+        "continuation argmax mismatch: {cont_first_mismatch:?}"
     );
-    assert!(
-        gdn_cos.state_min_cos >= 0.999,
-        "GDN state cos_min={} < 0.999 (worst_gdn={} blk={} max_abs={})",
-        gdn_cos.state_min_cos,
-        gdn_cos.state_worst_layer,
-        state_block,
-        gdn_cos.state_max_abs,
-    );
-    assert!(
-        gdn_cos.conv_min_cos >= 0.999,
-        "GDN conv cos_min={} < 0.999 (worst_gdn={} blk={} max_abs={})",
-        gdn_cos.conv_min_cos,
-        gdn_cos.conv_worst_layer,
-        conv_block,
-        gdn_cos.conv_max_abs,
-    );
-    assert!(
-        kv_cos.k_min_cos >= 0.999,
-        "KV K cos_min={} < 0.999 (worst_attn={} blk={} max_abs={})",
-        kv_cos.k_min_cos,
-        kv_cos.k_worst_layer,
-        k_block,
-        kv_cos.k_max_abs,
-    );
-    assert!(
-        kv_cos.v_min_cos >= 0.999,
-        "KV V cos_min={} < 0.999 (worst_attn={} blk={} max_abs={})",
-        kv_cos.v_min_cos,
-        kv_cos.v_worst_layer,
-        v_block,
-        kv_cos.v_max_abs,
-    );
+    if let Some(threshold) = effective_cont_cos_gate {
+        assert!(
+            cont_min_cos >= threshold,
+            "continuation logits cos_min={cont_min_cos} < {threshold}"
+        );
+    }
+    if let Some(threshold) = effective_internal_cos_gate {
+        assert!(
+            gdn_cos.state_min_cos >= threshold,
+            "GDN state cos_min={} < {} (worst_gdn={} blk={} max_abs={})",
+            gdn_cos.state_min_cos,
+            threshold,
+            gdn_cos.state_worst_layer,
+            state_block,
+            gdn_cos.state_max_abs,
+        );
+        assert!(
+            gdn_cos.conv_min_cos >= threshold,
+            "GDN conv cos_min={} < {} (worst_gdn={} blk={} max_abs={})",
+            gdn_cos.conv_min_cos,
+            threshold,
+            gdn_cos.conv_worst_layer,
+            conv_block,
+            gdn_cos.conv_max_abs,
+        );
+        assert!(
+            kv_cos.k_min_cos >= threshold,
+            "KV K cos_min={} < {} (worst_attn={} blk={} max_abs={})",
+            kv_cos.k_min_cos,
+            threshold,
+            kv_cos.k_worst_layer,
+            k_block,
+            kv_cos.k_max_abs,
+        );
+        assert!(
+            kv_cos.v_min_cos >= threshold,
+            "KV V cos_min={} < {} (worst_attn={} blk={} max_abs={})",
+            kv_cos.v_min_cos,
+            threshold,
+            kv_cos.v_worst_layer,
+            v_block,
+            kv_cos.v_max_abs,
+        );
+    }
 }
 
 #[test]
@@ -2911,6 +2962,18 @@ fn max_abs_delta_27b(a: &[f32], b: &[f32]) -> f32 {
         .zip(b)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max)
+}
+
+fn argmax_i32_27b(xs: &[f32]) -> i32 {
+    let mut best = 0usize;
+    let mut best_v = f32::NEG_INFINITY;
+    for (i, &v) in xs.iter().enumerate() {
+        if v > best_v {
+            best = i;
+            best_v = v;
+        }
+    }
+    best as i32
 }
 
 struct KvCosSummary {

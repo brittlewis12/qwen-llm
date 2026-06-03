@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.247 BF16 A3B Support Exposes A Real MoE Gap
+
+Status: added BF16 expert-bank token-loop support so the local sharded A3B BF16
+model no longer aborts on MoE routed gate/up expert banks. Raw artifacts are in
+`target/profiles/v0247-a3b-bf16-pp16-smoke.json` and
+`target/profiles/v0247-a3b-bf16-pp512-paired.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty BF16 A3B `pp16` smoke: no unsupported-dtype abort
+- clean post-commit BF16 A3B `pp512` paired row
+
+| Model | Shape | Fast-path audit | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | --- | ---: | ---: | ---: |
+| A3B BF16 | `pp512` | MoE `0/40`, lm yes | `87.27` | `1408.49` | `0.062` |
+
+Read: BF16 MoE is now a support baseline, not a performance solution. The broad
+audit found only this local coverage class, and the paired row proves it is a
+real scoreboard cliff. The next high-EV kernel branch is a prompt-native grouped
+BF16 routed MoE work unit, not more Q4/Q5/Q6 target tuning.
+
 ## 2026-06-03 — v0.246 Split-GGUF Audit Visibility Restored
 
 Status: fixed `scripts/profile/gguf_fastpath_audit.py` so split GGUF entry

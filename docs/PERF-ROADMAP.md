@@ -672,12 +672,13 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.246:
+Current rank after v0.247:
 
-1. Residual discovery before more kernels: target-family synthetic and real rows
-   are currently won, adjacent 4B quant breadth is clean, and split-GGUF audit now
-   resolves A10B to `48/48` grouped MoE coverage. The next performance branch
-   should start by finding a fresh paired miss, not by guessing a new hot kernel.
+1. BF16 A3B grouped MoE coverage: residual discovery found one major local gap.
+   The sharded A3B BF16 file now runs after token-loop support, but `pp512` is
+   `87.27 / 1408.49 t/s` (`0.062x`) with MoE fast-path audit `0/40`. The next
+   high-EV branch is prompt-native grouped BF16 routed gate/up/down, with a
+   promote gate at least restoring parity on `pp512` before longer sweeps.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

@@ -26,6 +26,7 @@ DENSE_FFN_PREFILL = {
     "BF16",
     "Q2_K",
     "Q3_K",
+    "IQ2_S",
     "IQ3_XXS",
     "IQ3_S",
     "Q4_0",
@@ -52,6 +53,7 @@ MOE_DOWN_FAST = {"Q5_K", "Q6_K", "Q8_0", "IQ4_XS"}
 BLOCK_ALIGNMENT = {
     "Q2_K": 256,
     "Q3_K": 256,
+    "IQ2_S": 256,
     "IQ3_XXS": 256,
     "IQ3_S": 256,
     "Q4_0": 32,

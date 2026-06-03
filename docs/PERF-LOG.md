@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.240 Dense `IQ2_S`/`IQ3_*` Matrix Kernels Close 4B UD Low-Bit
+
+Status: added native dense `IQ2_S` mat-vec/mat-mat support, then promoted dense
+`IQ2_S`, `IQ3_XXS`, and `IQ3_S` prompt mat-mat from scalar coverage kernels to
+64x32x32 simdgroup-matrix kernels. Artifact directory:
+`target/profiles/v0240-dense-iq2s/`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `cargo test -p qwen-llm mat_vec_and_mat_mat_dense_iq2_s_match_cpu --release -- --nocapture --test-threads=1`
+- `cargo test -p qwen-llm mat_vec_and_mat_mat_dense_iq3_match_cpu --release -- --nocapture --test-threads=1`
+- targeted fast-path audit: both 4B UD low-bit files now report FFN `32/32`, GDN
+  `24/24`, attention `8/8`, lm-tail `yes`
+
+Primitive oracle results: `IQ2_S` scalar mat-vec matches CPU dequant at
+`2.46e-7`; matrix `IQ2_S` matches within `8.69e-5`. Matrix `IQ3_XXS` and
+`IQ3_S` match within `5.67e-5` and `2.99e-5` respectively.
+
+| Model | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| `Qwen3.5-4B-UD-Q2_K_XL` | `pp512` | `1462.30` | `1465.40` | `0.998` |
+| `Qwen3.5-4B-UD-Q2_K_XL` | `pp1024` | `1480.04` | `1471.19` | `1.006` |
+| `Qwen3.5-4B-UD-Q2_K_XL` | `pp4096` | `1451.04` | `1440.79` | `1.007` |
+| `Qwen3.5-4B-UD-IQ2_M` | `pp512` | `1497.46` | `1496.14` | `1.001` |
+| `Qwen3.5-4B-UD-IQ2_M` | `pp1024` | `1514.35` | `1499.18` | `1.010` |
+| `Qwen3.5-4B-UD-IQ2_M` | `pp4096` | `1480.14` | `1415.94` | `1.045` |
+
+Read: the v0.238 cliff is closed for prompt prefill. `UD-Q2_K_XL` moved from
+`0.115x` to parity, and `UD-IQ2_M` moved from `0.035x` to parity/win. The key
+lesson is the same as the MoE quant fixes but sharper: static coverage alone was
+not enough. Scalar dense `IQ3_*` and `IQ2_S` kernels changed audit counts, but the
+scoreboard did not move until the common prompt mat-mat work unit matched the
+existing simdgroup-matrix execution model. The final `UD-IQ2_M pp512` phase
+trace confirms the mechanism: `gdn_z` drops from `229.38 ms` to `23.72 ms`, and
+GDN `ffn_down_resid` drops from `174.21 ms` to `50.23 ms`.
+
 ## 2026-06-03 — v0.239 Dense `IQ3_*` Coverage Cuts The UD Low-Bit Cliff
 
 Status: added native dense 2D `IQ3_XXS` and `IQ3_S` mat-vec/mat-mat dispatch,

@@ -1177,6 +1177,28 @@ pub fn encode_mat_vec_q2_k_f32(
     )
 }
 
+pub fn encode_mat_vec_iq2_s_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    encode_mat_vec_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        GgmlType::IQ2_S,
+        "kernel_mat_vec_iq2_s_f32",
+    )
+}
+
 pub fn encode_mat_vec_iq3_xxs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1910,6 +1932,52 @@ fn encode_mat_mat_q2_k_f32_mm(
     )
 }
 
+pub fn encode_mat_mat_iq2_s_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    static IQ2_S_MM: OnceLock<bool> = OnceLock::new();
+    if *IQ2_S_MM.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_IQ2_S_MM").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_mat_qk_lowbit_mm(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            n_query,
+            GgmlType::IQ2_S,
+            "mat_mat_iq2_s_mm",
+            "kernel_mat_mat_iq2_s_f32_mm",
+            82,
+        );
+    }
+    encode_mat_mat_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        GgmlType::IQ2_S,
+        "kernel_mat_mat_iq2_s_f32",
+    )
+}
+
 pub fn encode_mat_mat_iq3_xxs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1920,6 +1988,28 @@ pub fn encode_mat_mat_iq3_xxs_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
+    static IQ3_XXS_MM: OnceLock<bool> = OnceLock::new();
+    if *IQ3_XXS_MM.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_IQ3_XXS_MM").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_mat_qk_lowbit_mm(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            n_query,
+            GgmlType::IQ3_XXS,
+            "mat_mat_iq3_xxs_mm",
+            "kernel_mat_mat_iq3_xxs_f32_mm",
+            98,
+        );
+    }
     encode_mat_mat_block256_f32(
         ctx,
         enc,
@@ -1944,6 +2034,28 @@ pub fn encode_mat_mat_iq3_s_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
+    static IQ3_S_MM: OnceLock<bool> = OnceLock::new();
+    if *IQ3_S_MM.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATMAT_IQ3_S_MM").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_mat_qk_lowbit_mm(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            n_query,
+            GgmlType::IQ3_S,
+            "mat_mat_iq3_s_mm",
+            "kernel_mat_mat_iq3_s_f32_mm",
+            110,
+        );
+    }
     encode_mat_mat_block256_f32(
         ctx,
         enc,
@@ -13896,6 +14008,104 @@ mod tests {
                 .fold(0f32, f32::max);
             eprintln!("[q3_k mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "Q3_K mat_mat max_abs={max_abs}");
+        }
+    }
+
+    #[test]
+    fn mat_vec_and_mat_mat_dense_iq2_s_match_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.5-4B-UD-IQ2_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[dense-iq2_s] skipped missing fixture {path}");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let w = match g.tensors.iter().find(|t| {
+            t.name.starts_with("blk.")
+                && t.name.ends_with(".weight")
+                && t.dtype == GgmlType::IQ2_S
+                && t.shape.len() == 2
+                && t.shape[0] % 256 == 0
+        }) {
+            Some(t) => t,
+            None => {
+                eprintln!("[dense-iq2_s] skipped missing IQ2_S tensor in {path}");
+                return;
+            }
+        };
+        let n_in = w.shape[0] as usize;
+        let n_out = w.shape[1] as usize;
+        eprintln!("[dense-iq2_s] {} shape=[{n_in}, {n_out}]", w.name);
+
+        let weight_f32 = crate::codec::dequant_to_f32(w, g.slice(w)).expect("dequant");
+        let w_t = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(w),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::IQ2_S,
+        )
+        .expect("weight tensor");
+
+        let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+        let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let y_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y tensor");
+        one_shot(&ctx, |enc| {
+            encode_mat_vec_iq2_s_f32(&ctx, enc, &w_t, &x_t, &y_t, n_in, n_out)
+        })
+        .expect("mat_vec encode");
+        let gpu = read_back_f32(&y_t.buffer, n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!("[dense-iq2_s mat_vec] max|Delta|={max_abs:.2e}");
+        assert!(max_abs < 1e-2, "IQ2_S mat_vec max_abs={max_abs}");
+
+        for &n_query in &[1usize, 16] {
+            let x_pack: Vec<f32> = (0..n_query * n_in)
+                .map(|i| ((i % 17) as f32 - 8.0) * 1e-2)
+                .collect();
+            let mut cpu_pack = vec![0.0f32; n_query * n_out];
+            for q in 0..n_query {
+                let row = &x_pack[q * n_in..(q + 1) * n_in];
+                let out = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, row);
+                cpu_pack[q * n_out..(q + 1) * n_out].copy_from_slice(&out);
+            }
+            let x_pack_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x_pack),
+                vec![n_query as u64, n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x pack tensor");
+            let y_pack_t = MetalTensor::zeros_f32(&ctx, vec![(n_query * n_out) as u64])
+                .expect("y pack tensor");
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_iq2_s_f32(
+                    &ctx, enc, &w_t, &x_pack_t, &y_pack_t, n_in, n_out, n_query,
+                )
+            })
+            .expect("mat_mat encode");
+            let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
+            let max_abs = gpu_pack
+                .iter()
+                .zip(cpu_pack.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("[dense-iq2_s mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
+            assert!(max_abs < 1e-2, "IQ2_S mat_mat max_abs={max_abs}");
         }
     }
 

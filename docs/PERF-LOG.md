@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.238 Broad Audit Finds Dense UD IQ2/IQ3 Cliff
+
+Status: broadened the local Qwen GGUF fast-path audit after A3B quant coverage
+turned green. Artifact: `target/profiles/v0238-local-qwen-fastpath-audit.tsv`.
+
+Most dense Qwen3.5/3.6 files are now statically clean across FFN, GDN, attention,
+and lm-tail. The major remaining non-sharded local coverage miss is dense 4B UD
+low-bit:
+
+| Model | Audit | Paired `pp512` qwen | llama.cpp | qwen/lcpp |
+| --- | --- | ---: | ---: | ---: |
+| `Qwen3.5-4B-UD-Q2_K_XL` | FFN `22/32`, GDN `0/24`, attn `5/8` | `169.40` | `1466.80` | `0.115` |
+| `Qwen3.5-4B-UD-IQ2_M` | FFN `0/32`, GDN `0/24`, attn `0/8` | `51.82` | `1491.13` | `0.035` |
+
+Read: this is now the largest measured local scoreboard cliff. The missing common
+primitive is dense 2D `IQ2_S`/`IQ3_XXS`/`IQ3_S` mat-mat coverage; MoE expert-bank
+native `IQ3_*` does not help ordinary dense projections. Artifacts for the paired
+gap rows are in `target/profiles/v0238-local-coverage-gaps/`.
+
 ## 2026-06-03 — v0.237 A3B Quant `pp512` Re-Anchor Is Won
 
 Status: ran one-block paired `pp512` anchors for the local non-sharded A3B quant

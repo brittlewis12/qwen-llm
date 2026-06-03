@@ -665,29 +665,32 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.233:
+Current rank after v0.238:
 
-1. Paired family/real-rollout guardrails: re-anchor the now-covered A3B quant
-   family, long prompts, and real rollouts against pinned llama.cpp before opening
-   another microkernel. The `UD-IQ4_XS` coverage fix changed one cell by roughly
-   `37x`; breadth can still dominate local tuning.
-2. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+1. Dense UD `IQ2_S`/`IQ3_*` coverage: broad audit and paired `pp512` rows expose
+   the largest local cliff, with 4B `UD-Q2_K_XL` at `0.115x` llama.cpp and
+   `UD-IQ2_M` at `0.035x`. Start in the common dense 2D mat-mat dispatch path,
+   not MoE, fused FFN, or attention-specific code. First target is native
+   `IQ2_S`/`IQ3_XXS`/`IQ3_S` projection coverage with primitive oracles and audit
+   count gates.
+2. Paired family/real-rollout guardrails: keep target-family synthetic and real
+   rollout comparisons current, but A3B non-sharded quantized MoE has moved to
+   guardrail mode after v0.237 `pp512` wins across measured quants.
+3. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured
    `moe_inner` activations rather than another synthetic row-stride oracle.
-3. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+4. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
    or profile scope. The local llama.cpp b9481 build no longer exposes
    `GGML_METAL_PROFILE_OPS`, so this may require a tiny canonical profiling patch
    or a non-invasive external capture before more kernel code.
-4. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+5. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
    `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
    than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
    before any end-to-end tuning.
-5. Small dense residuals: continue only from stable paired deltas, not from
-   narrow N64 or one-cell policy retreads.
 
 The sections below preserve the rationale and reopen criteria from earlier
 sprints; the current rank above overrides stale branch ordering when they

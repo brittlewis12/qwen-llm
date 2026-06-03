@@ -638,6 +638,10 @@ Recent measured negatives:
   direct kernel only for `<8` regressed Q4 `pp512` GPU time (`0.7086/0.7027`
   base versus `0.7274/0.7380`). Packed fallback variants need a new mechanism
   before reopening.
+- A first Q5 down multi-expert tiny4 microtile showed positive GPU time but failed
+  correctness (`logits cos=0.981292` on the A3B prefill-vs-single gate). A
+  corrected microtile remains a possible branch, but correctness must run before
+  any perf row is counted.
 
 ## Force-Ranked Next Bets
 

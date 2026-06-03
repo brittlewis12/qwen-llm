@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.226 Rejected Tiny4 Down Microtile
+
+Status: tried and removed a force-only Q5 down `<8` multi-expert microtile. The
+prototype packed four tiny experts into one threadgroup and left `>=8` on the
+current grouped down path.
+
+Performance signal before correctness:
+
+| Variant | Q4 `pp512` GPU ms/token rows |
+| --- | ---: |
+| base | `0.7016 / 0.7068` |
+| tiny4 down | `0.6921 / 0.6897` |
+
+Correctness gate failed, so the performance signal is invalid:
+
+- `QWEN_PREFILL_MOE_TINY4_DOWN=1 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture`
+- First scenario failed with `logits cos=0.981292 < 0.999`.
+
+Read: the broad idea of multi-expert tiny tiling may still be live, but this
+implementation is not. The likely bug is tile-layout geometry: one simdgroup per
+expert did not reproduce the grouped A-tile fill/store structure correctly. Do
+not treat the GPU-time row as a win unless a corrected microtile passes the A3B
+prefill-vs-single gate.
+
 ## 2026-06-03 — v0.225 Rejected Cold-Packed SwiGLU Proof
 
 Status: tried and removed a force-only cold-packed SwiGLU proof for A3B Q4

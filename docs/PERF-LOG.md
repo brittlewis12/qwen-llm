@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.223 A3B Short-MoE Tiny-Bucket Diagnosis
+
+Status: added disabled MoE bucket-bin trace support under
+`QWEN_PREFILL_TRACE_MOE_BUCKET_BINS=1`. The trace splits Q4 grouped SwiGLU and
+Q5 grouped down into `<16`, `16-31`, `32-47`, `48-63`, and `>=64` bucket bins
+and extends bucket stats with per-bin expert and slot counts. Default execution
+is unchanged; Q5/IQ4_XS grouped down now carries full-range min/max args for the
+trace split.
+
+Validation:
+
+- `cargo build --release`
+- `cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture`
+
+Q4 `pp512` bin-normalized trace:
+
+| Phase | `<16` | `16-31` | `32-47` | `48-63` | `>=64` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SwiGLU ms/k-slot | `2.276` | `1.307` | `1.133` | `1.310` | `0.549` |
+| Down ms/k-slot | `2.104` | `0.870` | `1.096` | `1.326` | `0.282` |
+| Slot fraction | `0.131` | `0.105` | `0.075` | `0.056` | `0.633` |
+
+Q4 `pp768` confirms the same shape but with fewer tiny slots: `<16` is `0.092`
+of slots, while `>=64` rises to `0.701`. `<16` remains expensive per slot:
+SwiGLU `1.951 ms/k-slot`, down `1.982 ms/k-slot`.
+
+Falsifiers:
+
+- Hot-threshold sweeps are tiny/noisy: `th40` is only slightly best at `pp512`,
+  tied with default at `pp768`; all-`n32` regresses and all-`n16` loses at the
+  winning side of the knee.
+- Old packed-routed fallback is not the cold answer: Q4 `pp512` packed is
+  `~574 t/s` versus grouped `~1224-1232 t/s`.
+- Range-width cap for bounded count ranges looked plausible from dispatch shape
+  but failed A/B: Q4 `pp512` cap rows `1236.6/1217.6` versus rollback
+  `1234.4/1246.5`; Q4 `pp768` was mixed/noisy. Removed from default code.
+
+Read: the short-MoE miss is an active underfilled-bucket tax, not route work,
+not scalar hot threshold policy, not old packed fallback, and not impossible
+x-tile early returns. The next exact branch should target `<16` buckets for both
+SwiGLU and down while leaving `>=16` on the current grouped path. A candidate
+must prove bin-time movement first, then clear Q4 `pp512` end-to-end without
+hurting `pp768/1024`, and only then generalize to Q6/Q8/Q3.
+
 ## 2026-06-03 — v0.222 Clean A3B Quant Breakpoint Sweep
 
 Status: reran the A3B quant breakpoint sweep after rebuilding from v0.221.

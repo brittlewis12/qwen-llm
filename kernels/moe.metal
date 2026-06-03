@@ -3160,6 +3160,8 @@ struct moe_group_q5k_args {
     uint K;
     uint nb01;
     uint stride_b;
+    uint min_count;
+    uint max_count;
 };
 
 struct moe_group_q6k_args {
@@ -3238,7 +3240,7 @@ kernel void kernel_moe_down_q5_K_f32_grouped_slots(
     const int r1 = tgpig.x * NR1_MM;
 
     const int count = counts[im];
-    if (r1 >= count) return;
+    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
     const short nr1 = (count - r1 < NR1_MM) ? (short)(count - r1) : NR1_MM;
@@ -3367,7 +3369,7 @@ kernel void kernel_moe_down_iq4_xs_f32_grouped_slots(
     const int r1 = tgpig.x * NR1_MM;
 
     const int count = counts[im];
-    if (r1 >= count) return;
+    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
     const short nr1 = (count - r1 < NR1_MM) ? (short)(count - r1) : NR1_MM;

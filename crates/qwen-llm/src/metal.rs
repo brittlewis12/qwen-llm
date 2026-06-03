@@ -4383,6 +4383,39 @@ pub fn encode_moe_down_q5_K_f32_grouped_slots(
     n_expert: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    encode_moe_down_q5_K_f32_grouped_slots_range(
+        ctx,
+        enc,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_in,
+        n_out,
+        n_expert,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_down_q5_K_f32_grouped_slots_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
     if n_in % 256 != 0 {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q5_K_grouped_slots",
@@ -4427,6 +4460,8 @@ pub fn encode_moe_down_q5_K_f32_grouped_slots(
         k: u32,
         nb01: u32,
         stride_b: u32,
+        min_count: u32,
+        max_count: u32,
     }
     let nb01 = ((n_in / 256) * 176) as u32;
     enc.set_bytes(
@@ -4437,6 +4472,8 @@ pub fn encode_moe_down_q5_K_f32_grouped_slots(
             k: n_in as u32,
             nb01,
             stride_b: n_in as u32,
+            min_count,
+            max_count,
         },
     );
     enc.set_tensor(1, weight);
@@ -4699,6 +4736,8 @@ pub fn encode_moe_down_iq4_xs_f32_grouped_slots(
         k: u32,
         nb01: u32,
         stride_b: u32,
+        min_count: u32,
+        max_count: u32,
     }
     enc.set_bytes(
         0,
@@ -4708,6 +4747,8 @@ pub fn encode_moe_down_iq4_xs_f32_grouped_slots(
             k: n_in as u32,
             nb01: (n_in / 256) as u32,
             stride_b: n_in as u32,
+            min_count: 0,
+            max_count: i32::MAX as u32,
         },
     );
     enc.set_tensor(1, weight);

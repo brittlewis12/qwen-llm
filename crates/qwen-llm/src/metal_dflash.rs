@@ -734,6 +734,11 @@ fn prefill_trace_moe_buckets_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_MOE_BUCKETS"))
 }
 
+fn prefill_trace_moe_bucket_bins_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_MOE_BUCKET_BINS"))
+}
+
 fn trace_prefill_moe_bucket_stats(
     enabled: bool,
     chunk_idx: usize,
@@ -769,6 +774,18 @@ fn trace_prefill_moe_bucket_stats(
     let ge16 = active.iter().filter(|&&c| c >= 16).count();
     let ge32 = active.iter().filter(|&&c| c >= 32).count();
     let ge48 = active.iter().filter(|&&c| c >= 48).count();
+    let bin_stats = |min_slots: usize, max_slots: usize| -> (usize, usize) {
+        active
+            .iter()
+            .copied()
+            .filter(|&c| c >= min_slots && c <= max_slots)
+            .fold((0, 0), |(experts, slots), c| (experts + 1, slots + c))
+    };
+    let (e_lt16, s_lt16) = bin_stats(1, 15);
+    let (e_16_31, s_16_31) = bin_stats(16, 31);
+    let (e_32_47, s_32_47) = bin_stats(32, 47);
+    let (e_48_63, s_48_63) = bin_stats(48, 63);
+    let (e_ge64, s_ge64) = bin_stats(64, usize::MAX);
     let (hot_min, hot_experts, hot_slots) = if let Some(min_slots) = hot_expert_min_slots {
         let hot_experts = active.iter().filter(|&&c| c >= min_slots).count();
         let hot_slots = active.iter().filter(|&&c| c >= min_slots).sum::<usize>();
@@ -777,7 +794,7 @@ fn trace_prefill_moe_bucket_stats(
         (-1, 0, 0)
     };
     eprintln!(
-        "[prefill-moe-buckets] chunk={chunk_idx} start={chunk_start} layer={layer_idx} total={total}/{} active={} p50={p50} p90={p90} max={max} ge16={ge16} ge32={ge32} ge48={ge48} hot_min={hot_min} hot_experts={hot_experts} hot_slots={hot_slots}",
+        "[prefill-moe-buckets] chunk={chunk_idx} start={chunk_start} layer={layer_idx} total={total}/{} active={} p50={p50} p90={p90} max={max} ge16={ge16} ge32={ge32} ge48={ge48} hot_min={hot_min} hot_experts={hot_experts} hot_slots={hot_slots} e_lt16={e_lt16} s_lt16={s_lt16} e_16_31={e_16_31} s_16_31={s_16_31} e_32_47={e_32_47} s_32_47={s_32_47} e_48_63={e_48_63} s_48_63={s_48_63} e_ge64={e_ge64} s_ge64={s_ge64}",
         chunk_p * topk,
         active.len(),
     );
@@ -7195,71 +7212,213 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 );
                             }
                             {
-                                let enc = KernelEncoder::begin(&cmd_buf);
-                                label_prefill_encoder(&enc, il, "moe-routed-grouped-swiglu");
-                                if zero_grouped_buffers {
-                                    encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
+                                let split_q4_swiglu_bins = prefill_trace_moe_bucket_bins_enabled()
+                                    && matches!(moe.gate_exps.dtype, GgmlType::Q4_K)
+                                    && matches!(moe.up_exps.dtype, GgmlType::Q4_K)
+                                    && !grouped_q4_n32_all
+                                    && prefill_moe_grouped_hot_q4_n32_enabled(chunk_p)
+                                    && hot_expert_min_slots == Some(48);
+                                if split_q4_swiglu_bins {
+                                    let bins: [(&str, u32, u32, bool); 5] = [
+                                        ("routed_swiglu_lt16", 0, 15, false),
+                                        ("routed_swiglu_16_31", 16, 31, false),
+                                        ("routed_swiglu_32_47", 32, 47, false),
+                                        ("routed_swiglu_48_63", 48, 63, true),
+                                        ("routed_swiglu_ge64", 64, i32::MAX as u32, true),
+                                    ];
+                                    for (bin_idx, (phase, min_slots, max_slots, use_n32)) in
+                                        bins.into_iter().enumerate()
+                                    {
+                                        let enc = KernelEncoder::begin(&cmd_buf);
+                                        label_prefill_encoder(&enc, il, phase);
+                                        if zero_grouped_buffers && bin_idx == 0 {
+                                            encode_fill_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &moe_group_inner_pack_p,
+                                                0.0,
+                                            )?;
+                                        }
+                                        if use_n32 {
+                                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
+                                                base.ctx,
+                                                &enc,
+                                                &moe.gate_exps,
+                                                &moe.up_exps,
+                                                &h_pack_p,
+                                                &moe_group_count_pack,
+                                                &moe_group_ids_pack,
+                                                &moe_group_inner_pack_p,
+                                                h,
+                                                f_exp,
+                                                n_expert,
+                                                topk,
+                                                chunk_p,
+                                                min_slots,
+                                                max_slots,
+                                            )?;
+                                        } else {
+                                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
+                                                base.ctx,
+                                                &enc,
+                                                &moe.gate_exps,
+                                                &moe.up_exps,
+                                                &h_pack_p,
+                                                &moe_group_count_pack,
+                                                &moe_group_ids_pack,
+                                                &moe_group_inner_pack_p,
+                                                h,
+                                                f_exp,
+                                                n_expert,
+                                                topk,
+                                                chunk_p,
+                                                min_slots,
+                                                max_slots,
+                                            )?;
+                                        }
+                                        enc.end();
+                                        flush_prefill_layer_phase(
+                                            base.ctx,
+                                            &mut cmd_buf,
+                                            &mut prefill_gpu_total_ms,
+                                            trace_layer_phases,
+                                            chunk_idx,
+                                            chunk_start,
+                                            il,
+                                            "moe",
+                                            phase,
+                                        );
+                                    }
+                                } else {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    label_prefill_encoder(&enc, il, "moe-routed-grouped-swiglu");
+                                    if zero_grouped_buffers {
+                                        encode_fill_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &moe_group_inner_pack_p,
+                                            0.0,
+                                        )?;
+                                    }
+                                    encode_prefill_moe_grouped_swiglu(
+                                        base.ctx,
+                                        &enc,
+                                        moe,
+                                        &h_pack_p,
+                                        &moe_group_count_pack,
+                                        &moe_group_ids_pack,
+                                        &moe_group_inner_pack_p,
+                                        h,
+                                        f_exp,
+                                        n_expert,
+                                        topk,
+                                        chunk_p,
+                                        grouped_q4_n32_all,
+                                        hot_expert_min_slots,
+                                    )?;
+                                    enc.end();
+                                    flush_prefill_layer_phase(
+                                        base.ctx,
+                                        &mut cmd_buf,
+                                        &mut prefill_gpu_total_ms,
+                                        trace_layer_phases,
+                                        chunk_idx,
+                                        chunk_start,
+                                        il,
+                                        "moe",
+                                        "routed_swiglu",
+                                    );
                                 }
-                                encode_prefill_moe_grouped_swiglu(
-                                    base.ctx,
-                                    &enc,
-                                    moe,
-                                    &h_pack_p,
-                                    &moe_group_count_pack,
-                                    &moe_group_ids_pack,
-                                    &moe_group_inner_pack_p,
-                                    h,
-                                    f_exp,
-                                    n_expert,
-                                    topk,
-                                    chunk_p,
-                                    grouped_q4_n32_all,
-                                    hot_expert_min_slots,
-                                )?;
-                                enc.end();
-                                flush_prefill_layer_phase(
-                                    base.ctx,
-                                    &mut cmd_buf,
-                                    &mut prefill_gpu_total_ms,
-                                    trace_layer_phases,
-                                    chunk_idx,
-                                    chunk_start,
-                                    il,
-                                    "moe",
-                                    "routed_swiglu",
-                                );
                             }
                             {
-                                let enc = KernelEncoder::begin(&cmd_buf);
-                                label_prefill_encoder(&enc, il, "moe-routed-grouped-down");
-                                if zero_grouped_buffers {
-                                    encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
+                                let split_q5_down_bins = prefill_trace_moe_bucket_bins_enabled()
+                                    && matches!(moe.down_exps.dtype, GgmlType::Q5_K);
+                                if split_q5_down_bins {
+                                    let bins: [(&str, u32, u32); 5] = [
+                                        ("routed_down_lt16", 0, 15),
+                                        ("routed_down_16_31", 16, 31),
+                                        ("routed_down_32_47", 32, 47),
+                                        ("routed_down_48_63", 48, 63),
+                                        ("routed_down_ge64", 64, i32::MAX as u32),
+                                    ];
+                                    for (bin_idx, (phase, min_slots, max_slots)) in
+                                        bins.into_iter().enumerate()
+                                    {
+                                        let enc = KernelEncoder::begin(&cmd_buf);
+                                        label_prefill_encoder(&enc, il, phase);
+                                        if zero_grouped_buffers && bin_idx == 0 {
+                                            encode_fill_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &moe_group_out_pack_p,
+                                                0.0,
+                                            )?;
+                                        }
+                                        crate::metal::encode_moe_down_q5_K_f32_grouped_slots_range(
+                                            base.ctx,
+                                            &enc,
+                                            &moe.down_exps,
+                                            &moe_group_inner_pack_p,
+                                            &moe_group_count_pack,
+                                            &moe_group_ids_pack,
+                                            &moe_group_out_pack_p,
+                                            f_exp,
+                                            h,
+                                            n_expert,
+                                            chunk_p,
+                                            min_slots,
+                                            max_slots,
+                                        )?;
+                                        enc.end();
+                                        flush_prefill_layer_phase(
+                                            base.ctx,
+                                            &mut cmd_buf,
+                                            &mut prefill_gpu_total_ms,
+                                            trace_layer_phases,
+                                            chunk_idx,
+                                            chunk_start,
+                                            il,
+                                            "moe",
+                                            phase,
+                                        );
+                                    }
+                                } else {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    label_prefill_encoder(&enc, il, "moe-routed-grouped-down");
+                                    if zero_grouped_buffers {
+                                        encode_fill_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &moe_group_out_pack_p,
+                                            0.0,
+                                        )?;
+                                    }
+                                    encode_prefill_moe_grouped_down(
+                                        base.ctx,
+                                        &enc,
+                                        &moe.down_exps,
+                                        &moe_group_inner_pack_p,
+                                        &moe_group_count_pack,
+                                        &moe_group_ids_pack,
+                                        &moe_group_out_pack_p,
+                                        f_exp,
+                                        h,
+                                        n_expert,
+                                        chunk_p,
+                                    )?;
+                                    enc.end();
+                                    flush_prefill_layer_phase(
+                                        base.ctx,
+                                        &mut cmd_buf,
+                                        &mut prefill_gpu_total_ms,
+                                        trace_layer_phases,
+                                        chunk_idx,
+                                        chunk_start,
+                                        il,
+                                        "moe",
+                                        "routed_down",
+                                    );
                                 }
-                                encode_prefill_moe_grouped_down(
-                                    base.ctx,
-                                    &enc,
-                                    &moe.down_exps,
-                                    &moe_group_inner_pack_p,
-                                    &moe_group_count_pack,
-                                    &moe_group_ids_pack,
-                                    &moe_group_out_pack_p,
-                                    f_exp,
-                                    h,
-                                    n_expert,
-                                    chunk_p,
-                                )?;
-                                enc.end();
-                                flush_prefill_layer_phase(
-                                    base.ctx,
-                                    &mut cmd_buf,
-                                    &mut prefill_gpu_total_ms,
-                                    trace_layer_phases,
-                                    chunk_idx,
-                                    chunk_start,
-                                    il,
-                                    "moe",
-                                    "routed_down",
-                                );
                             }
                             if !fused_grouped_finalizer {
                                 let enc = KernelEncoder::begin(&cmd_buf);

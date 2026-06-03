@@ -627,14 +627,19 @@ Recent measured negatives:
   exact-shape 27B microbench at `N=321`, below the go gate.
 - Forcing single Q4 prompt mat-mat to `NR1=16` is worse than the current `NR1=32`
   path at `N=321`, so easy tile narrowing is not the answer.
+- A3B Q4 short-MoE threshold/dispatch retreads are demoted: hot-threshold sweeps
+  are tiny/noisy, all-`n32` regresses, all-`n16` only helps the losing side of the
+  knee, old packed-routed fallback is about half-speed at `pp512`, and a simple
+  bounded range-width cap failed A/B.
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.222:
+Current rank after v0.223:
 
 1. MoE short-prompt mechanics: A3B Q3/Q4/Q6/Q8 all have `40/40` grouped
    coverage, all lose `pp512`, and all win from `pp768` upward. Attack the
-   shared grouped routed SwiGLU/down knee before adding another quant kernel.
+   shared grouped routed SwiGLU/down knee before adding another quant kernel;
+   v0.223 bin traces point specifically at `<16` expert buckets.
 2. Paired family/real-rollout guardrails: keep synthetic long prompts, real
    rollouts, and pinned llama.cpp comparisons ahead of isolated microbench wins.
 3. Remaining MoE quant breadth: UD-IQ4_XS remains `0/40` grouped coverage
@@ -646,6 +651,16 @@ Current rank after v0.222:
 The sections below preserve the rationale and reopen criteria from earlier
 sprints; the current rank above overrides stale branch ordering when they
 conflict.
+
+Current MoE short-branch rule:
+
+- Target active underfilled buckets, not route work or threshold policy. Q4
+  `pp512` bin traces show `<16` is only `13%` of routed slots but costs
+  `2.276 ms/k-slot` in SwiGLU and `2.104 ms/k-slot` in down, versus `>=64` at
+  `0.549` and `0.282` respectively.
+- The next code branch should be a `<16`-only tiny-bucket path for both SwiGLU
+  and down, leaving `>=16` on the current grouped path. Gate on bin-time movement
+  first, then Q4 `pp512` end-to-end, then Q6/Q8/Q3 generalization.
 
 ### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 

@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.225 Rejected Cold-Packed SwiGLU Proof
+
+Status: tried and removed a force-only cold-packed SwiGLU proof for A3B Q4
+`<8` buckets. The branch masked topk slots by expert count on GPU, ran the
+existing packed Q4 SwiGLU only for cold slots, and made grouped Q4 skip `0-7`.
+Down stayed grouped, so this isolated whether the existing packed direct SwiGLU
+kernel could be a cheap cold-slot answer.
+
+Q4 `pp512` A/B:
+
+| Variant | GPU ms/token rows | Read |
+| --- | ---: | --- |
+| base | `0.7086 / 0.7027` | current grouped path |
+| cold-packed SwiGLU | `0.7274 / 0.7380` | regression |
+
+Artifact: `target/profiles/v0224-a3b-cold-direct/q4-pp512-cold-packed-swiglu-sweep.json`.
+
+Read: a masked reuse of the old packed-slot direct kernel is not the flat cold
+path. It preserves too much slot-major control/weight traversal overhead even
+when restricted to `<8`. The next branch needs either a genuinely new cold-slot
+list/direct kernel or a higher-level algorithmic change; do not reopen packed
+fallback variants without a new mechanism.
+
 ## 2026-06-03 — v0.224 A3B `<8` Tiny-Bucket Split
 
 Status: refined `QWEN_PREFILL_TRACE_MOE_BUCKET_BINS=1` from `<16` to `<8` and

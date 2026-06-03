@@ -634,6 +634,10 @@ Recent measured negatives:
 - A `<8`-only grouped n8 tile is also demoted: it preserves too much grouped
   underfill/control overhead and regressed Q4 `pp512` GPU time (`~0.706/0.709`
   base to `~0.732/0.732`).
+- A masked cold-packed SwiGLU proof is demoted too: reusing the old packed-slot
+  direct kernel only for `<8` regressed Q4 `pp512` GPU time (`0.7086/0.7027`
+  base versus `0.7274/0.7380`). Packed fallback variants need a new mechanism
+  before reopening.
 
 ## Force-Ranked Next Bets
 

@@ -169,7 +169,9 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   v0.240 dense `IQ2_S`/`IQ3_*` matrix-kernel pass closes the measured 4B UD
   low-bit prompt cliff: local `UD-Q2_K_XL` and `UD-IQ2_M` are now parity/wins at
   `pp512/1024/4096`. v0.241 closes the measured decode side too, with clean
-  `tg128` rows at `1.13-1.15x` pinned llama.cpp. Older
+  `tg128` rows at `1.13-1.15x` pinned llama.cpp. v0.242 adjacent 4B breadth is
+  clean: `Q3_K_M`, `IQ4_XS`, and `Q4_K_M` are parity/win at `pp512/4096`, and
+  all three win at `tg128`. Older
   A3B low-bit context: clean v0.189 A3B Q3 `pp1024` paired
   evidence is `90.28` qwen versus `1392.02` llama.cpp (`0.065x`), while no-FFN
   jumps to `2858.64 t/s`. The v0.192 env-gated grouped F32/IQ4_XS candidate
@@ -670,29 +672,35 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.240:
+Current rank after v0.242:
 
-1. Paired family/real-rollout guardrails: the known dense 4B UD low-bit prompt
-   cliff is closed after v0.240. Re-anchor the broader target family and real
-   rollout prompts before opening another narrow kernel branch, especially after
-   any benchmark-target llama.cpp update or power/thermal confound.
-2. Dense low-bit breadth guardrails: v0.240 proves prompt prefill for local 4B
-   `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, and v0.241 proves their
-   `tg128` decode sentinels. Keep other local UD files in audit/family sweeps,
-   but low-bit dense kernel work is no longer above target-family re-anchoring
-   unless a paired file exposes a fresh miss.
-3. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+1. Real-rollout and true-long guardrails: current-head target-family synthetic
+   sentinels are clean (`27B`, `A3B`, and `A10B` all win at `pp1024`, `pp4096`,
+   and `tg128`), and adjacent local 4B quant breadth stayed clean. Before a new
+   microkernel branch, re-anchor the real prompts / true-long cells that can still
+   reveal chunk-policy, residency, or context-scaling issues.
+2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
+   A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
+   latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at
+   `1.16x/1.17x/1.07x`, and A10B at `1.13x/1.33x/1.05x` for
+   `pp1024/pp4096/tg128`.
+3. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
+   `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
+   `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
+   and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work
+   only when a paired file or static audit exposes a fresh miss.
+4. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured
    `moe_inner` activations rather than another synthetic row-stride oracle.
-4. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+5. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
    or profile scope. The local llama.cpp b9481 build no longer exposes
    `GGML_METAL_PROFILE_OPS`, so this may require a tiny canonical profiling patch
    or a non-invasive external capture before more kernel code.
-5. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+6. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
    `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
    than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
    before any end-to-end tuning.

@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.242 Breadth And Primary Sentinels Stay Clean
+
+Status: after the dense UD low-bit prompt/decode fixes, ran bounded adjacent
+4B quant breadth plus current-head primary family sentinels. Raw local breadth
+artifacts are in `target/profiles/v0242-4b-breadth/`; committed family
+artifacts are in:
+
+- `docs/bench/2026-06-03-1914-27B-v0242-sentinel-family/`
+- `docs/bench/2026-06-03-1917-35B-A3B-v0242-sentinel-family/`
+- `docs/bench/2026-06-03-1918-122B-A10B-v0242-sentinel-family/`
+
+The targeted 4B audit reports `32/32` dense FFN, `24/24` GDN, `8/8`
+attention, and `lm=yes` across every local 4B quant. Adjacent paired breadth:
+
+| Model | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| 4B `Q3_K_M` | `pp512` | `1437.54` | `1439.28` | `0.999` |
+| 4B `Q3_K_M` | `pp4096` | `1419.20` | `1402.06` | `1.012` |
+| 4B `IQ4_XS` | `pp512` | `1464.82` | `1495.27` | `0.980` |
+| 4B `IQ4_XS` | `pp4096` | `1449.57` | `1430.61` | `1.013` |
+| 4B `Q4_K_M` | `pp512` | `1465.76` | `1450.98` | `1.010` |
+| 4B `Q4_K_M` | `pp4096` | `1430.48` | `1320.14` | `1.084` |
+| 4B `Q3_K_M` | `tg128` | `103.75` | `89.13` | `1.164` |
+| 4B `IQ4_XS` | `tg128` | `113.69` | `103.56` | `1.098` |
+| 4B `Q4_K_M` | `tg128` | `107.35` | `97.97` | `1.096` |
+
+Primary sentinel rows were current-head `build_dirty=0`, sequential, AC-power
+style runs with no recorded thermal or performance warnings:
+
+| Model | Shape | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| 27B dense | `pp1024` | `240.48` | `231.86` | `1.037` |
+| 27B dense | `pp4096` | `220.85` | `198.70` | `1.111` |
+| 27B dense | `tg128` | `24.30` | `21.71` | `1.119` |
+| 35B A3B | `pp1024` | `1630.33` | `1411.47` | `1.155` |
+| 35B A3B | `pp4096` | `1574.87` | `1350.39` | `1.166` |
+| 35B A3B | `tg128` | `81.18` | `76.11` | `1.067` |
+| 122B A10B | `pp1024` | `506.45` | `446.84` | `1.133` |
+| 122B A10B | `pp4096` | `477.01` | `359.37` | `1.327` |
+| 122B A10B | `tg128` | `35.60` | `33.90` | `1.050` |
+
+Read: the v0.240-v0.241 dense low-bit fixes did not destabilize adjacent local
+4B quants or the Q4 target family. The live queue should stay on real-rollout /
+true-long guardrails and fresh paired residuals, not another low-bit harvest.
+
 ## 2026-06-03 — v0.241 Dense Low-Bit Decode Flips To A Win
 
 Status: added row-reuse fast mat-vec kernels for dense `IQ2_S`, `IQ3_XXS`, and

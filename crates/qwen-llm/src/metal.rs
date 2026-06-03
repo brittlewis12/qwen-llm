@@ -1186,6 +1186,30 @@ pub fn encode_mat_vec_iq2_s_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    static IQ2_S_MV: OnceLock<bool> = OnceLock::new();
+    if *IQ2_S_MV.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_IQ2_S_FAST").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            256,
+            GgmlType::IQ2_S,
+            "mat_vec_iq2_s_fast",
+            "kernel_mat_vec_iq2_s_f32_fast",
+            4,
+            2,
+            0,
+        );
+    }
     encode_mat_vec_block256_f32(
         ctx,
         enc,
@@ -1208,6 +1232,30 @@ pub fn encode_mat_vec_iq3_xxs_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    static IQ3_XXS_MV: OnceLock<bool> = OnceLock::new();
+    if *IQ3_XXS_MV.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_IQ3_XXS_FAST").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            256,
+            GgmlType::IQ3_XXS,
+            "mat_vec_iq3_xxs_fast",
+            "kernel_mat_vec_iq3_xxs_f32_fast",
+            4,
+            2,
+            0,
+        );
+    }
     encode_mat_vec_block256_f32(
         ctx,
         enc,
@@ -1230,6 +1278,30 @@ pub fn encode_mat_vec_iq3_s_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
+    static IQ3_S_MV: OnceLock<bool> = OnceLock::new();
+    if *IQ3_S_MV.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_IQ3_S_FAST").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    }) {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            256,
+            GgmlType::IQ3_S,
+            "mat_vec_iq3_s_fast",
+            "kernel_mat_vec_iq3_s_f32_fast",
+            4,
+            2,
+            0,
+        );
+    }
     encode_mat_vec_block256_f32(
         ctx,
         enc,

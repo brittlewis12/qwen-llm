@@ -44,6 +44,7 @@ MOE_GATE_UP_FAST = {
     ("Q6_K", "Q6_K"),
     ("Q8_0", "Q8_0"),
     ("IQ3_XXS", "IQ3_XXS"),
+    ("IQ3_S", "IQ3_S"),
 }
 MOE_DOWN_FAST = {"Q5_K", "Q6_K", "Q8_0", "IQ4_XS"}
 BLOCK_ALIGNMENT = {
@@ -55,6 +56,8 @@ BLOCK_ALIGNMENT = {
     "Q5_K": 256,
     "Q6_K": 256,
     "Q8_0": 32,
+    "IQ3_XXS": 256,
+    "IQ3_S": 256,
     "IQ4_NL": 32,
     "IQ4_XS": 256,
 }
@@ -161,7 +164,7 @@ def moe_q8_gateup_auto_ok(gate_shape: list[int]) -> bool:
     return len(gate_shape) >= 3 and gate_shape[:3] == [2048, 512, 256]
 
 
-def moe_iq3xxs_gateup_auto_ok(gate_shape: list[int]) -> bool:
+def moe_iq3_gateup_auto_ok(gate_shape: list[int]) -> bool:
     # Current auto gate is h == 2048 && f_exp == 512 && n_expert == 256.
     # GGUF expert gate/up shape is [h, f_exp, n_expert, 1] for the observed A3B.
     return len(gate_shape) >= 3 and gate_shape[:3] == [2048, 512, 256]
@@ -211,8 +214,8 @@ def audit_model(
                 gateup_ok = gateup_ok and moe_q8_gateup_auto_ok(
                     gate_shape
                 )  # scoped auto path
-            if (gate, up) == ("IQ3_XXS", "IQ3_XXS"):
-                gateup_ok = gateup_ok and moe_iq3xxs_gateup_auto_ok(
+            if (gate, up) in (("IQ3_XXS", "IQ3_XXS"), ("IQ3_S", "IQ3_S")):
+                gateup_ok = gateup_ok and moe_iq3_gateup_auto_ok(
                     gate_shape
                 )  # scoped auto path
             if not gateup_ok or down not in MOE_DOWN_FAST:

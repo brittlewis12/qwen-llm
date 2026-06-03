@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.233 Native `IQ3_S` MoE Restores UD-IQ4_XS Coverage
+
+Status: added native `IQ3_S` MoE expert-bank support for gate/up decode and
+grouped prefill, then taught the static audit that `IQ3_S/IQ3_S/IQ4_XS` is a
+covered A3B MoE shape. The `UD-IQ4_XS` A3B file now reports `40/40` grouped MoE
+fast-path coverage instead of `0/40`.
+
+Validation:
+
+- `cargo build --release`
+- `cargo test -p qwen-llm moe_mat_vec_iq3_s_matches_f32_dequant_fixture --release -- --ignored --nocapture --test-threads=1`
+- `cargo test -p qwen-llm moe_grouped_swiglu_iq3_s_matches_f32_dequant_fixture --release -- --ignored --nocapture --test-threads=1`
+- `UD-IQ4_XS` A3B external prefill-vs-single at `T=32`, `P=32`, `cont=4`, with
+  `QWEN_A3B_MOE_TEST_INTERNAL_COS_MIN=0.996` and continuation floor `0.999`
+
+Correctness read: the primitive `IQ3_S` matvec oracle lands at `max_abs=1.863e-7`;
+the grouped SwiGLU oracle lands at `cos=1.000000`, `max_abs=7.531e-7`. The
+end-to-end grouped `UD-IQ4_XS` gate passes final logits (`0.999841`) and
+continuation (`0.999443`, no mismatch) with a relaxed internal-state floor. The
+same internal cosine envelope appears when gate/up are dequanted to F32, so the
+remaining strict-internal miss is the existing grouped `IQ4_XS` down precision
+profile, not the new `IQ3_S` gate/up kernel.
+
+Paired llama.cpp anchors:
+
+| Shape | qwen | llama.cpp | qwen/lcpp | Artifact |
+| --- | ---: | ---: | ---: | --- |
+| `pp512` repeat | `1457.90 / 1459.35` | `1438.66 / 1445.39` | `1.013 / 1.010` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-pp512-paired-r3b2.json` |
+| `pp1024` | `1602.27` | `1446.95` | `1.107` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-pp1024-paired.json` |
+| `pp4096` | `1549.08` | `1386.59` | `1.117` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-pp4096-paired.json` |
+| Marcus rollout, 4558 toks | `1494.29` | `1370.58` | `1.090` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-marcus20-paired.json` |
+
+Read: this closes the catastrophic quant-coverage miss (`~0.027x` at `pp512` on
+v0.232) and turns `UD-IQ4_XS` into another A3B MoE win. The highest-leverage
+pattern is still dtype coverage first, kernel microsearch second: one native
+expert-bank dtype changed the board by roughly `37x` at `pp512`, while the recent
+Q4 tiny-SwiGLU variants only moved noise or regressed.
+
 ## 2026-06-03 — v0.232 Rejected MR32 Q4 `<8` SwiGLU Microtile
 
 Status: tried and removed an env-gated Q4 `<8` routed-SwiGLU MR32 microtile. The

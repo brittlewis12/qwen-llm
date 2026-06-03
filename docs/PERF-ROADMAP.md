@@ -87,15 +87,13 @@ Current caveats:
   `~242-246 t/s` averaged, with warmed samples above `280 t/s`; it is improved
   but not yet a cold-average pinned-lcpp win.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
-  v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage
-  and move Q3/Q4/Q6/Q8 static audits to `40/40`. The clean v0.222 breakpoint
-  sweep shows a shared short-prompt miss across covered quants: `pp512` ratios
-  are `0.910x/0.915x/0.883x/0.903x` for Q3/Q4/Q6/Q8, while every covered quant
-  wins from `pp768` upward. v0.227 fine-bin traces show the same `<8` routed
-  SwiGLU pathology across Q3/Q4/Q6/Q8: `<8` is only `~6.4%` of routed slots but
-  costs `~2.95-3.57 ms/k-slot`, versus `>=64` at `~0.46-0.57 ms/k-slot`.
-  UD-IQ4_XS MoE remains the local A3B coverage miss (`IQ3_S/IQ3_S/IQ4_XS`,
-  `0/40`).
+  v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
+  v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
+  `40/40` grouped MoE coverage. The `UD-IQ4_XS` paired rows are now wins at
+  `pp512` (`1.01x` repeat), `pp1024` (`1.11x`), `pp4096` (`1.12x`), and the
+  Marcus real rollout (`1.09x`). Remaining quant risk is no longer this known
+  A3B MoE file; it is unmeasured expert-bank combinations outside the local
+  target set plus dense UD files with `IQ2/IQ3` tensors.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -155,17 +153,15 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   now use every dtype with primitive mat-mat support (`F32`, `F16`, `BF16`,
   `Q2_K`, `Q3_K`, `Q4_0`, `Q4_1`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ4_NL`,
   `IQ4_XS`), so the local 0.8B quant family is clean across dense FFN, GDN,
-  attention, and lm-tail coverage. Q2_K/Q3_K/IQ4_NL/IQ4_XS now have
+  attention, and lm-tail coverage. MoE grouped coverage includes the target A3B
+  Q3/Q4/Q6/Q8 and `UD-IQ4_XS` expert-bank combinations. Q2_K/Q3_K/IQ4_NL/IQ4_XS now have
   simdgroup_matrix prompt mat-mat tiles: clean local 0.8B low-bit rows move from
   `0.15-0.26x` llama.cpp at `pp1024` to `0.96-0.98x` across `pp1024/4096`.
   The v0176 dense validation generalizes this to 2B/9B Q2/Q3/IQ4_XS and 27B Q3:
   2B is `0.97-1.00x`, 9B is `0.99-1.06x`, and 27B Q3 `pp1024` is `1.08x`
   llama.cpp. Remaining explicit coverage gaps are MoE grouped expert-bank
-  variants outside target quants and UD low-bit `IQ2/IQ3` dense tensors. A3B
-  Q3/IQ4_XS MoE now has a generic GPU fallback for F32-dequant gate/up plus
-  native IQ4_XS down, so it runs instead of crashing, but audit still correctly
-  reports `0/40` grouped coverage by default because those files use `IQ3_XXS`
-  gate/up expert banks with `IQ4_XS` down. Clean v0.189 A3B Q3 `pp1024` paired
+  variants outside target quants and UD low-bit `IQ2/IQ3` dense tensors. Older
+  A3B low-bit context: clean v0.189 A3B Q3 `pp1024` paired
   evidence is `90.28` qwen versus `1392.02` llama.cpp (`0.065x`), while no-FFN
   jumps to `2858.64 t/s`. The v0.192 env-gated grouped F32/IQ4_XS candidate
   (`QWEN_PREFILL_MOE_GROUPED_F32_GATEUP=1`) moves A3B Q3 to dirty paired
@@ -665,23 +661,26 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.232:
+Current rank after v0.233:
 
-1. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+1. Paired family/real-rollout guardrails: re-anchor the now-covered A3B quant
+   family, long prompts, and real rollouts against pinned llama.cpp before opening
+   another microkernel. The `UD-IQ4_XS` coverage fix changed one cell by roughly
+   `37x`; breadth can still dominate local tuning.
+2. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+   below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
+   same envelope. Decide whether this is an accepted continuation/rank envelope
+   or a down-kernel accuracy issue before broad default claims for that quant.
+3. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
    or profile scope. The local llama.cpp b9481 build no longer exposes
    `GGML_METAL_PROFILE_OPS`, so this may require a tiny canonical profiling patch
    or a non-invasive external capture before more kernel code.
-2. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+4. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
    `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
    than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
    before any end-to-end tuning.
-3. Paired family/real-rollout guardrails: keep synthetic long prompts, real
-   rollouts, and pinned llama.cpp comparisons ahead of isolated microbench wins.
-4. Remaining MoE quant breadth: UD-IQ4_XS remains `0/40` grouped coverage
-   (`IQ3_S/IQ3_S/IQ4_XS`), but do not let audit aesthetics outrank the shared
-   covered-quant `pp512` miss unless that quant becomes the explicit product row.
 5. Small dense residuals: continue only from stable paired deltas, not from
    narrow N64 or one-cell policy retreads.
 
@@ -790,17 +789,14 @@ Next branch order:
   remains the synthetic breadth scoreboard and now records cooldown plus
   thermal/memory context per command; use `prefill_compare.py` repeat blocks for
   promotion-grade narrow cells.
-- Third, finish A3B Q3 native IQ3 defaultability before opening another low-bit MoE
-  microbranch: direct oracles are green and env perf beats llama.cpp, and the G8
-  matrix VT bug is fixed. Treat the blk0 `qkv+alpha` GDN matvec repair as a
-  correctness oracle, not the final performance answer; decide whether long
-  default gates should be continuation/generation based before spending more
-  kernel time on strict internal-state cosine.
-- Fourth, keep MoE quant breadth active but subordinate it to the shared short
-  miss. A3B Q3/Q4/Q6/Q8 now have `40/40` grouped coverage; clean v0.222 rows all
-  lose `pp512` and win from `pp768`. Prefer `pp512` routed-SwiGLU/down
-  attribution over IQ3_S grouped coverage unless UD-IQ4_XS becomes the explicit
-  product row.
+- Third, keep low-bit MoE defaultability tied to continuation/rank behavior rather
+  than strict internal-state cosine alone. v0.233 shows `UD-IQ4_XS` final logits
+  and continuation pass while internal GDN/KV cosines sit below `0.999`, and F32
+  gate/up points at grouped `IQ4_XS` down as the envelope source.
+- Fourth, keep MoE quant breadth active only where audit finds a real uncovered
+  target file. A3B Q3/Q4/Q6/Q8 and `UD-IQ4_XS` now have `40/40` grouped coverage;
+  prefer paired family guardrails and routed-tail attribution over adding kernels
+  for quants not present in the target/product set.
 - Fifth, small dense remains a paired mismatch but is no longer above MoE quant
   breadth. Start from 0.8B `pp512`
   and require 2B plus 4B/9B/27B canaries before promotion. v0.215 landed the

@@ -619,6 +619,23 @@ fn encode_prefill_moe_grouped_swiglu(
                 chunk_p,
             )
         }
+        (GgmlType::IQ3_S, GgmlType::IQ3_S) => {
+            crate::metal::encode_moe_swiglu_iq3_s_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+            )
+        }
         (GgmlType::F32, GgmlType::F32) => {
             crate::metal::encode_moe_swiglu_f32_f32_grouped_slots_n16(
                 ctx,
@@ -758,6 +775,25 @@ fn encode_prefill_moe_grouped_swiglu_range(
         }
         (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => {
             crate::metal::encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
+        (GgmlType::IQ3_S, GgmlType::IQ3_S) => {
+            crate::metal::encode_moe_swiglu_iq3_s_f32_grouped_slots_n16_range(
                 ctx,
                 enc,
                 &moe.gate_exps,
@@ -6961,7 +6997,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     (GgmlType::Q8_0, GgmlType::Q8_0) => {
                         prefill_moe_grouped_q8_gateup_enabled(h, f_exp, n_expert)
                     }
-                    (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => {
+                    (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) | (GgmlType::IQ3_S, GgmlType::IQ3_S) => {
                         chunk_p >= 32 && prefill_moe_grouped_iq3_gateup_enabled(h, f_exp, n_expert)
                     }
                     (GgmlType::F32, GgmlType::F32) => {
@@ -7394,7 +7430,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         (GgmlType::Q5_K, GgmlType::Q5_K)
                                         | (GgmlType::Q6_K, GgmlType::Q6_K)
                                         | (GgmlType::Q8_0, GgmlType::Q8_0)
-                                        | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => true,
+                                        | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
+                                        | (GgmlType::IQ3_S, GgmlType::IQ3_S) => true,
                                         _ => false,
                                     };
                                 if split_swiglu_bins {

@@ -34,9 +34,10 @@ use crate::metal::{
     encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
     encode_fill_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
     encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32,
-    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
-    encode_moe_mat_vec_f32, encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
+    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32,
+    encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
+    encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
@@ -166,6 +167,16 @@ fn prefill_gdn_skinny_f32_e8p32_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_PREFILL_GDN_SKINNY_E8P32").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn prefill_gdn_pair_l2_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_PREFILL_GDN_PAIR_L2").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -5201,24 +5212,38 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     n_v_u,
                                     head_dim_u,
                                 )?;
-                                encode_l2_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &gdn_q_norm_pack_p,
-                                    &gdn_q_norm_pack_p,
-                                    chunk_p * n_k_u,
-                                    head_dim_u,
-                                    RMS_EPS,
-                                )?;
-                                encode_l2_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &gdn_k_norm_pack_p,
-                                    &gdn_k_norm_pack_p,
-                                    chunk_p * n_k_u,
-                                    head_dim_u,
-                                    RMS_EPS,
-                                )?;
+                                if prefill_gdn_pair_l2_enabled() {
+                                    encode_l2_norm_pair_batched_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &gdn_q_norm_pack_p,
+                                        &gdn_q_norm_pack_p,
+                                        &gdn_k_norm_pack_p,
+                                        &gdn_k_norm_pack_p,
+                                        chunk_p * n_k_u,
+                                        head_dim_u,
+                                        RMS_EPS,
+                                    )?;
+                                } else {
+                                    encode_l2_norm_batched_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &gdn_q_norm_pack_p,
+                                        &gdn_q_norm_pack_p,
+                                        chunk_p * n_k_u,
+                                        head_dim_u,
+                                        RMS_EPS,
+                                    )?;
+                                    encode_l2_norm_batched_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &gdn_k_norm_pack_p,
+                                        &gdn_k_norm_pack_p,
+                                        chunk_p * n_k_u,
+                                        head_dim_u,
+                                        RMS_EPS,
+                                    )?;
+                                }
                                 enc.end();
                                 flush_prefill_layer_phase(
                                     base.ctx,

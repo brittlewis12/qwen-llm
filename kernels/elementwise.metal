@@ -321,6 +321,48 @@ kernel void kernel_l2_norm_batched_f32(
     }
 }
 
+kernel void kernel_l2_norm_pair_batched_f32(
+        constant l2_norm_batched_args & args [[buffer(0)]],
+        device const float * q_x    [[buffer(1)]],
+        device       float * q_y    [[buffer(2)]],
+        device const float * k_x    [[buffer(3)]],
+        device       float * k_y    [[buffer(4)]],
+        threadgroup  float * shmem  [[threadgroup(0)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        uint2  tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint2  ntg   [[threads_per_threadgroup]]) {
+    const uint hi = tgpig.x;
+    if (hi >= args.n_heads || tgpig.y >= 2) return;
+
+    device const float * x_h;
+    device       float * y_h;
+    if (tgpig.y == 0) {
+        x_h = q_x + (ulong)hi * args.head_dim;
+        y_h = q_y + (ulong)hi * args.head_dim;
+    } else {
+        x_h = k_x + (ulong)hi * args.head_dim;
+        y_h = k_y + (ulong)hi * args.head_dim;
+    }
+
+    float sumsq = 0.0f;
+    for (uint i = tpitg.x; i < args.head_dim; i += ntg.x) {
+        const float v = x_h[i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+    if (tiisg == 0) shmem[sgitg] = sumsq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = (tiisg < (ntg.x + 31) / 32) ? shmem[tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+
+    const float scale = 1.0f / max(sqrt(sumsq), args.eps);
+    for (uint i = tpitg.x; i < args.head_dim; i += ntg.x) {
+        y_h[i] = x_h[i] * scale;
+    }
+}
+
 // Copy with offset: y[i] = x[src_off + i]  for i in 0..n.
 // Used to slice the GDN post-conv qkv buffer into per-role Q/K/V views
 // without doing a CPU round-trip. v2 will replace this with kernels

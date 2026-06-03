@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.215 GDN Paired Q/K L2 Prep
+
+Status: promoted paired GDN Q/K L2 normalization in prompt prefill. The new
+`kernel_l2_norm_pair_batched_f32` replaces the two per-GDN-layer Q and K L2
+dispatches with one two-plane dispatch. Rollback is
+`QWEN_PREFILL_GDN_PAIR_L2=0`.
+
+Correctness and build:
+
+- `cargo test -p qwen-llm l2_norm_pair_batched_matches_cpu -- --nocapture`
+- `cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_0_8b -- --nocapture`
+- `cargo build --release`
+
+Promotion A/B rows before checkpoint, comparing default against rollback:
+
+| Model | Shape | default | rollback | Read | Artifact |
+| --- | ---: | ---: | ---: | --- | --- |
+| 0.8B | `pp512` | `7418.45 / 7439.47 / 7454.13` | `7276.97 / 7266.45 / 7268.90` | `+2.2-2.5%` | `target/profiles/v0215-dirty-08b-pp512-gdn-pair-l2-rollback-sweep.json` |
+| 0.8B | `pp1024` | `7780.46 / 7776.14` | `7571.37 / 7578.19` | `+2.6-2.8%` | `target/profiles/v0215-dirty-08b-pp1024-gdn-pair-l2-rollback-sweep.json` |
+| 2B | `pp512` | `3541.88 / 3516.46` | `3511.26 / 3488.60` | `+0.8-0.9%` | `target/profiles/v0215-dirty-2b-pp512-gdn-pair-l2-rollback-sweep.json` |
+| 2B | `pp1024` | `3719.72 / 3716.41` | `3678.05 / 3670.50` | `+1.1-1.3%` | `target/profiles/v0215-dirty-2b-pp1024-gdn-pair-l2-rollback-sweep.json` |
+
+Larger dense canaries were neutral-to-positive: 4B `pp512` moved
+`1462.26/1458.22 -> 1467.68/1466.48`, 9B `pp512` moved
+`808.13/806.93 -> 809.93/808.68`, and 27B `pp512` moved
+`237.03/237.25 -> 237.68/238.71`.
+
+Falsifiers in the same sprint:
+
+- GDN packed-step NSG8 row grouping was correctness-safe but flat/regressive:
+  0.8B `pp512` `nsg8` was `6596.58/6644.91/6596.93` versus base
+  `6652.14/6617.27/6653.12`, and the traced `gdn_step` bucket did not drop.
+- Lowering the existing Q5/Q6 N64 threshold to `512` is not the missing Q5 GDN
+  projection fix. Warmed 0.8B `pp512` showed Q5 flat, Q5+Q6 flat, and Q6-only
+  slower in `target/profiles/v0215-clean-08b-pp512-q5q6-split-warmed.json`.
+
+Read: this is a real small-dense cleanup with a direct GDN-prep mechanism, not
+the whole lcpp gap. It closes several percent on 0.8B short/medium and gives a
+smaller positive guardrail on 2B, while larger dense shapes stay safe.
+
 ## 2026-06-02 — v0.212 Small-Dense Fused Q4 SwiGLU Gate
 
 Status: promoted dense Q4 fused SwiGLU only for small hidden states

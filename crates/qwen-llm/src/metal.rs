@@ -9972,6 +9972,69 @@ pub fn encode_l2_norm_batched_f32(
     Ok(())
 }
 
+pub fn encode_l2_norm_pair_batched_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_x: &MetalTensor,
+    q_y: &MetalTensor,
+    k_x: &MetalTensor,
+    k_y: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let want = (n_heads * head_dim) as u64;
+    if q_x.n_elements() != want
+        || q_y.n_elements() != want
+        || k_x.n_elements() != want
+        || k_y.n_elements() != want
+    {
+        return Err(MetalError::BadShape {
+            kernel: "l2_norm_pair_batched",
+            detail: format!("q/k inputs and outputs expected {want} elements"),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        eps: f32,
+    }
+    let pso = ctx.pipeline("kernel_l2_norm_pair_batched_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, q_x);
+    enc.set_tensor(2, q_y);
+    enc.set_tensor(3, k_x);
+    enc.set_tensor(4, k_y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: n_heads,
+            height: 2,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Embedding lookup: `y[r * n_cols + i] = embed[ids[r] * n_cols + i]`.
 /// `embed` is `[vocab, n_cols]` in F32/F16/BF16; `ids` is `[n_rows]` i32.
 /// Decode uses `n_rows = 1`; prefill uses `n_rows = batch`.
@@ -15096,6 +15159,80 @@ mod tests {
             assert!(
                 max_abs < 1e-5,
                 "l2_norm_batched n_heads={n_heads} head_dim={head_dim}: max|Δ|={max_abs}"
+            );
+        }
+    }
+
+    #[test]
+    fn l2_norm_pair_batched_matches_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128), (8, 256)] {
+            let total = n_heads * head_dim;
+            let q: Vec<f32> = (0..total)
+                .map(|i| ((i % 29) as f32 - 14.0) * 0.04)
+                .collect();
+            let k: Vec<f32> = (0..total)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.03)
+                .collect();
+            let eps = 1e-6f32;
+
+            let normalize = |x: &[f32]| {
+                let mut out = vec![0.0f32; total];
+                for h in 0..n_heads {
+                    let off = h * head_dim;
+                    let sq: f32 = (0..head_dim).map(|i| x[off + i].powi(2)).sum();
+                    let scale = 1.0 / sq.sqrt().max(eps);
+                    for i in 0..head_dim {
+                        out[off + i] = x[off + i] * scale;
+                    }
+                }
+                out
+            };
+            let q_cpu = normalize(&q);
+            let k_cpu = normalize(&k);
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&k),
+                vec![total as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let q_y = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+            let k_y = MetalTensor::zeros_f32(&ctx, vec![total as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_l2_norm_pair_batched_f32(
+                    &ctx, enc, &q_t, &q_y, &k_t, &k_y, n_heads, head_dim, eps,
+                )
+            })
+            .unwrap();
+            let q_gpu = read_back_f32(&q_y.buffer, total);
+            let k_gpu = read_back_f32(&k_y.buffer, total);
+
+            let q_max = q_gpu
+                .iter()
+                .zip(q_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let k_max = k_gpu
+                .iter()
+                .zip(k_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                q_max < 1e-5 && k_max < 1e-5,
+                "l2_norm_pair n_heads={n_heads} head_dim={head_dim}: q={q_max} k={k_max}"
             );
         }
     }

@@ -87,10 +87,10 @@ Current caveats:
   `~242-246 t/s` averaged, with warmed samples above `280 t/s`; it is improved
   but not yet a cold-average pinned-lcpp win.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
-  v0.219 adds A3B Q6_K grouped gate/up coverage and moves static audit coverage
-  to `40/40`, but the paired `pp512` row is still `0.931x` versus llama.cpp while
-  `pp1024/4096` are `1.064x/1.113x`. A3B Q8_0 MoE still audits at `0/40` grouped
-  coverage, so Q8 gate/up support is the next obvious cross-quant capability gap.
+  v0.219/v0.220 add A3B Q6_K and Q8_0 grouped routed coverage and move both
+  static audits to `40/40`. The paired `pp512` rows still trail llama.cpp
+  (`0.931x` Q6, `0.908x` Q8), while `pp1024/4096` are ahead. UD-IQ4_XS MoE
+  remains the local A3B coverage miss (`IQ3_S/IQ3_S/IQ4_XS`, `0/40`).
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -628,11 +628,11 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.219:
+Current rank after v0.220:
 
-1. MoE quant breadth: A3B Q8_0 grouped gate/up support is the largest remaining
-   static coverage miss in the target local model set, and A3B Q6_K still needs a
-   `pp512` routed-SwiGLU attribution pass despite winning at `pp1024+`.
+1. MoE quant breadth and short-prompt mechanics: A3B Q6_K and Q8_0 now have
+   `40/40` grouped coverage, but both still lose `pp512` while winning
+   `pp1024+`; UD-IQ4_XS remains `0/40` grouped coverage.
 2. Paired family/real-rollout guardrails: keep synthetic long prompts, real
    rollouts, and pinned llama.cpp comparisons ahead of isolated microbench wins.
 3. Small dense residuals: continue only from stable paired deltas, not from
@@ -730,10 +730,10 @@ Next branch order:
   correctness oracle, not the final performance answer; decide whether long
   default gates should be continuation/generation based before spending more
   kernel time on strict internal-state cosine.
-- Fourth, keep MoE quant breadth active: A3B Q6_K now has `40/40` grouped
-  coverage, but its `pp512` row is still behind lcpp and A3B Q8_0 remains `0/40`.
-  Prefer Q8 gate/up coverage or Q6 `pp512` routed-SwiGLU attribution over another
-  small dense policy branch.
+- Fourth, keep MoE quant breadth active: A3B Q6_K and Q8_0 now have `40/40`
+  grouped coverage, but both still trail lcpp at `pp512`, and UD-IQ4_XS remains
+  `0/40`. Prefer Q6/Q8 `pp512` routed-SwiGLU/down attribution or IQ3_S grouped
+  coverage over another small dense policy branch.
 - Fifth, small dense remains a paired mismatch but is no longer above MoE quant
   breadth. Start from 0.8B `pp512`
   and require 2B plus 4B/9B/27B canaries before promotion. v0.215 landed the

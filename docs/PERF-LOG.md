@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.220 A3B Q8 Grouped MoE Coverage
+
+Status: added grouped Q8_0 routed gate/up SwiGLU and grouped Q8_0 routed down
+for the observed A3B expert shape. This moves A3B Q8_0 MoE from `0/40` to
+`40/40` grouped routed coverage. Rollback is
+`QWEN_PREFILL_MOE_GROUPED_Q8_GATEUP=0`, but rollback cannot execute the Q8
+routed gate/up path and fails on the old F32-only v1 driver.
+
+Correctness and build:
+
+- `cargo test -p qwen-llm moe_grouped_q8_0_swiglu_down_matches_f32_dequant_fixture -- --ignored --nocapture`
+- `cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_0_8b -- --nocapture`
+- `cargo build --release`
+
+Dirty A3B Q8 evidence:
+
+| Shape | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | --- |
+| `pp512` | `1216.15` | `1339.02` | `0.908x` | `target/profiles/v0220-dirty-a3b-q8-pp512-paired-compare.json` |
+| `pp1024` | `1496.77` | `1408.30` | `1.063x` | `target/profiles/v0220-dirty-a3b-q8-pp1024-paired-compare.json` |
+| `pp4096` | `1545.07` | `1387.55` | `1.114x` | `target/profiles/v0220-dirty-a3b-q8-pp4096-paired-compare.json` |
+
+Runtime `pp512` trace confirms dynamic grouped coverage and the same short-
+prompt signature as Q6: `routed_swiglu=119.51 ms`, `routed_down=63.68 ms`,
+`route_fused=7.05 ms`, and attention is not the limiting bucket.
+
+Read: Q8 is now a capability/coverage win with medium/long paired wins, but
+short A3B `pp512` remains behind llama.cpp. The remaining quant coverage miss in
+the local A3B set is UD-IQ4_XS (`IQ3_S/IQ3_S/IQ4_XS`), while the Q6/Q8 short
+miss points to grouped routed SwiGLU/down mechanics rather than routing.
+
 ## 2026-06-03 — v0.219 A3B Q6 Grouped MoE Coverage
 
 Status: added grouped Q6_K routed gate/up SwiGLU for the observed A3B Q6

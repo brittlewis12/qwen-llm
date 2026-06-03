@@ -38,7 +38,7 @@ DENSE_FFN_PREFILL = {
 LM_PREFILL = DENSE_FFN_PREFILL
 MATRIX_PREFILL = DENSE_FFN_PREFILL
 GDN_SKINNY_PREFILL = MATRIX_PREFILL | {"F32"}
-MOE_GATE_UP_FAST = {("Q4_K", "Q4_K"), ("Q5_K", "Q5_K")}
+MOE_GATE_UP_FAST = {("Q4_K", "Q4_K"), ("Q5_K", "Q5_K"), ("Q6_K", "Q6_K")}
 MOE_DOWN_FAST = {"Q5_K", "Q6_K"}
 BLOCK_ALIGNMENT = {
     "Q2_K": 256,
@@ -143,6 +143,12 @@ def moe_q5_gateup_auto_ok(gate_shape: list[int]) -> bool:
     return len(gate_shape) >= 3 and gate_shape[:3] == [3072, 1024, 256]
 
 
+def moe_q6_gateup_auto_ok(gate_shape: list[int]) -> bool:
+    # Current auto gate is h == 2048 && f_exp == 512 && n_expert == 256.
+    # GGUF expert gate/up shape is [h, f_exp, n_expert, 1] for the observed A3B.
+    return len(gate_shape) >= 3 and gate_shape[:3] == [2048, 512, 256]
+
+
 def audit_model(
     model: Path, tensors: dict[str, dict[str, object]]
 ) -> dict[str, object]:
@@ -177,6 +183,10 @@ def audit_model(
             gateup_ok = (gate, up) in MOE_GATE_UP_FAST
             if (gate, up) == ("Q5_K", "Q5_K"):
                 gateup_ok = gateup_ok and moe_q5_gateup_auto_ok(
+                    gate_shape
+                )  # scoped auto path
+            if (gate, up) == ("Q6_K", "Q6_K"):
+                gateup_ok = gateup_ok and moe_q6_gateup_auto_ok(
                     gate_shape
                 )  # scoped auto path
             if not gateup_ok or down not in MOE_DOWN_FAST:

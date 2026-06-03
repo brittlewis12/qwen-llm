@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.219 A3B Q6 Grouped MoE Coverage
+
+Status: added grouped Q6_K routed gate/up SwiGLU for the observed A3B Q6
+expert shape (`h=2048`, `f_exp=512`, `n_expert=256`). This changes A3B
+Q6 from an uncovered MoE quant to `40/40` grouped routed coverage. Rollback
+is `QWEN_PREFILL_MOE_GROUPED_Q6_GATEUP=0`, but rollback cannot execute the
+Q6 routed gate/up path and fails with the old F32-only v1 driver.
+
+Correctness and build:
+
+- `cargo test -p qwen-llm moe_grouped_swiglu_q6_k_matches_f32_dequant_fixture -- --ignored --nocapture`
+- `cargo build --release`
+
+Dirty A3B Q6 evidence:
+
+| Shape | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | --- |
+| `pp128` | `553.88` | n/a | capability smoke | `target/profiles/v0219-dirty-a3b-q6-pp128-grouped-gateup-smoke.json` |
+| `pp512` | `1182.07` | `1269.16` | `0.931x` | `target/profiles/v0219-dirty-a3b-q6-pp512-paired-compare.json` |
+| `pp1024` | `1416.97` | `1331.88` | `1.064x` | `target/profiles/v0219-dirty-a3b-q6-pp1024-paired-compare.json` |
+| `pp4096` | `1472.49` | `1323.35` | `1.113x` | `target/profiles/v0219-dirty-a3b-q6-pp4096-paired-compare.json` |
+
+Runtime `pp512` trace confirms dynamic grouped coverage: `routed_swiglu=40`,
+`routed_down=40`, `route_fused=40`, and `shared_packed=40`. The same audit still
+flags A3B Q8_0 MoE as `0/40`, so Q8 grouped gate/up remains the next quant-
+coverage gap if the goal is fastest across all shipped quants.
+
+Read: this is a high-value coverage/capability fix, not a finished Q6 speed
+story. The `pp512` row is still behind llama.cpp and the phase trace books
+`routed_swiglu` as the largest bucket, so Q6 grouped SwiGLU mechanics or Q8
+coverage are better next moves than another small dense policy retread.
+
 ## 2026-06-03 — v0.218 Rejected Q4 N64 Shape Policy
 
 Status: tried and reverted a default policy that disabled Q4_K N64 only for

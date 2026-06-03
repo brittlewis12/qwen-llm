@@ -292,6 +292,15 @@ fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize
     }
 }
 
+fn prefill_moe_grouped_q6_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_Q6_GATEUP")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => h == 2048 && f_exp == 512 && n_expert == 256,
+    }
+}
+
 fn prefill_moe_grouped_f32_gateup_enabled() -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_F32_GATEUP")) {
@@ -525,6 +534,23 @@ fn encode_prefill_moe_grouped_swiglu(
         ),
         (GgmlType::Q5_K, GgmlType::Q5_K) => {
             crate::metal::encode_moe_swiglu_q5_K_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+            )
+        }
+        (GgmlType::Q6_K, GgmlType::Q6_K) => {
+            crate::metal::encode_moe_swiglu_q6_K_f32_grouped_slots_n16(
                 ctx,
                 enc,
                 &moe.gate_exps,
@@ -6711,6 +6737,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     (GgmlType::Q4_K, GgmlType::Q4_K) => true,
                     (GgmlType::Q5_K, GgmlType::Q5_K) => {
                         prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert)
+                    }
+                    (GgmlType::Q6_K, GgmlType::Q6_K) => {
+                        prefill_moe_grouped_q6_gateup_enabled(h, f_exp, n_expert)
                     }
                     (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => {
                         chunk_p >= 32 && prefill_moe_grouped_iq3_gateup_enabled()

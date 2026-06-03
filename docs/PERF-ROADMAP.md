@@ -86,6 +86,11 @@ Current caveats:
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to
   `~242-246 t/s` averaged, with warmed samples above `280 t/s`; it is improved
   but not yet a cold-average pinned-lcpp win.
+- Quant breadth is now an active MoE guardrail, not a documentation afterthought.
+  v0.219 adds A3B Q6_K grouped gate/up coverage and moves static audit coverage
+  to `40/40`, but the paired `pp512` row is still `0.931x` versus llama.cpp while
+  `pp1024/4096` are `1.064x/1.113x`. A3B Q8_0 MoE still audits at `0/40` grouped
+  coverage, so Q8 gate/up support is the next obvious cross-quant capability gap.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -623,6 +628,20 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
+Current rank after v0.219:
+
+1. MoE quant breadth: A3B Q8_0 grouped gate/up support is the largest remaining
+   static coverage miss in the target local model set, and A3B Q6_K still needs a
+   `pp512` routed-SwiGLU attribution pass despite winning at `pp1024+`.
+2. Paired family/real-rollout guardrails: keep synthetic long prompts, real
+   rollouts, and pinned llama.cpp comparisons ahead of isolated microbench wins.
+3. Small dense residuals: continue only from stable paired deltas, not from
+   narrow N64 or one-cell policy retreads.
+
+The sections below preserve the rationale and reopen criteria from earlier
+sprints; the current rank above overrides stale branch ordering when they
+conflict.
+
 ### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 
 Optimizes: Qwen3.6 27B dense prompt prefill after the G6 matrix-attention body
@@ -711,10 +730,12 @@ Next branch order:
   correctness oracle, not the final performance answer; decide whether long
   default gates should be continuation/generation based before spending more
   kernel time on strict internal-state cosine.
-- Fourth, keep A3B/A10B MoE in guardrail mode unless coverage drops below
-  `40/40` or `48/48` or a warmed short-prompt row regresses. Do not revive
-  hot-threshold or concentration-only branches without new distribution evidence.
-- Fifth, small dense is the active paired mismatch again. Start from 0.8B `pp512`
+- Fourth, keep MoE quant breadth active: A3B Q6_K now has `40/40` grouped
+  coverage, but its `pp512` row is still behind lcpp and A3B Q8_0 remains `0/40`.
+  Prefer Q8 gate/up coverage or Q6 `pp512` routed-SwiGLU attribution over another
+  small dense policy branch.
+- Fifth, small dense remains a paired mismatch but is no longer above MoE quant
+  breadth. Start from 0.8B `pp512`
   and require 2B plus 4B/9B/27B canaries before promotion. v0.215 landed the
   low-risk GDN prep dispatch cleanup; recent falsifiers say the next branch
   should target FFN/GDN projection mechanics or dataflow, not attention, encoder

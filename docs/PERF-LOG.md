@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.222 Clean A3B Quant Breakpoint Sweep
+
+Status: reran the A3B quant breakpoint sweep after rebuilding from v0.221.
+Every qwen row reports `build_commit=a8baa0f6c` and `build_dirty=0`, so the
+older stale-build v0.222 packet is superseded.
+
+Clean paired breakpoint evidence:
+
+| Quant | `pp256` | `pp384` | `pp512` | `pp768` | `pp1024` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Q3_K_M | `0.883x` | `0.915x` | `0.910x` | `1.048x` | `1.065x` |
+| Q4_K_M | `0.805x` | `0.910x` | `0.915x` | `1.111x` | `1.073x` |
+| Q6_K | `0.627x` | `0.875x` | `0.883x` | `1.078x` | `1.041x` |
+| Q8_0 | `0.646x` | `0.896x` | `0.903x` | `1.102x` | `1.044x` |
+
+Artifact: `target/profiles/v0222-clean-a3b-quant-breakpoint/summary.tsv`.
+
+Read: native grouped coverage across Q3/Q4/Q6/Q8 does generalize, but the
+remaining miss is shared across covered quants: A3B loses `pp256-512` and wins
+from `pp768` upward. That makes short-prompt grouped routed SwiGLU/down kernel
+economics higher EV than another quant-coverage branch. UD-IQ4_XS still needs
+IQ3_S gate/up support, but that should not displace the shared `pp512` miss
+unless the product priority is specifically that quant.
+
 ## 2026-06-03 — v0.221 A3B Q3 Native IQ3 MoE Default
 
 Status: defaulted native IQ3_XXS expert-bank residency and grouped IQ3_XXS

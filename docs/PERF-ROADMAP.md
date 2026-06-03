@@ -88,9 +88,10 @@ Current caveats:
   but not yet a cold-average pinned-lcpp win.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage
-  and move all three static audits to `40/40`. Their paired `pp512` rows still
-  trail llama.cpp (`0.938x` Q3, `0.931x` Q6, `0.908x` Q8), while `pp1024/4096`
-  are ahead. UD-IQ4_XS MoE remains the local A3B coverage miss
+  and move Q3/Q4/Q6/Q8 static audits to `40/40`. The clean v0.222 breakpoint
+  sweep shows a shared short-prompt miss across covered quants: `pp512` ratios
+  are `0.910x/0.915x/0.883x/0.903x` for Q3/Q4/Q6/Q8, while every covered quant
+  wins from `pp768` upward. UD-IQ4_XS MoE remains the local A3B coverage miss
   (`IQ3_S/IQ3_S/IQ4_XS`, `0/40`).
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
@@ -629,14 +630,17 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.221:
+Current rank after v0.222:
 
-1. MoE short-prompt mechanics and remaining quant breadth: A3B Q3_K_M, Q6_K,
-   and Q8_0 now have `40/40` grouped coverage, but all still lose `pp512` while
-   winning `pp1024+`; UD-IQ4_XS remains `0/40` grouped coverage.
+1. MoE short-prompt mechanics: A3B Q3/Q4/Q6/Q8 all have `40/40` grouped
+   coverage, all lose `pp512`, and all win from `pp768` upward. Attack the
+   shared grouped routed SwiGLU/down knee before adding another quant kernel.
 2. Paired family/real-rollout guardrails: keep synthetic long prompts, real
    rollouts, and pinned llama.cpp comparisons ahead of isolated microbench wins.
-3. Small dense residuals: continue only from stable paired deltas, not from
+3. Remaining MoE quant breadth: UD-IQ4_XS remains `0/40` grouped coverage
+   (`IQ3_S/IQ3_S/IQ4_XS`), but do not let audit aesthetics outrank the shared
+   covered-quant `pp512` miss unless that quant becomes the explicit product row.
+4. Small dense residuals: continue only from stable paired deltas, not from
    narrow N64 or one-cell policy retreads.
 
 The sections below preserve the rationale and reopen criteria from earlier
@@ -731,10 +735,11 @@ Next branch order:
   correctness oracle, not the final performance answer; decide whether long
   default gates should be continuation/generation based before spending more
   kernel time on strict internal-state cosine.
-- Fourth, keep MoE quant breadth active: A3B Q3_K_M, Q6_K, and Q8_0 now have
-  `40/40` grouped coverage, but all still trail lcpp at `pp512`, and UD-IQ4_XS
-  remains `0/40`. Prefer `pp512` routed-SwiGLU/down attribution or IQ3_S grouped
-  coverage over another small dense policy branch.
+- Fourth, keep MoE quant breadth active but subordinate it to the shared short
+  miss. A3B Q3/Q4/Q6/Q8 now have `40/40` grouped coverage; clean v0.222 rows all
+  lose `pp512` and win from `pp768`. Prefer `pp512` routed-SwiGLU/down
+  attribution over IQ3_S grouped coverage unless UD-IQ4_XS becomes the explicit
+  product row.
 - Fifth, small dense remains a paired mismatch but is no longer above MoE quant
   breadth. Start from 0.8B `pp512`
   and require 2B plus 4B/9B/27B canaries before promotion. v0.215 landed the

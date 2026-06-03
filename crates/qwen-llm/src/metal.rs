@@ -5768,6 +5768,155 @@ pub fn encode_moe_mat_vec_f32(
     Ok(())
 }
 
+pub fn encode_moe_mat_vec_bf16_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    topk_idx: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::BF16 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_mat_vec_bf16",
+            detail: format!("expected BF16 expert weight, got {:?}", weight.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_in
+        || topk_idx.n_elements() as usize != topk
+        || out.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_mat_vec_bf16",
+            detail: format!(
+                "shape mismatch: x={} idx={} out={} expected x={n_in} idx={topk} out={}",
+                x.n_elements(),
+                topk_idx.n_elements(),
+                out.n_elements(),
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_mat_vec_bf16_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, out);
+
+    const NSG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_moe_down_bf16_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    expert_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::BF16 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_bf16",
+            detail: format!("expected BF16 expert down, got {:?}", weight.dtype),
+        });
+    }
+    if inner.n_elements() as usize != topk * n_in
+        || topk_idx.n_elements() as usize != topk
+        || expert_out.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_bf16",
+            detail: format!(
+                "shape mismatch: inner={} idx={} out={} expected inner={} idx={topk} out={}",
+                inner.n_elements(),
+                topk_idx.n_elements(),
+                expert_out.n_elements(),
+                topk * n_in,
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_bf16_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, expert_out);
+
+    const NSG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[allow(non_snake_case)]
 pub fn encode_moe_down_q6_K_f32(
     ctx: &MetalContext,

@@ -94,6 +94,10 @@ constant uchar moe_ksigns_iq2xs[128] = {
     240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
 };
 
+static inline float moe_bf16_to_float(ushort v) {
+    return as_type<float>((uint)v << 16);
+}
+
 constant uint moe_iq3xxs_grid[256] = {
     0x04040404, 0x04040414, 0x04040424, 0x04040c0c, 0x04040c1c, 0x04040c3e, 0x04041404, 0x04041414,
     0x04041c0c, 0x04042414, 0x04043e1c, 0x04043e2c, 0x040c040c, 0x040c041c, 0x040c0c04, 0x040c0c14,
@@ -3227,6 +3231,93 @@ kernel void kernel_moe_mat_vec_f32_f32(
     }
     for (uint i = n_in_v4 * 4 + tiisg; i < args.n_in; i += 32) {
         sum += w[i] * x[i];
+    }
+
+    const float tot = simd_sum(sum);
+    if (tiisg == 0) {
+        out[(ulong)slot * args.n_out + row] = tot;
+    }
+}
+
+kernel void kernel_moe_mat_vec_bf16_f32(
+        constant moe_f32_args & args    [[buffer(0)]],
+        device const ushort  * weight   [[buffer(1)]],
+        device const float   * x        [[buffer(2)]],
+        device const int     * top_idx  [[buffer(3)]],
+        device       float   * out      [[buffer(4)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint row = tgpig.x * NSG_MOE_F32 + sgitg;
+    if (row >= args.n_out) return;
+
+    const ulong expert_stride = (ulong)args.n_out * args.n_in;
+    device const ushort * w = weight + (ulong)expert_i * expert_stride + (ulong)row * args.n_in;
+
+    float sum = 0.0f;
+    const uint n_in_v4 = args.n_in / 4;
+    device const ushort4 * w4 = (device const ushort4 *)w;
+    device const float4 * x4 = (device const float4 *)x;
+    for (uint i = tiisg; i < n_in_v4; i += 32) {
+        const ushort4 a = w4[i];
+        const float4 b = x4[i];
+        sum += moe_bf16_to_float(a.x) * b.x
+             + moe_bf16_to_float(a.y) * b.y
+             + moe_bf16_to_float(a.z) * b.z
+             + moe_bf16_to_float(a.w) * b.w;
+    }
+    for (uint i = n_in_v4 * 4 + tiisg; i < args.n_in; i += 32) {
+        sum += moe_bf16_to_float(w[i]) * x[i];
+    }
+
+    const float tot = simd_sum(sum);
+    if (tiisg == 0) {
+        out[(ulong)slot * args.n_out + row] = tot;
+    }
+}
+
+kernel void kernel_moe_down_bf16_f32(
+        constant moe_f32_args & args    [[buffer(0)]],
+        device const ushort  * weight   [[buffer(1)]],
+        device const float   * inner    [[buffer(2)]],
+        device const int     * top_idx  [[buffer(3)]],
+        device       float   * out      [[buffer(4)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint row = tgpig.x * NSG_MOE_F32 + sgitg;
+    if (row >= args.n_out) return;
+
+    const ulong expert_stride = (ulong)args.n_out * args.n_in;
+    device const ushort * w = weight + (ulong)expert_i * expert_stride + (ulong)row * args.n_in;
+    device const float * x = inner + (ulong)slot * args.n_in;
+
+    float sum = 0.0f;
+    const uint n_in_v4 = args.n_in / 4;
+    device const ushort4 * w4 = (device const ushort4 *)w;
+    device const float4 * x4 = (device const float4 *)x;
+    for (uint i = tiisg; i < n_in_v4; i += 32) {
+        const ushort4 a = w4[i];
+        const float4 b = x4[i];
+        sum += moe_bf16_to_float(a.x) * b.x
+             + moe_bf16_to_float(a.y) * b.y
+             + moe_bf16_to_float(a.z) * b.z
+             + moe_bf16_to_float(a.w) * b.w;
+    }
+    for (uint i = n_in_v4 * 4 + tiisg; i < args.n_in; i += 32) {
+        sum += moe_bf16_to_float(w[i]) * x[i];
     }
 
     const float tot = simd_sum(sum);

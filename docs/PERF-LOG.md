@@ -52,6 +52,7 @@ Paired llama.cpp anchors:
 | `pp512` repeat | `1457.90 / 1459.35` | `1438.66 / 1445.39` | `1.013 / 1.010` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-pp512-paired-r3b2.json` |
 | `pp1024` | `1602.27` | `1446.95` | `1.107` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-pp1024-paired.json` |
 | `pp4096` | `1549.08` | `1386.59` | `1.117` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-pp4096-paired.json` |
+| `pp16384` | `1254.28` | `1055.14` | `1.189` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-pp16384-paired.json` |
 | Marcus rollout, 4558 toks | `1494.29` | `1370.58` | `1.090` | `target/profiles/v0233-iq3s-native/a3b-udiq4xs-marcus20-paired.json` |
 
 Read: this closes the catastrophic quant-coverage miss (`~0.027x` at `pp512` on

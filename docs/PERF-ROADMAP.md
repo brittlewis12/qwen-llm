@@ -91,9 +91,10 @@ Current caveats:
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
   `40/40` grouped MoE coverage. The `UD-IQ4_XS` paired rows are now wins at
   `pp512` (`1.01x` repeat), `pp1024` (`1.11x`), `pp4096` (`1.12x`), and the
-  Marcus real rollout (`1.09x`). Remaining quant risk is no longer this known
-  A3B MoE file; it is unmeasured expert-bank combinations outside the local
-  target set plus dense UD files with `IQ2/IQ3` tensors.
+  Marcus real rollout (`1.09x`); the one-run `pp16384` guardrail is `1.19x`.
+  Remaining quant risk is no longer this known A3B MoE file; it is unmeasured
+  expert-bank combinations outside the local target set plus dense UD files with
+  `IQ2/IQ3` tensors.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 

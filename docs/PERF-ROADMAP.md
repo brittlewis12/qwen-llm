@@ -653,15 +653,21 @@ Recent measured negatives:
   but regressed Q4 `pp512` GPU ms/token (`0.6881/0.6854` base versus
   `0.7078/0.7086`) and failed to move the `<8` target bin (`36.28 -> 36.91 ms`).
   Do not revive one-simdgroup R16 SwiGLU without a new mechanism.
+- Split gate/up with existing grouped Q4 matmuls is also falsified. It passed the
+  A3B prefill-vs-single correctness gate, but Q4 `pp512` GPU ms/token regressed
+  from `0.6851/0.6820` to `0.7017/0.7009`; the `<8` SwiGLU phase moved only
+  `37.98 -> 36.92 ms`, far below the go gate. Do not reopen split sidecars unless
+  the second projection fuses the epilogue and materially changes dispatch shape.
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.230:
+Current rank after v0.231:
 
-1. SwiGLU-specific tiny-bucket mechanics: Q5 down proves corrected tiny geometry
-   can move a target bin, but the direct Q4 SwiGLU R16 port regresses. The next
-   SwiGLU branch needs a different mechanism or a llama.cpp differential, not a
-   blind reuse of the down microtile.
+1. True tiny-bucket SwiGLU geometry: Q5 down proves corrected tiny geometry can
+   move a target bin, but direct R16 and split-gate/up retreads both regress. The
+   next code branch must materially change how `<8` Q4 SwiGLU keeps simdgroups
+   occupied, e.g. multiple tiny experts per useful unit or a one-temp second
+   projection that fuses the epilogue.
 2. Bounded llama.cpp structural audit: verify whether llama.cpp avoids treating
    `<8` expert buckets as independent underfilled grouped work. Keep this to a
    concrete dispatch/layout comparison; do not reopen route-side or threshold
@@ -692,7 +698,9 @@ Current MoE short-branch rule:
 - Down now has a correctness-safe force-only proof. It reduces the target bin but
   is not enough by itself to justify defaulting. The first analogous SwiGLU port
   is falsified; future SwiGLU work must explain the dual-dequant/epilogue cost
-  before adding another tiny kernel.
+  before adding another tiny kernel. The split gate/up sidecar also failed, so
+  the remaining SwiGLU path is a real execution-shape change, not merely
+  unfusing the current grouped kernel.
 
 ### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 

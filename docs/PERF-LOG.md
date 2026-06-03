@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.231 Rejected Split Q4 `<8` SwiGLU Sidecar
+
+Status: tried and removed an env-gated Q4 `<8` routed-SwiGLU split sidecar. The
+proof used the existing grouped Q4 matmul range kernel twice, storing gate into
+`moe_group_inner_pack` and up into `moe_inner_pack`, then applied the existing
+F32 `silu_mul` epilogue before leaving `>=8` buckets on the current grouped
+SwiGLU path.
+
+Validation before measuring:
+
+- `cargo build --release`
+- `QWEN_PREFILL_MOE_SPLIT_Q4_SWIGLU_LT8=1 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture --test-threads=1`
+
+Q4 `pp512` A/B:
+
+| Variant | GPU ms/token rows | Read |
+| --- | ---: | --- |
+| default | `0.6851 / 0.6820` | current grouped path |
+| split `<8` | `0.7017 / 0.7009` | regression |
+
+Trace-bin read at Q4 `pp512`:
+
+| SwiGLU bin | Default | Split `<8` | Read |
+| --- | ---: | ---: | --- |
+| `<8` ms | `37.98` | `36.92` | only `-2.8%`, below gate |
+
+Artifacts: `target/profiles/v0231-a3b-split-swiglu-lt8/`.
+
+Read: split gate/up with existing grouped matmuls is not the missing mechanism.
+It is correctness-safe but adds dispatch and F32 epilogue traffic while keeping
+the broad grouped geometry. This falsifies the cleanest "dual Q4 dequant fusion
+is the culprit" hypothesis; the next SwiGLU branch must be a true tiny-bucket
+execution shape or a llama.cpp differential, not a split-sidecar retread.
+
 ## 2026-06-03 — v0.230 Default Short-Chunk Tiny8 Q5 Down
 
 Status: defaulted the exact Q5 routed-down tiny8 R16 path for short chunks only.

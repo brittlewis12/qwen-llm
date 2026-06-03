@@ -13020,6 +13020,121 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn moe_grouped_down_iq4_xs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq4xs-down-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let down_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_down_exps.weight" && t.dtype == GgmlType::IQ4_XS)
+            .expect("missing IQ4_XS MoE down tensor");
+        let n_in = down_t.shape[0] as usize;
+        let n_out = down_t.shape[1] as usize;
+        let n_expert = down_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let n_tokens = 32usize;
+        let row_stride = (n_in / 256) * 136;
+        let expert_stride = n_out * row_stride;
+        let down_bytes_all = g.slice(down_t);
+        let down_expert_bytes =
+            &down_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_down_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_out as u64],
+            dtype: GgmlType::IQ4_XS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let down_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, down_expert_bytes).expect("down dequant");
+        let x: Vec<f32> = (0..n_tokens * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let mut cpu = vec![0.0f32; n_tokens * n_out];
+        for token in 0..n_tokens {
+            let x_tok = &x[token * n_in..(token + 1) * n_in];
+            let y = crate::forward::mat_vec_pub(&down_f32, n_in, n_out, x_tok);
+            cpu[token * n_out..(token + 1) * n_out].copy_from_slice(&y);
+        }
+
+        let down_gpu = MetalTensor::from_gguf_tensor(&ctx, down_t, down_bytes_all).expect("down");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_tokens * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let mut counts = vec![0i32; n_expert];
+        counts[expert] = n_tokens as i32;
+        let mut ids = vec![0i32; n_expert * n_tokens];
+        for token in 0..n_tokens {
+            ids[expert * n_tokens + token] = token as i32;
+        }
+        let counts_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&counts),
+            vec![n_expert as u64],
+            GgmlType::F32,
+        )
+        .expect("counts tensor");
+        let ids_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![(n_expert * n_tokens) as u64],
+            GgmlType::F32,
+        )
+        .expect("ids tensor");
+        let out_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_out) as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_down_iq4_xs_f32_grouped_slots(
+                &ctx,
+                enc,
+                &down_gpu,
+                &x_gpu,
+                &counts_gpu,
+                &ids_gpu,
+                &out_gpu,
+                n_in,
+                n_out,
+                n_expert,
+                n_tokens,
+            )
+        })
+        .expect("gpu grouped iq4xs down");
+        let gpu = read_back_f32(&out_gpu.buffer, n_tokens * n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq4xs-down-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
     fn moe_grouped_swiglu_q6_k_matches_f32_dequant_fixture() {
         let path = std::env::var("QWEN_A3B_Q6_MODEL")
             .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q6_K.gguf".into());

@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.234 Adds `IQ4_XS` Grouped-Down Oracle
+
+Status: added a targeted ignored oracle for the A3B `UD-IQ4_XS` grouped MoE down
+kernel after v0.233 exposed a strict full-model internal-state cosine envelope.
+
+Validation:
+
+- `cargo test -p qwen-llm moe_grouped_down_iq4_xs_matches_f32_dequant_fixture --release -- --ignored --nocapture --test-threads=1`
+
+Result: `cos=1.000000`, `max_abs=1.386e-5` against a per-expert F32 dequant CPU
+reference. This does not reproduce the full-model `0.996-0.998` internal GDN/KV
+cosines from the `T=32/P=32` continuation gate, so the caveat is not an obvious
+`IQ4_XS` row-stride/dequant indexing bug. Treat the remaining envelope as
+cumulative/activation-distribution precision until a capture with real `moe_inner`
+activations proves a narrower down-kernel defect.
+
 ## 2026-06-03 — v0.233 Native `IQ3_S` MoE Restores UD-IQ4_XS Coverage
 
 Status: added native `IQ3_S` MoE expert-bank support for gate/up decode and

@@ -669,8 +669,9 @@ Current rank after v0.233:
    `37x`; breadth can still dominate local tuning.
 2. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
-   same envelope. Decide whether this is an accepted continuation/rank envelope
-   or a down-kernel accuracy issue before broad default claims for that quant.
+   same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
+   `max_abs=1.386e-5`), so the next accuracy check needs real captured
+   `moe_inner` activations rather than another synthetic row-stride oracle.
 3. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,

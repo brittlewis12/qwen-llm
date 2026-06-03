@@ -81,15 +81,26 @@ pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
     )
 }
 
-fn moe_iq3_expert_native_enabled() -> bool {
+fn moe_iq3_expert_native_enabled(desc: &TensorDesc) -> bool {
     let truthy = |v: &str| matches!(v, "1" | "true" | "TRUE" | "yes" | "YES");
+    let falsey = |v: &str| matches!(v, "0" | "false" | "FALSE" | "no" | "NO");
     if let Ok(v) = std::env::var("QWEN_MOE_IQ3_EXPERT_NATIVE") {
-        return truthy(&v);
+        if truthy(&v) {
+            return true;
+        }
+        if falsey(&v) {
+            return false;
+        }
     }
-    matches!(
-        std::env::var("QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP").as_deref(),
-        Ok(v) if truthy(v)
-    )
+    if let Ok(v) = std::env::var("QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP") {
+        if truthy(&v) {
+            return true;
+        }
+        if falsey(&v) {
+            return false;
+        }
+    }
+    desc.shape.len() >= 3 && desc.shape[0..3] == [2048, 512, 256]
 }
 
 fn alloc_shape_error(detail: &'static str) -> MetalError {
@@ -327,7 +338,7 @@ impl MetalModel {
         let lm_head = load_weight(model.lm_head)?;
 
         let load_moe_expert = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            if moe_iq3_expert_native_enabled() && matches!(desc.dtype, GgmlType::IQ3_XXS) {
+            if matches!(desc.dtype, GgmlType::IQ3_XXS) && moe_iq3_expert_native_enabled(desc) {
                 Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
             } else {
                 load_weight(desc)

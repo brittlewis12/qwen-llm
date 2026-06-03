@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.221 A3B Q3 Native IQ3 MoE Default
+
+Status: defaulted native IQ3_XXS expert-bank residency and grouped IQ3_XXS
+routed gate/up SwiGLU for the observed A3B Q3 shape. This moves A3B Q3_K_M
+MoE from slow F32-dequant expert residency to native `40/40` grouped routed
+coverage. Rollbacks are `QWEN_MOE_IQ3_EXPERT_NATIVE=0` and
+`QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP=0`.
+
+Correctness and build:
+
+- `cargo test -p qwen-llm moe_grouped_swiglu_iq3_xxs_matches_f32_dequant_fixture -- --ignored --nocapture`
+- `cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_0_8b -- --nocapture`
+- `cargo build --release`
+
+Dirty A3B Q3 default evidence:
+
+| Shape | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | --- |
+| `pp512` | `1241.44` | `1323.36` | `0.938x` | `target/profiles/v0221-dirty-a3b-q3-pp512-default-compare.json` |
+| `pp1024` | `1497.39` | `1387.80` | `1.079x` | `target/profiles/v0221-dirty-a3b-q3-pp1024-default-compare.json` |
+| `pp4096` | `1542.34` | `1379.67` | `1.118x` | `target/profiles/v0221-dirty-a3b-q3-pp4096-default-compare.json` |
+
+Runtime `pp512` trace confirms grouped coverage and the same short-prompt
+signature as Q6/Q8: `routed_swiglu=118.56 ms`, `routed_down=68.38 ms`, and
+`route_fused=7.02 ms`.
+
+Read: A3B Q3/Q6/Q8 now all have native `40/40` grouped coverage and win
+medium/long paired rows, but all still lose short `pp512`. The remaining local
+A3B quant coverage miss is UD-IQ4_XS (`IQ3_S/IQ3_S/IQ4_XS`), which needs a new
+IQ3_S gate/up dequant path rather than an auto-policy flip.
+
 ## 2026-06-03 — v0.220 A3B Q8 Grouped MoE Coverage
 
 Status: added grouped Q8_0 routed gate/up SwiGLU and grouped Q8_0 routed down

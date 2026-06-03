@@ -318,11 +318,12 @@ fn prefill_moe_grouped_f32_gateup_enabled() -> bool {
     }
 }
 
-fn prefill_moe_grouped_iq3_gateup_enabled() -> bool {
+fn prefill_moe_grouped_iq3_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP")) {
         PrefillEnvMode::ForceOn => true,
-        PrefillEnvMode::ForceOff | PrefillEnvMode::Auto => false,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => h == 2048 && f_exp == 512 && n_expert == 256,
     }
 }
 
@@ -6774,7 +6775,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         prefill_moe_grouped_q8_gateup_enabled(h, f_exp, n_expert)
                     }
                     (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => {
-                        chunk_p >= 32 && prefill_moe_grouped_iq3_gateup_enabled()
+                        chunk_p >= 32 && prefill_moe_grouped_iq3_gateup_enabled(h, f_exp, n_expert)
                     }
                     (GgmlType::F32, GgmlType::F32) => {
                         chunk_p >= 32 && prefill_moe_grouped_f32_gateup_enabled()

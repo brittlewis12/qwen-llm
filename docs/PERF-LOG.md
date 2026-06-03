@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.218 Rejected Q4 N64 Shape Policy
+
+Status: tried and reverted a default policy that disabled Q4_K N64 only for
+`n_query < 1024 && n_out <= 1536`. The idea came from a clean retread where
+global `QWEN_MATMAT_Q4_K_N64=0` looked positive on 0.8B/2B `pp512`, but the
+narrow mixed-kernel policy did not reproduce that win.
+
+Dirty 0.8B `pp512` gates after the policy edit:
+
+| Variant | Rows | Artifact |
+| --- | ---: | --- |
+| default policy | `6858.60 / 6776.82` | `target/profiles/v0218-dirty-08b-pp512-q4-n64-policy-sweep.json` |
+| force N64 | `6852.08 / 6859.29` | `target/profiles/v0218-dirty-08b-pp512-q4-n64-policy-sweep.json` |
+| default policy | `6576.90 / 6794.06` | `target/profiles/v0218-dirty-08b-pp512-q4-n64-policy-triage.json` |
+| force N64 | `6854.26 / 6824.99` | `target/profiles/v0218-dirty-08b-pp512-q4-n64-policy-triage.json` |
+| global off | `6820.93 / 6888.30` | `target/profiles/v0218-dirty-08b-pp512-q4-n64-policy-triage.json` |
+
+Read: the shape-local rule created a worse mixed Q4 kernel packet than either
+forcing N64 or disabling N64 globally in the short retest. Do not default this
+policy. Reopen Q4 N64 policy only with per-op dispatch attribution or a broader
+family packet that distinguishes global-off, force-on, and mixed routing.
+
 ## 2026-06-03 — v0.217 Rejected Fused Q4 SwiGLU N64
 
 Status: tried and removed an env-only fused Q4 SwiGLU N64 sidecar for the

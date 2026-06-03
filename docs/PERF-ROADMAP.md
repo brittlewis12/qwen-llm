@@ -77,9 +77,10 @@ Current caveats:
   `pp512` and `1.01x` at `pp1024`. 4B/9B/27B canaries were neutral-positive.
   v0.206-v0.215 say this is not attention, fast-path coverage, GDN matvec
   fallback, command-encoder coalescing/streaming, NSG8 GDN-step grouping, or
-  another Q5/Q6 N64 threshold fiddle. The remaining high-EV branch is deeper
-  short-prompt FFN/GDN projection mechanics, especially the 0.8B and 2B `pp512`
-  cells.
+  another Q5/Q6 N64 threshold fiddle. A fused Q4 SwiGLU N64 sidecar was also
+  correctness-safe but regressed 0.8B `pp512`. The remaining high-EV branch is
+  deeper short-prompt FFN/GDN projection mechanics, especially the 0.8B and 2B
+  `pp512` cells.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
   `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to
@@ -717,8 +718,8 @@ Next branch order:
   and require 2B plus 4B/9B/27B canaries before promotion. v0.215 landed the
   low-risk GDN prep dispatch cleanup; recent falsifiers say the next branch
   should target FFN/GDN projection mechanics or dataflow, not attention, encoder
-  coalescing/streaming, GDN matvec fallback, NSG8 GDN-step grouping, or broad
-  low-threshold N64 policy.
+  coalescing/streaming, GDN matvec fallback, NSG8 GDN-step grouping, fused Q4
+  SwiGLU N64, or broad low-threshold N64 policy.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh
   same-process or phase evidence crosses a total-throughput gate.
 

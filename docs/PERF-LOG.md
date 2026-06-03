@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.217 Rejected Fused Q4 SwiGLU N64
+
+Status: tried and removed an env-only fused Q4 SwiGLU N64 sidecar for the
+small-dense FFN bucket. The kernel was correctness-safe, but the larger fused
+epilogue/staging path regressed 0.8B `pp512`, so it is not a keep candidate.
+
+Correctness:
+
+- `QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_N64=1 cargo test -p qwen-llm ffn_fused_swiglu_q4_K_mm_n16_matches_unfused -- --nocapture`
+- `QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_N64=1 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_0_8b -- --nocapture`
+
+Warmed 0.8B `pp512` A/B:
+
+| Variant | Rows | Artifact |
+| --- | ---: | --- |
+| base | `7446.73 / 7480.24 / 7468.51` | `target/profiles/v0216-dirty-08b-pp512-fused-swiglu-n64-sweep.json` |
+| fused N64 | `7271.48 / 7288.58 / 7281.37` | `target/profiles/v0216-dirty-08b-pp512-fused-swiglu-n64-sweep.json` |
+
+Read: the theoretical reuse from a 64-column fused tile is outweighed by the
+larger fused epilogue/staging cost. Do not reopen fused Q4 N64 unless the
+epilogue becomes direct-store or otherwise avoids the 64x64 gate/up staging
+wall.
+
 ## 2026-06-03 — v0.215 GDN Paired Q/K L2 Prep
 
 Status: promoted paired GDN Q/K L2 normalization in prompt prefill. The new

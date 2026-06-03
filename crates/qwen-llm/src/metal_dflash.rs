@@ -634,6 +634,145 @@ fn encode_prefill_moe_grouped_swiglu(
     }
 }
 
+fn encode_prefill_moe_grouped_swiglu_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    moe: &MetalMoeFfn,
+    h_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    h: usize,
+    f_exp: usize,
+    n_expert: usize,
+    topk: usize,
+    chunk_p: usize,
+    min_slots: u32,
+    max_slots: u32,
+    use_q4_n32: bool,
+) -> Result<(), MetalError> {
+    match (moe.gate_exps.dtype, moe.up_exps.dtype) {
+        (GgmlType::Q4_K, GgmlType::Q4_K) if use_q4_n32 => {
+            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
+        (GgmlType::Q4_K, GgmlType::Q4_K) => {
+            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
+        (GgmlType::Q5_K, GgmlType::Q5_K) => {
+            crate::metal::encode_moe_swiglu_q5_K_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
+        (GgmlType::Q6_K, GgmlType::Q6_K) => {
+            crate::metal::encode_moe_swiglu_q6_K_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
+        (GgmlType::Q8_0, GgmlType::Q8_0) => {
+            crate::metal::encode_moe_swiglu_q8_0_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
+        (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => {
+            crate::metal::encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
+        other => Err(MetalError::BadShape {
+            kernel: "prefill_moe_grouped_swiglu_range",
+            detail: format!("unsupported grouped gate/up dtypes {other:?}"),
+        }),
+    }
+}
+
 fn encode_prefill_moe_grouped_down(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -7214,22 +7353,31 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 );
                             }
                             {
-                                let split_q4_swiglu_bins = prefill_trace_moe_bucket_bins_enabled()
-                                    && matches!(moe.gate_exps.dtype, GgmlType::Q4_K)
-                                    && matches!(moe.up_exps.dtype, GgmlType::Q4_K)
-                                    && !grouped_q4_n32_all
+                                let q4_hot_swiglu_bins = matches!(
+                                    (moe.gate_exps.dtype, moe.up_exps.dtype),
+                                    (GgmlType::Q4_K, GgmlType::Q4_K)
+                                ) && !grouped_q4_n32_all
                                     && prefill_moe_grouped_hot_q4_n32_enabled(chunk_p)
                                     && hot_expert_min_slots == Some(48);
-                                if split_q4_swiglu_bins {
-                                    let bins: [(&str, u32, u32, bool); 6] = [
-                                        ("routed_swiglu_lt8", 0, 7, false),
-                                        ("routed_swiglu_8_15", 8, 15, false),
-                                        ("routed_swiglu_16_31", 16, 31, false),
-                                        ("routed_swiglu_32_47", 32, 47, false),
-                                        ("routed_swiglu_48_63", 48, 63, true),
-                                        ("routed_swiglu_ge64", 64, i32::MAX as u32, true),
+                                let split_swiglu_bins = prefill_trace_moe_bucket_bins_enabled()
+                                    && match (moe.gate_exps.dtype, moe.up_exps.dtype) {
+                                        (GgmlType::Q4_K, GgmlType::Q4_K) => q4_hot_swiglu_bins,
+                                        (GgmlType::Q5_K, GgmlType::Q5_K)
+                                        | (GgmlType::Q6_K, GgmlType::Q6_K)
+                                        | (GgmlType::Q8_0, GgmlType::Q8_0)
+                                        | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => true,
+                                        _ => false,
+                                    };
+                                if split_swiglu_bins {
+                                    let bins: [(&str, u32, u32); 6] = [
+                                        ("routed_swiglu_lt8", 0, 7),
+                                        ("routed_swiglu_8_15", 8, 15),
+                                        ("routed_swiglu_16_31", 16, 31),
+                                        ("routed_swiglu_32_47", 32, 47),
+                                        ("routed_swiglu_48_63", 48, 63),
+                                        ("routed_swiglu_ge64", 64, i32::MAX as u32),
                                     ];
-                                    for (bin_idx, (phase, min_slots, max_slots, use_n32)) in
+                                    for (bin_idx, (phase, min_slots, max_slots)) in
                                         bins.into_iter().enumerate()
                                     {
                                         let enc = KernelEncoder::begin(&cmd_buf);
@@ -7242,43 +7390,23 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 0.0,
                                             )?;
                                         }
-                                        if use_n32 {
-                                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
-                                                base.ctx,
-                                                &enc,
-                                                &moe.gate_exps,
-                                                &moe.up_exps,
-                                                &h_pack_p,
-                                                &moe_group_count_pack,
-                                                &moe_group_ids_pack,
-                                                &moe_group_inner_pack_p,
-                                                h,
-                                                f_exp,
-                                                n_expert,
-                                                topk,
-                                                chunk_p,
-                                                min_slots,
-                                                max_slots,
-                                            )?;
-                                        } else {
-                                            crate::metal::encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
-                                                base.ctx,
-                                                &enc,
-                                                &moe.gate_exps,
-                                                &moe.up_exps,
-                                                &h_pack_p,
-                                                &moe_group_count_pack,
-                                                &moe_group_ids_pack,
-                                                &moe_group_inner_pack_p,
-                                                h,
-                                                f_exp,
-                                                n_expert,
-                                                topk,
-                                                chunk_p,
-                                                min_slots,
-                                                max_slots,
-                                            )?;
-                                        }
+                                        encode_prefill_moe_grouped_swiglu_range(
+                                            base.ctx,
+                                            &enc,
+                                            moe,
+                                            &h_pack_p,
+                                            &moe_group_count_pack,
+                                            &moe_group_ids_pack,
+                                            &moe_group_inner_pack_p,
+                                            h,
+                                            f_exp,
+                                            n_expert,
+                                            topk,
+                                            chunk_p,
+                                            min_slots,
+                                            max_slots,
+                                            q4_hot_swiglu_bins && min_slots >= 48,
+                                        )?;
                                         enc.end();
                                         flush_prefill_layer_phase(
                                             base.ctx,

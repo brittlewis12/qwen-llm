@@ -91,8 +91,11 @@ Current caveats:
   and move Q3/Q4/Q6/Q8 static audits to `40/40`. The clean v0.222 breakpoint
   sweep shows a shared short-prompt miss across covered quants: `pp512` ratios
   are `0.910x/0.915x/0.883x/0.903x` for Q3/Q4/Q6/Q8, while every covered quant
-  wins from `pp768` upward. UD-IQ4_XS MoE remains the local A3B coverage miss
-  (`IQ3_S/IQ3_S/IQ4_XS`, `0/40`).
+  wins from `pp768` upward. v0.227 fine-bin traces show the same `<8` routed
+  SwiGLU pathology across Q3/Q4/Q6/Q8: `<8` is only `~6.4%` of routed slots but
+  costs `~2.95-3.57 ms/k-slot`, versus `>=64` at `~0.46-0.57 ms/k-slot`.
+  UD-IQ4_XS MoE remains the local A3B coverage miss (`IQ3_S/IQ3_S/IQ4_XS`,
+  `0/40`).
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -645,18 +648,23 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.224:
+Current rank after v0.227:
 
-1. MoE short-prompt mechanics: A3B Q3/Q4/Q6/Q8 all have `40/40` grouped
-   coverage, all lose `pp512`, and all win from `pp768` upward. Attack the
-   shared grouped routed SwiGLU/down knee before adding another quant kernel;
-   v0.223 bin traces point specifically at `<16` expert buckets.
-2. Paired family/real-rollout guardrails: keep synthetic long prompts, real
+1. Corrected MoE tiny-bucket execution: A3B Q3/Q4/Q6/Q8 all have `40/40`
+   grouped coverage, all lose `pp512`, and all win from `pp768` upward. v0.227
+   traces make `<8` the cross-quant target. Build a corrected multi-expert tiny
+   microkernel with down as the first proving ground; port the scheduling idea to
+   SwiGLU only after exact down correctness and a real `pp512` win.
+2. Bounded llama.cpp structural audit: verify whether llama.cpp avoids treating
+   `<8` expert buckets as independent underfilled grouped work. Keep this to a
+   concrete dispatch/layout comparison; do not reopen route-side or threshold
+   tuning without new evidence.
+3. Paired family/real-rollout guardrails: keep synthetic long prompts, real
    rollouts, and pinned llama.cpp comparisons ahead of isolated microbench wins.
-3. Remaining MoE quant breadth: UD-IQ4_XS remains `0/40` grouped coverage
+4. Remaining MoE quant breadth: UD-IQ4_XS remains `0/40` grouped coverage
    (`IQ3_S/IQ3_S/IQ4_XS`), but do not let audit aesthetics outrank the shared
    covered-quant `pp512` miss unless that quant becomes the explicit product row.
-4. Small dense residuals: continue only from stable paired deltas, not from
+5. Small dense residuals: continue only from stable paired deltas, not from
    narrow N64 or one-cell policy retreads.
 
 The sections below preserve the rationale and reopen criteria from earlier
@@ -668,11 +676,12 @@ Current MoE short-branch rule:
 - Target active underfilled buckets, not route work or threshold policy. Q4
   `pp512` fine-bin traces show `<8` is only `6.3%` of routed slots but costs
   `3.485 ms/k-slot` in SwiGLU and `3.278 ms/k-slot` in down, versus `>=64` at
-  `0.498` and `0.252` respectively.
-- The next code branch should be a flat `<8` cold-slot/direct-GEMV path for both
-  SwiGLU and down, leaving `>=8` on the current grouped path. A smaller grouped
-  tile is falsified. Gate on bin-time movement first, then Q4 `pp512` GPU time,
-  then Q6/Q8/Q3 generalization.
+  `0.498` and `0.252` respectively. Q3/Q6/Q8 SwiGLU traces show the same shape.
+- The next code branch should be a corrected multi-expert `<8` microkernel that
+  amortizes several tiny experts in one useful unit. Do down first because it has
+  the simpler correctness surface; only count performance after exactness passes.
+  Gate on bin-time movement first, then A3B `pp512` GPU time, then no regression
+  at `pp768/1024+` and broad quant generalization.
 
 ### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 

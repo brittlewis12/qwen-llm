@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.227 Cross-Quant Tiny-Bucket SwiGLU Trace
+
+Status: generalized disabled `QWEN_PREFILL_TRACE_MOE_BUCKET_BINS=1` SwiGLU
+fine bins beyond Q4. Q6_K and Q8_0 grouped SwiGLU now expose range wrappers;
+Q3/IQ3_XXS, Q4_K, Q5_K, Q6_K, and Q8_0 SwiGLU can be split into `<8`,
+`8-15`, `16-31`, `32-47`, `48-63`, and `>=64` bins. Default execution is
+unchanged.
+
+Validation:
+
+- `cargo build --release`
+- `cargo test -p qwen-llm moe_grouped_swiglu_q6_k_matches_f32_dequant_fixture --release -- --ignored --nocapture --test-threads=1`
+- `cargo test -p qwen-llm moe_grouped_q8_0_swiglu_down_matches_f32_dequant_fixture --release -- --ignored --nocapture --test-threads=1`
+- `cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture --test-threads=1`
+
+A3B `pp512` SwiGLU fine-bin evidence:
+
+| Quant | `<8` slot fraction | `<8` ms/k-slot | `>=64` ms/k-slot |
+| --- | ---: | ---: | ---: |
+| Q3_K_M | `0.064` | `2.948` | `0.478` |
+| Q4_K_M | `0.063` | `3.485` | `0.498` |
+| Q6_K | `0.065` | `3.572` | `0.565` |
+| Q8_0 | `0.065` | `3.025` | `0.457` |
+
+Artifacts: `target/profiles/v0227-a3b-quant-bins/`.
+
+Read: the short-prompt MoE knee is now a cross-quant bucket-geometry problem,
+not a Q4-specific kernel quirk. `<8` experts are only `~6.4%` of routed slots but
+cost roughly `6-7x` per slot versus `>=64`. The next exact branch should be a
+corrected multi-expert tiny-bucket microkernel, with down as the first proving
+ground and SwiGLU only after exact down correctness/perf is established.
+
 ## 2026-06-03 — v0.226 Rejected Tiny4 Down Microtile
 
 Status: tried and removed a force-only Q5 down `<8` multi-expert microtile. The

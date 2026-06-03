@@ -3182,6 +3182,43 @@ pub fn encode_moe_swiglu_q6_K_f32_grouped_slots_n16(
     topk: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    encode_moe_swiglu_q6_K_f32_grouped_slots_n16_range(
+        ctx,
+        enc,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn encode_moe_swiglu_q6_K_f32_grouped_slots_n16_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
     if n_hidden % 256 != 0 {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q6_K_grouped_slots_n16",
@@ -3244,8 +3281,8 @@ pub fn encode_moe_swiglu_q6_K_f32_grouped_slots_n16(
             n_tokens: n_tokens as u32,
             nb01,
             stride_b: n_hidden as u32,
-            min_count: 0,
-            max_count: i32::MAX as u32,
+            min_count,
+            max_count,
         },
     );
     enc.set_tensor(1, w_gate);
@@ -3284,6 +3321,42 @@ pub fn encode_moe_swiglu_q8_0_f32_grouped_slots_n16(
     n_expert: usize,
     topk: usize,
     n_tokens: usize,
+) -> Result<(), MetalError> {
+    encode_moe_swiglu_q8_0_f32_grouped_slots_n16_range(
+        ctx,
+        enc,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+pub fn encode_moe_swiglu_q8_0_f32_grouped_slots_n16_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
 ) -> Result<(), MetalError> {
     if n_hidden % 32 != 0 {
         return Err(MetalError::BadShape {
@@ -3347,8 +3420,8 @@ pub fn encode_moe_swiglu_q8_0_f32_grouped_slots_n16(
             n_tokens: n_tokens as u32,
             nb01,
             stride_b: n_hidden as u32,
-            min_count: 0,
-            max_count: i32::MAX as u32,
+            min_count,
+            max_count,
         },
     );
     enc.set_tensor(1, w_gate);

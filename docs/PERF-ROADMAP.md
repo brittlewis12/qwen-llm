@@ -75,9 +75,9 @@ Current caveats:
   shape-gated dense Q4 fused SwiGLU narrows 0.8B to `0.91-0.92x` at `pp512` and
   `0.97-0.98x` at `pp1024`, while keeping larger dense shapes on the unfused
   path by default. v0.206-v0.212 say this is not attention, fast-path coverage,
-  GDN matvec fallback, command-encoder coalescing, or another N64 threshold
-  fiddle. The remaining high-EV branch is structural short-prompt FFN/GDN body
-  execution, especially the 0.8B `pp512` cell.
+  GDN matvec fallback, command-encoder coalescing/streaming, or another N64
+  threshold fiddle. The remaining high-EV branch is structural short-prompt
+  FFN/GDN body execution, especially the 0.8B and 2B `pp512` cells.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
   `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to
@@ -714,7 +714,8 @@ Next branch order:
 - Fifth, small dense is the active paired mismatch again. Start from 0.8B `pp512`
   and require 2B plus 4B/9B/27B canaries before promotion. Recent falsifiers say
   the next branch should target FFN/GDN body math or dataflow, not attention,
-  encoder coalescing, GDN matvec fallback, or broad low-threshold N64 policy.
+  encoder coalescing/streaming, GDN matvec fallback, or broad low-threshold N64
+  policy.
 - Defer reduced-smem promotion, fused FFN, and fused online-softmax/PV until fresh
   same-process or phase evidence crosses a total-throughput gate.
 

@@ -32,6 +32,8 @@ Clean paired pinned-b9481 rows after v0.212:
 | --- | ---: | ---: | ---: | ---: | --- |
 | 0.8B | `pp512` | `7254.74 / 7182.30` | `7874.91 / 7878.64` | `0.921x / 0.912x` | `target/profiles/v0212-clean-08b-pp512-shape-fused-compare.json` |
 | 0.8B | `pp1024` | `7599.28 / 7593.34` | `7783.26 / 7836.44` | `0.976x / 0.969x` | `target/profiles/v0212-clean-08b-pp1024-shape-fused-compare.json` |
+| 2B | `pp512` | `3482.97 / 3492.48` | `3626.60 / 3633.43` | `0.960x / 0.961x` | `target/profiles/v0213-clean-2b-pp512-shape-fused-compare.json` |
+| 2B | `pp1024` | `3670.52 / 3665.02` | `3676.17 / 3672.49` | `0.998x / 0.998x` | `target/profiles/v0213-clean-2b-pp1024-shape-fused-compare.json` |
 
 Canary read:
 
@@ -42,6 +44,9 @@ Canary read:
 - The GDN tail encoder coalescing sidecar passed the 0.8B prefill-vs-single gate
   but was flat/noise at `pp512` and `pp1024`; do not keep or reopen encoder-
   coalescing as the next small-dense lever without new evidence.
+- Streaming layer command buffers (`QWEN_PREFILL_STREAM_LAYERS`) was also tested as
+  a llama.cpp-style CPU/GPU overlap sidecar. `stream12` was at most sub-1% positive
+  on 0.8B and flat on 2B `pp512`, so it was not kept.
 
 Read: this is a useful incremental scoreboard cleanup, not the lcpp-cracking
 branch. 0.8B `pp1024` is now close to parity, but `pp512` is still materially

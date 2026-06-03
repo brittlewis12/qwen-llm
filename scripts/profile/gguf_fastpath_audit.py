@@ -196,6 +196,28 @@ def audit_model(
     for layer, block in sorted(layers.items()):
         if "ffn_gate_exps.weight" in block:
             moe_total += 1
+            missing = [
+                name
+                for name in (
+                    "ffn_gate_exps.weight",
+                    "ffn_up_exps.weight",
+                    "ffn_down_exps.weight",
+                )
+                if name not in block
+            ]
+            if missing:
+                moe_bad.append(f"{layer}:missing({','.join(missing)})")
+                moe_dtypes.append(
+                    tuple(
+                        str(block[name]["dtype"]) if name in block else "missing"
+                        for name in (
+                            "ffn_gate_exps.weight",
+                            "ffn_up_exps.weight",
+                            "ffn_down_exps.weight",
+                        )
+                    )
+                )
+                continue
             gate = str(block["ffn_gate_exps.weight"]["dtype"])
             up = str(block["ffn_up_exps.weight"]["dtype"])
             down = str(block["ffn_down_exps.weight"]["dtype"])

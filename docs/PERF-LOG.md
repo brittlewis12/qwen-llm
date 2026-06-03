@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.236 Re-Audits Local A3B Quant Coverage
+
+Status: re-ran the static A3B fast-path audit after native `IQ3_S` landed and
+made the audit robust to partial GGUF shards with missing MoE tensors. Artifact:
+`target/profiles/v0236-a3b-fastpath-audit.tsv`.
+
+Audit result for non-sharded local A3B files: `Q4_K_M`, `Q3_K_M`, `Q6_K`, `Q8_0`,
+`UD-Q4_K_M`, and `UD-IQ4_XS` all report `40/40` grouped MoE coverage. The only
+remaining local A3B audit caveat is the sharded BF16 file: shard 1 contains partial
+MoE expert banks (`BF16/BF16/missing` for most layers), while shard 2 contains
+GDN/attention and no complete MoE bank. Treat that as a separate sharded/BF16
+support question, not a regression in the quantized A3B MoE target set.
+
 ## 2026-06-03 — v0.234 Adds `IQ4_XS` Grouped-Down Oracle
 
 Status: added a targeted ignored oracle for the A3B `UD-IQ4_XS` grouped MoE down

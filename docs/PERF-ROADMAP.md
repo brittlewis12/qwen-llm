@@ -658,20 +658,25 @@ Recent measured negatives:
   from `0.6851/0.6820` to `0.7017/0.7009`; the `<8` SwiGLU phase moved only
   `37.98 -> 36.92 ms`, far below the go gate. Do not reopen split sidecars unless
   the second projection fuses the epilogue and materially changes dispatch shape.
+- The MR32 Q4 `<8` microtile is falsified too. It packed two tiny experts per
+  threadgroup with two simdgroups per expert and no separate F32 epilogue, passed
+  correctness, but regressed Q4 `pp512` GPU ms/token (`0.6851/0.6858` default
+  versus `0.7032/0.7006`) and left `<8` SwiGLU flat (`35.88 -> 36.02 ms`).
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.231:
+Current rank after v0.232:
 
-1. True tiny-bucket SwiGLU geometry: Q5 down proves corrected tiny geometry can
-   move a target bin, but direct R16 and split-gate/up retreads both regress. The
-   next code branch must materially change how `<8` Q4 SwiGLU keeps simdgroups
-   occupied, e.g. multiple tiny experts per useful unit or a one-temp second
-   projection that fuses the epilogue.
-2. Bounded llama.cpp structural audit: verify whether llama.cpp avoids treating
-   `<8` expert buckets as independent underfilled grouped work. Keep this to a
-   concrete dispatch/layout comparison; do not reopen route-side or threshold
-   tuning without new evidence.
+1. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+   faster inside comparable routed gate/up/down arithmetic, or whether remaining
+   differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
+   or profile scope. The local llama.cpp b9481 build no longer exposes
+   `GGML_METAL_PROFILE_OPS`, so this may require a tiny canonical profiling patch
+   or a non-invasive external capture before more kernel code.
+2. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+   `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
+   than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
+   before any end-to-end tuning.
 3. Paired family/real-rollout guardrails: keep synthetic long prompts, real
    rollouts, and pinned llama.cpp comparisons ahead of isolated microbench wins.
 4. Remaining MoE quant breadth: UD-IQ4_XS remains `0/40` grouped coverage
@@ -690,17 +695,18 @@ Current MoE short-branch rule:
   `pp512` fine-bin traces show `<8` is only `6.3%` of routed slots but costs
   `3.485 ms/k-slot` in SwiGLU and `3.278 ms/k-slot` in down, versus `>=64` at
   `0.498` and `0.252` respectively. Q3/Q6/Q8 SwiGLU traces show the same shape.
-- The next code branch should be a corrected multi-expert `<8` microkernel that
-  amortizes several tiny experts in one useful unit. Do down first because it has
-  the simpler correctness surface; only count performance after exactness passes.
-  Gate on bin-time movement first, then A3B `pp512` GPU time, then no regression
-  at `pp768/1024+` and broad quant generalization.
+- The next branch should be attribution-first, not another Q4 tiny-SwiGLU retread.
+  If attribution proves the residual is inside comparable `<8` SwiGLU arithmetic,
+  require a genuinely new multi-expert work unit and gate on bin-time movement
+  first, then A3B `pp512` GPU time, then no regression at `pp768/1024+` and broad
+  quant generalization.
 - Down now has a correctness-safe force-only proof. It reduces the target bin but
   is not enough by itself to justify defaulting. The first analogous SwiGLU port
   is falsified; future SwiGLU work must explain the dual-dequant/epilogue cost
   before adding another tiny kernel. The split gate/up sidecar also failed, so
   the remaining SwiGLU path is a real execution-shape change, not merely
-  unfusing the current grouped kernel.
+  unfusing the current grouped kernel. The MR32 attempt failed that bar too;
+  pause Q4 tiny-SwiGLU code until attribution identifies a new mechanism.
 
 ### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 

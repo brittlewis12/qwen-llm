@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.232 Rejected MR32 Q4 `<8` SwiGLU Microtile
+
+Status: tried and removed an env-gated Q4 `<8` routed-SwiGLU MR32 microtile. The
+kernel packed two tiny experts per threadgroup, used two simdgroups per expert,
+and wrote `silu(gate) * up` directly without a separate F32 epilogue pass.
+
+Validation before measuring:
+
+- `cargo build --release`
+- `QWEN_PREFILL_MOE_TINY8_SWIGLU_MR32=1 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture --test-threads=1`
+
+Q4 `pp512` A/B:
+
+| Variant | GPU ms/token rows | Read |
+| --- | ---: | --- |
+| default | `0.6851 / 0.6858` | current grouped path |
+| MR32 `<8` | `0.7032 / 0.7006` | regression |
+
+Trace-bin read at Q4 `pp512`:
+
+| SwiGLU bin | Default | MR32 `<8` | Read |
+| --- | ---: | ---: | --- |
+| `<8` ms | `35.88` | `36.02` | target flat/slightly worse |
+
+Artifacts: `target/profiles/v0232-a3b-tiny-swiglu-mr32/`.
+
+Read: giving tiny Q4 SwiGLU two simdgroups per expert and removing the split
+epilogue still fails the bin gate. Together with v0.229 and v0.231, this says the
+SwiGLU tiny-bucket wall is not fixed by row-width retuning, separate gate/up, or
+obvious simdgroup allocation changes. The next move should be scoped
+llama.cpp/counter attribution or a genuinely different multi-expert work unit;
+do not add another Q4 `<8` microtile without a new causal mechanism.
+
 ## 2026-06-03 — v0.231 Rejected Split Q4 `<8` SwiGLU Sidecar
 
 Status: tried and removed an env-gated Q4 `<8` routed-SwiGLU split sidecar. The

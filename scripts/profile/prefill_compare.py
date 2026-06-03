@@ -168,6 +168,7 @@ def count_lcpp_prompt_tokens(args: argparse.Namespace, text: str) -> int:
             "-m",
             args.model,
             "--stdin",
+            "--ids",
             "--show-count",
             "--no-bos",
             "--log-disable",

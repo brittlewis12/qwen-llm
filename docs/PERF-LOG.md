@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.228 Tiny8 R16 Q5 Down Proof
+
+Status: added a force-only `QWEN_PREFILL_MOE_TINY8_DOWN_R16=1` Q5 routed-down
+microkernel for `<8` expert buckets. The kernel uses one simdgroup per expert,
+a 16-row output tile, and an `<=8` slot tile, then leaves `>=8` buckets on the
+current grouped down path. Default execution is unchanged.
+
+Validation:
+
+- `cargo build --release`
+- `QWEN_PREFILL_MOE_TINY8_DOWN_R16=1 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture --test-threads=1`
+
+A3B Q4 end-to-end rows:
+
+| Shape | Base GPU ms/token | Tiny8 R16 GPU ms/token | Read |
+| --- | ---: | ---: | --- |
+| `pp256` | `0.8294 / 0.8479` | `0.8256 / 0.8229` | positive |
+| `pp512` | `0.6894 / 0.6873` | `0.6857 / 0.6823` | small positive |
+| `pp768` | `0.6381 / 0.6378` | `0.6373 / 0.6374` | neutral-positive |
+| `pp1024` | `0.6143 / 0.6138` | `0.6150 / 0.6144` | neutral/slight negative |
+
+Trace-bin movement at Q4 `pp512`:
+
+| Down bin | Base | Tiny8 R16 | Read |
+| --- | ---: | ---: | --- |
+| `<8` ms | `32.99` | `21.16` | `-35.9%` |
+| `<8` ms/k-slot | `3.185` | `2.043` | direct target moves |
+| all down-bin ms | `110.14` | `94.15` | trace-only aggregate |
+
+Artifacts: `target/profiles/v0228-a3b-tiny-r16/`.
+
+Read: the corrected 16-row one-simdgroup geometry fixes the earlier tiny4
+correctness trap and materially reduces the `<8` down bin. End-to-end movement is
+real but modest because down is only one part of the routed tail. Keep the path
+force-only for now; the next live branch is porting the same tiny-bucket geometry
+to SwiGLU, where Q4 `pp512` still spends comparable `<8` time.
+
 ## 2026-06-03 — v0.227 Cross-Quant Tiny-Bucket SwiGLU Trace
 
 Status: generalized disabled `QWEN_PREFILL_TRACE_MOE_BUCKET_BINS=1` SwiGLU

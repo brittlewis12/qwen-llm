@@ -390,6 +390,11 @@ fn prefill_moe_grouped_zero_fill_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_MOE_GROUPED_ZERO_FILL"))
 }
 
+fn prefill_moe_tiny_down_r16_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_MOE_TINY8_DOWN_R16"))
+}
+
 fn prefill_moe_grouped_concurrent_tail_enabled(chunk_p: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     if chunk_p < 512 {
@@ -787,6 +792,26 @@ fn encode_prefill_moe_grouped_down(
     chunk_p: usize,
 ) -> Result<(), MetalError> {
     match down_exps.dtype {
+        GgmlType::Q5_K if prefill_moe_tiny_down_r16_enabled() => {
+            crate::metal::encode_moe_down_q5_K_f32_grouped_slots_tiny8_r16(
+                ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p, 1, 7,
+            )?;
+            crate::metal::encode_moe_down_q5_K_f32_grouped_slots_range(
+                ctx,
+                enc,
+                down_exps,
+                inner,
+                counts,
+                ids,
+                out,
+                f_exp,
+                h,
+                n_expert,
+                chunk_p,
+                8,
+                i32::MAX as u32,
+            )
+        }
         GgmlType::Q5_K => crate::metal::encode_moe_down_q5_K_f32_grouped_slots(
             ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
         ),
@@ -7486,21 +7511,42 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 0.0,
                                             )?;
                                         }
-                                        crate::metal::encode_moe_down_q5_K_f32_grouped_slots_range(
-                                            base.ctx,
-                                            &enc,
-                                            &moe.down_exps,
-                                            &moe_group_inner_pack_p,
-                                            &moe_group_count_pack,
-                                            &moe_group_ids_pack,
-                                            &moe_group_out_pack_p,
-                                            f_exp,
-                                            h,
-                                            n_expert,
-                                            chunk_p,
-                                            min_slots,
-                                            max_slots,
-                                        )?;
+                                        if prefill_moe_tiny_down_r16_enabled()
+                                            && min_slots == 0
+                                            && max_slots == 7
+                                        {
+                                            crate::metal::encode_moe_down_q5_K_f32_grouped_slots_tiny8_r16(
+                                                base.ctx,
+                                                &enc,
+                                                &moe.down_exps,
+                                                &moe_group_inner_pack_p,
+                                                &moe_group_count_pack,
+                                                &moe_group_ids_pack,
+                                                &moe_group_out_pack_p,
+                                                f_exp,
+                                                h,
+                                                n_expert,
+                                                chunk_p,
+                                                1,
+                                                7,
+                                            )?;
+                                        } else {
+                                            crate::metal::encode_moe_down_q5_K_f32_grouped_slots_range(
+                                                base.ctx,
+                                                &enc,
+                                                &moe.down_exps,
+                                                &moe_group_inner_pack_p,
+                                                &moe_group_count_pack,
+                                                &moe_group_ids_pack,
+                                                &moe_group_out_pack_p,
+                                                f_exp,
+                                                h,
+                                                n_expert,
+                                                chunk_p,
+                                                min_slots,
+                                                max_slots,
+                                            )?;
+                                        }
                                         enc.end();
                                         flush_prefill_layer_phase(
                                             base.ctx,

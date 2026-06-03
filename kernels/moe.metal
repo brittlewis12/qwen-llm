@@ -3164,6 +3164,17 @@ struct moe_group_q5k_args {
     uint max_count;
 };
 
+struct moe_group_q5k_tiny_args {
+    uint M;
+    uint N;
+    uint K;
+    uint n_expert;
+    uint nb01;
+    uint stride_b;
+    uint min_count;
+    uint max_count;
+};
+
 struct moe_group_q6k_args {
     uint M;
     uint N;
@@ -3341,6 +3352,137 @@ kernel void kernel_moe_down_q5_K_f32_grouped_slots(
             const int slot = ids[(ulong)im * args.N + r1 + j];
             device float * D = dst + (ulong)slot * args.M + r0;
             threadgroup float * C = temp_str + (j * NR0_MM);
+            for (int i = 0; i < nr0; ++i) {
+                D[i] = C[i];
+            }
+        }
+    }
+}
+
+kernel void kernel_moe_down_q5_K_f32_grouped_slots_tiny8_r16(
+        constant moe_group_q5k_tiny_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const float * srcB         [[buffer(2)]],
+        device const int   * counts       [[buffer(3)]],
+        device const int   * ids          [[buffer(4)]],
+        device       float * dst          [[buffer(5)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    constexpr int MR = 16;
+    constexpr int NR = 8;
+    constexpr int SG_SMEM_BYTES = 1536;
+
+    threadgroup uchar * sg_mem = shmem + (uint)sgitg * SG_SMEM_BYTES;
+    threadgroup half * sa = (threadgroup half *)(sg_mem);
+    threadgroup half * sb = (threadgroup half *)(sg_mem + 1024);
+    threadgroup float * temp_str = ((threadgroup float *)(shmem + 6144)) + (uint)sgitg * (MR * NR);
+
+    const int im = (int)tgpig.y * 4 + (int)sgitg;
+    const int r0 = (int)tgpig.x * MR;
+
+    int count = 0;
+    if (im < (int)args.n_expert) {
+        count = counts[im];
+    }
+    const bool active = im < (int)args.n_expert && count >= int(args.min_count)
+                     && count <= int(args.max_count) && count > 0;
+    const short nr0 = ((int)args.M - r0 < MR) ? (short)((int)args.M - r0) : MR;
+    const short nr1 = (count < NR) ? (short)count : NR;
+
+    const short row_local = (short)(tiisg / 2);
+    const short il0 = (short)(tiisg & 1);
+    short il = il0;
+
+    const short slot_local = (short)(tiisg / 4);
+    const short iy = 8 * (short)(tiisg & 3);
+
+    const int global_m = r0 + row_local;
+    const bool row_active = active && global_m < (int)args.M;
+    const bool slot_active = active && slot_local < nr1;
+
+    const short offset1 = il0 / Q5K_NL;
+    const ulong expert_stride = (ulong)args.nb01 * args.M;
+    const int im_safe = (im < (int)args.n_expert) ? im : 0;
+    const int m_safe = (global_m < (int)args.M) ? global_m : 0;
+    device const uchar * x_ptr = srcA + expert_stride * (ulong)im_safe
+                                      + (ulong)args.nb01 * (ulong)m_safe
+                                      + (ulong)offset1 * Q5K_BYTES;
+
+    int slot_id = 0;
+    if (slot_active) {
+        slot_id = ids[(ulong)im * args.N + slot_local];
+    }
+    device const float * y_ptr = srcB + (ulong)args.stride_b * (ulong)max(slot_id, 0)
+                                      + (ulong)iy;
+
+    simdgroup_half8x8 ma[2];
+    simdgroup_half8x8 mb;
+    simdgroup_float8x8 mc[2];
+    mc[0] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    mc[1] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        half4x4 temp_a;
+        if (row_active) {
+            dequantize_q5_K_half_grouped(x_ptr, il, temp_a);
+        } else {
+            for (short i = 0; i < 16; ++i) {
+                temp_a[i / 4][i % 4] = half(0.0f);
+            }
+        }
+        for (short i = 0; i < 16; ++i) {
+            const short sx = 2 * il0 + i / 8;
+            const short sy = row_local / 8;
+            const short lx = row_local & 7;
+            const short ly = i & 7;
+            const short ib = 2 * sx + sy;
+            sa[64 * ib + 8 * ly + lx] = temp_a[i / 4][i % 4];
+        }
+
+        {
+            const short sx = (short)(tiisg & 3);
+            threadgroup half * bd = sb + 64 * sx + 8 * slot_local;
+            if (slot_active) {
+                *(threadgroup half2x4 *)bd = (half2x4)(*((device const float2x4 *)y_ptr));
+            } else {
+                for (short i = 0; i < 8; ++i) {
+                    bd[i] = half(0.0f);
+                }
+            }
+        }
+
+        il = (il + 2 < Q5K_NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2)
+                  ? x_ptr + Q5K_BYTES * ((2 + Q5K_NL - 1) / Q5K_NL)
+                  : x_ptr;
+        y_ptr += NK_MM;
+
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_load(ma[0], sa + 64 * (2 * ik + 0), 8, 0, false);
+            simdgroup_load(ma[1], sa + 64 * (2 * ik + 1), 8, 0, false);
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_load(mb, sb + 64 * ik, 8, 0, false);
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_multiply_accumulate(mc[0], mb, ma[0], mc[0]);
+            simdgroup_multiply_accumulate(mc[1], mb, ma[1], mc[1]);
+        }
+    }
+
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_store(mc[0], temp_str, MR, 0, false);
+    simdgroup_store(mc[1], temp_str + 8, MR, 0, false);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (active) {
+        for (int j = tiisg; j < nr1; j += 32) {
+            const int slot = ids[(ulong)im * args.N + j];
+            device float * D = dst + (ulong)slot * args.M + r0;
+            threadgroup float * C = temp_str + j * MR;
             for (int i = 0; i < nr0; ++i) {
                 D[i] = C[i];
             }

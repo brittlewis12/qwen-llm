@@ -16,6 +16,7 @@ TENSOR_RE = re.compile(
     r"^\|\s*\d+\s*\|\s*(?P<name>[^|]+?)\s*\|\s*(?P<dtype>[A-Za-z0-9_]+)\s*\|\s*(?P<shape>[^|]+?)\s*\|"
 )
 BLK_RE = re.compile(r"^blk\.(?P<layer>\d+)\.(?P<suffix>.+)$")
+SHARD_RE = re.compile(r"-\d{5}-of-(?P<total>\d{5})\.gguf$")
 
 # These sets mirror the current prefill routing gates in metal_dflash.rs. They
 # are intentionally stricter than generic mat-mat dispatch when the prefill path
@@ -127,6 +128,28 @@ def load_tensors(gguf_bin: str, model: Path) -> dict[str, dict[str, object]]:
     return tensors
 
 
+def tensor_sources(model: Path) -> list[Path]:
+    match = SHARD_RE.search(model.name)
+    if not match:
+        return [model]
+    base = model.with_name(SHARD_RE.sub(".gguf", model.name))
+    if base.exists():
+        return [base]
+    pattern = SHARD_RE.sub("-*-of-*.gguf", model.name)
+    shards = sorted(model.parent.glob(pattern))
+    return shards if shards else [model]
+
+
+def load_model_tensors(
+    gguf_bin: str, model: Path
+) -> tuple[dict[str, dict[str, object]], list[Path]]:
+    tensors: dict[str, dict[str, object]] = {}
+    sources = tensor_sources(model)
+    for source in sources:
+        tensors.update(load_tensors(gguf_bin, source))
+    return tensors, sources
+
+
 def count_ok(total: int, bad: list[str]) -> str:
     return f"{total - len(bad)}/{total}" if total else "n/a"
 
@@ -175,7 +198,7 @@ def moe_iq3_gateup_auto_ok(gate_shape: list[int]) -> bool:
 
 
 def audit_model(
-    model: Path, tensors: dict[str, dict[str, object]]
+    model: Path, tensors: dict[str, dict[str, object]], sources: list[Path]
 ) -> dict[str, object]:
     layers: dict[int, dict[str, dict[str, object]]] = defaultdict(dict)
     for name, info in tensors.items():
@@ -349,6 +372,7 @@ def audit_model(
     return {
         "model": str(model),
         "name": model.name,
+        "tensor_sources": ",".join(source.name for source in sources),
         "layers": len(layers),
         "dense_ffn_fast": count_ok(dense_ffn_total, dense_ffn_bad),
         "gdn_matrix_fast": count_ok(gdn_total, gdn_bad),
@@ -379,8 +403,8 @@ def main() -> int:
         if not model.exists():
             print(f"missing model: {model}", file=sys.stderr)
             return 2
-        tensors = load_tensors(args.gguf_bin, model)
-        rows.append(audit_model(model, tensors))
+        tensors, sources = load_model_tensors(args.gguf_bin, model)
+        rows.append(audit_model(model, tensors, sources))
 
     if args.json:
         print(json.dumps({"models": rows}, separators=(",", ":")))
@@ -388,6 +412,7 @@ def main() -> int:
 
     fields = [
         "name",
+        "tensor_sources",
         "layers",
         "dense_ffn_fast",
         "gdn_matrix_fast",

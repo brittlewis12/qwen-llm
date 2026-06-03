@@ -672,12 +672,12 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.244:
+Current rank after v0.246:
 
-1. Harness/audit hardening that prevents blind spots: real-prompt paired rows are
-   now won for 27B dense, A3B, and A10B, but the A10B split-GGUF fast-path audit
-   still reports `moe=n/a` / `lm=no:missing` because it only sees the entry shard.
-   Fix sharded audit visibility before trusting coverage claims on split models.
+1. Residual discovery before more kernels: target-family synthetic and real rows
+   are currently won, adjacent 4B quant breadth is clean, and split-GGUF audit now
+   resolves A10B to `48/48` grouped MoE coverage. The next performance branch
+   should start by finding a fresh paired miss, not by guessing a new hot kernel.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

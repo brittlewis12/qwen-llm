@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.246 Split-GGUF Audit Visibility Restored
+
+Status: fixed `scripts/profile/gguf_fastpath_audit.py` so split GGUF entry
+shards resolve to the sibling consolidated tensor listing when it exists, or to
+the shard set otherwise. This makes the static audit useful for A10B-style
+sharded benchmark targets instead of reporting `0` layers from the first shard.
+
+Validation:
+
+| Input | Tensor source | MoE | LM | Gaps |
+| --- | --- | ---: | --- | --- |
+| A10B `00001-of-00003` | unsuffixed A10B GGUF | `48/48` | yes | `-` |
+| A10B unsuffixed GGUF | unsuffixed A10B GGUF | `48/48` | yes | `-` |
+| A3B `UD-Q4_K_M` | same file | `40/40` | yes | `-` |
+
+Read: the A10B audit caveat from the real-rollout packet was harness debt, not a
+runtime coverage gap. Keep static coverage gates trustworthy by resolving tensor
+sources before ranking quant or sharded-model work.
+
 ## 2026-06-03 — v0.244 Real Rollout Guardrails Are Won
 
 Status: fixed the real-prompt paired harness token counter (`llama-tokenize
@@ -24,9 +43,9 @@ replay.
 | 122B A10B | `v02_reva`, strip | `19591` | `376.17` | `325.05` | `1.157` |
 
 Read: the v0.242 synthetic sentinel wins survive real message rendering and
-longer prompt lengths. The A10B row also exposes a harness caveat: static
-fast-path audit is currently blind on the first shard of a split GGUF and reports
-`moe=n/a`, `lm=no:missing`, even though the performance path is clearly live.
+longer prompt lengths. The A10B row also exposed a pre-v0.246 harness caveat:
+static fast-path audit was blind on the first shard of a split GGUF and reported
+`moe=n/a`, `lm=no:missing`, even though the performance path was clearly live.
 Treat sharded audit support as harness debt, not a measured performance gap.
 
 ## 2026-06-03 — v0.242 Breadth And Primary Sentinels Stay Clean

@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.224 A3B `<8` Tiny-Bucket Split
+
+Status: refined `QWEN_PREFILL_TRACE_MOE_BUCKET_BINS=1` from `<16` to `<8` and
+`8-15` bins. This keeps default execution unchanged and makes the tiny-bucket
+target specific enough to avoid replaying broad n8 mistakes.
+
+Q4 `pp512` fine-bin evidence:
+
+| Phase | `<8` | `8-15` | `16-31` | `>=64` |
+| --- | ---: | ---: | ---: | ---: |
+| SwiGLU ms/k-slot | `3.485` | `1.269` | `1.093` | `0.498` |
+| Down ms/k-slot | `3.278` | `1.341` | `0.798` | `0.252` |
+| Slot fraction | `0.063` | `0.068` | `0.105` | `0.633` |
+
+Negative prototype:
+
+- Tried and removed an env-gated `<8` n8 grouped tile for Q4 SwiGLU plus Q5
+  down. Q4 `pp512` GPU ms/token regressed from base `~0.706/0.709` to tiny n8
+  `~0.732/0.732`; `pp128` smoke was also slow. This confirms the issue is not
+  merely n16 row padding.
+
+Read: `<8` is the true short-prompt monster: it is only `6.3%` of routed slots
+but costs `36.1 ms` in SwiGLU and `34.0 ms` in down. A smaller grouped tile still
+preserves the bad bucket-granularity execution model. The next exact branch
+should be a flat cold-slot/direct-GEMV path for `<8` buckets, ideally with direct
+weighted down accumulation once correctness is controlled. Gate on GPU time and
+bin ms/k-slot, not noisy t/s alone.
+
 ## 2026-06-03 — v0.223 A3B Short-MoE Tiny-Bucket Diagnosis
 
 Status: added disabled MoE bucket-bin trace support under

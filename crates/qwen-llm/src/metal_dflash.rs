@@ -781,6 +781,8 @@ fn trace_prefill_moe_bucket_stats(
             .filter(|&c| c >= min_slots && c <= max_slots)
             .fold((0, 0), |(experts, slots), c| (experts + 1, slots + c))
     };
+    let (e_lt8, s_lt8) = bin_stats(1, 7);
+    let (e_8_15, s_8_15) = bin_stats(8, 15);
     let (e_lt16, s_lt16) = bin_stats(1, 15);
     let (e_16_31, s_16_31) = bin_stats(16, 31);
     let (e_32_47, s_32_47) = bin_stats(32, 47);
@@ -794,7 +796,7 @@ fn trace_prefill_moe_bucket_stats(
         (-1, 0, 0)
     };
     eprintln!(
-        "[prefill-moe-buckets] chunk={chunk_idx} start={chunk_start} layer={layer_idx} total={total}/{} active={} p50={p50} p90={p90} max={max} ge16={ge16} ge32={ge32} ge48={ge48} hot_min={hot_min} hot_experts={hot_experts} hot_slots={hot_slots} e_lt16={e_lt16} s_lt16={s_lt16} e_16_31={e_16_31} s_16_31={s_16_31} e_32_47={e_32_47} s_32_47={s_32_47} e_48_63={e_48_63} s_48_63={s_48_63} e_ge64={e_ge64} s_ge64={s_ge64}",
+        "[prefill-moe-buckets] chunk={chunk_idx} start={chunk_start} layer={layer_idx} total={total}/{} active={} p50={p50} p90={p90} max={max} ge16={ge16} ge32={ge32} ge48={ge48} hot_min={hot_min} hot_experts={hot_experts} hot_slots={hot_slots} e_lt8={e_lt8} s_lt8={s_lt8} e_8_15={e_8_15} s_8_15={s_8_15} e_lt16={e_lt16} s_lt16={s_lt16} e_16_31={e_16_31} s_16_31={s_16_31} e_32_47={e_32_47} s_32_47={s_32_47} e_48_63={e_48_63} s_48_63={s_48_63} e_ge64={e_ge64} s_ge64={s_ge64}",
         chunk_p * topk,
         active.len(),
     );
@@ -7219,8 +7221,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     && prefill_moe_grouped_hot_q4_n32_enabled(chunk_p)
                                     && hot_expert_min_slots == Some(48);
                                 if split_q4_swiglu_bins {
-                                    let bins: [(&str, u32, u32, bool); 5] = [
-                                        ("routed_swiglu_lt16", 0, 15, false),
+                                    let bins: [(&str, u32, u32, bool); 6] = [
+                                        ("routed_swiglu_lt8", 0, 7, false),
+                                        ("routed_swiglu_8_15", 8, 15, false),
                                         ("routed_swiglu_16_31", 16, 31, false),
                                         ("routed_swiglu_32_47", 32, 47, false),
                                         ("routed_swiglu_48_63", 48, 63, true),
@@ -7334,8 +7337,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 let split_q5_down_bins = prefill_trace_moe_bucket_bins_enabled()
                                     && matches!(moe.down_exps.dtype, GgmlType::Q5_K);
                                 if split_q5_down_bins {
-                                    let bins: [(&str, u32, u32); 5] = [
-                                        ("routed_down_lt16", 0, 15),
+                                    let bins: [(&str, u32, u32); 6] = [
+                                        ("routed_down_lt8", 0, 7),
+                                        ("routed_down_8_15", 8, 15),
                                         ("routed_down_16_31", 16, 31),
                                         ("routed_down_32_47", 32, 47),
                                         ("routed_down_48_63", 48, 63),

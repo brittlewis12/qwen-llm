@@ -631,10 +631,13 @@ Recent measured negatives:
   are tiny/noisy, all-`n32` regresses, all-`n16` only helps the losing side of the
   knee, old packed-routed fallback is about half-speed at `pp512`, and a simple
   bounded range-width cap failed A/B.
+- A `<8`-only grouped n8 tile is also demoted: it preserves too much grouped
+  underfill/control overhead and regressed Q4 `pp512` GPU time (`~0.706/0.709`
+  base to `~0.732/0.732`).
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.223:
+Current rank after v0.224:
 
 1. MoE short-prompt mechanics: A3B Q3/Q4/Q6/Q8 all have `40/40` grouped
    coverage, all lose `pp512`, and all win from `pp768` upward. Attack the
@@ -655,12 +658,13 @@ conflict.
 Current MoE short-branch rule:
 
 - Target active underfilled buckets, not route work or threshold policy. Q4
-  `pp512` bin traces show `<16` is only `13%` of routed slots but costs
-  `2.276 ms/k-slot` in SwiGLU and `2.104 ms/k-slot` in down, versus `>=64` at
-  `0.549` and `0.282` respectively.
-- The next code branch should be a `<16`-only tiny-bucket path for both SwiGLU
-  and down, leaving `>=16` on the current grouped path. Gate on bin-time movement
-  first, then Q4 `pp512` end-to-end, then Q6/Q8/Q3 generalization.
+  `pp512` fine-bin traces show `<8` is only `6.3%` of routed slots but costs
+  `3.485 ms/k-slot` in SwiGLU and `3.278 ms/k-slot` in down, versus `>=64` at
+  `0.498` and `0.252` respectively.
+- The next code branch should be a flat `<8` cold-slot/direct-GEMV path for both
+  SwiGLU and down, leaving `>=8` on the current grouped path. A smaller grouped
+  tile is falsified. Gate on bin-time movement first, then Q4 `pp512` GPU time,
+  then Q6/Q8/Q3 generalization.
 
 ### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 

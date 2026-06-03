@@ -89,9 +89,12 @@ Current caveats:
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
-  `40/40` grouped MoE coverage. The `UD-IQ4_XS` paired rows are now wins at
-  `pp512` (`1.01x` repeat), `pp1024` (`1.11x`), `pp4096` (`1.12x`), and the
-  Marcus real rollout (`1.09x`); the one-run `pp16384` guardrail is `1.19x`.
+  `40/40` grouped MoE coverage. The v0.237 paired `pp512` re-anchor is now won
+  across measured non-sharded local A3B quants: Qwen3.6 `UD-Q4_K_M` `1.05x`,
+  Qwen3.5 `Q3_K_M` `1.04x`, `Q6_K` `1.02x`, `Q8_0` `1.03x`, plus the v0.233
+  `UD-IQ4_XS` repeat at `1.01x`. `UD-IQ4_XS` also wins at `pp1024` (`1.11x`),
+  `pp4096` (`1.12x`), Marcus real rollout (`1.09x`), and one-run `pp16384`
+  (`1.19x`).
   Remaining quant risk is no longer this known A3B MoE file; it is sharded BF16
   A3B support, unmeasured expert-bank combinations outside the local target set,
   plus dense UD files with `IQ2/IQ3` tensors.

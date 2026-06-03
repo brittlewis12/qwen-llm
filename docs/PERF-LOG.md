@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.237 A3B Quant `pp512` Re-Anchor Is Won
+
+Status: ran one-block paired `pp512` anchors for the local non-sharded A3B quant
+set after the `IQ3_S` coverage fix and audit hardening. Artifact directory:
+`target/profiles/v0237-a3b-quant-pp512/`.
+
+| Model | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| Qwen3.6 `UD-Q4_K_M` | `1463.73` | `1394.04` | `1.050` |
+| Qwen3.5 `Q3_K_M` | `1488.48` | `1435.86` | `1.037` |
+| Qwen3.5 `Q6_K` | `1413.89` | `1381.03` | `1.024` |
+| Qwen3.5 `Q8_0` | `1495.19` | `1450.38` | `1.031` |
+
+Read: the old covered-quant `pp512` miss is stale. Together with the v0.233
+`UD-IQ4_XS` repeat (`1.01x`) and v0.232 Q4 repeat (`1.04x`), every measured
+non-sharded local A3B quant now has a paired `pp512` win. The remaining A3B quant
+breadth risk is sharded BF16 support, not the quantized MoE family.
+
 ## 2026-06-03 — v0.236 Re-Audits Local A3B Quant Coverage
 
 Status: re-ran the static A3B fast-path audit after native `IQ3_S` landed and

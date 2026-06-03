@@ -168,7 +168,8 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   variants outside target quants and unmeasured UD low-bit dense tensors. The
   v0.240 dense `IQ2_S`/`IQ3_*` matrix-kernel pass closes the measured 4B UD
   low-bit prompt cliff: local `UD-Q2_K_XL` and `UD-IQ2_M` are now parity/wins at
-  `pp512/1024/4096`. Older
+  `pp512/1024/4096`. v0.241 closes the measured decode side too, with clean
+  `tg128` rows at `1.13-1.15x` pinned llama.cpp. Older
   A3B low-bit context: clean v0.189 A3B Q3 `pp1024` paired
   evidence is `90.28` qwen versus `1392.02` llama.cpp (`0.065x`), while no-FFN
   jumps to `2858.64 t/s`. The v0.192 env-gated grouped F32/IQ4_XS candidate
@@ -675,11 +676,11 @@ Current rank after v0.240:
    cliff is closed after v0.240. Re-anchor the broader target family and real
    rollout prompts before opening another narrow kernel branch, especially after
    any benchmark-target llama.cpp update or power/thermal confound.
-2. Dense low-bit decode and breadth guardrails: v0.240 proves prompt prefill for
-   local 4B `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, but decode and
-   other local UD files still need explicit paired sentinels. If a decode miss
-   appears, start from native `IQ2_S`/`IQ3_*` mat-vec work units rather than more
-   prompt mat-mat code.
+2. Dense low-bit breadth guardrails: v0.240 proves prompt prefill for local 4B
+   `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, and v0.241 proves their
+   `tg128` decode sentinels. Keep other local UD files in audit/family sweeps,
+   but low-bit dense kernel work is no longer above target-family re-anchoring
+   unless a paired file exposes a fresh miss.
 3. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,

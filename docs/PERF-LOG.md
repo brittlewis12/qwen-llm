@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.241 Dense Low-Bit Decode Flips To A Win
+
+Status: added row-reuse fast mat-vec kernels for dense `IQ2_S`, `IQ3_XXS`, and
+`IQ3_S`, then rebuilt the clean post-commit binary and ran direct `tg128`
+sentinels against pinned llama.cpp. Artifact directory:
+`target/profiles/v0241-lowbit-matvec/`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dense `IQ2_S` mat-vec/mat-mat CPU-oracle test, release build
+- dense `IQ3_XXS`/`IQ3_S` mat-vec/mat-mat CPU-oracle test, release build
+- clean post-commit `tg128` rows for both local 4B UD low-bit files
+
+| Model | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| `Qwen3.5-4B-UD-IQ2_M` `tg128` | `112.72` | `99.72` | `1.130` |
+| `Qwen3.5-4B-UD-Q2_K_XL` `tg128` | `114.62` | `99.93` | `1.147` |
+
+Read: the decode side of the v0.238 dense UD low-bit cliff is closed for the two
+measured local files. The dirty pre-check exposed the gap (`UD-IQ2_M` was
+`33.88` vs llama `100.03`, `0.34x`); the fast mat-vec work unit flips the clean
+post-commit rows to `1.13-1.15x`. Keep broader UD quant breadth as a guardrail,
+but do not reopen low-bit dense decode unless a paired file exposes a fresh miss.
+
 ## 2026-06-03 — v0.240 Dense `IQ2_S`/`IQ3_*` Matrix Kernels Close 4B UD Low-Bit
 
 Status: added native dense `IQ2_S` mat-vec/mat-mat support, then promoted dense

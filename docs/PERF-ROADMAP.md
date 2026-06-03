@@ -155,16 +155,17 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
   `A3B 40/40` grouped MoE, `A10B 48/48` grouped MoE, and dense `27B 64/64` FFN +
   `48/48` GDN + `16/16` attention. The dense/GDN/attention/lm-tail predicates
   now use every dtype with primitive mat-mat support (`F32`, `F16`, `BF16`,
-  `Q2_K`, `Q3_K`, `Q4_0`, `Q4_1`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `IQ4_NL`,
-  `IQ4_XS`), so the local 0.8B quant family is clean across dense FFN, GDN,
-  attention, and lm-tail coverage. MoE grouped coverage includes the target A3B
+  `Q2_K`, `Q3_K`, `IQ3_XXS`, `IQ3_S`, `Q4_0`, `Q4_1`, `Q4_K`, `Q5_K`, `Q6_K`,
+  `Q8_0`, `IQ4_NL`, `IQ4_XS`), so the local 0.8B quant family is clean across
+  dense FFN, GDN, attention, and lm-tail coverage. MoE grouped coverage includes
+  the target A3B
   Q3/Q4/Q6/Q8 and `UD-IQ4_XS` expert-bank combinations. Q2_K/Q3_K/IQ4_NL/IQ4_XS now have
   simdgroup_matrix prompt mat-mat tiles: clean local 0.8B low-bit rows move from
   `0.15-0.26x` llama.cpp at `pp1024` to `0.96-0.98x` across `pp1024/4096`.
   The v0176 dense validation generalizes this to 2B/9B Q2/Q3/IQ4_XS and 27B Q3:
   2B is `0.97-1.00x`, 9B is `0.99-1.06x`, and 27B Q3 `pp1024` is `1.08x`
   llama.cpp. Remaining explicit coverage gaps are MoE grouped expert-bank
-  variants outside target quants and UD low-bit `IQ2/IQ3` dense tensors. Older
+  variants outside target quants and UD low-bit dense `IQ2_S` tensors. Older
   A3B low-bit context: clean v0.189 A3B Q3 `pp1024` paired
   evidence is `90.28` qwen versus `1392.02` llama.cpp (`0.065x`), while no-FFN
   jumps to `2858.64 t/s`. The v0.192 env-gated grouped F32/IQ4_XS candidate
@@ -665,14 +666,14 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.238:
+Current rank after v0.239:
 
-1. Dense UD `IQ2_S`/`IQ3_*` coverage: broad audit and paired `pp512` rows expose
-   the largest local cliff, with 4B `UD-Q2_K_XL` at `0.115x` llama.cpp and
-   `UD-IQ2_M` at `0.035x`. Start in the common dense 2D mat-mat dispatch path,
-   not MoE, fused FFN, or attention-specific code. First target is native
-   `IQ2_S`/`IQ3_XXS`/`IQ3_S` projection coverage with primitive oracles and audit
-   count gates.
+1. Dense UD `IQ2_S` coverage: v0.239 added native dense `IQ3_XXS`/`IQ3_S` and
+   moved 4B `UD-Q2_K_XL` from `0.115x` to `0.217x` llama.cpp at `pp512`, but the
+   remaining coverage gap is now explicit `IQ2_S`. Start in the common dense 2D
+   mat-mat dispatch path, not MoE, fused FFN, or attention-specific code. The gate
+   is primitive oracle correctness plus audit movement to full or near-full
+   `UD-Q2_K_XL`/`UD-IQ2_M` dense coverage.
 2. Paired family/real-rollout guardrails: keep target-family synthetic and real
    rollout comparisons current, but A3B non-sharded quantized MoE has moved to
    guardrail mode after v0.237 `pp512` wins across measured quants.

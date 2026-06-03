@@ -151,6 +151,8 @@ fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
             | GgmlType::BF16
             | GgmlType::Q2_K
             | GgmlType::Q3_K
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
             | GgmlType::Q4_0
             | GgmlType::Q4_1
             | GgmlType::Q4_K

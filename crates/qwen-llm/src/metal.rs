@@ -1177,6 +1177,50 @@ pub fn encode_mat_vec_q2_k_f32(
     )
 }
 
+pub fn encode_mat_vec_iq3_xxs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    encode_mat_vec_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        GgmlType::IQ3_XXS,
+        "kernel_mat_vec_iq3_xxs_f32",
+    )
+}
+
+pub fn encode_mat_vec_iq3_s_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    encode_mat_vec_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        GgmlType::IQ3_S,
+        "kernel_mat_vec_iq3_s_f32",
+    )
+}
+
 pub fn encode_mat_vec_iq4_xs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1863,6 +1907,54 @@ fn encode_mat_mat_q2_k_f32_mm(
         "mat_mat_q2_k_mm",
         "kernel_mat_mat_q2_K_f32_mm",
         84,
+    )
+}
+
+pub fn encode_mat_mat_iq3_xxs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        GgmlType::IQ3_XXS,
+        "kernel_mat_mat_iq3_xxs_f32",
+    )
+}
+
+pub fn encode_mat_mat_iq3_s_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        GgmlType::IQ3_S,
+        "kernel_mat_mat_iq3_s_f32",
     )
 }
 
@@ -13804,6 +13896,123 @@ mod tests {
                 .fold(0f32, f32::max);
             eprintln!("[q3_k mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "Q3_K mat_mat max_abs={max_abs}");
+        }
+    }
+
+    #[test]
+    fn mat_vec_and_mat_mat_dense_iq3_match_cpu() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let fixtures = [
+            (
+                "/Users/tito/models/Qwen3.5-4B-UD-Q2_K_XL.gguf",
+                GgmlType::IQ3_XXS,
+            ),
+            (
+                "/Users/tito/models/Qwen3.5-4B-UD-Q2_K_XL.gguf",
+                GgmlType::IQ3_S,
+            ),
+        ];
+        for &(path, dtype) in &fixtures {
+            if !std::path::Path::new(path).exists() {
+                eprintln!("[dense-iq3 {dtype:?}] skipped missing fixture {path}");
+                continue;
+            }
+            let g = crate::gguf::GgufFile::open(path).expect("open");
+            let w = match g.tensors.iter().find(|t| {
+                t.name.starts_with("blk.")
+                    && t.name.ends_with(".weight")
+                    && t.dtype == dtype
+                    && t.shape.len() == 2
+                    && t.shape[0] % 256 == 0
+            }) {
+                Some(t) => t,
+                None => {
+                    eprintln!("[dense-iq3 {dtype:?}] skipped missing dtype tensor in {path}");
+                    continue;
+                }
+            };
+            let n_in = w.shape[0] as usize;
+            let n_out = w.shape[1] as usize;
+            eprintln!("[dense-iq3 {dtype:?}] {} shape=[{n_in}, {n_out}]", w.name);
+
+            let weight_f32 = crate::codec::dequant_to_f32(w, g.slice(w)).expect("dequant");
+            let w_t =
+                MetalTensor::from_bytes(&ctx, g.slice(w), vec![n_in as u64, n_out as u64], dtype)
+                    .expect("weight tensor");
+
+            let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 1e-2).collect();
+            let cpu = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, &x);
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("x tensor");
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y tensor");
+            one_shot(&ctx, |enc| match dtype {
+                GgmlType::IQ3_XXS => {
+                    encode_mat_vec_iq3_xxs_f32(&ctx, enc, &w_t, &x_t, &y_t, n_in, n_out)
+                }
+                GgmlType::IQ3_S => {
+                    encode_mat_vec_iq3_s_f32(&ctx, enc, &w_t, &x_t, &y_t, n_in, n_out)
+                }
+                _ => unreachable!(),
+            })
+            .expect("mat_vec encode");
+            let gpu = read_back_f32(&y_t.buffer, n_out);
+            let max_abs = gpu
+                .iter()
+                .zip(cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("[dense-iq3 {dtype:?} mat_vec] max|Delta|={max_abs:.2e}");
+            assert!(max_abs < 1e-2, "{dtype:?} mat_vec max_abs={max_abs}");
+
+            for &n_query in &[1usize, 16] {
+                let x_pack: Vec<f32> = (0..n_query * n_in)
+                    .map(|i| ((i % 17) as f32 - 8.0) * 1e-2)
+                    .collect();
+                let mut cpu_pack = vec![0.0f32; n_query * n_out];
+                for q in 0..n_query {
+                    let row = &x_pack[q * n_in..(q + 1) * n_in];
+                    let out = crate::forward::mat_vec_pub(&weight_f32, n_in, n_out, row);
+                    cpu_pack[q * n_out..(q + 1) * n_out].copy_from_slice(&out);
+                }
+                let x_pack_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&x_pack),
+                    vec![n_query as u64, n_in as u64],
+                    GgmlType::F32,
+                )
+                .expect("x pack tensor");
+                let y_pack_t = MetalTensor::zeros_f32(&ctx, vec![(n_query * n_out) as u64])
+                    .expect("y pack tensor");
+                one_shot(&ctx, |enc| match dtype {
+                    GgmlType::IQ3_XXS => encode_mat_mat_iq3_xxs_f32(
+                        &ctx, enc, &w_t, &x_pack_t, &y_pack_t, n_in, n_out, n_query,
+                    ),
+                    GgmlType::IQ3_S => encode_mat_mat_iq3_s_f32(
+                        &ctx, enc, &w_t, &x_pack_t, &y_pack_t, n_in, n_out, n_query,
+                    ),
+                    _ => unreachable!(),
+                })
+                .expect("mat_mat encode");
+                let gpu_pack = read_back_f32(&y_pack_t.buffer, n_query * n_out);
+                let max_abs = gpu_pack
+                    .iter()
+                    .zip(cpu_pack.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                eprintln!(
+                    "[dense-iq3 {dtype:?} mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}"
+                );
+                assert!(max_abs < 1e-2, "{dtype:?} mat_mat max_abs={max_abs}");
+            }
         }
     }
 

@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.239 Dense `IQ3_*` Coverage Cuts The UD Low-Bit Cliff
+
+Status: added native dense 2D `IQ3_XXS` and `IQ3_S` mat-vec/mat-mat dispatch,
+then re-ran the targeted low-bit dense audit and paired `pp512` anchors. Artifact
+directory: `target/profiles/v0239-dense-iq3/`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `cargo test -p qwen-llm mat_vec_and_mat_mat_dense_iq3_match_cpu --release -- --nocapture --test-threads=1`
+
+Primitive oracle results: `IQ3_XXS` and `IQ3_S` dense mat-vec/mat-mat both match
+CPU dequant on the local 4B UD fixture with max absolute error below `2e-7` for
+mat-vec and below `5e-8` for `n_query=1/16` mat-mat.
+
+| Model | Audit before | Audit after | qwen before | qwen after | llama.cpp | qwen/lcpp after |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `Qwen3.5-4B-UD-Q2_K_XL` | FFN `22/32`, GDN `0/24`, attn `5/8` | FFN `27/32`, GDN `24/24`, attn `8/8` | `169.40` | `317.84` | `1461.47` | `0.217` |
+| `Qwen3.5-4B-UD-IQ2_M` | FFN `0/32`, GDN `0/24`, attn `0/8` | FFN `5/32`, GDN `0/24`, attn `3/8` | `51.82` | `62.73` | `1492.77` | `0.042` |
+
+Read: dense `IQ3_*` support is a real coverage and throughput win, especially for
+`UD-Q2_K_XL` (`~1.88x` qwen-side at `pp512`), but it does not close the low-bit
+dense cliff. Native dense `IQ2_S` is now the unavoidable top kernel: it is the
+remaining 4B `UD-Q2_K_XL` fast-path gap and dominates `UD-IQ2_M`.
+
 ## 2026-06-03 — v0.238 Broad Audit Finds Dense UD IQ2/IQ3 Cliff
 
 Status: broadened the local Qwen GGUF fast-path audit after A3B quant coverage

@@ -71,6 +71,8 @@ pub fn weight_dtype_kept_native(dtype: GgmlType) -> bool {
             | GgmlType::BF16
             | GgmlType::Q2_K
             | GgmlType::Q3_K
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
             | GgmlType::Q4_0
             | GgmlType::Q4_1
             | GgmlType::Q4_K
@@ -4331,6 +4333,12 @@ pub fn encode_mat_vec_dispatch(
         GgmlType::Q3_K => Ok(crate::metal::encode_mat_vec_q3_k_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
+        GgmlType::IQ3_XXS => Ok(crate::metal::encode_mat_vec_iq3_xxs_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
+        GgmlType::IQ3_S => Ok(crate::metal::encode_mat_vec_iq3_s_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
         GgmlType::Q4_0 => Ok(crate::metal::encode_mat_vec_q4_0_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
@@ -4404,6 +4412,12 @@ pub fn encode_mat_mat_dispatch(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         GgmlType::Q3_K => Ok(crate::metal::encode_mat_mat_q3_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::IQ3_XXS => Ok(crate::metal::encode_mat_mat_iq3_xxs_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::IQ3_S => Ok(crate::metal::encode_mat_mat_iq3_s_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         GgmlType::Q4_0 => Ok(crate::metal::encode_mat_mat_q4_0_f32(

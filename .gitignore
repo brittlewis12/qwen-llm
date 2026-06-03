@@ -10,6 +10,10 @@ target/
 bench/results/
 *.trace/
 
+# python cache
+__pycache__/
+*.py[cod]
+
 # editor
 .vscode/
 .idea/

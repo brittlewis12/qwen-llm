@@ -72,13 +72,14 @@ Current caveats:
   repeats showed `1.000x` and `1.008x`; treat that cell as parity/noise until a
   longer repeat packet says otherwise.
 - Small dense short/medium prefill is not won across the board, but v0.215's
-  paired GDN Q/K L2 prep narrows the live gap again. Promotion rows move 0.8B
-  `pp512/pp1024` by about `+2-3%` versus rollback and 2B by about `+1%`, while
-  4B/9B/27B canaries are neutral-positive. v0.206-v0.215 say this is not
-  attention, fast-path coverage, GDN matvec fallback, command-encoder
-  coalescing/streaming, NSG8 GDN-step grouping, or another Q5/Q6 N64 threshold
-  fiddle. The remaining high-EV branch is deeper short-prompt FFN/GDN projection
-  mechanics, especially the 0.8B and 2B `pp512` cells.
+  paired GDN Q/K L2 prep narrows the live gap again. Clean paired rows put 0.8B
+  at `0.94-0.97x` for `pp512` and parity for `pp1024`; 2B is `0.97x` at
+  `pp512` and `1.01x` at `pp1024`. 4B/9B/27B canaries were neutral-positive.
+  v0.206-v0.215 say this is not attention, fast-path coverage, GDN matvec
+  fallback, command-encoder coalescing/streaming, NSG8 GDN-step grouping, or
+  another Q5/Q6 N64 threshold fiddle. The remaining high-EV branch is deeper
+  short-prompt FFN/GDN projection mechanics, especially the 0.8B and 2B `pp512`
+  cells.
 - A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
   `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
   v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to

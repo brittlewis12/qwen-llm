@@ -33,6 +33,15 @@ Larger dense canaries were neutral-to-positive: 4B `pp512` moved
 `808.13/806.93 -> 809.93/808.68`, and 27B `pp512` moved
 `237.03/237.25 -> 237.68/238.71`.
 
+Clean paired pinned-b9481 rows after v0.215:
+
+| Model | Shape | qwen | llama.cpp | Ratio | Artifact |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 0.8B | `pp512` | `7444.06 / 7417.89` | `7711.82 / 7865.60` | `0.965x / 0.943x` | `target/profiles/v0215-clean-08b-pp512-pair-l2-compare.json` |
+| 0.8B | `pp1024` | `7772.91 / 7772.88` | `7748.63 / 7776.73` | `1.003x / 1.000x` | `target/profiles/v0215-clean-08b-pp1024-pair-l2-compare.json` |
+| 2B | `pp512` | `3532.36 / 3534.02` | `3629.93 / 3653.37` | `0.973x / 0.967x` | `target/profiles/v0215-clean-2b-pp512-pair-l2-compare.json` |
+| 2B | `pp1024` | `3712.66 / 3705.86` | `3673.19 / 3668.64` | `1.011x / 1.010x` | `target/profiles/v0215-clean-2b-pp1024-pair-l2-compare.json` |
+
 Falsifiers in the same sprint:
 
 - GDN packed-step NSG8 row grouping was correctness-safe but flat/regressive:

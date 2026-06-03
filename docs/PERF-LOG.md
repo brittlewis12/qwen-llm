@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.229 Rejected Tiny8 R16 Q4 SwiGLU Proof
+
+Status: tried and removed a force-only Q4 routed-SwiGLU tiny8 R16 proof. The
+prototype reused the corrected down-kernel geometry: one simdgroup per expert,
+a 16-row output tile, and an `<=8` slot tile. Correctness passed, but the
+performance gate failed.
+
+Validation before measuring:
+
+- `cargo build --release`
+- `QWEN_PREFILL_MOE_TINY8_SWIGLU_R16=1 cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture --test-threads=1`
+
+Q4 `pp512` A/B:
+
+| Variant | GPU ms/token rows | Read |
+| --- | ---: | --- |
+| base | `0.6881 / 0.6854` | current grouped path |
+| tiny SwiGLU | `0.7078 / 0.7086` | regression |
+| tiny SwiGLU + tiny down | `0.7063 / 0.7059` | regression |
+
+Trace-bin read at Q4 `pp512`:
+
+| SwiGLU bin | Base | Tiny8 R16 | Read |
+| --- | ---: | ---: | --- |
+| `<8` ms | `36.28` | `36.91` | target worsened |
+| `<8` ms/k-slot | `3.503` | `3.563` | target worsened |
+
+Artifacts: `target/profiles/v0229-a3b-tiny-swiglu-r16/`.
+
+Read: the corrected down geometry does not transfer to fused gate/up SwiGLU. The
+one-simdgroup 16-row shape is exact, but it fails to reduce the `<8` SwiGLU bin
+and regresses end-to-end. Do not revive this port without a new SwiGLU-specific
+mechanism; the live question is now why dual Q4 dequant plus the fused epilogue
+does not benefit from the same tiny geometry that helps Q5 down.
+
 ## 2026-06-03 — v0.228 Tiny8 R16 Q5 Down Proof
 
 Status: added a force-only `QWEN_PREFILL_MOE_TINY8_DOWN_R16=1` Q5 routed-down

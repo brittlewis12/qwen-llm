@@ -649,15 +649,19 @@ Recent measured negatives:
   `pp512` `<8` down drops from `32.99 -> 21.16 ms`, while end-to-end GPU
   ms/token moves from `0.6894/0.6873` to `0.6857/0.6823`. Keep it env-gated until
   the same geometry is tested on SwiGLU and broad guardrails justify a default.
+- The naive Q4 SwiGLU port of that geometry is falsified. It passed correctness
+  but regressed Q4 `pp512` GPU ms/token (`0.6881/0.6854` base versus
+  `0.7078/0.7086`) and failed to move the `<8` target bin (`36.28 -> 36.91 ms`).
+  Do not revive one-simdgroup R16 SwiGLU without a new mechanism.
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.228:
+Current rank after v0.229:
 
-1. Port tiny-bucket execution to routed SwiGLU: the corrected Q5 tiny8 R16 down
-   proof is exact and moves the `<8` down bin, but end-to-end gain is modest.
-   Reuse the same one-simdgroup/16-row/`<=8` geometry for Q4/Q5/Q6/Q8 SwiGLU
-   before deciding whether tiny-bucket execution should become default.
+1. SwiGLU-specific tiny-bucket mechanics: Q5 down proves corrected tiny geometry
+   can move a target bin, but the direct Q4 SwiGLU R16 port regresses. The next
+   SwiGLU branch needs a different mechanism or a llama.cpp differential, not a
+   blind reuse of the down microtile.
 2. Bounded llama.cpp structural audit: verify whether llama.cpp avoids treating
    `<8` expert buckets as independent underfilled grouped work. Keep this to a
    concrete dispatch/layout comparison; do not reopen route-side or threshold
@@ -686,8 +690,9 @@ Current MoE short-branch rule:
   Gate on bin-time movement first, then A3B `pp512` GPU time, then no regression
   at `pp768/1024+` and broad quant generalization.
 - Down now has a correctness-safe force-only proof. It reduces the target bin but
-  is not enough by itself to justify defaulting; the next decision point is
-  whether a SwiGLU port compounds the routed-tail win without harming `pp768+`.
+  is not enough by itself to justify defaulting. The first analogous SwiGLU port
+  is falsified; future SwiGLU work must explain the dual-dequant/epilogue cost
+  before adding another tiny kernel.
 
 ### 1. Hypothesis: Dense 27B residuals have pivoted from attention to GDN/FFN
 

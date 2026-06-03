@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.244 Real Rollout Guardrails Are Won
+
+Status: fixed the real-prompt paired harness token counter (`llama-tokenize
+--ids`) after a long `v02_reva` fixture exposed non-UTF-8 token text on stdout,
+then ran one-block current-head real-rollout guardrails. Raw artifacts are in
+`target/profiles/v0244-real/`.
+
+All rows are sequential, `build_dirty=0`, and record no thermal or performance
+warnings. 3.6-series rows preserve thinking; the 3.5 A10B row strips thinking on
+replay.
+
+| Model | Fixture | Tokens | qwen | llama.cpp | qwen/lcpp |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 27B dense | `v02_3.6_deep`, preserve | `23122` | `199.22` | `192.68` | `1.034` |
+| 35B A3B | `v02_reva`, preserve | `34502` | `964.28` | `902.79` | `1.068` |
+| 122B A10B | `v02_reva`, strip | `19591` | `376.17` | `325.05` | `1.157` |
+
+Read: the v0.242 synthetic sentinel wins survive real message rendering and
+longer prompt lengths. The A10B row also exposes a harness caveat: static
+fast-path audit is currently blind on the first shard of a split GGUF and reports
+`moe=n/a`, `lm=no:missing`, even though the performance path is clearly live.
+Treat sharded audit support as harness debt, not a measured performance gap.
+
 ## 2026-06-03 — v0.242 Breadth And Primary Sentinels Stay Clean
 
 Status: after the dense UD low-bit prompt/decode fixes, ran bounded adjacent

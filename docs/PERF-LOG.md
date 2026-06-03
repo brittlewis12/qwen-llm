@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.230 Default Short-Chunk Tiny8 Q5 Down
+
+Status: defaulted the exact Q5 routed-down tiny8 R16 path for short chunks only.
+`QWEN_PREFILL_MOE_TINY8_DOWN_R16=0` is the rollback; `=1` still forces it on
+for all chunk sizes. Auto mode enables it at `chunk_p <= 768` and leaves
+`pp1024+` on the existing grouped down path.
+
+Validation:
+
+- `cargo build --release`
+- `cargo test -p qwen-llm prefill_tokens_matches_single_token_loop_35b_a3b_moe --release -- --ignored --nocapture --test-threads=1`
+
+A3B Q4 default-vs-rollback rows:
+
+| Shape | Default GPU ms/token | Rollback GPU ms/token | Read |
+| --- | ---: | ---: | --- |
+| `pp512` | `0.6864 / 0.6871` | `0.6889 / 0.6969` | positive |
+| `pp1024` | `0.6141 / 0.6147` | `0.6172 / 0.6154` | no regression |
+
+Artifact: `target/profiles/v0230-a3b-tiny-down-default/`.
+
+Read: the down proof is now a narrow default win rather than a permanent hidden
+env branch. It remains intentionally short-chunk scoped because the forced path
+was only neutral/slightly negative at `pp1024`; broader defaulting needs fresh
+evidence.
+
 ## 2026-06-03 — v0.229 Rejected Tiny8 R16 Q4 SwiGLU Proof
 
 Status: tried and removed a force-only Q4 routed-SwiGLU tiny8 R16 proof. The

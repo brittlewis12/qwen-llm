@@ -645,10 +645,10 @@ Recent measured negatives:
   correctness (`logits cos=0.981292` on the A3B prefill-vs-single gate). A
   corrected microtile remains a possible branch, but correctness must run before
   any perf row is counted.
-- The corrected Q5 tiny8 R16 down proof is exact and force-only positive: Q4
-  `pp512` `<8` down drops from `32.99 -> 21.16 ms`, while end-to-end GPU
-  ms/token moves from `0.6894/0.6873` to `0.6857/0.6823`. Keep it env-gated until
-  the same geometry is tested on SwiGLU and broad guardrails justify a default.
+- The corrected Q5 tiny8 R16 down proof is exact and now defaults for
+  `chunk_p <= 768`, with `QWEN_PREFILL_MOE_TINY8_DOWN_R16=0` as rollback. Q4
+  `pp512` default/rollback rows are `0.6864/0.6871` versus `0.6889/0.6969`
+  GPU ms/token; `pp1024` is left on the old path in auto mode.
 - The naive Q4 SwiGLU port of that geometry is falsified. It passed correctness
   but regressed Q4 `pp512` GPU ms/token (`0.6881/0.6854` base versus
   `0.7078/0.7086`) and failed to move the `<8` target bin (`36.28 -> 36.91 ms`).
@@ -656,7 +656,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.229:
+Current rank after v0.230:
 
 1. SwiGLU-specific tiny-bucket mechanics: Q5 down proves corrected tiny geometry
    can move a target bin, but the direct Q4 SwiGLU R16 port regresses. The next

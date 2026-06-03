@@ -390,9 +390,13 @@ fn prefill_moe_grouped_zero_fill_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_MOE_GROUPED_ZERO_FILL"))
 }
 
-fn prefill_moe_tiny_down_r16_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_MOE_TINY8_DOWN_R16"))
+fn prefill_moe_tiny_down_r16_enabled(chunk_p: usize) -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_TINY8_DOWN_R16")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => chunk_p <= 768,
+    }
 }
 
 fn prefill_moe_grouped_concurrent_tail_enabled(chunk_p: usize) -> bool {
@@ -792,7 +796,7 @@ fn encode_prefill_moe_grouped_down(
     chunk_p: usize,
 ) -> Result<(), MetalError> {
     match down_exps.dtype {
-        GgmlType::Q5_K if prefill_moe_tiny_down_r16_enabled() => {
+        GgmlType::Q5_K if prefill_moe_tiny_down_r16_enabled(chunk_p) => {
             crate::metal::encode_moe_down_q5_K_f32_grouped_slots_tiny8_r16(
                 ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p, 1, 7,
             )?;
@@ -7511,7 +7515,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 0.0,
                                             )?;
                                         }
-                                        if prefill_moe_tiny_down_r16_enabled()
+                                        if prefill_moe_tiny_down_r16_enabled(chunk_p)
                                             && min_slots == 0
                                             && max_slots == 7
                                         {

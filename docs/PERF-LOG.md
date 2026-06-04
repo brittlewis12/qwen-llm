@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-04 — v0.252 BF16 A3B Sidecar Drift Is Bounded But Not Promotion-Grade
+
+Status: added an ignored sharded A3B BF16 drift smoke for the
+`QWEN_MATMAT_BF16_BFLOAT_ACT=1` sidecar. It compares exact BF16 prefill against
+the sidecar over final logits, GDN state/conv tensors, and KV positions on a
+32-token prompt.
+
+Validation:
+
+- `cargo fmt`
+- ignored A3B BF16 exact-vs-sidecar drift smoke:
+  `logits_cos=0.999616`, `min_state_cos=0.996382@13`,
+  `min_conv_cos=0.996720@12`
+
+Read: the sidecar is not catastrophically wrong on the actual sharded A3B BF16
+model, but it fails the stricter `0.999` internal-state promotion bar. Keep it as
+a default-off research switch. If this path is ever considered for default, the
+next gate must be greedy next-token/top-k stability and longer-context drift, not
+another primitive oracle.
+
 ## 2026-06-04 — v0.251 BF16 Sidecar Gets A Model-Level Drift Gate
 
 Status: added a thread-local BF16 bfloat-activation override for in-process A/B

@@ -20440,6 +20440,86 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn prefill_bf16_bfloat_act_a3b_moe_drift_smoke() {
+        let path = "/Users/tito/models/BF16/Qwen3.5-35B-A3B-BF16-00001-of-00002.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[bf16-bfloat-act-a3b] skipped — fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(crate::metal::MetalError::EmptyLibrary)
+            | Err(crate::metal::MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let g = GgufFile::open(path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let arch = &mm.arch;
+        let total_n = 32usize;
+        let p = 32usize;
+        let ids: Vec<i32> = (0..total_n)
+            .map(|i| ((i * 13 + 7) % (arch.vocab_size as usize - 1)) as i32 + 1)
+            .collect();
+
+        let run = |enabled: bool| {
+            crate::metal_forward::with_matmat_bf16_bfloat_act_override(enabled, || {
+                let mut session = MetalSession::fresh(&ctx, &mm, total_n + 4).expect("session");
+                let mut scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, p as u32)
+                    .expect("scratch");
+                let logits = prefill_tokens_with_multi_hidden(
+                    &mf,
+                    &ids,
+                    0,
+                    &mut session,
+                    &mut scratch,
+                    &[],
+                    None,
+                )
+                .expect("prefill");
+                let gdn_state: Vec<Vec<f32>> =
+                    session.gdn_state.iter().map(read_tensor_f32).collect();
+                let gdn_conv: Vec<Vec<f32>> =
+                    session.gdn_conv.iter().map(read_tensor_f32).collect();
+                (logits, gdn_state, gdn_conv, session.kv_n_pos.clone())
+            })
+        };
+
+        let exact = run(false);
+        let approx = run(true);
+        let logits_cos = cosine_f32(&exact.0, &approx.0);
+        assert!(logits_cos >= 0.999, "logits cos={logits_cos}");
+        assert_eq!(exact.3, approx.3, "kv positions differ");
+        let mut min_state_cos = f64::INFINITY;
+        let mut min_state_idx = 0usize;
+        for (i, (a, b)) in exact.1.iter().zip(approx.1.iter()).enumerate() {
+            let cos = cosine_f32(a, b);
+            if cos < min_state_cos {
+                min_state_cos = cos;
+                min_state_idx = i;
+            }
+        }
+        let mut min_conv_cos = f64::INFINITY;
+        let mut min_conv_idx = 0usize;
+        for (i, (a, b)) in exact.2.iter().zip(approx.2.iter()).enumerate() {
+            let cos = cosine_f32(a, b);
+            if cos < min_conv_cos {
+                min_conv_cos = cos;
+                min_conv_idx = i;
+            }
+        }
+        eprintln!(
+            "[bf16-bfloat-act-a3b] logits_cos={logits_cos:.6} \
+             min_state_cos={min_state_cos:.6}@{min_state_idx} \
+             min_conv_cos={min_conv_cos:.6}@{min_conv_idx}"
+        );
+        assert!(min_state_cos >= 0.995, "gdn_state min cos={min_state_cos}");
+        assert!(min_conv_cos >= 0.995, "gdn_conv min cos={min_conv_cos}");
+    }
+
     /// **MoE prefill correctness gate** (Qwen3.6-35B-A3B-UD-Q4_K_M, with
     /// gate/up expert banks in Q4_K and down expert banks in a mixed Q5_K/Q6_K
     /// set). Oracle: a sequential `single_token` loop. Experimental: one

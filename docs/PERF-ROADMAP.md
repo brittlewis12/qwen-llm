@@ -95,9 +95,10 @@ Current caveats:
   `UD-IQ4_XS` repeat at `1.01x`. `UD-IQ4_XS` also wins at `pp1024` (`1.11x`),
   `pp4096` (`1.12x`), Marcus real rollout (`1.09x`), and one-run `pp16384`
   (`1.19x`).
-  Remaining quant risk is no longer this known A3B MoE file; it is sharded BF16
-  A3B support, unmeasured expert-bank combinations outside the local target set,
-  plus dense UD files with `IQ2/IQ3` tensors.
+  Remaining quant risk is no longer this known A3B MoE file; it is BF16 prompt
+  performance after v0.249 restored `40/40` grouped MoE coverage, unmeasured
+  expert-bank combinations outside the local target set, plus dense UD files with
+  `IQ2/IQ3` tensors.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -672,13 +673,15 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.247:
+Current rank after v0.249:
 
-1. BF16 A3B grouped MoE coverage: residual discovery found one major local gap.
-   The sharded A3B BF16 file now runs after token-loop support, but `pp512` is
-   `87.27 / 1408.49 t/s` (`0.062x`) with MoE fast-path audit `0/40`. The next
-   high-EV branch is prompt-native grouped BF16 routed gate/up/down, with a
-   promote gate at least restoring parity on `pp512` before longer sweeps.
+1. BF16 A3B prompt mat-mat/GDN wall: grouped BF16 MoE restores the sharded BF16
+   A3B audit to `40/40` and improves `pp512` GPU time versus token-loop, but the
+   phase trace now books the wall in `gdn_qkv`, attention, `gdn_z`, `gdn_back`,
+   and shared packed work. The next exact step is attribution of BF16 prompt
+   mat-mat/GDN/attention mechanics. Any bfloat-activation matrix tile must remain
+   env-gated/approximate until a BF16-rounded CPU oracle and model-level logits /
+   GDN / KV correctness gates pass.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

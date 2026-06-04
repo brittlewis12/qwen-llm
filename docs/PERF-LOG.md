@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-03 — v0.249 BF16 Grouped MoE Moves The Wall To Dense/GDN BF16
+
+Status: added prompt grouped BF16 routed gate/up/down coverage for the local
+sharded A3B BF16 shape (`h=2048`, `f_exp=512`, `n_expert=256`) while restoring
+the exact scalar BF16 prompt mat-mat contract. Raw pre-commit artifacts are in
+`target/profiles/v0249-a3b-bf16-fastpath-audit.json`,
+`target/profiles/v0249-a3b-bf16-grouped-vs-tokenloop-pp512.json`, and
+`target/profiles/v0249-a3b-bf16-grouped-pp512-phase-summary.tsv`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `cargo test -p qwen-llm mat_vec_and_mat_mat_half_weights_match_cpu --release -- --nocapture --test-threads=1`
+- static BF16 A3B audit: MoE `40/40`, lm yes, gaps `-`
+
+| Model | Shape | Variant | t/s | GPU ms/token | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| A3B BF16 | `pp512` | grouped BF16 MoE | `80.53` | `11.652` | pre-commit dirty |
+| A3B BF16 | `pp512` | BF16 MoE token-loop | `73.99` | `13.071` | pre-commit dirty |
+
+Phase trace read: grouped BF16 routed MoE is no longer the dominant named wall.
+The dirty `pp512` trace books `gdn_qkv 2223 ms`, attention `1197 ms`, `gdn_z
+1117 ms`, `gdn_back 1057 ms`, shared packed `581 ms`, routed SwiGLU `259 ms`,
+and routed down `130 ms`. The giant BF16 gap is therefore systemic BF16 prompt
+mat-mat/GDN/attention work, not just routed MoE coverage.
+
+Policy read: a bfloat simdgroup BF16 mat-mat tile was explored and builds, but
+it changes the primitive contract from BF16-weight/F32-activation accumulation to
+BF16-weight/BF16-rounded-activation accumulation and fails the exact CPU oracle.
+Keep exact BF16 mat-mat as default; any fast bfloat-activation tile must return
+as an explicitly gated approximate path with its own BF16-rounded CPU oracle and
+model-level correctness gates before default promotion.
+
 ## 2026-06-03 — v0.247 BF16 A3B Support Exposes A Real MoE Gap
 
 Status: added BF16 expert-bank token-loop support so the local sharded A3B BF16

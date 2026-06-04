@@ -330,6 +330,15 @@ fn prefill_moe_grouped_iq3_gateup_enabled(h: usize, f_exp: usize, n_expert: usiz
     }
 }
 
+fn prefill_moe_grouped_bf16_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_BF16_GATEUP")) {
+        PrefillEnvMode::ForceOn => true,
+        PrefillEnvMode::ForceOff => false,
+        PrefillEnvMode::Auto => h == 2048 && f_exp == 512 && n_expert == 256,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrefillEnvMode {
     Auto,
@@ -656,6 +665,23 @@ fn encode_prefill_moe_grouped_swiglu(
                 chunk_p,
             )
         }
+        (GgmlType::BF16, GgmlType::BF16) => {
+            crate::metal::encode_moe_swiglu_bf16_f32_grouped_slots_n16(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+            )
+        }
         other => Err(MetalError::BadShape {
             kernel: "prefill_moe_grouped_swiglu",
             detail: format!("unsupported grouped gate/up dtypes {other:?}"),
@@ -865,6 +891,9 @@ fn encode_prefill_moe_grouped_down(
             ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
         ),
         GgmlType::IQ4_XS => crate::metal::encode_moe_down_iq4_xs_f32_grouped_slots(
+            ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
+        ),
+        GgmlType::BF16 => crate::metal::encode_moe_down_bf16_f32_grouped_slots(
             ctx, enc, down_exps, inner, counts, ids, out, f_exp, h, n_expert, chunk_p,
         ),
         other => Err(MetalError::BadShape {
@@ -6970,6 +6999,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     matches!(
                         dtype,
                         GgmlType::F32
+                            | GgmlType::BF16
                             | GgmlType::Q4_K
                             | GgmlType::Q5_K
                             | GgmlType::Q6_K
@@ -6982,7 +7012,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     && moe.down_exps.dtype == GgmlType::Q5_K;
                 let grouped_down_dtype_eligible = matches!(
                     moe.down_exps.dtype,
-                    GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS
+                    GgmlType::Q5_K
+                        | GgmlType::Q6_K
+                        | GgmlType::Q8_0
+                        | GgmlType::IQ4_XS
+                        | GgmlType::BF16
                 );
                 let topk = arch.expert_used_count.min(arch.expert_count) as usize;
                 let n_expert = arch.expert_count as usize;
@@ -7005,6 +7039,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     }
                     (GgmlType::F32, GgmlType::F32) => {
                         chunk_p >= 32 && prefill_moe_grouped_f32_gateup_enabled()
+                    }
+                    (GgmlType::BF16, GgmlType::BF16) => {
+                        chunk_p >= 32 && prefill_moe_grouped_bf16_gateup_enabled(h, f_exp, n_expert)
                     }
                     _ => false,
                 };

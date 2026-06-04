@@ -682,9 +682,11 @@ Current rank after v0.249:
    BF16-rounded primitive oracle and is positive dirty at `pp512`; a 0.8B BF16
    exact-vs-sidecar model gate passes; the sharded A3B BF16 drift smoke is
    bounded (`logits_cos=0.999616`) but internal GDN state/conv minima sit around
-   `0.996-0.997`, so it remains default-off. Next exact work is deeper
-   attribution of BF16 prompt mat-mat/GDN/attention mechanics and why wall time
-   still lags despite projection phase movement.
+   `0.996-0.997`, so it remains default-off. Paired v0.253 rows keep BF16 far
+   behind llama.cpp even with the sidecar (`0.099x` at `pp512`, `0.180x` at
+   `pp1024`), and a naive llama-like direct-store probe regressed. Next BF16 work
+   must target actual llama.cpp `mul_mm_id`/MoE execution shape or be demoted
+   behind primary-family guardrails.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

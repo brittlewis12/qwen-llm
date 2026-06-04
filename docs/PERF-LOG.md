@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-04 — v0.253 BF16 Differential Keeps The Gap Structural
+
+Status: ran fresh paired BF16 A3B comparisons against pinned llama.cpp and
+probed a llama-like direct full-tile store variant for the sidecar. Raw artifacts
+are in `target/profiles/v0253-a3b-bf16-pp512-paired.json`,
+`target/profiles/v0253-a3b-bf16-pp512-bfloat-act-paired.json`,
+`target/profiles/v0253-a3b-bf16-pp1024-bfloat-act-paired.json`, and
+`target/profiles/v0253-a3b-bf16-pp512-bfloat-act-direct-paired.json`.
+
+| Model | Shape | qwen variant | qwen | llama.cpp | qwen/lcpp | qwen GPU ms |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| A3B BF16 | `pp512` | exact default | `68.37` | `1321.89` | `0.052` | `6492` |
+| A3B BF16 | `pp512` | bfloat-act | `131.53` | `1330.13` | `0.099` | `3658` |
+| A3B BF16 | `pp1024` | bfloat-act | `251.60` | `1397.45` | `0.180` | `3866` |
+| A3B BF16 | `pp512` | bfloat-act direct-store probe | `72.77` | `1320.35` | `0.055` | n/a |
+
+Read: the bfloat-activation sidecar is a useful diagnostic but does not explain
+llama.cpp's BF16 performance. Even with approximate BF16 activations, qwen is
+still `5-10x` behind on paired BF16 A3B prompt rows. A naive direct full-tile
+device-store clone from llama.cpp regressed badly versus the sidecar, so do not
+revive that store-shape tweak without a counter trace. The next BF16 branch must
+compare the actual llama.cpp `mul_mm_id`/MoE execution shape or demote BF16 back
+to a breadth guardrail.
+
 ## 2026-06-04 — v0.252 BF16 A3B Sidecar Drift Is Bounded But Not Promotion-Grade
 
 Status: added an ignored sharded A3B BF16 drift smoke for the

@@ -47,7 +47,7 @@ use crate::metal::{
     encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
-use std::sync::OnceLock;
+use std::{cell::Cell, sync::OnceLock};
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
@@ -185,7 +185,25 @@ fn concurrent_gdn_moe_decode_enabled() -> bool {
     })
 }
 
+thread_local! {
+    static MATMAT_BF16_BFLOAT_ACT_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+pub fn with_matmat_bf16_bfloat_act_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    let previous = MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    let out = f();
+    MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.set(previous));
+    out
+}
+
 fn matmat_bf16_bfloat_act_enabled() -> bool {
+    if let Some(enabled) = MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.get()) {
+        return enabled;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         matches!(

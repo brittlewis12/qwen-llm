@@ -679,10 +679,11 @@ Current rank after v0.249:
    A3B audit to `40/40` and improves `pp512` GPU time versus token-loop, but the
    phase trace now books the wall in `gdn_qkv`, attention, `gdn_z`, `gdn_back`,
    and shared packed work. The v0.250 bfloat-activation mat-mat sidecar has a
-   BF16-rounded primitive oracle and is positive dirty at `pp512`, but it remains
-   default-off until final-logit / GDN / KV model gates prove the numerical policy.
-   Next exact work is deeper attribution of BF16 prompt mat-mat/GDN/attention
-   mechanics and why wall time still lags despite projection phase movement.
+   BF16-rounded primitive oracle and is positive dirty at `pp512`; a 0.8B BF16
+   exact-vs-sidecar model gate passes, but the sidecar remains default-off until
+   the same final-logit / GDN / KV gate passes on sharded A3B BF16. Next exact
+   work is deeper attribution of BF16 prompt mat-mat/GDN/attention mechanics and
+   why wall time still lags despite projection phase movement.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

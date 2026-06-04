@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-04 — v0.251 BF16 Sidecar Gets A Model-Level Drift Gate
+
+Status: added a thread-local BF16 bfloat-activation override for in-process A/B
+tests and an ignored 0.8B BF16 prefill gate that compares exact BF16 prefill to
+the sidecar on final logits, captured hidden states, GDN state/conv tensors, and
+KV positions.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- BF16 bfloat-activation primitive oracle over query/output tails
+- ignored 0.8B BF16 exact-vs-sidecar prefill gate:
+  `logits_cos=0.999994`, `hidden_cos=0.999991`
+
+Read: this still does not promote the sidecar for A3B BF16, but it removes the
+biggest immediate objection to keeping it as a research switch. The remaining
+promotion gate is the same exact-vs-sidecar comparison on the sharded A3B BF16
+model, where repeated GDN/attention/MoE rounding has the actual risk profile.
+
 ## 2026-06-04 — v0.250 BF16 Bfloat-Activation Mat-Mat Sidecar
 
 Status: added an env-gated BF16 prompt mat-mat sidecar behind

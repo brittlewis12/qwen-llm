@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-04 — v0.250 BF16 Bfloat-Activation Mat-Mat Sidecar
+
+Status: added an env-gated BF16 prompt mat-mat sidecar behind
+`QWEN_MATMAT_BF16_BFLOAT_ACT=1`. The default path remains exact
+BF16-weight/F32-activation mat-mat. The sidecar intentionally computes against
+BF16-rounded activations and falls back to the exact path for unsupported
+`n_in % 32 != 0` shapes. Raw artifacts are in
+`target/profiles/v0249-clean-a3b-bf16-grouped-vs-tokenloop-pp512.json`,
+`target/profiles/v0250-dirty-a3b-bf16-bfloat-act-pp512.json`, and
+`target/profiles/v0250-dirty-a3b-bf16-bfloat-act-pp512-phase-summary.tsv`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- exact BF16/F16 half-weight matrix CPU-oracle test
+- BF16 bfloat-activation oracle over `n_query=1/16/32/33` and `n_out=70/3584`
+
+| Model | Shape | Variant | t/s | GPU ms/token | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| A3B BF16 | `pp512` | grouped BF16 MoE | `69.07` | `13.135` | clean v0.249 |
+| A3B BF16 | `pp512` | BF16 MoE token-loop | `54.49` | `15.702` | clean v0.249 |
+| A3B BF16 | `pp512` | exact BF16 mat-mat | `72.51` | `13.408` | dirty v0.250 |
+| A3B BF16 | `pp512` | bfloat-act sidecar | `82.26` | `11.872` | dirty v0.250 |
+
+Read: the sidecar is useful but not a promotion. The primitive oracle first
+caught a real standalone-tile row bug (rows 32..63 were zero when the A tile used
+the wrong row/thread mapping), then passed exactly against a BF16-rounded CPU
+reference after matching the MoE tile geometry. The dirty paired row is positive
+but only `~13%`, and model-level drift is still unmeasured. Keep it default-off
+until final-logit / GDN / KV gates say the BF16 activation rounding policy is
+acceptable.
+
 ## 2026-06-03 — v0.249 BF16 Grouped MoE Moves The Wall To Dense/GDN BF16
 
 Status: added prompt grouped BF16 routed gate/up/down coverage for the local

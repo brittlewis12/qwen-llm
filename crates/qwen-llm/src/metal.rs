@@ -1651,6 +1651,83 @@ pub fn encode_mat_mat_bf16_f32(
     )
 }
 
+pub fn encode_mat_mat_bf16_bfloat_act_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if n_in % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_bf16_bfloat_act_f32",
+            detail: format!("n_in={n_in} not divisible by 32"),
+        });
+    }
+    if weight.dtype != GgmlType::BF16 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_bf16_bfloat_act_f32",
+            detail: format!("weight.dtype = {:?}, expected BF16", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_bf16_bfloat_act_f32",
+            detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_query * n_in || y.n_elements() as usize != n_out * n_query {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_bf16_bfloat_act_f32",
+            detail: format!(
+                "shape mismatch x={} y={} expected x={} y={}",
+                x.n_elements(),
+                y.n_elements(),
+                n_query * n_in,
+                n_out * n_query
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_mat_mat_bf16_bfloat_act_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_query: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_query: n_query as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: n_query.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_mat_mat_block32_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -14177,6 +14254,95 @@ mod tests {
                     "[half-weight {dtype:?} mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}"
                 );
                 assert!(max_abs < 1e-3, "{dtype:?} mat_mat max_abs={max_abs}");
+            }
+        }
+    }
+
+    #[test]
+    fn mat_mat_bf16_bfloat_act_matches_rounded_cpu() {
+        fn round_to_bf16_f32(x: f32) -> f32 {
+            let bits = x.to_bits();
+            let lsb = (bits >> 16) & 1;
+            f32::from_bits(bits.wrapping_add(0x7fff + lsb) & 0xffff_0000)
+        }
+
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let path = "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[bf16-bfloat-act] skipped missing fixture {path}");
+            return;
+        }
+        let g = crate::gguf::GgufFile::open(path).expect("open");
+        let w = g
+            .tensors
+            .iter()
+            .find(|t| {
+                t.name == "blk.0.ffn_gate.weight" && t.dtype == GgmlType::BF16 && t.shape.len() == 2
+            })
+            .expect("missing BF16 test tensor");
+        let n_in = w.shape[0] as usize;
+        let n_out = w.shape[1] as usize;
+        let weight_f32 = crate::codec::dequant_to_f32(w, g.slice(w)).expect("dequant");
+        let w_t = MetalTensor::from_bytes(
+            &ctx,
+            g.slice(w),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::BF16,
+        )
+        .expect("weight tensor");
+
+        for &n_out_case in &[70usize, n_out] {
+            let weight_case = &weight_f32[..n_in * n_out_case];
+            for &n_query in &[1usize, 16, 32, 33] {
+                let x_pack: Vec<f32> = (0..n_query * n_in)
+                    .map(|i| ((i % 17) as f32 - 8.0) * 1e-2)
+                    .collect();
+                let x_bf16: Vec<f32> = x_pack.iter().copied().map(round_to_bf16_f32).collect();
+                let mut cpu_pack = vec![0.0f32; n_query * n_out_case];
+                for q in 0..n_query {
+                    let row = &x_bf16[q * n_in..(q + 1) * n_in];
+                    let out = crate::forward::mat_vec_pub(weight_case, n_in, n_out_case, row);
+                    cpu_pack[q * n_out_case..(q + 1) * n_out_case].copy_from_slice(&out);
+                }
+                let x_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&x_pack),
+                    vec![n_query as u64, n_in as u64],
+                    GgmlType::F32,
+                )
+                .expect("x tensor");
+                let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_query * n_out_case) as u64])
+                    .expect("y tensor");
+                one_shot(&ctx, |enc| {
+                    encode_mat_mat_bf16_bfloat_act_f32(
+                        &ctx, enc, &w_t, &x_t, &y_t, n_in, n_out_case, n_query,
+                    )
+                })
+                .expect("approx bf16 matmat encode");
+                let gpu = read_back_f32(&y_t.buffer, n_query * n_out_case);
+                let dot: f64 = gpu
+                    .iter()
+                    .zip(cpu_pack.iter())
+                    .map(|(a, b)| *a as f64 * *b as f64)
+                    .sum();
+                let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+                let nc: f64 = cpu_pack.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+                let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+                let max_abs = gpu
+                    .iter()
+                    .zip(cpu_pack.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                eprintln!(
+                    "[bf16-bfloat-act n_out={n_out_case} n_query={n_query}] \
+                     cos={cos:.6} max|Delta|={max_abs:.2e}"
+                );
+                assert!(cos > 0.99999, "cos={cos}");
+                assert!(max_abs < 1e-3, "max_abs={max_abs}");
             }
         }
     }

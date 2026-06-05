@@ -140,7 +140,7 @@ fn prefill_dense_ffn_fused_swiglu_q4_enabled(hidden: usize) -> bool {
     }) {
         return enabled;
     }
-    hidden <= 1536
+    hidden <= 2048
 }
 
 fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
@@ -8839,47 +8839,107 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         );
                     }
 
-                    {
-                        let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_mat_mat_dispatch(
+                    if split_ffn_subphases {
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                d_w,
+                                &ffn_inner_pack_p,
+                                &ffn_out_pack_p,
+                                f,
+                                h,
+                                chunk_p,
+                            )?;
+                            enc.end();
+                        }
+                        flush_prefill_layer_phase(
                             base.ctx,
-                            &enc,
-                            d_w,
-                            &ffn_inner_pack_p,
-                            &ffn_out_pack_p,
-                            f,
-                            h,
-                            chunk_p,
-                        )?;
-                        encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
-                        if let Some(dst) = hidden_dst {
-                            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
-                                if lid as usize == il {
-                                    for n_idx in 0..chunk_p {
-                                        let global_idx = chunk_base + n_idx;
-                                        let elem_off = (global_idx * k_target + k_idx) * h;
-                                        let row_view = x_pack_p
-                                            .view_subrange((n_idx * h) as u64, vec![h as u64]);
-                                        encode_scatter_offset_f32(
-                                            base.ctx, &enc, &row_view, dst, elem_off, h,
-                                        )?;
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            block_kind,
+                            "ffn_down",
+                        );
+
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
+                            if let Some(dst) = hidden_dst {
+                                for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                                    if lid as usize == il {
+                                        for n_idx in 0..chunk_p {
+                                            let global_idx = chunk_base + n_idx;
+                                            let elem_off = (global_idx * k_target + k_idx) * h;
+                                            let row_view = x_pack_p
+                                                .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                            encode_scatter_offset_f32(
+                                                base.ctx, &enc, &row_view, dst, elem_off, h,
+                                            )?;
+                                        }
                                     }
                                 }
                             }
+                            enc.end();
                         }
-                        enc.end();
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            block_kind,
+                            "ffn_resid",
+                        );
+                    } else {
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_mat_mat_dispatch(
+                                base.ctx,
+                                &enc,
+                                d_w,
+                                &ffn_inner_pack_p,
+                                &ffn_out_pack_p,
+                                f,
+                                h,
+                                chunk_p,
+                            )?;
+                            encode_add_inplace_f32(base.ctx, &enc, &x_pack_p, &ffn_out_pack_p)?;
+                            if let Some(dst) = hidden_dst {
+                                for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                                    if lid as usize == il {
+                                        for n_idx in 0..chunk_p {
+                                            let global_idx = chunk_base + n_idx;
+                                            let elem_off = (global_idx * k_target + k_idx) * h;
+                                            let row_view = x_pack_p
+                                                .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                            encode_scatter_offset_f32(
+                                                base.ctx, &enc, &row_view, dst, elem_off, h,
+                                            )?;
+                                        }
+                                    }
+                                }
+                            }
+                            enc.end();
+                        }
+                        flush_prefill_layer_phase(
+                            base.ctx,
+                            &mut cmd_buf,
+                            &mut prefill_gpu_total_ms,
+                            trace_layer_phases,
+                            chunk_idx,
+                            chunk_start,
+                            il,
+                            block_kind,
+                            "ffn_down_resid",
+                        );
                     }
-                    flush_prefill_layer_phase(
-                        base.ctx,
-                        &mut cmd_buf,
-                        &mut prefill_gpu_total_ms,
-                        trace_layer_phases,
-                        chunk_idx,
-                        chunk_start,
-                        il,
-                        block_kind,
-                        "ffn_down_resid",
-                    );
                 } else {
                     let enc = KernelEncoder::begin(&cmd_buf);
                     encode_rms_norm_batched_f32(

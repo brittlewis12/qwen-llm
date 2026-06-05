@@ -6,6 +6,71 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-05 — v0.263 Dense 2B pp512 Is FFN Projection-Limited
+
+Status: re-anchored the small dense short-prefill residual, added trace-only
+`ffn_down` / `ffn_resid` splitting under `QWEN_PREFILL_TRACE_FFN_SUBPHASES=1`,
+and widened the default dense Q4 fused SwiGLU eligibility from `hidden <= 1536`
+to `hidden <= 2048`. Raw artifacts:
+`target/profiles/v0262-2b-q4-pp512-paired-residual.json`,
+`target/profiles/v0262-2b-q4-pp512-noop-budget.json`,
+`target/profiles/v0263-2b-q4-pp512-ffn-split-down-resid-summary.tsv`,
+`target/profiles/v0263-2b-q4-pp512-fused2048-sweep.json`,
+`target/profiles/v0263-2b-q4-pp1024-fused2048-sweep.json`, and
+`target/profiles/v0263-2b-q4-pp512-fused2048-paired.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- 2B Q4 `pp512` paired residual and no-op budget
+- 2B Q4 `pp512` FFN split trace with down/residual separation
+- 2B Q4 `pp512/1024` default-vs-rollback repeat sweeps
+- 2B Q4 `pp512` paired qwen-vs-llama.cpp default comparison
+
+| Model | Shape | Variant | qwen | llama.cpp | qwen/lcpp | Read |
+| --- | ---: | --- | ---: | ---: | ---: | --- |
+| 0.8B Q4_K_M | `pp512` | paired block 0 | `7350.06` | `7856.20` | `0.936` | lcpp variable |
+| 0.8B Q4_K_M | `pp512` | paired block 1 | `7392.92` | `7472.81` | `0.989` | near parity |
+| 2B Q4_K_M | `pp512` | old default block 0 | `3519.31` | `3667.67` | `0.960` | real residual |
+| 2B Q4_K_M | `pp512` | old default block 1 | `3495.85` | `3669.23` | `0.953` | real residual |
+| 2B Q4_K_M | `pp512` | new default block 0 | `3553.57` | `3670.24` | `0.968` | narrowed |
+| 2B Q4_K_M | `pp512` | new default block 1 | `3549.77` | `3629.98` | `0.978` | narrowed |
+
+Default-vs-rollback rows for the `hidden <= 2048` fused-SwiGLU widening:
+
+| Model | Shape | Default | Rollback | Read |
+| --- | ---: | ---: | ---: | --- |
+| 2B Q4_K_M | `pp512` block 0 | `3528.37` | `3509.21` | `+0.5%` |
+| 2B Q4_K_M | `pp512` block 1 | `3546.05` | `3500.85` | `+1.3%` |
+| 2B Q4_K_M | `pp512` block 2 | `3544.51` | `3511.23` | `+0.9%` |
+| 2B Q4_K_M | `pp1024` block 0 | `3699.71` | `3673.07` | `+0.7%` |
+| 2B Q4_K_M | `pp1024` block 1 | `3690.51` | `3684.08` | `+0.2%` |
+
+The 2B no-op budget centers the remaining gap on dense FFN first, GDN second,
+and not attention body: base is `3490-3514 t/s`, no-FFN is `7701-7770`, no-GDN
+body is `4215-4227`, and no-attention-body is only `3621-3627`.
+
+The split FFN trace says the down residual add is not the missing budget. With
+subphase splitting enabled, last-pass 2B `pp512` totals are gate `27.83 ms`, up
+`27.83 ms`, down `29.70 ms`, SwiGLU `1.37 ms`, and residual add only
+`0.54 ms`. Do not chase dense down-epilogue residual fusion as the primary fix;
+the live target is Q4 projection mechanics for gate/up/down plus the secondary
+GDN projection/body residual.
+
+## 2026-06-05 — v0.262 Dense Small pp512 Residual Is Real On 2B
+
+Status: compared small dense `pp512` against pinned llama.cpp after the main
+family was mostly won. Raw artifacts:
+`target/profiles/v0262-0p8b-q4-pp512-paired-residual.json`,
+`target/profiles/v0262-2b-q4-pp512-paired-residual.json`,
+`target/profiles/v0262-2b-q4-pp512-phase-summary.tsv`, and
+`target/profiles/v0262-2b-q4-pp512-noop-budget.json`.
+
+Read: 0.8B is too lcpp-variable to drive kernel work alone, but 2B loses twice
+at `0.960x` and `0.953x`. The first named buckets are FFN projections
+(`ffn_gate_up_swiglu` and `ffn_down_resid`) plus GDN qkv/body pieces; attention
+body is too small to explain the gap.
+
 ## 2026-06-05 — v0.261 A10B pp128 Is A Warmth Methodology Gap
 
 Status: re-anchored the stale A10B very-short prefill caveat against pinned

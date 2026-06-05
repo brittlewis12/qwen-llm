@@ -71,16 +71,15 @@ Current caveats:
 - The full v0.203 family `27B pp512` row showed `0.913x`, but immediate paired
   repeats showed `1.000x` and `1.008x`; treat that cell as parity/noise until a
   longer repeat packet says otherwise.
-- Small dense short/medium prefill is not won across the board, but v0.215's
-  paired GDN Q/K L2 prep narrows the live gap again. Clean paired rows put 0.8B
-  at `0.94-0.97x` for `pp512` and parity for `pp1024`; 2B is `0.97x` at
-  `pp512` and `1.01x` at `pp1024`. 4B/9B/27B canaries were neutral-positive.
-  v0.206-v0.215 say this is not attention, fast-path coverage, GDN matvec
-  fallback, command-encoder coalescing/streaming, NSG8 GDN-step grouping, or
-  another Q5/Q6 N64 threshold fiddle. A fused Q4 SwiGLU N64 sidecar was also
-  correctness-safe but regressed 0.8B `pp512`. The remaining high-EV branch is
-  deeper short-prompt FFN/GDN projection mechanics, especially the 0.8B and 2B
-  `pp512` cells.
+- Small dense short prefill is still the main primary-family residual. v0.262
+  re-anchors 2B Q4 `pp512` as a real paired loss (`0.960x/0.953x`) while 0.8B
+  remains too lcpp-variable to drive work alone (`0.936x/0.989x`). v0.263 widens
+  dense Q4 fused-SwiGLU default coverage to `hidden <= 2048`, improving 2B
+  `pp512` by `+0.5-1.3%` qwen-only and narrowing paired rows to
+  `0.968x/0.978x`; rollback is `QWEN_PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4=0`.
+  The live residual is still Q4 FFN projection mechanics plus secondary GDN, not
+  attention body or residual-add epilogues: FFN split traces put residual add at
+  only `~0.54 ms` for 2B `pp512`.
 - A10B very-short prefill is not a kernel-roadmap item unless a warmed paired row
   regresses. The v0.261 default `pp128` paired repeat still loses from cold
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
@@ -691,41 +690,48 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.259:
+Current rank after v0.263:
 
-1. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
-   A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
-   latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at
+1. Small dense `pp512` FFN/GDN projection residual: 2B Q4 is the clean target,
+   not 0.8B alone. v0.263 narrows the gap with default fused-SwiGLU coverage for
+   `hidden <= 2048`, but paired rows still sit at `0.968x/0.978x`. Next work
+   should compare/copy Q4 projection mechanics for gate/up/down and GDN qkv/z
+   against llama.cpp, not retread attention, fast-path coverage, residual-add
+   fusion, command-encoder coalescing, or GDN matvec fallback.
+2. Promotion-grade paired residual search for the main family: only reopen dense
+   27B, A3B MoE, or A10B MoE kernel work if a same-session paired repeat exposes
+   a real gap. The latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at
    `1.16x/1.17x/1.07x`, and A10B at `1.13x/1.33x/1.05x` for
    `pp1024/pp4096/tg128`; real-rollout rows are also won at `1.03x/1.07x/1.16x`
    for 27B/A3B/A10B respectively.
-2. True-long and chunk-policy guardrails: real prompts are clean, but candidate
+3. True-long and chunk-policy guardrails: real prompts are clean, but candidate
    long-prompt changes still need synthetic `pp16384+` plus real message rows.
    `prefill_chunk=1024` remains a safe default cap, not a proven optimum.
-3. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
+4. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
    and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work
    only when a paired file or static audit exposes a fresh miss.
-4. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+5. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured
    `moe_inner` activations rather than another synthetic row-stride oracle.
-5. BF16 A3B full structural sidecar: grouped BF16 MoE restores the sharded A3B
+6. BF16 A3B full structural sidecar: grouped BF16 MoE restores the sharded A3B
    audit to `40/40`, but paired v0.253 rows remain far behind llama.cpp even with
    the bfloat-activation sidecar (`0.099x` at `pp512`, `0.180x` at `pp1024`).
    v0.254-v0.259 kill command-buffer splitting, separate `NR1=32` gate/up,
    reduce/finalizer focus, Q5-style tiny-down, and hot-only separate SwiGLU. BF16
    is now a demoted red cell unless we deliberately schedule a full `mul_mm_id`
    routed projection sidecar with a large wall gate.
-6. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+7. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
-   or profile scope. The local llama.cpp b9481 build no longer exposes
-   `GGML_METAL_PROFILE_OPS`, so this may require a tiny canonical profiling patch
-   or a non-invasive external capture before more kernel code.
-7. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+   or profile scope. The pinned upstream b9481 build does not expose
+   `GGML_METAL_PROFILE_OPS`; the local fork has a profiling patch, but any
+   attribution claim needs either a canonical profiling patch or a clearly marked
+   non-scoreboard capture before more kernel code.
+8. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
    `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
    than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
    before any end-to-end tuning.

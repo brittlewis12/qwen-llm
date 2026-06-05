@@ -101,8 +101,11 @@ Current caveats:
   `IQ2/IQ3` tensors. The v0.254 BF16 probes falsified two tempting local exits:
   per-layer command-buffer splitting did not improve wall time, and a more
   llama-like separate `NR1=32` BF16 gate/up sidecar was only `~3%` at `pp512`.
-  The remaining BF16 work should be graph-wide `mul_mm`/`mul_mm_id` parity and
-  wall-clock paired attribution, not another routed-SwiGLU tile tweak.
+  The v0.255 wall no-op budget then re-centered the BF16 cliff on routed MoE:
+  bfloat-act `pp512` is `77.00 t/s`, no routed MoE is `825.63 t/s`, no grouped
+  SwiGLU is `205.76 t/s`, and no grouped down is `142.44 t/s`. The remaining
+  BF16 work should be a deeper `mul_mm_id`/layout parity probe for routed experts
+  plus graph-wide wall attribution, not another local routed-SwiGLU tile tweak.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 

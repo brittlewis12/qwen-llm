@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-04 — v0.255 BF16 Wall Budget Re-centers Routed MoE
+
+Status: added default-off grouped MoE diagnostic no-ops for routed SwiGLU
+(`QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU`) and routed down
+(`QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN`), then ran a BF16 A3B `pp512` wall-budget
+sweep. Raw artifact:
+`target/profiles/v0255-a3b-bf16-pp512-grouped-moe-split-budget.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+
+| Model | Shape | Variant | t/s | GPU ms/token | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| A3B BF16 | `pp512` | bfloat-act | `77.00` | `12.358` | dirty v0.255 |
+| A3B BF16 | `pp512` | no routed MoE | `825.63` | `0.370` | routed dominates wall |
+| A3B BF16 | `pp512` | no grouped SwiGLU | `205.76` | `3.569` | down/reduce still large |
+| A3B BF16 | `pp512` | no grouped down | `142.44` | `6.766` | SwiGLU still larger |
+
+Read: BF16 attribution should be based on wall-clock/no-op deltas, not phase
+trace GPU sums. With routed MoE removed, qwen is still behind llama.cpp but much
+closer; the catastrophic BF16 gap is routed MoE first. The split diagnostics say
+both grouped SwiGLU and grouped down matter, with SwiGLU larger. The v0.254
+separate gate/up falsifier says the missing llama.cpp delta is not merely fused
+`NR1=16` versus separate `NR1=32`; the next exact branch needs a deeper
+`mul_mm_id`/layout parity probe for BF16 routed experts.
+
 ## 2026-06-04 — v0.254 BF16 Llama-Isomorphic Falsifiers Stay Small
 
 Status: tried two default-off BF16 diagnostics and reverted both code probes after

@@ -106,8 +106,11 @@ Current caveats:
   SwiGLU is `205.76 t/s`, and no grouped down is `142.44 t/s`. The v0.256
   reduce split says weighted sum is not the missing budget: no grouped reduce is
   flat/noise while no grouped down+reduce still moves to `~92-94 t/s`. The
-  remaining BF16 work should be a deeper `mul_mm_id`/layout parity probe for
-  routed expert projections, not route/reduce/finalizer or another local
+  v0.257 bucket-bin trace says the expert-projection loss is not uniform:
+  `<8` buckets are `6-17x` slower per slot than `>=64` buckets, while hot buckets
+  still dominate aggregate SwiGLU at `pp1024`. The remaining BF16 work should be
+  a deeper `mul_mm_id`/layout parity probe for routed expert projections or a
+  tiny-bin work-unit reset, not route/reduce/finalizer or another local
   routed-SwiGLU tile tweak.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
@@ -691,8 +694,10 @@ Current rank after v0.256:
    `0.180x` at `pp1024`). v0.254 kills per-layer command-buffer splitting and a
    separate `NR1=32` gate/up sidecar; v0.255-v0.256 wall no-ops re-center the
    catastrophic budget on routed MoE while ruling out weighted-sum/reduce as the
-   missing bucket. Next BF16 work must target actual llama.cpp `mul_mm_id` expert
-   projection layout/dataflow, especially down and SwiGLU materialization, or be
+   missing bucket. v0.257 bin traces show `<8` buckets are pathological per slot,
+   but hot `>=64` buckets still carry the largest aggregate SwiGLU at `pp1024`.
+   Next BF16 work must target actual llama.cpp `mul_mm_id` expert projection
+   layout/dataflow or a tiny-bucket work-unit reset, with a large wall gate, or be
    demoted behind primary-family guardrails.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The

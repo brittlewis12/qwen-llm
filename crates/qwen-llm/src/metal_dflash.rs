@@ -817,6 +817,25 @@ fn encode_prefill_moe_grouped_swiglu_range(
                 max_slots,
             )
         }
+        (GgmlType::BF16, GgmlType::BF16) => {
+            crate::metal::encode_moe_swiglu_bf16_f32_grouped_slots_n16_range(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                h_pack,
+                counts,
+                ids,
+                inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+                chunk_p,
+                min_slots,
+                max_slots,
+            )
+        }
         (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) => {
             crate::metal::encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
                 ctx,
@@ -7500,6 +7519,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         (GgmlType::Q5_K, GgmlType::Q5_K)
                                         | (GgmlType::Q6_K, GgmlType::Q6_K)
                                         | (GgmlType::Q8_0, GgmlType::Q8_0)
+                                        | (GgmlType::BF16, GgmlType::BF16)
                                         | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
                                         | (GgmlType::IQ3_S, GgmlType::IQ3_S) => true,
                                         _ => false,
@@ -7607,9 +7627,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 }
                             }
                             {
-                                let split_q5_down_bins = prefill_trace_moe_bucket_bins_enabled()
-                                    && matches!(moe.down_exps.dtype, GgmlType::Q5_K);
-                                if split_q5_down_bins {
+                                let split_down_bins = prefill_trace_moe_bucket_bins_enabled()
+                                    && matches!(
+                                        moe.down_exps.dtype,
+                                        GgmlType::Q5_K | GgmlType::BF16
+                                    );
+                                if split_down_bins {
                                     let bins: [(&str, u32, u32); 6] = [
                                         ("routed_down_lt8", 0, 7),
                                         ("routed_down_8_15", 8, 15),
@@ -7631,7 +7654,23 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 0.0,
                                             )?;
                                         }
-                                        if prefill_moe_tiny_down_r16_enabled(chunk_p)
+                                        if moe.down_exps.dtype == GgmlType::BF16 {
+                                            crate::metal::encode_moe_down_bf16_f32_grouped_slots_range(
+                                                base.ctx,
+                                                &enc,
+                                                &moe.down_exps,
+                                                &moe_group_inner_pack_p,
+                                                &moe_group_count_pack,
+                                                &moe_group_ids_pack,
+                                                &moe_group_out_pack_p,
+                                                f_exp,
+                                                h,
+                                                n_expert,
+                                                chunk_p,
+                                                min_slots,
+                                                max_slots,
+                                            )?;
+                                        } else if prefill_moe_tiny_down_r16_enabled(chunk_p)
                                             && min_slots == 0
                                             && max_slots == 7
                                         {

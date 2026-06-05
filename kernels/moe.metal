@@ -3724,6 +3724,16 @@ struct moe_group_q6k_args {
     uint stride_b;
 };
 
+struct moe_group_bf16_args {
+    uint M;
+    uint N;
+    uint K;
+    uint nb01;
+    uint stride_b;
+    uint min_count;
+    uint max_count;
+};
+
 inline void dequantize_q5_K_half_grouped(device const uchar * blk_bytes,
                                          short il,
                                          thread half4x4 & reg) {
@@ -4463,7 +4473,7 @@ kernel void kernel_moe_down_q8_0_f32_grouped_slots(
 }
 
 kernel void kernel_moe_down_bf16_f32_grouped_slots(
-        constant moe_group_q6k_args & args [[buffer(0)]],
+        constant moe_group_bf16_args & args [[buffer(0)]],
         device const bfloat * srcA         [[buffer(1)]],
         device const float  * srcB         [[buffer(2)]],
         device const int    * counts       [[buffer(3)]],
@@ -4481,7 +4491,8 @@ kernel void kernel_moe_down_bf16_f32_grouped_slots(
     const int r1 = tgpig.x * NR1_MM;
 
     const int count = counts[im];
-    if (r1 >= count) return;
+    if (count < int(args.min_count) || count > int(args.max_count)
+            || r1 >= count) return;
 
     const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
     const short nr1 = (count - r1 < NR1_MM) ? (short)(count - r1) : NR1_MM;

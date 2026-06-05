@@ -4051,6 +4051,42 @@ pub fn encode_moe_swiglu_bf16_f32_grouped_slots_n16(
     topk: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    encode_moe_swiglu_bf16_f32_grouped_slots_n16_range(
+        ctx,
+        enc,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+pub fn encode_moe_swiglu_bf16_f32_grouped_slots_n16_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
     if w_gate.dtype != GgmlType::BF16 || w_up.dtype != GgmlType::BF16 {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_bf16_grouped_slots_n16",
@@ -4106,8 +4142,8 @@ pub fn encode_moe_swiglu_bf16_f32_grouped_slots_n16(
             n_tokens: n_tokens as u32,
             nb01: n_hidden as u32,
             stride_b: n_hidden as u32,
-            min_count: 0,
-            max_count: i32::MAX as u32,
+            min_count,
+            max_count,
         },
     );
     enc.set_tensor(1, w_gate);
@@ -5453,6 +5489,38 @@ pub fn encode_moe_down_bf16_f32_grouped_slots(
     n_expert: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    encode_moe_down_bf16_f32_grouped_slots_range(
+        ctx,
+        enc,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_in,
+        n_out,
+        n_expert,
+        n_tokens,
+        0,
+        i32::MAX as u32,
+    )
+}
+
+pub fn encode_moe_down_bf16_f32_grouped_slots_range(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<(), MetalError> {
     if n_in % 32 != 0 {
         return Err(MetalError::BadShape {
             kernel: "moe_down_bf16_grouped_slots",
@@ -5497,6 +5565,8 @@ pub fn encode_moe_down_bf16_f32_grouped_slots(
         k: u32,
         nb01: u32,
         stride_b: u32,
+        min_count: u32,
+        max_count: u32,
     }
     enc.set_bytes(
         0,
@@ -5506,6 +5576,8 @@ pub fn encode_moe_down_bf16_f32_grouped_slots(
             k: n_in as u32,
             nb01: n_in as u32,
             stride_b: n_in as u32,
+            min_count,
+            max_count,
         },
     );
     enc.set_tensor(1, weight);

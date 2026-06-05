@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-05 — v0.257 BF16 Bin Trace Finds Tiny-Bucket Waste
+
+Status: extended the default-off MoE bucket-bin phase trace to BF16 grouped
+SwiGLU and down. Raw artifacts:
+`target/profiles/v0257-a3b-bf16-pp512-bin-bucket-trace.log`,
+`target/profiles/v0257-a3b-bf16-pp512-bin-bucket-trace-summary.tsv`,
+`target/profiles/v0257-a3b-bf16-pp1024-bin-trace.log`, and
+`target/profiles/v0257-a3b-bf16-pp1024-bin-trace-summary.tsv`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- A3B BF16 `pp512/pp1024` bfloat-act bin traces with bucket stats
+
+| Shape | Phase/bin | Slots | GPU ms | us/slot | Read |
+| ---: | --- | ---: | ---: | ---: | --- |
+| `pp512` | SwiGLU `<8` | `10,604` | `130.97` | `12.35` | tiny waste |
+| `pp512` | SwiGLU `>=64` | `103,233` | `178.42` | `1.73` | hot aggregate |
+| `pp512` | down `<8` | `10,604` | `81.14` | `7.65` | tiny waste |
+| `pp512` | down `>=64` | `103,233` | `67.56` | `0.65` | hot efficient |
+| `pp1024` | SwiGLU `<8` | `10,312` | `114.69` | `11.12` | tiny waste |
+| `pp1024` | SwiGLU `>=64` | `245,279` | `274.86` | `1.12` | hot aggregate |
+| `pp1024` | down `<8` | `10,312` | `75.08` | `7.28` | tiny waste |
+| `pp1024` | down `>=64` | `245,279` | `106.79` | `0.44` | hot efficient |
+
+Read: BF16 routed expert work is not uniformly slow. Underfilled `<8` buckets
+are pathological on a per-slot basis and consume about the same absolute time as
+large hot buckets despite an order of magnitude fewer slots. Hot `>=64` buckets
+still dominate aggregate SwiGLU at `pp1024`, so the branch should not become only
+a tiny-bin cleanup. The next exact probe should either make BF16 tiny buckets use
+a different work unit or build a small llama.cpp `mul_mm_id`-shaped down/SwiGLU
+falsifier that can explain both tiny-bin waste and hot-bin throughput.
+
 ## 2026-06-05 — v0.256 BF16 Reduce Is Not The Missing Budget
 
 Status: added a default-off grouped MoE reduce diagnostic

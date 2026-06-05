@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-05 — v0.256 BF16 Reduce Is Not The Missing Budget
+
+Status: added a default-off grouped MoE reduce diagnostic
+(`QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE`) and made the grouped SwiGLU/down/reduce
+no-ops apply to the concurrent grouped tail too. Raw artifacts:
+`target/profiles/v0256-a3b-bf16-pp512-grouped-moe-reduce-budget.json` and
+`target/profiles/v0256-a3b-bf16-pp512-grouped-moe-reduce-repeat.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+
+| Model | Shape | Variant | t/s | GPU ms/token | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| A3B BF16 | `pp512` | bfloat-act | `62.34` / `63.94` | `14.522` / `14.676` | repeat blocks |
+| A3B BF16 | `pp512` | no grouped reduce | `62.85` / `63.43` | `14.557` / `14.882` | flat/noise |
+| A3B BF16 | `pp512` | no grouped down+reduce | `91.96` / `94.24` | `9.442` / `9.346` | down dominates split |
+
+Read: the v0.255 no-down speedup is not mostly the weighted-sum/reduce pass.
+Skipping reduce alone is flat to slightly worse, while skipping down plus the
+dependent reduce still gives the material lift. Keep BF16 routed work focused on
+the expert projection/data-layout path, especially down and SwiGLU, rather than
+on the final routed weighted sum.
+
 ## 2026-06-04 — v0.255 BF16 Wall Budget Re-centers Routed MoE
 
 Status: added default-off grouped MoE diagnostic no-ops for routed SwiGLU

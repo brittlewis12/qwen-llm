@@ -103,9 +103,12 @@ Current caveats:
   llama-like separate `NR1=32` BF16 gate/up sidecar was only `~3%` at `pp512`.
   The v0.255 wall no-op budget then re-centered the BF16 cliff on routed MoE:
   bfloat-act `pp512` is `77.00 t/s`, no routed MoE is `825.63 t/s`, no grouped
-  SwiGLU is `205.76 t/s`, and no grouped down is `142.44 t/s`. The remaining
-  BF16 work should be a deeper `mul_mm_id`/layout parity probe for routed experts
-  plus graph-wide wall attribution, not another local routed-SwiGLU tile tweak.
+  SwiGLU is `205.76 t/s`, and no grouped down is `142.44 t/s`. The v0.256
+  reduce split says weighted sum is not the missing budget: no grouped reduce is
+  flat/noise while no grouped down+reduce still moves to `~92-94 t/s`. The
+  remaining BF16 work should be a deeper `mul_mm_id`/layout parity probe for
+  routed expert projections, not route/reduce/finalizer or another local
+  routed-SwiGLU tile tweak.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -680,20 +683,17 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.249:
+Current rank after v0.256:
 
-1. BF16 A3B prompt mat-mat/GDN wall: grouped BF16 MoE restores the sharded BF16
-   A3B audit to `40/40` and improves `pp512` GPU time versus token-loop, but the
-   phase trace now books the wall in `gdn_qkv`, attention, `gdn_z`, `gdn_back`,
-   and shared packed work. The v0.250 bfloat-activation mat-mat sidecar has a
-   BF16-rounded primitive oracle and is positive dirty at `pp512`; a 0.8B BF16
-   exact-vs-sidecar model gate passes; the sharded A3B BF16 drift smoke is
-   bounded (`logits_cos=0.999616`) but internal GDN state/conv minima sit around
-   `0.996-0.997`, so it remains default-off. Paired v0.253 rows keep BF16 far
-   behind llama.cpp even with the sidecar (`0.099x` at `pp512`, `0.180x` at
-   `pp1024`), and a naive llama-like direct-store probe regressed. Next BF16 work
-   must target actual llama.cpp `mul_mm_id`/MoE execution shape or be demoted
-   behind primary-family guardrails.
+1. BF16 A3B routed expert projection shape: grouped BF16 MoE restores the
+   sharded BF16 A3B audit to `40/40`, but paired v0.253 rows keep BF16 far behind
+   llama.cpp even with the bfloat-activation sidecar (`0.099x` at `pp512`,
+   `0.180x` at `pp1024`). v0.254 kills per-layer command-buffer splitting and a
+   separate `NR1=32` gate/up sidecar; v0.255-v0.256 wall no-ops re-center the
+   catastrophic budget on routed MoE while ruling out weighted-sum/reduce as the
+   missing bucket. Next BF16 work must target actual llama.cpp `mul_mm_id` expert
+   projection layout/dataflow, especially down and SwiGLU materialization, or be
+   demoted behind primary-family guardrails.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

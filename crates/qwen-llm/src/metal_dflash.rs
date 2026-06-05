@@ -286,6 +286,11 @@ fn prefill_noop_moe_grouped_down_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN"))
 }
 
+fn prefill_noop_moe_grouped_reduce_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE"))
+}
+
 fn prefill_moe_grouped_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -7066,6 +7071,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     let skip_moe_shared = prefill_noop_moe_shared_enabled();
                     let noop_grouped_swiglu = prefill_noop_moe_grouped_swiglu_enabled();
                     let noop_grouped_down = prefill_noop_moe_grouped_down_enabled();
+                    let noop_grouped_reduce = prefill_noop_moe_grouped_reduce_enabled();
                     let hot_expert_min_slots = prefill_moe_hot_expert_min_slots();
                     let packed_route_path = prefill_moe_packed_route_enabled()
                         && router_mat_mat_eligible(moe.gate_inp.dtype)
@@ -7296,48 +7302,60 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
                         }
-                        encode_prefill_moe_grouped_swiglu(
-                            base.ctx,
-                            &enc,
-                            moe,
-                            &h_pack_p,
-                            &moe_group_count_pack,
-                            &moe_group_ids_pack,
-                            &moe_group_inner_pack_p,
-                            h,
-                            f_exp,
-                            n_expert,
-                            topk,
-                            chunk_p,
-                            grouped_q4_n32_all,
-                            hot_expert_min_slots,
-                        )?;
+                        if noop_grouped_swiglu {
+                            encode_fill_f32(base.ctx, &enc, &moe_group_inner_pack_p, 0.0)?;
+                        } else {
+                            encode_prefill_moe_grouped_swiglu(
+                                base.ctx,
+                                &enc,
+                                moe,
+                                &h_pack_p,
+                                &moe_group_count_pack,
+                                &moe_group_ids_pack,
+                                &moe_group_inner_pack_p,
+                                h,
+                                f_exp,
+                                n_expert,
+                                topk,
+                                chunk_p,
+                                grouped_q4_n32_all,
+                                hot_expert_min_slots,
+                            )?;
+                        }
                         if zero_grouped_buffers {
                             encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
                         }
-                        encode_prefill_moe_grouped_down(
-                            base.ctx,
-                            &enc,
-                            &moe.down_exps,
-                            &moe_group_inner_pack_p,
-                            &moe_group_count_pack,
-                            &moe_group_ids_pack,
-                            &moe_group_out_pack_p,
-                            f_exp,
-                            h,
-                            n_expert,
-                            chunk_p,
-                        )?;
-                        crate::metal::encode_moe_weighted_sum_packed_f32(
-                            base.ctx,
-                            &enc,
-                            &moe_group_out_pack_p,
-                            &moe_topk_weight_pack_p,
-                            &moe_mixer_out_pack_p,
-                            h,
-                            topk,
-                            chunk_p,
-                        )?;
+                        if noop_grouped_down {
+                            encode_fill_f32(base.ctx, &enc, &moe_group_out_pack_p, 0.0)?;
+                        } else {
+                            encode_prefill_moe_grouped_down(
+                                base.ctx,
+                                &enc,
+                                &moe.down_exps,
+                                &moe_group_inner_pack_p,
+                                &moe_group_count_pack,
+                                &moe_group_ids_pack,
+                                &moe_group_out_pack_p,
+                                f_exp,
+                                h,
+                                n_expert,
+                                chunk_p,
+                            )?;
+                        }
+                        if noop_grouped_down || noop_grouped_reduce {
+                            encode_fill_f32(base.ctx, &enc, &moe_mixer_out_pack_p, 0.0)?;
+                        } else {
+                            crate::metal::encode_moe_weighted_sum_packed_f32(
+                                base.ctx,
+                                &enc,
+                                &moe_group_out_pack_p,
+                                &moe_topk_weight_pack_p,
+                                &moe_mixer_out_pack_p,
+                                h,
+                                topk,
+                                chunk_p,
+                            )?;
+                        }
                         encode_mat_mat_dispatch(
                             base.ctx,
                             &enc,
@@ -7711,7 +7729,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             }
                             if !fused_grouped_finalizer {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                if noop_grouped_down {
+                                if noop_grouped_down || noop_grouped_reduce {
                                     encode_fill_f32(base.ctx, &enc, &moe_mixer_out_pack_p, 0.0)?;
                                 } else {
                                     crate::metal::encode_moe_weighted_sum_packed_f32(
@@ -7797,7 +7815,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 )?;
                             }
                             if !fused_grouped_finalizer {
-                                if noop_grouped_down {
+                                if noop_grouped_down || noop_grouped_reduce {
                                     encode_fill_f32(base.ctx, &enc, &moe_mixer_out_pack_p, 0.0)?;
                                 } else {
                                     crate::metal::encode_moe_weighted_sum_packed_f32(

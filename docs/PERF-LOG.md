@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-05 — v0.258 BF16 Tiny-Down Probe Regresses
+
+Status: tried and reverted a default-off BF16 `<8` down probe modeled after the
+Q5 tiny-down `MR16/NR8` one-simdgroup work unit. Raw artifacts:
+`target/profiles/v0258-a3b-bf16-pp512-tiny-down-bin-trace.log`,
+`target/profiles/v0258-a3b-bf16-pp512-tiny-down-bin-trace-summary.tsv`, and
+`target/profiles/v0258-a3b-bf16-pp512-tiny-down-sweep.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- A3B BF16 `pp512` bfloat-act bin trace with tiny-down forced
+- A3B BF16 `pp512` bfloat-act/tiny-down repeat sweep
+
+| Model | Shape | Variant | t/s | GPU ms/token | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| A3B BF16 | `pp512` | bfloat-act | `64.14` / `94.47` | `13.696` / `10.278` | repeat blocks |
+| A3B BF16 | `pp512` | BF16 tiny down | `57.35` / `80.41` | `15.161` / `12.206` | regression |
+
+Read: the naive tiny-bucket reset is not enough. The forced trace leaves
+`routed_down_lt8` at `84.98 ms`, slightly worse than the v0.257 baseline
+`81.14 ms`, and the non-trace repeat regresses wall/GPU time in both blocks.
+Do not retread the Q5 tiny-down clone for BF16. A viable tiny-bucket branch must
+change more than `MR16/NR8` tiling, or it should arrive as part of a broader
+`mul_mm_id`-style routed projection sidecar.
+
 ## 2026-06-05 — v0.257 BF16 Bin Trace Finds Tiny-Bucket Waste
 
 Status: extended the default-off MoE bucket-bin phase trace to BF16 grouped

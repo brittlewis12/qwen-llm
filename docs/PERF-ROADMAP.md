@@ -109,9 +109,10 @@ Current caveats:
   v0.257 bucket-bin trace says the expert-projection loss is not uniform:
   `<8` buckets are `6-17x` slower per slot than `>=64` buckets, while hot buckets
   still dominate aggregate SwiGLU at `pp1024`. The remaining BF16 work should be
-  a deeper `mul_mm_id`/layout parity probe for routed expert projections or a
-  tiny-bin work-unit reset, not route/reduce/finalizer or another local
-  routed-SwiGLU tile tweak.
+  a deeper `mul_mm_id`/layout parity probe for routed expert projections, not
+  route/reduce/finalizer or another local routed-SwiGLU tile tweak. v0.258
+  specifically kills a Q5-style BF16 tiny-down `MR16/NR8` clone; any tiny-bin
+  reset must change the work unit more deeply.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
@@ -697,8 +698,9 @@ Current rank after v0.256:
    missing bucket. v0.257 bin traces show `<8` buckets are pathological per slot,
    but hot `>=64` buckets still carry the largest aggregate SwiGLU at `pp1024`.
    Next BF16 work must target actual llama.cpp `mul_mm_id` expert projection
-   layout/dataflow or a tiny-bucket work-unit reset, with a large wall gate, or be
-   demoted behind primary-family guardrails.
+   layout/dataflow or a deeper tiny-bucket work-unit reset, with a large wall
+   gate, or be demoted behind primary-family guardrails. v0.258 kills the naive
+   Q5-style BF16 tiny-down clone.
 2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

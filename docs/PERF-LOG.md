@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-05 — v0.261 A10B pp128 Is A Warmth Methodology Gap
+
+Status: re-anchored the stale A10B very-short prefill caveat against pinned
+llama.cpp. Raw artifacts:
+`target/profiles/v0261-a10b-pp128-paired-residual.json`,
+`target/profiles/v0261-a10b-pp128-warm-residency-sweep.json`, and
+`target/profiles/v0261-a10b-pp128-warm-paired.json`.
+
+| Model | Shape | Variant | qwen | llama.cpp | qwen/lcpp | Read |
+| --- | ---: | --- | ---: | ---: | ---: | --- |
+| A10B Q4_K_XL | `pp128` | default block 0 | `202.13` | `256.14` | `0.789` | cold outlier |
+| A10B Q4_K_XL | `pp128` | default block 1 | `160.97` | `256.24` | `0.628` | cold outlier |
+| A10B Q4_K_XL | `pp128` | warm banks | `284.20` | `256.47` | `1.108` | steady-state win |
+
+Qwen-only repeat with `QWEN_PP_WARM_MOE_BANKS=1` or `QWEN_PP_RESIDENCY_SET=1`
+is stable around `283-284 t/s`, while default samples show first measured reps
+as low as `57.95-151.52 t/s` and warm reps around `188-283 t/s`.
+
+Read: the primary A10B `pp128` residual is still not a kernel-roadmap item. It is
+expert-bank first-touch / residency methodology. Do not chase A10B pp128 kernels
+from default cold averages; use explicit warm-bank/residency knobs when asking a
+steady-state question, and keep outer wall visible because the warm touch is not
+free.
+
 ## 2026-06-05 — v0.259 BF16 Hot-SwiGLU Sidecar Regresses
 
 Status: tried and reverted a default-off hot-only BF16 SwiGLU sidecar behind

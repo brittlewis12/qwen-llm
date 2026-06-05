@@ -81,11 +81,11 @@ Current caveats:
   correctness-safe but regressed 0.8B `pp512`. The remaining high-EV branch is
   deeper short-prompt FFN/GDN projection mechanics, especially the 0.8B and 2B
   `pp512` cells.
-- A10B very-short prefill remains a real uncovered corner: the b9481 repeat had
-  `pp128` at `0.852x` even though `pp512+` and `tg128` were won/parity. The
-  v0.204 G16 threshold cleanup moves qwen-only `pp128` from `~220-223 t/s` to
-  `~242-246 t/s` averaged, with warmed samples above `280 t/s`; it is improved
-  but not yet a cold-average pinned-lcpp win.
+- A10B very-short prefill is not a kernel-roadmap item unless a warmed paired row
+  regresses. The v0.261 default `pp128` paired repeat still loses from cold
+  first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
+  same-session steady-state win (`284.20` qwen versus `256.47` llama.cpp,
+  `1.108x`). Keep outer wall visible because the warm touch is not free.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -533,7 +533,9 @@ Recent confirmed wins:
   a steady-state runtime miss. Bench-only `QWEN_PP_WARM_MOE_BANKS=1` and
   `QWEN_PP_RESIDENCY_SET=1` collapse the cold outliers while leaving steady-state
   `pp320/pp512` flat, so treat them as benchmark methodology knobs rather than a
-  top runtime roadmap item.
+  top runtime roadmap item. v0.261 re-confirms this on the current stack:
+  default paired `pp128` loses from cold outliers, while warm-bank paired `pp128`
+  wins pinned llama.cpp at `1.108x`.
 
 - `qwen-bench pp` now exposes a phase-matched prompt-only harness and lowering
   summary for dense/MoE prompt work. It confirmed the dense `pp320` miss is real

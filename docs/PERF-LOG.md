@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-05 — v0.259 BF16 Hot-SwiGLU Sidecar Regresses
+
+Status: tried and reverted a default-off hot-only BF16 SwiGLU sidecar behind
+`QWEN_PREFILL_MOE_BF16_HOT_SWIGLU_SEPARATE=1`. The probe kept cold buckets on
+the fused grouped kernel, used separate `NR1=32` BF16 projections for experts
+with `count >= 64`, then applied grouped `silu_mul`. Raw artifacts:
+`target/profiles/v0259-a3b-bf16-pp512-hot-swiglu-separate-sweep.json`,
+`target/profiles/v0259-a3b-bf16-pp1024-hot-swiglu-separate-sweep.json`, and
+`target/profiles/v0259-a3b-bf16-pp512-hot-swiglu-separate-trace-summary.tsv`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- A3B BF16 `pp512` bfloat-act/hot-separate repeat sweep
+- A3B BF16 `pp1024` bfloat-act/hot-separate sweep
+- A3B BF16 `pp512` hot-separate phase trace
+
+| Model | Shape | Variant | t/s | GPU ms/token | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| A3B BF16 | `pp512` | bfloat-act | `61.39` / `74.90` | `15.288` / `13.102` | repeat blocks |
+| A3B BF16 | `pp512` | hot separate | `63.23` / `65.19` | `13.329` / `15.097` | mixed/regressive |
+| A3B BF16 | `pp1024` | bfloat-act | `142.37` | `6.853` | one block |
+| A3B BF16 | `pp1024` | hot separate | `116.59` | `7.297` | clear regression |
+
+Read: a small llama.cpp-shaped hot projection graft does not crack BF16 SwiGLU.
+It adds separate gate/up projection and grouped elementwise traffic, and the
+`pp1024` cell regresses exactly where hot buckets should have helped. Combined
+with v0.254's all-slot separate gate/up falsifier, stop pursuing separable
+gate/up projection grafts unless a full `mul_mm_id` sidecar changes more of the
+graph at once. BF16 should be demoted behind primary-family guardrails unless a
+larger structural probe is deliberately scheduled.
+
 ## 2026-06-05 — v0.258 BF16 Tiny-Down Probe Regresses
 
 Status: tried and reverted a default-off BF16 `<8` down probe modeled after the

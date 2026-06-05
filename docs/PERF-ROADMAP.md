@@ -689,39 +689,34 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.256:
+Current rank after v0.259:
 
-1. BF16 A3B routed expert projection shape: grouped BF16 MoE restores the
-   sharded BF16 A3B audit to `40/40`, but paired v0.253 rows keep BF16 far behind
-   llama.cpp even with the bfloat-activation sidecar (`0.099x` at `pp512`,
-   `0.180x` at `pp1024`). v0.254 kills per-layer command-buffer splitting and a
-   separate `NR1=32` gate/up sidecar; v0.255-v0.256 wall no-ops re-center the
-   catastrophic budget on routed MoE while ruling out weighted-sum/reduce as the
-   missing bucket. v0.257 bin traces show `<8` buckets are pathological per slot,
-   but hot `>=64` buckets still carry the largest aggregate SwiGLU at `pp1024`.
-   v0.258 kills the naive Q5-style BF16 tiny-down clone, and v0.259 kills a
-   hot-only separate gate/up `NR1=32` SwiGLU graft. BF16 is now a demoted red
-   cell unless we deliberately schedule a full `mul_mm_id` routed projection
-   sidecar with a large wall gate.
-2. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
+1. Promotion-grade paired residual search: only reopen dense 27B, A3B MoE, or
    A10B MoE kernel work if a same-session paired repeat exposes a real gap. The
    latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at
    `1.16x/1.17x/1.07x`, and A10B at `1.13x/1.33x/1.05x` for
    `pp1024/pp4096/tg128`; real-rollout rows are also won at `1.03x/1.07x/1.16x`
    for 27B/A3B/A10B respectively.
-3. True-long and chunk-policy guardrails: real prompts are clean, but candidate
+2. True-long and chunk-policy guardrails: real prompts are clean, but candidate
    long-prompt changes still need synthetic `pp16384+` plus real message rows.
    `prefill_chunk=1024` remains a safe default cap, not a proven optimum.
-4. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
+3. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
    and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work
    only when a paired file or static audit exposes a fresh miss.
-5. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+4. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured
    `moe_inner` activations rather than another synthetic row-stride oracle.
+5. BF16 A3B full structural sidecar: grouped BF16 MoE restores the sharded A3B
+   audit to `40/40`, but paired v0.253 rows remain far behind llama.cpp even with
+   the bfloat-activation sidecar (`0.099x` at `pp512`, `0.180x` at `pp1024`).
+   v0.254-v0.259 kill command-buffer splitting, separate `NR1=32` gate/up,
+   reduce/finalizer focus, Q5-style tiny-down, and hot-only separate SwiGLU. BF16
+   is now a demoted red cell unless we deliberately schedule a full `mul_mm_id`
+   routed projection sidecar with a large wall gate.
 6. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,

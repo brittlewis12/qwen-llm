@@ -98,7 +98,11 @@ Current caveats:
   Remaining quant risk is no longer this known A3B MoE file; it is BF16 prompt
   performance after v0.249 restored `40/40` grouped MoE coverage, unmeasured
   expert-bank combinations outside the local target set, plus dense UD files with
-  `IQ2/IQ3` tensors.
+  `IQ2/IQ3` tensors. The v0.254 BF16 probes falsified two tempting local exits:
+  per-layer command-buffer splitting did not improve wall time, and a more
+  llama-like separate `NR1=32` BF16 gate/up sidecar was only `~3%` at `pp512`.
+  The remaining BF16 work should be graph-wide `mul_mm`/`mul_mm_id` parity and
+  wall-clock paired attribution, not another routed-SwiGLU tile tweak.
 
 Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 

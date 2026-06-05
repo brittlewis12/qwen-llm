@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-04 — v0.254 BF16 Llama-Isomorphic Falsifiers Stay Small
+
+Status: tried two default-off BF16 diagnostics and reverted both code probes after
+they failed keep gates. Raw artifacts are in
+`target/profiles/v0254-a3b-bf16-pp512-layer-commit-sweep.json`,
+`target/profiles/v0254-a3b-bf16-pp512-layer-async-repeat.json`,
+`target/profiles/v0254-a3b-bf16-pp512-separate-gateup-repeat.json`, and
+`target/profiles/v0254-a3b-bf16-pp512-separate-gateup-trace-summary.tsv`.
+
+| Model | Shape | Variant | t/s | GPU ms/token | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| A3B BF16 | `pp512` | bfloat-act | `79.76` | `12.047` | repeat block 1 |
+| A3B BF16 | `pp512` | separate BF16 gate/up | `82.33` | `11.800` | `+3.2%`, below gate |
+| A3B BF16 | `pp512` | bfloat-act | `94.36` | `10.202` | async repeat block 1 |
+| A3B BF16 | `pp512` | async layer commit | `90.44` | `1.128` | wall regressed, GPU metric misleading |
+
+Read: the BF16 routed-SwiGLU fused `NR1=16` hypothesis is not the missing
+llama.cpp delta. A separate `NR1=32` gate/up projection sidecar only gave a
+small noisy end-to-end lift and its traced routed bucket was not better. The
+layer-command-buffer probes also failed as production tactics and exposed an
+important attribution warning: once a run changes command-buffer granularity,
+`avg_gpu_ns` is no longer comparable to the one-command-buffer baseline even
+when wall time is. Keep BF16 focused on graph-wide llama.cpp `mul_mm`/`mul_mm_id`
+mechanics and wall-clock paired rows, not command-buffer GPU timestamp deltas.
+
 ## 2026-06-04 — v0.253 BF16 Differential Keeps The Gap Structural
 
 Status: ran fresh paired BF16 A3B comparisons against pinned llama.cpp and

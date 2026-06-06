@@ -43,6 +43,14 @@ use std::sync::{Arc, OnceLock};
 
 thread_local! {
     static ATTN_V4_GROUP_TILE_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    static KERNEL_TRACE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static KERNEL_TRACE_COUNTERS: Cell<KernelTraceCounters> = const {
+        Cell::new(KernelTraceCounters {
+            encoders: 0,
+            concurrent_encoders: 0,
+            dispatches: 0,
+        })
+    };
 }
 
 use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layout};
@@ -74,6 +82,63 @@ pub enum MetalError {
     TensorSizeOverflow { shape: Vec<u64>, elem_bytes: usize },
     #[error("tensor byte size overflow: shape={shape:?}, dtype={dtype:?} does not fit")]
     TensorByteSizeOverflow { shape: Vec<u64>, dtype: GgmlType },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KernelTraceCounters {
+    pub encoders: u64,
+    pub concurrent_encoders: u64,
+    pub dispatches: u64,
+}
+
+#[must_use]
+pub struct KernelTraceGuard {
+    previous: bool,
+}
+
+impl Drop for KernelTraceGuard {
+    fn drop(&mut self) {
+        KERNEL_TRACE_ACTIVE.with(|active| active.set(self.previous));
+    }
+}
+
+pub fn kernel_trace_begin() -> KernelTraceGuard {
+    KERNEL_TRACE_COUNTERS.with(|counters| counters.set(KernelTraceCounters::default()));
+    let previous = KERNEL_TRACE_ACTIVE.with(|active| {
+        let previous = active.get();
+        active.set(true);
+        previous
+    });
+    KernelTraceGuard { previous }
+}
+
+pub fn kernel_trace_snapshot() -> KernelTraceCounters {
+    KERNEL_TRACE_COUNTERS.with(|counters| counters.get())
+}
+
+fn kernel_trace_record_encoder(concurrent: bool) {
+    if !KERNEL_TRACE_ACTIVE.with(|active| active.get()) {
+        return;
+    }
+    KERNEL_TRACE_COUNTERS.with(|counters| {
+        let mut current = counters.get();
+        current.encoders += 1;
+        if concurrent {
+            current.concurrent_encoders += 1;
+        }
+        counters.set(current);
+    });
+}
+
+fn kernel_trace_record_dispatch() {
+    if !KERNEL_TRACE_ACTIVE.with(|active| active.get()) {
+        return;
+    }
+    KERNEL_TRACE_COUNTERS.with(|counters| {
+        let mut current = counters.get();
+        current.dispatches += 1;
+        counters.set(current);
+    });
 }
 
 /// Checked element-count and byte-size computation for a tensor shape.
@@ -496,6 +561,7 @@ pub struct KernelEncoder {
 impl KernelEncoder {
     pub fn begin(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
         let raw = cmd.computeCommandEncoder().expect("compute encoder");
+        kernel_trace_record_encoder(false);
         Self { raw }
     }
 
@@ -503,6 +569,7 @@ impl KernelEncoder {
         let raw = cmd
             .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
             .expect("concurrent compute encoder");
+        kernel_trace_record_encoder(true);
         Self { raw }
     }
 
@@ -556,6 +623,7 @@ impl KernelEncoder {
     }
 
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
+        kernel_trace_record_dispatch();
         self.raw
             .dispatchThreadgroups_threadsPerThreadgroup(grid, threads);
     }

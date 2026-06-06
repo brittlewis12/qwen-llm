@@ -42,7 +42,7 @@ use crate::metal::{
     encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
     encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_split_qkv_fused_f32,
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32, kernel_trace_begin, kernel_trace_snapshot,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalMoeFfn, MetalSession, RMS_EPS, checked_u64_add,
@@ -5109,6 +5109,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         let mut cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
         let trace_layer_phases = prefill_trace_layer_phases_enabled();
         let trace_wall = prefill_trace_wall_enabled();
+        let _kernel_trace_guard = trace_wall.then(kernel_trace_begin);
         let trace_moe_buckets = trace_layer_phases && prefill_trace_moe_buckets_enabled();
 
         // Sized views of layer_scratch sliced to chunk_p. Every encoder
@@ -9135,8 +9136,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 );
             }
             if trace_wall {
+                let kernel_trace = kernel_trace_snapshot();
                 eprintln!(
-                    "[prefill-wall] idx={} start={} tokens={} last=1 tail={} setup_ms={:.3} encode_ms={:.3} commit_ms={:.3} wait_ms={:.3} readback_ms={:.3} gpu_ms={:.3} wall_ms={:.3} cumulative_gpu_ms={:.3}",
+                    "[prefill-wall] idx={} start={} tokens={} last=1 tail={} setup_ms={:.3} encode_ms={:.3} commit_ms={:.3} wait_ms={:.3} readback_ms={:.3} encoders={} concurrent_encoders={} dispatches={} gpu_ms={:.3} wall_ms={:.3} cumulative_gpu_ms={:.3}",
                     chunk_idx,
                     chunk_start,
                     chunk_p,
@@ -9150,6 +9152,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     (after_commit - before_commit).as_secs_f64() * 1e3,
                     (after_wait - after_commit).as_secs_f64() * 1e3,
                     tail_readback_ms,
+                    kernel_trace.encoders,
+                    kernel_trace.concurrent_encoders,
+                    kernel_trace.dispatches,
                     chunk_gpu_ms,
                     chunk_wall_ms,
                     prefill_gpu_total_ms,
@@ -9180,8 +9185,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             );
         }
         if trace_wall {
+            let kernel_trace = kernel_trace_snapshot();
             eprintln!(
-                "[prefill-wall] idx={} start={} tokens={} last=0 tail=skip setup_ms={:.3} encode_ms={:.3} commit_ms={:.3} wait_ms={:.3} readback_ms=0.000 gpu_ms={:.3} wall_ms={:.3} cumulative_gpu_ms={:.3}",
+                "[prefill-wall] idx={} start={} tokens={} last=0 tail=skip setup_ms={:.3} encode_ms={:.3} commit_ms={:.3} wait_ms={:.3} readback_ms=0.000 encoders={} concurrent_encoders={} dispatches={} gpu_ms={:.3} wall_ms={:.3} cumulative_gpu_ms={:.3}",
                 chunk_idx,
                 chunk_start,
                 chunk_p,
@@ -9189,6 +9195,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 (before_commit - chunk_encode_start).as_secs_f64() * 1e3,
                 (after_commit - before_commit).as_secs_f64() * 1e3,
                 (after_wait - after_commit).as_secs_f64() * 1e3,
+                kernel_trace.encoders,
+                kernel_trace.concurrent_encoders,
+                kernel_trace.dispatches,
                 chunk_gpu_ms,
                 chunk_wall_ms,
                 prefill_gpu_total_ms,

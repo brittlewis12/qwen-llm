@@ -39,7 +39,12 @@ use objc2_metal::{
 use parking_lot::Mutex;
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
+
+static KERNEL_TRACE_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static ATTN_V4_GROUP_TILE_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
@@ -103,6 +108,7 @@ impl Drop for KernelTraceGuard {
 }
 
 pub fn kernel_trace_begin() -> KernelTraceGuard {
+    KERNEL_TRACE_EVER_ENABLED.store(true, Ordering::Relaxed);
     KERNEL_TRACE_COUNTERS.with(|counters| counters.set(KernelTraceCounters::default()));
     let previous = KERNEL_TRACE_ACTIVE.with(|active| {
         let previous = active.get();
@@ -116,7 +122,11 @@ pub fn kernel_trace_snapshot() -> KernelTraceCounters {
     KERNEL_TRACE_COUNTERS.with(|counters| counters.get())
 }
 
+#[inline]
 fn kernel_trace_record_encoder(concurrent: bool) {
+    if !KERNEL_TRACE_EVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     if !KERNEL_TRACE_ACTIVE.with(|active| active.get()) {
         return;
     }
@@ -130,7 +140,11 @@ fn kernel_trace_record_encoder(concurrent: bool) {
     });
 }
 
+#[inline]
 fn kernel_trace_record_dispatch() {
+    if !KERNEL_TRACE_EVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     if !KERNEL_TRACE_ACTIVE.with(|active| active.get()) {
         return;
     }

@@ -12026,6 +12026,68 @@ pub fn encode_gdn_prep_packed_f32(
         head_dim: u32,
         conv_dim: u32,
     }
+    static PARALLEL: OnceLock<bool> = OnceLock::new();
+    let use_parallel = *PARALLEL.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PREFILL_GDN_PREP_PARALLEL").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    });
+    if use_parallel && n_tokens >= 3 {
+        let args = Args {
+            n_tokens: n_tokens as u32,
+            n_k_heads: n_k_heads as u32,
+            n_v_heads: n_v_heads as u32,
+            head_dim: head_dim as u32,
+            conv_dim: conv_dim as u32,
+        };
+        let pso = ctx.pipeline("kernel_gdn_prep_parallel_f32")?;
+        enc.set_pipeline(&pso);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(1, qkv_pack);
+        enc.set_tensor(2, conv_buf);
+        enc.set_tensor(3, conv_w);
+        enc.set_tensor(4, q_pack);
+        enc.set_tensor(5, k_pack);
+        enc.set_tensor(6, v_pack);
+        let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(256);
+        let total = n_tokens * conv_dim;
+        let n_tg = total.div_ceil(tg_threads);
+        enc.dispatch(
+            MTLSize {
+                width: n_tg,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: tg_threads,
+                height: 1,
+                depth: 1,
+            },
+        );
+
+        let pso = ctx.pipeline("kernel_gdn_prep_parallel_state_f32")?;
+        enc.set_pipeline(&pso);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(1, qkv_pack);
+        enc.set_tensor(2, conv_buf);
+        let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(256);
+        let total = 3 * conv_dim;
+        let n_tg = total.div_ceil(tg_threads);
+        enc.dispatch(
+            MTLSize {
+                width: n_tg,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: tg_threads,
+                height: 1,
+                depth: 1,
+            },
+        );
+        return Ok(());
+    }
     let pso = ctx.pipeline("kernel_gdn_prep_packed_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(

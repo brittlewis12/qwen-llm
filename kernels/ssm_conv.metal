@@ -130,6 +130,61 @@ kernel void kernel_gdn_prep_packed_f32(
     }
 }
 
+kernel void kernel_gdn_prep_parallel_f32(
+        constant gdn_prep_packed_args & args [[buffer(0)]],
+        device const float * qkv_pack  [[buffer(1)]], // [n_tokens, conv_dim]
+        device const float * conv_buf  [[buffer(2)]], // [K-1, conv_dim]
+        device const float * conv_w    [[buffer(3)]], // [conv_dim, K]
+        device       float * q_pack    [[buffer(4)]], // [n_tokens, n_k_heads, head_dim]
+        device       float * k_pack    [[buffer(5)]], // [n_tokens, n_k_heads, head_dim]
+        device       float * v_pack    [[buffer(6)]], // [n_tokens, n_v_heads, head_dim]
+        uint tid [[thread_position_in_grid]]) {
+    const ulong total = (ulong)args.n_tokens * args.conv_dim;
+    if ((ulong)tid >= total) return;
+
+    const uint c = tid % args.conv_dim;
+    const uint tok = tid / args.conv_dim;
+    const uint cd = args.conv_dim;
+    const uint qk_dim = args.n_k_heads * args.head_dim;
+    const uint v_dim = args.n_v_heads * args.head_dim;
+
+    device const float * w = conv_w + (ulong)c * CONV_K;
+    float s = 0.0f;
+    for (int k = 0; k < CONV_K; ++k) {
+        const int src_t = int(tok) + k - (CONV_K - 1);
+        const float x = (src_t < 0)
+            ? conv_buf[(ulong)(src_t + (CONV_K - 1)) * cd + c]
+            : qkv_pack[(ulong)src_t * cd + c];
+        s += w[k] * x;
+    }
+    const float out = s / (1.0f + exp(-s));
+
+    if (c < qk_dim) {
+        q_pack[(ulong)tok * qk_dim + c] = out;
+    } else if (c < 2 * qk_dim) {
+        k_pack[(ulong)tok * qk_dim + (c - qk_dim)] = out;
+    } else {
+        v_pack[(ulong)tok * v_dim + (c - 2 * qk_dim)] = out;
+    }
+}
+
+kernel void kernel_gdn_prep_parallel_state_f32(
+        constant gdn_prep_packed_args & args [[buffer(0)]],
+        device const float * qkv_pack  [[buffer(1)]], // [n_tokens, conv_dim]
+        device       float * conv_buf  [[buffer(2)]], // [K-1, conv_dim]
+        uint tid [[thread_position_in_grid]]) {
+    const uint total = (CONV_K - 1) * args.conv_dim;
+    if (tid >= total) return;
+
+    const uint row = tid / args.conv_dim;
+    const uint c = tid % args.conv_dim;
+    const int src_t = int(args.n_tokens) - (CONV_K - 1) + int(row);
+    const float x = (src_t < 0)
+        ? conv_buf[(ulong)(src_t + (CONV_K - 1)) * args.conv_dim + c]
+        : qkv_pack[(ulong)src_t * args.conv_dim + c];
+    conv_buf[(ulong)row * args.conv_dim + c] = x;
+}
+
 // RMSNormGated: post-GDN-recurrence norm with a gating output.
 //
 //   y[hi, dv] = norm(o[hi, dv]) * silu(z[hi, dv])

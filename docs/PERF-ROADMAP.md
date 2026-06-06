@@ -83,10 +83,11 @@ Current caveats:
   no longer a clean single-kernel story. v0.265 wall reconciliation shows 0.8B
   `pp512` CPU setup/encode/commit is only `~0.17-0.28 ms`; wall is dominated by
   GPU wait, with GPU timestamps at `~65.9-66.0 ms`. Patched local llama.cpp op
-  profiles put FFN and GDN-ish aggregates in the same broad range as qwen. Keep
-  attention, N64 tile policy, residual-add epilogues, shared-memory policy, and
-  CPU orchestration off the primary branch unless fresh accounting contradicts
-  this.
+  profiles put FFN and GDN-ish aggregates in the same broad range as qwen. v0.267
+  counts `205` compute encoders and `433` dispatches for both 0.8B and 2B Q4
+  `pp512`, so this is not an 0.8B-only dispatch-count explosion. Keep attention,
+  N64 tile policy, residual-add epilogues, shared-memory policy, and CPU
+  orchestration off the primary branch unless fresh accounting contradicts this.
 - A10B very-short prefill is not a kernel-roadmap item unless a warmed paired row
   regresses. The v0.261 default `pp128` paired repeat still loses from cold
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
@@ -697,17 +698,17 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.265:
+Current rank after v0.267:
 
 1. Small dense `pp512` distributed GPU residual: 2B Q4 is nearly closed
    (`0.971x/0.982x`), but 0.8B paired is still `0.940x`. v0.263/v0.264 remove
    the obvious fused-FFN and N64-policy misses; v0.265 shows CPU encode/commit is
-   not the wall and local llama.cpp op profiles do not reveal a huge named-kernel
-   delta. Next work should account for production GPU work more tightly: command
-   encoder count, small untraced kernels, GDN prep/gated packaging, and any
-   one-command-buffer scheduling gaps. Do not retread attention, fast-path
-   coverage, residual-add fusion, N64 policy, shared-memory policy, command-buffer
-   streaming, or GDN matvec fallback.
+   not the wall; v0.267 shows 0.8B and 2B have the same production count of `205`
+   encoders and `433` dispatches. Next work should locate dispatch clusters rather
+   than count totals: small untraced kernels, GDN prep/gated packaging, and any
+   llama.cpp graph-shape delta that makes the same math cheaper at 0.8B. Do not
+   retread attention, fast-path coverage, residual-add fusion, N64 policy,
+   shared-memory policy, command-buffer streaming, or GDN matvec fallback.
 2. Promotion-grade paired residual search for the main family: only reopen dense
    27B, A3B MoE, or A10B MoE kernel work if a same-session paired repeat exposes
    a real gap. The latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

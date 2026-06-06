@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-06 — v0.267 Add Prefill Kernel Dispatch Counters
+
+Status: extended `QWEN_PREFILL_TRACE_WALL=1` with trace-only encoder and
+dispatch counts, then added a cold process-wide guard so disabled runs avoid
+thread-local counter traffic. Raw artifacts:
+`target/profiles/v0267-0p8b-q4-pp512-wall-count.log`,
+`target/profiles/v0267-0p8b-q4-pp512-wall-count.out`,
+`target/profiles/v0267-2b-q4-pp512-wall-count.log`, and
+`target/profiles/v0267-2b-q4-pp512-wall-count.out`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- 0.8B and 2B Q4 `pp512` clean wall-count traces
+
+Both dense 0.8B and 2B `pp512` emit `205` compute encoders and `433`
+dispatches in the production-shaped packed prefill path. Warm timed rows:
+
+| Model | encode ms | GPU ms | wall ms | encoders | dispatches |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0.8B Q4_K_M run 2 | `0.198` | `66.074` | `69.149` | `205` | `433` |
+| 0.8B Q4_K_M run 3 | `0.200` | `65.797` | `68.656` | `205` | `433` |
+| 2B Q4_K_M run 2 | `0.154` | `141.179` | `144.350` | `205` | `433` |
+| 2B Q4_K_M run 3 | `0.133` | `140.899` | `143.272` | `205` | `433` |
+
+Read: the remaining 0.8B gap is not an accidental 0.8B-only dispatch-count
+explosion. Fixed GPU-side dispatch/packaging cost can still matter more at 0.8B
+because the math budget is smaller, but the next evidence should locate which
+dispatch clusters differ from llama.cpp or are mergeable. Do not infer that a
+total count alone justifies another broad kernel rewrite.
+
 ## 2026-06-06 — v0.265 Add Small-Dense Wall Reconciliation Trace
 
 Status: added `QWEN_PREFILL_TRACE_WALL=1`, a low-overhead chunk-level wall trace

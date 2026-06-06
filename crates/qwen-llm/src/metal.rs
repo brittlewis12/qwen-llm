@@ -56,6 +56,13 @@ thread_local! {
             dispatches: 0,
         })
     };
+    static KERNEL_TRACE_LAST: Cell<KernelTraceCounters> = const {
+        Cell::new(KernelTraceCounters {
+            encoders: 0,
+            concurrent_encoders: 0,
+            dispatches: 0,
+        })
+    };
 }
 
 use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layout};
@@ -96,6 +103,22 @@ pub struct KernelTraceCounters {
     pub dispatches: u64,
 }
 
+impl KernelTraceCounters {
+    pub fn is_zero(self) -> bool {
+        self.encoders == 0 && self.concurrent_encoders == 0 && self.dispatches == 0
+    }
+
+    fn saturating_sub(self, previous: Self) -> Self {
+        Self {
+            encoders: self.encoders.saturating_sub(previous.encoders),
+            concurrent_encoders: self
+                .concurrent_encoders
+                .saturating_sub(previous.concurrent_encoders),
+            dispatches: self.dispatches.saturating_sub(previous.dispatches),
+        }
+    }
+}
+
 #[must_use]
 pub struct KernelTraceGuard {
     previous: bool,
@@ -110,6 +133,7 @@ impl Drop for KernelTraceGuard {
 pub fn kernel_trace_begin() -> KernelTraceGuard {
     KERNEL_TRACE_EVER_ENABLED.store(true, Ordering::Relaxed);
     KERNEL_TRACE_COUNTERS.with(|counters| counters.set(KernelTraceCounters::default()));
+    KERNEL_TRACE_LAST.with(|last| last.set(KernelTraceCounters::default()));
     let previous = KERNEL_TRACE_ACTIVE.with(|active| {
         let previous = active.get();
         active.set(true);
@@ -120,6 +144,15 @@ pub fn kernel_trace_begin() -> KernelTraceGuard {
 
 pub fn kernel_trace_snapshot() -> KernelTraceCounters {
     KERNEL_TRACE_COUNTERS.with(|counters| counters.get())
+}
+
+pub fn kernel_trace_take_delta() -> KernelTraceCounters {
+    let current = kernel_trace_snapshot();
+    KERNEL_TRACE_LAST.with(|last| {
+        let previous = last.get();
+        last.set(current);
+        current.saturating_sub(previous)
+    })
 }
 
 #[inline]

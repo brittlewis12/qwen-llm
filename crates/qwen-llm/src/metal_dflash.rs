@@ -43,6 +43,7 @@ use crate::metal::{
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
     encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_split_qkv_fused_f32,
     encode_topk_logits_softmax_dot_sigmoid_packed_f32, kernel_trace_begin, kernel_trace_snapshot,
+    kernel_trace_take_delta,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalMoeFfn, MetalSession, RMS_EPS, checked_u64_add,
@@ -989,6 +990,11 @@ fn prefill_trace_wall_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_WALL"))
 }
 
+fn prefill_trace_counts_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_COUNTS"))
+}
+
 fn prefill_trace_attn_phases_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_ATTN_PHASES"))
@@ -1087,6 +1093,14 @@ fn flush_prefill_phase(
     layer_idx: usize,
     phase: &str,
 ) {
+    emit_prefill_count_phase(
+        prefill_trace_counts_enabled(),
+        chunk_idx,
+        chunk_start,
+        layer_idx,
+        "attn-detail",
+        phase,
+    );
     if !enabled {
         return;
     }
@@ -1101,6 +1115,34 @@ fn flush_prefill_phase(
     *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
 }
 
+fn emit_prefill_count_phase(
+    enabled: bool,
+    chunk_idx: usize,
+    chunk_start: u32,
+    layer_idx: usize,
+    kind: &str,
+    phase: &str,
+) {
+    if !enabled {
+        return;
+    }
+    let delta = kernel_trace_take_delta();
+    if delta.is_zero() {
+        return;
+    }
+    eprintln!(
+        "[prefill-count-phase] chunk={} start={} layer={} kind={} phase={} encoders={} concurrent_encoders={} dispatches={}",
+        chunk_idx,
+        chunk_start,
+        layer_idx,
+        kind,
+        phase,
+        delta.encoders,
+        delta.concurrent_encoders,
+        delta.dispatches,
+    );
+}
+
 fn flush_prefill_layer_phase(
     ctx: &MetalContext,
     cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -1112,6 +1154,14 @@ fn flush_prefill_layer_phase(
     kind: &str,
     phase: &str,
 ) {
+    emit_prefill_count_phase(
+        prefill_trace_counts_enabled(),
+        chunk_idx,
+        chunk_start,
+        layer_idx,
+        kind,
+        phase,
+    );
     if !enabled {
         return;
     }
@@ -3973,7 +4023,6 @@ pub fn encode_packed_verify_layer_major_inner(
             )?;
             enc.end();
         }
-
         // 2b: mixer. Two paths.
         //
         //   GDN: per-token inner loop (recurrent; can't batch over
@@ -5109,7 +5158,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         let mut cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
         let trace_layer_phases = prefill_trace_layer_phases_enabled();
         let trace_wall = prefill_trace_wall_enabled();
-        let _kernel_trace_guard = trace_wall.then(kernel_trace_begin);
+        let trace_counts = prefill_trace_counts_enabled();
+        let _kernel_trace_guard = (trace_wall || trace_counts).then(kernel_trace_begin);
         let trace_moe_buckets = trace_layer_phases && prefill_trace_moe_buckets_enabled();
 
         // Sized views of layer_scratch sliced to chunk_p. Every encoder
@@ -5142,6 +5192,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             )?;
             enc.end();
         }
+        emit_prefill_count_phase(trace_counts, chunk_idx, chunk_start, 0, "chunk", "embed");
 
         // === Phase 2: per-layer body. ===
         let mut gdn_idx = 0usize;
@@ -9102,6 +9153,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 )?;
                 enc.end();
             }
+            emit_prefill_count_phase(trace_counts, chunk_idx, chunk_start, 0, "chunk", "tail");
             let before_commit = Instant::now();
             cmd_buf.commit();
             let after_commit = Instant::now();

@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-06 — v0.270 Test Parallel GDN Prep
+
+Status: added `QWEN_PREFILL_TRACE_COUNTS=1` for non-serializing dispatch-cluster
+counts, then tested an env-gated `QWEN_PREFILL_GDN_PREP_PARALLEL=1` GDN prep
+prototype. The prototype parallelizes the depthwise conv over token and channel,
+but keeps tiny chunks on the serial path for conv-state correctness. Raw
+artifacts: `target/profiles/v0269-count-phase-summary.tsv`,
+`target/profiles/v0269-0p8b-q4-pp512-gdn-split-sweep.json`,
+`target/profiles/v0269-2b-q4-pp512-gdn-split-sweep.json`,
+`target/profiles/v0270-0p8b-q4-pp512-gdn-prep-parallel-sweep.json`,
+`target/profiles/v0270-2b-q4-pp512-gdn-prep-parallel-sweep.json`,
+`target/profiles/v0270-0p8b-q4-pp1024-gdn-prep-parallel-sweep.json`,
+`target/profiles/v0270-2b-q4-pp1024-gdn-prep-parallel-sweep.json`,
+`target/profiles/v0270-0p8b-q4-pp4096-gdn-prep-parallel-sweep.json`,
+`target/profiles/v0270-2b-q4-pp4096-gdn-prep-parallel-sweep.json`,
+`target/profiles/v0270-0p8b-q4-pp16384-gdn-prep-parallel-sweep.json`, and
+`target/profiles/v0270-2b-q4-pp16384-gdn-prep-parallel-sweep.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- Parallel GDN prep 0.8B prefill-vs-single correctness gate
+- 0.8B/2B Q4 `pp512`, `pp1024`, `pp4096`, and `pp16384` A/B sweeps
+
+Dispatch clusters are identical for 0.8B and 2B dense `pp512`: top counts are
+GDN front+alpha/beta (`108` dispatches), dense FFN (`72`), attention
+front+rope/scatter (`54`), and GDN prep (`36`). GDN split budget says the 0.8B
+GDN body is real budget (`~19-22 ms` at `pp512`), but not a single easy subphase:
+prep, step, back/out, and gated all contribute.
+
+Parallel GDN prep is correctness-safe but not default-worthy. It is flat/noise at
+0.8B `pp512/1024/4096/16384`, slightly positive only in a one-block 2B `pp4096`
+and `pp16384` spot, and regressive/noisy at 2B `pp1024`. Do not promote or
+retread this exact token-channel parallel prep shape without a new mechanism.
+
 ## 2026-06-06 — v0.267 Add Prefill Kernel Dispatch Counters
 
 Status: extended `QWEN_PREFILL_TRACE_WALL=1` with trace-only encoder and

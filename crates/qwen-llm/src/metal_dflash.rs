@@ -984,6 +984,11 @@ fn prefill_trace_chunks_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_CHUNKS"))
 }
 
+fn prefill_trace_wall_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_WALL"))
+}
+
 fn prefill_trace_attn_phases_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_ATTN_PHASES"))
@@ -5103,6 +5108,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         // commits (codex Q3 hazard), and (b) layer_scratch is reused.
         let mut cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
         let trace_layer_phases = prefill_trace_layer_phases_enabled();
+        let trace_wall = prefill_trace_wall_enabled();
         let trace_moe_buckets = trace_layer_phases && prefill_trace_moe_buckets_enabled();
 
         // Sized views of layer_scratch sliced to chunk_p. Every encoder
@@ -5118,6 +5124,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         let mixer_out_pack_p = layer_scratch
             .mixer_out_pack
             .view_subrange(0, vec![(chunk_p * h) as u64]);
+        let chunk_encode_start = Instant::now();
 
         // === Phase 1: batched embed of chunk_p tokens. ===
         {
@@ -9094,11 +9101,27 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 )?;
                 enc.end();
             }
+            let before_commit = Instant::now();
             cmd_buf.commit();
+            let after_commit = Instant::now();
             cmd_buf.waitUntilCompleted();
+            let after_wait = Instant::now();
             let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
-            let chunk_wall_ms = chunk_wall.elapsed().as_secs_f64() * 1e3;
             prefill_gpu_total_ms += chunk_gpu_ms;
+            let mut tail_readback_ms = 0.0f64;
+            let result_logits = if matches!(tail_mode, PrefillTailMode::ReadLogits) {
+                let readback_start = Instant::now();
+                let mut last_logits = vec![0.0f32; v];
+                unsafe {
+                    let src = target_session.logits.buffer.contents().as_ptr() as *const f32;
+                    std::ptr::copy_nonoverlapping(src, last_logits.as_mut_ptr(), v);
+                }
+                tail_readback_ms = readback_start.elapsed().as_secs_f64() * 1e3;
+                Some(last_logits)
+            } else {
+                None
+            };
+            let chunk_wall_ms = chunk_wall.elapsed().as_secs_f64() * 1e3;
             if prefill_trace_chunks_enabled() {
                 eprintln!(
                     "[prefill-chunk] idx={} start={} tokens={} gpu_ms={:.2} wall_ms={:.2} ms_per_tok={:.4} cumulative_gpu_ms={:.2}",
@@ -9111,20 +9134,36 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     prefill_gpu_total_ms,
                 );
             }
-            if matches!(tail_mode, PrefillTailMode::ReadLogits) {
-                let mut last_logits = vec![0.0f32; v];
-                unsafe {
-                    let src = target_session.logits.buffer.contents().as_ptr() as *const f32;
-                    std::ptr::copy_nonoverlapping(src, last_logits.as_mut_ptr(), v);
-                }
-                return Ok((Some(last_logits), prefill_gpu_total_ms));
+            if trace_wall {
+                eprintln!(
+                    "[prefill-wall] idx={} start={} tokens={} last=1 tail={} setup_ms={:.3} encode_ms={:.3} commit_ms={:.3} wait_ms={:.3} readback_ms={:.3} gpu_ms={:.3} wall_ms={:.3} cumulative_gpu_ms={:.3}",
+                    chunk_idx,
+                    chunk_start,
+                    chunk_p,
+                    if matches!(tail_mode, PrefillTailMode::ReadLogits) {
+                        "read"
+                    } else {
+                        "skip"
+                    },
+                    (chunk_encode_start - chunk_wall).as_secs_f64() * 1e3,
+                    (before_commit - chunk_encode_start).as_secs_f64() * 1e3,
+                    (after_commit - before_commit).as_secs_f64() * 1e3,
+                    (after_wait - after_commit).as_secs_f64() * 1e3,
+                    tail_readback_ms,
+                    chunk_gpu_ms,
+                    chunk_wall_ms,
+                    prefill_gpu_total_ms,
+                );
             }
-            return Ok((None, prefill_gpu_total_ms));
+            return Ok((result_logits, prefill_gpu_total_ms));
         }
 
         // Non-last chunk: just commit + wait (no tail).
+        let before_commit = Instant::now();
         cmd_buf.commit();
+        let after_commit = Instant::now();
         cmd_buf.waitUntilCompleted();
+        let after_wait = Instant::now();
         let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
         let chunk_wall_ms = chunk_wall.elapsed().as_secs_f64() * 1e3;
         prefill_gpu_total_ms += chunk_gpu_ms;
@@ -9137,6 +9176,21 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                 chunk_gpu_ms,
                 chunk_wall_ms,
                 chunk_gpu_ms / chunk_p as f64,
+                prefill_gpu_total_ms,
+            );
+        }
+        if trace_wall {
+            eprintln!(
+                "[prefill-wall] idx={} start={} tokens={} last=0 tail=skip setup_ms={:.3} encode_ms={:.3} commit_ms={:.3} wait_ms={:.3} readback_ms=0.000 gpu_ms={:.3} wall_ms={:.3} cumulative_gpu_ms={:.3}",
+                chunk_idx,
+                chunk_start,
+                chunk_p,
+                (chunk_encode_start - chunk_wall).as_secs_f64() * 1e3,
+                (before_commit - chunk_encode_start).as_secs_f64() * 1e3,
+                (after_commit - before_commit).as_secs_f64() * 1e3,
+                (after_wait - after_commit).as_secs_f64() * 1e3,
+                chunk_gpu_ms,
+                chunk_wall_ms,
                 prefill_gpu_total_ms,
             );
         }

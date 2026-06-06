@@ -80,9 +80,13 @@ Current caveats:
   v0.264 also disables Q4 N64 mat-mat tiles for small `n_query <= 512` shapes
   when either projection side is `<= 2048`, giving another `~0-1%` at 0.8B/2B
   `pp512` and narrowing 2B paired rows to `0.971x/0.982x`. The live residual is
-  still Q4 FFN projection mechanics plus secondary GDN, not attention body,
-  N64 tile policy, or residual-add epilogues: FFN split traces put residual add
-  at only `~0.54 ms` for 2B `pp512`.
+  no longer a clean single-kernel story. v0.265 wall reconciliation shows 0.8B
+  `pp512` CPU setup/encode/commit is only `~0.17-0.28 ms`; wall is dominated by
+  GPU wait, with GPU timestamps at `~65.9-66.0 ms`. Patched local llama.cpp op
+  profiles put FFN and GDN-ish aggregates in the same broad range as qwen. Keep
+  attention, N64 tile policy, residual-add epilogues, shared-memory policy, and
+  CPU orchestration off the primary branch unless fresh accounting contradicts
+  this.
 - A10B very-short prefill is not a kernel-roadmap item unless a warmed paired row
   regresses. The v0.261 default `pp128` paired repeat still loses from cold
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
@@ -693,16 +697,17 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.264:
+Current rank after v0.265:
 
-1. Small dense `pp512` FFN/GDN projection residual: 2B Q4 is the clean target,
-   not 0.8B alone. v0.263 narrows the gap with default fused-SwiGLU coverage for
-   `hidden <= 2048`, and v0.264 removes a short-shape N64 tile overfit. Paired
-   2B `pp512` still sits at `0.971x/0.982x`; 0.8B paired is still `0.940x`.
-   Next work should compare/copy Q4 projection mechanics for gate/up/down and
-   GDN qkv/z against llama.cpp, not retread attention, fast-path coverage,
-   residual-add fusion, N64 policy, command-encoder coalescing, or GDN matvec
-   fallback.
+1. Small dense `pp512` distributed GPU residual: 2B Q4 is nearly closed
+   (`0.971x/0.982x`), but 0.8B paired is still `0.940x`. v0.263/v0.264 remove
+   the obvious fused-FFN and N64-policy misses; v0.265 shows CPU encode/commit is
+   not the wall and local llama.cpp op profiles do not reveal a huge named-kernel
+   delta. Next work should account for production GPU work more tightly: command
+   encoder count, small untraced kernels, GDN prep/gated packaging, and any
+   one-command-buffer scheduling gaps. Do not retread attention, fast-path
+   coverage, residual-add fusion, N64 policy, shared-memory policy, command-buffer
+   streaming, or GDN matvec fallback.
 2. Promotion-grade paired residual search for the main family: only reopen dense
    27B, A3B MoE, or A10B MoE kernel work if a same-session paired repeat exposes
    a real gap. The latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

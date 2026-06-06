@@ -6,6 +6,54 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-06 — v0.265 Add Small-Dense Wall Reconciliation Trace
+
+Status: added `QWEN_PREFILL_TRACE_WALL=1`, a low-overhead chunk-level wall trace
+that reports setup, CPU encode, command-buffer commit, wait, optional readback,
+GPU timestamp, and total wall time. Also rechecked shared-memory mat-mat policy
+and local patched llama.cpp op profiles. Raw artifacts:
+`target/profiles/v0265-0p8b-q4-pp512-wall-trace.log`,
+`target/profiles/v0265-2b-q4-pp512-smem-auto512-sweep.json`,
+`target/profiles/v0265-0p8b-q4-pp512-smem-auto512-sweep.json`,
+`target/profiles/v0265-0p8b-q4-pp512-noop-budget.json`,
+`target/profiles/v0265-0p8b-q4-pp512-phase-summary.tsv`,
+`target/profiles/v0265-0p8b-q4-pp512-local-lcpp-profile-verbose-summary.tsv`,
+and `target/profiles/v0265-2b-q4-pp512-local-lcpp-profile-verbose-summary.tsv`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- 0.8B Q4 `pp512` wall trace
+- 0.8B and 2B Q4 `pp512` default-vs-smem repeat sweeps
+- 0.8B Q4 `pp512` no-op budget and phase trace
+- Local patched llama.cpp `--verbose` Metal op profiles for 0.8B/2B `pp512`
+
+Wall reconciliation for timed 0.8B `pp512` runs:
+
+| Run | setup ms | encode ms | commit ms | wait ms | GPU ms | wall ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `0.010` | `0.202` | `0.010` | `68.554` | `65.851` | `68.777` |
+| 2 | `0.010` | `0.258` | `0.012` | `69.232` | `65.991` | `69.513` |
+| 3 | `0.010` | `0.150` | `0.009` | `68.179` | `66.032` | `68.349` |
+
+Read: CPU setup/encode/commit is not the 0.8B `pp512` gap. The timed path is
+already one command buffer and spends essentially all wall time in GPU wait;
+`GPUEndTime-GPUStartTime` is `~65.9-66.0 ms`, while wall is `~68.3-69.5 ms`.
+
+`QWEN_MATMAT_QK_LLAMA_SMEM=1` remains flat/noise under the v0.264 auto policy:
+2B `pp512` is mixed (`3535.91/3567.90/3550.21` default versus
+`3556.61/3546.16/3557.26` smem), and 0.8B `pp512` is also flat
+(`7469.06/7463.69/7389.29` default versus `7456.80/7470.45/7437.84` smem).
+Do not promote or retread shared-memory policy without a new mechanism.
+
+The local llama.cpp op profile is attribution-only, not scoreboard: it uses a
+local patched fork, `--verbose`, and serializes one graph node per command buffer.
+It disproves a huge named-kernel delta. 0.8B `pp512` has llama FFN gate/up/out+GLU
+around `26.9 ms`, comparable to qwen's `~27.2 ms`; GDN-ish buckets are also
+similar in aggregate. 2B shows the same pattern. The remaining small-dense gap is
+now more likely distributed GPU work/encoder packaging or a handful of small
+GDN-prep/gated details than one obviously bad FFN/GDN mat-mat kernel.
+
 ## 2026-06-05 — v0.264 Disable Q4 N64 For Small pp512 Projections
 
 Status: changed `QWEN_MATMAT_Q4_K_N64` from an always-on default to a three-way

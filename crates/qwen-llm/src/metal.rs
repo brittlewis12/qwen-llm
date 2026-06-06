@@ -2648,14 +2648,33 @@ fn mat_mat_qk_threadgroup_memory_with_policy(
     }
 }
 
-fn mat_mat_q4_k_n64_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_Q4_K_N64").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatMatQ4KN64Mode {
+    Auto,
+    ForceOn,
+    ForceOff,
+}
+
+fn mat_mat_q4_k_n64_mode() -> MatMatQ4KN64Mode {
+    static MODE: OnceLock<MatMatQ4KN64Mode> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("QWEN_MATMAT_Q4_K_N64").as_deref() {
+        Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO") => MatMatQ4KN64Mode::ForceOff,
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") => MatMatQ4KN64Mode::ForceOn,
+        _ => MatMatQ4KN64Mode::Auto,
     })
+}
+
+#[cfg(test)]
+fn mat_mat_q4_k_n64_enabled() -> bool {
+    !matches!(mat_mat_q4_k_n64_mode(), MatMatQ4KN64Mode::ForceOff)
+}
+
+fn mat_mat_q4_k_use_n64(n_in: usize, n_out: usize, n_query: usize) -> bool {
+    match mat_mat_q4_k_n64_mode() {
+        MatMatQ4KN64Mode::ForceOff => false,
+        MatMatQ4KN64Mode::ForceOn => true,
+        MatMatQ4KN64Mode::Auto => !(n_query <= 512 && (n_in <= 2048 || n_out <= 2048)),
+    }
 }
 
 fn mat_mat_q5_k_n64_enabled() -> bool {
@@ -2761,7 +2780,8 @@ pub fn encode_mat_mat_q4_k_f32(
     let nb01 = ((n_in / 256) * 144) as u32;
     let stride_b = n_in as u32;
 
-    let use_n64 = mat_mat_q4_k_n64_enabled() && n_query % 64 == 0 && n_out % 64 == 0;
+    let use_n64 =
+        mat_mat_q4_k_use_n64(n_in, n_out, n_query) && n_query % 64 == 0 && n_out % 64 == 0;
     let kernel_name = if use_n64 {
         "kernel_mat_mat_q4_K_f32_n64"
     } else if n_query == 16 {

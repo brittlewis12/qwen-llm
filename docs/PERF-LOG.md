@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-05 — v0.264 Disable Q4 N64 For Small pp512 Projections
+
+Status: changed `QWEN_MATMAT_Q4_K_N64` from an always-on default to a three-way
+policy. `0` forces the legacy NR1 path off, `1` forces N64 on, and unset auto
+keeps N64 for larger/longer prompt mat-mats while disabling it for small
+`n_query <= 512` projections when either side is `<= 2048`. Raw artifacts:
+`target/profiles/v0264-2b-q4-pp512-q4n64-auto512-sweep.json`,
+`target/profiles/v0264-0p8b-q4-pp512-q4n64-auto512-sweep.json`,
+`target/profiles/v0264-2b-q4-pp1024-q4n64-auto512-sweep.json`,
+`target/profiles/v0264-2b-q4-pp512-q4n64-auto512-paired.json`, and
+`target/profiles/v0264-0p8b-q4-pp512-q4n64-auto512-paired.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- 2B Q4 `pp512` default-vs-force-N64 repeat sweep
+- 0.8B Q4 `pp512` default-vs-force-N64 repeat sweep
+- 2B Q4 `pp1024` default-vs-force-N64/force-off repeat sweep
+- 2B and 0.8B Q4 `pp512` paired qwen-vs-llama.cpp comparisons
+
+| Model | Shape | Default | Force N64 | Read |
+| --- | ---: | ---: | ---: | --- |
+| 2B Q4_K_M | `pp512` block 0 | `3554.34` | `3514.67` | `+1.1%` |
+| 2B Q4_K_M | `pp512` block 1 | `3551.18` | `3551.16` | flat |
+| 2B Q4_K_M | `pp512` block 2 | `3559.05` | `3521.36` | `+1.1%` |
+| 0.8B Q4_K_M | `pp512` block 0 | `7439.32` | `7397.79` | `+0.6%` |
+| 0.8B Q4_K_M | `pp512` block 1 | `7416.89` | `7407.49` | `+0.1%` |
+| 0.8B Q4_K_M | `pp512` block 2 | `7431.46` | `7356.53` | `+1.0%` |
+| 2B Q4_K_M | `pp1024` block 0 | `3712.13` | `3703.18` | neutral-positive |
+| 2B Q4_K_M | `pp1024` block 1 | `3715.09` | `3701.10` | neutral-positive |
+
+Paired `pp512` after the policy change narrows 2B to `0.971x/0.982x` versus
+pinned llama.cpp. 0.8B still loses both paired blocks at `0.940x`; do not treat
+the N64 policy as the full small-dense fix. The residual remains Q4 projection
+mechanics and secondary GDN, but this kills one self-inflicted short-shape tile
+overfit before the next kernel branch.
+
 ## 2026-06-05 — v0.263 Dense 2B pp512 Is FFN Projection-Limited
 
 Status: re-anchored the small dense short-prefill residual, added trace-only

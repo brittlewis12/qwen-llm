@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-09 — v0.272 Re-anchor Small-Dense Around Llama ubatch
+
+Status: ran a near-512 paired N-sweep for 0.8B/2B Q4 and a tuned llama.cpp
+`-ub 1024` control. Also captured qwen/llama Metal System Trace launch packets;
+the current trace summary is useful for command-buffer/interval accounting but
+does not expose per-dispatch kernel labels. Raw artifacts:
+`target/profiles/v0272-0p8b-q4-pp*-paired-nsweep.json`,
+`target/profiles/v0272-2b-q4-pp*-paired-nsweep.json`,
+`target/profiles/v0272-0p8b-q4-pp*-paired-lcpp-ub1024.json`,
+`target/profiles/v0272-2b-q4-pp*-paired-lcpp-ub1024.json`,
+`target/profiles/v0272-0p8b-q4-pp512-qwen-launch.trace`, and
+`target/profiles/v0272-0p8b-q4-pp512-lcpp-ub1024-launch.trace`.
+
+Validation:
+
+- 0.8B Q4 paired `pp384/448/512/576/640/768/1024`
+- 2B Q4 paired `pp448/512/576/640/1024`
+- 0.8B/2B Q4 paired `pp512/576/1024` with llama.cpp `-ub 1024`
+- 0.8B Q4 qwen-only `pp1024` chunk-size probes
+
+Default llama.cpp uses `n_ubatch=512`, which creates a visible comparison cliff
+above `pp512`. With default llama, 0.8B loses at `pp448/512` (`0.962x/0.959x`),
+wins at `pp576/640/768` (`1.023x/1.043x/1.026x`), then loses slightly at
+`pp1024` (`0.977x`). 2B shows the same shape but nearly closed at `pp512`
+(`0.996x`) and wins `pp576/640/1024` (`1.029x/1.041x/1.008x`).
+
+The tuned llama.cpp `-ub 1024` control removes most of that default-ubatch cliff.
+0.8B then loses `pp512/576/1024` at `0.948x/0.937x/0.960x`, while 2B is much
+closer at `0.978x/0.983x/1.000x`. Treat family-default wins above `pp512` as
+real scoreboard wins but not proof that small dense is solved against a tuned
+llama.cpp baseline. Qwen's own `pp1024` chunk-size probe favors the default
+single `1024` chunk (`7796 t/s`) over `512` (`7572`) and `768` (`7423`).
+
 ## 2026-06-06 — v0.270 Test Parallel GDN Prep
 
 Status: added `QWEN_PREFILL_TRACE_COUNTS=1` for non-serializing dispatch-cluster

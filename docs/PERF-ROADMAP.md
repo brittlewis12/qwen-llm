@@ -92,6 +92,12 @@ Current caveats:
   attention, N64 tile policy, residual-add epilogues, shared-memory policy, GDN
   prep parallelization, and CPU orchestration off the primary branch unless fresh
   accounting contradicts this.
+- v0.272 shows small dense has a benchmark-methodology trap: default llama.cpp
+  `n_ubatch=512` creates wins for qwen just above `pp512`, but llama.cpp
+  `-ub 1024` reopens 0.8B at `pp512/576/1024` (`0.948x/0.937x/0.960x`). 2B is
+  much closer against the same tuned control (`0.978x/0.983x/1.000x`). Treat
+  family-default wins as scoreboard wins, not as evidence the tuned small-dense
+  gap is closed.
 - A10B very-short prefill is not a kernel-roadmap item unless a warmed paired row
   regresses. The v0.261 default `pp128` paired repeat still loses from cold
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
@@ -702,16 +708,16 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.270:
+Current rank after v0.272:
 
-1. Small dense `pp512` distributed GPU residual: 2B Q4 is nearly closed
-   (`0.971x/0.982x`), but 0.8B paired is still `0.940x`. v0.263/v0.264 remove
-   the obvious fused-FFN and N64-policy misses; v0.265 shows CPU encode/commit is
-   not the wall; v0.267 shows 0.8B and 2B have the same production count of `205`
-   encoders and `433` dispatches. v0.270 falsifies the obvious token-channel GDN
-   prep parallelization. Next work should locate a llama.cpp graph-shape delta or
-   a true fusion that removes memory passes, not just increases parallelism. Do
-   not retread attention, fast-path coverage, residual-add fusion, N64 policy,
+1. Small dense tuned-llama residual: 2B Q4 is nearly closed, but 0.8B is still
+   `0.948x/0.937x/0.960x` at `pp512/576/1024` when llama.cpp runs `-ub 1024`.
+   Default-family wins above `pp512` are partly a llama `n_ubatch=512` artifact.
+   v0.263-v0.270 remove fused-FFN coverage, N64 policy, CPU orchestration,
+   dispatch-count explosion, and simple GDN prep parallelization as explanations.
+   Next work should find a shape-matched llama.cpp graph/tile delta or a true
+   fusion that removes memory passes, especially in 0.8B GDN/FFN. Do not retread
+   attention, fast-path coverage, residual-add fusion, N64 policy,
    shared-memory policy, GDN prep parallelization, command-buffer streaming, or
    GDN matvec fallback.
 2. Promotion-grade paired residual search for the main family: only reopen dense

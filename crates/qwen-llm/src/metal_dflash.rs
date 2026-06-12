@@ -5601,65 +5601,143 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             apply_mixer_residual = false;
                         } else if dense_packed_gdn_step_enabled() {
                             if gdn_split.run_prep() {
-                                let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_gdn_prep_packed_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &gdn_qkv_pack_p,
-                                    &target_session.gdn_conv[gi],
-                                    &g.conv1d,
-                                    &gdn_q_norm_pack_p,
-                                    &gdn_k_norm_pack_p,
-                                    &gdn_v_pack_p,
-                                    chunk_p,
-                                    n_k_u,
-                                    n_v_u,
-                                    head_dim_u,
-                                )?;
-                                if prefill_gdn_pair_l2_enabled() {
-                                    encode_l2_norm_pair_batched_f32(
+                                if trace_layer_phases {
+                                    {
+                                        let enc = KernelEncoder::begin(&cmd_buf);
+                                        encode_gdn_prep_packed_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &gdn_qkv_pack_p,
+                                            &target_session.gdn_conv[gi],
+                                            &g.conv1d,
+                                            &gdn_q_norm_pack_p,
+                                            &gdn_k_norm_pack_p,
+                                            &gdn_v_pack_p,
+                                            chunk_p,
+                                            n_k_u,
+                                            n_v_u,
+                                            head_dim_u,
+                                        )?;
+                                        enc.end();
+                                    }
+                                    flush_prefill_layer_phase(
                                         base.ctx,
-                                        &enc,
-                                        &gdn_q_norm_pack_p,
-                                        &gdn_q_norm_pack_p,
-                                        &gdn_k_norm_pack_p,
-                                        &gdn_k_norm_pack_p,
-                                        chunk_p * n_k_u,
-                                        head_dim_u,
-                                        RMS_EPS,
-                                    )?;
+                                        &mut cmd_buf,
+                                        &mut prefill_gpu_total_ms,
+                                        trace_layer_phases,
+                                        chunk_idx,
+                                        chunk_start,
+                                        il,
+                                        "gdn",
+                                        "gdn_prep_conv",
+                                    );
+
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    if prefill_gdn_pair_l2_enabled() {
+                                        encode_l2_norm_pair_batched_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &gdn_q_norm_pack_p,
+                                            &gdn_q_norm_pack_p,
+                                            &gdn_k_norm_pack_p,
+                                            &gdn_k_norm_pack_p,
+                                            chunk_p * n_k_u,
+                                            head_dim_u,
+                                            RMS_EPS,
+                                        )?;
+                                    } else {
+                                        encode_l2_norm_batched_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &gdn_q_norm_pack_p,
+                                            &gdn_q_norm_pack_p,
+                                            chunk_p * n_k_u,
+                                            head_dim_u,
+                                            RMS_EPS,
+                                        )?;
+                                        encode_l2_norm_batched_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &gdn_k_norm_pack_p,
+                                            &gdn_k_norm_pack_p,
+                                            chunk_p * n_k_u,
+                                            head_dim_u,
+                                            RMS_EPS,
+                                        )?;
+                                    }
+                                    enc.end();
+                                    flush_prefill_layer_phase(
+                                        base.ctx,
+                                        &mut cmd_buf,
+                                        &mut prefill_gpu_total_ms,
+                                        trace_layer_phases,
+                                        chunk_idx,
+                                        chunk_start,
+                                        il,
+                                        "gdn",
+                                        "gdn_prep_l2",
+                                    );
                                 } else {
-                                    encode_l2_norm_batched_f32(
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    encode_gdn_prep_packed_f32(
                                         base.ctx,
                                         &enc,
+                                        &gdn_qkv_pack_p,
+                                        &target_session.gdn_conv[gi],
+                                        &g.conv1d,
                                         &gdn_q_norm_pack_p,
-                                        &gdn_q_norm_pack_p,
-                                        chunk_p * n_k_u,
+                                        &gdn_k_norm_pack_p,
+                                        &gdn_v_pack_p,
+                                        chunk_p,
+                                        n_k_u,
+                                        n_v_u,
                                         head_dim_u,
-                                        RMS_EPS,
                                     )?;
-                                    encode_l2_norm_batched_f32(
+                                    if prefill_gdn_pair_l2_enabled() {
+                                        encode_l2_norm_pair_batched_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &gdn_q_norm_pack_p,
+                                            &gdn_q_norm_pack_p,
+                                            &gdn_k_norm_pack_p,
+                                            &gdn_k_norm_pack_p,
+                                            chunk_p * n_k_u,
+                                            head_dim_u,
+                                            RMS_EPS,
+                                        )?;
+                                    } else {
+                                        encode_l2_norm_batched_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &gdn_q_norm_pack_p,
+                                            &gdn_q_norm_pack_p,
+                                            chunk_p * n_k_u,
+                                            head_dim_u,
+                                            RMS_EPS,
+                                        )?;
+                                        encode_l2_norm_batched_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &gdn_k_norm_pack_p,
+                                            &gdn_k_norm_pack_p,
+                                            chunk_p * n_k_u,
+                                            head_dim_u,
+                                            RMS_EPS,
+                                        )?;
+                                    }
+                                    enc.end();
+                                    flush_prefill_layer_phase(
                                         base.ctx,
-                                        &enc,
-                                        &gdn_k_norm_pack_p,
-                                        &gdn_k_norm_pack_p,
-                                        chunk_p * n_k_u,
-                                        head_dim_u,
-                                        RMS_EPS,
-                                    )?;
+                                        &mut cmd_buf,
+                                        &mut prefill_gpu_total_ms,
+                                        trace_layer_phases,
+                                        chunk_idx,
+                                        chunk_start,
+                                        il,
+                                        "gdn",
+                                        "gdn_prep",
+                                    );
                                 }
-                                enc.end();
-                                flush_prefill_layer_phase(
-                                    base.ctx,
-                                    &mut cmd_buf,
-                                    &mut prefill_gpu_total_ms,
-                                    trace_layer_phases,
-                                    chunk_idx,
-                                    chunk_start,
-                                    il,
-                                    "gdn",
-                                    "gdn_prep",
-                                );
                             }
 
                             if gdn_split.run_step() {

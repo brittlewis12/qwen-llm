@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-12 — v0.283 Hardware-First Decode Framing
+
+Status: corrected the roadmap framing after the audit review. llama.cpp remains
+the required comparison target, but it is now explicitly a floor and regression
+guard, not the final objective. Hardware utilization is the north-star lens:
+decode branches should move effective bandwidth or remove measured serial/launch
+shape waste, and prefill branches should move effective FLOP/s or eliminate
+measured memory passes.
+
+Additional A10B decode control: bench-only `--pipelined` decode regressed
+`tg128` to `33.20 t/s` versus the current default `34.92 t/s` and the pinned
+llama.cpp repeat `36.36 t/s`. Together with the `QWEN_DECODE_MOE_CONCURRENT_GDN=0`
+rollback at `32.80 t/s`, this says the active A10B branch should not be CPU
+encode pipelining or the old GDN-overlap toggle. The next hypothesis needs a
+deeper GDN/FFN execution-shape change that improves MoE decode hardware
+utilization, with llama.cpp parity as the minimum acceptable floor.
+
 ## 2026-06-12 — v0.282 Audit Digest and A10B Decode Attribution
 
 Status: digested the out-of-band audit and cross-checked it against current

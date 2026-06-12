@@ -14,15 +14,19 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current North Star
 
-Beat llama.cpp across dense and MoE Qwen 3.5/3.6 workloads, ideally by more
-than a little, without taking shortcuts that fail at long context or larger
-model shapes.
+Maximize useful throughput on Apple Silicon across dense and MoE Qwen 3.5/3.6
+workloads. Beating llama.cpp is a required milestone and regression guard, not
+the endpoint; when a path is far below measured or estimated hardware roofline,
+keep hunting even if the current llama.cpp row is already green.
 
 Primary guardrails:
 
 - Dense: `Qwen3.6-27B-Q4_K_M.gguf`
 - MoE A3B: `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`
 - MoE A10B: `Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf`
+- Treat llama.cpp parity as the floor. Promotion-grade wins should also improve
+  the hardware-utilization story: higher effective bandwidth for decode, higher
+  effective FLOP/s for prefill, or removal of a measured serial/memory pass.
 - Never run performance benchmarks in parallel.
 - Use the repo-pinned llama.cpp benchmark lock for scoreboard comparisons:
   `scripts/bench/llama-cpp.lock.json`, built by
@@ -722,17 +726,21 @@ Recent measured negatives:
 
 Current rank after v0.281:
 
-1. A10B MoE decode attribution: current-default sentinels say prefill is healthy,
-   but A10B decode is repeatedly behind pinned llama.cpp. `tg128` repeat is
-   `35.02` qwen versus `36.36` llama.cpp (`0.96x`), and `tg64/tg256` are
-   `0.97x/0.95x`, while 27B and A3B decode repeats remain positive. First gate:
-   phase/profile A10B decode and prove a named bucket owns at least `1.5-2%`
-   end-to-end before opening kernel work. Any fix must be neutral or positive on
-   A3B and 27B `tg128`. First attribution says serialized A10B `ctx128` token
-   cost is GDN mixer `43.7%`, MoE FFN `31.0%`, attention `14.0%`, LM head `6.5%`,
-   and route `4.7%`; disabling the existing GDN-concurrent decode path regresses
-   `tg128` from `34.92` to `32.80 t/s`, so the next branch must be a deeper
-   GDN/FFN execution-shape change, not the old overlap toggle.
+1. A10B MoE decode execution-shape attribution: current-default sentinels say
+   prefill is healthy, but A10B decode is repeatedly behind pinned llama.cpp and
+   far below the likely bandwidth ceiling. `tg128` repeat is `35.02` qwen versus
+   `36.36` llama.cpp (`0.96x`), and `tg64/tg256` are `0.97x/0.95x`, while 27B and
+   A3B decode repeats remain positive. First gate: phase/profile A10B decode and
+   prove a named bucket owns at least `1.5-2%` end-to-end before opening kernel
+   work. The goal is not a `1.01x` llama.cpp scrape; it is a step-function toward
+   better MoE decode hardware utilization, with llama.cpp as the floor. Any fix
+   must be neutral or positive on A3B and 27B `tg128`. First attribution says
+   serialized A10B `ctx128` token cost is GDN mixer `43.7%`, MoE FFN `31.0%`,
+   attention `14.0%`, LM head `6.5%`, and route `4.7%`; disabling the existing
+   GDN-concurrent decode path regresses `tg128` from `34.92` to `32.80 t/s`, and
+   bench-only `--pipelined` also regresses to `33.20 t/s`, so the next branch must
+   be a deeper GDN/FFN execution-shape change, not the old overlap toggle or CPU
+   encode pipelining.
 2. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen
@@ -757,12 +765,13 @@ Current rank after v0.281:
    defaults, fast-path coverage, residual-add fusion, N64 policy, shared-memory
    policy, GDN token-channel parallelization, command-buffer streaming, GDN
    matvec fallback, or HD128 normalization row count.
-6. Speculative hardware-headroom watchlist: MoE decode execution-shape reset,
-   ICB/MTL4 encode-once decode, MTP/packed verify, fused online-softmax prefill
-   attention, chunked GDN, cross-chunk encode/execute overlap, production
-   residency/warm expert banks, and epilogue fusions are all plausible but need a
-   trace-proven idle/bandwidth/phase gate before implementation. One-time
-   measured roofline calibration would make these rankings less folklore-driven.
+6. Hardware-headroom watchlist: MoE decode execution-shape reset, ICB/MTL4
+   encode-once decode, MTP/packed verify, fused online-softmax prefill attention,
+   chunked GDN, cross-chunk encode/execute overlap, production residency/warm
+   expert banks, and epilogue fusions are all plausible paths to dominate beyond
+   llama.cpp. They need a trace-proven idle/bandwidth/phase gate before
+   implementation, not merely a green or red llama row. One-time measured roofline
+   calibration would make these rankings less folklore-driven.
 7. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,

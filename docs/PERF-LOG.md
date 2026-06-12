@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-12 — v0.281 Post-GDN Sentinel Sweep
+
+Status: ran narrow current-default sentinels after the HD128 paired-L2 and
+rmsnorm-gated defaults. Raw artifacts:
+`docs/bench/2026-06-12-2132-27B-v0280-hd128-gdn-sentinel-family/`,
+`docs/bench/2026-06-12-2134-35B-A3B-v0280-hd128-gdn-sentinel-family/`,
+`docs/bench/2026-06-12-2136-122B-A10B-v0280-hd128-gdn-sentinel-family/`,
+`docs/bench/2026-06-12-2149-122B-A10B-v0280-a10b-tg-repeat-family/`,
+`docs/bench/2026-06-12-2154-27B-v0280-decode-repeat-family/`,
+`docs/bench/2026-06-12-2156-35B-A3B-v0280-decode-repeat-family/`,
+`docs/bench/2026-06-12-2157-122B-A10B-v0280-a10b-decode-shape-family/`, and
+`target/profiles/v0280-a10b-q4xl-pp512-current-paired-repeat.json`.
+
+Validation:
+
+- 27B, A3B, and A10B `pp512/pp1024/tg128` one-run family sentinels
+- A10B `pp512` paired repeat with cold block discarded
+- 27B, A3B, and A10B `tg128` runs=3 decode repeats
+- A10B `tg64/tg256` runs=3 decode shape sweep
+
+The post-default prefill scoreboard is still healthy. 27B is `1.01x/1.06x` at
+`pp512/pp1024`; A3B is `1.07x/1.20x`; A10B is `1.16x` at `pp1024`. The A10B
+one-run `pp512` row looked red (`0.97x`) but the paired repeat falsified it as a
+cold/noise artifact: qwen `461.18 t/s` versus llama.cpp `443.52 t/s` (`1.04x`)
+after discarding the first block.
+
+The remaining confirmed red is A10B decode. Repeated `tg128` is qwen
+`35.02 t/s` versus llama.cpp `36.36 t/s` (`0.96x`), while 27B/A3B repeats stay
+positive at `1.04x/1.07x`. A10B decode is also behind at `tg64/tg256`
+(`0.97x/0.95x`), so the next highest-EV branch is A10B MoE decode attribution,
+not more small-dense prefill normalization work.
+
 ## 2026-06-12 — v0.279 Default HD128 Gated Norm
 
 Status: added and defaulted a head_dim=128 specialization for GDN

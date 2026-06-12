@@ -40,6 +40,12 @@ mostly closes the tuned small-dense gap, but 0.8B `pp512` is still not won, so
 the next branch should keep targeting small per-head/per-token GDN or Q/K prep
 shape/fusion rather than broad attention or matmul retreads.
 
+Follow-up: an 8-row variant of the same HD128 paired-L2 shape was
+correctness-safe but flat/slightly worse on 0.8B Q4 `pp512` (`7738.71/7787.76`
+t/s versus the R4 default's prior `7799.28/7772.54`), so the committed default
+stays at four rows per threadgroup. Artifact:
+`target/profiles/v0276-0p8b-q4-pp512-l2r8-sweep.json`.
+
 ## 2026-06-09 — v0.272 Re-anchor Small-Dense Around Llama ubatch
 
 Status: ran a near-512 paired N-sweep for 0.8B/2B Q4 and a tuned llama.cpp

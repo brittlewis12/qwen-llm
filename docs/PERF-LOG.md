@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-12 — v0.274 Default HD128 Paired L2
+
+Status: added and defaulted a head_dim=128 specialization for paired GDN Q/K
+L2 normalization. The old paired kernel launched one oversized threadgroup per
+128-element row; the new path uses one simdgroup per row and four rows per
+threadgroup. Rollback: `QWEN_L2_PAIR_HD128_R4=0`. Raw artifacts:
+`target/profiles/v0273-0p8b-q4-pp512-l2pair-r4-sweep.json`,
+`target/profiles/v0273-2b-q4-pp512-l2pair-r4-sweep.json`,
+`target/profiles/v0273-0p8b-q4-pp1024-l2pair-r4-sweep.json`,
+`target/profiles/v0273-2b-q4-pp1024-l2pair-r4-sweep.json`,
+`target/profiles/v0274-0p8b-q4-pp512-l2r4-default-sweep.json`,
+`target/profiles/v0274-2b-q4-pp512-l2r4-default-sweep.json`, and
+`target/profiles/v0274-clean-*-l2r4-default-paired-lcpp-ub1024.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- 0.8B prefill-vs-single correctness gate, first opt-in and then default
+- 0.8B/2B Q4 `pp512/1024` opt-in A/B sweeps
+- 0.8B/2B Q4 `pp512` default-vs-rollback sweeps
+- clean paired 0.8B/2B Q4 `pp512/1024` vs llama.cpp `-ub 1024`
+
+The specialization is a real small-dense win. Default-vs-rollback `pp512` rows
+move 0.8B from `7490.83/7419.89` to `7799.28/7772.54 t/s`, and 2B from
+`3590.57/3580.20` to `3628.65/3653.24 t/s`. Opt-in `pp1024` sweeps were also
+positive: 0.8B moved from roughly `7703-7761` to `7969-8031 t/s`, and 2B from
+`3691-3714` to `3780-3781 t/s`.
+
+Against tuned llama.cpp `-ub 1024`, clean current-commit rows are now 0.8B
+`pp512/1024` at `0.977x/0.996x` and 2B `pp512/1024` at `1.019x/1.022x`. This
+mostly closes the tuned small-dense gap, but 0.8B `pp512` is still not won, so
+the next branch should keep targeting small per-head/per-token GDN or Q/K prep
+shape/fusion rather than broad attention or matmul retreads.
+
 ## 2026-06-09 — v0.272 Re-anchor Small-Dense Around Llama ubatch
 
 Status: ran a near-512 paired N-sweep for 0.8B/2B Q4 and a tuned llama.cpp

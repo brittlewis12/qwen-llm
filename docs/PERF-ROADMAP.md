@@ -88,16 +88,22 @@ Current caveats:
   `pp512`, so this is not an 0.8B-only dispatch-count explosion. v0.269 count
   clusters show GDN front+alpha/beta, dense FFN, attention front+rope/scatter,
   and GDN prep dominate dispatch count; v0.270 says a simple token-channel
-  parallel GDN prep is correctness-safe but flat/noisy through `pp16384`. Keep
-  attention, N64 tile policy, residual-add epilogues, shared-memory policy, GDN
-  prep parallelization, and CPU orchestration off the primary branch unless fresh
-  accounting contradicts this.
+  parallel GDN prep is correctness-safe but flat/noisy through `pp16384`, while
+  v0.274 finds a real head_dim=128 paired-L2 shape win by replacing the oversized
+  per-row threadgroup with one simdgroup per row and four rows per threadgroup.
+  Keep attention, N64 tile policy, residual-add epilogues, shared-memory policy,
+  GDN prep token-channel parallelization, and CPU orchestration off the primary
+  branch unless fresh accounting contradicts this.
 - v0.272 shows small dense has a benchmark-methodology trap: default llama.cpp
   `n_ubatch=512` creates wins for qwen just above `pp512`, but llama.cpp
   `-ub 1024` reopens 0.8B at `pp512/576/1024` (`0.948x/0.937x/0.960x`). 2B is
   much closer against the same tuned control (`0.978x/0.983x/1.000x`). Treat
   family-default wins as scoreboard wins, not as evidence the tuned small-dense
-  gap is closed.
+  gap is closed. v0.274 defaults the head_dim=128 paired-L2 R4 specialization
+  with `QWEN_L2_PAIR_HD128_R4=0` as rollback; clean current-commit tuned rows are
+  now 0.8B `pp512/1024` at `0.977x/0.996x` and 2B `pp512/1024` at
+  `1.019x/1.022x`. The residual is now mostly 0.8B `pp512` fixed-shape overhead,
+  not a broad small-dense failure.
 - A10B very-short prefill is not a kernel-roadmap item unless a warmed paired row
   regresses. The v0.261 default `pp128` paired repeat still loses from cold
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
@@ -708,18 +714,17 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.272:
+Current rank after v0.274:
 
-1. Small dense tuned-llama residual: 2B Q4 is nearly closed, but 0.8B is still
-   `0.948x/0.937x/0.960x` at `pp512/576/1024` when llama.cpp runs `-ub 1024`.
-   Default-family wins above `pp512` are partly a llama `n_ubatch=512` artifact.
-   v0.263-v0.270 remove fused-FFN coverage, N64 policy, CPU orchestration,
-   dispatch-count explosion, and simple GDN prep parallelization as explanations.
-   Next work should find a shape-matched llama.cpp graph/tile delta or a true
-   fusion that removes memory passes, especially in 0.8B GDN/FFN. Do not retread
-   attention, fast-path coverage, residual-add fusion, N64 policy,
-   shared-memory policy, GDN prep parallelization, command-buffer streaming, or
-   GDN matvec fallback.
+1. Small dense tuned-llama residual: v0.274 mostly closes the `-ub 1024` control
+   by defaulting the head_dim=128 paired-L2 R4 path. Clean rows are now 0.8B
+   `pp512/1024` at `0.977x/0.996x` and 2B `pp512/1024` at `1.019x/1.022x`.
+   The remaining live red cell is 0.8B `pp512`, and the best clue is shape
+   efficiency in small per-head/per-token prep kernels. Next work should audit
+   and, only if justified, fuse or row-pack the GDN/QK prep cluster. Do not
+   retread attention, fast-path coverage, residual-add fusion, N64 policy,
+   shared-memory policy, GDN token-channel parallelization, command-buffer
+   streaming, or GDN matvec fallback.
 2. Promotion-grade paired residual search for the main family: only reopen dense
    27B, A3B MoE, or A10B MoE kernel work if a same-session paired repeat exposes
    a real gap. The latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at

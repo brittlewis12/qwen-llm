@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-12 — v0.284 Decode Roofline Reframe and Fused-Routed Falsifier
+
+Status: strengthened the roadmap's hardware-first frame after a second audit
+review. The key correction is semantic and operational: llama.cpp parity is a
+milestone, while red-cell status must also consider distance from measured device
+ceilings. Until calibration exists, the roofline numbers are estimates; the next
+tooling step is to measure device stream bandwidth and simple ALU/matrix FLOP/s
+directly and carry utilization columns alongside qwen/lcpp rows.
+
+Additional A10B decode falsifier: a dirty env-gated probe wired the existing
+single-token fused routed `Q4_K/Q4_K/Q5_K` kernel into decode for matching
+layers. Correctness smoke passed against the serial path, but throughput
+collapsed: default `tg128` was `35.04/35.02 t/s` around the probe, while
+`QWEN_DECODE_MOE_FUSED_ROUTED_Q4Q5=1` measured `4.26 t/s`. The code was not
+kept. This falsifies the naive "one giant fused routed token kernel" as the A10B
+decode answer; fewer dispatches alone are not enough if the work shape destroys
+occupancy/locality.
+
+Accepted audit corrections now reflected in the roadmap:
+
+- BF16 MoE demotion is product-priority, not proof that the mechanical claims are
+  false. The prior BF16 falsifiers did not isolate scalar 2-byte A-tile loads.
+- GDN prep falsifiers do not falsify chunked delta-rule / `gdn_step` work; those
+  are different kernels and mechanisms.
+- MTP/packed verify is the real path beyond the dense 27B decode weight-read
+  floor, not just speculative polish.
+- Cross-chunk overlap should be bundled with true-long measurement because it is
+  cheap to test against the same multi-chunk fixtures.
+
 ## 2026-06-12 — v0.283 Hardware-First Decode Framing
 
 Status: corrected the roadmap framing after the audit review. llama.cpp remains

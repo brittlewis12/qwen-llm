@@ -363,6 +363,35 @@ kernel void kernel_l2_norm_pair_batched_f32(
     }
 }
 
+kernel void kernel_l2_norm_pair_hd128_r4_f32(
+        constant l2_norm_batched_args & args [[buffer(0)]],
+        device const float * q_x    [[buffer(1)]],
+        device       float * q_y    [[buffer(2)]],
+        device const float * k_x    [[buffer(3)]],
+        device       float * k_y    [[buffer(4)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        uint2  tpitg [[thread_position_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uint ROWS_PER_TG = 4;
+    const uint hi = tgpig.x * ROWS_PER_TG + tpitg.y;
+    if (hi >= args.n_heads || args.head_dim != 128) return;
+
+    device const float * x = (tgpig.y == 0 ? q_x : k_x) + (ulong)hi * 128;
+    device       float * y = (tgpig.y == 0 ? q_y : k_y) + (ulong)hi * 128;
+
+    float sumsq = 0.0f;
+    for (uint i = tiisg; i < 128; i += 32) {
+        const float v = x[i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+
+    const float scale = 1.0f / max(sqrt(sumsq), args.eps);
+    for (uint i = tiisg; i < 128; i += 32) {
+        y[i] = x[i] * scale;
+    }
+}
+
 // Copy with offset: y[i] = x[src_off + i]  for i in 0..n.
 // Used to slice the GDN post-conv qkv buffer into per-role Q/K/V views
 // without doing a CPU round-trip. v2 will replace this with kernels

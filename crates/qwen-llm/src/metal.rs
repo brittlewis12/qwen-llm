@@ -11626,6 +11626,42 @@ pub fn encode_l2_norm_pair_batched_f32(
         head_dim: u32,
         eps: f32,
     }
+    static HD128_R4: OnceLock<bool> = OnceLock::new();
+    let use_hd128_r4 = *HD128_R4.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_L2_PAIR_HD128_R4").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    });
+    if use_hd128_r4 && head_dim == 128 {
+        let pso = ctx.pipeline("kernel_l2_norm_pair_hd128_r4_f32")?;
+        enc.set_pipeline(&pso);
+        enc.set_bytes(
+            0,
+            &Args {
+                n_heads: n_heads as u32,
+                head_dim: head_dim as u32,
+                eps,
+            },
+        );
+        enc.set_tensor(1, q_x);
+        enc.set_tensor(2, q_y);
+        enc.set_tensor(3, k_x);
+        enc.set_tensor(4, k_y);
+        enc.dispatch(
+            MTLSize {
+                width: n_heads.div_ceil(4),
+                height: 2,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 4,
+                depth: 1,
+            },
+        );
+        return Ok(());
+    }
     let pso = ctx.pipeline("kernel_l2_norm_pair_batched_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(

@@ -249,3 +249,35 @@ kernel void kernel_rmsnorm_gated_f32(
         y_h[i] = normed * silu_z;
     }
 }
+
+kernel void kernel_rmsnorm_gated_hd128_r4_f32(
+        constant rmsnorm_gated_args & args [[buffer(0)]],
+        device const float * o      [[buffer(1)]],
+        device const float * weight [[buffer(2)]],
+        device const float * z      [[buffer(3)]],
+        device       float * y      [[buffer(4)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        uint2 tpitg [[thread_position_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uint ROWS_PER_TG = 4;
+    const uint hi = tgpig.x * ROWS_PER_TG + tpitg.y;
+    if (hi >= args.n_heads || args.head_dim != 128) return;
+
+    device const float * o_h = o + (ulong)hi * 128;
+    device const float * z_h = z + (ulong)hi * 128;
+    device       float * y_h = y + (ulong)hi * 128;
+
+    float sumsq = 0.0f;
+    for (uint i = tiisg; i < 128; i += 32) {
+        const float v = o_h[i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+
+    const float scale = 1.0f / sqrt(sumsq / 128.0f + args.eps);
+    for (uint i = tiisg; i < 128; i += 32) {
+        const float normed = o_h[i] * scale * weight[i];
+        const float zi = z_h[i];
+        y_h[i] = normed * (zi / (1.0f + exp(-zi)));
+    }
+}

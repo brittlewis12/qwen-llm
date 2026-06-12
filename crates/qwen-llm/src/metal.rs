@@ -12199,6 +12199,42 @@ pub fn encode_rmsnorm_gated_f32(
         head_dim: u32,
         eps: f32,
     }
+    static HD128_R4: OnceLock<bool> = OnceLock::new();
+    let use_hd128_r4 = *HD128_R4.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_RMSNORM_GATED_HD128_R4").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    });
+    if use_hd128_r4 && head_dim == 128 {
+        let pso = ctx.pipeline("kernel_rmsnorm_gated_hd128_r4_f32")?;
+        enc.set_pipeline(&pso);
+        enc.set_bytes(
+            0,
+            &Args {
+                n_heads: n_heads as u32,
+                head_dim: head_dim as u32,
+                eps,
+            },
+        );
+        enc.set_tensor(1, o);
+        enc.set_tensor(2, weight);
+        enc.set_tensor(3, z);
+        enc.set_tensor(4, y);
+        enc.dispatch(
+            MTLSize {
+                width: n_heads.div_ceil(4),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 4,
+                depth: 1,
+            },
+        );
+        return Ok(());
+    }
     let pso = ctx.pipeline("kernel_rmsnorm_gated_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(

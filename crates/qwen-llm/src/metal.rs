@@ -12201,9 +12201,9 @@ pub fn encode_rmsnorm_gated_f32(
     }
     static HD128_R4: OnceLock<bool> = OnceLock::new();
     let use_hd128_r4 = *HD128_R4.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("QWEN_RMSNORM_GATED_HD128_R4").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     });
     if use_hd128_r4 && head_dim == 128 {

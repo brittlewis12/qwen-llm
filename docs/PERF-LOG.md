@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-12 — v0.282 Audit Digest and A10B Decode Attribution
+
+Status: digested the out-of-band audit and cross-checked it against current
+post-v0.279 evidence. Also captured first A10B decode attribution controls. Raw
+artifacts: `target/profiles/v0282-a10b-decode-ctx128-phase.out`,
+`target/profiles/v0282-a10b-tg128-default.json`, and
+`target/profiles/v0282-a10b-tg128-no-concurrent-gdn.json`.
+
+Validation:
+
+- A10B decode phase profile at `ctx=128`
+- A10B `tg128` qwen-only default versus `QWEN_DECODE_MOE_CONCURRENT_GDN=0`
+- cx adversarial review of the audit priorities versus current evidence
+
+Current accepted read: A10B decode is the top active red cell. The repeated
+decode deficit is broad across `tg64/tg128/tg256` (`0.97x/0.96x/0.95x`), while
+27B and A3B decode repeats remain positive. The phase profile at `ctx=128`
+attributes serialized token cost to GDN mixer `13.28 ms` (`43.7%`), MoE FFN
+`9.43 ms` (`31.0%`), attention `4.27 ms` (`14.0%`), route `1.43 ms` (`4.7%`),
+and LM head `1.97 ms` (`6.5%`). Disabling the existing MoE decode GDN
+concurrency regresses A10B `tg128` from `34.92` to `32.80 t/s`, so that overlap
+is real but no longer enough to win.
+
+Accepted from the audit, but not all as top branches:
+
+- MoE decode has the largest confirmed current execution-shape miss; attack it
+  with bucket-level attribution before another kernel bet.
+- BF16 MoE remains a demoted catastrophic red cell, and the mechanical hypotheses
+  are plausible: vectorize BF16 weight tile loads, remove binned full-grid
+  relaunch waste, and fix down-kernel epilogues. It is not higher priority than
+  A10B decode unless BF16 becomes product-critical.
+- A3B true-long needs a current-default rerun before implementation work. The old
+  `pp34502=0.78x` row is stale relative to later matrix/long-branch evidence.
+- Fused online-softmax attention, chunked GDN, cross-chunk pipelining, ICB/MTP,
+  production residency, and epilogue fusions are now explicit watchlist items;
+  each needs a fresh causal gate before displacing confirmed red cells.
+
+Stale or overstated in the audit: the 0.8B `pp512` tuned-control row is no
+longer `0.977x` after v0.279 (`1.023x` clean); A3B true-long should not be
+treated as a current-default loss until rerun; and "not falsified" is not enough
+to rank cross-chunk pipelining, ICB, MTP, or epilogue shelf above A10B decode.
+
 ## 2026-06-12 — v0.281 Post-GDN Sentinel Sweep
 
 Status: ran narrow current-default sentinels after the HD128 paired-L2 and

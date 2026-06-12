@@ -64,7 +64,7 @@ Current short/decode guardrails:
 | 122B A10B | `pp1024` | `504.43` | `430.68` | `1.17x` | v0.203 pinned b9481 |
 | 27B dense | `tg128` | `24.46` | `20.01` | `1.22x` | v0.203 pinned b9481 |
 | 35B A3B | `tg128` | `82.31` | `77.42` | `1.06x` | v0.203 pinned b9481 |
-| 122B A10B | `tg128` | `35.76` | `35.21` | `1.02x` | v0.203 repeat |
+| 122B A10B | `tg128` | `35.02` | `36.36` | `0.96x` | v0.281 repeat |
 
 Current caveats:
 
@@ -112,6 +112,9 @@ Current caveats:
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
   same-session steady-state win (`284.20` qwen versus `256.47` llama.cpp,
   `1.108x`). Keep outer wall visible because the warm touch is not free.
+- A10B decode is the current confirmed red cell. v0.281 repeats put A10B decode
+  at `0.97x/0.96x/0.95x` for `tg64/tg128/tg256`, while A3B and 27B `tg128`
+  remain positive. The old v0.203 A10B decode parity row is stale.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -725,46 +728,59 @@ Current rank after v0.281:
    `0.97x/0.95x`, while 27B and A3B decode repeats remain positive. First gate:
    phase/profile A10B decode and prove a named bucket owns at least `1.5-2%`
    end-to-end before opening kernel work. Any fix must be neutral or positive on
-   A3B and 27B `tg128`.
+   A3B and 27B `tg128`. First attribution says serialized A10B `ctx128` token
+   cost is GDN mixer `43.7%`, MoE FFN `31.0%`, attention `14.0%`, LM head `6.5%`,
+   and route `4.7%`; disabling the existing GDN-concurrent decode path regresses
+   `tg128` from `34.92` to `32.80 t/s`, so the next branch must be a deeper
+   GDN/FFN execution-shape change, not the old overlap toggle.
 2. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen
    prefill only if a paired repeat exposes a real current-default red cell.
-3. Remaining dense prompt attribution, only if a paired red cell survives: the
+3. A3B true-long current-default recheck: the old `pp34502=0.78x` row is stale
+   relative to later matrix/long-branch wins and v0.203 `pp16384` family wins.
+   Before implementing fused online-softmax, chunk policy, or GDN-scan work, rerun
+   current default on synthetic `pp16384`, synthetic `pp34502`, and one real
+   34.5k rollout against same-session llama.cpp. If the loss survives, require any
+   branch to improve both synthetic and real long prompts without harming
+   `pp512/1024`.
+4. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
+   catastrophic demoted red cell, but the audit's mechanical hypotheses are now
+   the right reopen criteria: vectorized BF16 weight tile loads, removal of
+   binned full-grid relaunch waste, and all-simdgroup/vectorized down epilogues.
+   Do not claim product-family movement from BF16 until it moves BF16 A3B wall by
+   a large factor and preserves grouped coverage.
+5. Remaining dense prompt attribution, only if a paired red cell survives: the
    latest phase trace shows `gdn_gated` and `gdn_prep_l2` are now tiny. If short
    dense still regresses in a clean repeat, target projection/FFN, GDN step, or
    attention body with a shape-matched differential. Do not retread attention
    defaults, fast-path coverage, residual-add fusion, N64 policy, shared-memory
    policy, GDN token-channel parallelization, command-buffer streaming, GDN
    matvec fallback, or HD128 normalization row count.
-4. True-long and chunk-policy guardrails: real prompts are clean, but candidate
-   long-prompt changes still need synthetic `pp16384+` plus real message rows.
-   `prefill_chunk=1024` remains a safe default cap, not a proven optimum.
-5. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
+6. Speculative hardware-headroom watchlist: MoE decode execution-shape reset,
+   ICB/MTL4 encode-once decode, MTP/packed verify, fused online-softmax prefill
+   attention, chunked GDN, cross-chunk encode/execute overlap, production
+   residency/warm expert banks, and epilogue fusions are all plausible but need a
+   trace-proven idle/bandwidth/phase gate before implementation. One-time
+   measured roofline calibration would make these rankings less folklore-driven.
+7. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
    and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work
    only when a paired file or static audit exposes a fresh miss.
-6. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+8. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured
    `moe_inner` activations rather than another synthetic row-stride oracle.
-7. BF16 A3B full structural sidecar: grouped BF16 MoE restores the sharded A3B
-   audit to `40/40`, but paired v0.253 rows remain far behind llama.cpp even with
-   the bfloat-activation sidecar (`0.099x` at `pp512`, `0.180x` at `pp1024`).
-   v0.254-v0.259 kill command-buffer splitting, separate `NR1=32` gate/up,
-   reduce/finalizer focus, Q5-style tiny-down, and hot-only separate SwiGLU. BF16
-   is now a demoted red cell unless we deliberately schedule a full `mul_mm_id`
-   routed projection sidecar with a large wall gate.
-8. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+9. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
    or profile scope. The pinned upstream b9481 build does not expose
    `GGML_METAL_PROFILE_OPS`; the local fork has a profiling patch, but any
    attribution claim needs either a canonical profiling patch or a clearly marked
    non-scoreboard capture before more kernel code.
-9. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+10. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
    `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
    than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
    before any end-to-end tuning.

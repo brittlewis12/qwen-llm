@@ -103,7 +103,10 @@ Current caveats:
   with `QWEN_L2_PAIR_HD128_R4=0` as rollback; clean current-commit tuned rows are
   now 0.8B `pp512/1024` at `0.977x/0.996x` and 2B `pp512/1024` at
   `1.019x/1.022x`. The residual is now mostly 0.8B `pp512` fixed-shape overhead,
-  not a broad small-dense failure.
+  not a broad small-dense failure. v0.279 then defaults the same R4 row shape for
+  GDN rmsnorm-gated with `QWEN_RMSNORM_GATED_HD128_R4=0` as rollback. Clean tuned
+  rows are now 0.8B `pp512/1024` at `1.023x/1.023x` and 2B `pp512/1024` at
+  `0.999x/1.034x`; treat 2B `pp512` as parity/noise, not a new kernel red cell.
 - A10B very-short prefill is not a kernel-roadmap item unless a warmed paired row
   regresses. The v0.261 default `pp128` paired repeat still loses from cold
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
@@ -714,23 +717,22 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.274:
+Current rank after v0.279:
 
-1. Small dense tuned-llama residual: v0.274 mostly closes the `-ub 1024` control
-   by defaulting the head_dim=128 paired-L2 R4 path. Clean rows are now 0.8B
-   `pp512/1024` at `0.977x/0.996x` and 2B `pp512/1024` at `1.019x/1.022x`.
-   The remaining live red cell is 0.8B `pp512`, and the best clue is shape
-   efficiency in small per-head/per-token prep kernels. Next work should audit
-   and, only if justified, fuse or row-pack the GDN/QK prep cluster. Do not
-   retread attention, fast-path coverage, residual-add fusion, N64 policy,
-   shared-memory policy, GDN token-channel parallelization, command-buffer
-   streaming, or GDN matvec fallback.
-2. Promotion-grade paired residual search for the main family: only reopen dense
-   27B, A3B MoE, or A10B MoE kernel work if a same-session paired repeat exposes
-   a real gap. The latest sentinel packet has 27B at `1.04x/1.11x/1.12x`, A3B at
-   `1.16x/1.17x/1.07x`, and A10B at `1.13x/1.33x/1.05x` for
-   `pp1024/pp4096/tg128`; real-rollout rows are also won at `1.03x/1.07x/1.16x`
-   for 27B/A3B/A10B respectively.
+1. Promotion-grade paired residual search for the main family and small dense:
+   v0.279 cracks the tuned small-dense control except for parity/noise 2B
+   `pp512`: clean `-ub 1024` ratios are 0.8B `1.023x/1.023x` and 2B
+   `0.999x/1.034x` at `pp512/1024`. The next highest-EV work is not another
+   small-dense normalization retread; it is a paired sentinel/family sweep that
+   confirms no main target or quant regressed and identifies the largest real
+   red cell under current defaults.
+2. Remaining dense prompt attribution, only if a paired red cell survives: the
+   latest phase trace shows `gdn_gated` and `gdn_prep_l2` are now tiny. If short
+   dense still regresses in a clean repeat, target projection/FFN, GDN step, or
+   attention body with a shape-matched differential. Do not retread attention
+   defaults, fast-path coverage, residual-add fusion, N64 policy, shared-memory
+   policy, GDN token-channel parallelization, command-buffer streaming, GDN
+   matvec fallback, or HD128 normalization row count.
 3. True-long and chunk-policy guardrails: real prompts are clean, but candidate
    long-prompt changes still need synthetic `pp16384+` plus real message rows.
    `prefill_chunk=1024` remains a safe default cap, not a proven optimum.

@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-12 — v0.279 Default HD128 Gated Norm
+
+Status: added and defaulted a head_dim=128 specialization for GDN
+rmsnorm-gated rows. The old kernel used an oversized threadgroup-memory
+reduction per head row; the new path uses the same one-simdgroup-per-row,
+four-rows-per-threadgroup shape as the paired-L2 win. Rollback:
+`QWEN_RMSNORM_GATED_HD128_R4=0`. Raw artifacts:
+`target/profiles/v0278-0p8b-q4-pp512-rmsnorm-gated-r4-sweep.json`,
+`target/profiles/v0278-2b-q4-pp512-rmsnorm-gated-r4-sweep.json`,
+`target/profiles/v0278-0p8b-q4-pp1024-rmsnorm-gated-r4-sweep.json`,
+`target/profiles/v0278-2b-q4-pp1024-rmsnorm-gated-r4-sweep.json`,
+`target/profiles/v0279-0p8b-q4-pp512-rmsnorm-gated-r4-default-sweep.json`,
+`target/profiles/v0279-2b-q4-pp512-rmsnorm-gated-r4-default-sweep.json`, and
+`target/profiles/v0279-clean-*-rmsnorm-gated-default-paired-lcpp-ub1024.json`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `QWEN_RMSNORM_GATED_HD128_R4=1` rmsnorm-gated CPU oracle
+- 0.8B prefill-vs-single correctness gate, first opt-in and then default
+- 0.8B/2B Q4 `pp512/1024` opt-in A/B sweeps
+- 0.8B/2B Q4 `pp512` default-vs-rollback sweeps
+- clean paired 0.8B/2B Q4 `pp512/1024` vs llama.cpp `-ub 1024`
+
+The qwen-only A/B is consistently positive: 0.8B `pp512/1024` moves from
+`7792-7814/7993-8063` to `7887-8042/8199-8257 t/s`, and 2B `pp512/1024` moves
+from `3651-3658/3785-3797` to `3661-3701/3853-3856 t/s`. Default-vs-rollback
+`pp512` confirms the same direction: 0.8B `~7770 -> ~7980 t/s`, 2B
+`~3650 -> ~3703 t/s`.
+
+Against tuned llama.cpp `-ub 1024`, clean current-commit rows are now 0.8B
+`pp512/1024` at `1.023x/1.023x`, and 2B `pp512/1024` at `0.999x/1.034x`. The
+small-dense tuned-control cliff is now cracked except for a parity/noise 2B
+`pp512` cell. A clean phase trace after the default shows the targeted GDN tail
+is no longer material at 0.8B `pp512`: `gdn_gated` is `0.41 ms`, `gdn_prep_l2`
+is `0.45 ms`, and the remaining named buckets are projection/FFN, GDN step,
+and attention body.
+
 ## 2026-06-12 — v0.274 Default HD128 Paired L2
 
 Status: added and defaulted a head_dim=128 specialization for paired GDN Q/K

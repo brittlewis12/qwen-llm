@@ -110,6 +110,38 @@ kernel void kernel_touch_bytes_f32(
     sink[tid] = acc;
 }
 
+struct roofline_stream_args {
+    uint n;
+    float alpha;
+};
+
+kernel void kernel_roofline_stream_f32(
+        constant roofline_stream_args & args [[buffer(0)]],
+        device const float * x [[buffer(1)]],
+        device       float * y [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    y[tid] = fma(y[tid], args.alpha, x[tid]);
+}
+
+struct roofline_fma_args {
+    uint n;
+    uint iters;
+};
+
+kernel void kernel_roofline_fma_f32(
+        constant roofline_fma_args & args [[buffer(0)]],
+        device const float * x [[buffer(1)]],
+        device       float * y [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    float v = x[tid];
+    for (uint i = 0; i < args.iters; ++i) {
+        v = fma(v, 1.0000001f, 0.0000001f);
+    }
+    y[tid] = v;
+}
+
 // out[i] = a[i] * b[i]
 kernel void kernel_mul_f32(
         constant n_args & args [[buffer(0)]],

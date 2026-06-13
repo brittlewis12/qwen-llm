@@ -28,8 +28,9 @@ Primary guardrails:
   the hardware-utilization story: higher effective bandwidth for decode, higher
   effective FLOP/s for prefill, or removal of a measured serial/memory pass.
 - Scoreboards should carry both comparison axes: qwen/lcpp for external parity
-  and qwen/roofline for hardware headroom. Until the roofline calibration bench
-  lands, roofline percentages are estimates and must be labeled as such.
+  and qwen/roofline for hardware headroom. v0.285 adds `qwen-bench roofline`;
+  current M4 Max anchors are `474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s`
+  Q4_K mat-mat through our dispatcher, and `3.03 TFLOP/s` scalar FMA sanity.
 - Never run performance benchmarks in parallel.
 - Use the repo-pinned llama.cpp benchmark lock for scoreboard comparisons:
   `scripts/bench/llama-cpp.lock.json`, built by
@@ -72,6 +73,16 @@ Current short/decode guardrails:
 | 27B dense | `tg128` | `24.46` | `20.01` | `1.22x` | v0.203 pinned b9481 |
 | 35B A3B | `tg128` | `82.31` | `77.42` | `1.06x` | v0.203 pinned b9481 |
 | 122B A10B | `tg128` | `35.02` | `36.36` | `0.96x` | v0.281 repeat |
+
+Measured roofline anchors from v0.285 on M4 Max, AC power, high-power mode, no
+recorded warnings:
+
+| Anchor | Shape | Measured | Interpretation |
+| --- | ---: | ---: | --- |
+| Stream | `512 MiB` per buffer | `474.0 GB/s` | decode bandwidth denominator |
+| Q4_K mat-mat | `4096x4096x1024` | `12.80 nominal TFLOP/s` | regular prompt projection ceiling |
+| Q4_K mat-mat | `8192x8192x512` | `12.53 nominal TFLOP/s` | size-sensitivity check |
+| Scalar FMA | `4M elems x4096` | `3.03 TFLOP/s` | scalar/latency sanity, not matmul peak |
 
 Current caveats:
 
@@ -727,7 +738,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.281:
+Current rank after v0.285:
 
 1. A10B MoE decode execution-shape attribution: current-default sentinels say
    prefill is healthy, but A10B decode is repeatedly behind pinned llama.cpp and
@@ -736,10 +747,11 @@ Current rank after v0.281:
    A3B decode repeats remain positive. First gate: phase/profile A10B decode and
    prove a named bucket owns at least `1.5-2%` end-to-end before opening kernel
    work. The goal is not a `1.01x` llama.cpp scrape; it is a step-function toward
-   better MoE decode hardware utilization, with llama.cpp as the floor. Provisional
-   target before measured calibration: move A10B toward at least `~55%` of the
-   estimated bandwidth roofline, not merely past `36 t/s`. Any fix must be neutral
-   or positive on A3B and 27B `tg128`. First attribution says
+   better MoE decode hardware utilization, with llama.cpp as the floor. v0.285
+   measured stream bandwidth at `474 GB/s`, so a `55%` decode-bandwidth gate means
+   `~261 GB/s` effective bandwidth; the t/s conversion must come from explicit
+   active-byte accounting rather than folklore. Any fix must be neutral or positive
+   on A3B and 27B `tg128`. First attribution says
    serialized A10B `ctx128` token cost is GDN mixer `43.7%`, MoE FFN `31.0%`,
    attention `14.0%`, LM head `6.5%`, and route `4.7%`; disabling the existing
    GDN-concurrent decode path regresses `tg128` from `34.92` to `32.80 t/s`, and
@@ -748,11 +760,13 @@ Current rank after v0.281:
    encode pipelining. A dirty fused routed Q4/Q5 token sidecar also regressed
    catastrophically (`~35 -> 4.26 t/s`), so the reset must preserve occupancy and
    memory behavior rather than collapsing all routed work into one monolith.
-2. Measured roofline calibration and utilization scoreboard: add a one-time GPU
-   calibration packet for stream-read/write bandwidth and simple ALU/matrix FLOP/s
-   on this machine, then add utilization columns to family/digest outputs. This is
-   not optional polish: without a measured qwen/roofline axis, green llama.cpp rows
-   keep hiding 2-4x decode headroom. Gate future "done" claims on both axes.
+2. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
+   packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
+   `3.03 TFLOP/s` scalar-FMA sanity). Next, add qwen/roofline columns to family and
+   digest outputs wherever active-byte or equivalent-FLOP accounting is defensible.
+   This is not optional polish: without a measured qwen/roofline axis, green
+   llama.cpp rows keep hiding decode and fixed-overhead headroom. Gate future
+   "done" claims on both axes.
 3. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen

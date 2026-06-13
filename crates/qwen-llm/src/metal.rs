@@ -510,6 +510,26 @@ impl MetalTensor {
         })
     }
 
+    /// Allocate a zero-initialized tensor of any GGML dtype.
+    ///
+    /// This is mainly for synthetic benchmarks that need valid quantized
+    /// buffers without loading a model tensor from disk.
+    pub fn zeros_dtype(
+        ctx: &MetalContext,
+        shape: Vec<u64>,
+        dtype: GgmlType,
+    ) -> Result<Self, MetalError> {
+        let (_n, bytes) = checked_ggml_shape_bytes(&shape, dtype)?;
+        let zeros = vec![0u8; bytes.max(1)];
+        let buffer = ctx.buffer_from(&zeros)?;
+        Ok(Self {
+            buffer,
+            offset: 0,
+            shape,
+            dtype,
+        })
+    }
+
     /// Build a zero-copy sub-view of this tensor: same underlying MTLBuffer,
     /// shifted by `elem_offset` elements (of the tensor's dtype), with a
     /// new logical `shape`. The resulting view shares storage and aliases
@@ -8211,6 +8231,97 @@ pub fn encode_touch_bytes_f32(
         },
         MTLSize {
             width: sink_n.min(256),
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_roofline_stream_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    alpha: f32,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    if y.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "roofline_stream",
+            detail: format!("y.n_elements={} != x.n_elements={n}", y.n_elements()),
+        });
+    }
+    let pso = ctx.pipeline("kernel_roofline_stream_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        alpha: f32,
+    }
+    enc.set_bytes(0, &Args { n: n as u32, alpha });
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, y);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_roofline_fma_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    iters: usize,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    if y.n_elements() as usize != n || iters == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "roofline_fma",
+            detail: format!(
+                "y.n_elements={} x.n_elements={n} iters={iters}",
+                y.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_roofline_fma_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        iters: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            iters: iters as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, y);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
             height: 1,
             depth: 1,
         },

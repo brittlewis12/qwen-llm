@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-13 — v0.285 Measured Roofline Anchors
+
+Status: added `qwen-bench roofline` as a lightweight calibration harness so the
+roadmap can stop treating llama.cpp parity as the only scoreboard axis. The new
+command records AC/battery/thermal metadata and emits compact JSON. It currently
+measures a streaming F32 memory kernel, a scalar dependent-FMA sanity kernel, and
+a synthetic large Q4_K mat-mat through the same dispatcher used by prompt
+projections.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- smoke: `target/profiles/v0285-roofline-mat-smoke-postfmt.json`
+- default: `target/profiles/v0285-roofline-default-v2.json`
+- larger Q4 mat-mat check: `target/profiles/v0285-roofline-mat8192.json`
+- cx adversarial review of how to interpret the anchors
+
+Measured M4 Max anchors on AC power, high-power mode, no recorded warnings:
+
+- Stream: `512 MiB` per buffer, nominal `1.61 GB` per rep, `3.398 ms` average,
+  `474.0 GB/s`.
+- Scalar FMA sanity: `34.36 GFLOP` nominal, `11.335 ms` average,
+  `3.03 TFLOP/s`. This is not a matmul roofline.
+- Q4_K mat-mat dispatcher: `4096x4096x1024`, `34.36 GFLOP` nominal,
+  `2.685 ms`, `12.80 nominal TFLOP/s`; larger `8192x8192x512` measured
+  `12.53 nominal TFLOP/s`.
+
+Interpretation: the Q4_K number is a practical ceiling for large regular prompt
+projection work in our current dispatcher, not a general Apple GPU compute peak
+and not evidence that decode can approach that number. The stream anchor lowers
+the old spec-sheet `546 GB/s` bandwidth estimate by about `13%`, which changes
+numeric utilization gates but not the priority order: A10B decode remains the
+confirmed active red cell, and future scoreboards need qwen/lcpp plus
+qwen/roofline columns.
+
 ## 2026-06-12 — v0.284 Decode Roofline Reframe and Fused-Routed Falsifier
 
 Status: strengthened the roadmap's hardware-first frame after a second audit

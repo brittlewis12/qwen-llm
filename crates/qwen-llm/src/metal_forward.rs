@@ -47,6 +47,8 @@ use crate::metal::{
     encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use std::{cell::Cell, sync::OnceLock};
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
@@ -180,6 +182,16 @@ fn concurrent_gdn_moe_decode_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_DECODE_MOE_CONCURRENT_GDN").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn concurrent_shared_moe_decode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_MOE_CONCURRENT_SHARED").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -1374,14 +1386,34 @@ impl<'a> MetalForward<'a> {
         ffn_up: &MetalTensor,
         ffn_down: &MetalTensor,
     ) -> Result<(), MfError> {
-        let arch = &self.model.arch;
-        let h = arch.hidden_size as usize;
-        let f_shared = arch.expert_shared_feed_forward_length as usize;
+        self.encode_moe_shared_ffn_core_gpu(enc, session, ffn_gate, ffn_up, ffn_down)?;
+        self.encode_moe_shared_ffn_accumulate_gpu(enc, session)
+    }
 
+    fn encode_moe_shared_ffn_core_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+    ) -> Result<(), MfError> {
+        self.encode_moe_shared_ffn_gate_up_gpu(enc, session, ffn_gate, ffn_up)?;
+        self.encode_moe_shared_ffn_silu_gpu(enc, session)?;
+        self.encode_moe_shared_ffn_down_gpu(enc, session, ffn_down)
+    }
+
+    fn encode_moe_shared_ffn_gate_up_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        let f_shared = self.model.arch.expert_shared_feed_forward_length as usize;
         let shared_gate_tmp = session.ffn_gate.view_subrange(0, vec![f_shared as u64]);
         let shared_up_tmp = session.ffn_up.view_subrange(0, vec![f_shared as u64]);
-        let shared_inner_tmp = session.ffn_inner.view_subrange(0, vec![f_shared as u64]);
-        let shared_out_tmp = session.ffn_out.view_subrange(0, vec![h as u64]);
         encode_mat_vec_dispatch(
             self.ctx,
             enc,
@@ -1400,6 +1432,18 @@ impl<'a> MetalForward<'a> {
             h,
             f_shared,
         )?;
+        Ok(())
+    }
+
+    fn encode_moe_shared_ffn_silu_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let f_shared = self.model.arch.expert_shared_feed_forward_length as usize;
+        let shared_gate_tmp = session.ffn_gate.view_subrange(0, vec![f_shared as u64]);
+        let shared_up_tmp = session.ffn_up.view_subrange(0, vec![f_shared as u64]);
+        let shared_inner_tmp = session.ffn_inner.view_subrange(0, vec![f_shared as u64]);
         encode_silu_mul_f32(
             self.ctx,
             enc,
@@ -1407,6 +1451,19 @@ impl<'a> MetalForward<'a> {
             &shared_up_tmp,
             &shared_inner_tmp,
         )?;
+        Ok(())
+    }
+
+    fn encode_moe_shared_ffn_down_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        ffn_down: &MetalTensor,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        let f_shared = self.model.arch.expert_shared_feed_forward_length as usize;
+        let shared_inner_tmp = session.ffn_inner.view_subrange(0, vec![f_shared as u64]);
+        let shared_out_tmp = session.ffn_out.view_subrange(0, vec![h as u64]);
         encode_mat_vec_dispatch(
             self.ctx,
             enc,
@@ -1416,6 +1473,16 @@ impl<'a> MetalForward<'a> {
             f_shared,
             h,
         )?;
+        Ok(())
+    }
+
+    fn encode_moe_shared_ffn_accumulate_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        let shared_out_tmp = session.ffn_out.view_subrange(0, vec![h as u64]);
         encode_axpy_scalar_f32(
             self.ctx,
             enc,
@@ -1438,6 +1505,157 @@ impl<'a> MetalForward<'a> {
         self.encode_moe_routed_ffn_gpu(enc, session, moe)?;
         self.encode_moe_shared_ffn_gpu(enc, session, ffn_gate, ffn_up, ffn_down)?;
         encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
+        Ok(())
+    }
+
+    fn encode_moe_ffn_apply_gpu_concurrent_shared(
+        &self,
+        cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        if moe.gate_exps.dtype != GgmlType::Q4_K || moe.up_exps.dtype != GgmlType::Q4_K {
+            let enc = KernelEncoder::begin(cmd_buf);
+            self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
+            enc.end();
+            return Ok(());
+        }
+
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let moe_inner = session
+            .moe_inner
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let moe_expert_out = session
+            .moe_expert_out
+            .view_subrange(0, vec![(topk * h) as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+        let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        {
+            let enc = KernelEncoder::begin_concurrent(cmd_buf);
+            encode_moe_swiglu_q4_K_f32(
+                self.ctx,
+                &enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &session.h,
+                &topk_idx,
+                &moe_inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+            )?;
+            self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
+            enc.end();
+        }
+        {
+            let enc = KernelEncoder::begin(cmd_buf);
+            self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
+            enc.end();
+        }
+
+        let routed_weighted_sum_is_pending = match moe.down_exps.dtype {
+            GgmlType::Q5_K => {
+                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                encode_moe_down_q5_K_f32(
+                    self.ctx,
+                    &enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                enc.end();
+                true
+            }
+            GgmlType::Q6_K => {
+                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                encode_moe_down_weighted_sum_q6_K_f32(
+                    self.ctx,
+                    &enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &topk_w,
+                    &session.mixer_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                enc.end();
+                false
+            }
+            GgmlType::IQ4_XS => {
+                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                encode_moe_down_iq4_xs_f32(
+                    self.ctx,
+                    &enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                enc.end();
+                true
+            }
+            GgmlType::BF16 => {
+                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                encode_moe_down_bf16_f32(
+                    self.ctx,
+                    &enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                enc.end();
+                true
+            }
+            _ => unreachable!(),
+        };
+
+        {
+            let enc = KernelEncoder::begin(cmd_buf);
+            if routed_weighted_sum_is_pending {
+                encode_moe_weighted_sum_f32(
+                    self.ctx,
+                    &enc,
+                    &moe_expert_out,
+                    &topk_w,
+                    &session.mixer_out,
+                    h,
+                    topk,
+                )?;
+            }
+            self.encode_moe_shared_ffn_accumulate_gpu(&enc, session)?;
+            encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+            enc.end();
+        }
         Ok(())
     }
 
@@ -1716,23 +1934,57 @@ impl<'a> MetalForward<'a> {
                             RMS_EPS,
                         )?;
                         self.encode_moe_route_prepare(&enc, session, moe)?;
-                        self.encode_moe_ffn_apply_gpu(
-                            &enc,
+                        if !concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                session,
+                                &g.ffn_gate,
+                                &g.ffn_up,
+                                &g.ffn_down,
+                                moe,
+                            )?;
+                        }
+                        enc.end();
+                    }
+                    if concurrent_shared_moe_decode_enabled() {
+                        self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                            &cmd_buf,
                             session,
                             &g.ffn_gate,
                             &g.ffn_up,
                             &g.ffn_down,
                             moe,
                         )?;
-                        enc.end();
                     }
                 }
-                MetalBlock::Attn(_) => {
+                MetalBlock::Attn(a) => {
                     let slot = MixerSlot::Attn(attn_idx);
                     attn_idx += 1;
                     let enc = KernelEncoder::begin(&cmd_buf);
-                    self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+                    self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                    let moe = a.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                    self.encode_moe_route_prepare(&enc, session, moe)?;
+                    if !concurrent_shared_moe_decode_enabled() {
+                        self.encode_moe_ffn_apply_gpu(
+                            &enc,
+                            session,
+                            &a.ffn_gate,
+                            &a.ffn_up,
+                            &a.ffn_down,
+                            moe,
+                        )?;
+                    }
                     enc.end();
+                    if concurrent_shared_moe_decode_enabled() {
+                        self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                            &cmd_buf,
+                            session,
+                            &a.ffn_gate,
+                            &a.ffn_up,
+                            &a.ffn_down,
+                            moe,
+                        )?;
+                    }
                 }
             }
         }
@@ -1864,23 +2116,57 @@ impl<'a> MetalForward<'a> {
                             RMS_EPS,
                         )?;
                         self.encode_moe_route_prepare(&enc, session, moe)?;
-                        self.encode_moe_ffn_apply_gpu(
-                            &enc,
+                        if !concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                session,
+                                &g.ffn_gate,
+                                &g.ffn_up,
+                                &g.ffn_down,
+                                moe,
+                            )?;
+                        }
+                        enc.end();
+                    }
+                    if concurrent_shared_moe_decode_enabled() {
+                        self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                            &cmd_buf,
                             session,
                             &g.ffn_gate,
                             &g.ffn_up,
                             &g.ffn_down,
                             moe,
                         )?;
-                        enc.end();
                     }
                 }
-                MetalBlock::Attn(_) => {
+                MetalBlock::Attn(a) => {
                     let slot = MixerSlot::Attn(attn_idx);
                     attn_idx += 1;
                     let enc = KernelEncoder::begin(&cmd_buf);
-                    self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+                    self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                    let moe = a.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                    self.encode_moe_route_prepare(&enc, session, moe)?;
+                    if !concurrent_shared_moe_decode_enabled() {
+                        self.encode_moe_ffn_apply_gpu(
+                            &enc,
+                            session,
+                            &a.ffn_gate,
+                            &a.ffn_up,
+                            &a.ffn_down,
+                            moe,
+                        )?;
+                    }
                     enc.end();
+                    if concurrent_shared_moe_decode_enabled() {
+                        self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                            &cmd_buf,
+                            session,
+                            &a.ffn_gate,
+                            &a.ffn_up,
+                            &a.ffn_down,
+                            moe,
+                        )?;
+                    }
                 }
             }
         }
@@ -3302,10 +3588,17 @@ impl<'a> MetalForward<'a> {
             ));
         }
 
-        let mut gdn_mixer_total_ms = 0.0f64;
+        let mut gdn_pre_norm_total_ms = 0.0f64;
+        let mut gdn_front_proj_total_ms = 0.0f64;
+        let mut gdn_alpha_beta_total_ms = 0.0f64;
+        let mut gdn_tail_total_ms = 0.0f64;
+        let mut gdn_out_proj_total_ms = 0.0f64;
+        let mut gdn_resid_post_total_ms = 0.0f64;
         let mut attn_mixer_total_ms = 0.0f64;
         let mut route_total_ms = 0.0f64;
-        let mut ffn_total_ms = 0.0f64;
+        let mut routed_ffn_total_ms = 0.0f64;
+        let mut shared_ffn_total_ms = 0.0f64;
+        let mut ffn_resid_total_ms = 0.0f64;
         let mut gdn_count = 0usize;
         let mut attn_count = 0usize;
         let mut gdn_idx = 0usize;
@@ -3331,17 +3624,126 @@ impl<'a> MetalForward<'a> {
             };
             let moe = moe.ok_or(MfError::UnsupportedMoe)?;
 
-            {
-                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
-                let enc = KernelEncoder::begin(&cmd);
-                self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
-                enc.end();
-                cmd.commit();
-                cmd.waitUntilCompleted();
-                let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
-                match block {
-                    MetalBlock::Gdn(_) => gdn_mixer_total_ms += ms,
-                    MetalBlock::Attn(_) => attn_mixer_total_ms += ms,
+            match (block, slot) {
+                (MetalBlock::Gdn(g), MixerSlot::Gdn(gdn_i)) => {
+                    let v_dim = self.model.arch.gdn_n_v_heads as usize
+                        * self.model.arch.gdn_head_dim as usize;
+
+                    {
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        gdn_pre_norm_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                    {
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        self.encode_gdn_front_projections(&enc, g, session)?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        gdn_front_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                    {
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        encode_sigmoid_f32(self.ctx, &enc, &session.gdn_b, &session.gdn_beta)?;
+                        encode_gdn_decay_chain_f32(
+                            self.ctx,
+                            &enc,
+                            &session.gdn_a,
+                            &g.dt_bias,
+                            &g.a_log,
+                            &session.gdn_alpha,
+                        )?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        gdn_alpha_beta_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                    {
+                        let gdn_qkv = session.gdn_qkv.clone();
+                        let gdn_z = session.gdn_z.clone();
+                        let gdn_alpha = session.gdn_alpha.clone();
+                        let gdn_beta = session.gdn_beta.clone();
+                        let gdn_normed = session.gdn_normed.clone();
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        self.encode_gdn_tail(
+                            &enc,
+                            g,
+                            gdn_i,
+                            session,
+                            &gdn_qkv,
+                            &gdn_z,
+                            &gdn_alpha,
+                            &gdn_beta,
+                            &gdn_normed,
+                        )?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        gdn_tail_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                    {
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        encode_mat_vec_dispatch(
+                            self.ctx,
+                            &enc,
+                            &g.out_proj,
+                            &session.gdn_normed,
+                            &session.mixer_out,
+                            v_dim,
+                            h,
+                        )?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        gdn_out_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                    {
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.post_attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        gdn_resid_post_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+                }
+                (MetalBlock::Attn(_), MixerSlot::Attn(_)) => {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    attn_mixer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
+                _ => {
+                    return Err(MfError::Metal(MetalError::BadShape {
+                        kernel: "single_token_phase_profiled_moe",
+                        detail: "mixer slot type did not match block kind".into(),
+                    }));
                 }
             }
 
@@ -3358,17 +3760,57 @@ impl<'a> MetalForward<'a> {
             {
                 let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                 let enc = KernelEncoder::begin(&cmd);
-                self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
+                self.encode_moe_routed_ffn_gpu(&enc, session, moe)?;
                 enc.end();
                 cmd.commit();
                 cmd.waitUntilCompleted();
-                ffn_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                routed_ffn_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            }
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                self.encode_moe_shared_ffn_gpu(&enc, session, ffn_gate, ffn_up, ffn_down)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                shared_ffn_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            }
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                ffn_resid_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             }
         }
-        phases.push((format!("gdn mixer (x{gdn_count})"), gdn_mixer_total_ms));
+        phases.push((
+            format!("gdn pre_norm (x{gdn_count})"),
+            gdn_pre_norm_total_ms,
+        ));
+        phases.push((
+            format!("gdn front proj (x{gdn_count})"),
+            gdn_front_proj_total_ms,
+        ));
+        phases.push((
+            format!("gdn alpha/beta (x{gdn_count})"),
+            gdn_alpha_beta_total_ms,
+        ));
+        phases.push((format!("gdn tail (x{gdn_count})"), gdn_tail_total_ms));
+        phases.push((
+            format!("gdn out_proj (x{gdn_count})"),
+            gdn_out_proj_total_ms,
+        ));
+        phases.push((
+            format!("gdn resid/post (x{gdn_count})"),
+            gdn_resid_post_total_ms,
+        ));
         phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
         phases.push(("moe route".into(), route_total_ms));
-        phases.push(("moe ffn".into(), ffn_total_ms));
+        phases.push(("moe routed ffn".into(), routed_ffn_total_ms));
+        phases.push(("moe shared ffn".into(), shared_ffn_total_ms));
+        phases.push(("moe ffn residual".into(), ffn_resid_total_ms));
 
         {
             let cmd = self.ctx.queue.commandBuffer().expect("cmd");

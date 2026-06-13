@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-13 — v0.286 Default MoE Decode Shared-Overlap Waves
+
+Status: promoted a correctness-safe MoE decode overlap path for the shared expert
+FFN. The initial naive version tried to run the whole routed chain and whole
+shared chain in concurrent encoders; A10B correctness failed immediately
+(`argmax 97572` versus `4178`, `cos=0.7647`). The kept path uses dependency
+waves only: Q4 routed SwiGLU overlaps shared gate/up, shared SiLU stays serial,
+routed down overlaps shared down, and the routed/shared accumulation remains a
+serial finalizer. Rollback: `QWEN_DECODE_MOE_CONCURRENT_SHARED=0`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- A10B concurrent-GDN MoE correctness with shared overlap
+- A3B concurrent-GDN MoE correctness with shared overlap
+- A10B `tg128` default versus rollback
+- A3B `tg128` default versus rollback
+- cx adversarial review of the decode dispatch-chain frame
+
+Attribution before the change split A10B decode at `ctx=128` into GDN front
+projection `8.63 ms` (`28.2%`), routed FFN `6.01 ms` (`19.7%`), attention
+`4.30 ms` (`14.1%`), GDN out projection `3.26 ms` (`10.7%`), shared FFN
+`3.22 ms` (`10.5%`), LM head `2.04 ms` (`6.7%`), route `1.42 ms` (`4.7%`),
+and GDN tail `1.06 ms` (`3.5%`).
+
+Default-vs-rollback decode results on AC power, no recorded warnings:
+
+- A10B `tg128`: default `36.74 t/s`, rollback `35.16 t/s` (`+4.5%`). This
+  clears the pinned llama.cpp repeat row (`36.36 t/s`) by about `1.01x`.
+- A3B `tg128`: default `85.81 t/s`, rollback `81.25 t/s` (`+5.6%`).
+
 ## 2026-06-13 — v0.285 Measured Roofline Anchors
 
 Status: added `qwen-bench roofline` as a lightweight calibration harness so the

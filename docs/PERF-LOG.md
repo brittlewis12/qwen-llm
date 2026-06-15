@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-15 — v0.291 Q8 Mat-Vec Llama-Style Probe
+
+Status: defaulted a Q8_0 mat-vec kernel that mirrors llama.cpp's decode work shape
+more closely. Unlike the killed row-pair probe, this changes the inner dataflow:
+four simdgroups cooperate on two output rows, each lane handles eight quants per
+visited Q8 block, and threadgroup memory reduces the four partial K-stripes.
+Rollback: `QWEN_MATVEC_Q8_0_LCPP=0`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- offline Metal compile of `kernels/mat_vec_q8_0.metal`
+- default Q8_0 primitive correctness
+- default A10B and `QWEN_MATVEC_Q8_0_LCPP=1` A3B decode correctness smokes
+- A10B `tg64/tg128/tg256`, A3B `tg128`, and dense 27B `tg128` qwen-only A/Bs
+  on AC power with no recorded warnings
+
+Results:
+
+- A10B `tg64`: `35.77 -> 42.90 t/s` (`+19.9%`)
+- A10B `tg128`: default `42.80/42.81 t/s` versus rollback `35.88 t/s`
+  (`+19.3%`)
+- A10B `tg256`: `34.74 -> 42.45 t/s` (`+22.2%`)
+- A3B `tg128`: `84.22 -> 98.04 t/s` (`+16.4%`)
+- dense 27B `tg128`: `23.40 -> 23.13 t/s` with forced env (`-1.1%`, noisy and
+  likely unaffected because the local 27B Q4 file has no Q8_0 tensors)
+
+Interpretation: this is the first post-v0.286 MoE decode discontinuity. The Q8
+front/out/attention projection path was structurally under-parallelized; matching
+llama.cpp's cooperative Q8 mat-vec shape converts that bucket into a large MoE
+decode win.
+
 ## 2026-06-15 — v0.290 GDN Front Fused-Q8 Falsifier
 
 Status: tested an env-gated fused Q8_0 GDN-front decode path for A10B

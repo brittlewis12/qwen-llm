@@ -680,6 +680,13 @@ Recent confirmed wins:
 - Attach-mode decode tracing is now practical via `qwen-bench decode-window`, and
   `scripts/profile/trace-metal.py` gives a compact Metal timeline summary
   without hand-written one-off parsers.
+- Llama-style Q8_0 decode mat-vec is a large default MoE win with rollback
+  `QWEN_MATVEC_Q8_0_LCPP=0`. A10B moves from `35.77 -> 42.90 t/s` at `tg64`,
+  default `tg128` is `42.80/42.81` versus rollback `35.88`, and `tg256` moves
+  `34.74 -> 42.45`; A3B `tg128` moves `84.22 -> 98.04`. Dense 27B `tg128` was
+  slightly negative/noisy under forced env (`23.40 -> 23.13`), but the local 27B
+  Q4 file has no Q8_0 tensors, so treat that as a repeat guardrail rather than a
+  blocker.
 - Group16 attention tile4 default for 122B long context.
 - Group6 dense attention `NWG=64` at `n_pos >= 4096`.
 - `QWEN_ATTN_V4_NWG`, `QWEN_ATTN_V4_TILE_C`, and `QWEN_ATTN_V4_G16_TILE` A/B knobs.
@@ -753,9 +760,14 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.290:
+Current rank after v0.291:
 
-1. MoE decode execution-shape second pass: v0.287 closes the A10B decode shape
+1. Clean re-anchor after the Q8_0 lcpp default. v0.291 is a discontinuous MoE
+   decode win (`+16-22%`) because it changes Q8 row-dot dataflow rather than just
+   launch shape. Next gate: commit, rebuild from the clean commit, and rerun the
+   A10B `tg64/tg128/tg256` shape packet against pinned llama.cpp so the headline
+   row is not dirty-stamped.
+2. MoE decode execution-shape second pass: v0.287 closes the A10B decode shape
    packet versus pinned llama.cpp (`tg64/tg128/tg256 = 1.01x/1.02x/1.02x`) and
    v0.286 lifts A3B `tg128` to `85.81 t/s`, but the hardware-utilization objective
    is not satisfied. v0.285 measured stream bandwidth at `474 GB/s`, so a `55%`
@@ -774,18 +786,18 @@ Current rank after v0.290:
    (`36.73 -> 25.04 t/s`). Reopen GDN front only with a packed/branch-free bank or
    a genuinely different tiled Q8 kernel; otherwise move to GDN out, LM head, or
    long-context attention/KV-Q with phase evidence.
-2. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
+3. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
    `3.03 TFLOP/s` scalar-FMA sanity). Next, add qwen/roofline columns to family and
    digest outputs wherever active-byte or equivalent-FLOP accounting is defensible.
    This is not optional polish: without a measured qwen/roofline axis, green
    llama.cpp rows keep hiding decode and fixed-overhead headroom. Gate future
    "done" claims on both axes.
-3. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
+4. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen
    prefill only if a paired repeat exposes a real current-default red cell.
-4. A3B true-long current-default recheck: the old `pp34502=0.78x` row is stale
+5. A3B true-long current-default recheck: the old `pp34502=0.78x` row is stale
    relative to later matrix/long-branch wins and v0.203 `pp16384` family wins.
    Before implementing fused online-softmax, chunk policy, or GDN-scan work, rerun
    current default on synthetic `pp16384`, synthetic `pp34502`, and one real
@@ -794,7 +806,7 @@ Current rank after v0.290:
    covered by prior single-chunk stream-layer falsifiers. If the loss survives,
    require any branch to improve both synthetic and real long prompts without
    harming `pp512/1024`.
-5. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
+6. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
    catastrophic demoted red cell, but the audit's mechanical hypotheses are now
    the right reopen criteria: vectorized BF16 weight tile loads, removal of
    binned full-grid relaunch waste, and all-simdgroup/vectorized down epilogues.
@@ -802,31 +814,31 @@ Current rank after v0.290:
    that graveyard as evidence against this variable. Do not claim product-family
    movement from BF16 until it moves BF16 A3B wall by a large factor and preserves
    grouped coverage.
-6. MTP / packed-verify dense decode: dense 27B decode near the weight-read
+7. MTP / packed-verify dense decode: dense 27B decode near the weight-read
    roofline cannot get a large multiplier from execution cleanup alone. MTP is the
    path that can exceed the naive weight-read floor by amortizing verification
    across multiple drafted tokens. Keep it behind the current MoE decode
    hardware-utilization pass for now, but treat it as the main dense-decode
    domination lever, not an oracle curiosity.
-7. Remaining dense prompt attribution, only if a paired red cell survives: the
+8. Remaining dense prompt attribution, only if a paired red cell survives: the
    latest phase trace shows `gdn_gated` and `gdn_prep_l2` are now tiny. If short
    dense still regresses in a clean repeat, target projection/FFN, GDN step, or
    attention body with a shape-matched differential. Do not retread attention
    defaults, fast-path coverage, residual-add fusion, N64 policy, shared-memory
    policy, GDN token-channel parallelization, command-buffer streaming, GDN
    matvec fallback, or HD128 normalization row count.
-8. Hardware-headroom watchlist: ICB/MTL4 encode-once decode, fused online-softmax
+9. Hardware-headroom watchlist: ICB/MTL4 encode-once decode, fused online-softmax
    prefill attention, chunked delta-rule GDN, production residency/warm expert
    banks, and epilogue fusions are all plausible paths to dominate beyond
    llama.cpp. They need a trace-proven idle/bandwidth/phase gate before
    implementation, not merely a green or red llama row. GDN prep falsifiers do not
    falsify chunked `gdn_step`; they are different kernels and mechanisms.
-9. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
+10. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
    and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work
    only when a paired file or static audit exposes a fresh miss.
-10. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+11. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured

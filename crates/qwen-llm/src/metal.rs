@@ -12790,6 +12790,17 @@ pub fn encode_mat_vec_q5_k_f32(
 /// switch the DFlash drafter from F32-dequant to native Q8_0 storage
 /// (drafter weight footprint 7.4 GB → 1.85 GB, eliminates per-token
 /// re-read of the dequant'd F32 weights at hot decode).
+fn mat_vec_q8_0_lcpp_enabled() -> bool {
+    static OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
+    let override_value =
+        *OVERRIDE.get_or_init(|| match std::env::var("QWEN_MATVEC_Q8_0_LCPP").as_deref() {
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO") => Some(false),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") => Some(true),
+            _ => None,
+        });
+    override_value.unwrap_or(true)
+}
+
 pub fn encode_mat_vec_q8_0_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -12811,7 +12822,12 @@ pub fn encode_mat_vec_q8_0_f32(
             detail: format!("weight.dtype = {:?}, expected Q8_0", weight.dtype),
         });
     }
-    let pso = ctx.pipeline("kernel_mat_vec_q8_0_f32")?;
+    let use_lcpp = mat_vec_q8_0_lcpp_enabled();
+    let pso = ctx.pipeline(if use_lcpp {
+        "kernel_mat_vec_q8_0_f32_lcpp"
+    } else {
+        "kernel_mat_vec_q8_0_f32"
+    })?;
     enc.set_pipeline(&pso);
 
     #[repr(C)]
@@ -12831,17 +12847,19 @@ pub fn encode_mat_vec_q8_0_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    // NR0=1, NSG=2 → 2 output rows per threadgroup (matches Q5_K shape).
-    const NR0: usize = 1;
-    const NSG: usize = 2;
+    let (nr0, nsg) = if use_lcpp { (2, 4) } else { (1, 2) };
+    if use_lcpp {
+        enc.set_threadgroup_memory(0, 32 * nr0 * std::mem::size_of::<f32>());
+    }
+    let rows_per_threadgroup = if use_lcpp { nr0 } else { nr0 * nsg };
     enc.dispatch(
         MTLSize {
-            width: n_out.div_ceil(NR0 * NSG),
+            width: n_out.div_ceil(rows_per_threadgroup),
             height: 1,
             depth: 1,
         },
         MTLSize {
-            width: NSG * 32,
+            width: nsg * 32,
             height: 1,
             depth: 1,
         },

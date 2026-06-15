@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-15 — v0.290 GDN Front Fused-Q8 Falsifier
+
+Status: tested an env-gated fused Q8_0 GDN-front decode path for A10B
+(`QWEN_DECODE_GDN_FRONT_FUSED_Q8=1`). The first version only fused dispatch for
+`qkv`, `z`, `beta`, and `alpha`; a second version also staged the hidden vector in
+threadgroup memory and used four simdgroups per threadgroup. Both were removed.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- offline Metal compile of the modified Q8 kernel
+- A10B concurrent-GDN MoE correctness smoke with exact logits match
+- A10B `tg128` base / fused / base qwen-only A/B on battery, explicitly treated as
+  confounded but still strong enough to reject the x-cache shape
+
+Results:
+
+- dispatch-only fused Q8, battery-confounded: base A `35.75 t/s`, fused
+  `35.78 t/s`, base B `36.56 t/s`
+- x-cached fused Q8, battery-confounded: base A `36.73 t/s`, fused `25.04 t/s`,
+  base B `35.90 t/s`
+
+Interpretation: the GDN-front bucket is still real, but this shape is the wrong
+mechanism. Saving launches without changing the row-dot dataflow is too weak, and
+per-threadgroup hidden-vector staging collapses occupancy enough to dominate any
+reuse. Future Q8 GDN-front work needs a packed/branch-free bank and genuinely new
+tiling, or should move to the next named decode bucket.
+
 ## 2026-06-15 — v0.289 Q8 Mat-Vec Row-Pair Falsifier
 
 Status: tested a Q8_0 mat-vec `NR0=2` row-pair variant as a GDN-front/out and LM

@@ -688,6 +688,12 @@ Recent confirmed wins:
 
 Recent measured negatives:
 
+- Fused Q8_0 GDN-front decode is falsified in the tested forms. Dispatch-only
+  fusion was flat/noisy on battery (`35.75/35.78/36.56 t/s` base/fused/base), and
+  the x-cached four-simdgroup version was correctness-safe but catastrophic
+  (`36.73/25.04/35.90 t/s`, battery-confounded but too large to ignore). Do not
+  reopen this as launch fusion or hidden-vector threadgroup staging; a future Q8
+  front branch must change packing/tiling materially.
 - Q8_0 mat-vec row-pairing is falsified for A10B decode. An `NR0=2` variant passed
   primitive and A10B decode correctness, but regressed `tg128` from
   `36.73/36.90 t/s` base to `33.37 t/s`. Do not copy Q4/Q6 row-pair geometry to
@@ -747,7 +753,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.286:
+Current rank after v0.290:
 
 1. MoE decode execution-shape second pass: v0.287 closes the A10B decode shape
    packet versus pinned llama.cpp (`tg64/tg128/tg256 = 1.01x/1.02x/1.02x`) and
@@ -758,11 +764,16 @@ Current rank after v0.286:
    A10B profile names the remaining largest buckets: GDN front projection `28.2%`,
    routed FFN `19.7%`, attention `14.1%`, GDN out projection `10.7%`, shared FFN
    `10.5%`, LM head `6.7%`, route `4.7%`, and GDN tail `3.5%`. The kept
-   shared-overlap win proves dependency-wave overlap is viable; the rejected
+   shared-overlap win proves dependency-wave overlap is viable. The rejected
    whole-chain concurrent version proves dependent chains inside concurrent
-   encoders are correctness-unsafe. Next gates: target a named bucket for at least
+   encoders are correctness-unsafe, while v0.288-v0.290 falsify three tempting GDN
+   front retreads: split concurrent encoders, Q8 row-pairing, and fused Q8
+   dispatch/x-cache staging. Next gates: target a named bucket for at least
    `1.5-2%` end-to-end, preserve A3B/A10B gains, and do not collapse occupancy
-   like the fused routed monolith (`~35 -> 4.26 t/s`).
+   like the fused routed monolith (`~35 -> 4.26 t/s`) or x-cached Q8 front
+   (`36.73 -> 25.04 t/s`). Reopen GDN front only with a packed/branch-free bank or
+   a genuinely different tiled Q8 kernel; otherwise move to GDN out, LM head, or
+   long-context attention/KV-Q with phase evidence.
 2. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
    `3.03 TFLOP/s` scalar-FMA sanity). Next, add qwen/roofline columns to family and

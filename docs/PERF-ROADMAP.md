@@ -688,6 +688,10 @@ Recent confirmed wins:
 
 Recent measured negatives:
 
+- Q8_0 mat-vec row-pairing is falsified for A10B decode. An `NR0=2` variant passed
+  primitive and A10B decode correctness, but regressed `tg128` from
+  `36.73/36.90 t/s` base to `33.37 t/s`. Do not copy Q4/Q6 row-pair geometry to
+  Q8_0 without a new memory-access mechanism.
 - Split-concurrent GDN front projections are falsified for MoE decode. The probe
   was correctness-safe on A10B, but regressed `tg128` from `36.72/36.90 t/s` base
   to `35.09 t/s`; future GDN front work needs a different work shape or input

@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-15 — v0.289 Q8 Mat-Vec Row-Pair Falsifier
+
+Status: tested a Q8_0 mat-vec `NR0=2` row-pair variant as a GDN-front/out and LM
+head decode lever. A10B uses Q8_0 heavily in GDN front projections
+(`attn_qkv`, `attn_gate`, `ssm_alpha`, `ssm_beta`) and `ssm_out`, so this was a
+plausible hardware-utilization branch. The probe was correctness-safe, but it
+regressed A10B `tg128` sharply and was removed.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `QWEN_MATVEC_Q8_0_R2=1` Q8_0 primitive correctness
+- `QWEN_MATVEC_Q8_0_R2=1` A10B concurrent-GDN MoE correctness smoke
+- A10B `tg128` base / R2 / base qwen-only A/B
+
+Results:
+
+- base A: `36.73 t/s`
+- Q8_0 R2: `33.37 t/s`
+- base B: `36.90 t/s`
+
+Interpretation: simple row-pairing is worse for Q8_0 decode mat-vec on this
+shape. The Q8_0 path is important, but future work needs a different mechanism
+than copying the Q4/Q6 `NR0=2` pattern.
+
 ## 2026-06-15 — v0.288 GDN Front Split-Concurrent Falsifier
 
 Status: tested the obvious next MoE decode idea after the v0.286 shared-overlap

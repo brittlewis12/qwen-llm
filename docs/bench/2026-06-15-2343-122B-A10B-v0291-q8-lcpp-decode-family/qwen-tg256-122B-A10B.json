@@ -1,0 +1,46 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "6058a8d4c",
+    "build_dirty": 0,
+    "test_time": "2026-06-15T23:50:41Z",
+    "model_filename": "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+    "model_size": 77018996736,
+    "model_n_params": 122111526912,
+    "arch_kind": "moe",
+    "test": "tg256",
+    "n_tokens": 256,
+    "n_repetitions": 3,
+    "avg_ts": 42.44560624584822,
+    "stddev_ts": 0.054935691077199394,
+    "samples_ts": [
+      42.471543547371795,
+      42.482771141204644,
+      42.38250404896824
+    ],
+    "samples_ns": [
+      6027565250,
+      6025972250,
+      6040228291
+    ],
+    "avg_ns": 6031255263,
+    "avg_gpu_ns": 5885116237,
+    "decode_gb_per_s": null,
+    "prefill_chunk": null,
+    "decode_mode": "apples-lcpp",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "finishing charge",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

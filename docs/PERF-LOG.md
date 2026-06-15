@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-15 — v0.292 A10B Decode Re-Anchor After Q8
+
+Status: reran the A10B decode shape sentinel from a clean v0.291 build after the
+llama-style Q8_0 mat-vec default. Raw artifact:
+`docs/bench/2026-06-15-2343-122B-A10B-v0291-q8-lcpp-decode-family/`.
+
+Validation:
+
+- `cargo build --release` after committing v0.291
+- `scripts/bench/family.py --tag 122B-A10B --shapes tg64,tg128,tg256 --runs 3`
+- pinned llama.cpp lock `b9481`, sequential runs, no recorded thermal/perf warnings
+
+Result: A10B decode is now a material win, not a parity/noise cell.
+
+- `tg64`: qwen `42.90 t/s`, llama.cpp `35.75 t/s` (`1.20x`)
+- `tg128`: qwen `42.82 t/s`, llama.cpp `35.58 t/s` (`1.20x`)
+- `tg256`: qwen `42.45 t/s`, llama.cpp `35.00 t/s` (`1.21x`)
+
+Interpretation: copying the right Q8 mat-vec execution shape was higher leverage
+than more GDN-front launch rearrangement. MoE decode remains a hardware-utilization
+target, but the pinned llama.cpp A10B decode row is now decisively green.
+
 ## 2026-06-15 — v0.291 Q8 Mat-Vec Llama-Style Probe
 
 Status: defaulted a Q8_0 mat-vec kernel that mirrors llama.cpp's decode work shape

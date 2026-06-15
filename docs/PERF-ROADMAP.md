@@ -688,6 +688,10 @@ Recent confirmed wins:
 
 Recent measured negatives:
 
+- Split-concurrent GDN front projections are falsified for MoE decode. The probe
+  was correctness-safe on A10B, but regressed `tg128` from `36.72/36.90 t/s` base
+  to `35.09 t/s`; future GDN front work needs a different work shape or input
+  reuse, not four concurrent encoders around the existing mat-vecs.
 - Generic grouped expert-major MoE routed FFN via CPU ledger + gather/scatter +
   generic per-expert mat-mat is strongly negative on both A3B and 122B.
 - Re-based “split routed FFN sidecar” experiments now show that beating the old

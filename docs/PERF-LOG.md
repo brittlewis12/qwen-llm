@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-15 — v0.288 GDN Front Split-Concurrent Falsifier
+
+Status: tested the obvious next MoE decode idea after the v0.286 shared-overlap
+win: split the four GDN front projections (`qkv`, `z`, `beta`, `alpha`) into
+separate concurrent encoders instead of one concurrent encoder. The probe was
+correctness-safe on A10B, but it regressed A10B `tg128` materially and was removed.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `QWEN_DECODE_GDN_FRONT_SPLIT=1` A10B concurrent-GDN MoE correctness smoke
+- A10B `tg128` base / split / base qwen-only A/B
+
+Results:
+
+- base A: `36.72 t/s`
+- split concurrent front: `35.09 t/s`
+- base B: `36.90 t/s`
+
+Interpretation: GDN front projection remains a large decode bucket, but merely
+splitting the already-concurrent front projection encoder into four concurrent
+encoders is the wrong mechanism. Future GDN front work should change the work
+shape or input reuse, not add encoder fragmentation.
+
 ## 2026-06-15 — v0.287 A10B Decode Shape Re-Anchor
 
 Status: reran the A10B decode shape sentinel after rebuilding the release binary

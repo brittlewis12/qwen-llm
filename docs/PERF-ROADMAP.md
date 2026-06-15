@@ -72,7 +72,7 @@ Current short/decode guardrails:
 | 122B A10B | `pp1024` | `504.43` | `430.68` | `1.17x` | v0.203 pinned b9481 |
 | 27B dense | `tg128` | `24.46` | `20.01` | `1.22x` | v0.203 pinned b9481 |
 | 35B A3B | `tg128` | `85.81` | `77.42` | `1.11x` | v0.286 default |
-| 122B A10B | `tg128` | `36.74` | `36.36` | `1.01x` | v0.286 default |
+| 122B A10B | `tg128` | `37.07` | `36.19` | `1.02x` | v0.287 shape re-anchor |
 
 Measured roofline anchors from v0.285 on M4 Max, AC power, high-power mode, no
 recorded warnings:
@@ -130,10 +130,10 @@ Current caveats:
   first-touch variance (`0.789x/0.628x`), but `QWEN_PP_WARM_MOE_BANKS=1` gives a
   same-session steady-state win (`284.20` qwen versus `256.47` llama.cpp,
   `1.108x`). Keep outer wall visible because the warm touch is not free.
-- A10B decode is no longer red at `tg128` after v0.286 shared-overlap waves
-  (`36.74` qwen versus `36.36` pinned llama.cpp), but `tg64/tg256` need fresh
-  sentinels before declaring the whole A10B decode shape won. Keep MoE decode
-  active because hardware utilization remains the objective, not parity alone.
+- A10B decode is no longer red in the fresh v0.287 shape packet after v0.286
+  shared-overlap waves: `tg64/tg128/tg256` are `1.01x/1.02x/1.02x` versus
+  pinned llama.cpp. Keep MoE decode active because hardware utilization remains
+  the objective, not parity alone.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -741,19 +741,20 @@ Recent measured negatives:
 
 Current rank after v0.286:
 
-1. MoE decode execution-shape second pass: v0.286 cracks the A10B `tg128` llama
-   row (`36.74` qwen versus `36.36` pinned llama.cpp) and lifts A3B to `85.81 t/s`,
-   but the hardware-utilization objective is not satisfied. v0.285 measured stream
-   bandwidth at `474 GB/s`, so a `55%` decode-bandwidth gate means `~261 GB/s`
-   effective bandwidth; the t/s conversion must come from explicit active-byte
-   accounting rather than folklore. The split A10B profile now names the remaining
-   largest buckets: GDN front projection `28.2%`, routed FFN `19.7%`, attention
-   `14.1%`, GDN out projection `10.7%`, shared FFN `10.5%`, LM head `6.7%`, route
-   `4.7%`, and GDN tail `3.5%`. The kept shared-overlap win proves dependency-wave
-   overlap is viable; the rejected whole-chain concurrent version proves dependent
-   chains inside concurrent encoders are correctness-unsafe. Next gates: target a
-   named bucket for at least `1.5-2%` end-to-end, preserve A3B/A10B gains, and do
-   not collapse occupancy like the fused routed monolith (`~35 -> 4.26 t/s`).
+1. MoE decode execution-shape second pass: v0.287 closes the A10B decode shape
+   packet versus pinned llama.cpp (`tg64/tg128/tg256 = 1.01x/1.02x/1.02x`) and
+   v0.286 lifts A3B `tg128` to `85.81 t/s`, but the hardware-utilization objective
+   is not satisfied. v0.285 measured stream bandwidth at `474 GB/s`, so a `55%`
+   decode-bandwidth gate means `~261 GB/s` effective bandwidth; the t/s conversion
+   must come from explicit active-byte accounting rather than folklore. The split
+   A10B profile names the remaining largest buckets: GDN front projection `28.2%`,
+   routed FFN `19.7%`, attention `14.1%`, GDN out projection `10.7%`, shared FFN
+   `10.5%`, LM head `6.7%`, route `4.7%`, and GDN tail `3.5%`. The kept
+   shared-overlap win proves dependency-wave overlap is viable; the rejected
+   whole-chain concurrent version proves dependent chains inside concurrent
+   encoders are correctness-unsafe. Next gates: target a named bucket for at least
+   `1.5-2%` end-to-end, preserve A3B/A10B gains, and do not collapse occupancy
+   like the fused routed monolith (`~35 -> 4.26 t/s`).
 2. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
    `3.03 TFLOP/s` scalar-FMA sanity). Next, add qwen/roofline columns to family and

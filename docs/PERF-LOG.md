@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-15 — v0.287 A10B Decode Shape Re-Anchor
+
+Status: reran the A10B decode shape sentinel after rebuilding the release binary
+from the v0.286 commit so the bench provenance is clean. Raw artifact:
+`docs/bench/2026-06-15-0611-122B-A10B-v0286-decode-shape-clean-family/`.
+
+Validation:
+
+- `cargo build --release`
+- `scripts/bench/family.py --tag 122B-A10B --shapes tg64,tg128,tg256 --runs 3`
+- pinned llama.cpp lock `b9481`, sequential runs, no recorded thermal/perf warnings
+
+Result: the shared-overlap default now wins A10B decode across the measured shape
+packet, not just `tg128`.
+
+- `tg64`: qwen `37.14 t/s`, llama.cpp `36.64 t/s` (`1.01x`)
+- `tg128`: qwen `37.07 t/s`, llama.cpp `36.19 t/s` (`1.02x`)
+- `tg256`: qwen `36.03 t/s`, llama.cpp `35.23 t/s` (`1.02x`)
+
+Interpretation: the old A10B decode red cell is closed against pinned llama.cpp
+for this shape packet, but it remains a hardware-utilization target. The next MoE
+decode work should be framed as domination/headroom, not parity recovery.
+
 ## 2026-06-13 — v0.286 Default MoE Decode Shared-Overlap Waves
 
 Status: promoted a correctness-safe MoE decode overlap path for the shared expert

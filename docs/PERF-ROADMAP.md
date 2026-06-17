@@ -725,6 +725,12 @@ Recent confirmed wins:
 
 Recent measured negatives:
 
+- A3B long-context attention-v4 exposed knobs are exhausted after the v0.293 tile2
+  default. At `ctx16384`, `QWEN_ATTN_V4_NWG=32` regressed attention sharply
+  (`3.39 -> 4.89 ms`), `QWEN_ATTN_V4_TILE_C=32` was worse/flat, and
+  `QWEN_ATTN_V4_TILE_C=128` was phase-interesting but end-to-end flat/noise
+  (`83.2/84.0/83.9 t/s` default/C128/default). Reopen A3B long attention only
+  with a deeper body/KV-traffic mechanism, not another knob flip.
 - Fused Q8_0 GDN-front decode is falsified in the tested forms. Dispatch-only
   fusion was flat/noisy on battery (`35.75/35.78/36.56 t/s` base/fused/base), and
   the x-cached four-simdgroup version was correctness-safe but catastrophic

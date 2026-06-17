@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-17 — v0.296 A3B Long-Attention Knob Sweep
+
+Status: after the v0.293 group8 tile2 default, swept the remaining exposed
+attention-v4 decode knobs at A3B `ctx=16384` before opening a deeper KV/body
+branch. No new default.
+
+Validation:
+
+- clean `v0.295` release binary, AC power, no recorded warnings
+- sequential `qwen-bench phase --ctx 16384` for default, `TILE_C=32`,
+  `TILE_C=128`, and `NWG=32`
+- sequential `ctx-sweep --checkpoints 16384 --window 5` for default / `TILE_C=128`
+  / default repeat
+
+Results:
+
+- Default phase: `phase_sum=13.32 ms`, attention `3.39 ms`
+- `QWEN_ATTN_V4_TILE_C=32`: `phase_sum=13.60 ms`, attention `3.39 ms`
+- `QWEN_ATTN_V4_TILE_C=128`: `phase_sum=13.52 ms`, attention `3.24 ms`, but
+  total phase did not move and the `ctx16384` A/B was flat/noise
+- `QWEN_ATTN_V4_NWG=32`: `phase_sum=15.06 ms`, attention `4.89 ms`
+- `ctx16384` C128 A/B: default A `83.2 t/s`, C128 `84.0`, default B `83.9`
+
+Interpretation: the easy long-attention knobs are exhausted for A3B after tile2.
+`NWG=32` is clearly worse, `C=32` is worse/flat, and `C=128` is not a reliable
+end-to-end win. The next attention work needs a deeper body/KV-traffic mechanism,
+not another default knob flip.
+
 ## 2026-06-17 — v0.295 F32 Row-Pair Decode Mat-Vec
 
 Status: defaulted a cooperative row-pair F32 mat-vec variant with rollback

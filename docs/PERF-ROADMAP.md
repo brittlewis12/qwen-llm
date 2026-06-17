@@ -147,6 +147,12 @@ Current caveats:
   `tg128` about `+0.2-0.3%`, and the shared-FFN phase drops `0.99 -> 0.85 ms`
   on A3B / `2.08 -> 1.82 ms` on A10B. This confirms the shelf, but it is not a
   strategic discontinuity by itself.
+- F32 row-pair mat-vec is a small default MoE route cleanup. v0.295 defaults a
+  cooperative two-row / four-simdgroup F32 mat-vec with
+  `QWEN_MATVEC_F32_LCPP_R2=0` as rollback. A3B `tg128` moves about `+0.9-1.0%`,
+  A10B about `+0.2-0.4%`, and A3B `ctx16384` stayed neutral-positive. Treat this
+  as a route-execution shelf win, not proof that F32 mat-vec retuning alone can
+  close the remaining decode headroom.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -707,6 +713,9 @@ Recent confirmed wins:
 - Shared Q8_0 SwiGLU default for MoE decode, with `QWEN_DECODE_SHARED_SWIGLU_Q8=0`
   as rollback. This fuses shared expert gate/up plus `silu_mul`, moving A3B
   `tg128` roughly `98.84 -> 99.5-99.6 t/s` and A10B `42.84 -> 42.94-42.97 t/s`.
+- F32 row-pair decode mat-vec default, with `QWEN_MATVEC_F32_LCPP_R2=0` as
+  rollback. The cooperative two-row / four-simdgroup shape moves A3B `tg128`
+  roughly `99.64 -> 100.5-100.7 t/s` and A10B `42.87 -> 42.97-43.05 t/s`.
 - Group16 attention tile4 default for 122B long context.
 - Group6 dense attention `NWG=64` at `n_pos >= 4096`.
 - `QWEN_ATTN_V4_NWG`, `QWEN_ATTN_V4_TILE_C`, `QWEN_ATTN_V4_G8_TILE`, and
@@ -796,11 +805,11 @@ Current rank after v0.293:
    lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective is
    not satisfied. v0.293 active-byte accounting says Q8 projection buckets are now
    near the measured stream ceiling, while routed FFN remains large (`~25%` A10B
-   `ctx128`, `~21%` A3B `ctx128`) and less saturated. v0.294 confirms shared FFN
-   has cleanup headroom, but simple shared gate/up fusion is only sub-1% end-to-end.
-   Next gates: target a named bucket for at least `1.5-2%` end-to-end, preserve
-   A3B/A10B gains, and avoid the known occupancy traps from fused routed monoliths
-   and x-cached Q8 front staging.
+   `ctx128`, `~21%` A3B `ctx128`) and less saturated. v0.294-v0.295 confirm shared
+   FFN and F32 route have cleanup headroom, but each simple local fix is only
+   sub-1% to ~1% end-to-end. Next gates: target a named bucket for at least
+   `1.5-2%` end-to-end, preserve A3B/A10B gains, and avoid the known occupancy
+   traps from fused routed monoliths and x-cached Q8 front staging.
 3. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
    `3.03 TFLOP/s` scalar-FMA sanity), and v0.293 adds

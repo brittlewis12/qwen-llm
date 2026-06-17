@@ -634,6 +634,72 @@ kernel void kernel_mat_vec_f32_f32(
     }
 }
 
+kernel void kernel_mat_vec_f32_f32_lcpp_r2(
+        constant mat_vec_args & args   [[buffer(0)]],
+        device const float    * weight [[buffer(1)]],
+        device const float    * x      [[buffer(2)]],
+        device       float    * y      [[buffer(3)]],
+        threadgroup  float    * shmem  [[threadgroup(0)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr ushort NW = 32;
+    constexpr ushort NR0 = 2;
+    constexpr ushort NSG = 4;
+
+    const uint first_row = tgpig * NR0;
+    if (first_row >= args.n_out) return;
+
+    const uint n_in_v4 = args.n_in / 4;
+    const uint i0 = uint(sgitg) * NW + uint(tiisg);
+    device const float4 * x4 = (device const float4 *)x + i0;
+
+    float sum[NR0] = {0.0f, 0.0f};
+    for (uint i = i0; i < n_in_v4; i += NSG * NW) {
+        const float4 xv = *x4;
+        for (ushort row = 0; row < NR0; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const float4 * w4 =
+                (device const float4 *)(weight + (first_row + row) * args.n_in);
+            const float4 wv = w4[i];
+            sum[row] += wv.x * xv.x + wv.y * xv.y + wv.z * xv.z + wv.w * xv.w;
+        }
+        x4 += NSG * NW;
+    }
+
+    const uint tail_start = n_in_v4 * 4;
+    for (uint i = tail_start + uint(sgitg) * NW + uint(tiisg);
+         i < args.n_in;
+         i += NSG * NW) {
+        const float xv = x[i];
+        for (ushort row = 0; row < NR0; ++row) {
+            if (first_row + row >= args.n_out) break;
+            sum[row] += weight[(first_row + row) * args.n_in + i] * xv;
+        }
+    }
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        if (sgitg == 0) row_shmem[tiisg] = 0.0f;
+        sum[row] = simd_sum(sum[row]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        if (tiisg == 0) row_shmem[sgitg] = sum[row];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0 && first_row + row < args.n_out; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        const float total = simd_sum(row_shmem[tiisg]);
+        if (tiisg == 0 && sgitg == 0) {
+            y[first_row + row] = total;
+        }
+    }
+}
+
 kernel void kernel_mat_vec_f16_f32(
         constant mat_vec_args & args   [[buffer(0)]],
         device const half     * weight [[buffer(1)]],

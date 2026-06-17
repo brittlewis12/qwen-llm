@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-17 — v0.295 F32 Row-Pair Decode Mat-Vec
+
+Status: defaulted a cooperative row-pair F32 mat-vec variant with rollback
+`QWEN_MATVEC_F32_LCPP_R2=0`. The new path uses two output rows per threadgroup
+and four simdgroups split across K stripes, reusing each loaded `x` vector across
+two rows. This primarily targets F32 router logits on MoE decode.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `mat_vec_f32_matches_cpu` with the new default
+- A3B and A10B concurrent-GDN MoE correctness smokes, new default
+- dirty AC-power A3B/A10B `tg128` default / rollback / default A/Bs
+- A3B `ctx16384` guard with default versus rollback
+
+Results:
+
+| Model | Default A | Rollback | Default B | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B `tg128` | `100.52` | `99.64` | `100.68` | `+0.9-1.0%` |
+| A10B `tg128` | `43.05` | `42.87` | `42.97` | `+0.2-0.4%` |
+
+A3B long-context decode stayed neutral-positive in the single `ctx16384` guard:
+`83.5` rollback-ish base versus `83.7` with R2 enabled before defaulting.
+
+Interpretation: the F32 route path had a small but repeatable execution-shape
+miss. This is still not the strategic route overhaul: phase splits were noisy and
+did not cleanly attribute the whole win to `moe route`. Keep chasing larger named
+MoE decode buckets only when the branch moves end-to-end, not just a subphase.
+
 ## 2026-06-17 — v0.294 Shared Q8 SwiGLU Decode Fusion
 
 Status: defaulted a focused MoE decode shared-FFN cleanup. Shared expert gate/up

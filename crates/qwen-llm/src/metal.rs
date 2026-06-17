@@ -903,6 +903,16 @@ pub fn encode_rms_norm_mul_f32(
 /// `y` is `[n_out]`.
 ///
 /// CPU oracle: [`crate::forward::mat_vec_pub`].
+fn mat_vec_f32_lcpp_r2_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_MATVEC_F32_LCPP_R2").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
 pub fn encode_mat_vec_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -939,7 +949,12 @@ pub fn encode_mat_vec_f32(
             detail: format!("y.n_elements={} != n_out={n_out}", y.n_elements()),
         });
     }
-    let pso = ctx.pipeline("kernel_mat_vec_f32_f32")?;
+    let use_r2 = mat_vec_f32_lcpp_r2_enabled();
+    let pso = ctx.pipeline(if use_r2 {
+        "kernel_mat_vec_f32_f32_lcpp_r2"
+    } else {
+        "kernel_mat_vec_f32_f32"
+    })?;
     enc.set_pipeline(&pso);
 
     #[repr(C)]
@@ -958,6 +973,25 @@ pub fn encode_mat_vec_f32(
     enc.set_tensor(1, weight);
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
+
+    if use_r2 {
+        let nr0 = 2usize;
+        let nsg = 4usize;
+        enc.set_threadgroup_memory(0, 32 * nr0 * std::mem::size_of::<f32>());
+        enc.dispatch(
+            MTLSize {
+                width: n_out.div_ceil(nr0),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: nsg * 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+        return Ok(());
+    }
 
     const ROWS_PER_TG: usize = 4;
     enc.dispatch(

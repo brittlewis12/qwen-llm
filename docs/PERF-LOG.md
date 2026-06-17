@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-17 — v0.293 Decode Roofline + A3B G8 Tile2 Default
+
+Status: after the v0.291 Q8_0 mat-vec win, reprofiled MoE decode phases through
+the hardware-utilization lens and defaulted the long-context A3B decode attention
+split. `GROUP=8` decode now uses tile2 for `n_pos >= 4096`; rollback / A/B knob is
+`QWEN_ATTN_V4_G8_TILE=8`. Prompt-prefill keeps its separate selector.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `cargo test -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv --release -- --ignored --nocapture --test-threads=1`
+- sequential A3B `ctx-sweep` default versus `QWEN_ATTN_V4_G8_TILE=8` rollback at
+  `128,1024,4096,8192,16384`
+- sequential A3B `phase --ctx 16384` default versus rollback
+- `uv run scripts/profile/decode_phase_roofline.py --help`
+
+Results, A3B decode context sweep (`t/s`, default tile2 versus tile8 rollback):
+
+| ctx | tile2 default | tile8 rollback | delta |
+| ---: | ---: | ---: | ---: |
+| 128 | `100.0` | `99.5` | `+0.5%` |
+| 1024 | `95.0` | `94.8` | `+0.2%` |
+| 4096 | `94.0` | `89.4` | `+5.1%` |
+| 8192 | `89.1` | `83.7` | `+6.5%` |
+| 16384 | `82.2` | `72.8` | `+12.9%` |
+
+Phase profile at A3B `ctx=16384` confirms the win is the intended bucket:
+
+- phase sum: `15.12 -> 13.66 ms` (`-9.7%`)
+- attention mixer: `4.80 -> 3.60 ms` (`-25.0%`)
+- routed FFN and Q8 projection buckets are otherwise broadly stable/noisy
+
+Post-Q8 decode roofline accounting changes the next-bet read. At short context,
+Q8_0 projection buckets are now near the measured stream ceiling rather than the
+best first target: A10B `ctx128` estimates GDN front at `~426 GB/s` (`~90%` of the
+v0.285 stream anchor), GDN out at `~405 GB/s`, and LM head at `~409 GB/s`. Routed
+FFN remains large (`~25%` of A10B phase time, `~21%` of A3B), while long-context
+A3B attention becomes the visible slope term (`26%` after tile2 at `ctx=16384`).
+
+Interpretation: the old A3B group8 decode attention split was a real long-context
+execution-shape miss. Tile2 is a cheap default win with essentially neutral short
+context. The next attention work should target the remaining long-context body
+and KV traffic, not more Q8 projection dispatch retreads unless a new mechanism
+changes their already-high bandwidth utilization.
+
 ## 2026-06-15 — v0.292 A10B Decode Re-Anchor After Q8
 
 Status: reran the A10B decode shape sentinel from a clean v0.291 build after the

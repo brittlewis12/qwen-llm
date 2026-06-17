@@ -134,6 +134,13 @@ Current caveats:
   v0.292 clean re-anchor: `tg64/tg128/tg256` are `1.20x/1.20x/1.21x` versus
   pinned llama.cpp. Keep MoE decode active because hardware utilization remains
   the objective, not parity alone.
+- A3B long-context decode attention had a stale group8 execution-shape miss.
+  v0.293 defaults `GROUP=8` decode to tile2 for `n_pos >= 4096` with
+  `QWEN_ATTN_V4_G8_TILE=8` as rollback. The A3B `ctx128/1024/4096/8192/16384`
+  sweep is now `100.0/95.0/94.0/89.1/82.2 t/s` versus rollback
+  `99.5/94.8/89.4/83.7/72.8`; `ctx16384` attention drops
+  `4.80 -> 3.60 ms`. Attention is still the long-context slope term, but the
+  first split fix is now defaulted.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -687,9 +694,14 @@ Recent confirmed wins:
   slightly negative/noisy under forced env (`23.40 -> 23.13`), but the local 27B
   Q4 file has no Q8_0 tensors, so treat that as a repeat guardrail rather than a
   blocker.
+- Group8 attention tile2 default for A3B long-context decode. At `ctx16384`, the
+  default-vs-rollback phase packet moves total phase time `15.12 -> 13.66 ms` and
+  attention `4.80 -> 3.60 ms`; context sweep throughput moves
+  `72.8 -> 82.2 t/s` at 16K with neutral short-context behavior.
 - Group16 attention tile4 default for 122B long context.
 - Group6 dense attention `NWG=64` at `n_pos >= 4096`.
-- `QWEN_ATTN_V4_NWG`, `QWEN_ATTN_V4_TILE_C`, and `QWEN_ATTN_V4_G16_TILE` A/B knobs.
+- `QWEN_ATTN_V4_NWG`, `QWEN_ATTN_V4_TILE_C`, `QWEN_ATTN_V4_G8_TILE`, and
+  `QWEN_ATTN_V4_G16_TILE` A/B knobs.
 - Production-style `NWG=64` correctness coverage for attention v4.
 - MoE intra-block profiler: 122B block ~0.594 ms, with mixer prep largest.
 
@@ -760,39 +772,37 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.292:
+Current rank after v0.293:
 
-1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
+1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
+   attention still had high-EV execution-shape headroom (`ctx16384` attention
+   `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). The remaining long-context
+   slope is still attention-shaped: after tile2, A3B `ctx16384` attention is
+   `26.3%` of phase time, and A10B `ctx16384` attention is roughly tied with GDN
+   front/routed FFN. Next gates: improve A3B `ctx8192/16384` and one real rollout,
+   preserve `ctx128/1024`, and keep A10B group16 neutral. Prefer group8/group16
+   body/KV-traffic mechanisms over Q8 projection retreads.
+2. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
-   lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective
-   is not satisfied. v0.285 measured stream bandwidth at `474 GB/s`, so a `55%`
-   decode-bandwidth gate means `~261 GB/s` effective bandwidth; the t/s conversion
-   must come from explicit active-byte accounting rather than folklore. The split
-   A10B profile names the remaining largest buckets: GDN front projection `28.2%`,
-   routed FFN `19.7%`, attention `14.1%`, GDN out projection `10.7%`, shared FFN
-   `10.5%`, LM head `6.7%`, route `4.7%`, and GDN tail `3.5%`. The kept
-   shared-overlap win proves dependency-wave overlap is viable. The rejected
-   whole-chain concurrent version proves dependent chains inside concurrent
-   encoders are correctness-unsafe, while v0.288-v0.290 falsify three tempting GDN
-   front retreads: split concurrent encoders, Q8 row-pairing, and fused Q8
-   dispatch/x-cache staging. Next gates: target a named bucket for at least
-   `1.5-2%` end-to-end, preserve A3B/A10B gains, and do not collapse occupancy
-   like the fused routed monolith (`~35 -> 4.26 t/s`) or x-cached Q8 front
-   (`36.73 -> 25.04 t/s`). Reopen GDN front only with a packed/branch-free bank or
-   a genuinely different tiled Q8 kernel; otherwise move to GDN out, LM head, or
-   long-context attention/KV-Q with phase evidence.
-2. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
+   lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective is
+   not satisfied. v0.293 active-byte accounting says Q8 projection buckets are now
+   near the measured stream ceiling, while routed FFN remains large (`~25%` A10B
+   `ctx128`, `~21%` A3B `ctx128`) and less saturated. Next gates: target a named
+   bucket for at least `1.5-2%` end-to-end, preserve A3B/A10B gains, and avoid the
+   known occupancy traps from fused routed monoliths and x-cached Q8 front staging.
+3. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
-   `3.03 TFLOP/s` scalar-FMA sanity). Next, add qwen/roofline columns to family and
-   digest outputs wherever active-byte or equivalent-FLOP accounting is defensible.
-   This is not optional polish: without a measured qwen/roofline axis, green
-   llama.cpp rows keep hiding decode and fixed-overhead headroom. Gate future
-   "done" claims on both axes.
-3. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
+   `3.03 TFLOP/s` scalar-FMA sanity), and v0.293 adds
+   `scripts/profile/decode_phase_roofline.py` for phase-level active-byte reads.
+   Next, add qwen/roofline columns to family and digest outputs wherever active-byte
+   or equivalent-FLOP accounting is defensible. This is not optional polish: without
+   a measured qwen/roofline axis, green llama.cpp rows keep hiding decode and
+   fixed-overhead headroom. Gate future "done" claims on both axes.
+4. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen
    prefill only if a paired repeat exposes a real current-default red cell.
-4. A3B true-long current-default recheck: the old `pp34502=0.78x` row is stale
+5. A3B true-long current-default recheck: the old `pp34502=0.78x` row is stale
    relative to later matrix/long-branch wins and v0.203 `pp16384` family wins.
    Before implementing fused online-softmax, chunk policy, or GDN-scan work, rerun
    current default on synthetic `pp16384`, synthetic `pp34502`, and one real
@@ -801,7 +811,7 @@ Current rank after v0.292:
    covered by prior single-chunk stream-layer falsifiers. If the loss survives,
    require any branch to improve both synthetic and real long prompts without
    harming `pp512/1024`.
-5. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
+6. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
    catastrophic demoted red cell, but the audit's mechanical hypotheses are now
    the right reopen criteria: vectorized BF16 weight tile loads, removal of
    binned full-grid relaunch waste, and all-simdgroup/vectorized down epilogues.
@@ -809,26 +819,26 @@ Current rank after v0.292:
    that graveyard as evidence against this variable. Do not claim product-family
    movement from BF16 until it moves BF16 A3B wall by a large factor and preserves
    grouped coverage.
-6. MTP / packed-verify dense decode: dense 27B decode near the weight-read
+7. MTP / packed-verify dense decode: dense 27B decode near the weight-read
    roofline cannot get a large multiplier from execution cleanup alone. MTP is the
    path that can exceed the naive weight-read floor by amortizing verification
    across multiple drafted tokens. Keep it behind the current MoE decode
    hardware-utilization pass for now, but treat it as the main dense-decode
    domination lever, not an oracle curiosity.
-7. Remaining dense prompt attribution, only if a paired red cell survives: the
+8. Remaining dense prompt attribution, only if a paired red cell survives: the
    latest phase trace shows `gdn_gated` and `gdn_prep_l2` are now tiny. If short
    dense still regresses in a clean repeat, target projection/FFN, GDN step, or
    attention body with a shape-matched differential. Do not retread attention
    defaults, fast-path coverage, residual-add fusion, N64 policy, shared-memory
    policy, GDN token-channel parallelization, command-buffer streaming, GDN
    matvec fallback, or HD128 normalization row count.
-8. Hardware-headroom watchlist: ICB/MTL4 encode-once decode, fused online-softmax
+9. Hardware-headroom watchlist: ICB/MTL4 encode-once decode, fused online-softmax
    prefill attention, chunked delta-rule GDN, production residency/warm expert
    banks, and epilogue fusions are all plausible paths to dominate beyond
    llama.cpp. They need a trace-proven idle/bandwidth/phase gate before
    implementation, not merely a green or red llama row. GDN prep falsifiers do not
    falsify chunked `gdn_step`; they are different kernels and mechanisms.
-9. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
+10. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
    and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work

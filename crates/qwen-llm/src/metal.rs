@@ -9158,12 +9158,16 @@ pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
     }
 }
 
-/// Group-16 subgroup size for v4's main pass.
+/// Group-tile subgroup size for v4's decode main pass.
 ///
 /// The 122B A10B shape (`GROUP=16`) is faster when split across multiple
 /// threadgroups: tile4 trades extra K/V reads for much higher occupancy and
 /// lower register pressure. Keep `QWEN_ATTN_V4_G16_TILE` as a kill switch / A/B
 /// knob (`4`, `8`, or `16`), but default long-context group16 to tile4.
+///
+/// The 35B A3B shape (`GROUP=8`) has the same long-context signature with a
+/// smaller best split. Keep `QWEN_ATTN_V4_G8_TILE` as a kill switch / A/B knob
+/// (`2`, `4`, or `8`), but default long-context group8 decode to tile2.
 fn attn_v4_g8_tile_override(var: &str) -> Option<usize> {
     std::env::var(var)
         .ok()
@@ -9182,7 +9186,7 @@ pub fn attn_v4_choose_group_tile(n_pos: usize, group: usize) -> usize {
         static G8_TILE: OnceLock<Option<usize>> = OnceLock::new();
         return G8_TILE
             .get_or_init(|| attn_v4_g8_tile_override("QWEN_ATTN_V4_G8_TILE"))
-            .unwrap_or(8);
+            .unwrap_or(2);
     }
     if group != 16 {
         return group;

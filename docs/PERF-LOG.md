@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-17 — v0.294 Shared Q8 SwiGLU Decode Fusion
+
+Status: defaulted a focused MoE decode shared-FFN cleanup. Shared expert gate/up
+weights are Q8_0 on the primary A3B/A10B MoE files, so decode now computes
+`silu(gate(h)) * up(h)` in one Q8_0 kernel instead of two Q8_0 mat-vec dispatches
+plus a separate F32 `silu_mul` pass. Rollback: `QWEN_DECODE_SHARED_SWIGLU_Q8=0`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- A3B and A10B concurrent-GDN MoE correctness smokes, default path
+- dirty AC-power A3B/A10B `tg128` default / rollback / default A/Bs
+- A3B/A10B `phase --ctx 128` default versus rollback
+- A3B `ctx16384` repeat guard after a noisy full context sweep
+
+Results are small but consistent on the direct decode sentinel:
+
+| Model | Default A | Rollback | Default B | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B `tg128` | `99.50` | `98.84` | `99.57` | `+0.7%` |
+| A10B `tg128` | `42.97` | `42.84` | `42.94` | `+0.2-0.3%` |
+
+The phase packet confirms the intended bucket moves:
+
+- A3B `ctx128` shared FFN: `0.99 -> 0.85 ms`
+- A10B `ctx128` shared FFN: `2.08 -> 1.82 ms`
+
+A3B long-context guard was noisy in the full ladder, but the repeat at `ctx16384`
+was neutral-positive (`82.9` default versus `82.4` rollback). Treat this as an
+opportunistic default cleanup, not a strategic discontinuity.
+
+Interpretation: route/shared FFN is a real under-saturated MoE decode shelf, but
+simple shared gate/up fusion only buys sub-1% end-to-end. Future work in this lane
+needs a larger mechanism, likely route execution shape or routed/shared finalization,
+not more one-pass shared activation cleanup alone.
+
 ## 2026-06-17 — v0.293 Decode Roofline + A3B G8 Tile2 Default
 
 Status: after the v0.291 Q8_0 mat-vec win, reprofiled MoE decode phases through

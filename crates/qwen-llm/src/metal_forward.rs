@@ -42,9 +42,10 @@ use crate::metal::{
     encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32,
     encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
     encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
+    encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
+    encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
 use objc2::rc::Retained;
@@ -192,6 +193,16 @@ fn concurrent_shared_moe_decode_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_DECODE_MOE_CONCURRENT_SHARED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn decode_shared_swiglu_q8_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_SHARED_SWIGLU_Q8").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -1398,8 +1409,10 @@ impl<'a> MetalForward<'a> {
         ffn_up: &MetalTensor,
         ffn_down: &MetalTensor,
     ) -> Result<(), MfError> {
-        self.encode_moe_shared_ffn_gate_up_gpu(enc, session, ffn_gate, ffn_up)?;
-        self.encode_moe_shared_ffn_silu_gpu(enc, session)?;
+        let fused_inner = self.encode_moe_shared_ffn_gate_up_gpu(enc, session, ffn_gate, ffn_up)?;
+        if !fused_inner {
+            self.encode_moe_shared_ffn_silu_gpu(enc, session)?;
+        }
         self.encode_moe_shared_ffn_down_gpu(enc, session, ffn_down)
     }
 
@@ -1409,9 +1422,26 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
         ffn_gate: &MetalTensor,
         ffn_up: &MetalTensor,
-    ) -> Result<(), MfError> {
+    ) -> Result<bool, MfError> {
         let h = self.model.arch.hidden_size as usize;
         let f_shared = self.model.arch.expert_shared_feed_forward_length as usize;
+        if decode_shared_swiglu_q8_enabled()
+            && ffn_gate.dtype == GgmlType::Q8_0
+            && ffn_up.dtype == GgmlType::Q8_0
+        {
+            let shared_inner_tmp = session.ffn_inner.view_subrange(0, vec![f_shared as u64]);
+            encode_shared_swiglu_q8_0_f32(
+                self.ctx,
+                enc,
+                ffn_gate,
+                ffn_up,
+                &session.h,
+                &shared_inner_tmp,
+                h,
+                f_shared,
+            )?;
+            return Ok(true);
+        }
         let shared_gate_tmp = session.ffn_gate.view_subrange(0, vec![f_shared as u64]);
         let shared_up_tmp = session.ffn_up.view_subrange(0, vec![f_shared as u64]);
         encode_mat_vec_dispatch(
@@ -1432,7 +1462,7 @@ impl<'a> MetalForward<'a> {
             h,
             f_shared,
         )?;
-        Ok(())
+        Ok(false)
     }
 
     fn encode_moe_shared_ffn_silu_gpu(
@@ -1553,13 +1583,14 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?;
-            self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
+            let shared_inner_fused =
+                self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
             enc.end();
-        }
-        {
-            let enc = KernelEncoder::begin(cmd_buf);
-            self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
-            enc.end();
+            if !shared_inner_fused {
+                let enc = KernelEncoder::begin(cmd_buf);
+                self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
+                enc.end();
+            }
         }
 
         let routed_weighted_sum_is_pending = match moe.down_exps.dtype {

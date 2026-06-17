@@ -12871,6 +12871,70 @@ pub fn encode_mat_vec_q8_0_f32(
     Ok(())
 }
 
+pub fn encode_shared_swiglu_q8_0_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_weight: &MetalTensor,
+    up_weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if n_in % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "shared_swiglu_q8_0",
+            detail: format!("n_in={n_in} not divisible by 32 (Q8_0 super-block)"),
+        });
+    }
+    if gate_weight.dtype != GgmlType::Q8_0 || up_weight.dtype != GgmlType::Q8_0 {
+        return Err(MetalError::BadShape {
+            kernel: "shared_swiglu_q8_0",
+            detail: format!(
+                "gate/up dtype = {:?}/{:?}, expected Q8_0/Q8_0",
+                gate_weight.dtype, up_weight.dtype
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_shared_swiglu_q8_0_f32_lcpp")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, gate_weight);
+    enc.set_tensor(2, up_weight);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, y);
+
+    let nr0 = 2usize;
+    let nsg = 4usize;
+    enc.set_threadgroup_memory(0, 32 * 2 * nr0 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(nr0),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: nsg * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// One-shot Q8_0 mat-vec for tests.
 pub fn mat_vec_q8_0_f32_readback_for_test(
     ctx: &MetalContext,

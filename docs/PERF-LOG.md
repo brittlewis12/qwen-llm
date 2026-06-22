@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.310 Q5 Down U64 Load Falsifier
+
+Status: tested and removed a Q5 routed-down load-slimming sidecar that replaced
+scalar `qh/q1/q2` byte reads with packed `ulong` loads plus byte extraction. The
+goal was to reduce scalar load instruction pressure without changing scheduling,
+weighted-sum fusion, or output shape. It regressed, especially on A10B.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with production-wave split and
+  `QWEN_DECODE_MOE_Q5_DOWN_U64=1`
+
+Results:
+
+| Model | Baseline down wave | U64 down wave | Read |
+| --- | ---: | ---: | --- |
+| A3B `ctx128` | `~1.24 ms` | `1.32 ms` | regressed |
+| A10B `ctx128` | `~2.61 ms` | `3.28 ms` | severe regression |
+
+Interpretation: naive packed-byte loads plus shifts are worse than the current
+scalar byte pattern. Do not pursue Q5 down load slimming by converting q streams to
+`ulong` extraction; any next dequant attempt needs a different instruction mix and
+a micro gate before full phase runs.
+
 ## 2026-06-22 — v0.309 Q5 Down Inner-Load Oracle
 
 Status: tested and removed a diagnostic Q5 routed-down inner-load no-op. The

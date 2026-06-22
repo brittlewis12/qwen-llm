@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.299 MoE Q8 KV Subgroup Falsifier
+
+Status: tested and removed an experimental MoE decode Q8-KV sidecar for the
+group8/group16 v4 subgroup attention path. The sidecar added Q8 readers for A3B
+tile2 and A10B tile4, enabled them with `QWEN_KV_Q8=1`, and left the default F16
+KV path unchanged.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- Q8-KV subgroup similarity smoke before removal: A3B/A10B `cos=0.999992`
+- dirty AC-power A3B/A10B `phase --ctx 16384` default versus `QWEN_KV_Q8=1`
+
+Results:
+
+| Model | F16 phase | Q8-KV phase | F16 attn | Q8-KV attn | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A3B `ctx16384` | `12.81 ms` | `13.95 ms` | `3.32 ms` | `4.16 ms` | regressed |
+| A10B `ctx16384` | `26.86 ms` | `27.97 ms` | `5.78 ms` | `6.61 ms` | regressed |
+
+Interpretation: the long-context v4 main body is still the right strategic
+attention target, but a straightforward Q8-KV subgroup reader is not the exit.
+The dequant/addressing cost overwhelms the byte reduction on both primary MoE
+long-context shapes. Next attention work should test layout/reader mechanics or a
+more structural body rewrite, not default KV quantization.
+
 ## 2026-06-22 — v0.298 Fused MoE Decode Finalizer
 
 Status: defaulted a focused MoE decode finalizer cleanup. After routed output and

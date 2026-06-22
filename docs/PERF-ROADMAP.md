@@ -745,6 +745,12 @@ Recent measured negatives:
   `QWEN_ATTN_V4_TILE_C=128` was phase-interesting but end-to-end flat/noise
   (`83.2/84.0/83.9 t/s` default/C128/default). Reopen A3B long attention only
   with a deeper body/KV-traffic mechanism, not another knob flip.
+- MoE Q8-KV subgroup attention is falsified in the straightforward reader form.
+  The sidecar was numerically close to F16 KV (`cos=0.999992`) but regressed
+  long-context phase profiles: A3B `ctx16384` attention `3.32 -> 4.16 ms` and
+  A10B `ctx16384` attention `5.78 -> 6.61 ms`. Do not reopen KV quantization for
+  MoE decode unless the reader/dequant path changes materially; the next
+  attention body probe should favor layout or a structural body rewrite.
 - Fused Q8_0 GDN-front decode is falsified in the tested forms. Dispatch-only
   fusion was flat/noisy on battery (`35.75/35.78/36.56 t/s` base/fused/base), and
   the x-cached four-simdgroup version was correctness-safe but catastrophic
@@ -810,7 +816,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.298:
+Current rank after v0.299:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -818,8 +824,9 @@ Current rank after v0.298:
    slope is still attention-shaped: after tile2, A3B `ctx16384` attention is
    `26.3%` of phase time, and A10B `ctx16384` attention is roughly tied with GDN
    front/routed FFN. Next gates: improve A3B `ctx8192/16384` and one real rollout,
-   preserve `ctx128/1024`, and keep A10B group16 neutral. Prefer group8/group16
-   body/KV-traffic mechanisms over Q8 projection retreads.
+   preserve `ctx128/1024`, and keep A10B group16 neutral. v0.299 kills the
+   straightforward MoE Q8-KV subgroup reader, so prefer cache-layout, reader
+   vectorization, or structural body mechanisms over KV quantization as-is.
 2. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
    lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective is

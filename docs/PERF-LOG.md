@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.301 Production-Path MoE Phase Attribution
+
+Status: refreshed the MoE decode phase profiler so `moe ffn apply` now times the
+current production FFN apply path, including concurrent shared scheduling, fused
+Q5 routed down+weighted-sum, shared Q8 SwiGLU, and the fused finalizer. This
+replaces the stale split routed/shared/residual attribution that bypassed recent
+defaults.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with the refreshed profiler
+
+Results:
+
+| Model | Phase sum | GDN front | Attn mixer | MoE route | MoE FFN apply |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B `ctx128` | `9.88 ms` | `2.15 ms` | `1.28 ms` | `0.95 ms` | `2.83 ms` |
+| A10B `ctx128` | `22.52 ms` | `5.39 ms` | `3.21 ms` | `1.42 ms` | `6.92 ms` |
+
+Interpretation: current production-path attribution still leaves MoE FFN apply as
+the largest named decode bucket (`~29-31%`) on both MoE targets. GDN front remains
+large, but prior Q8 work says it is close to the stream ceiling; the next decode
+branch should therefore stay on MoE FFN execution shape unless a fresh roofline
+packet contradicts that.
+
 ## 2026-06-22 — v0.300 Group8 Tile1 Attention Falsifier
 
 Status: tested and removed an experimental A3B decode attention tile1 subgroup

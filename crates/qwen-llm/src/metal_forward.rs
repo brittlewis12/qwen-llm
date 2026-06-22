@@ -3706,9 +3706,7 @@ impl<'a> MetalForward<'a> {
         let mut gdn_resid_post_total_ms = 0.0f64;
         let mut attn_mixer_total_ms = 0.0f64;
         let mut route_total_ms = 0.0f64;
-        let mut routed_ffn_total_ms = 0.0f64;
-        let mut shared_ffn_total_ms = 0.0f64;
-        let mut ffn_resid_total_ms = 0.0f64;
+        let mut ffn_apply_total_ms = 0.0f64;
         let mut gdn_count = 0usize;
         let mut attn_count = 0usize;
         let mut gdn_idx = 0usize;
@@ -3869,30 +3867,18 @@ impl<'a> MetalForward<'a> {
 
             {
                 let cmd = self.ctx.queue.commandBuffer().expect("cmd");
-                let enc = KernelEncoder::begin(&cmd);
-                self.encode_moe_routed_ffn_gpu(&enc, session, moe)?;
-                enc.end();
+                if concurrent_shared_moe_decode_enabled() {
+                    self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                        &cmd, session, ffn_gate, ffn_up, ffn_down, moe,
+                    )?;
+                } else {
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
+                    enc.end();
+                }
                 cmd.commit();
                 cmd.waitUntilCompleted();
-                routed_ffn_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
-            }
-            {
-                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
-                let enc = KernelEncoder::begin(&cmd);
-                self.encode_moe_shared_ffn_gpu(&enc, session, ffn_gate, ffn_up, ffn_down)?;
-                enc.end();
-                cmd.commit();
-                cmd.waitUntilCompleted();
-                shared_ffn_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
-            }
-            {
-                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
-                let enc = KernelEncoder::begin(&cmd);
-                encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
-                enc.end();
-                cmd.commit();
-                cmd.waitUntilCompleted();
-                ffn_resid_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                ffn_apply_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             }
         }
         phases.push((
@@ -3918,9 +3904,7 @@ impl<'a> MetalForward<'a> {
         ));
         phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
         phases.push(("moe route".into(), route_total_ms));
-        phases.push(("moe routed ffn".into(), routed_ffn_total_ms));
-        phases.push(("moe shared ffn".into(), shared_ffn_total_ms));
-        phases.push(("moe ffn residual".into(), ffn_resid_total_ms));
+        phases.push(("moe ffn apply".into(), ffn_apply_total_ms));
 
         {
             let cmd = self.ctx.queue.commandBuffer().expect("cmd");

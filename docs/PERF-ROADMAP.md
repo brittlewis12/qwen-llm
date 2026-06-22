@@ -169,6 +169,12 @@ Current caveats:
   apply at `2.83 ms` / `28.6%` on A3B and `6.92 ms` / `30.7%` on A10B. This keeps
   MoE FFN execution shape as the live decode branch, while GDN-front retreads stay
   demoted unless fresh roofline evidence contradicts v0.293.
+- v0.302 kills a row-group-4 F32 mat-vec widening probe for the route/GDN F32
+  projection shelf. The correctness-safe sidecar regressed the mixed MoE route
+  bucket (`0.96 -> 1.00 ms` A3B, `1.34 -> 1.43 ms` A10B at `ctx128`). Do not infer
+  from the low route active-byte percentage that another F32 mat-vec retile is high
+  EV; split route into named subphases first, and keep the production
+  `moe ffn apply` split as the next decode attribution gate.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -826,9 +832,20 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.301:
+Current rank after v0.302:
 
-1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
+1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
+   ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
+   lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective is
+   not satisfied. v0.301 production-path attribution still shows MoE FFN apply as
+   the largest named bucket (`28.6%` A3B, `30.7%` A10B at `ctx128`). v0.302 says
+   route widening is not the next exit: the row-group-4 F32 sidecar regressed the
+   mixed route bucket. Next gate: split production FFN apply into routed gate/up,
+   routed down+sum, shared gate/up, shared down, and finalizer before implementing;
+   target a named bucket for at least `1.5-2%` end-to-end, preserve A3B/A10B gains,
+   and avoid the known occupancy traps from fused routed monoliths and x-cached Q8
+   front staging.
+2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). The remaining long-context
    slope is still attention-shaped: after tile2, A3B `ctx16384` attention is
@@ -838,21 +855,6 @@ Current rank after v0.301:
    straightforward MoE Q8-KV subgroup reader, and v0.300 kills smaller subgroup
    splits. Prefer cache-layout, reader vectorization, or structural body
    mechanisms over KV quantization as-is or another subgroup knob.
-2. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
-   ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
-   lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective is
-   not satisfied. v0.293 active-byte accounting says Q8 projection buckets are now
-   near the measured stream ceiling, while routed FFN remains large (`~25%` A10B
-   `ctx128`, `~21%` A3B `ctx128`) and less saturated. v0.294-v0.295 confirm shared
-   FFN and F32 route have cleanup headroom, but each simple local fix is only
-   sub-1% to ~1% end-to-end. v0.297 shows the stronger pattern: remove routed FFN
-   intermediates/dispatches where a fused kernel preserves occupancy; v0.298 says
-   finalizer/tail-pass cleanup is real but only sub-1%. v0.301 refreshes the phase
-   profiler around the current production FFN apply path and still shows MoE FFN
-   apply as the largest named bucket (`28.6%` A3B, `30.7%` A10B at `ctx128`). Next
-   gates: target a named bucket for at least `1.5-2%` end-to-end, preserve A3B/A10B
-   gains, and avoid the known occupancy traps from fused routed monoliths and
-   x-cached Q8 front staging.
 3. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
    `3.03 TFLOP/s` scalar-FMA sanity), and v0.293 adds

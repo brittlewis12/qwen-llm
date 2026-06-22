@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.302 F32 R4 Mat-Vec Falsifier + Phase Roofline Cleanup
+
+Status: tested and removed an opt-in row-group-4 F32 mat-vec sidecar for the
+MoE decode route/GDN F32 projection shelf. The branch was correctness-safe but
+did not improve the low-bandwidth route bucket. Kept the useful profiler cleanup:
+`scripts/profile/decode_phase_roofline.py` now understands the production
+`moe ffn apply` phase from v0.301.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- R4 correctness: `mat_vec_f32_matches_cpu` under
+  `QWEN_MATVEC_F32_LCPP_R4=1`
+- dirty AC-power A3B/A10B `phase --ctx 128` default versus
+  `QWEN_MATVEC_F32_LCPP_R4=1`
+
+Results:
+
+| Model | Variant | Phase sum | MoE route | MoE FFN apply | Read |
+| --- | --- | ---: | ---: | ---: | --- |
+| A3B `ctx128` | default | `9.87 ms` | `0.96 ms` | `2.75 ms` | baseline |
+| A3B `ctx128` | R4 | `9.96 ms` | `1.00 ms` | `2.72 ms` | flat/regressed |
+| A10B `ctx128` | default | `22.57 ms` | `1.34 ms` | `6.93 ms` | baseline |
+| A10B `ctx128` | R4 | `22.61 ms` | `1.43 ms` | `6.94 ms` | regressed |
+
+Interpretation: do not chase route by widening the current F32 row-group again.
+The route bucket is a mixed dispatch/topk/logits bucket, and its rough active-byte
+denominator is not enough to justify another mat-vec retile. Next MoE decode work
+should split the production `moe ffn apply` bucket into routed/shared/down/finalizer
+subphases and only implement against a named movable sub-bucket.
+
 ## 2026-06-22 — v0.301 Production-Path MoE Phase Attribution
 
 Status: refreshed the MoE decode phase profiler so `moe ffn apply` now times the

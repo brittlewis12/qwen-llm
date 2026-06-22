@@ -113,6 +113,29 @@ def category_bytes(
     expert_count: int,
 ) -> dict[str, tuple[int, str]]:
     expert_scale = expert_used / expert_count
+    moe_routed = tensor_sum(
+        rows,
+        lambda r: any(
+            part in r.name
+            for part in (
+                "ffn_gate_exps.weight",
+                "ffn_up_exps.weight",
+                "ffn_down_exps.weight",
+            )
+        ),
+        expert_scale,
+    )
+    moe_shared = tensor_sum(
+        rows,
+        lambda r: any(
+            part in r.name
+            for part in (
+                "ffn_gate_shexp.weight",
+                "ffn_up_shexp.weight",
+                "ffn_down_shexp.weight",
+            )
+        ),
+    )
     return {
         "gdn front proj": (
             tensor_sum(
@@ -149,33 +172,16 @@ def category_bytes(
             "projection weights only; excludes KV traffic",
         ),
         "moe routed ffn": (
-            tensor_sum(
-                rows,
-                lambda r: any(
-                    part in r.name
-                    for part in (
-                        "ffn_gate_exps.weight",
-                        "ffn_up_exps.weight",
-                        "ffn_down_exps.weight",
-                    )
-                ),
-                expert_scale,
-            ),
+            moe_routed,
             f"expert weights scaled by {expert_used}/{expert_count}",
         ),
         "moe shared ffn": (
-            tensor_sum(
-                rows,
-                lambda r: any(
-                    part in r.name
-                    for part in (
-                        "ffn_gate_shexp.weight",
-                        "ffn_up_shexp.weight",
-                        "ffn_down_shexp.weight",
-                    )
-                ),
-            ),
+            moe_shared,
             "weights only; excludes activations",
+        ),
+        "moe ffn apply": (
+            moe_routed + moe_shared,
+            f"routed expert weights scaled by {expert_used}/{expert_count} plus shared FFN",
         ),
         "moe route": (
             tensor_sum(

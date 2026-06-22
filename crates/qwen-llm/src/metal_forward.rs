@@ -34,10 +34,10 @@ use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
     attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
     encode_attn_decode_v4_f32, encode_axpy_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
-    encode_ffn_swiglu_q4_K_f32, encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32,
-    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32,
-    encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
+    encode_ffn_swiglu_q4_K_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
+    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
+    encode_moe_down_bf16_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_down_weighted_sum_q6_K_f32,
     encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32, encode_moe_mat_vec_iq3_s_f32,
     encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_shared_accum_resid_f32,
@@ -252,6 +252,26 @@ fn phase_moe_ffn_deep_split_enabled() -> bool {
         matches!(
             std::env::var("QWEN_PHASE_MOE_FFN_SPLIT").as_deref(),
             Ok("2") | Ok("deep") | Ok("DEEP")
+        )
+    })
+}
+
+fn decode_moe_noop_routed_gateup_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
+fn decode_moe_noop_routed_down_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_DECODE_MOE_NOOP_ROUTED_DOWN").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
         )
     })
 }
@@ -1642,19 +1662,23 @@ impl<'a> MetalForward<'a> {
             .view_subrange(0, vec![(topk * f_exp) as u64]);
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
 
-        encode_moe_swiglu_q4_K_f32(
-            self.ctx,
-            enc,
-            &moe.gate_exps,
-            &moe.up_exps,
-            &session.h,
-            &topk_idx,
-            &moe_inner,
-            h,
-            f_exp,
-            n_expert,
-            topk,
-        )?;
+        if decode_moe_noop_routed_gateup_enabled() {
+            encode_fill_f32(self.ctx, enc, &moe_inner, 0.0)?;
+        } else {
+            encode_moe_swiglu_q4_K_f32(
+                self.ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &session.h,
+                &topk_idx,
+                &moe_inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+            )?;
+        }
         Ok(())
     }
 
@@ -1677,6 +1701,11 @@ impl<'a> MetalForward<'a> {
             .view_subrange(0, vec![(topk * h) as u64]);
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        if decode_moe_noop_routed_down_enabled() {
+            encode_fill_f32(self.ctx, enc, &session.mixer_out, 0.0)?;
+            return Ok(false);
+        }
 
         let pending = match moe.down_exps.dtype {
             GgmlType::Q5_K => {
@@ -1771,30 +1800,8 @@ impl<'a> MetalForward<'a> {
         ffn_up: &MetalTensor,
         moe: &MetalMoeFfn,
     ) -> Result<bool, MfError> {
-        let arch = &self.model.arch;
-        let h = arch.hidden_size as usize;
-        let f_exp = arch.expert_feed_forward_length as usize;
-        let n_expert = arch.expert_count as usize;
-        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
-        let moe_inner = session
-            .moe_inner
-            .view_subrange(0, vec![(topk * f_exp) as u64]);
-        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
-
         let enc = KernelEncoder::begin_concurrent(cmd_buf);
-        encode_moe_swiglu_q4_K_f32(
-            self.ctx,
-            &enc,
-            &moe.gate_exps,
-            &moe.up_exps,
-            &session.h,
-            &topk_idx,
-            &moe_inner,
-            h,
-            f_exp,
-            n_expert,
-            topk,
-        )?;
+        self.encode_moe_routed_gate_up_q4_gpu(&enc, session, moe)?;
         let shared_inner_fused =
             self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
         enc.end();
@@ -1821,6 +1828,14 @@ impl<'a> MetalForward<'a> {
             .view_subrange(0, vec![(topk * h) as u64]);
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        if decode_moe_noop_routed_down_enabled() {
+            let enc = KernelEncoder::begin_concurrent(cmd_buf);
+            encode_fill_f32(self.ctx, &enc, &session.mixer_out, 0.0)?;
+            self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+            enc.end();
+            return Ok(false);
+        }
 
         let pending = match moe.down_exps.dtype {
             GgmlType::Q5_K => {

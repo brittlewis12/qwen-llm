@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.305 Routed Gate/Down No-Op Oracles
+
+Status: added diagnostic-only, correctness-breaking MoE decode no-op oracles for
+routed gate/up and routed down. `QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP=1` fills
+`moe_inner` instead of running routed Q4 gate/up/SwiGLU;
+`QWEN_DECODE_MOE_NOOP_ROUTED_DOWN=1` fills routed `mixer_out` instead of routed
+down/weighted-sum. Both preserve the production wave schedule around shared work
+and finalization.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with production-wave split plus each
+  no-op oracle
+- dirty AC-power same-build A3B/A10B `tg128 --runs 2` baseline and no-op variants
+- cx adversarial review of the no-op-driven implementation target
+
+Results:
+
+| Model | Base `tg128` | Gate/up no-op | Down no-op | Gate/up wave | Down wave |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B | `103.71 t/s` | `115.00 t/s` (`+10.9%`) | `113.48 t/s` (`+9.4%`) | `1.23 -> 0.35 ms` | `1.24 -> 0.42 ms` |
+| A10B | `44.86 t/s` | `51.79 t/s` (`+15.4%`) | `49.05 t/s` (`+9.3%`) | `3.80 -> 0.83 ms` | `2.61 -> 0.68 ms` |
+
+Interpretation: the production-schedule upper bound validates routed gate/up as
+the first exact MoE decode implementation target, with routed down second and still
+material. The next branch should be an env-gated, gate/up-only replacement for
+`encode_moe_routed_gate_up_q4_gpu`; do not revive the giant routed FFN monolith.
+
 ## 2026-06-22 — v0.304 Deep MoE FFN Subphase Attribution
 
 Status: extended the opt-in phase diagnostic with

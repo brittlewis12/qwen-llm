@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.303 MoE Decode FFN Wave Attribution
+
+Status: added an opt-in `QWEN_PHASE_MOE_FFN_SPLIT=1` phase diagnostic that splits
+the current MoE decode FFN apply path into production dependency waves while
+leaving the default phase profiler on the production aggregate. The refactor keeps
+the default concurrent shared path intact and makes the next MoE decode branch less
+guesswork-driven.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B default `phase --ctx 128` after the refactor
+- dirty AC-power A3B/A10B `phase --ctx 128` with `QWEN_PHASE_MOE_FFN_SPLIT=1`
+- dirty AC-power A3B/A10B `tg128 --runs 3` default guard
+
+Results:
+
+| Model | FFN apply / split | Gate/up wave | Down wave | Finalizer | tg128 guard |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B `ctx128` | `2.70 ms` default / `2.67 ms` split | `1.31 ms` | `1.24 ms` | `0.12 ms` | `103.70 t/s` |
+| A10B `ctx128` | `6.89 ms` default / `6.66 ms` split | `3.75 ms` | `2.62 ms` | `0.14 ms` | `44.89 t/s` |
+
+Serial diagnostic with `QWEN_DECODE_MOE_CONCURRENT_SHARED=0` puts routed FFN at
+`2.31 ms` A3B / `5.86 ms` A10B and shared core at `0.76 ms` / `1.53 ms`, so the
+current concurrent waves are still buying real overlap. The finalizer is now tiny;
+route and finalizer should not be the next decode targets.
+
+Interpretation: the live MoE decode headroom is inside the gate/up and down waves,
+especially A10B gate/up. The next branch should isolate routed gate/up versus
+shared gate/up within the wave or attack routed Q4 SwiGLU/down mechanics directly,
+not retry the already-falsified giant routed monolith.
+
 ## 2026-06-22 — v0.302 F32 R4 Mat-Vec Falsifier + Phase Roofline Cleanup
 
 Status: tested and removed an opt-in row-group-4 F32 mat-vec sidecar for the

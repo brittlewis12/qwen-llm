@@ -229,6 +229,16 @@ fn decode_moe_fused_finalizer_enabled() -> bool {
     })
 }
 
+fn phase_moe_ffn_split_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_MOE_FFN_SPLIT").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 thread_local! {
     static MATMAT_BF16_BFLOAT_ACT_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
@@ -1599,22 +1609,51 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    fn encode_moe_ffn_apply_gpu_concurrent_shared(
+    fn encode_moe_ffn_gate_up_wave_gpu(
         &self,
         cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         session: &mut MetalSession,
         ffn_gate: &MetalTensor,
         ffn_up: &MetalTensor,
+        moe: &MetalMoeFfn,
+    ) -> Result<bool, MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let moe_inner = session
+            .moe_inner
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+
+        let enc = KernelEncoder::begin_concurrent(cmd_buf);
+        encode_moe_swiglu_q4_K_f32(
+            self.ctx,
+            &enc,
+            &moe.gate_exps,
+            &moe.up_exps,
+            &session.h,
+            &topk_idx,
+            &moe_inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+        )?;
+        let shared_inner_fused =
+            self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
+        enc.end();
+        Ok(shared_inner_fused)
+    }
+
+    fn encode_moe_ffn_down_wave_gpu(
+        &self,
+        cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        session: &mut MetalSession,
         ffn_down: &MetalTensor,
         moe: &MetalMoeFfn,
-    ) -> Result<(), MfError> {
-        if moe.gate_exps.dtype != GgmlType::Q4_K || moe.up_exps.dtype != GgmlType::Q4_K {
-            let enc = KernelEncoder::begin(cmd_buf);
-            self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
-            enc.end();
-            return Ok(());
-        }
-
+    ) -> Result<bool, MfError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
         let f_exp = arch.expert_feed_forward_length as usize;
@@ -1629,32 +1668,7 @@ impl<'a> MetalForward<'a> {
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
-        {
-            let enc = KernelEncoder::begin_concurrent(cmd_buf);
-            encode_moe_swiglu_q4_K_f32(
-                self.ctx,
-                &enc,
-                &moe.gate_exps,
-                &moe.up_exps,
-                &session.h,
-                &topk_idx,
-                &moe_inner,
-                h,
-                f_exp,
-                n_expert,
-                topk,
-            )?;
-            let shared_inner_fused =
-                self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
-            enc.end();
-            if !shared_inner_fused {
-                let enc = KernelEncoder::begin(cmd_buf);
-                self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
-                enc.end();
-            }
-        }
-
-        let routed_weighted_sum_is_pending = match moe.down_exps.dtype {
+        let pending = match moe.down_exps.dtype {
             GgmlType::Q5_K => {
                 let enc = KernelEncoder::begin_concurrent(cmd_buf);
                 let pending = if decode_moe_q5_down_fused_enabled() {
@@ -1749,23 +1763,69 @@ impl<'a> MetalForward<'a> {
             }
             _ => unreachable!(),
         };
+        Ok(pending)
+    }
 
-        {
+    fn encode_moe_ffn_final_wave_gpu(
+        &self,
+        cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        session: &mut MetalSession,
+        routed_weighted_sum_is_pending: bool,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        let topk = self
+            .model
+            .arch
+            .expert_used_count
+            .min(self.model.arch.expert_count) as usize;
+        let moe_expert_out = session
+            .moe_expert_out
+            .view_subrange(0, vec![(topk * h) as u64]);
+        let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        let enc = KernelEncoder::begin(cmd_buf);
+        if routed_weighted_sum_is_pending {
+            encode_moe_weighted_sum_f32(
+                self.ctx,
+                &enc,
+                &moe_expert_out,
+                &topk_w,
+                &session.mixer_out,
+                h,
+                topk,
+            )?;
+        }
+        self.encode_moe_final_residual_gpu(&enc, session)?;
+        enc.end();
+        Ok(())
+    }
+
+    fn encode_moe_ffn_apply_gpu_concurrent_shared(
+        &self,
+        cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        if moe.gate_exps.dtype != GgmlType::Q4_K || moe.up_exps.dtype != GgmlType::Q4_K {
             let enc = KernelEncoder::begin(cmd_buf);
-            if routed_weighted_sum_is_pending {
-                encode_moe_weighted_sum_f32(
-                    self.ctx,
-                    &enc,
-                    &moe_expert_out,
-                    &topk_w,
-                    &session.mixer_out,
-                    h,
-                    topk,
-                )?;
-            }
-            self.encode_moe_final_residual_gpu(&enc, session)?;
+            self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
+            enc.end();
+            return Ok(());
+        }
+
+        let shared_inner_fused =
+            self.encode_moe_ffn_gate_up_wave_gpu(cmd_buf, session, ffn_gate, ffn_up, moe)?;
+        if !shared_inner_fused {
+            let enc = KernelEncoder::begin(cmd_buf);
+            self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
             enc.end();
         }
+        let routed_weighted_sum_is_pending =
+            self.encode_moe_ffn_down_wave_gpu(cmd_buf, session, ffn_down, moe)?;
+        self.encode_moe_ffn_final_wave_gpu(cmd_buf, session, routed_weighted_sum_is_pending)?;
         Ok(())
     }
 
@@ -3707,10 +3767,17 @@ impl<'a> MetalForward<'a> {
         let mut attn_mixer_total_ms = 0.0f64;
         let mut route_total_ms = 0.0f64;
         let mut ffn_apply_total_ms = 0.0f64;
+        let mut ffn_gate_up_wave_total_ms = 0.0f64;
+        let mut ffn_shared_silu_total_ms = 0.0f64;
+        let mut ffn_down_wave_total_ms = 0.0f64;
+        let mut ffn_finalizer_total_ms = 0.0f64;
+        let mut ffn_fallback_routed_total_ms = 0.0f64;
+        let mut ffn_fallback_shared_total_ms = 0.0f64;
         let mut gdn_count = 0usize;
         let mut attn_count = 0usize;
         let mut gdn_idx = 0usize;
         let mut attn_idx = 0usize;
+        let split_ffn_apply = phase_moe_ffn_split_enabled();
         for block in &self.model.blocks {
             let slot = match block {
                 MetalBlock::Gdn(_) => {
@@ -3865,7 +3932,70 @@ impl<'a> MetalForward<'a> {
                 route_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             }
 
-            {
+            if split_ffn_apply {
+                if concurrent_shared_moe_decode_enabled()
+                    && moe.gate_exps.dtype == GgmlType::Q4_K
+                    && moe.up_exps.dtype == GgmlType::Q4_K
+                {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let shared_inner_fused =
+                        self.encode_moe_ffn_gate_up_wave_gpu(&cmd, session, ffn_gate, ffn_up, moe)?;
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_gate_up_wave_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    if !shared_inner_fused {
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        ffn_shared_silu_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let routed_weighted_sum_is_pending =
+                        self.encode_moe_ffn_down_wave_gpu(&cmd, session, ffn_down, moe)?;
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_down_wave_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    self.encode_moe_ffn_final_wave_gpu(
+                        &cmd,
+                        session,
+                        routed_weighted_sum_is_pending,
+                    )?;
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                } else {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_routed_ffn_gpu(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_fallback_routed_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_shared_ffn_core_gpu(&enc, session, ffn_gate, ffn_up, ffn_down)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_fallback_shared_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_final_residual_gpu(&enc, session)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
+            } else {
                 let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                 if concurrent_shared_moe_decode_enabled() {
                     self.encode_moe_ffn_apply_gpu_concurrent_shared(
@@ -3904,7 +4034,32 @@ impl<'a> MetalForward<'a> {
         ));
         phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
         phases.push(("moe route".into(), route_total_ms));
-        phases.push(("moe ffn apply".into(), ffn_apply_total_ms));
+        if split_ffn_apply {
+            if ffn_gate_up_wave_total_ms > 0.0 {
+                phases.push(("moe ffn gate/up wave".into(), ffn_gate_up_wave_total_ms));
+            }
+            if ffn_shared_silu_total_ms > 0.0 {
+                phases.push(("moe ffn shared silu".into(), ffn_shared_silu_total_ms));
+            }
+            if ffn_down_wave_total_ms > 0.0 {
+                phases.push(("moe ffn down wave".into(), ffn_down_wave_total_ms));
+            }
+            if ffn_fallback_routed_total_ms > 0.0 {
+                phases.push((
+                    "moe ffn fallback routed".into(),
+                    ffn_fallback_routed_total_ms,
+                ));
+            }
+            if ffn_fallback_shared_total_ms > 0.0 {
+                phases.push((
+                    "moe ffn fallback shared".into(),
+                    ffn_fallback_shared_total_ms,
+                ));
+            }
+            phases.push(("moe ffn finalizer".into(), ffn_finalizer_total_ms));
+        } else {
+            phases.push(("moe ffn apply".into(), ffn_apply_total_ms));
+        }
 
         {
             let cmd = self.ctx.queue.commandBuffer().expect("cmd");

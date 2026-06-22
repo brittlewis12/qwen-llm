@@ -175,6 +175,13 @@ Current caveats:
   from the low route active-byte percentage that another F32 mat-vec retile is high
   EV; split route into named subphases first, and keep the production
   `moe ffn apply` split as the next decode attribution gate.
+- v0.303 adds the production-wave FFN split gate. At `ctx128`, A3B FFN apply is
+  `2.70 ms` aggregate / `1.31 ms` gate-up wave / `1.24 ms` down wave / `0.12 ms`
+  finalizer; A10B is `6.89 ms` / `3.75 ms` / `2.62 ms` / `0.14 ms`. With
+  concurrent shared disabled for diagnosis, routed FFN is much larger than shared
+  core (`2.31` versus `0.76 ms` A3B, `5.86` versus `1.53 ms` A10B). Treat gate/up
+  and down mechanics as live; finalizer, route widening, and naive monolith fusion
+  are not next.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -832,7 +839,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.302:
+Current rank after v0.303:
 
 1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
@@ -840,10 +847,12 @@ Current rank after v0.302:
    not satisfied. v0.301 production-path attribution still shows MoE FFN apply as
    the largest named bucket (`28.6%` A3B, `30.7%` A10B at `ctx128`). v0.302 says
    route widening is not the next exit: the row-group-4 F32 sidecar regressed the
-   mixed route bucket. Next gate: split production FFN apply into routed gate/up,
-   routed down+sum, shared gate/up, shared down, and finalizer before implementing;
-   target a named bucket for at least `1.5-2%` end-to-end, preserve A3B/A10B gains,
-   and avoid the known occupancy traps from fused routed monoliths and x-cached Q8
+   mixed route bucket. v0.303 splits FFN apply into production waves and points at
+   gate/up and down, not finalizer: A10B `ctx128` gate/up wave is `3.75 ms`, down
+   wave `2.62 ms`, finalizer `0.14 ms`; A3B is `1.31/1.24/0.12 ms`. Next gate:
+   isolate routed versus shared cost inside the gate/up/down waves, then target a
+   named bucket for at least `1.5-2%` end-to-end while preserving A3B/A10B and
+   avoiding the known occupancy traps from fused routed monoliths and x-cached Q8
    front staging.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention

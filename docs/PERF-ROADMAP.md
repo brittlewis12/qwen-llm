@@ -198,6 +198,12 @@ Current caveats:
   was directionally positive (`44.86 -> 45.38 t/s` A10B, `103.71 -> 104.63 t/s`
   A3B) but far below the `+3%` keep gate and below the `15-20%` routed gate/up
   subphase gate. Do not spend the next pass on simple `NR0/NSG` reshaping alone.
+- v0.307 adds subphase roofline estimates and re-ranks exact MoE decode work.
+  A10B routed gate/up is already `~435 GB/s` (`~92%` of the measured stream
+  anchor), while routed down is `~324 GB/s` (`~68%`) and A3B routed down is only
+  `~192 GB/s` (`~40%`). Gate/up is still the largest no-op ceiling, but exact
+  work should now target routed down unless gate/up has a credible byte-reduction
+  or reuse mechanism.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -855,7 +861,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.306:
+Current rank after v0.307:
 
 1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
@@ -868,15 +874,14 @@ Current rank after v0.306:
    wave `2.62 ms`, finalizer `0.14 ms`; A3B is `1.31/1.24/0.12 ms`. v0.304
    identifies the routed components inside that envelope: A10B routed gate/up is
    `3.14 ms`, routed down `2.57 ms`, and shared work is smaller. v0.305 no-op
-   oracles validate the production-schedule ceiling: routed gate/up no-op is
-   `+15.4%` A10B and `+10.9%` A3B at `tg128`, while routed down no-op is
-   `+9.3%/+9.4%`. Next implementation gate: build an env-gated replacement only
-   for `encode_moe_routed_gate_up_q4_gpu`; require exact `moe_inner` parity first,
-   then at least `15-20%` routed gate/up subphase improvement on A10B and `+3%`
-   A10B `tg128` with A3B neutral-positive. v0.306 says simple `NR0/NSG` retuning
-   alone is too small, so the next gate/up branch needs a deeper mechanism. If it
-   misses, switch to routed down. Avoid the known occupancy traps from fused routed
-   monoliths and x-cached Q8 front staging.
+   oracles validate both ceilings, but v0.307 roofline estimates re-rank exact
+   work: A10B routed gate/up is already `~92%` of stream, while routed down is
+   `~68%` and A3B routed down is `~40%`. Next implementation gate: target routed
+   down first and keep only if A10B down improves `>=10%` (`2.57 -> <=2.30 ms`) or
+   A3B down moves `1.22 -> <=1.00 ms`, with `tg128` converting by at least `2-3%`.
+   Gate/up work needs a credible byte-reduction/reuse mechanism before reopening.
+   Avoid fused routed monoliths, x-cached Q8 front staging, and row-shape-only
+   gate/up retunes.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). The remaining long-context

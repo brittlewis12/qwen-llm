@@ -113,6 +113,18 @@ def category_bytes(
     expert_count: int,
 ) -> dict[str, tuple[int, str]]:
     expert_scale = expert_used / expert_count
+    moe_routed_gate_up = tensor_sum(
+        rows,
+        lambda r: any(
+            part in r.name for part in ("ffn_gate_exps.weight", "ffn_up_exps.weight")
+        ),
+        expert_scale,
+    )
+    moe_routed_down = tensor_sum(
+        rows,
+        lambda r: "ffn_down_exps.weight" in r.name,
+        expert_scale,
+    )
     moe_routed = tensor_sum(
         rows,
         lambda r: any(
@@ -124,6 +136,16 @@ def category_bytes(
             )
         ),
         expert_scale,
+    )
+    moe_shared_gate_up = tensor_sum(
+        rows,
+        lambda r: any(
+            part in r.name for part in ("ffn_gate_shexp.weight", "ffn_up_shexp.weight")
+        ),
+    )
+    moe_shared_down = tensor_sum(
+        rows,
+        lambda r: "ffn_down_shexp.weight" in r.name,
     )
     moe_shared = tensor_sum(
         rows,
@@ -178,6 +200,30 @@ def category_bytes(
         "moe shared ffn": (
             moe_shared,
             "weights only; excludes activations",
+        ),
+        "moe ffn routed gate/up": (
+            moe_routed_gate_up,
+            f"routed gate+up expert weights scaled by {expert_used}/{expert_count}",
+        ),
+        "moe ffn routed down": (
+            moe_routed_down,
+            f"routed down expert weights scaled by {expert_used}/{expert_count}",
+        ),
+        "moe ffn shared gate/up": (
+            moe_shared_gate_up,
+            "shared gate+up weights only; excludes activations",
+        ),
+        "moe ffn shared down": (
+            moe_shared_down,
+            "shared down weights only; excludes activations",
+        ),
+        "moe ffn gate/up wave": (
+            moe_routed_gate_up + moe_shared_gate_up,
+            f"routed gate+up scaled by {expert_used}/{expert_count} plus shared gate+up",
+        ),
+        "moe ffn down wave": (
+            moe_routed_down + moe_shared_down,
+            f"routed down scaled by {expert_used}/{expert_count} plus shared down",
         ),
         "moe ffn apply": (
             moe_routed + moe_shared,

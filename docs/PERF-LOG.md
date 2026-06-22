@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.307 FFN Split Roofline Re-rank
+
+Status: extended `scripts/profile/decode_phase_roofline.py` to estimate routed and
+shared gate/up/down subphase bytes. Applying it to the v0.304 deep split changes
+the exact-work priority: routed gate/up has the biggest no-op ceiling, but A10B
+routed gate/up is already near the measured stream roofline.
+
+Validation:
+
+- `uv run scripts/profile/decode_phase_roofline.py` on A3B/A10B deep FFN split
+- cx adversarial review after the R1S4 near-miss and subphase roofline packet
+
+Results:
+
+| Model | Routed gate/up | Routed down | Shared gate/up | Shared down |
+| --- | ---: | ---: | ---: | ---: |
+| A3B | `343 GB/s` (`72%`) | `192 GB/s` (`40%`) | `194 GB/s` (`41%`) | `111 GB/s` (`24%`) |
+| A10B | `435 GB/s` (`92%`) | `324 GB/s` (`68%`) | `387 GB/s` (`82%`) | `229 GB/s` (`48%`) |
+
+Interpretation: switch exact kernel work to routed down. Gate/up remains the
+largest no-op ceiling, but it is byte-dominated on A10B and R1S4 already showed
+nearby shape work is too small. Routed down is still large and visibly
+under-streaming on both MoE targets. Keep gate/up work constrained to a credible
+byte-reduction/reuse mechanism; do not run another row-shape-only sidecar next.
+
 ## 2026-06-22 — v0.306 Routed Gate/Up R1S4 Near-Miss
 
 Status: tested and removed a decode-only routed Q4 gate/up row-shape sidecar. The

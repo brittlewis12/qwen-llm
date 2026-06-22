@@ -182,6 +182,12 @@ Current caveats:
   core (`2.31` versus `0.76 ms` A3B, `5.86` versus `1.53 ms` A10B). Treat gate/up
   and down mechanics as live; finalizer, route widening, and naive monolith fusion
   are not next.
+- v0.304 deep-splits FFN apply into routed/shared subphases. A10B `ctx128` is
+  routed gate/up `3.14 ms`, routed down `2.57 ms`, shared gate/up `0.83 ms`, shared
+  down `0.70 ms`; A3B is `1.10/1.22/0.46/0.40 ms`. Shared FFN is not the next
+  target. The next cheap falsifier is a routed gate/up no-op versus routed down
+  no-op inside the production wave schedule; only write a new routed Q4 kernel if
+  the corresponding no-op recovers the production wave and end-to-end guard.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -839,7 +845,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.303:
+Current rank after v0.304:
 
 1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
@@ -849,9 +855,13 @@ Current rank after v0.303:
    route widening is not the next exit: the row-group-4 F32 sidecar regressed the
    mixed route bucket. v0.303 splits FFN apply into production waves and points at
    gate/up and down, not finalizer: A10B `ctx128` gate/up wave is `3.75 ms`, down
-   wave `2.62 ms`, finalizer `0.14 ms`; A3B is `1.31/1.24/0.12 ms`. Next gate:
-   isolate routed versus shared cost inside the gate/up/down waves, then target a
-   named bucket for at least `1.5-2%` end-to-end while preserving A3B/A10B and
+   wave `2.62 ms`, finalizer `0.14 ms`; A3B is `1.31/1.24/0.12 ms`. v0.304
+   identifies the routed components inside that envelope: A10B routed gate/up is
+   `3.14 ms`, routed down `2.57 ms`, and shared work is smaller. Next gate: add
+   diagnostic no-op oracles for routed gate/up and routed down inside the
+   production wave schedule. If gate/up no-op recovers the wave materially, attack
+   routed Q4 SwiGLU mechanics; if down no-op is comparable or larger, rerank down.
+   Require at least `1.5-2%` end-to-end potential while preserving A3B/A10B and
    avoiding the known occupancy traps from fused routed monoliths and x-cached Q8
    front staging.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode

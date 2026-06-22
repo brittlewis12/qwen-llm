@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.304 Deep MoE FFN Subphase Attribution
+
+Status: extended the opt-in phase diagnostic with
+`QWEN_PHASE_MOE_FFN_SPLIT=deep`, which serializes MoE FFN apply into routed
+gate/up, routed down, shared gate/up, shared down, fallback, and finalizer
+subphases. Default decode and default phase output remain unchanged.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with
+  `QWEN_PHASE_MOE_FFN_SPLIT=deep`
+- cx adversarial review of the split-driven next target
+
+Results:
+
+| Model | Routed gate/up | Routed down | Shared gate/up | Shared down | Finalizer |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B `ctx128` | `1.10 ms` | `1.22 ms` | `0.46 ms` | `0.40 ms` | `0.12 ms` |
+| A10B `ctx128` | `3.14 ms` | `2.57 ms` | `0.83 ms` | `0.70 ms` | `0.14 ms` |
+
+Interpretation: shared work is not next; it is smaller and mostly hidden under
+routed production waves. A10B points at routed Q4 gate/up/SwiGLU first, while A3B
+is nearly balanced and slightly down-heavy. The next cheap falsifier should be a
+diagnostic-only routed gate/up no-op versus routed down no-op in the production
+wave schedule. If gate/up no-op does not recover the production wave, do not write
+another Q4 SwiGLU kernel.
+
 ## 2026-06-22 — v0.303 MoE Decode FFN Wave Attribution
 
 Status: added an opt-in `QWEN_PHASE_MOE_FFN_SPLIT=1` phase diagnostic that splits

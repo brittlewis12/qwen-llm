@@ -234,7 +234,24 @@ fn phase_moe_ffn_split_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         matches!(
             std::env::var("QWEN_PHASE_MOE_FFN_SPLIT").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            Ok("1")
+                | Ok("2")
+                | Ok("deep")
+                | Ok("DEEP")
+                | Ok("true")
+                | Ok("TRUE")
+                | Ok("yes")
+                | Ok("YES")
+        )
+    })
+}
+
+fn phase_moe_ffn_deep_split_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_MOE_FFN_SPLIT").as_deref(),
+            Ok("2") | Ok("deep") | Ok("DEEP")
         )
     })
 }
@@ -1607,6 +1624,143 @@ impl<'a> MetalForward<'a> {
         self.encode_moe_shared_ffn_core_gpu(enc, session, ffn_gate, ffn_up, ffn_down)?;
         self.encode_moe_final_residual_gpu(enc, session)?;
         Ok(())
+    }
+
+    fn encode_moe_routed_gate_up_q4_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let moe_inner = session
+            .moe_inner
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+
+        encode_moe_swiglu_q4_K_f32(
+            self.ctx,
+            enc,
+            &moe.gate_exps,
+            &moe.up_exps,
+            &session.h,
+            &topk_idx,
+            &moe_inner,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+        )?;
+        Ok(())
+    }
+
+    fn encode_moe_routed_down_only_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        moe: &MetalMoeFfn,
+    ) -> Result<bool, MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let moe_inner = session
+            .moe_inner
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let moe_expert_out = session
+            .moe_expert_out
+            .view_subrange(0, vec![(topk * h) as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+        let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        let pending = match moe.down_exps.dtype {
+            GgmlType::Q5_K => {
+                if decode_moe_q5_down_fused_enabled() {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                        self.ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &topk_w,
+                        &session.mixer_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                        1,
+                    )?;
+                    false
+                } else {
+                    encode_moe_down_q5_K_f32(
+                        self.ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &moe_expert_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                    )?;
+                    true
+                }
+            }
+            GgmlType::Q6_K => {
+                encode_moe_down_weighted_sum_q6_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &topk_w,
+                    &session.mixer_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                false
+            }
+            GgmlType::IQ4_XS => {
+                encode_moe_down_iq4_xs_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                true
+            }
+            GgmlType::BF16 => {
+                encode_moe_down_bf16_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                true
+            }
+            _ => unreachable!(),
+        };
+        Ok(pending)
     }
 
     fn encode_moe_ffn_gate_up_wave_gpu(
@@ -3771,6 +3925,10 @@ impl<'a> MetalForward<'a> {
         let mut ffn_shared_silu_total_ms = 0.0f64;
         let mut ffn_down_wave_total_ms = 0.0f64;
         let mut ffn_finalizer_total_ms = 0.0f64;
+        let mut ffn_routed_gate_up_total_ms = 0.0f64;
+        let mut ffn_routed_down_total_ms = 0.0f64;
+        let mut ffn_shared_gate_up_total_ms = 0.0f64;
+        let mut ffn_shared_down_total_ms = 0.0f64;
         let mut ffn_fallback_routed_total_ms = 0.0f64;
         let mut ffn_fallback_shared_total_ms = 0.0f64;
         let mut gdn_count = 0usize;
@@ -3778,6 +3936,7 @@ impl<'a> MetalForward<'a> {
         let mut gdn_idx = 0usize;
         let mut attn_idx = 0usize;
         let split_ffn_apply = phase_moe_ffn_split_enabled();
+        let deep_split_ffn_apply = phase_moe_ffn_deep_split_enabled();
         for block in &self.model.blocks {
             let slot = match block {
                 MetalBlock::Gdn(_) => {
@@ -3933,7 +4092,64 @@ impl<'a> MetalForward<'a> {
             }
 
             if split_ffn_apply {
-                if concurrent_shared_moe_decode_enabled()
+                if deep_split_ffn_apply
+                    && moe.gate_exps.dtype == GgmlType::Q4_K
+                    && moe.up_exps.dtype == GgmlType::Q4_K
+                {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_routed_gate_up_q4_gpu(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_routed_gate_up_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    let routed_weighted_sum_is_pending =
+                        self.encode_moe_routed_down_only_gpu(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_routed_down_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    let shared_inner_fused =
+                        self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_shared_gate_up_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    if !shared_inner_fused {
+                        let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                        let enc = KernelEncoder::begin(&cmd);
+                        self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
+                        enc.end();
+                        cmd.commit();
+                        cmd.waitUntilCompleted();
+                        ffn_shared_silu_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    }
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_shared_down_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    self.encode_moe_ffn_final_wave_gpu(
+                        &cmd,
+                        session,
+                        routed_weighted_sum_is_pending,
+                    )?;
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    ffn_finalizer_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                } else if concurrent_shared_moe_decode_enabled()
                     && moe.gate_exps.dtype == GgmlType::Q4_K
                     && moe.up_exps.dtype == GgmlType::Q4_K
                 {
@@ -4035,11 +4251,23 @@ impl<'a> MetalForward<'a> {
         phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
         phases.push(("moe route".into(), route_total_ms));
         if split_ffn_apply {
+            if ffn_routed_gate_up_total_ms > 0.0 {
+                phases.push(("moe ffn routed gate/up".into(), ffn_routed_gate_up_total_ms));
+            }
+            if ffn_routed_down_total_ms > 0.0 {
+                phases.push(("moe ffn routed down".into(), ffn_routed_down_total_ms));
+            }
+            if ffn_shared_gate_up_total_ms > 0.0 {
+                phases.push(("moe ffn shared gate/up".into(), ffn_shared_gate_up_total_ms));
+            }
             if ffn_gate_up_wave_total_ms > 0.0 {
                 phases.push(("moe ffn gate/up wave".into(), ffn_gate_up_wave_total_ms));
             }
             if ffn_shared_silu_total_ms > 0.0 {
                 phases.push(("moe ffn shared silu".into(), ffn_shared_silu_total_ms));
+            }
+            if ffn_shared_down_total_ms > 0.0 {
+                phases.push(("moe ffn shared down".into(), ffn_shared_down_total_ms));
             }
             if ffn_down_wave_total_ms > 0.0 {
                 phases.push(("moe ffn down wave".into(), ffn_down_wave_total_ms));

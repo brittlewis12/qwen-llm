@@ -5349,13 +5349,12 @@ fn run_phase(args: PhaseArgs) -> Result<()> {
     }
     let (_, wall_artifact, phases) = mf.single_token_phase_profiled(0, target as u32, &mut s)?;
     let phase_sum: f64 = phases.iter().map(|p| p.1).sum();
-    let phase_mode = if matches!(
-        std::env::var("QWEN_PHASE_MOE_FFN_SPLIT").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    ) {
-        "production-wave FFN split diagnostic"
-    } else {
-        "production-realistic GPU"
+    let phase_mode = match std::env::var("QWEN_PHASE_MOE_FFN_SPLIT").as_deref() {
+        Ok("2") | Ok("deep") | Ok("DEEP") => "deep serial FFN split diagnostic",
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") => {
+            "production-wave FFN split diagnostic"
+        }
+        _ => "production-realistic GPU",
     };
     println!(
         "[phase ctx={target}] phase_sum={phase_sum:.2} ms ({phase_mode})  \

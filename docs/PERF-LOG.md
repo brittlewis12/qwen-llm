@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.309 Q5 Down Inner-Load Oracle
+
+Status: tested and removed a diagnostic Q5 routed-down inner-load no-op. The
+oracle preserved the Q5 weight/dequant loop shape, top-k loop, weighted
+accumulation, stores, and production scheduling, but replaced `moe_inner` loads
+with constants. It measured the removable ceiling for inner activation replay.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with production-wave split and
+  `QWEN_DECODE_MOE_Q5_DOWN_NOINNER=1`
+- dirty AC-power A3B/A10B `tg128 --runs 2` with the oracle
+- cx adversarial review of staging versus dequant-path slimming
+
+Results:
+
+| Model | Down wave | `tg128` | Read |
+| --- | ---: | ---: | --- |
+| A3B | `~1.24 -> 1.07 ms` | `103.71 -> 105.75 t/s` | `+2.0%` upper bound |
+| A10B | `~2.61 -> 2.21 ms` | `44.86 -> 45.76 t/s` | `+2.0%` upper bound |
+
+Interpretation: repeated `moe_inner` loads are real, but too small to justify a
+broad staging path. With `NSG=2`, practical staged reuse would capture less than
+the `+2%` oracle and add barriers. Prefer Q5 down weight/dequant path slimming
+over inner staging unless a tiny staged microproof clears a strict keep gate.
+
 ## 2026-06-22 — v0.308 Q5 Down S4 Falsifier
 
 Status: tested and removed a routed Q5 down+weighted-sum sidecar that changed the

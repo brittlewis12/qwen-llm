@@ -209,6 +209,11 @@ Current caveats:
   the mechanism. The weight-only roofline likely undercounts repeated `moe_inner`
   activation traffic; the next routed-down gate is an inner-load no-op, not a
   full staging kernel.
+- v0.309 runs the Q5 down inner-load no-op. It drops down wave to `1.07 ms` A3B /
+  `2.21 ms` A10B and `tg128` to `+2.0%` on both targets, so activation replay is
+  real but too small for broad staging after overhead. Prefer Q5 down weight/dequant
+  slimming; only try inner staging as a tiny S4-stage microproof with a strict
+  `>=5%` down-wave and `>=0.8%` A10B `tg128` keep gate.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -866,7 +871,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.308:
+Current rank after v0.309:
 
 1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
@@ -884,11 +889,13 @@ Current rank after v0.308:
    `~68%` and A3B routed down is `~40%`. Next implementation gate: target routed
    down first and keep only if A10B down improves `>=10%` (`2.57 -> <=2.30 ms`) or
    A3B down moves `1.22 -> <=1.00 ms`, with `tg128` converting by at least `2-3%`.
-   v0.308 kills simple Q5 down `NSG=4`; next, add an inner-load no-op for Q5 down
-   to prove whether repeated `moe_inner` loads are removable before writing a real
-   staged/reuse kernel. Gate/up work needs a credible byte-reduction/reuse
-   mechanism before reopening. Avoid fused routed monoliths, x-cached Q8 front
-   staging, and row-shape-only retunes.
+   v0.308 kills simple Q5 down `NSG=4`, and v0.309 says inner-load replay is only
+   a `+2%` end-to-end oracle. Next, target Q5 down weight/dequant path slimming
+   with no scheduling change: packed qh/q/sc/dh loads, less scalar unpack, or lower
+   register pressure. Keep only if down-wave improves `>=3-5%` and `tg128` moves
+   `>=0.7-1.0%` with A3B/A10B non-regression. Gate/up work needs a credible
+   byte-reduction/reuse mechanism before reopening. Avoid fused routed monoliths,
+   x-cached Q8 front staging, and row-shape-only retunes.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). The remaining long-context

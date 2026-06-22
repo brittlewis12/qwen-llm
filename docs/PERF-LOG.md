@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.297 Fused Q5 Down Weighted-Sum Decode
+
+Status: defaulted the existing packed-slot Q5_K down+weighted-sum kernel on the
+single-token MoE decode path. Q5_K routed down previously wrote `[topk, hidden]`
+expert outputs and then launched a separate weighted-sum pass; the fused path
+accumulates weighted routed output directly into `mixer_out`. Rollback:
+`QWEN_DECODE_MOE_Q5_DOWN_FUSED=0`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- A3B and A10B concurrent-GDN MoE correctness smokes, opt-in and default
+- dirty AC-power A3B/A10B `tg128` default / rollback / default A/Bs
+- A3B/A10B `phase --ctx 128` default/opt-in versus old path
+- A3B `ctx16384` guard
+
+Results:
+
+| Model | Default A | Rollback | Default B | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B `tg128` | `103.80` | `101.86` | `105.15` | `+1.9-3.2%` |
+| A10B `tg128` | `44.66` | `43.96` | `44.65` | `+1.6%` |
+
+The initial opt-in A/B before defaulting showed the same direction: A3B
+`102.18/103.65/102.29` and A10B `43.95/44.70/43.96` for base/fused/base.
+A3B `ctx16384` also improved in the guard (`85.4 -> 86.1 t/s`).
+
+Interpretation: this is the first post-v0.293 MoE decode bucket win above the
+local-noise shelf. The right mechanism was not another routed monolith; it was
+removing an avoidable routed-down intermediate and weighted-sum dispatch for the
+dominant Q5_K down case while preserving occupancy.
+
 ## 2026-06-17 — v0.296 A3B Long-Attention Knob Sweep
 
 Status: after the v0.293 group8 tile2 default, swept the remaining exposed

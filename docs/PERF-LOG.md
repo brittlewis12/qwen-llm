@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.298 Fused MoE Decode Finalizer
+
+Status: defaulted a focused MoE decode finalizer cleanup. After routed output and
+shared expert core are available, the decode path now fuses shared accumulation,
+`mixer_out` update, and residual add into one pass. The rollback knob is
+`QWEN_DECODE_MOE_FUSED_FINALIZER=0`.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- A3B concurrent-GDN MoE correctness smoke, opt-in and default
+- A10B concurrent-GDN MoE correctness smoke, opt-in and default
+- dirty AC-power A3B/A10B `tg128` opt-in and default / rollback / default A/Bs
+
+Results:
+
+| Model | Default A | Rollback | Default B | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B `tg128` | `104.21` | `103.78` | `104.31` | `+0.4-0.5%` |
+| A10B `tg128` | `44.74` | `44.64` | `44.85` | `+0.2-0.5%` |
+
+The initial opt-in A/B before defaulting showed the same direction: A3B
+`103.97/104.54/104.15` and A10B `44.70/44.90/44.61` for base/fused/base.
+
+Interpretation: this is an opportunistic dispatch and memory-pass cleanup, not a
+strategic discontinuity. It strengthens the v0.297 read: the safe MoE decode lane
+is removing avoidable intermediates and tail passes while avoiding the occupancy
+collapse seen in larger routed monoliths.
+
 ## 2026-06-22 — v0.297 Fused Q5 Down Weighted-Sum Decode
 
 Status: defaulted the existing packed-slot Q5_K down+weighted-sum kernel on the

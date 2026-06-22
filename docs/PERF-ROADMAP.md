@@ -159,6 +159,11 @@ Current caveats:
   weighted-sum dispatch. Rollback is `QWEN_DECODE_MOE_Q5_DOWN_FUSED=0`. A3B
   `tg128` moves `101.86 -> 103.8-105.1 t/s`, A10B moves `43.96 -> 44.65 t/s`,
   and A3B `ctx16384` moves `85.4 -> 86.1 t/s` in the guard.
+- Fused MoE decode finalization is another small default cleanup. v0.298 fuses
+  shared accumulation, `mixer_out` update, and residual add after the shared FFN
+  core. Rollback is `QWEN_DECODE_MOE_FUSED_FINALIZER=0`. A3B `tg128` moves
+  `103.78 -> 104.2-104.3 t/s`; A10B moves `44.64 -> 44.7-44.9 t/s`. Treat this
+  as opportunistic tail-pass cleanup, not a new strategic lane.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -805,7 +810,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.297:
+Current rank after v0.298:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -823,10 +828,10 @@ Current rank after v0.297:
    `ctx128`, `~21%` A3B `ctx128`) and less saturated. v0.294-v0.295 confirm shared
    FFN and F32 route have cleanup headroom, but each simple local fix is only
    sub-1% to ~1% end-to-end. v0.297 shows the stronger pattern: remove routed FFN
-   intermediates/dispatches where a fused kernel preserves occupancy. Next gates:
-   target a named bucket for at least `1.5-2%` end-to-end, preserve A3B/A10B gains,
-   and avoid the known occupancy traps from fused routed monoliths and x-cached Q8
-   front staging.
+   intermediates/dispatches where a fused kernel preserves occupancy; v0.298 says
+   finalizer/tail-pass cleanup is real but only sub-1%. Next gates: target a named
+   bucket for at least `1.5-2%` end-to-end, preserve A3B/A10B gains, and avoid the
+   known occupancy traps from fused routed monoliths and x-cached Q8 front staging.
 3. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
    `3.03 TFLOP/s` scalar-FMA sanity), and v0.293 adds

@@ -40,13 +40,13 @@ use crate::metal::{
     encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_down_weighted_sum_q6_K_f32,
     encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32, encode_moe_mat_vec_iq3_s_f32,
-    encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_swiglu_q4_K_f32,
-    encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
-    encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32, encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_f32,
+    encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_shared_accum_resid_f32,
+    encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
 use objc2::rc::Retained;
@@ -214,6 +214,16 @@ fn decode_moe_q5_down_fused_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_DECODE_MOE_Q5_DOWN_FUSED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn decode_moe_fused_finalizer_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_MOE_FUSED_FINALIZER").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -1551,6 +1561,29 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
+    fn encode_moe_final_residual_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        let shared_out_tmp = session.ffn_out.view_subrange(0, vec![h as u64]);
+        if decode_moe_fused_finalizer_enabled() {
+            encode_moe_shared_accum_resid_f32(
+                self.ctx,
+                enc,
+                &shared_out_tmp,
+                &session.moe_shared_gate,
+                &session.mixer_out,
+                &session.x,
+            )?;
+        } else {
+            self.encode_moe_shared_ffn_accumulate_gpu(enc, session)?;
+            encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn encode_moe_ffn_apply_gpu(
         &self,
         enc: &KernelEncoder,
@@ -1561,8 +1594,8 @@ impl<'a> MetalForward<'a> {
         moe: &MetalMoeFfn,
     ) -> Result<(), MfError> {
         self.encode_moe_routed_ffn_gpu(enc, session, moe)?;
-        self.encode_moe_shared_ffn_gpu(enc, session, ffn_gate, ffn_up, ffn_down)?;
-        encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
+        self.encode_moe_shared_ffn_core_gpu(enc, session, ffn_gate, ffn_up, ffn_down)?;
+        self.encode_moe_final_residual_gpu(enc, session)?;
         Ok(())
     }
 
@@ -1730,8 +1763,7 @@ impl<'a> MetalForward<'a> {
                     topk,
                 )?;
             }
-            self.encode_moe_shared_ffn_accumulate_gpu(&enc, session)?;
-            encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+            self.encode_moe_final_residual_gpu(&enc, session)?;
             enc.end();
         }
         Ok(())

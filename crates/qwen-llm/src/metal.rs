@@ -6990,6 +6990,57 @@ pub fn encode_axpy_scalar_f32(
     Ok(())
 }
 
+pub fn encode_moe_shared_accum_resid_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    shared_out: &MetalTensor,
+    shared_gate: &MetalTensor,
+    mixer_out: &MetalTensor,
+    x: &MetalTensor,
+) -> Result<(), MetalError> {
+    let n = x.n_elements() as usize;
+    if shared_gate.n_elements() != 1
+        || shared_out.n_elements() as usize != n
+        || mixer_out.n_elements() as usize != n
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_shared_accum_resid",
+            detail: format!(
+                "expected shared_gate[1] and shared_out/mixer_out/x n={n}, got gate={} shared={} mixer={}",
+                shared_gate.n_elements(),
+                shared_out.n_elements(),
+                mixer_out.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_moe_shared_accum_resid_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+    }
+    enc.set_bytes(0, &Args { n: n as u32 });
+    enc.set_tensor(1, shared_out);
+    enc.set_tensor(2, shared_gate);
+    enc.set_tensor(3, mixer_out);
+    enc.set_tensor(4, x);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_topk_logits_softmax_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

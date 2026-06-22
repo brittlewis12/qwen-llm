@@ -5081,6 +5081,20 @@ kernel void kernel_axpy_scalar_f32(
     accum[tid] += scale[0] * x[tid];
 }
 
+kernel void kernel_moe_shared_accum_resid_f32(
+        constant axpy_scalar_args & args [[buffer(0)]],
+        device const float       * shared_out [[buffer(1)]],
+        device const float       * shared_gate [[buffer(2)]],
+        device       float       * mixer_out  [[buffer(3)]],
+        device       float       * x          [[buffer(4)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    float mixed = mixer_out[tid];
+    mixed += shared_gate[0] * shared_out[tid];
+    mixer_out[tid] = mixed;
+    x[tid] += mixed;
+}
+
 struct axpy_rowwise_args {
     uint n_cols;
     uint n_rows;

@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.300 Group8 Tile1 Attention Falsifier
+
+Status: tested and removed an experimental A3B decode attention tile1 subgroup
+variant. The sidecar split group8 into one Q-head per subgroup, doubling K/V reads
+again versus the current tile2 default in exchange for lower register pressure and
+more threadgroups. No default changed.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `QWEN_ATTN_V4_G8_TILE=1` group8 subgroup correctness gate
+- dirty AC-power A3B `phase --ctx 16384` default versus tile1
+
+Results:
+
+| Variant | Phase sum | Attention | Read |
+| --- | ---: | ---: | --- |
+| default tile2 | `12.18 ms` | `3.25 ms` | baseline |
+| tile1 sidecar | `12.53 ms` | `3.27 ms` | flat/worse |
+
+Interpretation: after v0.293 tile2, splitting group8 further is not the next
+long-attention exit. Tile1 preserves correctness but gives back the occupancy win
+to extra K/V traffic and scheduler overhead. A group16 tile2 probe was also
+stopped at correctness during the same branch, so do not widen subgroup splits
+without a new kernel/dataflow mechanism.
+
 ## 2026-06-22 — v0.299 MoE Q8 KV Subgroup Falsifier
 
 Status: tested and removed an experimental MoE decode Q8-KV sidecar for the

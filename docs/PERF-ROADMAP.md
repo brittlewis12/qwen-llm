@@ -751,6 +751,11 @@ Recent measured negatives:
   A10B `ctx16384` attention `5.78 -> 6.61 ms`. Do not reopen KV quantization for
   MoE decode unless the reader/dequant path changes materially; the next
   attention body probe should favor layout or a structural body rewrite.
+- A3B group8 tile1 decode attention is falsified. The sidecar passed the group8
+  correctness gate, but `ctx16384` phase was flat/worse versus tile2: phase sum
+  `12.18 -> 12.53 ms`, attention `3.25 -> 3.27 ms`. A group16 tile2 probe was
+  also stopped at correctness. Do not reopen smaller subgroup splits without a
+  new dataflow mechanism.
 - Fused Q8_0 GDN-front decode is falsified in the tested forms. Dispatch-only
   fusion was flat/noisy on battery (`35.75/35.78/36.56 t/s` base/fused/base), and
   the x-cached four-simdgroup version was correctness-safe but catastrophic
@@ -816,7 +821,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.299:
+Current rank after v0.300:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -825,8 +830,9 @@ Current rank after v0.299:
    `26.3%` of phase time, and A10B `ctx16384` attention is roughly tied with GDN
    front/routed FFN. Next gates: improve A3B `ctx8192/16384` and one real rollout,
    preserve `ctx128/1024`, and keep A10B group16 neutral. v0.299 kills the
-   straightforward MoE Q8-KV subgroup reader, so prefer cache-layout, reader
-   vectorization, or structural body mechanisms over KV quantization as-is.
+   straightforward MoE Q8-KV subgroup reader, and v0.300 kills smaller subgroup
+   splits. Prefer cache-layout, reader vectorization, or structural body
+   mechanisms over KV quantization as-is or another subgroup knob.
 2. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
    lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective is

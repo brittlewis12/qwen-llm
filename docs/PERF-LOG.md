@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.306 Routed Gate/Up R1S4 Near-Miss
+
+Status: tested and removed a decode-only routed Q4 gate/up row-shape sidecar. The
+sidecar changed the MoE SwiGLU row shape from the llama-like `NR0=2, NSG=2` to
+`NR0=1, NSG=4`, reducing per-simdgroup accumulator pressure while doubling
+simdgroups per threadgroup. It was correctness-plausible but did not clear the
+implementation gate.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with production-wave split and
+  `QWEN_DECODE_MOE_Q4_GATEUP_R1S4=1`
+- dirty AC-power A3B/A10B `tg128 --runs 2` with the sidecar
+
+Results:
+
+| Model | Gate/up wave | `tg128` | Read |
+| --- | ---: | ---: | --- |
+| A3B | `1.19 ms` | `104.63 t/s` | small positive versus `103.71` baseline |
+| A10B | `3.56 ms` | `45.38 t/s` | `+1.2%` versus `44.86` baseline |
+
+Interpretation: simple Q4 gate/up row-shape retuning is not the expected escape.
+The sidecar is directionally positive but far below the `+3%` A10B keep gate and
+below the `15-20%` routed gate/up subphase gate. Do not keep the duplicate kernel;
+the next gate/up attempt needs a deeper mechanism than only `NR0/NSG` reshaping.
+
 ## 2026-06-22 — v0.305 Routed Gate/Down No-Op Oracles
 
 Status: added diagnostic-only, correctness-breaking MoE decode no-op oracles for

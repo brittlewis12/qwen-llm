@@ -194,6 +194,10 @@ Current caveats:
   A10B gate/up wave `3.80 -> 0.83 ms`, down wave `2.61 -> 0.68 ms`; A3B gate/up
   `1.23 -> 0.35 ms`, down `1.24 -> 0.42 ms`. Attack routed Q4 gate/up first, down
   second. Do not optimize shared, route, finalizer, or the prior monolith.
+- v0.306 kills a narrow routed Q4 gate/up row-shape sidecar (`NR0=1, NSG=4`). It
+  was directionally positive (`44.86 -> 45.38 t/s` A10B, `103.71 -> 104.63 t/s`
+  A3B) but far below the `+3%` keep gate and below the `15-20%` routed gate/up
+  subphase gate. Do not spend the next pass on simple `NR0/NSG` reshaping alone.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -851,7 +855,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.305:
+Current rank after v0.306:
 
 1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
@@ -869,9 +873,10 @@ Current rank after v0.305:
    `+9.3%/+9.4%`. Next implementation gate: build an env-gated replacement only
    for `encode_moe_routed_gate_up_q4_gpu`; require exact `moe_inner` parity first,
    then at least `15-20%` routed gate/up subphase improvement on A10B and `+3%`
-   A10B `tg128` with A3B neutral-positive. If it misses, switch to routed down.
-   Avoid the known occupancy traps from fused routed monoliths and x-cached Q8
-   front staging.
+   A10B `tg128` with A3B neutral-positive. v0.306 says simple `NR0/NSG` retuning
+   alone is too small, so the next gate/up branch needs a deeper mechanism. If it
+   misses, switch to routed down. Avoid the known occupancy traps from fused routed
+   monoliths and x-cached Q8 front staging.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). The remaining long-context

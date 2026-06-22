@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-22 — v0.308 Q5 Down S4 Falsifier
+
+Status: tested and removed a routed Q5 down+weighted-sum sidecar that changed the
+Q5 down row shape from `NR0=1, NSG=2` to `NR0=1, NSG=4`. The goal was to reduce
+threadgroup count and improve the under-streaming routed-down bucket. It regressed
+the down wave and did not proceed to end-to-end promotion.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with production-wave split and
+  `QWEN_DECODE_MOE_Q5_DOWN_S4=1`
+- cx adversarial review of the S4 miss and routed-down next gate
+
+Results:
+
+| Model | Baseline down wave | S4 down wave | Read |
+| --- | ---: | ---: | --- |
+| A3B `ctx128` | `~1.24 ms` | `1.29 ms` | regressed |
+| A10B `ctx128` | `~2.61 ms` | `2.75 ms` | regressed |
+
+Interpretation: simple simdgroup widening is not the routed-down exit. The
+weight-only roofline undercounts repeated `moe_inner` reads; S4 likely worsens that
+duplication without sharing. Keep routed down active because the down no-op still
+buys `~9% tg128`, but gate any staging/reuse work with an inner-load no-op first.
+
 ## 2026-06-22 — v0.307 FFN Split Roofline Re-rank
 
 Status: extended `scripts/profile/decode_phase_roofline.py` to estimate routed and

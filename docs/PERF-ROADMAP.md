@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.319:
+Current rank after v0.321:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -928,11 +928,15 @@ Current rank after v0.319:
    `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and `3.03 TFLOP/s` scalar-FMA
    sanity), v0.293 adds `scripts/profile/decode_phase_roofline.py` for phase-level
    active-byte reads, v0.312 adds optional tg JSON command/encoder/dispatch
-   accounting, and v0.315 adds decode attention KV byte estimates. Next, add just
-   enough qwen/roofline output to explain the active branch: decode t/s, wall/GPU
-   time, phase split, dispatch/encoder counts where available, and defensible
-   bytes/token or bandwidth proxies. This is not dashboard work; it is the decision
-   spine for capacity, execution-shape, and roofline calls.
+   accounting, v0.315 adds decode attention KV byte estimates, and v0.321 adds
+   active decode weight bandwidth from bench JSON or manual context-sweep rows.
+   The first A3B Q4 `ctx8192` sample is `93.0 t/s`, `2.6215 GB/token`, and
+   `243.8 GB/s` (`51.4%` of measured stream roofline); attention KV subgroup
+   traffic is `0.6711 GB/token` at `294.3 GB/s`. Next, keep using this output to
+   explain the active branch with decode t/s, wall/GPU time, phase split,
+   dispatch/encoder counts where available, and defensible bytes/token or
+   bandwidth proxies. This is not dashboard work; it is the decision spine for
+   capacity, execution-shape, and roofline calls.
 4. Packed-verify/spec decode, structural rewrite only: v0.314 fixes production
    `qwen-bench dflash` scratch allocation and shows real narrative `static-16`
    decode is catastrophically slower than no-spec despite good acceptance
@@ -949,14 +953,18 @@ Current rank after v0.319:
    `56774`-token chaos rollout is `1.168x` versus pinned llama.cpp. Do not reopen
    fused online-softmax, chunk policy, or GDN-scan work from the old true-long row
    alone.
-6. BF16 structural sidecar, explicitly scheduled only: BF16 remains a catastrophic
-   demoted red cell, but v0.319 falsifies the most concrete grouped-MoE scalar
-   A-load hypothesis. Dirty `bfloat4` loads regressed BF16 grouped `routed_swiglu`
-   (`130.80 -> 217.73 ms`) and `routed_down` (`64.78 -> 98.30 ms`), while the BF16
-   phase trace shows GDN projections/back-projection dominate (`gdn_qkv + gdn_z +
-   gdn_back ~= 2252 ms`, about two thirds of traced time). Reopen BF16 around GDN
-   BF16 mat-mat/projection lowering or binned dispatch only with a new phase gate;
-   do not reapply grouped-MoE vector A-loads.
+6. BF16 accounting/differential audit, explicitly scheduled only: BF16 remains a
+   catastrophic demoted red cell, but v0.319 falsifies the most concrete
+   grouped-MoE scalar A-load hypothesis. Dirty `bfloat4` loads regressed BF16
+   grouped `routed_swiglu` (`130.80 -> 217.73 ms`) and `routed_down`
+   (`64.78 -> 98.30 ms`). v0.320 then rechecks the existing
+   `QWEN_MATMAT_BF16_BFLOAT_ACT=1` sidecar: traced GDN/attention phases collapse
+   (`gdn_qkv 1141.65 -> 99.97 ms`, `attn 611.94 -> 69.44 ms`), but no-trace
+   production moves only modestly/noisily and the paired row remains `0.059x`
+   llama.cpp (`73.63` versus `1239.10 t/s`). Do not default bfloat-act or reopen
+   BF16 kernel work until named production accounting explains `>=90%` of BF16
+   `pp512` wall, or one identified category is `>=40%` of wall and has a plausible
+   `>=1.5x` no-trace production fix. Do not reapply grouped-MoE vector A-loads.
 7. Short MoE decode execution-shape, only with fresh evidence: v0.292-v0.311 make
    decode materially greener, but v0.312 says the current default is already
    GPU-active at `~95.8-97.8%` wall on warmed A3B/A10B `tg128`. The GDN-concurrent

@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 DTYPE_BYTES_PER_BLOCK: dict[str, tuple[int, int]] = {
@@ -354,6 +356,85 @@ def category_bytes(
     }
 
 
+def active_decode_weight_bytes(estimates: dict[str, tuple[int, str]]) -> int:
+    return sum(
+        estimates[name][0]
+        for name in (
+            "gdn front proj",
+            "gdn out_proj",
+            "attn mixer",
+            "moe ffn apply",
+            "moe route",
+            "lm head",
+        )
+        if name in estimates
+    )
+
+
+def _first_bench_record(data: Any) -> dict[str, Any]:
+    if isinstance(data, list):
+        if not data:
+            raise SystemExit("empty bench JSON list")
+        return _first_bench_record(data[0])
+    if not isinstance(data, dict):
+        raise SystemExit("bench JSON root must be an object or list")
+    if isinstance(data.get("bench"), dict):
+        return data["bench"]
+    if isinstance(data.get("variants"), list) and data["variants"]:
+        return _first_bench_record(data["variants"][0])
+    return data
+
+
+def parse_bench_json(path: Path) -> dict[str, Any]:
+    return _first_bench_record(json.loads(path.read_text()))
+
+
+def print_decode_roofline_summary(
+    bench_json: Path | None,
+    decode_tps: float | None,
+    avg_wall_ms_token: float | None,
+    avg_gpu_ms_token: float | None,
+    estimates: dict[str, tuple[int, str]],
+    peak_gb_s: float,
+) -> None:
+    bench: dict[str, Any] = {}
+    if bench_json is not None:
+        bench = parse_bench_json(bench_json)
+    avg_ts = decode_tps if decode_tps is not None else bench.get("avg_ts")
+    if avg_ts is None:
+        return
+    active_bytes = active_decode_weight_bytes(estimates)
+    active_gb = active_bytes / 1e9
+    active_gb_s = active_gb * float(avg_ts)
+    print(f"decode_tps\t{float(avg_ts):.4f}")
+    print(f"decode_active_weight_gb_per_token\t{active_gb:.4f}")
+    print(f"decode_active_weight_gb_s\t{active_gb_s:.1f}")
+    print(f"decode_active_weight_pct_stream\t{active_gb_s / peak_gb_s * 100.0:.1f}")
+
+    n_tokens = bench.get("n_tokens") or bench.get("n_gen")
+    avg_ns = bench.get("avg_ns")
+    avg_gpu_ns = bench.get("avg_gpu_ns")
+    if avg_wall_ms_token is not None:
+        print(f"decode_avg_wall_ms_token\t{avg_wall_ms_token:.4f}")
+    if avg_gpu_ms_token is not None:
+        print(f"decode_avg_gpu_ms_token\t{avg_gpu_ms_token:.4f}")
+    if avg_wall_ms_token is None and n_tokens and avg_ns is not None:
+        print(f"decode_avg_wall_ms_token\t{float(avg_ns) / float(n_tokens) / 1e6:.4f}")
+    if avg_gpu_ms_token is None and n_tokens and avg_gpu_ns is not None:
+        print(
+            f"decode_avg_gpu_ms_token\t{float(avg_gpu_ns) / float(n_tokens) / 1e6:.4f}"
+        )
+    for key in (
+        "kernel_trace_command_buffers_per_token",
+        "kernel_trace_encoders_per_token",
+        "kernel_trace_concurrent_encoders_per_token",
+        "kernel_trace_dispatches_per_token",
+    ):
+        value = bench.get(key)
+        if value is not None:
+            print(f"decode_{key}\t{value}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Estimate decode phase weight bandwidth from qwen-bench phase output."
@@ -371,6 +452,18 @@ def main() -> None:
     parser.add_argument("--group-tile", type=int, help="override attn_v4 group tile")
     parser.add_argument("--nwg", type=int, help="override attn_v4 split-K count")
     parser.add_argument("--tile-c", type=int, help="override attn_v4 KV tile length")
+    parser.add_argument(
+        "--bench-json",
+        type=Path,
+        help="optional qwen-bench JSON row for decode t/s and active-weight roofline",
+    )
+    parser.add_argument(
+        "--decode-tps",
+        type=float,
+        help="manual decode tokens/sec, useful for ctx-sweep text rows",
+    )
+    parser.add_argument("--avg-wall-ms-token", type=float)
+    parser.add_argument("--avg-gpu-ms-token", type=float)
     args = parser.parse_args()
 
     expert_count = (
@@ -391,6 +484,14 @@ def main() -> None:
     print(f"phase_sum_ms\t{phase_sum:.4f}")
     print(f"expert_used\t{expert_used}")
     print(f"expert_count\t{expert_count}")
+    print_decode_roofline_summary(
+        args.bench_json,
+        args.decode_tps,
+        args.avg_wall_ms_token,
+        args.avg_gpu_ms_token,
+        estimates,
+        args.peak_gb_s,
+    )
     print_attention_kv_estimate(
         args.metadata,
         phases,

@@ -6,6 +6,75 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.321 Decode Roofline Attribution Spine
+
+Status: extended `scripts/profile/decode_phase_roofline.py` so a context-sweep
+or bench JSON row can be tied directly to active decode weight bandwidth. The
+script now reports decode t/s, active GB/token, GB/s, and stream-roofline percent
+alongside the existing phase-level weight and attention-KV estimates.
+
+Validation:
+
+- `uv run scripts/profile/decode_phase_roofline.py --help`
+- A3B Q4 `ctx8192 --window 4 --fresh-per-checkpoint` context sweep
+- A3B Q4 `ctx8192` phase profile and roofline summary
+
+Results:
+
+| A3B Q4 `ctx8192` row | Value | Read |
+| --- | ---: | --- |
+| decode throughput | `93.0 t/s` | current-default long decode sample |
+| active weight traffic | `2.6215 GB/token` | estimated active weights |
+| active weight bandwidth | `243.8 GB/s` | `51.4%` of measured stream roofline |
+| attention KV subgroup traffic | `0.6711 GB/token` | group8 tile2, four subgroups |
+| attention KV bandwidth | `294.3 GB/s` | `299.0 GB/s` including partials |
+| `gdn front proj` | `2.33 ms`, `351.0 GB/s` | already high bandwidth |
+| `moe ffn apply` | `2.73 ms`, `273.0 GB/s` | still largest named phase |
+| `attn mixer` | `2.28 ms` | includes projection plus KV path |
+
+Interpretation: A3B long decode still has hardware headroom, but the current
+sample is no longer a single obvious weight-streaming miss. GDN front/out and
+LM head are already near high stream rates, while attention and MoE FFN remain
+large enough to drive work. Use this roofline format as the decision spine for
+the next long-context decode branch: require a named phase/byte mechanism, not
+just lower estimated bytes, before writing another attention subgroup variant.
+
+## 2026-06-23 — v0.320 BF16 Bfloat-Act Recheck
+
+Status: rechecked the existing `QWEN_MATMAT_BF16_BFLOAT_ACT=1` sidecar after
+the v0.319 BF16 phase re-centering. The sidecar remains useful diagnostically,
+but it does not explain llama.cpp's BF16 prompt throughput.
+
+Validation:
+
+- A3B BF16 `pp512` exact baseline and bfloat-act qwen-only repeat sweep
+- A3B BF16 `pp512` bfloat-act paired run versus pinned llama.cpp
+- A3B BF16 and 0.8B BF16 ignored correctness/drift smokes with bfloat-act
+- A3B BF16 bfloat-act layer-phase trace
+
+Results:
+
+| BF16 `pp512` packet | Base | Bfloat-act | Read |
+| --- | ---: | ---: | --- |
+| qwen-only block 0 | `68.55 t/s` | `73.68 t/s` | small win |
+| qwen-only block 1 | `78.36 t/s` | `100.31 t/s` | noisy larger win |
+| paired versus llama.cpp | n/a | `73.63 / 1239.10 t/s` | `0.059x` |
+| traced `gdn_qkv` | `1141.65 ms` | `99.97 ms` | trace-local collapse |
+| traced `attn` | `611.94 ms` | `69.44 ms` | trace-local collapse |
+| traced `routed_swiglu` | `130.80 ms` | `391.66 ms` | trace-local regression |
+| traced `routed_down` | `64.78 ms` | `166.36 ms` | trace-local regression |
+
+Correctness stayed bounded for the opt-in sidecar: A3B MoE exact-vs-sidecar
+reported `logits_cos=0.999689`, `min_state_cos=0.996387`, and the 0.8B BF16
+model smoke reported `logits_cos=0.999993` / `hidden_cos=0.999991`.
+
+Interpretation: bfloat-act can collapse named BF16 mat-mat phases in the phase
+trace, but production throughput remains far below llama.cpp and the phase trace
+does not reconcile with no-trace wall/GPU timing. Do not default bfloat-act from
+this packet. Reopen BF16 only as an accounting/differential audit that explains
+at least `90%` of BF16 `pp512` wall time, or as a fix that moves no-trace
+production throughput by `>=1.5x` and reaches at least `0.25x` llama.cpp.
+
 ## 2026-06-23 — v0.319 BF16 MoE Vector-A-Load Falsifier
 
 Status: tested and removed a dirty BF16 grouped-MoE vector-load probe that replaced

@@ -231,6 +231,13 @@ Current caveats:
   between default and rollback. The GDN-concurrent win is banked GPU overlap, not
   a fresh CPU/encoder-bubble mandate. Demote short MoE decode scheduling work
   unless a new trace isolates a larger GPU-overlap mechanism.
+- v0.313 kills the first structural long-attention sidecar. A four-simdgroup
+  cooperative subgroup TG passed correctness and gave an A3B synthetic `ctx4096`
+  main-only win, but it was flat at synthetic `ctx16384/32768`, flat/regressive on
+  A10B, and regressed full-model A3B `ctx16384` attention (`3.24 -> 3.57 ms`). Do
+  not pursue subgroup packing without a new cache/counter signal; the next
+  long-attention proof should be KV layout/reader structure, not more subgroup
+  shape work.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -897,9 +904,10 @@ Current rank after v0.312:
    `26.3%` of phase time, and A10B `ctx16384` attention is roughly tied with GDN
    front/routed FFN. Next gates: improve A3B `ctx8192/16384` and one real rollout,
    preserve `ctx128/1024`, and keep A10B group16 neutral. v0.299 kills the
-   straightforward MoE Q8-KV subgroup reader, and v0.300 kills smaller subgroup
-   splits. Prefer cache-layout, reader vectorization, or structural body
-   mechanisms over KV quantization as-is or another subgroup knob.
+   straightforward MoE Q8-KV subgroup reader, v0.300 kills smaller subgroup
+   splits, and v0.313 kills cooperative four-simdgroup subgroup packing. The next
+   credible proof is KV-head-major/cache-layout or reader-vectorization structure;
+   do not reopen subgroup shape, `NWG`, `TILE_C`, or ggml-Q8 KV without new data.
 2. Packed-verify/spec decode measurement: dense 27B decode near the weight-read
    roofline cannot get a large multiplier from execution cleanup alone, and MoE
    decode cleanup also compounds into verify. Do not implement a broad speculative

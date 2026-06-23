@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.313 Coop4 Long-Attention Falsifier
+
+Status: tested and removed a decode-attention sidecar that packed the four
+current subgroup tiles into one four-simdgroup threadgroup for A3B group8 tile2
+and A10B group16 tile4 at `C=64`. The hypothesis was that one cooperative TG per
+`(kv_head, partition)` could keep the current occupancy class while making the
+four duplicate K/V streams more cache-local. Correctness passed; long-context perf
+did not.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `QWEN_ATTN_V4_COOP4=1` group8 focused attention correctness
+- `QWEN_ATTN_V4_COOP4=1` all-shape v4 attention correctness
+- default versus coop4 `attn_v4_main_reduce_breakdown_moe_shapes`
+- dirty A3B `phase --ctx 4096/16384` default versus coop4
+- cx adversarial review of structural long-attention options
+
+Results:
+
+| Shape | Context | Main default | Main coop4 | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B synthetic | `4096` | `0.092 ms` | `0.039 ms` | large main-only win |
+| A3B synthetic | `16384` | `0.194 ms` | `0.195 ms` | flat |
+| A3B synthetic | `32768` | `0.390 ms` | `0.392 ms` | flat |
+| A10B synthetic | `4096` | `0.046 ms` | `0.048 ms` | slight regression |
+| A10B synthetic | `16384` | `0.220 ms` | `0.222 ms` | flat/regressive |
+| A10B synthetic | `32768` | `0.437 ms` | `0.438 ms` | flat |
+
+Full-model A3B phase confirms the keep gate fails: at `ctx4096`, attention moves
+`2.04 -> 1.82 ms` but total phase is flat/slightly worse (`11.30 -> 11.34 ms`);
+at `ctx16384`, attention regresses `3.24 -> 3.57 ms` and total phase regresses
+`12.62 -> 12.77 ms`.
+
+Interpretation: correctness-safe coop4 does not recover the long-context K/V
+traffic/occupancy tradeoff. If duplicate subgroup K/V reads are the problem, this
+shape does not make them cheaper at long contexts. Do not keep the sidecar or
+reopen multi-simdgroup TG packing without a new cache/counter signal. The next
+long-attention structural bet should be KV-head-major/cache-layout proof or a more
+radical body; otherwise move to packed-verify measurement.
+
 ## 2026-06-23 — v0.312 Decode Trace Counts And GDN Rollback Packet
 
 Status: added optional decode kernel-count fields to `qwen-bench tg` JSON behind

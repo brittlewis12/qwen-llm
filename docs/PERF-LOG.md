@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.315 Decode KV Estimator And Group-Tile Falsifier
+
+Status: added attention KV byte estimates to `scripts/profile/decode_phase_roofline.py`
+and used them to re-read the A3B long-context decode slope. The estimator reports
+logical KV bytes, subgroup-reread bytes, split-K partial bytes, group tile, NWG,
+and effective GB/s from the existing phase output plus GGUF metadata.
+
+Validation:
+
+- A3B current-default `ctx-sweep` through `32768`, window `3`
+- A3B phase profiles at `ctx570`, `ctx16384`, and `ctx32768`
+- A10B capped `ctx-sweep` through `4096` and `16384`, plus phase profiles
+- A3B `ctx32768` phase A/B with `QWEN_ATTN_V4_G8_TILE=4` and `=8`
+- cx adversarial review before and after adding the KV estimator
+
+Results:
+
+| Model | Context | Variant | Decode / phase read |
+| --- | ---: | --- | --- |
+| A3B | `32768` | default tile2 | `73.5 t/s`; attention `5.35 ms` / `36.2%` |
+| A3B | `32768` | tile4 | attention `5.63 ms`, phase `15.08 ms` |
+| A3B | `32768` | tile8 | attention `8.42 ms`, phase `17.55 ms` |
+| A10B | `16384` | capped default | `39.9 t/s`; attention `5.53 ms` / `21.2%` |
+
+A3B default tile2 at `ctx32768` streams `2.684 GB` of subgroup-reread KV per
+token across the ten attention layers (`0.671 GB` logical floor) plus only
+`0.011 GB` partial traffic, for an estimated `~502 GB/s`. Tile4 halves the
+estimated KV reads to `1.342 GB` but regresses attention to `5.63 ms`; tile8
+reaches the logical `0.671 GB` floor but regresses badly to `8.42 ms`. A10B
+`ctx16384` is more balanced: estimated subgroup KV is `1.611 GB` at `~291 GB/s`,
+while GDN front and MoE FFN are already strong weight-stream phases.
+
+Interpretation: A3B true-long decode attention is real, but the current tile2 path
+is already bandwidth-like at long context. Simple subgroup-reread reduction is
+falsified: reducing bytes without preserving occupancy/register behavior loses.
+Demote broad KV-head-major rewrites unless they unlock a new execution shape rather
+than merely changing address order. Also keep the A10B `32768` max-cap sweep as a
+benchmark/product memory-pressure warning, not a valid short-context perf row.
+
 ## 2026-06-23 — v0.314 Production DFlash Scratch Fix And Falsifier
 
 Status: fixed `qwen-bench dflash` production decode after discovering it allocated

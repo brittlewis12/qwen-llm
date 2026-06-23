@@ -83,6 +83,14 @@ def parse_metadata_int(path: Path | None, key: str) -> int | None:
     return None
 
 
+def parse_metadata_int_any(path: Path | None, suffix: str) -> int | None:
+    for prefix in ("qwen35moe", "qwen3", "qwen2"):
+        value = parse_metadata_int(path, f"{prefix}.{suffix}")
+        if value is not None:
+            return value
+    return None
+
+
 def parse_phase(path: Path) -> tuple[float, list[PhaseRow]]:
     phase_sum: float | None = None
     raw_rows: list[tuple[str, str, float]] = []
@@ -101,6 +109,108 @@ def parse_phase(path: Path) -> tuple[float, list[PhaseRow]]:
         PhaseRow(raw_name=raw, base_name=base, ms=ms, pct=ms / phase_sum * 100.0)
         for raw, base, ms in raw_rows
     ]
+
+
+def count_from_phase_name(raw_name: str) -> int | None:
+    match = re.search(r"\(x(\d+)\)$", raw_name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def attn_v4_nwg(ctx_len: int, group: int) -> int:
+    if group in {4, 6, 8, 16} and ctx_len >= 4096:
+        return 64
+    if ctx_len < 256:
+        return 16
+    return 32
+
+
+def attn_v4_tile_c(ctx_len: int, group: int) -> int:
+    if group == 16 and ctx_len >= 32768:
+        return 128
+    if group in {8, 16} and ctx_len >= 4096:
+        return 64
+    return 32
+
+
+def attn_v4_group_tile(ctx_len: int, group: int) -> int:
+    if ctx_len < 4096:
+        return group
+    if group == 8:
+        return 2
+    if group == 16:
+        return 4
+    return group
+
+
+def print_attention_kv_estimate(
+    metadata: Path | None,
+    phases: list[PhaseRow],
+    ctx_len: int | None,
+    kv_bytes_per_elem: int,
+    group_tile_override: int | None,
+    nwg_override: int | None,
+    tile_c_override: int | None,
+) -> None:
+    if metadata is None or ctx_len is None:
+        return
+
+    n_q_heads = parse_metadata_int_any(metadata, "attention.head_count")
+    n_kv_heads = parse_metadata_int_any(metadata, "attention.head_count_kv")
+    key_len = parse_metadata_int_any(metadata, "attention.key_length")
+    value_len = parse_metadata_int_any(metadata, "attention.value_length") or key_len
+    block_count = parse_metadata_int_any(metadata, "block_count")
+    interval = parse_metadata_int_any(metadata, "full_attention_interval")
+    if not all((n_q_heads, n_kv_heads, key_len, value_len)):
+        return
+
+    attn_phase = next(
+        (p for p in phases if p.base_name in {"attn mixer", "attn layers"}),
+        None,
+    )
+    if attn_phase is None or attn_phase.ms <= 0.0:
+        return
+
+    attn_layers = count_from_phase_name(attn_phase.raw_name)
+    if attn_layers is None and block_count and interval:
+        attn_layers = max(1, block_count // interval)
+    if attn_layers is None:
+        return
+
+    group = n_q_heads // max(1, n_kv_heads)
+    group_tile = group_tile_override or attn_v4_group_tile(ctx_len, group)
+    subgroups = max(1, group // max(1, group_tile))
+    nwg = nwg_override or attn_v4_nwg(ctx_len, group)
+    tile_c = tile_c_override or attn_v4_tile_c(ctx_len, group)
+
+    logical_bytes = (
+        attn_layers * n_kv_heads * ctx_len * (key_len + value_len) * kv_bytes_per_elem
+    )
+    subgroup_bytes = logical_bytes * subgroups
+    # Partial traffic is small versus long-context KV reads, but keeping it
+    # visible prevents the estimate from pretending reduce is free.
+    partial_bytes_per_layer = (
+        n_kv_heads * nwg * group * value_len * 4 + n_kv_heads * nwg * group * 2 * 4
+    )
+    partial_bytes = partial_bytes_per_layer * attn_layers
+    attn_s = attn_phase.ms / 1000.0
+
+    print(f"attention_kv_ctx\t{ctx_len}")
+    print(f"attention_kv_layers\t{attn_layers}")
+    print(f"attention_kv_group\t{group}")
+    print(f"attention_kv_group_tile\t{group_tile}")
+    print(f"attention_kv_subgroups\t{subgroups}")
+    print(f"attention_kv_nwg\t{nwg}")
+    print(f"attention_kv_tile_c\t{tile_c}")
+    print(f"attention_kv_logical_gb\t{logical_bytes / 1e9:.4f}")
+    print(f"attention_kv_subgroup_gb\t{subgroup_bytes / 1e9:.4f}")
+    print(f"attention_kv_partial_gb\t{partial_bytes / 1e9:.4f}")
+    print(f"attention_kv_subgroup_gb_s\t{subgroup_bytes / 1e9 / attn_s:.1f}")
+    print(
+        f"attention_kv_subgroup_plus_partial_gb_s\t"
+        f"{(subgroup_bytes + partial_bytes) / 1e9 / attn_s:.1f}"
+    )
 
 
 def tensor_sum(rows: list[TensorRow], pred, scale: float = 1.0) -> int:
@@ -254,6 +364,13 @@ def main() -> None:
     parser.add_argument("--expert-count", type=int)
     parser.add_argument("--expert-used", type=int)
     parser.add_argument("--peak-gb-s", type=float, default=474.0)
+    parser.add_argument(
+        "--ctx", type=int, help="decode context length for KV estimates"
+    )
+    parser.add_argument("--kv-bytes-per-elem", type=int, default=2)
+    parser.add_argument("--group-tile", type=int, help="override attn_v4 group tile")
+    parser.add_argument("--nwg", type=int, help="override attn_v4 split-K count")
+    parser.add_argument("--tile-c", type=int, help="override attn_v4 KV tile length")
     args = parser.parse_args()
 
     expert_count = (
@@ -274,6 +391,15 @@ def main() -> None:
     print(f"phase_sum_ms\t{phase_sum:.4f}")
     print(f"expert_used\t{expert_used}")
     print(f"expert_count\t{expert_count}")
+    print_attention_kv_estimate(
+        args.metadata,
+        phases,
+        args.ctx,
+        args.kv_bytes_per_elem,
+        args.group_tile,
+        args.nwg,
+        args.tile_c,
+    )
     print("phase\tms\tpct\test_weight_gb\test_gb_s\tpct_stream\tnote")
     for phase in phases:
         nbytes, note = estimates.get(phase.base_name, (0, "unestimated"))

@@ -3150,8 +3150,8 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let mut verify_scratch =
         MetalDFlashVerifyScratch::fresh(&ctx, &mm, cfg.block_size, k_layers as u32)
             .context("verify scratch")?;
-    let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, cfg.block_size)
-        .context("layer scratch")?;
+    let mut layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, cfg.block_size).context("layer scratch")?;
 
     // v0.75.1: contiguous [T, K*H] hidden capture buffer for the
     // packed prefill path. One allocation, one prefill call, one

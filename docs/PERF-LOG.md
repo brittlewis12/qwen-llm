@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.314 Production DFlash Scratch Fix And Falsifier
+
+Status: fixed `qwen-bench dflash` production decode after discovering it allocated
+the prefill-only layer-major scratch. `MetalDFlashLayerMajorScratch::fresh_prefill`
+keeps `final_logits_pack` as `[1]`, but `encode_packed_verify_layer_major_inner`
+needs `[N, vocab]` for production packed verify. The bench now uses the full
+scratch allocation and runs to greedy-equivalence completion.
+
+Validation:
+
+- `cargo build --release --bin qwen-bench`
+- `dflash static-16 --tokens 2 --no-warmup` smoke on 27B dense: equivalence PASS
+- `dflash static-16 --profile --tokens 64` on two real `the_current.md` prompts
+- cx adversarial review of the post-measurement priority update
+
+Results:
+
+| Prompt | Prompt tokens | Policy | Decode | No-spec decode | Read |
+| --- | ---: | --- | ---: | ---: | --- |
+| smoke | `4` | `static-16` | `6.39 t/s` | `24.33 t/s` | `0.263x`, PASS |
+| The Current | `570` | `static-16` | `8.35 t/s` | `23.95 t/s` | `0.349x`, PASS |
+| The Current | `2464` | `static-16` | `6.00 t/s` | `23.00 t/s` | `0.261x`, PASS |
+
+Acceptance is not the blocker on the real prompt: the `570`-token row has
+`alpha_pos1=0.613`, `alpha_chain=1.065`, and `mean_emitted_per_step=2.065`; the
+`2464`-token row has `alpha_pos1=0.656`, `alpha_chain=0.969`, and
+`mean_emitted_per_step=1.969`. The blocker is cost shape: at `2464` tokens,
+DFlash decode is `10670.7 ms`, no-spec decode is `2782.2 ms`, and drafter GPU
+time is only `3186.5 ms`, so verify/restore/logits/command overhead remains far
+above the saved target work even if drafter cost were free.
+
+Interpretation: DFlash should stay demoted as a product accelerator until packed
+verify/KV-state structure changes. Policy tuning cannot rescue `static-16` on the
+real narrative workload; `adaptive` correctly turns off at this context, avoiding
+damage but producing no hardware-throughput win. The next active branch should be
+current-default long-context decode/KV measurement plus a minimal roofline packet,
+not another speculative-policy sweep.
+
 ## 2026-06-23 — v0.313 Coop4 Long-Attention Falsifier
 
 Status: tested and removed a decode-attention sidecar that packed the four

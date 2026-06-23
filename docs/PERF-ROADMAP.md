@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.312:
+Current rank after v0.314:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -908,27 +908,16 @@ Current rank after v0.312:
    splits, and v0.313 kills cooperative four-simdgroup subgroup packing. The next
    credible proof is KV-head-major/cache-layout or reader-vectorization structure;
    do not reopen subgroup shape, `NWG`, `TILE_C`, or ggml-Q8 KV without new data.
-2. Packed-verify/spec decode measurement: dense 27B decode near the weight-read
-   roofline cannot get a large multiplier from execution cleanup alone, and MoE
-   decode cleanup also compounds into verify. Do not implement a broad speculative
-   branch blind; first measure current packed-verify or DFlash verification cost
-   against no-spec decode, including GPU active time, accepted tokens, and whether
-   verify is still replaying single-token GDN/attention loops. Promote only if the
-   effective throughput path can plausibly clear `>=1.25x` after full verify cost.
-3. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
-   packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
-   `3.03 TFLOP/s` scalar-FMA sanity), and v0.293 adds
-   `scripts/profile/decode_phase_roofline.py` for phase-level active-byte reads.
-   v0.312 adds optional tg JSON command/encoder/dispatch accounting. Next, add
-   qwen/roofline columns to family and digest outputs wherever active-byte or
-   equivalent-FLOP accounting is defensible. This is not optional polish: without
-   a measured qwen/roofline axis, green llama.cpp rows keep hiding decode and
-   fixed-overhead headroom. Gate future "done" claims on both axes.
-4. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
-   tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
-   rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen
-   prefill only if a paired repeat exposes a real current-default red cell.
-5. A3B true-long current-default recheck: the old `pp34502=0.78x` row is stale
+2. Utilization scoreboard plumbing, bundled with long-context decode: v0.285 adds
+   the one-time roofline calibration packet (`474 GB/s` stream,
+   `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and `3.03 TFLOP/s` scalar-FMA
+   sanity), v0.293 adds `scripts/profile/decode_phase_roofline.py` for phase-level
+   active-byte reads, and v0.312 adds optional tg JSON command/encoder/dispatch
+   accounting. Next, add just enough qwen/roofline output to explain the active
+   branch: decode t/s, wall/GPU time, phase split, dispatch/encoder counts where
+   available, and defensible bytes/token or bandwidth proxies. This is not
+   dashboard work; it is the decision spine for KV layout versus decode glue.
+3. True-long current-default recheck: the old `pp34502=0.78x` row is stale
    relative to later matrix/long-branch wins and v0.203 `pp16384` family wins.
    Before implementing fused online-softmax, chunk policy, or GDN-scan work, rerun
    current default on synthetic `pp16384`, synthetic `pp34502`, and one real
@@ -937,6 +926,18 @@ Current rank after v0.312:
    covered by prior single-chunk stream-layer falsifiers. If the loss survives,
    require any branch to improve both synthetic and real long prompts without
    harming `pp512/1024`.
+4. Packed-verify/spec decode, structural rewrite only: v0.314 fixes production
+   `qwen-bench dflash` scratch allocation and shows real narrative `static-16`
+   decode is catastrophically slower than no-spec despite good acceptance
+   (`0.349x` at `570` prompt tokens and `0.261x` at `2464`). Treat acceptance as
+   interesting but not sufficient. Do not spend time on policy knobs; promote spec
+   only if packed verify/KV restore/logits accounting identifies one removable
+   structural villain and a proof can plausibly clear `>=1.25x` decode on real
+   prompts after full verify cost.
+5. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
+   tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
+   rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen
+   prefill only if a paired repeat exposes a real current-default red cell.
 6. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
    catastrophic demoted red cell, but the audit's mechanical hypotheses are now
    the right reopen criteria: vectorized BF16 weight tile loads, removal of

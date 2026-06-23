@@ -218,6 +218,12 @@ Current caveats:
   reads with `ulong` loads plus shifts regressed A3B down wave to `1.32 ms` and
   A10B to `3.28 ms`. Do not pursue dequant slimming through wide integer load plus
   shift extraction without a smaller instruction-level microproof.
+- v0.311 runs the Q5 down no-weight oracle. It preserves inner loads, top-k,
+  weighted accumulation, stores, and production scheduling while replacing
+  weight/dequant math with constants. Down wave improves to `1.00 ms` A3B /
+  `2.15 ms` A10B and `tg128` moves only `+2.2%/+2.4%`. Q5 down remains real, but
+  the removable cost is smeared across several mechanisms; stop drilling local Q5
+  down sidecars unless a new mechanism or counter trace isolates a larger term.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -875,7 +881,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.310:
+Current rank after v0.311:
 
 1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
    ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
@@ -890,18 +896,17 @@ Current rank after v0.310:
    `3.14 ms`, routed down `2.57 ms`, and shared work is smaller. v0.305 no-op
    oracles validate both ceilings, but v0.307 roofline estimates re-rank exact
    work: A10B routed gate/up is already `~92%` of stream, while routed down is
-   `~68%` and A3B routed down is `~40%`. Next implementation gate: target routed
-   down first and keep only if A10B down improves `>=10%` (`2.57 -> <=2.30 ms`) or
-   A3B down moves `1.22 -> <=1.00 ms`, with `tg128` converting by at least `2-3%`.
-   v0.308 kills simple Q5 down `NSG=4`, and v0.309 says inner-load replay is only
-   a `+2%` end-to-end oracle. Next, target Q5 down weight/dequant path slimming
-   with no scheduling change: packed qh/q/sc/dh loads, less scalar unpack, or lower
-   register pressure. v0.310 kills the naive `ulong` q-byte load version, so any
-   remaining dequant attempt needs a smaller instruction-level microproof rather
-   than another full duplicate kernel. Keep only if down-wave improves `>=3-5%` and
-   `tg128` moves `>=0.7-1.0%` with A3B/A10B non-regression. Gate/up work needs a
-   credible byte-reduction/reuse mechanism before reopening. Avoid fused routed
-   monoliths, x-cached Q8 front staging, and row-shape-only retunes.
+   `~68%` and A3B routed down is `~40%`. v0.308 kills simple Q5 down `NSG=4`,
+   v0.309 says inner-load replay is only a `+2%` end-to-end oracle, v0.310 kills
+   naive `ulong` q-byte load slimming, and v0.311 says the whole removable Q5
+   weight/dequant ceiling is only `+2.2-2.4%` end-to-end. Treat local Q5 down
+   drilling as exhausted for now: keep it only if a counter trace or
+   instruction-level microproof isolates a new larger mechanism. The next
+   MoE-decode work should reset execution shape around serial dispatch/wave
+   overhead across routed, shared, and GDN verify paths, or yield to the
+   long-context attention/KV branch. Gate/up work needs a credible byte-reduction
+   or reuse mechanism before reopening. Avoid fused routed monoliths, x-cached Q8
+   front staging, and row-shape-only retunes.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). The remaining long-context

@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.311 Q5 Down No-Weight Oracle
+
+Status: tested and removed a Q5 routed-down diagnostic sidecar that preserved the
+inner activation loads, top-k loop, weighted accumulation, stores, and production
+wave scheduling, but replaced Q5 weight/dequant math with synthetic constant
+arithmetic. It measured the removable ceiling for the current weight/dequant work
+inside fused Q5 routed down.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- dirty AC-power A3B/A10B `phase --ctx 128` with production-wave split and
+  `QWEN_DECODE_MOE_Q5_DOWN_NOWEIGHT=1`
+- dirty AC-power A3B/A10B `tg128 --runs 2` with the oracle
+
+Results:
+
+| Model | Down wave | `tg128` | Read |
+| --- | ---: | ---: | --- |
+| A3B | `~1.24 -> 1.00 ms` | `103.71 -> 105.95 t/s` | `+2.2%` upper bound |
+| A10B | `~2.61 -> 2.15 ms` | `44.86 -> 45.93 t/s` | `+2.4%` upper bound |
+
+Interpretation: Q5 weight/dequant work is real, but it is not a single large
+exact exit. Together with v0.308-v0.310, the down bucket is now visibly smeared
+across weight/dequant, inner replay, loop/reduction/control, and scheduling. Do
+not keep drilling Q5 down local variants without a new mechanism or counter
+evidence; the next high-EV branch should reset decode execution shape or move to
+long-context attention/KV rather than chase another narrow duplicate kernel.
+
 ## 2026-06-22 — v0.310 Q5 Down U64 Load Falsifier
 
 Status: tested and removed a Q5 routed-down load-slimming sidecar that replaced

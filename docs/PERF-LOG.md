@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.324 A10B Long-Decode Roofline Confirms Down Wave
+
+Status: ran the A10B analogue of the A3B `ctx8192` decode roofline packet before
+attempting a deeper MoE-down rewrite. This tests whether the A3B down-wave signal
+is model-specific or a general MoE decode bottleneck.
+
+Validation:
+
+- A10B Q4_XL `ctx8192 --window 4 --fresh-per-checkpoint` sweep
+- A10B Q4_XL `ctx8192` production, FFN split, and deep FFN split phase profiles
+- A10B Q4_XL `ctx8192` routed-down no-op budget sweep
+
+Results:
+
+| A10B Q4_XL `ctx8192` row | Value | Read |
+| --- | ---: | --- |
+| default throughput | `38.8 t/s` | `25.76 ms/token`, `25.23` GPU |
+| active weight bandwidth | `311.5 GB/s` | `65.7%` of measured stream roofline |
+| `moe ffn apply` | `9.31 ms`, `34.8%` | largest named phase |
+| gate/up wave | `3.94 ms`, `14.9%` | production-wave split |
+| down wave | `4.90 ms`, `18.6%` | production-wave split |
+| routed Q5_K down | `4.58 ms`, `182 GB/s` | deep split, low by weight bytes |
+| shared Q8_0 down | `0.81 ms`, `198 GB/s` | deep split |
+| routed-down no-op | `45.9 t/s` | `21.78 ms/token`, large budget |
+
+Interpretation: A10B reproduces the A3B pattern strongly enough to keep MoE down
+as the active decode branch. Routed Q5_K down is a large low-bandwidth phase on
+both models, and no-oping it buys far more than the `>=1.5%` gate. The next code
+branch should be a deeper Q5 down work-unit change, not another threadgroup-count
+retune, Q8 rollback, or inner-vector staging wrapper.
+
 ## 2026-06-23 — v0.323 Q5 Down Inner-Staging Falsifier
 
 Status: tested and removed a dirty Q5_K routed-down probe that staged each

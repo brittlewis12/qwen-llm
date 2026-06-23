@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.322:
+Current rank after v0.323:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -905,9 +905,11 @@ Current rank after v0.322:
    split puts routed Q5_K down at `1.27 ms` / `184 GB/s` and shared Q8_0 down at
    `0.48 ms` / `93 GB/s`. Simple exits are killed: Q5 fused-down rollback is
    slower (`93.0 -> 92.3 t/s`), dirty Q5_K `NSG={4,1}` fails the phase gate, and
-   Q8_0 lcpp mat-vec rollback regresses badly (`80.2 t/s`). The next credible MoE
-   FFN branch must reduce repeated inner-vector traffic, change the Q5 down work
-   unit, or bring counters proving the down wave is compute/dequant-bound. Gate:
+   Q8_0 lcpp mat-vec rollback regresses badly (`80.2 t/s`). v0.323 also kills
+   naive threadgroup staging of the Q5_K down inner vector (`93.0 -> 88.1 t/s`),
+   so repeated inner reads are not removable by a simple copy/barrier wrapper. The
+   next credible MoE FFN branch must change the Q5 down work unit more deeply or
+   bring counters proving the down wave is compute/dequant-bound. Gate:
    `>=0.3 ms/token` total GPU improvement at `ctx8192` with `ctx128/1024` neutral.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention

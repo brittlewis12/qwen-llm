@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.323 Q5 Down Inner-Staging Falsifier
+
+Status: tested and removed a dirty Q5_K routed-down probe that staged each
+selected expert's `moe_inner` vector into threadgroup memory inside
+`kernel_moe_down_weighted_sum_q5_K_f32_packed_slots`. The hypothesis was that the
+low routed-down roofline came from repeated device reads of the same inner vector
+across output rows.
+
+Validation:
+
+- `cargo build --release --bin qwen-bench` with the dirty staging patch
+- A3B Q4 `ctx8192 --window 4 --fresh-per-checkpoint` sweep
+
+Results:
+
+| A3B Q4 `ctx8192` | Default | Threadgroup inner staging | Read |
+| --- | ---: | ---: | --- |
+| throughput | `93.0 t/s` | `88.1 t/s` | regression |
+| total ms/token | `10.75 ms` | `11.35 ms` | regression |
+| GPU ms/token | `10.24 ms` | `10.80 ms` | regression |
+
+Interpretation: naive threadgroup staging of the Q5_K down inner vector is not
+the missing down-wave mechanism. The extra copy/barriers cost more than any saved
+inner traffic, which suggests the repeated inner reads are already cache-friendly
+or not the dominant limiter. Reopen Q5 down only with a different work unit or a
+counter signal that isolates compute/dequant, cache, or occupancy pressure.
+
 ## 2026-06-23 — v0.322 Long-Decode MoE FFN Split Falsifiers
 
 Status: drilled into the A3B Q4 `ctx8192` MoE FFN apply bucket exposed by the

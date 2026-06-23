@@ -416,6 +416,12 @@ struct CtxSweepArgs {
     /// encoder.
     #[arg(long)]
     concurrent_attn_proj: bool,
+    /// Allocate a fresh right-sized session for each checkpoint instead of one
+    /// max-capacity session for the whole sweep. Slower, but avoids large unused
+    /// KV capacity poisoning earlier checkpoints on memory-pressure-sensitive
+    /// models.
+    #[arg(long)]
+    fresh_per_checkpoint: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -5325,6 +5331,7 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
         window,
         concurrent_gdn_proj,
         concurrent_attn_proj,
+        fresh_per_checkpoint,
     } = args;
     let ctx = MetalContext::new()?;
     eprintln!("[bench] device: {}", ctx.describe());
@@ -5336,50 +5343,93 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
         .iter()
         .max()
         .ok_or_else(|| anyhow!("no checkpoints"))?;
-    let mut s = MetalSession::fresh(&ctx, &mm, max_n + window + 16)?;
+    let mut s = MetalSession::fresh(&ctx, &mm, 32)?;
     let mf = MetalForward::new(&ctx, &mm);
 
     // Warmup pipeline state cache.
     for i in 0..3 {
         let _ = mf.single_token(0, i as u32, &mut s)?;
     }
-    let mut s = MetalSession::fresh(&ctx, &mm, max_n + window + 16)?;
-    // One pre-warmed token at position 0 to populate everything.
-    let _ = mf.single_token(0, 0, &mut s)?;
-
     println!("[ctx-sweep] === per-token decode cost vs context ===");
+    println!(
+        "[ctx-sweep] allocation_mode={}",
+        if fresh_per_checkpoint {
+            "fresh-per-checkpoint"
+        } else {
+            "single-max-capacity"
+        }
+    );
     println!("[ctx-sweep] context  total_ms  gpu_ms  cpu_enc_ms  t/s");
 
-    let mut prev_pos = 1u32;
-    for &target in &checkpoints {
-        for p in prev_pos..(target as u32) {
-            let _ = mf.single_token(0, p, &mut s)?;
-        }
-        prev_pos = target as u32;
+    if fresh_per_checkpoint {
+        for &target in &checkpoints {
+            let mut s = MetalSession::fresh(&ctx, &mm, target + window + 16)?;
+            if target > 0 {
+                let _ = mf.single_token(0, 0, &mut s)?;
+                for p in 1..(target as u32) {
+                    let _ = mf.single_token(0, p, &mut s)?;
+                }
+            }
 
-        let mut samples = Vec::with_capacity(window);
-        for i in 0..window {
-            let pos = prev_pos + i as u32;
-            let (_, p) = if concurrent_gdn_proj && concurrent_attn_proj {
-                mf.single_token_profiled_concurrent_gdn_attn_dense(0, pos, &mut s)?
-            } else if concurrent_gdn_proj {
-                mf.single_token_profiled_concurrent_gdn_dense(0, pos, &mut s)?
-            } else if concurrent_attn_proj {
-                mf.single_token_profiled_concurrent_attn_dense(0, pos, &mut s)?
-            } else {
-                mf.single_token_profiled(0, pos, &mut s)?
-            };
-            samples.push(p);
-        }
-        prev_pos += window as u32;
+            let mut samples = Vec::with_capacity(window);
+            for i in 0..window {
+                let pos = target as u32 + i as u32;
+                let (_, p) = if concurrent_gdn_proj && concurrent_attn_proj {
+                    mf.single_token_profiled_concurrent_gdn_attn_dense(0, pos, &mut s)?
+                } else if concurrent_gdn_proj {
+                    mf.single_token_profiled_concurrent_gdn_dense(0, pos, &mut s)?
+                } else if concurrent_attn_proj {
+                    mf.single_token_profiled_concurrent_attn_dense(0, pos, &mut s)?
+                } else {
+                    mf.single_token_profiled(0, pos, &mut s)?
+                };
+                samples.push(p);
+            }
 
-        let avg_total = samples.iter().map(|p| p.total_ms).sum::<f64>() / window as f64;
-        let avg_gpu = samples.iter().map(|p| p.gpu_kernel_ms).sum::<f64>() / window as f64;
-        let avg_enc = samples.iter().map(|p| p.cpu_encode_ms).sum::<f64>() / window as f64;
-        println!(
-            "[ctx-sweep] {target:>7}  {avg_total:>8.2}  {avg_gpu:>6.2}  {avg_enc:>10.2}  {:>4.1}",
-            1000.0 / avg_total
-        );
+            let avg_total = samples.iter().map(|p| p.total_ms).sum::<f64>() / window as f64;
+            let avg_gpu = samples.iter().map(|p| p.gpu_kernel_ms).sum::<f64>() / window as f64;
+            let avg_enc = samples.iter().map(|p| p.cpu_encode_ms).sum::<f64>() / window as f64;
+            println!(
+                "[ctx-sweep] {target:>7}  {avg_total:>8.2}  {avg_gpu:>6.2}  {avg_enc:>10.2}  {:>4.1}",
+                1000.0 / avg_total
+            );
+        }
+    } else {
+        let mut s = MetalSession::fresh(&ctx, &mm, max_n + window + 16)?;
+        // One pre-warmed token at position 0 to populate everything.
+        let _ = mf.single_token(0, 0, &mut s)?;
+
+        let mut prev_pos = 1u32;
+        for &target in &checkpoints {
+            for p in prev_pos..(target as u32) {
+                let _ = mf.single_token(0, p, &mut s)?;
+            }
+            prev_pos = target as u32;
+
+            let mut samples = Vec::with_capacity(window);
+            for i in 0..window {
+                let pos = prev_pos + i as u32;
+                let (_, p) = if concurrent_gdn_proj && concurrent_attn_proj {
+                    mf.single_token_profiled_concurrent_gdn_attn_dense(0, pos, &mut s)?
+                } else if concurrent_gdn_proj {
+                    mf.single_token_profiled_concurrent_gdn_dense(0, pos, &mut s)?
+                } else if concurrent_attn_proj {
+                    mf.single_token_profiled_concurrent_attn_dense(0, pos, &mut s)?
+                } else {
+                    mf.single_token_profiled(0, pos, &mut s)?
+                };
+                samples.push(p);
+            }
+            prev_pos += window as u32;
+
+            let avg_total = samples.iter().map(|p| p.total_ms).sum::<f64>() / window as f64;
+            let avg_gpu = samples.iter().map(|p| p.gpu_kernel_ms).sum::<f64>() / window as f64;
+            let avg_enc = samples.iter().map(|p| p.cpu_encode_ms).sum::<f64>() / window as f64;
+            println!(
+                "[ctx-sweep] {target:>7}  {avg_total:>8.2}  {avg_gpu:>6.2}  {avg_enc:>10.2}  {:>4.1}",
+                1000.0 / avg_total
+            );
+        }
     }
 
     Ok(())

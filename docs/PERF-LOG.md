@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.316 Fresh-Per-Checkpoint Context Sweeps
+
+Status: added `qwen-bench ctx-sweep --fresh-per-checkpoint` to avoid max-capacity
+session allocation poisoning early checkpoints on memory-pressure-sensitive runs.
+The default single-session mode remains available for fast ramp-once sweeps; the
+new mode allocates each checkpoint at `target + window + 16` and reramps from
+scratch, trading wall time for valid per-context capacity.
+
+Validation:
+
+- `cargo fmt && cargo build --release --bin qwen-bench`
+- 0.8B `ctx-sweep --checkpoints 4,8 --window 1` smoke in both allocation modes
+- A10B `ctx570/2464 --window 1 --fresh-per-checkpoint` validation
+
+Results:
+
+| Model | Mode | Contexts | Read |
+| --- | --- | --- | --- |
+| 0.8B | fresh | `4/8` | smoke passed; prints allocation mode |
+| 0.8B | single | `4/8` | smoke passed; default path preserved |
+| A10B | fresh | `570/2464` | `43.5/38.5 t/s`, matching capped valid rows |
+
+Interpretation: the A10B `32768` max-cap sweep from v0.315 was a real harness
+capacity confound, not a kernel result. Use `--fresh-per-checkpoint` for large
+MoE long-context sweeps when early checkpoints must remain valid. Keep the default
+single-session mode for cheaper same-capacity slope checks.
+
 ## 2026-06-23 — v0.315 Decode KV Estimator And Group-Tile Falsifier
 
 Status: added attention KV byte estimates to `scripts/profile/decode_phase_roofline.py`

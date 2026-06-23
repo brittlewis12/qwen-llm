@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.316:
+Current rank after v0.317:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -918,9 +918,11 @@ Current rank after v0.316:
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`
    at `8192/16384`). v0.316 adds `ctx-sweep --fresh-per-checkpoint`, which
    validates A10B `ctx570/2464` at `43.5/38.5 t/s` with right-sized sessions.
-   Use that mode for large MoE long-context sweeps where early checkpoints matter,
-   and treat any product session with large unused KV capacity as a memory-pressure
-   risk. Remaining work is product/session allocation policy, not kernel tuning.
+   v0.317 adds `decode --kv-capacity` and shows large unused capacity is mainly a
+   cold first-touch/residency hazard: A10B `ctx570 cap32768 --no-warmup` has a
+   `3089 ms` first decode token, but warmed `cap32768` returns to `43.3 t/s`.
+   Use fresh/right-sized modes for measurement, keep capacity explicit in product
+   benches, and handle cold-start residency separately from hot kernel tuning.
 3. Utilization scoreboard plumbing, bundled with long-context decode: v0.285 adds
    the one-time roofline calibration packet (`474 GB/s` stream,
    `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and `3.03 TFLOP/s` scalar-FMA

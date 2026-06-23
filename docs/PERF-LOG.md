@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.317 Decode KV-Capacity Sensitivity Harness
+
+Status: added `qwen-bench decode --kv-capacity` so capacity sensitivity can be
+tested on the product-like prefill+decode path instead of inferring from
+`ctx-sweep` allocation behavior. The option must be at least
+`prompt_tokens + generation_tokens + 16` and is printed in the decode header.
+
+Validation:
+
+- `cargo fmt && cargo build --release --bin qwen-bench`
+- 0.8B `decode --tokens 2 --kv-capacity 128 --no-warmup` smoke
+- A10B real prompt (`570` tokens) with `--tokens 16`, capacities `4096` and
+  `32768`, cold no-warmup plus a warmed `32768` check
+
+Results:
+
+| Model | Capacity | Warmup | Prefill | Decode | Steady decode |
+| --- | ---: | --- | ---: | ---: | ---: |
+| A10B | `4096` | no | `67.4 t/s` | `14.7 t/s` | `43.27 t/s` |
+| A10B | `32768` | no | `60.9 t/s` | `4.2 t/s` | `20.37 t/s` |
+| A10B | `32768` | yes | `451.8 t/s` | `43.3 t/s` | `43.29 t/s` |
+
+The cold `32768` row is dominated by first-touch behavior: the first decode token
+is `3089 ms` and the second is `405 ms`, then later tokens return to the normal
+`~23 ms` band. With the regular qwen-bench warmup, `32768` capacity is steady at
+the same `~43 t/s` as the right-sized row.
+
+Interpretation: large unused KV capacity is a cold-start/residency hazard rather
+than a steady-state kernel slope on this packet. Keep capacity explicit in decode
+benching, avoid treating no-warmup max-cap rows as kernel regressions, and handle
+first-touch/product residency separately from hot throughput optimization.
+
 ## 2026-06-23 — v0.316 Fresh-Per-Checkpoint Context Sweeps
 
 Status: added `qwen-bench ctx-sweep --fresh-per-checkpoint` to avoid max-capacity

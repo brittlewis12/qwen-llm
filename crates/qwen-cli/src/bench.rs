@@ -277,6 +277,10 @@ struct DecodeArgs {
     /// chooses a model-aware default (currently dense=256, MoE=16).
     #[arg(long)]
     prefill_chunk: Option<usize>,
+    /// Override decode session KV capacity for capacity-sensitivity tests.
+    /// Must be at least prompt_tokens + generation_tokens + 16.
+    #[arg(long)]
+    kv_capacity: Option<usize>,
     /// Force decode to read back full logits on every generated token instead
     /// of using the GPU argmax fast path.
     #[arg(long)]
@@ -4430,6 +4434,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         no_warmup,
         sequential_prefill,
         prefill_chunk,
+        kv_capacity,
         full_logits_decode,
         runs,
         output,
@@ -4466,16 +4471,22 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
             "--oracle-phase final requires at least one decode token; use --oracle-phase prefill for prompt-only validation"
         ));
     }
+    let mf = MetalForward::new(&ctx, &mm);
+    let min_cap = ids.len() + tokens + 16;
+    let cap = kv_capacity.unwrap_or(min_cap);
+    if cap < min_cap {
+        return Err(anyhow!(
+            "--kv-capacity {cap} is too small; need at least prompt_tokens + tokens + 16 = {min_cap}"
+        ));
+    }
     eprintln!(
-        "[bench] model={} prompt={:?} ({} tokens), gen={} tokens",
+        "[bench] model={} prompt={:?} ({} tokens), gen={} tokens, kv_capacity={}",
         model.display(),
         prompt,
         ids.len(),
-        tokens
+        tokens,
+        cap
     );
-
-    let mf = MetalForward::new(&ctx, &mm);
-    let cap = ids.len() + tokens + 16;
     let use_packed_prefill = !sequential_prefill;
     let use_gpu_argmax_decode = !full_logits_decode;
 

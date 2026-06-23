@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.318:
+Current rank after v0.319:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -949,14 +949,14 @@ Current rank after v0.318:
    `56774`-token chaos rollout is `1.168x` versus pinned llama.cpp. Do not reopen
    fused online-softmax, chunk policy, or GDN-scan work from the old true-long row
    alone.
-6. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
-   catastrophic demoted red cell, but the audit's mechanical hypotheses are now
-   the right reopen criteria: vectorized BF16 weight tile loads, removal of
-   binned full-grid relaunch waste, and all-simdgroup/vectorized down epilogues.
-   Prior BF16 falsifiers did not isolate scalar 2-byte A-tile loads, so do not use
-   that graveyard as evidence against this variable. Do not claim product-family
-   movement from BF16 until it moves BF16 A3B wall by a large factor and preserves
-   grouped coverage.
+6. BF16 structural sidecar, explicitly scheduled only: BF16 remains a catastrophic
+   demoted red cell, but v0.319 falsifies the most concrete grouped-MoE scalar
+   A-load hypothesis. Dirty `bfloat4` loads regressed BF16 grouped `routed_swiglu`
+   (`130.80 -> 217.73 ms`) and `routed_down` (`64.78 -> 98.30 ms`), while the BF16
+   phase trace shows GDN projections/back-projection dominate (`gdn_qkv + gdn_z +
+   gdn_back ~= 2252 ms`, about two thirds of traced time). Reopen BF16 around GDN
+   BF16 mat-mat/projection lowering or binned dispatch only with a new phase gate;
+   do not reapply grouped-MoE vector A-loads.
 7. Short MoE decode execution-shape, only with fresh evidence: v0.292-v0.311 make
    decode materially greener, but v0.312 says the current default is already
    GPU-active at `~95.8-97.8%` wall on warmed A3B/A10B `tg128`. The GDN-concurrent

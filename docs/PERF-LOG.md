@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.319 BF16 MoE Vector-A-Load Falsifier
+
+Status: tested and removed a dirty BF16 grouped-MoE vector-load probe that replaced
+the scalar 16-element BF16 A-tile reads in grouped SwiGLU and grouped down with
+four `bfloat4` loads plus the same threadgroup scatter. The hypothesis was that
+scalar A-tile loads explained the catastrophic BF16 A3B prompt row.
+
+Validation:
+
+- `cargo build --release --bin qwen-bench` with the dirty vector-load patch
+- A3B BF16 `pp512 --runs 1 --no-warmup` baseline versus dirty vector-load packet
+- A3B BF16 `pp512` layer-phase trace with the dirty patch and after reverting it
+
+Results:
+
+| BF16 `pp512` phase | Baseline | Vector A-load | Read |
+| --- | ---: | ---: | --- |
+| `routed_swiglu` | `130.80 ms` | `217.73 ms` | severe regression |
+| `routed_down` | `64.78 ms` | `98.30 ms` | severe regression |
+| `shared_packed` | `297.18 ms` | `299.30 ms` | flat |
+| `gdn_qkv + gdn_z + gdn_back` | `2251.80 ms` | `2257.51 ms` | dominant, untouched |
+
+Interpretation: scalar A-tile loads in grouped BF16 MoE are not the live BF16
+escape hatch; naive vector loads make the grouped MoE kernels worse. The BF16 red
+cell is dominated by BF16 GDN projection/back-projection phases (`~66%` of phase
+time), not by routed MoE. Reopen BF16 around GDN BF16 mat-mat/projection lowering
+or binned dispatch only with a new phase gate; do not reapply vector A-loads to
+grouped MoE.
+
 ## 2026-06-23 — v0.318 A3B True-Long Prefill Recheck
 
 Status: reran the stale A3B true-long prefill red cell with current HEAD and the

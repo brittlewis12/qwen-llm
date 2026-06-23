@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.322 Long-Decode MoE FFN Split Falsifiers
+
+Status: drilled into the A3B Q4 `ctx8192` MoE FFN apply bucket exposed by the
+v0.321 roofline sample. The production-wave split puts the FFN budget at
+`1.29 ms` gate/up wave, `1.40 ms` down wave, and `0.17 ms` finalizer; the deep
+serial diagnostic puts routed down at `1.27 ms` and shared down at `0.48 ms`.
+
+Validation:
+
+- A3B Q4 `ctx8192` production-wave and deep FFN split phase profiles
+- A3B Q4 `ctx8192 --window 4 --fresh-per-checkpoint` rollback sweeps
+- Dirty Q5_K down `NSG_Q5K={4,1}` probes, built and removed after measurement
+
+Results:
+
+| A3B Q4 `ctx8192` probe | Throughput | Phase read |
+| --- | ---: | --- |
+| default | `93.0 t/s` | baseline from v0.321 |
+| `QWEN_DECODE_MOE_Q5_DOWN_FUSED=0` | `92.3 t/s` | fused down still wins |
+| dirty Q5_K `NSG=4` | `93.6 t/s` | down wave flat at `1.40 ms` |
+| dirty Q5_K `NSG=1` | `94.1 t/s` | down wave worsens to `1.47 ms` |
+| `QWEN_MATVEC_Q8_0_LCPP=0` | `80.2 t/s` | Q8_0 rollback is severe |
+
+The deep split roofline estimates routed Q5_K down at `1.27 ms` / `184 GB/s`
+and shared Q8_0 down at `0.48 ms` / `93 GB/s`, but simple threadgroup-count
+retunes and the pre-fused Q5 down rollback do not turn that into a production
+win.
+
+Interpretation: the live MoE FFN budget is down-wave shaped, but not because the
+obvious Q5_K simdgroup count or Q8_0 lcpp mat-vec default is wrong. The next MoE
+FFN branch needs a different mechanism: reduce repeated inner-vector traffic,
+change the Q5 down work unit, or collect counters showing whether the down wave
+is compute/dequant-bound rather than weight-bandwidth-bound. Do not retread
+Q5_K `NSG={1,4}`, Q5 fused rollback, or Q8_0 lcpp rollback without new evidence.
+
 ## 2026-06-23 — v0.321 Decode Roofline Attribution Spine
 
 Status: extended `scripts/profile/decode_phase_roofline.py` so a context-sweep

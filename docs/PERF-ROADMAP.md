@@ -224,6 +224,13 @@ Current caveats:
   `2.15 ms` A10B and `tg128` moves only `+2.2%/+2.4%`. Q5 down remains real, but
   the removable cost is smeared across several mechanisms; stop drilling local Q5
   down sidecars unless a new mechanism or counter trace isolates a larger term.
+- v0.312 adds `QWEN_DECODE_TRACE_COUNTS=1` tg JSON accounting and reruns the
+  current-default versus `QWEN_DECODE_MOE_CONCURRENT_GDN=0` packet. The default
+  remains a real win (`+8.8%` A3B, `+6.0%` A10B in the clean no-trace repeat), but
+  warmed trace rows show `~95.8-97.8%` GPU/wall and unchanged dispatch counts
+  between default and rollback. The GDN-concurrent win is banked GPU overlap, not
+  a fresh CPU/encoder-bubble mandate. Demote short MoE decode scheduling work
+  unless a new trace isolates a larger GPU-overlap mechanism.
 - Quant breadth is now an active MoE guardrail, not a documentation afterthought.
   v0.219-v0.221 add A3B Q3_K_M, Q6_K, and Q8_0 native grouped routed coverage;
   v0.233 adds `IQ3_S/IQ3_S/IQ4_XS` and moves the local `UD-IQ4_XS` A3B file to
@@ -881,33 +888,9 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.311:
+Current rank after v0.312:
 
-1. MoE decode execution-shape second pass: v0.292 puts A10B decode materially
-   ahead of pinned llama.cpp (`tg64/tg128/tg256 = 1.20x/1.20x/1.21x`) and v0.291
-   lifts A3B `tg128` to `98.04 t/s`, but the hardware-utilization objective is
-   not satisfied. v0.301 production-path attribution still shows MoE FFN apply as
-   the largest named bucket (`28.6%` A3B, `30.7%` A10B at `ctx128`). v0.302 says
-   route widening is not the next exit: the row-group-4 F32 sidecar regressed the
-   mixed route bucket. v0.303 splits FFN apply into production waves and points at
-   gate/up and down, not finalizer: A10B `ctx128` gate/up wave is `3.75 ms`, down
-   wave `2.62 ms`, finalizer `0.14 ms`; A3B is `1.31/1.24/0.12 ms`. v0.304
-   identifies the routed components inside that envelope: A10B routed gate/up is
-   `3.14 ms`, routed down `2.57 ms`, and shared work is smaller. v0.305 no-op
-   oracles validate both ceilings, but v0.307 roofline estimates re-rank exact
-   work: A10B routed gate/up is already `~92%` of stream, while routed down is
-   `~68%` and A3B routed down is `~40%`. v0.308 kills simple Q5 down `NSG=4`,
-   v0.309 says inner-load replay is only a `+2%` end-to-end oracle, v0.310 kills
-   naive `ulong` q-byte load slimming, and v0.311 says the whole removable Q5
-   weight/dequant ceiling is only `+2.2-2.4%` end-to-end. Treat local Q5 down
-   drilling as exhausted for now: keep it only if a counter trace or
-   instruction-level microproof isolates a new larger mechanism. The next
-   MoE-decode work should reset execution shape around serial dispatch/wave
-   overhead across routed, shared, and GDN verify paths, or yield to the
-   long-context attention/KV branch. Gate/up work needs a credible byte-reduction
-   or reuse mechanism before reopening. Avoid fused routed monoliths, x-cached Q8
-   front staging, and row-shape-only retunes.
-2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
+1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). The remaining long-context
    slope is still attention-shaped: after tile2, A3B `ctx16384` attention is
@@ -917,12 +900,20 @@ Current rank after v0.311:
    straightforward MoE Q8-KV subgroup reader, and v0.300 kills smaller subgroup
    splits. Prefer cache-layout, reader vectorization, or structural body
    mechanisms over KV quantization as-is or another subgroup knob.
+2. Packed-verify/spec decode measurement: dense 27B decode near the weight-read
+   roofline cannot get a large multiplier from execution cleanup alone, and MoE
+   decode cleanup also compounds into verify. Do not implement a broad speculative
+   branch blind; first measure current packed-verify or DFlash verification cost
+   against no-spec decode, including GPU active time, accepted tokens, and whether
+   verify is still replaying single-token GDN/attention loops. Promote only if the
+   effective throughput path can plausibly clear `>=1.25x` after full verify cost.
 3. Utilization scoreboard plumbing: v0.285 adds the one-time roofline calibration
    packet (`474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s` Q4_K mat-mat, and
    `3.03 TFLOP/s` scalar-FMA sanity), and v0.293 adds
    `scripts/profile/decode_phase_roofline.py` for phase-level active-byte reads.
-   Next, add qwen/roofline columns to family and digest outputs wherever active-byte
-   or equivalent-FLOP accounting is defensible. This is not optional polish: without
+   v0.312 adds optional tg JSON command/encoder/dispatch accounting. Next, add
+   qwen/roofline columns to family and digest outputs wherever active-byte or
+   equivalent-FLOP accounting is defensible. This is not optional polish: without
    a measured qwen/roofline axis, green llama.cpp rows keep hiding decode and
    fixed-overhead headroom. Gate future "done" claims on both axes.
 4. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
@@ -946,12 +937,14 @@ Current rank after v0.311:
    that graveyard as evidence against this variable. Do not claim product-family
    movement from BF16 until it moves BF16 A3B wall by a large factor and preserves
    grouped coverage.
-7. MTP / packed-verify dense decode: dense 27B decode near the weight-read
-   roofline cannot get a large multiplier from execution cleanup alone. MTP is the
-   path that can exceed the naive weight-read floor by amortizing verification
-   across multiple drafted tokens. Keep it behind the current MoE decode
-   hardware-utilization pass for now, but treat it as the main dense-decode
-   domination lever, not an oracle curiosity.
+7. Short MoE decode execution-shape, only with fresh evidence: v0.292-v0.311 make
+   decode materially greener, but v0.312 says the current default is already
+   GPU-active at `~95.8-97.8%` wall on warmed A3B/A10B `tg128`. The GDN-concurrent
+   rollback win is real (`+8.8%/+6.0%`) but already banked, and disabling it mainly
+   increases GPU active time with the same dispatch count. Reopen only for a new
+   GPU-overlap or byte-reduction mechanism with a measured `>=2%` tg ceiling on
+   both MoE targets, or `>=3%` A10B with A3B neutral. Do not optimize encoder count
+   for its own sake: serial one-encoder rollback is slower.
 8. Remaining dense prompt attribution, only if a paired red cell survives: the
    latest phase trace shows `gdn_gated` and `gdn_prep_l2` are now tiny. If short
    dense still regresses in a clean repeat, target projection/FFN, GDN step, or
@@ -970,19 +963,19 @@ Current rank after v0.311:
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
    and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work
    only when a paired file or static audit exposes a fresh miss.
-10. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+11. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured
    `moe_inner` activations rather than another synthetic row-stride oracle.
-11. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+12. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
    or profile scope. The pinned upstream b9481 build does not expose
    `GGML_METAL_PROFILE_OPS`; the local fork has a profiling patch, but any
    attribution claim needs either a canonical profiling patch or a clearly marked
    non-scoreboard capture before more kernel code.
-12. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+13. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
    `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
    than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
    before any end-to-end tuning.

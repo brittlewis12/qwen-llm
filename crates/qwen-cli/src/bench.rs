@@ -29,13 +29,14 @@ use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
     metal::{
-        KernelEncoder, MetalContext, MetalTensor, encode_attn_decode_v4_f32,
+        KernelEncoder, KernelTraceCounters, MetalContext, MetalTensor, encode_attn_decode_v4_f32,
         encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
         encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
         encode_fill_f32, encode_mul_f32, encode_rms_norm_batched_f32, encode_roofline_fma_f32,
         encode_roofline_stream_f32, encode_rope_neox_f32_packed_consecutive,
         encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-        encode_split_q_gate_f32, encode_touch_bytes_f32, with_attn_v4_group_tile_override,
+        encode_split_q_gate_f32, encode_touch_bytes_f32, kernel_trace_begin, kernel_trace_snapshot,
+        with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -641,6 +642,10 @@ struct BenchRow {
     samples_ns: Vec<u64>,
     avg_ns: u64,
     avg_gpu_ns: Option<u64>,
+    kernel_trace_command_buffers_per_token: Option<f64>,
+    kernel_trace_encoders_per_token: Option<f64>,
+    kernel_trace_concurrent_encoders_per_token: Option<f64>,
+    kernel_trace_dispatches_per_token: Option<f64>,
     /// Effective decode bandwidth (GB/s). `None` for `pp<N>` rows and for
     /// MoE `tg<N>` rows — MoE active-param accounting is out of scope here,
     /// and the naive `model_size × t/s` overstates by ~10x for MoE.
@@ -3784,6 +3789,10 @@ fn run_pp(args: PpArgs) -> Result<()> {
             samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
             avg_ns: (wall_mean * 1e6) as u64,
             avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
+            kernel_trace_command_buffers_per_token: None,
+            kernel_trace_encoders_per_token: None,
+            kernel_trace_concurrent_encoders_per_token: None,
+            kernel_trace_dispatches_per_token: None,
             // pp is not a steady-state-bandwidth measurement, so we don't
             // emit a derived GB/s for prefill rows. Digest tools can compute
             // their own if they want, but the canonical bandwidth comparison
@@ -3951,6 +3960,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
     }
     let json_mode = matches!(output, OutputFormat::Json);
     macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
+    let trace_counts = env_flag_enabled("QWEN_DECODE_TRACE_COUNTS");
 
     let ctx = MetalContext::new().context("init MetalContext")?;
     text_log!("[tg] device: {}", ctx.describe());
@@ -4005,8 +4015,11 @@ fn run_tg(args: TgArgs) -> Result<()> {
     } else {
         None
     };
-    let run_once = |first_tok: i32, ranges: &mut dyn FnMut() -> i32| -> Result<(f64, f64)> {
+    let run_once = |first_tok: i32,
+                    ranges: &mut dyn FnMut() -> i32|
+     -> Result<(f64, f64, Option<KernelTraceCounters>)> {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("tg session")?;
+        let _kernel_trace_guard = trace_counts.then(kernel_trace_begin);
         if !pipelined {
             let t0 = Instant::now();
             let mut tok = first_tok;
@@ -4033,7 +4046,8 @@ fn run_tg(args: TgArgs) -> Result<()> {
                 tok = ranges();
             }
             let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
-            return Ok((wall_ms, gpu_ms_acc));
+            let counts = trace_counts.then(kernel_trace_snapshot);
+            return Ok((wall_ms, gpu_ms_acc, counts));
         }
 
         let ids_ping = ids_ping.as_ref().expect("pipelined ids");
@@ -4092,7 +4106,8 @@ fn run_tg(args: TgArgs) -> Result<()> {
         pending_cmd.waitUntilCompleted();
         gpu_ms_acc += (pending_cmd.GPUEndTime() - pending_cmd.GPUStartTime()) * 1e3;
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
-        Ok((wall_ms, gpu_ms_acc))
+        let counts = trace_counts.then(kernel_trace_snapshot);
+        Ok((wall_ms, gpu_ms_acc, counts))
     };
 
     if !no_warmup {
@@ -4103,13 +4118,17 @@ fn run_tg(args: TgArgs) -> Result<()> {
     let mut wall_samples: Vec<f64> = Vec::with_capacity(runs);
     let mut gpu_samples: Vec<f64> = Vec::with_capacity(runs);
     let mut ts_samples: Vec<f64> = Vec::with_capacity(runs);
+    let mut trace_samples: Vec<KernelTraceCounters> = Vec::with_capacity(runs);
     for run_idx in 0..runs {
         let first = next_rand_tok();
-        let (wall_ms, gpu_ms) = run_once(first, &mut next_rand_tok).context("tg run")?;
+        let (wall_ms, gpu_ms, trace) = run_once(first, &mut next_rand_tok).context("tg run")?;
         let ts = n_gen as f64 * 1000.0 / wall_ms;
         wall_samples.push(wall_ms);
         gpu_samples.push(gpu_ms);
         ts_samples.push(ts);
+        if let Some(trace) = trace {
+            trace_samples.push(trace);
+        }
         text_log!(
             "[tg] run {:>2}: wall {:>8.1} ms  gpu {:>8.1} ms  {:>7.2} t/s",
             run_idx + 1,
@@ -4123,6 +4142,20 @@ fn run_tg(args: TgArgs) -> Result<()> {
     let gpu_mean = sample_mean(&gpu_samples);
     let ts_mean = sample_mean(&ts_samples);
     let ts_sd = sample_stdev(&ts_samples);
+    let trace_per_token = if trace_counts && !trace_samples.is_empty() {
+        let denom = (trace_samples.len() * n_gen) as f64;
+        let encoders: u64 = trace_samples.iter().map(|t| t.encoders).sum();
+        let concurrent_encoders: u64 = trace_samples.iter().map(|t| t.concurrent_encoders).sum();
+        let dispatches: u64 = trace_samples.iter().map(|t| t.dispatches).sum();
+        Some((
+            1.0,
+            encoders as f64 / denom,
+            concurrent_encoders as f64 / denom,
+            dispatches as f64 / denom,
+        ))
+    } else {
+        None
+    };
 
     if json_mode {
         let (commit, dirty) = qwen_build_identity();
@@ -4163,6 +4196,10 @@ fn run_tg(args: TgArgs) -> Result<()> {
             samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
             avg_ns: (wall_mean * 1e6) as u64,
             avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
+            kernel_trace_command_buffers_per_token: trace_per_token.map(|t| t.0),
+            kernel_trace_encoders_per_token: trace_per_token.map(|t| t.1),
+            kernel_trace_concurrent_encoders_per_token: trace_per_token.map(|t| t.2),
+            kernel_trace_dispatches_per_token: trace_per_token.map(|t| t.3),
             decode_gb_per_s: gb_per_s,
             prefill_chunk: None,
             decode_mode: Some(if pipelined {
@@ -4191,6 +4228,13 @@ fn run_tg(args: TgArgs) -> Result<()> {
             gpu_mean,
             100.0 * gpu_mean / wall_mean.max(1e-9)
         );
+        if let Some((cmd_buffers, encoders, concurrent_encoders, dispatches)) = trace_per_token {
+            eprintln!(
+                "[tg] trace: {cmd_buffers:.1} command buffers/token, \
+                 {encoders:.1} encoders/token ({concurrent_encoders:.1} concurrent), \
+                 {dispatches:.1} dispatches/token"
+            );
+        }
         eprintln!(
             "[tg] note: empty KV per rep, random tokens, no logits readback — matches `llama-bench tg{n_gen}`."
         );
@@ -4346,6 +4390,10 @@ fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
             samples_ns: vec![(wall_ms * 1e6) as u64],
             avg_ns: (wall_ms * 1e6) as u64,
             avg_gpu_ns: Some((gpu_ms * 1e6) as u64),
+            kernel_trace_command_buffers_per_token: None,
+            kernel_trace_encoders_per_token: None,
+            kernel_trace_concurrent_encoders_per_token: None,
+            kernel_trace_dispatches_per_token: None,
             decode_gb_per_s: None,
             prefill_chunk: Some(prefill_chunk),
             decode_mode: None,
@@ -4659,6 +4707,10 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
             samples_ns: prefill_walls.iter().map(|w| (*w * 1e6) as u64).collect(),
             avg_ns: (prefill_wall * 1e6) as u64,
             avg_gpu_ns: prefill_gpu_total_ms.map(|g| (g * 1e6) as u64),
+            kernel_trace_command_buffers_per_token: None,
+            kernel_trace_encoders_per_token: None,
+            kernel_trace_concurrent_encoders_per_token: None,
+            kernel_trace_dispatches_per_token: None,
             decode_gb_per_s: None,
             prefill_chunk: if use_packed_prefill {
                 Some(prefill_chunk)
@@ -4709,6 +4761,10 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
                     .collect(),
                 avg_ns: (steady_mean_ms * 1e6) as u64,
                 avg_gpu_ns: None,
+                kernel_trace_command_buffers_per_token: None,
+                kernel_trace_encoders_per_token: None,
+                kernel_trace_concurrent_encoders_per_token: None,
+                kernel_trace_dispatches_per_token: None,
                 decode_gb_per_s: gb_per_s,
                 prefill_chunk: if use_packed_prefill {
                     Some(prefill_chunk)

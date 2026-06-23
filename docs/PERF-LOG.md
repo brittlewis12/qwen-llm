@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.312 Decode Trace Counts And GDN Rollback Packet
+
+Status: added optional decode kernel-count fields to `qwen-bench tg` JSON behind
+`QWEN_DECODE_TRACE_COUNTS=1`, then ran the current-default versus
+`QWEN_DECODE_MOE_CONCURRENT_GDN=0` packet requested by cx. The packet confirms the
+GDN concurrent path is a real default win, but the remaining default path is GPU-
+active rather than host/dispatch-bubble dominated.
+
+Validation:
+
+- `cargo fmt && cargo build --release`
+- `QWEN_DECODE_TRACE_COUNTS=1` 0.8B `tg16` JSON smoke
+- clean v0.311 A3B/A10B `tg128 --runs 3` default versus GDN rollback
+- dirty warmed A3B/A10B `tg128 --runs 1` trace-count packet
+- cx adversarial review of the post-v0.311 next branch
+
+Results:
+
+| Model | Variant | `tg128` | GPU ms/token | Wall ms/token | Counts/token |
+| --- | --- | ---: | ---: | ---: | --- |
+| A3B | default | `102.75 t/s` | `9.320` | `9.732` | `1 cmd, 222 enc, 110 conc, 904 disp` |
+| A3B | GDN rollback | `95.25 t/s` | `10.106` | `10.499` | `1 cmd, 1 enc, 0 conc, 904 disp` |
+| A10B | default | `44.32 t/s` | `22.068` | `22.563` | `1 cmd, 264 enc, 130 conc, 1086 disp` |
+| A10B | GDN rollback | `42.36 t/s` | `23.118` | `23.607` | `1 cmd, 1 enc, 0 conc, 1086 disp` |
+
+The clean no-trace repeat also shows the default winning: A3B `103.36` versus
+`94.98 t/s` (`+8.8%`) and A10B `45.41` versus `42.84 t/s` (`+6.0%`).
+
+Interpretation: the known concurrent-GDN wave win is banked and should stay
+default. It is not evidence for another local GDN kernel. The default path has
+`~95.8-97.8%` GPU/wall, and disabling GDN concurrency mainly increases GPU active
+time with the same dispatch count. Short MoE decode execution-shape work now needs
+a new GPU-overlap mechanism, not encoder-count reduction by itself. Pivot the next
+active branch to long-context attention/KV or packed-verify measurement unless a
+fresh trace exposes a larger scheduling bubble.
+
 ## 2026-06-23 — v0.311 Q5 Down No-Weight Oracle
 
 Status: tested and removed a Q5 routed-down diagnostic sidecar that preserved the

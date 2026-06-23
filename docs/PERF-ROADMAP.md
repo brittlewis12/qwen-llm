@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.317:
+Current rank after v0.318:
 
 1. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
@@ -933,16 +933,7 @@ Current rank after v0.317:
    time, phase split, dispatch/encoder counts where available, and defensible
    bytes/token or bandwidth proxies. This is not dashboard work; it is the decision
    spine for capacity, execution-shape, and roofline calls.
-4. True-long current-default recheck: the old `pp34502=0.78x` row is stale
-   relative to later matrix/long-branch wins and v0.203 `pp16384` family wins.
-   Before implementing fused online-softmax, chunk policy, or GDN-scan work, rerun
-   current default on synthetic `pp16384`, synthetic `pp34502`, and one real
-   34.5k rollout against same-session llama.cpp. Bundle cross-chunk overlap probes
-   with this packet, because that mechanism is multi-chunk-specific and was not
-   covered by prior single-chunk stream-layer falsifiers. If the loss survives,
-   require any branch to improve both synthetic and real long prompts without
-   harming `pp512/1024`.
-5. Packed-verify/spec decode, structural rewrite only: v0.314 fixes production
+4. Packed-verify/spec decode, structural rewrite only: v0.314 fixes production
    `qwen-bench dflash` scratch allocation and shows real narrative `static-16`
    decode is catastrophically slower than no-spec despite good acceptance
    (`0.349x` at `570` prompt tokens and `0.261x` at `2464`). Treat acceptance as
@@ -950,11 +941,15 @@ Current rank after v0.317:
    only if packed verify/KV restore/logits accounting identifies one removable
    structural villain and a proof can plausibly clear `>=1.25x` decode on real
    prompts after full verify cost.
-6. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
+5. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen
-   prefill only if a paired repeat exposes a real current-default red cell.
-7. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
+   prefill only if a paired repeat exposes a real current-default red cell. v0.318
+   clears the stale A3B true-long row: synthetic `pp34502` is `1.196x` and a real
+   `56774`-token chaos rollout is `1.168x` versus pinned llama.cpp. Do not reopen
+   fused online-softmax, chunk policy, or GDN-scan work from the old true-long row
+   alone.
+6. BF16 MoE structural sidecar, explicitly scheduled only: BF16 remains a
    catastrophic demoted red cell, but the audit's mechanical hypotheses are now
    the right reopen criteria: vectorized BF16 weight tile loads, removal of
    binned full-grid relaunch waste, and all-simdgroup/vectorized down epilogues.
@@ -962,7 +957,7 @@ Current rank after v0.317:
    that graveyard as evidence against this variable. Do not claim product-family
    movement from BF16 until it moves BF16 A3B wall by a large factor and preserves
    grouped coverage.
-8. Short MoE decode execution-shape, only with fresh evidence: v0.292-v0.311 make
+7. Short MoE decode execution-shape, only with fresh evidence: v0.292-v0.311 make
    decode materially greener, but v0.312 says the current default is already
    GPU-active at `~95.8-97.8%` wall on warmed A3B/A10B `tg128`. The GDN-concurrent
    rollback win is real (`+8.8%/+6.0%`) but already banked, and disabling it mainly
@@ -970,37 +965,37 @@ Current rank after v0.317:
    GPU-overlap or byte-reduction mechanism with a measured `>=2%` tg ceiling on
    both MoE targets, or `>=3%` A10B with A3B neutral. Do not optimize encoder count
    for its own sake: serial one-encoder rollback is slower.
-9. Remaining dense prompt attribution, only if a paired red cell survives: the
+8. Remaining dense prompt attribution, only if a paired red cell survives: the
    latest phase trace shows `gdn_gated` and `gdn_prep_l2` are now tiny. If short
    dense still regresses in a clean repeat, target projection/FFN, GDN step, or
    attention body with a shape-matched differential. Do not retread attention
    defaults, fast-path coverage, residual-add fusion, N64 policy, shared-memory
    policy, GDN token-channel parallelization, command-buffer streaming, GDN
    matvec fallback, or HD128 normalization row count.
-10. Hardware-headroom watchlist: ICB/MTL4 encode-once decode, fused online-softmax
+9. Hardware-headroom watchlist: ICB/MTL4 encode-once decode, fused online-softmax
    prefill attention, chunked delta-rule GDN, production residency/warm expert
    banks, and epilogue fusions are all plausible paths to dominate beyond
    llama.cpp. They need a trace-proven idle/bandwidth/phase gate before
    implementation, not merely a green or red llama row. GDN prep falsifiers do not
    falsify chunked `gdn_step`; they are different kernels and mechanisms.
-11. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
+10. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,
    and `Q4_K_M` clean at `pp512/4096/tg128`. Reopen low-bit dense kernel work
    only when a paired file or static audit exposes a fresh miss.
-12. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
+11. `IQ4_XS` grouped-down precision/perf audit: strict internal-state cosine is
    below the usual `0.999` floor on `UD-IQ4_XS`, and F32 gate/up reproduces the
    same envelope. The v0.234 primitive grouped-down oracle passes (`cos=1.0`,
    `max_abs=1.386e-5`), so the next accuracy check needs real captured
    `moe_inner` activations rather than another synthetic row-stride oracle.
-13. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
+12. Bounded llama.cpp / counter attribution: verify whether llama.cpp is actually
    faster inside comparable routed gate/up/down arithmetic, or whether remaining
    differences are orchestration, fused GDN, graph fusion, warm/cold accounting,
    or profile scope. The pinned upstream b9481 build does not expose
    `GGML_METAL_PROFILE_OPS`; the local fork has a profiling patch, but any
    attribution claim needs either a canonical profiling patch or a clearly marked
    non-scoreboard capture before more kernel code.
-14. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
+13. True multi-expert work-unit reset: if attribution proves the gap is inside Q4
    `<8` SwiGLU arithmetic, design a kernel that changes the work unit more deeply
    than R16, MR32, or split gate/up. It must improve `<8` by at least `25-30%`
    before any end-to-end tuning.

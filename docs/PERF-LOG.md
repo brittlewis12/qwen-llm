@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.318 A3B True-Long Prefill Recheck
+
+Status: reran the stale A3B true-long prefill red cell with current HEAD and the
+pinned llama.cpp benchmark target. The old `pp34502 ~= 0.78x` loss is no longer
+current.
+
+Validation:
+
+- Paired synthetic A3B `pp34502`, one block, no warmup
+- Paired real rollout from `game/chaos.json` rendered with preserved thinking,
+  `56774` llama-tokenized prompt tokens, one block, no warmup
+- Static fast-path audit clean for A3B MoE (`40/40` grouped fast path, `lm=yes`)
+
+Results:
+
+| Prompt | Tokens | qwen | llama.cpp | qwen/lcpp |
+| --- | ---: | ---: | ---: | ---: |
+| synthetic | `34502` | `1027.25 t/s` | `859.16 t/s` | `1.196x` |
+| chaos rollout | `56774` | `792.31 t/s` | `678.39 t/s` | `1.168x` |
+
+Interpretation: A3B true-long prompt prefill is now green on both synthetic and a
+real narrative rollout. Do not prioritize fused-online-softmax, chunk-policy, or
+GDN-scan prefill work from the stale red row alone. Reopen true-long prefill only
+if a current paired family row or real rollout regresses again.
+
 ## 2026-06-23 — v0.317 Decode KV-Capacity Sensitivity Harness
 
 Status: added `qwen-bench decode --kv-capacity` so capacity sensitivity can be

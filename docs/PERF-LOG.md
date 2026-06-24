@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.325 Q5 Down R2 Probe Falsified By Same-Build A/B
+
+Status: tested and removed a dirty Q5_K routed-down `R2` work-unit probe that
+computes two output rows per simdgroup in the fused weighted-sum down kernel. The
+first A10B read looked like a large win, but the same-build rollback check showed
+that result was a run-order/residency confound rather than a real R2 gain.
+
+Validation:
+
+- `cargo build --release --bin qwen-bench` with the dirty R2 patch
+- A3B and A10B Q4 `ctx8192 --window 4 --fresh-per-checkpoint` sweeps
+- A3B and A10B Q4 `ctx8192` FFN split phase profiles
+- A3B CPU single-token smoke and A10B concurrent-vs-serial smoke with the patch
+- Same-build `QWEN_DECODE_MOE_Q5_DOWN_R2=0` rollback sweep and split phase
+
+Results:
+
+| Probe | Default/R2 | Rollback/R1 | Read |
+| --- | ---: | ---: | --- |
+| A3B `ctx8192` sweep | `93.7 t/s` | old baseline `93.0 t/s` | below gate |
+| A3B down wave | `1.31 ms` | old baseline `1.40 ms` | phase-local only |
+| A10B first R2 sweep | `42.1 t/s` | old baseline `38.8 t/s` | confounded |
+| A10B same-build sweep | `41.9 t/s` | `42.0 t/s` | flat/slightly worse |
+| A10B split down wave | `2.86 ms` | `2.75 ms` | rollback slightly better |
+
+Correctness was not the issue: the dirty patch passed the A3B CPU single-token
+smoke (`cos=1.000000`, max abs `0.0015`) and the A10B concurrent-vs-serial smoke
+(`cos=1.000000`).
+
+Interpretation: Q5_K down R2 is not a promotion-grade win. The apparent A10B jump
+came from comparing against an earlier cold/order-confounded row. Keep requiring
+same-build rollback A/B for long decode changes, especially on large MoE models
+where residency and first-touch effects can masquerade as kernel wins.
+
 ## 2026-06-23 — v0.324 A10B Long-Decode Roofline Confirms Down Wave
 
 Status: ran the A10B analogue of the A3B `ctx8192` decode roofline packet before

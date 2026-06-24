@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-24 — v0.332 Long-Prefill Family Spot
+
+Status: used the suite path for a current long-prefill family spot after the short
+board was refreshed. This is `runs=1`, `pp4096/pp16384`, pinned llama.cpp b9481,
+`10s` cooldown, AC power, no recorded thermal/performance warnings.
+
+Artifact:
+
+- `docs/bench/2026-06-24-2326-v0331-long-prefill-spot-family/README.md`
+
+Results:
+
+| Model class | `pp4096` qwen/lcpp | `pp16384` qwen/lcpp | Read |
+| --- | ---: | ---: | --- |
+| Dense 0.8B/2B/4B/9B/27B | `1.07/1.05/1.10/1.08/1.06x` | `1.05/1.03/1.12/1.06/1.05x` | all green |
+| MoE A3B | `1.20x` | `1.17x` | clear win |
+| MoE A10B | `1.23x` | `1.18x` | clear win |
+
+Interpretation: the stale long synthetic prefill board is not the next kernel
+priority. Prefill still has hardware headroom, and real-rollout gates remain
+valuable, but the current family `pp4096/16384` comparison is broadly green. Move
+the active performance branch back to decode/roofline headroom or to a deliberately
+chosen product objective rather than reopening generic long-prefill parity work.
+
 ## 2026-06-24 — v0.331 A10B Short-Prefill Confirmation
 
 Status: followed up the v0.329 broad spot's only yellow short-shape cell with a

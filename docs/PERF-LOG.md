@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.326 Decode Context Variant Harness
+
+Status: added `scripts/profile/decode_ctx_sweep.py`, a cooled sequential wrapper
+for `qwen-bench ctx-sweep` with env variants, repeat blocks, shuffle order,
+checkpointed JSON, thermal snapshots, and memory-pressure snapshots. This closes
+the measurement gap exposed by the false Q5 R2 win: long-decode variants now have
+a lightweight same-build/order-aware harness like `prefill_sweep.py`.
+
+Validation:
+
+- `uv run python -m py_compile scripts/profile/decode_ctx_sweep.py`
+- `uv run scripts/profile/decode_ctx_sweep.py --help`
+- 0.8B `ctx4/window1` two-variant smoke with JSON checkpointing
+- `cargo build --release --bin qwen-bench` after reverting dirty kernel probes
+
+Interpretation: use this harness before declaring any future long-decode kernel
+win. For A10B/A3B `ctx8192`, require alternating default-vs-candidate or
+default-vs-rollback blocks; single before/after rows are not enough because the
+v0.325 Q5 R2 probe demonstrated order/residency false positives.
+
 ## 2026-06-23 — v0.325 Q5 Down R2 Probe Falsified By Same-Build A/B
 
 Status: tested and removed a dirty Q5_K routed-down `R2` work-unit probe that

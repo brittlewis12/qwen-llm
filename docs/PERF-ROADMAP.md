@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.325:
+Current rank after v0.326:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -917,7 +917,8 @@ Current rank after v0.325:
    rows were `41.9/42.0 t/s`, and rollback split down was slightly faster
    (`2.75 ms` versus `2.86 ms`). Gate: `>=0.3 ms/token` total GPU improvement at
    A3B `ctx8192`, `>=0.8%` A10B `ctx8192`, `ctx128/1024` neutral, and same-build
-   rollback A/B before declaring any long-decode kernel win.
+   rollback A/B via `scripts/profile/decode_ctx_sweep.py` before declaring any
+   long-decode kernel win.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in
@@ -946,6 +947,9 @@ Current rank after v0.325:
    active-byte reads, v0.312 adds optional tg JSON command/encoder/dispatch
    accounting, v0.315 adds decode attention KV byte estimates, and v0.321 adds
    active decode weight bandwidth from bench JSON or manual context-sweep rows.
+   v0.326 adds `scripts/profile/decode_ctx_sweep.py` for order-aware env-variant
+   `ctx-sweep` packets, closing the measurement gap that let v0.325's false Q5
+   R2 win survive too long.
    The first A3B Q4 `ctx8192` sample is `93.0 t/s`, `2.6215 GB/token`, and
    `243.8 GB/s` (`51.4%` of measured stream roofline); attention KV subgroup
    traffic is `0.6711 GB/token` at `294.3 GB/s`. Next, keep using this output to

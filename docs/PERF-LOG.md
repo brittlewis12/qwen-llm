@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-23 — v0.327 A10B Down-Variant Harness Re-Anchor
+
+Status: used the new decode context variant harness on clean HEAD to re-anchor
+A10B Q4_XL `ctx8192` down-path attribution under same-build ordering. This
+replaces the earlier single-row baseline that was confounded by first-touch/order
+effects.
+
+Validation:
+
+- `decode_ctx_sweep.py` A10B Q4_XL `ctx8192 --window 4 --fresh-per-checkpoint`
+- variants: default, routed-down no-op, and `QWEN_DECODE_MOE_Q5_DOWN_FUSED=0`
+- one shuffled block with `15s` cooldown, AC power, no recorded warnings
+
+Results:
+
+| A10B Q4_XL `ctx8192` variant | t/s | total ms/token | GPU ms/token |
+| --- | ---: | ---: | ---: |
+| default | `42.4` | `23.57` | `23.02` |
+| routed-down no-op | `46.0` | `21.75` | `21.14` |
+| Q5 down fused off | `41.8` | `23.92` | `23.28` |
+
+Interpretation: the clean same-build packet confirms routed Q5_K down remains a
+real budget (`+8.5%` no-op headroom), while the current fused weighted-sum path
+is still better than the split down+weighted-sum rollback. Use `42.4 t/s` as the
+current clean A10B `ctx8192` baseline for the next long-decode experiment, not
+the stale cold `38.8 t/s` row.
+
 ## 2026-06-23 — v0.326 Decode Context Variant Harness
 
 Status: added `scripts/profile/decode_ctx_sweep.py`, a cooled sequential wrapper

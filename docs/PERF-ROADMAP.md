@@ -895,7 +895,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.326:
+Current rank after v0.327:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -907,10 +907,12 @@ Current rank after v0.326:
    slower (`93.0 -> 92.3 t/s`), dirty Q5_K `NSG={4,1}` fails the phase gate, and
    Q8_0 lcpp mat-vec rollback regresses badly (`80.2 t/s`). v0.323 also kills
    naive threadgroup staging of the Q5_K down inner vector (`93.0 -> 88.1 t/s`),
-   so repeated inner reads are not removable by a simple copy/barrier wrapper. The
+   so repeated inner reads are not removable by a simple copy/barrier wrapper.
    v0.324 confirms the pattern on A10B Q4_XL `ctx8192`: MoE FFN apply is
-   `9.31 ms` / `34.8%`, down wave is `4.90 ms`, routed Q5_K down is `4.58 ms` /
-   `182 GB/s`, and no-oping routed down moves `38.8 -> 45.9 t/s`. The next
+   `9.31 ms` / `34.8%`, down wave is `4.90 ms`, and routed Q5_K down is
+   `4.58 ms` / `182 GB/s`. v0.327 re-anchors the clean same-build harness row:
+   default is `42.4 t/s`, routed-down no-op is `46.0 t/s`, and Q5 fused-off is
+   `41.8 t/s`. The next
    credible MoE FFN branch must change the Q5 down work unit more deeply or bring
    counters proving the down wave is compute/dequant-bound. v0.325 kills a Q5_K
    R2 two-output-row work-unit probe: same-build A10B `ctx8192` default/rollback

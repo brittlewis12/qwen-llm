@@ -29,6 +29,21 @@ pub enum RuntimeError {
     Tokenizer(#[from] TokError),
     #[error("sequence max_context_tokens must be >= 1")]
     EmptySequenceCapacity,
+    #[error(
+        "sequence position mismatch: caller position {caller_position}, tracked position {tracked_position}"
+    )]
+    SequencePositionMismatch {
+        caller_position: usize,
+        tracked_position: usize,
+    },
+    #[error(
+        "sequence capacity exceeded: position {position} + {n_tokens} tokens > max_context_tokens {max_context_tokens}"
+    )]
+    SequenceCapacityExceeded {
+        position: usize,
+        n_tokens: usize,
+        max_context_tokens: usize,
+    },
 }
 
 struct RuntimeInner {
@@ -145,6 +160,7 @@ impl LoadedModel {
             MetalSession::fresh(self.context(), &self.metal_model, config.max_context_tokens)?;
         Ok(Sequence {
             max_context_tokens: config.max_context_tokens,
+            position: 0,
             state,
         })
     }
@@ -166,6 +182,13 @@ impl SequenceConfig {
     pub fn new(max_context_tokens: usize) -> Self {
         Self { max_context_tokens }
     }
+
+    pub fn try_new(max_context_tokens: usize) -> Result<Self, RuntimeError> {
+        if max_context_tokens == 0 {
+            return Err(RuntimeError::EmptySequenceCapacity);
+        }
+        Ok(Self { max_context_tokens })
+    }
 }
 
 /// User-facing mutable state for one generated sequence.
@@ -174,12 +197,56 @@ impl SequenceConfig {
 /// ids, logits, and related per-sequence buffers.
 pub struct Sequence {
     max_context_tokens: usize,
+    position: usize,
     state: MetalSession,
 }
 
 impl Sequence {
     pub fn max_context_tokens(&self) -> usize {
         self.max_context_tokens
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    pub fn remaining_context_tokens(&self) -> usize {
+        self.max_context_tokens.saturating_sub(self.position)
+    }
+
+    pub fn check_position(&self, caller_position: usize) -> Result<(), RuntimeError> {
+        if caller_position != self.position {
+            return Err(RuntimeError::SequencePositionMismatch {
+                caller_position,
+                tracked_position: self.position,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn ensure_can_append(&self, n_tokens: usize) -> Result<(), RuntimeError> {
+        let end =
+            self.position
+                .checked_add(n_tokens)
+                .ok_or(RuntimeError::SequenceCapacityExceeded {
+                    position: self.position,
+                    n_tokens,
+                    max_context_tokens: self.max_context_tokens,
+                })?;
+        if end > self.max_context_tokens {
+            return Err(RuntimeError::SequenceCapacityExceeded {
+                position: self.position,
+                n_tokens,
+                max_context_tokens: self.max_context_tokens,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn advance_by(&mut self, n_tokens: usize) -> Result<(), RuntimeError> {
+        self.ensure_can_append(n_tokens)?;
+        self.position += n_tokens;
+        Ok(())
     }
 
     /// Low-level bridge for the existing Metal execution functions.

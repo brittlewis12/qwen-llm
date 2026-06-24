@@ -449,13 +449,12 @@ def main() -> int:
         lcpp_out.write_text(json.dumps(lcpp_rows, indent=2) + "\n")
         lcpp_count += 1
 
-        qwen_out = out_dir / f"qwen-suite-{tag}.json"
-        print(f"[family] -> {qwen_out}", file=sys.stderr)
         cmd = [qwen_bench, "suite", "-m", path, "--runs", str(args.runs), "-o", "json"]
         if pp_shapes:
             cmd += ["--pp", ",".join(str(p) for p in pp_shapes)]
         if tg_shapes:
             cmd += ["--tg", ",".join(str(n) for n in tg_shapes)]
+        print(f"[family] -> qwen suite {tag}", file=sys.stderr)
         cooldown = 0.0 if first_measured else args.cooldown_seconds
         first_measured = False
         rows, record = run_json_measured(
@@ -466,8 +465,13 @@ def main() -> int:
         record.update({"engine": "qwen", "tag": tag, "test": "suite"})
         manifest["command_records"].append(record)
         write_manifest(out_dir, manifest)
-        qwen_out.write_text(json.dumps(rows, indent=2) + "\n")
-        qwen_count += 1
+        for bench_row in rows:
+            test = bench_row.get("test", "")
+            if not re.fullmatch(r"(?:pp|tg)\d+", test):
+                die(f"unexpected qwen suite test name for tag={tag}: {test!r}")
+            qwen_out = out_dir / f"qwen-{test}-{tag}.json"
+            qwen_out.write_text(json.dumps([bench_row], indent=2) + "\n")
+            qwen_count += 1
 
     print(
         f"[family] sweep done: lcpp={lcpp_count} models, qwen={qwen_count} bench files",

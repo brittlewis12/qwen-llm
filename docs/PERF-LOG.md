@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-24 — v0.330 Runtime/Suite Hardening
+
+Status: hardened the v0.328 runtime boundary and suite harness before returning
+to kernel work. `Sequence` now tracks semantic position/capacity with checked
+advance helpers, suite rows emit setup timing fields, and `family.py` keeps the
+old per-shape `qwen-pp*/qwen-tg*` artifact naming while still using one in-process
+suite command per model.
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `uv run python -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/bench/family.py").read_text())'`
+- debug 0.8B `suite --pp 1 --tg 1 --runs 1 --no-warmup -o json` smoke showing
+  `avg_compute_ns`, `avg_session_alloc_ns`, and `avg_scratch_alloc_ns`
+
+Interpretation: this keeps `suite` useful for broad reads without making state
+reuse invisible. The public runtime API remains intentionally small; higher-level
+`prefill`/`decode_one`, pooling, slots, and batch types should wait until the
+position semantics are exercised behind non-bench call sites.
+
 ## 2026-06-24 — v0.329 Suite Spot Family Re-Anchor
 
 Status: ran the first clean family spot through the new qwen-side in-process

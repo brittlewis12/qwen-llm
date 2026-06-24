@@ -689,6 +689,9 @@ struct BenchRow {
     samples_ts: Vec<f64>,
     samples_ns: Vec<u64>,
     avg_ns: u64,
+    avg_compute_ns: Option<u64>,
+    avg_session_alloc_ns: Option<u64>,
+    avg_scratch_alloc_ns: Option<u64>,
     avg_gpu_ns: Option<u64>,
     kernel_trace_command_buffers_per_token: Option<f64>,
     kernel_trace_encoders_per_token: Option<f64>,
@@ -3859,6 +3862,9 @@ fn run_pp(args: PpArgs) -> Result<()> {
             samples_ts: ts_samples.clone(),
             samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
             avg_ns: (wall_mean * 1e6) as u64,
+            avg_compute_ns: Some((wall_mean * 1e6) as u64),
+            avg_session_alloc_ns: None,
+            avg_scratch_alloc_ns: None,
             avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
             kernel_trace_command_buffers_per_token: None,
             kernel_trace_encoders_per_token: None,
@@ -4282,6 +4288,9 @@ fn run_tg(args: TgArgs) -> Result<()> {
             samples_ts: ts_samples.clone(),
             samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
             avg_ns: (wall_mean * 1e6) as u64,
+            avg_compute_ns: Some((wall_mean * 1e6) as u64),
+            avg_session_alloc_ns: None,
+            avg_scratch_alloc_ns: None,
             avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
             kernel_trace_command_buffers_per_token: trace_per_token.map(|t| t.0),
             kernel_trace_encoders_per_token: trace_per_token.map(|t| t.1),
@@ -4400,12 +4409,20 @@ fn run_suite_pp_row(
     let mut wall_samples = Vec::with_capacity(runs);
     let mut gpu_samples = Vec::with_capacity(runs);
     let mut ts_samples = Vec::with_capacity(runs);
+    let mut session_alloc_samples = Vec::with_capacity(runs);
+    let mut scratch_alloc_samples = Vec::with_capacity(runs);
     for _ in 0..runs {
+        let session_t0 = Instant::now();
         let mut seq = loaded
             .create_sequence(SequenceConfig::new(cap))
             .context("suite pp session")?;
+        let session_alloc_ms = session_t0.elapsed().as_secs_f64() * 1e3;
+        let scratch_t0 = Instant::now();
         let mut scratch = fresh_prefill_scratch_for_prompt(ctx, mm, prefill_chunk, ids.len())
             .context("suite pp scratch")?;
+        let scratch_alloc_ms = scratch_t0.elapsed().as_secs_f64() * 1e3;
+        seq.ensure_can_append(ids.len())
+            .context("suite pp sequence capacity")?;
         let t0 = Instant::now();
         let gpu_ms = prefill_tokens_prompt_only_profiled(
             &mf,
@@ -4416,13 +4433,19 @@ fn run_suite_pp_row(
         )
         .context("suite pp timed prefill")?;
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        seq.advance_by(ids.len())
+            .context("suite pp advance sequence")?;
         wall_samples.push(wall_ms);
         gpu_samples.push(gpu_ms);
         ts_samples.push(ids.len() as f64 * 1000.0 / wall_ms);
+        session_alloc_samples.push(session_alloc_ms);
+        scratch_alloc_samples.push(scratch_alloc_ms);
     }
 
     let wall_mean = sample_mean(&wall_samples);
     let gpu_mean = sample_mean(&gpu_samples);
+    let session_alloc_mean = sample_mean(&session_alloc_samples);
+    let scratch_alloc_mean = sample_mean(&scratch_alloc_samples);
     Ok(BenchRow {
         schema_version: BENCH_SCHEMA_VERSION,
         engine: "qwen-llm",
@@ -4441,6 +4464,9 @@ fn run_suite_pp_row(
         samples_ts: ts_samples,
         samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
         avg_ns: (wall_mean * 1e6) as u64,
+        avg_compute_ns: Some((wall_mean * 1e6) as u64),
+        avg_session_alloc_ns: Some((session_alloc_mean * 1e6) as u64),
+        avg_scratch_alloc_ns: Some((scratch_alloc_mean * 1e6) as u64),
         avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
         kernel_trace_command_buffers_per_token: None,
         kernel_trace_encoders_per_token: None,
@@ -4480,10 +4506,14 @@ fn run_suite_tg_row(
     };
     let run_once = |first_tok: i32,
                     ranges: &mut dyn FnMut() -> i32|
-     -> Result<(f64, f64, Option<KernelTraceCounters>)> {
+     -> Result<(f64, f64, Option<KernelTraceCounters>, f64)> {
+        let session_t0 = Instant::now();
         let mut seq = loaded
             .create_sequence(SequenceConfig::new(cap))
             .context("suite tg session")?;
+        let session_alloc_ms = session_t0.elapsed().as_secs_f64() * 1e3;
+        seq.ensure_can_append(n_gen)
+            .context("suite tg sequence capacity")?;
         let _kernel_trace_guard = trace_counts.then(kernel_trace_begin);
         let t0 = Instant::now();
         let mut tok = first_tok;
@@ -4495,8 +4525,9 @@ fn run_suite_tg_row(
             tok = ranges();
         }
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        seq.advance_by(n_gen).context("suite tg advance sequence")?;
         let counts = trace_counts.then(kernel_trace_snapshot);
-        Ok((wall_ms, gpu_ms_acc, counts))
+        Ok((wall_ms, gpu_ms_acc, counts, session_alloc_ms))
     };
 
     if !no_warmup {
@@ -4507,14 +4538,16 @@ fn run_suite_tg_row(
     let mut wall_samples = Vec::with_capacity(runs);
     let mut gpu_samples = Vec::with_capacity(runs);
     let mut ts_samples = Vec::with_capacity(runs);
+    let mut session_alloc_samples = Vec::with_capacity(runs);
     let mut trace_samples = Vec::with_capacity(runs);
     for _ in 0..runs {
         let first = next_rand_tok();
-        let (wall_ms, gpu_ms, trace) =
+        let (wall_ms, gpu_ms, trace, session_alloc_ms) =
             run_once(first, &mut next_rand_tok).context("suite tg run")?;
         wall_samples.push(wall_ms);
         gpu_samples.push(gpu_ms);
         ts_samples.push(n_gen as f64 * 1000.0 / wall_ms);
+        session_alloc_samples.push(session_alloc_ms);
         if let Some(trace) = trace {
             trace_samples.push(trace);
         }
@@ -4522,6 +4555,7 @@ fn run_suite_tg_row(
 
     let wall_mean = sample_mean(&wall_samples);
     let gpu_mean = sample_mean(&gpu_samples);
+    let session_alloc_mean = sample_mean(&session_alloc_samples);
     let trace_per_token = if trace_counts && !trace_samples.is_empty() {
         let denom = (trace_samples.len() * n_gen) as f64;
         let encoders: u64 = trace_samples.iter().map(|t| t.encoders).sum();
@@ -4563,6 +4597,9 @@ fn run_suite_tg_row(
         samples_ts: ts_samples,
         samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
         avg_ns: (wall_mean * 1e6) as u64,
+        avg_compute_ns: Some((wall_mean * 1e6) as u64),
+        avg_session_alloc_ns: Some((session_alloc_mean * 1e6) as u64),
+        avg_scratch_alloc_ns: None,
         avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
         kernel_trace_command_buffers_per_token: trace_per_token.map(|t| t.0),
         kernel_trace_encoders_per_token: trace_per_token.map(|t| t.1),
@@ -4806,6 +4843,9 @@ fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
             samples_ts: vec![ts],
             samples_ns: vec![(wall_ms * 1e6) as u64],
             avg_ns: (wall_ms * 1e6) as u64,
+            avg_compute_ns: Some((wall_ms * 1e6) as u64),
+            avg_session_alloc_ns: None,
+            avg_scratch_alloc_ns: None,
             avg_gpu_ns: Some((gpu_ms * 1e6) as u64),
             kernel_trace_command_buffers_per_token: None,
             kernel_trace_encoders_per_token: None,
@@ -5130,6 +5170,9 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
             samples_ts: prefill_ts_samples.clone(),
             samples_ns: prefill_walls.iter().map(|w| (*w * 1e6) as u64).collect(),
             avg_ns: (prefill_wall * 1e6) as u64,
+            avg_compute_ns: Some((prefill_wall * 1e6) as u64),
+            avg_session_alloc_ns: None,
+            avg_scratch_alloc_ns: None,
             avg_gpu_ns: prefill_gpu_total_ms.map(|g| (g * 1e6) as u64),
             kernel_trace_command_buffers_per_token: None,
             kernel_trace_encoders_per_token: None,
@@ -5184,6 +5227,9 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
                     .map(|m| (*m * 1e6) as u64)
                     .collect(),
                 avg_ns: (steady_mean_ms * 1e6) as u64,
+                avg_compute_ns: Some((steady_mean_ms * 1e6) as u64),
+                avg_session_alloc_ns: None,
+                avg_scratch_alloc_ns: None,
                 avg_gpu_ns: None,
                 kernel_trace_command_buffers_per_token: None,
                 kernel_trace_encoders_per_token: None,

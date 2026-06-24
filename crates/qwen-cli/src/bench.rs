@@ -48,6 +48,7 @@ use qwen_llm::{
     metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     prefix_cache::PrefixCache,
+    runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
 };
@@ -180,6 +181,9 @@ enum Cmd {
     /// This is the apples-to-apples decode comparison. Use `decode` for real
     /// generation with a prompt.
     Tg(TgArgs),
+    /// In-process synthetic pp/tg suite: load one model once, then run many
+    /// shapes with fresh sessions per row.
+    Suite(SuiteArgs),
     /// Sweep context length (ramp + measure window).
     CtxSweep(CtxSweepArgs),
     /// Phase-resolved profile at one context length (uses the
@@ -393,6 +397,40 @@ struct TgArgs {
     seed: u64,
     /// `text` or `json` (`llama-bench -o json` shape).
     #[arg(short = 'o', long, value_enum, default_value = "text")]
+    output: OutputFormat,
+}
+
+/// Synthetic multi-shape suite that keeps one loaded model resident.
+///
+/// Each reported row still uses a fresh sequence/session for each measured
+/// repetition. This removes repeated process/model-load overhead without
+/// changing the steady-state pp/tg semantics used by the single-shape commands.
+#[derive(Parser, Debug)]
+struct SuiteArgs {
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Prompt-only prefill shapes. Accepts repeated flags or comma lists.
+    #[arg(long = "pp", value_delimiter = ',')]
+    pp: Vec<usize>,
+    /// Generation-only decode shapes. Accepts repeated flags or comma lists.
+    #[arg(long = "tg", value_delimiter = ',')]
+    tg: Vec<usize>,
+    /// Number of timed reps after each row's optional warmup.
+    #[arg(long, default_value = "1")]
+    runs: usize,
+    /// Skip each row's warmup pass.
+    #[arg(long)]
+    no_warmup: bool,
+    /// Packed prefill chunk size for pp rows. If omitted, uses the model-aware
+    /// default for each pp shape.
+    #[arg(long)]
+    prefill_chunk: Option<usize>,
+    /// Deterministic seed for synthetic tokens.
+    #[arg(long, default_value = "1")]
+    seed: u64,
+    /// `text` or `json` (`llama-bench -o json` shape). Defaults to JSON because
+    /// suite output usually feeds scripts.
+    #[arg(short = 'o', long, value_enum, default_value = "json")]
     output: OutputFormat,
 }
 
@@ -1343,6 +1381,7 @@ fn main() -> Result<()> {
         Cmd::Decode(a) => run_decode(a),
         Cmd::Pp(a) => run_pp(a),
         Cmd::Tg(a) => run_tg(a),
+        Cmd::Suite(a) => run_suite(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
         Cmd::Roofline(a) => run_roofline(a),
@@ -3621,23 +3660,27 @@ fn run_pp(args: PpArgs) -> Result<()> {
     let json_mode = matches!(output, OutputFormat::Json);
     macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
 
-    let ctx = MetalContext::new().context("init MetalContext")?;
-    text_log!("[pp] device: {}", ctx.describe());
+    let runtime = Runtime::metal().context("init Runtime")?;
+    text_log!("[pp] device: {}", runtime.describe());
     let power = capture_power_snapshot();
     text_log!("[pp] power: {}", power_snapshot_summary(power.as_ref()));
 
-    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
-    let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
-    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
+    let loaded = runtime
+        .load_model(&model)
+        .with_context(|| format!("load {}", model.display()))?;
+    let ctx = loaded.context();
+    let g = loaded.gguf();
+    let mm = loaded.metal_model();
+    let arch = loaded.arch();
 
     let (ids, source_label) = if let Some(prompt) = prompt {
-        let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
+        let tok = loaded.tokenizer().context("open tokenizer")?;
         let ids = tok.encode(&prompt, false).context("tokenize prompt")?;
         (ids, format!("text prompt ({} chars)", prompt.len()))
     } else if let Some(path) = file {
         let prompt =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
+        let tok = loaded.tokenizer().context("open tokenizer")?;
         let ids = tok.encode(&prompt, false).context("tokenize prompt file")?;
         (
             ids,
@@ -3650,7 +3693,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
             messages_thinking_mode(messages_preserve_thinking, messages_strip_thinking),
             !messages_no_generation_prompt,
         )?;
-        let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
+        let tok = loaded.tokenizer().context("open tokenizer")?;
         let ids = tok
             .encode(&prompt, false)
             .context("tokenize rendered messages prompt")?;
@@ -3663,7 +3706,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
             return Err(anyhow!("--n-prompt must be >= 1"));
         }
         (
-            synthetic_prompt_ids(n_prompt, m.arch.vocab_size, seed),
+            synthetic_prompt_ids(n_prompt, arch.vocab_size, seed),
             format!("synthetic token ids (seed={seed})"),
         )
     };
@@ -3672,12 +3715,12 @@ fn run_pp(args: PpArgs) -> Result<()> {
     }
 
     let prefill_chunk =
-        prefill_chunk.unwrap_or_else(|| default_prefill_chunk(m.arch.kind, ids.len()));
+        prefill_chunk.unwrap_or_else(|| default_prefill_chunk(arch.kind, ids.len()));
     if prefill_chunk == 0 {
         return Err(anyhow!("--prefill-chunk must be >= 1"));
     }
 
-    let mf = MetalForward::new(&ctx, &mm);
+    let mf = loaded.forward();
     let cap = ids.len() + 16;
     text_log!(
         "[pp] model={} source={} n_prompt={} runs={} chunk={} tail={}",
@@ -3689,14 +3732,14 @@ fn run_pp(args: PpArgs) -> Result<()> {
         if with_tail { "final-logits" } else { "skip" }
     );
     if !json_mode {
-        print_prefill_lowering_summary(&mm);
+        print_prefill_lowering_summary(mm);
     }
 
     let residency_guard = if env_flag_enabled("QWEN_PP_RESIDENCY_SET")
-        && m.arch.kind == qwen_llm::model::ArchKind::Moe
+        && arch.kind == qwen_llm::model::ArchKind::Moe
     {
         let (guard, allocations, bytes) =
-            pp_register_moe_residency_set(&ctx, &mf).context("register MoE residency set")?;
+            pp_register_moe_residency_set(ctx, &mf).context("register MoE residency set")?;
         text_log!(
             "[pp] residency: registered {allocations} MoE expert-bank allocations ({:.2} GiB tracked)",
             bytes as f64 / (1024.0 * 1024.0 * 1024.0)
@@ -3709,23 +3752,39 @@ fn run_pp(args: PpArgs) -> Result<()> {
     if residency_guard.is_some() && env_flag_enabled("QWEN_PP_WARM_MOE_BANKS") {
         text_log!("[pp] residency-set active; skipping QWEN_PP_WARM_MOE_BANKS touch pass");
     } else if env_flag_enabled("QWEN_PP_WARM_MOE_BANKS")
-        && m.arch.kind == qwen_llm::model::ArchKind::Moe
+        && arch.kind == qwen_llm::model::ArchKind::Moe
     {
         let touched =
-            pp_warm_moe_weight_banks(&ctx, &mf).context("warm grouped MoE weight banks")?;
+            pp_warm_moe_weight_banks(ctx, &mf).context("warm grouped MoE weight banks")?;
         text_log!("[pp] warmup: touched {touched} MoE expert-bank tensors via GPU residency pass");
     }
 
     if !no_warmup {
-        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session warmup")?;
-        let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
+        let mut s = loaded
+            .create_sequence(SequenceConfig::new(cap))
+            .context("session warmup")?;
+        let mut scratch = fresh_prefill_scratch_for_prompt(ctx, mm, prefill_chunk, ids.len())
             .context("warmup prefill scratch")?;
         if with_tail {
-            let _ = prefill_tokens_with_multi_hidden(&mf, &ids, 0, &mut s, &mut scratch, &[], None)
-                .context("warmup prefill with tail")?;
+            let _ = prefill_tokens_with_multi_hidden(
+                &mf,
+                &ids,
+                0,
+                s.metal_session_mut(),
+                &mut scratch,
+                &[],
+                None,
+            )
+            .context("warmup prefill with tail")?;
         } else {
-            let _ = prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
-                .context("warmup prompt-only prefill")?;
+            let _ = prefill_tokens_prompt_only_profiled(
+                &mf,
+                &ids,
+                0,
+                s.metal_session_mut(),
+                &mut scratch,
+            )
+            .context("warmup prompt-only prefill")?;
         }
     }
 
@@ -3733,8 +3792,10 @@ fn run_pp(args: PpArgs) -> Result<()> {
     let mut gpu_samples = Vec::with_capacity(runs);
     let mut ts_samples = Vec::with_capacity(runs);
     for run_idx in 0..runs {
-        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
-        let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, prefill_chunk, ids.len())
+        let mut s = loaded
+            .create_sequence(SequenceConfig::new(cap))
+            .context("session run")?;
+        let mut scratch = fresh_prefill_scratch_for_prompt(ctx, mm, prefill_chunk, ids.len())
             .context("timed prefill scratch")?;
 
         let t0 = Instant::now();
@@ -3743,7 +3804,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
                 &mf,
                 &ids,
                 0,
-                &mut s,
+                s.metal_session_mut(),
                 &mut scratch,
                 &[],
                 None,
@@ -3751,7 +3812,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
             .context("timed prefill with tail")?;
             gpu_ms
         } else {
-            prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
+            prefill_tokens_prompt_only_profiled(&mf, &ids, 0, s.metal_session_mut(), &mut scratch)
                 .context("timed prompt-only prefill")?
         };
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
@@ -3782,11 +3843,11 @@ fn run_pp(args: PpArgs) -> Result<()> {
             build_dirty: dirty,
             test_time: utc_iso8601_now(),
             model_filename: model.display().to_string(),
-            model_size: model_weight_bytes(&g),
+            model_size: model_weight_bytes(g),
             model_n_params: g
                 .get_u64("general.parameter_count")
                 .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum()),
-            arch_kind: match m.arch.kind {
+            arch_kind: match arch.kind {
                 qwen_llm::model::ArchKind::Dense => "dense",
                 qwen_llm::model::ArchKind::Moe => "moe",
             },
@@ -3972,17 +4033,21 @@ fn run_tg(args: TgArgs) -> Result<()> {
     macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
     let trace_counts = env_flag_enabled("QWEN_DECODE_TRACE_COUNTS");
 
-    let ctx = MetalContext::new().context("init MetalContext")?;
-    text_log!("[tg] device: {}", ctx.describe());
+    let runtime = Runtime::metal().context("init Runtime")?;
+    text_log!("[tg] device: {}", runtime.describe());
     let power = capture_power_snapshot();
     text_log!("[tg] power: {}", power_snapshot_summary(power.as_ref()));
 
-    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
-    let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
-    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
-    let mf = MetalForward::new(&ctx, &mm);
+    let loaded = runtime
+        .load_model(&model)
+        .with_context(|| format!("load {}", model.display()))?;
+    let ctx = loaded.context();
+    let g = loaded.gguf();
+    let mm = loaded.metal_model();
+    let arch = loaded.arch();
+    let mf = loaded.forward();
 
-    let vocab = m.arch.vocab_size.max(1);
+    let vocab = arch.vocab_size.max(1);
     // xorshift64* with the same `seed` controls the random tokens across
     // reps, so the bench is fully deterministic. Single shared state so
     // rep N+1 isn't reading the same tokens as rep N.
@@ -4011,16 +4076,16 @@ fn run_tg(args: TgArgs) -> Result<()> {
     let cap = n_gen + 16;
     let ids_ping = if pipelined {
         Some([
-            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined ids ping0")?,
-            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined ids ping1")?,
+            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined ids ping0")?,
+            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined ids ping1")?,
         ])
     } else {
         None
     };
     let argmax_ping = if pipelined {
         Some([
-            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined argmax ping0")?,
-            MetalTensor::zeros_f32(&ctx, vec![1]).context("tg pipelined argmax ping1")?,
+            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined argmax ping0")?,
+            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined argmax ping1")?,
         ])
     } else {
         None
@@ -4028,7 +4093,9 @@ fn run_tg(args: TgArgs) -> Result<()> {
     let run_once = |first_tok: i32,
                     ranges: &mut dyn FnMut() -> i32|
      -> Result<(f64, f64, Option<KernelTraceCounters>)> {
-        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("tg session")?;
+        let mut s = loaded
+            .create_sequence(SequenceConfig::new(cap))
+            .context("tg session")?;
         let _kernel_trace_guard = trace_counts.then(kernel_trace_begin);
         if !pipelined {
             let t0 = Instant::now();
@@ -4048,9 +4115,13 @@ fn run_tg(args: TgArgs) -> Result<()> {
                             "--concurrent-gdn-proj tg mode is currently MoE-only"
                         ));
                     }
-                    mf.single_token_argmax_profiled_concurrent_gdn_moe(tok, pos as u32, &mut s)?
+                    mf.single_token_argmax_profiled_concurrent_gdn_moe(
+                        tok,
+                        pos as u32,
+                        s.metal_session_mut(),
+                    )?
                 } else {
-                    mf.single_token_argmax_profiled(tok, pos as u32, &mut s)?
+                    mf.single_token_argmax_profiled(tok, pos as u32, s.metal_session_mut())?
                 };
                 gpu_ms_acc += prof.gpu_kernel_ms;
                 tok = ranges();
@@ -4080,7 +4151,13 @@ fn run_tg(args: TgArgs) -> Result<()> {
             .commandBuffer()
             .context("tg pipelined first command buffer")?;
         let first_enc = KernelEncoder::begin(&first_cmd);
-        mf.encode_single_token_argmax(&first_enc, 0, &mut s, &ids_ping[0], &argmax_ping[0])?;
+        mf.encode_single_token_argmax(
+            &first_enc,
+            0,
+            s.metal_session_mut(),
+            &ids_ping[0],
+            &argmax_ping[0],
+        )?;
         first_enc.end();
         first_cmd.commit();
         let mut pending_cmd = first_cmd;
@@ -4096,7 +4173,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
             mf.encode_single_token_argmax(
                 &next_enc,
                 pos as u32,
-                &mut s,
+                s.metal_session_mut(),
                 &ids_ping[next_slot],
                 &argmax_ping[next_slot],
             )?;
@@ -4169,17 +4246,17 @@ fn run_tg(args: TgArgs) -> Result<()> {
 
     if json_mode {
         let (commit, dirty) = qwen_build_identity();
-        let arch_kind_str: &'static str = match m.arch.kind {
+        let arch_kind_str: &'static str = match arch.kind {
             qwen_llm::model::ArchKind::Dense => "dense",
             qwen_llm::model::ArchKind::Moe => "moe",
         };
-        let model_size = model_weight_bytes(&g);
+        let model_size = model_weight_bytes(g);
         let model_n_params = g
             .get_u64("general.parameter_count")
             .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum());
         // Bandwidth is only meaningful for dense; MoE active-param accounting
         // lives outside this schema today.
-        let gb_per_s = if matches!(m.arch.kind, qwen_llm::model::ArchKind::Dense)
+        let gb_per_s = if matches!(arch.kind, qwen_llm::model::ArchKind::Dense)
             && model_size > 0
             && wall_mean > 0.0
         {
@@ -4259,6 +4336,336 @@ fn run_tg(args: TgArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn arch_kind_label(kind: qwen_llm::model::ArchKind) -> &'static str {
+    match kind {
+        qwen_llm::model::ArchKind::Dense => "dense",
+        qwen_llm::model::ArchKind::Moe => "moe",
+    }
+}
+
+struct SuiteRowContext {
+    build_commit: &'static str,
+    build_dirty: u8,
+    model_filename: String,
+    model_size: u64,
+    model_n_params: u64,
+    arch_kind: &'static str,
+    power: Option<PowerSnapshot>,
+    qwen_env: std::collections::BTreeMap<String, String>,
+}
+
+fn run_suite_pp_row(
+    loaded: &LoadedModel,
+    row_ctx: &SuiteRowContext,
+    n_prompt: usize,
+    runs: usize,
+    no_warmup: bool,
+    prefill_chunk_override: Option<usize>,
+    seed: u64,
+) -> Result<BenchRow> {
+    if n_prompt == 0 {
+        return Err(anyhow!("--pp values must be >= 1"));
+    }
+    let arch = loaded.arch();
+    let ctx = loaded.context();
+    let mm = loaded.metal_model();
+    let mf = loaded.forward();
+    let ids = synthetic_prompt_ids(n_prompt, arch.vocab_size, seed);
+    let prefill_chunk =
+        prefill_chunk_override.unwrap_or_else(|| default_prefill_chunk(arch.kind, ids.len()));
+    if prefill_chunk == 0 {
+        return Err(anyhow!("--prefill-chunk must be >= 1"));
+    }
+    let cap = ids.len() + 16;
+
+    if !no_warmup {
+        let mut seq = loaded
+            .create_sequence(SequenceConfig::new(cap))
+            .context("suite pp warmup session")?;
+        let mut scratch = fresh_prefill_scratch_for_prompt(ctx, mm, prefill_chunk, ids.len())
+            .context("suite pp warmup scratch")?;
+        let _ = prefill_tokens_prompt_only_profiled(
+            &mf,
+            &ids,
+            0,
+            seq.metal_session_mut(),
+            &mut scratch,
+        )
+        .context("suite pp warmup")?;
+    }
+
+    let mut wall_samples = Vec::with_capacity(runs);
+    let mut gpu_samples = Vec::with_capacity(runs);
+    let mut ts_samples = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let mut seq = loaded
+            .create_sequence(SequenceConfig::new(cap))
+            .context("suite pp session")?;
+        let mut scratch = fresh_prefill_scratch_for_prompt(ctx, mm, prefill_chunk, ids.len())
+            .context("suite pp scratch")?;
+        let t0 = Instant::now();
+        let gpu_ms = prefill_tokens_prompt_only_profiled(
+            &mf,
+            &ids,
+            0,
+            seq.metal_session_mut(),
+            &mut scratch,
+        )
+        .context("suite pp timed prefill")?;
+        let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        wall_samples.push(wall_ms);
+        gpu_samples.push(gpu_ms);
+        ts_samples.push(ids.len() as f64 * 1000.0 / wall_ms);
+    }
+
+    let wall_mean = sample_mean(&wall_samples);
+    let gpu_mean = sample_mean(&gpu_samples);
+    Ok(BenchRow {
+        schema_version: BENCH_SCHEMA_VERSION,
+        engine: "qwen-llm",
+        build_commit: row_ctx.build_commit,
+        build_dirty: row_ctx.build_dirty,
+        test_time: utc_iso8601_now(),
+        model_filename: row_ctx.model_filename.clone(),
+        model_size: row_ctx.model_size,
+        model_n_params: row_ctx.model_n_params,
+        arch_kind: row_ctx.arch_kind,
+        test: format!("pp{}", ids.len()),
+        n_tokens: ids.len(),
+        n_repetitions: runs,
+        avg_ts: sample_mean(&ts_samples),
+        stddev_ts: sample_stdev(&ts_samples),
+        samples_ts: ts_samples,
+        samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
+        avg_ns: (wall_mean * 1e6) as u64,
+        avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
+        kernel_trace_command_buffers_per_token: None,
+        kernel_trace_encoders_per_token: None,
+        kernel_trace_concurrent_encoders_per_token: None,
+        kernel_trace_dispatches_per_token: None,
+        decode_gb_per_s: None,
+        prefill_chunk: Some(prefill_chunk),
+        decode_mode: None,
+        prefill_mode: Some("packed"),
+        power: row_ctx.power.clone(),
+        qwen_env: row_ctx.qwen_env.clone(),
+    })
+}
+
+fn run_suite_tg_row(
+    loaded: &LoadedModel,
+    row_ctx: &SuiteRowContext,
+    n_gen: usize,
+    runs: usize,
+    no_warmup: bool,
+    seed: u64,
+) -> Result<BenchRow> {
+    if n_gen == 0 {
+        return Err(anyhow!("--tg values must be >= 1"));
+    }
+    let arch = loaded.arch();
+    let mf = loaded.forward();
+    let cap = n_gen + 16;
+    let vocab = arch.vocab_size.max(1);
+    let trace_counts = env_flag_enabled("QWEN_DECODE_TRACE_COUNTS");
+    let mut rng_state = if seed == 0 { 1u64 } else { seed };
+    let mut next_rand_tok = || -> i32 {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        (rng_state % vocab as u64) as i32
+    };
+    let run_once = |first_tok: i32,
+                    ranges: &mut dyn FnMut() -> i32|
+     -> Result<(f64, f64, Option<KernelTraceCounters>)> {
+        let mut seq = loaded
+            .create_sequence(SequenceConfig::new(cap))
+            .context("suite tg session")?;
+        let _kernel_trace_guard = trace_counts.then(kernel_trace_begin);
+        let t0 = Instant::now();
+        let mut tok = first_tok;
+        let mut gpu_ms_acc = 0.0;
+        for pos in 0..n_gen {
+            let (_argmax, prof) =
+                mf.single_token_argmax_profiled(tok, pos as u32, seq.metal_session_mut())?;
+            gpu_ms_acc += prof.gpu_kernel_ms;
+            tok = ranges();
+        }
+        let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let counts = trace_counts.then(kernel_trace_snapshot);
+        Ok((wall_ms, gpu_ms_acc, counts))
+    };
+
+    if !no_warmup {
+        let first = next_rand_tok();
+        let _ = run_once(first, &mut next_rand_tok).context("suite tg warmup")?;
+    }
+
+    let mut wall_samples = Vec::with_capacity(runs);
+    let mut gpu_samples = Vec::with_capacity(runs);
+    let mut ts_samples = Vec::with_capacity(runs);
+    let mut trace_samples = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let first = next_rand_tok();
+        let (wall_ms, gpu_ms, trace) =
+            run_once(first, &mut next_rand_tok).context("suite tg run")?;
+        wall_samples.push(wall_ms);
+        gpu_samples.push(gpu_ms);
+        ts_samples.push(n_gen as f64 * 1000.0 / wall_ms);
+        if let Some(trace) = trace {
+            trace_samples.push(trace);
+        }
+    }
+
+    let wall_mean = sample_mean(&wall_samples);
+    let gpu_mean = sample_mean(&gpu_samples);
+    let trace_per_token = if trace_counts && !trace_samples.is_empty() {
+        let denom = (trace_samples.len() * n_gen) as f64;
+        let encoders: u64 = trace_samples.iter().map(|t| t.encoders).sum();
+        let concurrent_encoders: u64 = trace_samples.iter().map(|t| t.concurrent_encoders).sum();
+        let dispatches: u64 = trace_samples.iter().map(|t| t.dispatches).sum();
+        Some((
+            1.0,
+            encoders as f64 / denom,
+            concurrent_encoders as f64 / denom,
+            dispatches as f64 / denom,
+        ))
+    } else {
+        None
+    };
+    let decode_gb_per_s = if matches!(arch.kind, qwen_llm::model::ArchKind::Dense)
+        && row_ctx.model_size > 0
+        && wall_mean > 0.0
+    {
+        Some((row_ctx.model_size as f64 / 1e9) / (wall_mean / 1000.0 / n_gen as f64))
+    } else {
+        None
+    };
+
+    Ok(BenchRow {
+        schema_version: BENCH_SCHEMA_VERSION,
+        engine: "qwen-llm",
+        build_commit: row_ctx.build_commit,
+        build_dirty: row_ctx.build_dirty,
+        test_time: utc_iso8601_now(),
+        model_filename: row_ctx.model_filename.clone(),
+        model_size: row_ctx.model_size,
+        model_n_params: row_ctx.model_n_params,
+        arch_kind: row_ctx.arch_kind,
+        test: format!("tg{n_gen}"),
+        n_tokens: n_gen,
+        n_repetitions: runs,
+        avg_ts: sample_mean(&ts_samples),
+        stddev_ts: sample_stdev(&ts_samples),
+        samples_ts: ts_samples,
+        samples_ns: wall_samples.iter().map(|w| (*w * 1e6) as u64).collect(),
+        avg_ns: (wall_mean * 1e6) as u64,
+        avg_gpu_ns: Some((gpu_mean * 1e6) as u64),
+        kernel_trace_command_buffers_per_token: trace_per_token.map(|t| t.0),
+        kernel_trace_encoders_per_token: trace_per_token.map(|t| t.1),
+        kernel_trace_concurrent_encoders_per_token: trace_per_token.map(|t| t.2),
+        kernel_trace_dispatches_per_token: trace_per_token.map(|t| t.3),
+        decode_gb_per_s,
+        prefill_chunk: None,
+        decode_mode: Some("apples-lcpp"),
+        prefill_mode: None,
+        power: row_ctx.power.clone(),
+        qwen_env: row_ctx.qwen_env.clone(),
+    })
+}
+
+fn run_suite(args: SuiteArgs) -> Result<()> {
+    let SuiteArgs {
+        model,
+        pp,
+        tg,
+        runs,
+        no_warmup,
+        prefill_chunk,
+        seed,
+        output,
+    } = args;
+    if runs == 0 {
+        return Err(anyhow!("--runs must be >= 1"));
+    }
+    if pp.is_empty() && tg.is_empty() {
+        return Err(anyhow!("provide at least one --pp or --tg shape"));
+    }
+    let json_mode = matches!(output, OutputFormat::Json);
+    macro_rules! text_log { ($($t:tt)*) => { if !json_mode { eprintln!($($t)*); } } }
+
+    let runtime = Runtime::metal().context("init Runtime")?;
+    text_log!("[suite] device: {}", runtime.describe());
+    let power = capture_power_snapshot();
+    text_log!("[suite] power: {}", power_snapshot_summary(power.as_ref()));
+
+    let loaded = runtime
+        .load_model(&model)
+        .with_context(|| format!("load {}", model.display()))?;
+    let g = loaded.gguf();
+    let (commit, dirty) = qwen_build_identity();
+    let row_ctx = SuiteRowContext {
+        build_commit: commit,
+        build_dirty: dirty,
+        model_filename: model.display().to_string(),
+        model_size: model_weight_bytes(g),
+        model_n_params: g
+            .get_u64("general.parameter_count")
+            .unwrap_or_else(|| g.tensors.iter().map(|t| t.n_elements()).sum()),
+        arch_kind: arch_kind_label(loaded.arch().kind),
+        power,
+        qwen_env: capture_qwen_env(),
+    };
+
+    text_log!(
+        "[suite] model={} pp={:?} tg={:?} runs={} warmup={} seed={}",
+        model.display(),
+        pp,
+        tg,
+        runs,
+        if no_warmup { "skip" } else { "on" },
+        seed,
+    );
+
+    let mut rows = Vec::with_capacity(pp.len() + tg.len());
+    for &n_prompt in &pp {
+        let row = run_suite_pp_row(
+            &loaded,
+            &row_ctx,
+            n_prompt,
+            runs,
+            no_warmup,
+            prefill_chunk,
+            seed,
+        )?;
+        text_log!(
+            "[suite] {:>8}: {:>8.2} t/s  {:>8.2} ms/token",
+            row.test,
+            row.avg_ts,
+            1000.0 / row.avg_ts.max(1e-9),
+        );
+        rows.push(row);
+    }
+    for &n_gen in &tg {
+        let row = run_suite_tg_row(&loaded, &row_ctx, n_gen, runs, no_warmup, seed)?;
+        text_log!(
+            "[suite] {:>8}: {:>8.2} t/s  {:>8.2} ms/token",
+            row.test,
+            row.avg_ts,
+            1000.0 / row.avg_ts.max(1e-9),
+        );
+        rows.push(row);
+    }
+
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string(&rows).context("serialize suite rows")?
+        );
+    }
     Ok(())
 }
 

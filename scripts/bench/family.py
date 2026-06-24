@@ -359,9 +359,9 @@ def main() -> int:
     print(f"[family] output: {out_dir}", file=sys.stderr)
 
     # Stderr noise filters — lcpp prints ggml_metal_* setup lines on every
-    # run; qwen-bench prints its own [pp]/[bench]/[tg] progress lines. None
+    # run; qwen-bench prints its own [pp]/[bench]/[tg]/[suite] progress lines. None
     # of that is useful in sweep mode.
-    qwen_noise = re.compile(r"^(\[(pp|bench|tg)\]|ggml_metal_|\s*$)")
+    qwen_noise = re.compile(r"^(\[(pp|bench|tg|suite)\]|ggml_metal_|\s*$)")
     lcpp_noise = re.compile(r"^(ggml_metal_|\s*$)")
 
     lcpp_engine = probe_lcpp(
@@ -399,7 +399,7 @@ def main() -> int:
             # Driver runs `lcpp(model_i); qwen(model_i)` for each model so
             # crash recovery is local and lcpp's baseline for each model is
             # taken minutes (not hours) before our number.
-            "engine_order": "per_model_lcpp_then_qwen",
+            "engine_order": "per_model_lcpp_then_qwen_suite",
         },
         "qwen_env_at_start": capture_qwen_env(),
         "command_records": [],
@@ -449,63 +449,25 @@ def main() -> int:
         lcpp_out.write_text(json.dumps(lcpp_rows, indent=2) + "\n")
         lcpp_count += 1
 
-        # qwen-bench pp, one file per shape.
-        for p in pp_shapes:
-            qpp_out = out_dir / f"qwen-pp{p}-{tag}.json"
-            print(f"[family] -> {qpp_out}", file=sys.stderr)
-            cmd = [
-                qwen_bench,
-                "pp",
-                "-m",
-                path,
-                "-p",
-                str(p),
-                "--runs",
-                str(args.runs),
-                "-o",
-                "json",
-            ]
-            cooldown = 0.0 if first_measured else args.cooldown_seconds
-            first_measured = False
-            rows, record = run_json_measured(
-                cmd,
-                stderr_filter=qwen_noise,
-                cooldown_seconds=cooldown,
-            )
-            record.update({"engine": "qwen", "tag": tag, "test": f"pp{p}"})
-            manifest["command_records"].append(record)
-            write_manifest(out_dir, manifest)
-            qpp_out.write_text(json.dumps(rows, indent=2) + "\n")
-            qwen_count += 1
-
-        # qwen-bench tg (apples-to-apples lcpp semantics), one file per shape.
-        for n in tg_shapes:
-            qtg_out = out_dir / f"qwen-tg{n}-{tag}.json"
-            print(f"[family] -> {qtg_out}", file=sys.stderr)
-            cmd = [
-                qwen_bench,
-                "tg",
-                "-m",
-                path,
-                "-n",
-                str(n),
-                "--runs",
-                str(args.runs),
-                "-o",
-                "json",
-            ]
-            cooldown = 0.0 if first_measured else args.cooldown_seconds
-            first_measured = False
-            rows, record = run_json_measured(
-                cmd,
-                stderr_filter=qwen_noise,
-                cooldown_seconds=cooldown,
-            )
-            record.update({"engine": "qwen", "tag": tag, "test": f"tg{n}"})
-            manifest["command_records"].append(record)
-            write_manifest(out_dir, manifest)
-            qtg_out.write_text(json.dumps(rows, indent=2) + "\n")
-            qwen_count += 1
+        qwen_out = out_dir / f"qwen-suite-{tag}.json"
+        print(f"[family] -> {qwen_out}", file=sys.stderr)
+        cmd = [qwen_bench, "suite", "-m", path, "--runs", str(args.runs), "-o", "json"]
+        if pp_shapes:
+            cmd += ["--pp", ",".join(str(p) for p in pp_shapes)]
+        if tg_shapes:
+            cmd += ["--tg", ",".join(str(n) for n in tg_shapes)]
+        cooldown = 0.0 if first_measured else args.cooldown_seconds
+        first_measured = False
+        rows, record = run_json_measured(
+            cmd,
+            stderr_filter=qwen_noise,
+            cooldown_seconds=cooldown,
+        )
+        record.update({"engine": "qwen", "tag": tag, "test": "suite"})
+        manifest["command_records"].append(record)
+        write_manifest(out_dir, manifest)
+        qwen_out.write_text(json.dumps(rows, indent=2) + "\n")
+        qwen_count += 1
 
     print(
         f"[family] sweep done: lcpp={lcpp_count} models, qwen={qwen_count} bench files",

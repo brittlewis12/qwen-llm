@@ -44,6 +44,10 @@ Primary guardrails:
 - `scripts/profile/prefill_sweep.py` runs the static GGUF fast-path audit by
   default; use `--require-fastpath-clean` for scoreboard runs where unexplained
   coverage misses should invalidate the comparison.
+- Use `qwen-bench suite` for qwen-side synthetic family spot checks when one
+  model should be loaded once across many pp/tg shapes. It still allocates fresh
+  sequence state per measured row; keep env-variant A/B as process-per-variant
+  until hot-path knobs move out of process-global env caches.
 
 ## Latest Baseline Snapshot
 

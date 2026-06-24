@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-24 — v0.328 Runtime Boundary and In-Process Family Suite
+
+Status: added the first phase of context management: `Runtime`, `LoadedModel`,
+`SequenceConfig`, and `Sequence`. The single-shape `pp`/`tg` benches now use that
+loaded-model boundary while preserving fresh-session semantics. Added
+`qwen-bench suite` for synthetic multi-shape pp/tg rows after one model load, and
+updated `scripts/bench/family.py` to use one qwen suite command per model instead
+of one qwen process per shape.
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli`
+- debug 0.8B `pp1` and `tg1` smoke through the ported single-shape paths
+- debug 0.8B `suite --pp 1,2 --tg 1 --runs 1 --no-warmup -o json` smoke
+- `cargo build --release --bin qwen-bench`
+- release 0.8B `suite --pp 1 --tg 1 --runs 1 --no-warmup -o json` smoke
+- `uv run python -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/bench/family.py").read_text())'`
+
+Interpretation: this is an infrastructure win, not a kernel speed claim. It makes
+fresh broader qwen reads cheaper and less process-load dominated while keeping
+scoreboard row semantics conservative: fresh sequence/session per measured rep,
+process-per-env variants, and explicit cold/warm boundaries still available.
+
 ## 2026-06-23 — v0.327 A10B Down-Variant Harness Re-Anchor
 
 Status: used the new decode context variant harness on clean HEAD to re-anchor

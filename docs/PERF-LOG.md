@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-24 — v0.331 A10B Short-Prefill Confirmation
+
+Status: followed up the v0.329 broad spot's only yellow short-shape cell with a
+repeated paired A10B packet. This used the v0.330 suite path, pinned llama.cpp
+b9481, `runs=3`, `pp128/512/1024`, `15s` cooldown before qwen, AC power, and no
+recorded thermal/performance warnings.
+
+Artifact:
+
+- `docs/bench/2026-06-24-2319-122B-A10B-v0330-a10b-short-prefill-family/README.md`
+
+Results:
+
+| Shape | llama.cpp | qwen | qwen/lcpp | Read |
+| --- | ---: | ---: | ---: | --- |
+| A10B `pp128` | `259` | `253` | `0.98x` | very-short parity/slight loss |
+| A10B `pp512` | `445` | `484` | `1.09x` | v0.329 yellow cell disappears |
+| A10B `pp1024` | `430` | `524` | `1.22x` | clear win |
+
+Interpretation: do not open a new A10B `pp512` branch from the v0.329 spot row.
+The repeated packet says the real short-MoE prefill concern, if any, is very-short
+`pp128` cold/first-touch behavior rather than the primary `pp512/1024` guardrail.
+Return priority to the active decode/roofline headroom work unless a production
+TTFT objective specifically elevates `pp128`.
+
 ## 2026-06-24 — v0.330 Runtime/Suite Hardening
 
 Status: hardened the v0.328 runtime boundary and suite harness before returning

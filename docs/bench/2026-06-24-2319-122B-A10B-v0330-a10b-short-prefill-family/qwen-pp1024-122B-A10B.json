@@ -1,0 +1,53 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "0dc1a96fd",
+    "build_dirty": 0,
+    "test_time": "2026-06-24T23:22:40Z",
+    "model_filename": "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+    "model_size": 77018996736,
+    "model_n_params": 122111526912,
+    "arch_kind": "moe",
+    "test": "pp1024",
+    "n_tokens": 1024,
+    "n_repetitions": 3,
+    "avg_ts": 524.2597853724707,
+    "stddev_ts": 7.817393834922138,
+    "samples_ts": [
+      533.0694822638761,
+      521.5589254482816,
+      518.1509484052544
+    ],
+    "samples_ns": [
+      1920950334,
+      1963344792,
+      1976258083
+    ],
+    "avg_ns": 1953517736,
+    "avg_compute_ns": 1953517736,
+    "avg_session_alloc_ns": 504319,
+    "avg_scratch_alloc_ns": 222874,
+    "avg_gpu_ns": 1938874916,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 1024,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "charged",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

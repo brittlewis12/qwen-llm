@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-24 — v0.329 Suite Spot Family Re-Anchor
+
+Status: ran the first clean family spot through the new qwen-side in-process
+suite path. This is a broad freshness check, not a release-grade repeat packet:
+`runs=1`, `pp512,tg128`, `5s` cooldown, pinned llama.cpp b9481, AC power, no
+recorded thermal/performance warnings.
+
+Artifact:
+
+- `docs/bench/2026-06-24-2258-v0328-suite-spot-family/README.md`
+
+Results:
+
+| Shape | Read |
+| --- | --- |
+| `pp512` dense | qwen is parity/win across `0.8B/2B/4B/9B/27B` (`1.08x/1.02x/1.04x/1.01x/1.01x`) |
+| `pp512` MoE | A3B wins (`1.08x`); A10B is parity/slightly down (`0.98x`) |
+| `tg128` dense | qwen wins across dense family (`1.34x/1.15x/1.16x/1.10x/1.07x`) |
+| `tg128` MoE | qwen wins A3B/A10B (`1.36x/1.23x`) |
+
+Interpretation: the stale v0.203 broad snapshot is no longer the freshest family
+read for short guardrail shapes. The new suite path validates the intended
+benchmarking workflow improvement: one qwen load per model for multiple pp/tg
+shapes, while still using fresh sequence state per measured row. Treat A10B
+`pp512` as the only broad spot-check yellow cell, but require a repeated paired
+packet before turning it back into a kernel branch.
+
 ## 2026-06-24 — v0.328 Runtime Boundary and In-Process Family Suite
 
 Status: added the first phase of context management: `Runtime`, `LoadedModel`,

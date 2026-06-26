@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-25 - v0.333 Decode Branch Gate Re-Anchor
+
+Status: ran a fresh A3B/A10B `ctx8192` long-decode gate after the prefill family
+refresh, using `decode_ctx_sweep.py` with sequential variants, `15s` cooldown,
+fresh right-sized sessions, AC power, and no recorded thermal/performance
+warnings.
+
+Artifact:
+
+- `docs/bench/2026-06-25-0009-v0332-decode-branch-gate/README.md`
+
+Results:
+
+| Model | default | routed-down no-op | fused down off | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4_K_M `ctx8192` | `93.1 t/s` | `100.4 t/s` | `91.8 t/s` | `+7.8%` down no-op budget |
+| A10B Q4_K_XL `ctx8192` | `42.4 t/s` | `46.1 t/s` | `41.3 t/s` | `+8.7%` down no-op budget |
+
+Phase split:
+
+| Model | GDN front | attention | MoE FFN apply | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4_K_M | `20.5%` | `21.3%` | `25.3%` | MoE FFN is largest named phase |
+| A10B Q4_K_XL | `23.1%` | `18.3%` | `29.3%` | MoE FFN is largest named phase |
+
+Interpretation: keep the active hardware-headroom branch on MoE decode execution
+shape. Routed down remains a real budget, but local Q5 down variants are still
+exhausted: fused-off regresses, and prior `NSG`, staging, R2, wide-load, and
+no-weight probes capped the pure Q5-kernel upside. The next credible MoE branch
+must change work granularity, byte movement, or overlap more structurally; use
+attention/KV as the measured secondary lane rather than the first branch.
+
 ## 2026-06-24 — v0.332 Long-Prefill Family Spot
 
 Status: used the suite path for a current long-prefill family spot after the short

@@ -899,7 +899,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.327:
+Current rank after v0.333:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -921,10 +921,15 @@ Current rank after v0.327:
    counters proving the down wave is compute/dequant-bound. v0.325 kills a Q5_K
    R2 two-output-row work-unit probe: same-build A10B `ctx8192` default/rollback
    rows were `41.9/42.0 t/s`, and rollback split down was slightly faster
-   (`2.75 ms` versus `2.86 ms`). Gate: `>=0.3 ms/token` total GPU improvement at
-   A3B `ctx8192`, `>=0.8%` A10B `ctx8192`, `ctx128/1024` neutral, and same-build
-   rollback A/B via `scripts/profile/decode_ctx_sweep.py` before declaring any
-   long-decode kernel win.
+   (`2.75 ms` versus `2.86 ms`). v0.333 rechecks both MoE targets after the prefill
+   refresh: A3B `ctx8192` default/down-noop/fused-off is `93.1/100.4/91.8 t/s`,
+   and A10B is `42.4/46.1/41.3 t/s`. Phase split still puts MoE FFN apply first
+   (`25.3%` A3B, `29.3%` A10B), but the local Q5-down shelf remains exhausted.
+   The next branch should change execution granularity, byte movement, or overlap
+   rather than retuning the same Q5 down kernel. Gate: `>=0.3 ms/token` total GPU
+   improvement at A3B `ctx8192`, `>=0.8%` A10B `ctx8192`, `ctx128/1024` neutral,
+   and same-build rollback A/B via `scripts/profile/decode_ctx_sweep.py` before
+   declaring any long-decode kernel win.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in
@@ -932,7 +937,9 @@ Current rank after v0.327:
    are falsified: v0.299 kills the straightforward MoE Q8-KV subgroup reader,
    v0.300 kills smaller subgroup splits, v0.313 kills cooperative four-simdgroup
    subgroup packing, and v0.315 kills simple group-tile/reread reduction. The
-   next credible proof must change execution shape without losing occupancy, or
+   v0.333 keeps attention/KV as a measured secondary lane at `21.3%` A3B and
+   `18.3%` A10B `ctx8192`, behind MoE FFN on both. The next credible proof must
+   change execution shape without losing occupancy, or
    show a counter signal beyond byte count/address order. Do not reopen subgroup
    shape, `NWG`, `TILE_C`, ggml-Q8 KV, or broad KV-head-major layout without new
    data.

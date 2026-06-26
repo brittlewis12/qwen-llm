@@ -899,7 +899,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.337:
+Current rank after v0.338:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -965,7 +965,12 @@ Current rank after v0.337:
    gate (`92.6/94.0 -> 92.5/91.8 t/s` on A3B and `42.6 -> 42.0 t/s` on A10B), so
    do not retread Q8 row-count tweaks without counter evidence. The live Q8 branch
    must change projection dataflow, fusion, or packing; otherwise return to MoE
-   FFN execution shape or attention/KV body work.
+   FFN execution shape or attention/KV body work. v0.338 adds the exact-shape
+   `qwen-bench gdn-proj-micro` harness and shows the current primitive is already
+   near the measured stream roofline on weight bytes alone: A10B QKV/Z/QKV+Z/OUT
+   are `485/473/476/461 GB/s` versus the `474 GB/s` stream anchor, while A3B is
+   `435/418/445/395 GB/s`. This demotes local GDN Q8 mat-vec retunes; reopen only
+   for structural byte reduction or a primitive proof that beats this harness.
 4. A10B memory-capacity/tooling hygiene: v0.315 shows a `ctx-sweep` that allocates
    for `32768` up front can poison even A10B `ctx570/2464` rows (`~0.6 t/s`), while
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`

@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-26 - v0.338 GDN Projection Microbench
+
+Status: added `qwen-bench gdn-proj-micro`, a reusable exact-shape primitive
+microbench for GDN Q8 projections across all GDN layers. Also refreshed compact
+qwen-side primary-family guardrails with clean `7e8808241` provenance.
+
+Artifact:
+
+- `docs/bench/2026-06-26-1730-v0338-gdn-proj-micro/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- compact `qwen-bench suite` rows for 0.8B, 27B, A3B, and A10B
+- A3B/A10B `qwen-bench gdn-proj-micro --warmup 3 --iters 10`
+
+Compact qwen-side suite, clean build stamp, AC power, no warnings:
+
+| Model | `pp512` | `pp4096` | `tg128` |
+| --- | ---: | ---: | ---: |
+| 0.8B Q4_K_M | `8037.45` | `8008.30` | `357.98` |
+| 27B Q4_K_M | `242.45` | `215.69` | `23.95` |
+| A3B Q4_K_M | `1503.02` | `1624.27` | `103.77` |
+| A10B Q4_K_XL | `449.37` | `497.55` | `44.01` |
+
+GDN projection primitive, weight bytes only:
+
+| Model | QKV | Z | QKV+Z | OUT |
+| --- | ---: | ---: | ---: | ---: |
+| A3B GB/s | `434.9` | `418.4` | `444.8` | `395.2` |
+| A10B GB/s | `485.1` | `472.8` | `476.4` | `460.7` |
+
+Interpretation: GDN projection work is a real decode phase, but current Q8
+projection kernels are already near the measured `474 GB/s` stream roofline on
+A10B. Keep GDN closed to local mat-vec retunes; reopen only for structural byte
+reduction or a primitive proof that beats this harness. The next serious decode
+branch should be MoE FFN dataflow or attention body work.
+
 ## 2026-06-25 - v0.337 GDN Q8 Projection Attribution
 
 Status: added `QWEN_PHASE_GDN_PROJ_SPLIT=1`, a phase-profile-only split for MoE

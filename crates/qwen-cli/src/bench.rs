@@ -44,8 +44,8 @@ use qwen_llm::{
         prefill_tokens_with_multi_hidden, prefill_tokens_with_multi_hidden_profiled,
         with_prefill_dense_ffn_fused_swiglu_q4_override,
     },
-    metal_forward::encode_mat_mat_dispatch,
     metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS},
+    metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     prefix_cache::PrefixCache,
     runtime::{LoadedModel, Runtime, SequenceConfig},
@@ -189,6 +189,8 @@ enum Cmd {
     /// Phase-resolved profile at one context length (uses the
     /// `phase_sum` GPU time, NOT the per-phase-cmdbuf wall artifact).
     Phase(PhaseArgs),
+    /// Exact-shape GDN projection primitive microbench.
+    GdnProjMicro(GdnProjMicroArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
     /// Warm to a target context, then wait for an external go signal before
@@ -474,6 +476,19 @@ struct PhaseArgs {
     /// Context length to profile at.
     #[arg(long, default_value = "4096")]
     ctx: usize,
+}
+
+#[derive(Parser, Debug)]
+struct GdnProjMicroArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "20")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "5")]
+    warmup: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1387,6 +1402,7 @@ fn main() -> Result<()> {
         Cmd::Suite(a) => run_suite(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
+        Cmd::GdnProjMicro(a) => run_gdn_proj_micro(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
@@ -1399,6 +1415,151 @@ fn main() -> Result<()> {
         Cmd::PpFfnAb(a) => run_pp_ffn_ab(a),
         Cmd::PpWait(a) => run_pp_wait(a),
     }
+}
+
+fn time_gpu_reps<F>(
+    ctx: &MetalContext,
+    warmup: usize,
+    iters: usize,
+    mut encode: F,
+) -> Result<(f64, f64)>
+where
+    F: FnMut(&KernelEncoder) -> Result<()>,
+{
+    for _ in 0..warmup {
+        let cmd = ctx.queue.commandBuffer().context("warmup cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode(&enc)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+
+    let mut wall_ms = 0.0f64;
+    let mut gpu_ms = 0.0f64;
+    for _ in 0..iters {
+        let cmd = ctx.queue.commandBuffer().context("timed cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode(&enc)?;
+        enc.end();
+        let t = Instant::now();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        wall_ms += t.elapsed().as_secs_f64() * 1e3;
+        gpu_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+    }
+    Ok((wall_ms / iters as f64, gpu_ms / iters as f64))
+}
+
+fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
+    let GdnProjMicroArgs {
+        model,
+        iters,
+        warmup,
+    } = args;
+    if iters == 0 {
+        return Err(anyhow!("--iters must be >= 1"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    let s = MetalSession::fresh(&ctx, &mm, 32).context("session")?;
+
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+    let n_v = arch.gdn_n_v_heads as usize;
+    let n_k = arch.gdn_n_k_heads as usize;
+    let head_dim = arch.gdn_head_dim as usize;
+    let conv_dim = (2 * n_k + n_v) * head_dim;
+    let v_dim = n_v * head_dim;
+    let gdn_blocks: Vec<_> = mm
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            MetalBlock::Gdn(g) => Some(g),
+            MetalBlock::Attn(_) => None,
+        })
+        .collect();
+    if gdn_blocks.is_empty() {
+        return Err(anyhow!("model has no GDN blocks"));
+    }
+
+    {
+        let cmd = ctx.queue.commandBuffer().context("init fill cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_fill_f32(&ctx, &enc, &s.h, 0.125)?;
+        encode_fill_f32(&ctx, &enc, &s.gdn_normed, 0.0625)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+
+    let qkv_bytes: u64 = gdn_blocks.iter().map(|gb| gb.in_proj_qkv.n_bytes()).sum();
+    let z_bytes: u64 = gdn_blocks.iter().map(|gb| gb.in_proj_z.n_bytes()).sum();
+    let out_bytes: u64 = gdn_blocks.iter().map(|gb| gb.out_proj.n_bytes()).sum();
+
+    println!(
+        "[gdn-proj-micro] model={} layers={} h={} conv_dim={} v_dim={} warmup={} iters={}",
+        model.display(),
+        gdn_blocks.len(),
+        h,
+        conv_dim,
+        v_dim,
+        warmup,
+        iters
+    );
+    println!("phase\tbytes_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
+
+    let report = |label: &str, bytes: u64, wall_ms: f64, gpu_ms: f64| {
+        let bytes_gb = bytes as f64 / 1e9;
+        let gb_s = bytes_gb / (gpu_ms / 1e3);
+        println!("{label}\t{bytes_gb:.4}\t{wall_ms:.4}\t{gpu_ms:.4}\t{gb_s:.1}");
+    };
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for gb in &gdn_blocks {
+            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_qkv, &s.h, &s.gdn_qkv, h, conv_dim)?;
+        }
+        Ok(())
+    })?;
+    report("qkv", qkv_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for gb in &gdn_blocks {
+            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
+        }
+        Ok(())
+    })?;
+    report("z", z_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for gb in &gdn_blocks {
+            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_qkv, &s.h, &s.gdn_qkv, h, conv_dim)?;
+            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
+        }
+        Ok(())
+    })?;
+    report("qkv+z", qkv_bytes + z_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for gb in &gdn_blocks {
+            encode_mat_vec_dispatch(
+                &ctx,
+                enc,
+                &gb.out_proj,
+                &s.gdn_normed,
+                &s.mixer_out,
+                v_dim,
+                h,
+            )?;
+        }
+        Ok(())
+    })?;
+    report("out", out_bytes, wall, gpu);
+
+    Ok(())
 }
 
 fn run_attn_front_micro(args: AttnFrontMicroArgs) -> Result<()> {

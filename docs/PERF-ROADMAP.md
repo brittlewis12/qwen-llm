@@ -51,32 +51,25 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, clean family rows after `v0.203` against pinned
-llama.cpp b9481 (`bfb4308b`, `MTL,BLAS`). AC power, no recorded thermal or
-performance warnings.
+M4 Max, release `qwen-bench`, clean narrow family spot after `v0.338` against
+pinned llama.cpp b9481 (`bfb4308b`, `MTL,BLAS`). AC power, no recorded thermal or
+performance warnings. Artifact:
+`docs/bench/2026-06-26-1804-v0338-spot-family/README.md`.
 
-| Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp4096` | `221.51` | `211.19` | `1.05x` | v0.203 pinned b9481 |
-| 27B dense | `pp16384` | `204.44` | `193.49` | `1.06x` | v0.203 pinned b9481 |
-| 35B A3B | `pp4096` | `1540.69` | `1319.85` | `1.17x` | v0.203 pinned b9481 |
-| 35B A3B | `pp16384` | `1182.87` | `1114.11` | `1.06x` | v0.203 pinned b9481 |
-| 122B A10B | `pp4096` | `457.25` | `393.69` | `1.16x` | v0.203 pinned b9481 |
-| 122B A10B | `pp16384` | `391.84` | `357.46` | `1.10x` | v0.203 pinned b9481 |
+| Model | `pp512` qwen/lcpp | `pp4096` qwen/lcpp | `tg128` qwen/lcpp | Notes |
+| --- | ---: | ---: | ---: | --- |
+| 0.8B dense | `1.08x` | `1.06x` | `1.25x` | runs=1 spot |
+| 2B dense | `1.04x` | `1.05x` | `1.13x` | runs=1 spot |
+| 4B dense | `1.04x` | `1.05x` | `1.14x` | runs=1 spot |
+| 9B dense | `1.02x` | `1.02x` | `1.08x` | runs=1 spot |
+| 27B dense | `1.06x` | `1.17x` | `1.24x` | runs=1 spot |
+| 35B A3B | `1.09x` | `1.20x` | `1.33x` | runs=1 spot |
+| 122B A10B | `1.00x` spot / `1.06x` repeat | `1.17x` | `1.26x` | pp512 repeat: `docs/bench/2026-06-26-1812-122B-A10B-v0338-pp512-repeat-family/README.md` |
 
-Current short/decode guardrails:
-
-| Model | Shape | qwen | llama.cpp | qwen/lcpp | Notes |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 27B dense | `pp512` | `236.30` | `236.25` | `1.00x` | v0.203 paired repeat |
-| 27B dense | `pp1024` | `237.93` | `217.95` | `1.09x` | v0.203 pinned b9481 |
-| 35B A3B | `pp512` | `1449.75` | `1415.12` | `1.02x` | v0.203 pinned b9481 |
-| 35B A3B | `pp1024` | `1620.35` | `1411.80` | `1.15x` | v0.203 pinned b9481 |
-| 122B A10B | `pp512` | `453.66` | `445.65` | `1.02x` | v0.203 pinned b9481 |
-| 122B A10B | `pp1024` | `504.43` | `430.68` | `1.17x` | v0.203 pinned b9481 |
-| 27B dense | `tg128` | `24.46` | `20.01` | `1.22x` | v0.203 pinned b9481 |
-| 35B A3B | `tg128` | `85.81` | `77.42` | `1.11x` | v0.286 default |
-| 122B A10B | `tg128` | `42.82` | `35.58` | `1.20x` | v0.292 pinned b9481 |
+Read: the current narrow paired board is green. Treat old v0.203 rows as history,
+not the active decision spine. Broader long-context or quant-specific sweeps may
+still expose red cells, but near-term branches should be hardware-headroom driven
+unless a fresh paired repeat contradicts this spot.
 
 Measured roofline anchors from v0.285 on M4 Max, AC power, high-power mode, no
 recorded warnings:

@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-26 - v0.339 Paired Family Spot Refresh
+
+Status: ran a narrow paired qwen-vs-llama family spot after v0.338, using pinned
+llama.cpp and clean `qwen-bench` provenance. Shapes were `pp512`, `pp4096`, and
+`tg128` with one run across all seven registered family models. The only apparent
+weak cell, A10B `pp512`, was immediately repeated with `runs=3` and cleared.
+
+Artifacts:
+
+- `docs/bench/2026-06-26-1804-v0338-spot-family/README.md`
+- `docs/bench/2026-06-26-1812-122B-A10B-v0338-pp512-repeat-family/README.md`
+
+Validation:
+
+- `cargo build --release --bin qwen-bench` after v0.338 commit
+- `uv run scripts/bench/family.py --shapes pp512,pp4096,tg128 --runs 1 --cooldown-seconds 10 --run-tag v0338-spot`
+- `uv run scripts/bench/family.py --tag 122B-A10B --shapes pp512 --runs 3 --cooldown-seconds 15 --run-tag v0338-pp512-repeat`
+
+Paired spot ratios:
+
+| Model | `pp512` | `pp4096` | `tg128` |
+| --- | ---: | ---: | ---: |
+| 0.8B dense | `1.08x` | `1.06x` | `1.25x` |
+| 2B dense | `1.04x` | `1.05x` | `1.13x` |
+| 4B dense | `1.04x` | `1.05x` | `1.14x` |
+| 9B dense | `1.02x` | `1.02x` | `1.08x` |
+| 27B dense | `1.06x` | `1.17x` | `1.24x` |
+| A3B MoE | `1.09x` | `1.20x` | `1.33x` |
+| A10B MoE | `1.00x` spot / `1.06x` repeat | `1.17x` | `1.26x` |
+
+Interpretation: the current narrow paired board is green. Do not steer from the
+old v0.203 family table. Near-term work should be hardware-headroom driven unless
+
 ## 2026-06-26 - v0.338 GDN Projection Microbench
 
 Status: added `qwen-bench gdn-proj-micro`, a reusable exact-shape primitive

@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-25 - v0.335 Head-Major KV Attention Falsifier
+
+Status: added and ran an ignored synthetic v4 attention proof for head-major F16
+K/V layout. The harness compares canonical token-major `[pos, kv_head, dim]`
+against `[kv_head, pos, dim]` while keeping the same current subgroup kernels and
+shared reduce path. Production decode/cache layout is unchanged.
+
+Artifact:
+
+- `docs/bench/2026-06-25-0120-v0335-attn-head-major-proof/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo test -p qwen-llm attn_v4_head_major_main_reduce_breakdown_moe_shapes --release -- --ignored --nocapture --test-threads=1`
+
+Results:
+
+| Shape | Context | token-major main | head-major main | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B group8/tile2/C64 | `8192` | `0.145 ms` | `0.080 ms` | isolated win |
+| A3B group8/tile2/C64 | `16384` | `0.191 ms` | `0.193 ms` | flat/slower |
+| A3B group8/tile2/C64 | `32768` | `0.384 ms` | `0.389 ms` | flat/slower |
+| A10B group16/tile4/C64 | `8192` | `0.092 ms` | `0.097 ms` | slower |
+| A10B group16/tile4/C64 | `16384` | `0.215 ms` | `0.218 ms` | flat/slower |
+| A10B group16/tile4/C128 | `32768` | `0.434 ms` | `0.436 ms` | flat/slower |
+
+All rows had `cos=1.00000000` and `max_abs=0.000e0` versus canonical output.
+
+Interpretation: do not productionize a head-major decode KV sidecar from this
+evidence. It is exact, but it fails the both-model and true-long gates; the only
+large win is an isolated A3B `ctx8192` row that disappears at longer context. The
+next attention/KV branch needs a deeper body rewrite or a new counter signal, not
+address-order surgery alone.
+
 ## 2026-06-25 - v0.334 Decode Attention Sigmoid-Mul Fusion
 
 Status: fused decode gated-attention finalization from `sigmoid(gate)` plus

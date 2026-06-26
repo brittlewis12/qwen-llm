@@ -428,7 +428,7 @@ inline void attn_v4_main_body_q8(
     }
 }
 
-template <ushort GROUP_TOTAL, ushort GROUP_TILE, ushort C>
+template <ushort GROUP_TOTAL, ushort GROUP_TILE, ushort C, bool HEAD_MAJOR>
 inline void attn_v4_main_subgroup_body(
         constant attn_v4_args & args,
         device const float    * q,
@@ -509,9 +509,11 @@ inline void attn_v4_main_subgroup_body(
             for (ushort g = 0; g < GROUP_TILE; ++g) partial[g] = 0.0f;
 
             if (cc < tile_count) {
+                const ulong k_off = HEAD_MAJOR
+                    ? (((ulong)kvh * args.n_pos + (ulong)(tile_start + cc)) * DK)
+                    : ((ulong)(tile_start + cc) * args.kv_stride + (ulong)kvh * DK);
                 device const half4 * pk4 = (device const half4 *)(
-                    k_cache + (ulong)(tile_start + cc) * args.kv_stride
-                            + (ulong)kvh * DK
+                    k_cache + k_off
                 );
                 threadgroup const half4 * sq4 = (threadgroup const half4 *)sq;
                 for (ushort ii = 0; ii < DK4_PER_LANE; ++ii) {
@@ -571,9 +573,11 @@ inline void attn_v4_main_subgroup_body(
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (ushort cc = 0; cc < tile_count; ++cc) {
+            const ulong v_off = HEAD_MAJOR
+                ? (((ulong)kvh * args.n_pos + (ulong)(tile_start + cc)) * DV)
+                : ((ulong)(tile_start + cc) * args.kv_stride + (ulong)kvh * DV);
             device const half4 * pv4 = (device const half4 *)(
-                v_cache + (ulong)(tile_start + cc) * args.kv_stride
-                        + (ulong)kvh * DV
+                v_cache + v_off
             );
             for (ushort ii = 0; ii < DV4_PER_LANE; ++ii) {
                 const half4 v_chunk = pv4[ii * NW + tiisg];
@@ -783,7 +787,7 @@ kernel void NAME( \
         threadgroup  float    * ss         [[threadgroup(1)]], \
         uint3  tgpig [[threadgroup_position_in_grid]], \
         ushort tiisg [[thread_index_in_simdgroup]]) { \
-    attn_v4_main_subgroup_body<16, GROUP_TILE_VAL, C_VAL>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+    attn_v4_main_subgroup_body<16, GROUP_TILE_VAL, C_VAL, false>(args, q, k_cache, v_cache, o_partial, ml_partial, \
                                                           sq, ss, tgpig, tiisg); \
 }
 
@@ -808,7 +812,39 @@ kernel void NAME( \
         threadgroup  float    * ss         [[threadgroup(1)]], \
         uint3  tgpig [[threadgroup_position_in_grid]], \
         ushort tiisg [[thread_index_in_simdgroup]]) { \
-    attn_v4_main_subgroup_body<8, GROUP_TILE_VAL, C_VAL>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+    attn_v4_main_subgroup_body<8, GROUP_TILE_VAL, C_VAL, false>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+                                                         sq, ss, tgpig, tiisg); \
+}
+
+#define ATTN_V4_G16_SUBGROUP_HM_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
+kernel void NAME( \
+        constant attn_v4_args & args      [[buffer(0)]], \
+        device const float    * q          [[buffer(1)]], \
+        device const half     * k_cache    [[buffer(2)]], \
+        device const half     * v_cache    [[buffer(3)]], \
+        device       float    * o_partial  [[buffer(4)]], \
+        device       float    * ml_partial [[buffer(5)]], \
+        threadgroup  half     * sq         [[threadgroup(0)]], \
+        threadgroup  float    * ss         [[threadgroup(1)]], \
+        uint3  tgpig [[threadgroup_position_in_grid]], \
+        ushort tiisg [[thread_index_in_simdgroup]]) { \
+    attn_v4_main_subgroup_body<16, GROUP_TILE_VAL, C_VAL, true>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+                                                          sq, ss, tgpig, tiisg); \
+}
+
+#define ATTN_V4_G8_SUBGROUP_HM_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
+kernel void NAME( \
+        constant attn_v4_args & args      [[buffer(0)]], \
+        device const float    * q          [[buffer(1)]], \
+        device const half     * k_cache    [[buffer(2)]], \
+        device const half     * v_cache    [[buffer(3)]], \
+        device       float    * o_partial  [[buffer(4)]], \
+        device       float    * ml_partial [[buffer(5)]], \
+        threadgroup  half     * sq         [[threadgroup(0)]], \
+        threadgroup  float    * ss         [[threadgroup(1)]], \
+        uint3  tgpig [[threadgroup_position_in_grid]], \
+        ushort tiisg [[thread_index_in_simdgroup]]) { \
+    attn_v4_main_subgroup_body<8, GROUP_TILE_VAL, C_VAL, true>(args, q, k_cache, v_cache, o_partial, ml_partial, \
                                                          sq, ss, tgpig, tiisg); \
 }
 
@@ -820,6 +856,10 @@ ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c16_f32,   2, 16)
 ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_f32,       2, 32)
 ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c64_f32,   2, 64)
 ATTN_V4_G8_SUBGROUP_KERNEL(kernel_attn_decode_v4_g8_t2_c128_f32,  2, 128)
+
+ATTN_V4_G16_SUBGROUP_HM_KERNEL(kernel_attn_decode_v4_g16_t4_c64_hm_f32, 4, 64)
+ATTN_V4_G16_SUBGROUP_HM_KERNEL(kernel_attn_decode_v4_g16_t4_c128_hm_f32, 4, 128)
+ATTN_V4_G8_SUBGROUP_HM_KERNEL(kernel_attn_decode_v4_g8_t2_c64_hm_f32, 2, 64)
 
 // ============================================================================
 // Packed prefill microproof: A3B/group8 prompt-native attention over QT rows.

@@ -899,7 +899,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.333:
+Current rank after v0.335:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -946,7 +946,11 @@ Current rank after v0.333:
    `sigmoid+mul`: A3B `ctx8192` moves `92.1/92.2 -> 93.6/93.3 t/s`, A10B is
    neutral/noise, and a dense 27B `ctx8192` guard moves `21.9 -> 22.6 t/s`. Treat
    this as a shelf win; the remaining attention branch is still the v4 body/KV
-   path, not more scalar epilogue passes.
+   path, not more scalar epilogue passes. v0.335 then falsifies the most concrete
+   layout-only KV proof: synthetic head-major F16 K/V is exact but flat/slower at
+   A3B `ctx16384/32768` and A10B `ctx8192/16384/32768`. Do not build production
+   head-major KV sidecars without a new counter signal or a body rewrite that
+   changes more than address order.
 3. A10B memory-capacity/tooling hygiene: v0.315 shows a `ctx-sweep` that allocates
    for `32768` up front can poison even A10B `ctx570/2464` rows (`~0.6 t/s`), while
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`

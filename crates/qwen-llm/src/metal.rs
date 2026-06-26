@@ -9832,6 +9832,147 @@ pub fn encode_attn_decode_v4_main_only_f32(
     Ok(())
 }
 
+/// Synthetic head-major F16 KV sidecar for v4 long-context attention proofing.
+///
+/// This intentionally supports only the current long MoE subgroup shapes:
+/// group8/tile2/C64 plus group16/tile4/C64/C128. `k_cache` and `v_cache` are
+/// laid out as `[kv_head, n_pos, head_dim]` with exactly `n_pos` rows per head.
+pub fn encode_attn_decode_v4_main_only_f32_head_major(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_pos: usize,
+    nwg: usize,
+    tile_c: usize,
+) -> Result<(), MetalError> {
+    const DK: usize = 256;
+    if n_q_heads % n_kv_heads != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4_main_hm",
+            detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
+        });
+    }
+    let group = n_q_heads / n_kv_heads;
+    if head_dim != DK || !matches!((group, tile_c), (8, 64) | (16, 64 | 128)) {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4_main_hm",
+            detail: format!(
+                "expected head_dim=256 and group/tile_c in {{8/64,16/64,16/128}}; got head_dim={head_dim} tile_c={tile_c} group={group}"
+            ),
+        });
+    }
+    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4_main_hm",
+            detail: format!(
+                "expected F16 K/V, got {:?}/{:?}",
+                k_cache.dtype, v_cache.dtype
+            ),
+        });
+    }
+    let want_q = (n_q_heads * head_dim) as u64;
+    let want_kv = (n_kv_heads * n_pos * head_dim) as u64;
+    let want_o_partial = (n_kv_heads * nwg * group * head_dim) as u64;
+    let want_ml_partial = (n_kv_heads * nwg * group * 2) as u64;
+    if q.n_elements() != want_q
+        || k_cache.n_elements() < want_kv
+        || v_cache.n_elements() < want_kv
+        || o_partial.n_elements() < want_o_partial
+        || ml_partial.n_elements() < want_ml_partial
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4_main_hm",
+            detail: format!(
+                "shape mismatch q={} want {want_q}, k={} v={} want >= {want_kv}, o={} want >= {want_o_partial}, ml={} want >= {want_ml_partial}",
+                q.n_elements(),
+                k_cache.n_elements(),
+                v_cache.n_elements(),
+                o_partial.n_elements(),
+                ml_partial.n_elements()
+            ),
+        });
+    }
+    if nwg == 0 || nwg > 64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_decode_v4_main_hm",
+            detail: format!("nwg={nwg} out of range [1, 64]"),
+        });
+    }
+
+    let group_tile = attn_v4_choose_group_tile(n_pos, group);
+    let pipeline_name = match (group, group_tile, tile_c) {
+        (8, 2, 64) => "kernel_attn_decode_v4_g8_t2_c64_hm_f32",
+        (16, 4, 64) => "kernel_attn_decode_v4_g16_t4_c64_hm_f32",
+        (16, 4, 128) => "kernel_attn_decode_v4_g16_t4_c128_hm_f32",
+        _ => {
+            return Err(MetalError::BadShape {
+                kernel: "attn_decode_v4_main_hm",
+                detail: format!(
+                    "unsupported group/group_tile/tile_c for HM proof: {group}/{group_tile}/{tile_c}"
+                ),
+            });
+        }
+    };
+
+    let scale = (1.0f32 / (head_dim as f32).sqrt()) * std::f32::consts::LOG2_E;
+    let rows_per_partition = n_pos.div_ceil(nwg.max(1));
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct MainArgs {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        n_partitions: u32,
+        rows_per_partition: u32,
+        scale: f32,
+    }
+
+    let pso_main = ctx.pipeline(pipeline_name)?;
+    enc.set_pipeline(&pso_main);
+    enc.set_bytes(
+        0,
+        &MainArgs {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_pos: n_pos as u32,
+            kv_stride: head_dim as u32,
+            n_partitions: nwg as u32,
+            rows_per_partition: rows_per_partition as u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, o_partial);
+    enc.set_tensor(5, ml_partial);
+    enc.set_threadgroup_memory(0, group_tile * DK * 2);
+    enc.set_threadgroup_memory(1, group_tile * tile_c * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_kv_heads,
+            height: group / group_tile,
+            depth: nwg,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Encode only the v4 reduce kernel into `enc`, consuming previously-written
 /// partials and producing the final attention output.
 pub fn encode_attn_decode_v4_reduce_only_f32(
@@ -19931,6 +20072,211 @@ mod tests {
                 bench_main("bench ", n_iters);
                 bench_reduce("warmup", warmup);
                 bench_reduce("bench ", n_iters);
+                eprintln!();
+            }
+        }
+    }
+
+    /// Synthetic head-major F16 K/V proof for the long-context MoE v4 attention
+    /// body. This is intentionally not a production cache layout: it isolates the
+    /// address-stride question before any prefill/session sidecar work.
+    #[test]
+    #[ignore]
+    fn attn_v4_head_major_main_reduce_breakdown_moe_shapes() {
+        use std::time::Instant;
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        eprintln!("[v4-hm-main-reduce] {}", ctx.describe());
+
+        fn cosine(a: &[f32], b: &[f32]) -> f64 {
+            let mut dot = 0.0f64;
+            let mut aa = 0.0f64;
+            let mut bb = 0.0f64;
+            for (&x, &y) in a.iter().zip(b) {
+                let x = x as f64;
+                let y = y as f64;
+                dot += x * y;
+                aa += x * x;
+                bb += y * y;
+            }
+            dot / (aa.sqrt() * bb.sqrt()).max(1e-30)
+        }
+
+        fn max_abs(a: &[f32], b: &[f32]) -> f32 {
+            a.iter()
+                .zip(b)
+                .map(|(&x, &y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        }
+
+        let hd = 256usize;
+        let n_iters = 96usize;
+        let warmup = 12usize;
+        let shapes: &[(usize, usize, &str, &[usize])] = &[
+            (16, 2, "a3b", &[8192, 16384, 32768]),
+            (32, 2, "a10b", &[8192, 16384, 32768]),
+        ];
+
+        for &(n_q, n_kv, label_shape, ctxs) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &n_pos in ctxs {
+                let nwg = attn_v4_choose_nwg(n_pos, group);
+                let tile_c = attn_v4_choose_tile_c(n_pos, group);
+                let group_tile = attn_v4_choose_group_tile(n_pos, group);
+                assert!(
+                    (group, group_tile, tile_c) == (8, 2, 64)
+                        || (group, group_tile, tile_c) == (16, 4, 64)
+                        || (group, group_tile, tile_c) == (16, 4, 128),
+                    "unexpected group/group_tile/tile_c {group}/{group_tile}/{tile_c}"
+                );
+
+                let q: Vec<f32> = (0..n_q * hd)
+                    .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                    .collect();
+                let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                    .collect();
+                let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                    .collect();
+
+                let k_tok_h: Vec<half::f16> =
+                    k_f32.iter().copied().map(half::f16::from_f32).collect();
+                let v_tok_h: Vec<half::f16> =
+                    v_f32.iter().copied().map(half::f16::from_f32).collect();
+                let mut k_hm_h = vec![half::f16::ZERO; k_tok_h.len()];
+                let mut v_hm_h = vec![half::f16::ZERO; v_tok_h.len()];
+                for pos in 0..n_pos {
+                    for kvh in 0..n_kv {
+                        let src = pos * kv_dim + kvh * hd;
+                        let dst = (kvh * n_pos + pos) * hd;
+                        k_hm_h[dst..dst + hd].copy_from_slice(&k_tok_h[src..src + hd]);
+                        v_hm_h[dst..dst + hd].copy_from_slice(&v_tok_h[src..src + hd]);
+                    }
+                }
+
+                let q_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q),
+                    vec![(n_q * hd) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let k_tok = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&k_tok_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let v_tok = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&v_tok_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let k_hm = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&k_hm_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let v_hm = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&v_hm_h),
+                    vec![(n_pos * kv_dim) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap();
+
+                let partial_elems = n_kv * nwg * group * hd;
+                let ml_elems = n_kv * nwg * group * 2;
+                let o_tok = MetalTensor::zeros_f32(&ctx, vec![partial_elems as u64]).unwrap();
+                let ml_tok = MetalTensor::zeros_f32(&ctx, vec![ml_elems as u64]).unwrap();
+                let y_tok = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+                let o_hm = MetalTensor::zeros_f32(&ctx, vec![partial_elems as u64]).unwrap();
+                let ml_hm = MetalTensor::zeros_f32(&ctx, vec![ml_elems as u64]).unwrap();
+                let y_hm = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_v4_main_only_f32(
+                        &ctx, enc, &q_t, &k_tok, &v_tok, &o_tok, &ml_tok, n_q, n_kv, hd, n_pos,
+                        nwg, tile_c,
+                    )?;
+                    encode_attn_decode_v4_reduce_only_f32(
+                        &ctx, enc, &o_tok, &ml_tok, &y_tok, n_q, n_kv, hd, nwg,
+                    )
+                })
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_attn_decode_v4_main_only_f32_head_major(
+                        &ctx, enc, &q_t, &k_hm, &v_hm, &o_hm, &ml_hm, n_q, n_kv, hd, n_pos, nwg,
+                        tile_c,
+                    )?;
+                    encode_attn_decode_v4_reduce_only_f32(
+                        &ctx, enc, &o_hm, &ml_hm, &y_hm, n_q, n_kv, hd, nwg,
+                    )
+                })
+                .unwrap();
+                let y_tok_v = read_back_f32(&y_tok.buffer, n_q * hd);
+                let y_hm_v = read_back_f32(&y_hm.buffer, n_q * hd);
+                eprintln!(
+                    "[v4-hm-correct {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2}] cos={:.8} max_abs={:.3e}",
+                    cosine(&y_tok_v, &y_hm_v),
+                    max_abs(&y_tok_v, &y_hm_v)
+                );
+
+                let bench_tok = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_main_only_f32(
+                            &ctx, &enc, &q_t, &k_tok, &v_tok, &o_tok, &ml_tok, n_q, n_kv, hd,
+                            n_pos, nwg, tile_c,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let _t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[v4-main-token {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+                let bench_hm = |label: &str, n: usize| {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n {
+                        encode_attn_decode_v4_main_only_f32_head_major(
+                            &ctx, &enc, &q_t, &k_hm, &v_hm, &o_hm, &ml_hm, n_q, n_kv, hd, n_pos,
+                            nwg, tile_c,
+                        )
+                        .unwrap();
+                    }
+                    enc.end();
+                    let _t = Instant::now();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    let gpu = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                    eprintln!(
+                        "[v4-main-hmajor {label_shape} group={group:>2} tile={group_tile:>2} n_pos={n_pos:>6} nwg={nwg:>2} C={tile_c:>2} {label}] gpu={gpu:7.2} ms  per-call={:6.3} ms",
+                        gpu / n as f64
+                    );
+                };
+
+                bench_tok("warmup", warmup);
+                bench_hm("warmup", warmup);
+                bench_tok("bench ", n_iters);
+                bench_hm("bench ", n_iters);
                 eprintln!();
             }
         }

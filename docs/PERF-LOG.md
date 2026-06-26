@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-25 - v0.334 Decode Attention Sigmoid-Mul Fusion
+
+Status: fused decode gated-attention finalization from `sigmoid(gate)` plus
+`attn_o *= gate` into one elementwise kernel, default-on with rollback
+`QWEN_DECODE_ATTN_SIGMOID_MUL=0`. This removes one pass/dispatch per attention
+layer without touching the v4 KV/body path.
+
+Artifact:
+
+- `docs/bench/2026-06-25-0100-v0334-decode-attn-sigmoid-mul/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo test -p qwen-llm elementwise_add_mul_silu_mul_sigmoid_mul --release -- --nocapture`
+- `cargo build --release --bin qwen-bench`
+- sequential `decode_ctx_sweep.py` A/B packets for A3B, A10B, and dense 27B
+
+Results:
+
+| Model | Shape | default | rollback | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4_K_M | `ctx8192` | `93.6/93.3 t/s` | `92.1/92.2 t/s` | positive |
+| A3B Q4_K_M | `ctx1024` | `99.4/99.4/99.6 t/s` | `99.4/99.2/99.4 t/s` | neutral/positive |
+| A10B Q4_K_XL | `ctx8192` | `42.4/42.6 t/s` | `42.6/42.2 t/s` | neutral/noise |
+| A10B Q4_K_XL | `ctx1024` | `42.5 t/s` | `42.3 t/s` | one-run positive |
+| 27B Q4_K_M | `ctx8192` | `22.6 t/s` | `21.9 t/s` | one-run dense guard positive |
+
+Interpretation: keep this as an attention-shelf cleanup, not as a substitute for
+the deeper attention/KV body work. It broadens decode wins and reduces one scalar
+memory pass per attention layer, while the current high-EV structural question
+remains whether a KV-layout/body proof can beat the v4 bandwidth/occupancy tradeoff.
+
 ## 2026-06-25 - v0.333 Decode Branch Gate Re-Anchor
 
 Status: ran a fresh A3B/A10B `ctx8192` long-decode gate after the prefill family

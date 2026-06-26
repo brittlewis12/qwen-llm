@@ -942,7 +942,11 @@ Current rank after v0.333:
    change execution shape without losing occupancy, or
    show a counter signal beyond byte count/address order. Do not reopen subgroup
    shape, `NWG`, `TILE_C`, ggml-Q8 KV, or broad KV-head-major layout without new
-   data.
+   data. v0.334 banks a small epilogue cleanup by fusing gated-attention
+   `sigmoid+mul`: A3B `ctx8192` moves `92.1/92.2 -> 93.6/93.3 t/s`, A10B is
+   neutral/noise, and a dense 27B `ctx8192` guard moves `21.9 -> 22.6 t/s`. Treat
+   this as a shelf win; the remaining attention branch is still the v4 body/KV
+   path, not more scalar epilogue passes.
 3. A10B memory-capacity/tooling hygiene: v0.315 shows a `ctx-sweep` that allocates
    for `32768` up front can poison even A10B `ctx570/2464` rows (`~0.6 t/s`), while
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`

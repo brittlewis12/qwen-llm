@@ -8194,6 +8194,18 @@ pub fn encode_silu_mul_f32(
     encode_elementwise_2in_1out(ctx, enc, "kernel_silu_mul_f32", gate, up, out)
 }
 
+/// Gated attention: out = x * sigmoid(gate). Used after attention before the
+/// output projection, and supports `out` aliasing `x`.
+pub fn encode_sigmoid_mul_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    x: &MetalTensor,
+    out: &MetalTensor,
+) -> Result<(), MetalError> {
+    encode_elementwise_2in_1out(ctx, enc, "kernel_sigmoid_mul_f32", gate, x, out)
+}
+
 /// In-place residual add: x += y. Used after each transformer block's
 /// mixer and FFN to add the residual stream back. Saves a scratch buffer
 /// vs out-of-place add.
@@ -17964,7 +17976,7 @@ mod tests {
     }
 
     #[test]
-    fn elementwise_add_mul_silu_mul() {
+    fn elementwise_add_mul_silu_mul_sigmoid_mul() {
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -18006,6 +18018,19 @@ mod tests {
                 "silu_mul[{i}] = {} vs {}",
                 silumul[i],
                 silu_a * b[i]
+            );
+        }
+
+        let sigmul = one_shot_f32_out(&ctx, n, |enc, y| {
+            encode_sigmoid_mul_f32(&ctx, enc, &a_t, &b_t, y)
+        });
+        for i in 0..n {
+            let sig_a = 1.0 / (1.0 + (-a[i]).exp());
+            assert!(
+                (sigmul[i] - sig_a * b[i]).abs() < 1e-5,
+                "sigmoid_mul[{i}] = {} vs {}",
+                sigmul[i],
+                sig_a * b[i]
             );
         }
     }

@@ -45,7 +45,7 @@ use crate::metal::{
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
     encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
 };
 use crate::model::ArchKind;
@@ -224,6 +224,16 @@ fn decode_moe_fused_finalizer_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_DECODE_MOE_FUSED_FINALIZER").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn decode_attn_sigmoid_mul_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_ATTN_SIGMOID_MUL").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -4781,8 +4791,12 @@ impl<'a> MetalForward<'a> {
             )?;
         }
 
-        encode_sigmoid_f32(self.ctx, enc, &s.attn_gate, &s.attn_q)?;
-        encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
+        if decode_attn_sigmoid_mul_enabled() {
+            encode_sigmoid_mul_f32(self.ctx, enc, &s.attn_gate, &s.attn_o, &s.attn_o)?;
+        } else {
+            encode_sigmoid_f32(self.ctx, enc, &s.attn_gate, &s.attn_q)?;
+            encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
+        }
         encode_mat_vec_dispatch(self.ctx, enc, &ab.o, &s.attn_o, &s.mixer_out, q_dim, h)?;
         Ok(())
     }
@@ -5218,12 +5232,12 @@ impl<'a> MetalForward<'a> {
         }
 
         // (9) Apply gated-attention sigmoid gate: attn_o *= sigmoid(gate).
-        // We need: y = attn_o * sigmoid(gate). Decompose into
-        //   sigmoid(gate) → tmp; attn_o * tmp → attn_o (in-place)
-        // We don't have a buffer for tmp. Reuse attn_q (no longer needed
-        // after attn_decode).
-        encode_sigmoid_f32(self.ctx, enc, &s.attn_gate, &s.attn_q)?;
-        encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
+        if decode_attn_sigmoid_mul_enabled() {
+            encode_sigmoid_mul_f32(self.ctx, enc, &s.attn_gate, &s.attn_o, &s.attn_o)?;
+        } else {
+            encode_sigmoid_f32(self.ctx, enc, &s.attn_gate, &s.attn_q)?;
+            encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
+        }
 
         // (10) Output projection: q_dim → hidden.
         encode_mat_vec_dispatch(self.ctx, enc, &ab.o, &s.attn_o, &s.mixer_out, q_dim, h)?;
@@ -7359,8 +7373,14 @@ mod tests {
         timed(
             "gate sigmoid + mul",
             &|enc| {
-                encode_sigmoid_f32(mf.ctx, enc, &s.attn_gate, &s.attn_q)?;
-                encode_mul_f32(mf.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o).map_err(MfError::from)
+                if decode_attn_sigmoid_mul_enabled() {
+                    encode_sigmoid_mul_f32(mf.ctx, enc, &s.attn_gate, &s.attn_o, &s.attn_o)
+                        .map_err(MfError::from)
+                } else {
+                    encode_sigmoid_f32(mf.ctx, enc, &s.attn_gate, &s.attn_q)?;
+                    encode_mul_f32(mf.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)
+                        .map_err(MfError::from)
+                }
             },
             &mut phases,
         )?;

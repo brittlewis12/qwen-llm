@@ -235,6 +235,18 @@ kernel void kernel_silu_mul_f32(
     out[tid] = silu_g * up[tid];
 }
 
+// Gated attention: out[i] = x[i] * sigmoid(gate[i]).
+kernel void kernel_sigmoid_mul_f32(
+        constant n_args & args [[buffer(0)]],
+        device const float * gate [[buffer(1)]],
+        device const float * x    [[buffer(2)]],
+        device       float * out  [[buffer(3)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const float g = gate[tid];
+    out[tid] = x[tid] / (1.0f + exp(-g));
+}
+
 // Softmax along the (only) dimension. One threadgroup; up to 1024 threads.
 // Used for attention scores (n = context_len, typically ≤ 4-256K). For
 // large n we'd want a 2-pass shared-memory reduce; this version does one

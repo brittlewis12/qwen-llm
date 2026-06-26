@@ -330,6 +330,16 @@ fn phase_moe_ffn_deep_split_enabled() -> bool {
     })
 }
 
+fn phase_gdn_proj_split_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_GDN_PROJ_SPLIT").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 fn decode_moe_noop_routed_gateup_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4003,6 +4013,10 @@ impl<'a> MetalForward<'a> {
 
         let mut gdn_pre_norm_total_ms = 0.0f64;
         let mut gdn_front_proj_total_ms = 0.0f64;
+        let mut gdn_qkv_proj_total_ms = 0.0f64;
+        let mut gdn_z_proj_total_ms = 0.0f64;
+        let mut gdn_beta_proj_total_ms = 0.0f64;
+        let mut gdn_alpha_proj_total_ms = 0.0f64;
         let mut gdn_alpha_beta_total_ms = 0.0f64;
         let mut gdn_tail_total_ms = 0.0f64;
         let mut gdn_out_proj_total_ms = 0.0f64;
@@ -4024,6 +4038,7 @@ impl<'a> MetalForward<'a> {
         let mut attn_count = 0usize;
         let mut gdn_idx = 0usize;
         let mut attn_idx = 0usize;
+        let split_gdn_proj = phase_gdn_proj_split_enabled();
         let split_ffn_apply = phase_moe_ffn_split_enabled();
         let deep_split_ffn_apply = phase_moe_ffn_deep_split_enabled();
         for block in &self.model.blocks {
@@ -4068,7 +4083,97 @@ impl<'a> MetalForward<'a> {
                         cmd.waitUntilCompleted();
                         gdn_pre_norm_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
                     }
-                    {
+                    if split_gdn_proj {
+                        let n_v = self.model.arch.gdn_n_v_heads as usize;
+                        let n_k = self.model.arch.gdn_n_k_heads as usize;
+                        let head_dim = self.model.arch.gdn_head_dim as usize;
+                        let conv_dim = (2 * n_k + n_v) * head_dim;
+                        {
+                            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                            let enc = KernelEncoder::begin(&cmd);
+                            if decode_gdn_noop_qkv_enabled() {
+                                encode_fill_f32(self.ctx, &enc, &session.gdn_qkv, 0.0)?;
+                            } else {
+                                encode_mat_vec_dispatch(
+                                    self.ctx,
+                                    &enc,
+                                    &g.in_proj_qkv,
+                                    &session.h,
+                                    &session.gdn_qkv,
+                                    h,
+                                    conv_dim,
+                                )?;
+                            }
+                            enc.end();
+                            cmd.commit();
+                            cmd.waitUntilCompleted();
+                            gdn_qkv_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                        }
+                        {
+                            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                            let enc = KernelEncoder::begin(&cmd);
+                            if decode_gdn_noop_z_enabled() {
+                                encode_fill_f32(self.ctx, &enc, &session.gdn_z, 0.0)?;
+                            } else {
+                                encode_mat_vec_dispatch(
+                                    self.ctx,
+                                    &enc,
+                                    &g.in_proj_z,
+                                    &session.h,
+                                    &session.gdn_z,
+                                    h,
+                                    v_dim,
+                                )?;
+                            }
+                            enc.end();
+                            cmd.commit();
+                            cmd.waitUntilCompleted();
+                            gdn_z_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                        }
+                        {
+                            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                            let enc = KernelEncoder::begin(&cmd);
+                            if decode_gdn_noop_beta_enabled() {
+                                encode_fill_f32(self.ctx, &enc, &session.gdn_b, 0.0)?;
+                            } else {
+                                encode_mat_vec_dispatch(
+                                    self.ctx,
+                                    &enc,
+                                    &g.beta_proj,
+                                    &session.h,
+                                    &session.gdn_b,
+                                    h,
+                                    n_v,
+                                )?;
+                            }
+                            enc.end();
+                            cmd.commit();
+                            cmd.waitUntilCompleted();
+                            gdn_beta_proj_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                        }
+                        {
+                            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                            let enc = KernelEncoder::begin(&cmd);
+                            if decode_gdn_noop_alpha_enabled() {
+                                encode_fill_f32(self.ctx, &enc, &session.gdn_a, 0.0)?;
+                            } else {
+                                encode_mat_vec_dispatch(
+                                    self.ctx,
+                                    &enc,
+                                    &g.alpha_proj,
+                                    &session.h,
+                                    &session.gdn_a,
+                                    h,
+                                    n_v,
+                                )?;
+                            }
+                            enc.end();
+                            cmd.commit();
+                            cmd.waitUntilCompleted();
+                            gdn_alpha_proj_total_ms +=
+                                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                        }
+                    } else {
                         let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                         let enc = KernelEncoder::begin(&cmd);
                         self.encode_gdn_front_projections(&enc, g, session)?;
@@ -4320,10 +4425,26 @@ impl<'a> MetalForward<'a> {
             format!("gdn pre_norm (x{gdn_count})"),
             gdn_pre_norm_total_ms,
         ));
-        phases.push((
-            format!("gdn front proj (x{gdn_count})"),
-            gdn_front_proj_total_ms,
-        ));
+        if split_gdn_proj {
+            phases.push((
+                format!("gdn qkv proj (x{gdn_count})"),
+                gdn_qkv_proj_total_ms,
+            ));
+            phases.push((format!("gdn z proj (x{gdn_count})"), gdn_z_proj_total_ms));
+            phases.push((
+                format!("gdn beta proj (x{gdn_count})"),
+                gdn_beta_proj_total_ms,
+            ));
+            phases.push((
+                format!("gdn alpha proj (x{gdn_count})"),
+                gdn_alpha_proj_total_ms,
+            ));
+        } else {
+            phases.push((
+                format!("gdn front proj (x{gdn_count})"),
+                gdn_front_proj_total_ms,
+            ));
+        }
         phases.push((
             format!("gdn alpha/beta (x{gdn_count})"),
             gdn_alpha_beta_total_ms,

@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-25 - v0.337 GDN Q8 Projection Attribution
+
+Status: added `QWEN_PHASE_GDN_PROJ_SPLIT=1`, a phase-profile-only split for MoE
+GDN front projections. Also tested and killed a correctness-safe Q8_0 R4 mat-vec
+sidecar; it regressed both MoE decode gates and was removed instead of kept as a
+dead knob.
+
+Artifact:
+
+- `docs/bench/2026-06-25-0200-v0337-gdn-q8-proj-attribution/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `QWEN_MATVEC_Q8_0_R4=1 cargo test -p qwen-llm mat_vec_q8_0_matches_cpu --release -- --nocapture`
+- `cargo build --release --bin qwen-bench`
+- sequential `decode_ctx_sweep.py` A3B/A10B `ctx8192` R4 packets
+- A10B `qwen-bench phase --ctx 8192` with `QWEN_PHASE_GDN_PROJ_SPLIT=1`
+
+Results:
+
+| Probe | Default | Candidate | Read |
+| --- | ---: | ---: | --- |
+| A3B `ctx8192` Q8 R4 block 0 | `92.6 t/s` | `92.5 t/s` | flat |
+| A3B `ctx8192` Q8 R4 block 1 | `94.0 t/s` | `91.8 t/s` | slower |
+| A10B `ctx8192` Q8 R4 | `42.6 t/s` | `42.0 t/s` | slower |
+
+A10B `ctx8192` phase split with deep MoE FFN split:
+
+| Phase | GPU ms | Share |
+| --- | ---: | ---: |
+| GDN QKV projection | `2.98` | `12.2%` |
+| GDN Z projection | `2.04` | `8.3%` |
+| GDN beta projection | `0.20` | `0.8%` |
+| GDN alpha projection | `0.25` | `1.0%` |
+| GDN out projection | `2.29` | `9.4%` |
+| Attention mixer | `4.39` | `18.0%` |
+| MoE routed gate/up | `3.16` | `12.9%` |
+| MoE routed down | `2.57` | `10.5%` |
+
+Interpretation: GDN projection work is a first-class A10B decode branch, but the
+next Q8 attempt must change dataflow/fusion/packing rather than only widening the
+output-row work unit. Beta/alpha fusion remains killed.
+
 ## 2026-06-25 - v0.336 GDN Decode No-Op Ladder
 
 Status: added diagnostic-only GDN decode no-op oracles for front aggregate,

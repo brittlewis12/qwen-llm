@@ -899,7 +899,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.335:
+Current rank after v0.337:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -958,7 +958,14 @@ Current rank after v0.335:
    Z, and OUT, while beta/alpha are flat/noise. Do not spend the next branch on
    beta/alpha fusion. The next credible implementation is an exact-shape Q8
    projection microbench for `h -> conv_dim`, `h -> v_dim`, and `v_dim -> h`, with
-   a required primitive win before production decode changes.
+   a required primitive win before production decode changes. v0.337 adds an
+   aggregate A10B `ctx8192` phase split: QKV is `2.98 ms` / `12.2%`, Z is
+   `2.04 ms` / `8.3%`, beta+alpha are only `0.45 ms` combined, and OUT is
+   `2.29 ms` / `9.4%`. A correctness-safe Q8_0 R4 row-widening sidecar failed the
+   gate (`92.6/94.0 -> 92.5/91.8 t/s` on A3B and `42.6 -> 42.0 t/s` on A10B), so
+   do not retread Q8 row-count tweaks without counter evidence. The live Q8 branch
+   must change projection dataflow, fusion, or packing; otherwise return to MoE
+   FFN execution shape or attention/KV body work.
 4. A10B memory-capacity/tooling hygiene: v0.315 shows a `ctx-sweep` that allocates
    for `32768` up front can poison even A10B `ctx570/2464` rows (`~0.6 t/s`), while
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`

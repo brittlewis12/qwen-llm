@@ -239,6 +239,70 @@ fn decode_attn_sigmoid_mul_enabled() -> bool {
     })
 }
 
+fn decode_gdn_noop_front_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_DECODE_GDN_NOOP_FRONT").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
+fn decode_gdn_noop_out_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_DECODE_GDN_NOOP_OUT").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
+fn decode_gdn_noop_qkv_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    decode_gdn_noop_front_enabled()
+        || *ENABLED.get_or_init(|| {
+            matches!(
+                std::env::var("QWEN_DECODE_GDN_NOOP_QKV").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        })
+}
+
+fn decode_gdn_noop_z_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    decode_gdn_noop_front_enabled()
+        || *ENABLED.get_or_init(|| {
+            matches!(
+                std::env::var("QWEN_DECODE_GDN_NOOP_Z").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        })
+}
+
+fn decode_gdn_noop_beta_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    decode_gdn_noop_front_enabled()
+        || *ENABLED.get_or_init(|| {
+            matches!(
+                std::env::var("QWEN_DECODE_GDN_NOOP_BETA").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        })
+}
+
+fn decode_gdn_noop_alpha_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    decode_gdn_noop_front_enabled()
+        || *ENABLED.get_or_init(|| {
+            matches!(
+                std::env::var("QWEN_DECODE_GDN_NOOP_ALPHA").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        })
+}
+
 fn phase_moe_ffn_split_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4566,18 +4630,34 @@ impl<'a> MetalForward<'a> {
         let conv_dim = (2 * n_k + n_v) * head_dim;
         let v_dim = n_v * head_dim;
 
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            &gb.in_proj_qkv,
-            &s.h,
-            &s.gdn_qkv,
-            h,
-            conv_dim,
-        )?;
-        encode_mat_vec_dispatch(self.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
-        encode_mat_vec_dispatch(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
-        encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
+        if decode_gdn_noop_qkv_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_qkv, 0.0)?;
+        } else {
+            encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                &gb.in_proj_qkv,
+                &s.h,
+                &s.gdn_qkv,
+                h,
+                conv_dim,
+            )?;
+        }
+        if decode_gdn_noop_z_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_z, 0.0)?;
+        } else {
+            encode_mat_vec_dispatch(self.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
+        }
+        if decode_gdn_noop_beta_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_b, 0.0)?;
+        } else {
+            encode_mat_vec_dispatch(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
+        }
+        if decode_gdn_noop_alpha_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_a, 0.0)?;
+        } else {
+            encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
+        }
         Ok(())
     }
 
@@ -4617,15 +4697,19 @@ impl<'a> MetalForward<'a> {
             &gdn_beta,
             &gdn_normed,
         )?;
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            &gb.out_proj,
-            &gdn_normed,
-            &s.mixer_out,
-            v_dim,
-            h,
-        )?;
+        if decode_gdn_noop_out_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.mixer_out, 0.0)?;
+        } else {
+            encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                &gb.out_proj,
+                &gdn_normed,
+                &s.mixer_out,
+                v_dim,
+                h,
+            )?;
+        }
         Ok(())
     }
 
@@ -4816,23 +4900,39 @@ impl<'a> MetalForward<'a> {
         let conv_dim = (2 * n_k + n_v) * head_dim;
         let v_dim = n_v * head_dim;
 
-        // QKV input projection.
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            &gb.in_proj_qkv,
-            &s.h,
-            &s.gdn_qkv,
-            h,
-            conv_dim,
-        )?;
-        // z projection.
-        encode_mat_vec_dispatch(self.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
-        // β source projection (then sigmoid).
-        encode_mat_vec_dispatch(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
+        if decode_gdn_noop_qkv_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_qkv, 0.0)?;
+        } else {
+            // QKV input projection.
+            encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                &gb.in_proj_qkv,
+                &s.h,
+                &s.gdn_qkv,
+                h,
+                conv_dim,
+            )?;
+        }
+        if decode_gdn_noop_z_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_z, 0.0)?;
+        } else {
+            // z projection.
+            encode_mat_vec_dispatch(self.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
+        }
+        if decode_gdn_noop_beta_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_b, 0.0)?;
+        } else {
+            // beta source projection.
+            encode_mat_vec_dispatch(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
+        }
+        if decode_gdn_noop_alpha_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.gdn_a, 0.0)?;
+        } else {
+            // α source projection.
+            encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
+        }
         encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
-        // α source projection.
-        encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
         // Decay-chain fusion: gdn_alpha stores exp(softplus(gdn_a + dt_bias) * a_log).
         // Replaces add_inplace + softplus + mul + per-row exp with one
         // per-head fused kernel.
@@ -4923,15 +5023,19 @@ impl<'a> MetalForward<'a> {
         )?;
 
         // Output projection: [v_dim, hidden] → mixer_out.
-        encode_mat_vec_dispatch(
-            self.ctx,
-            enc,
-            &gb.out_proj,
-            &s.gdn_normed,
-            &s.mixer_out,
-            v_dim,
-            h,
-        )?;
+        if decode_gdn_noop_out_enabled() {
+            encode_fill_f32(self.ctx, enc, &s.mixer_out, 0.0)?;
+        } else {
+            encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                &gb.out_proj,
+                &s.gdn_normed,
+                &s.mixer_out,
+                v_dim,
+                h,
+            )?;
+        }
         Ok(())
     }
 

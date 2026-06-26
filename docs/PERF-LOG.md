@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-25 - v0.336 GDN Decode No-Op Ladder
+
+Status: added diagnostic-only GDN decode no-op oracles for front aggregate,
+individual QKV/Z/beta/alpha projections, and out projection. These are
+correctness-breaking lower-bound attribution tools: each no-op writes zero fills
+instead of running the selected projection.
+
+Artifact:
+
+- `docs/bench/2026-06-25-0140-v0336-gdn-noop-ladder/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- sequential `decode_ctx_sweep.py` A3B/A10B `ctx8192` no-op packets
+
+Results:
+
+| Model | default | front no-op | out no-op | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4_K_M | `94.0 t/s` / `10.19 ms` | `112.9` / `8.41 ms` | `99.6` / `9.58 ms` | front and out both real |
+| A10B Q4_K_XL | `42.4 t/s` / `23.06 ms` | `53.0` / `18.38 ms` | `46.8` / `20.88 ms` | front and out both real |
+
+Subprojection ladder:
+
+| Model | default GPU | QKV no-op | Z no-op | beta no-op | alpha no-op | out no-op |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A3B Q4_K_M | `10.22 ms` | `9.11 ms` | `9.62 ms` | `10.28 ms` | `10.19 ms` | `9.59 ms` |
+| A10B Q4_K_XL | `23.02 ms` | `20.27 ms` | `21.19 ms` | `23.03 ms` | `23.34 ms` | `21.02 ms` |
+
+Interpretation: do not spend the next branch on beta/alpha skinny F32 fusion; the
+budget is QKV, Z, and OUT. Since these are Q8 projection-shaped and prior broad
+Q8 mat-vec work is already strong, the next credible implementation is an
+exact-shape Q8 projection microbench for the convicted shapes, not another
+concurrent-encoder or scalar epilogue cleanup.
+
 ## 2026-06-25 - v0.335 Head-Major KV Attention Falsifier
 
 Status: added and ran an ignored synthetic v4 attention proof for head-major F16

@@ -29,14 +29,17 @@ use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
     metal::{
-        KernelEncoder, KernelTraceCounters, MetalContext, MetalTensor, encode_attn_decode_v4_f32,
-        encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
-        encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
-        encode_fill_f32, encode_mul_f32, encode_rms_norm_batched_f32, encode_roofline_fma_f32,
-        encode_roofline_stream_f32, encode_rope_neox_f32_packed_consecutive,
+        KernelEncoder, KernelTraceCounters, MetalContext, MetalTensor, attn_v4_choose_group_tile,
+        attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
+        encode_attn_decode_v4_f32, encode_attn_decode_v4_main_only_f32,
+        encode_attn_decode_v4_reduce_only_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
+        encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
+        encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32, encode_mul_f32,
+        encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_roofline_fma_f32,
+        encode_roofline_stream_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
         encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-        encode_split_q_gate_f32, encode_touch_bytes_f32, kernel_trace_begin, kernel_trace_snapshot,
-        with_attn_v4_group_tile_override,
+        encode_sigmoid_mul_f32, encode_split_q_gate_f32, encode_touch_bytes_f32,
+        kernel_trace_begin, kernel_trace_snapshot, with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -189,6 +192,8 @@ enum Cmd {
     /// Phase-resolved profile at one context length (uses the
     /// `phase_sum` GPU time, NOT the per-phase-cmdbuf wall artifact).
     Phase(PhaseArgs),
+    /// Decode attention intra-layer profile at one context length.
+    AttnIntra(AttnIntraArgs),
     /// Exact-shape GDN projection primitive microbench.
     GdnProjMicro(GdnProjMicroArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
@@ -476,6 +481,22 @@ struct PhaseArgs {
     /// Context length to profile at.
     #[arg(long, default_value = "4096")]
     ctx: usize,
+}
+
+#[derive(Parser, Debug)]
+struct AttnIntraArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Context length to ramp before profiling one attention layer.
+    #[arg(long, default_value = "32768")]
+    ctx: usize,
+    /// Timed single-layer repetitions after the ramp.
+    #[arg(long, default_value = "3")]
+    runs: usize,
+    /// Optional absolute block index. Defaults to the first full-attention block.
+    #[arg(long)]
+    block: Option<usize>,
 }
 
 #[derive(Parser, Debug)]
@@ -1402,6 +1423,7 @@ fn main() -> Result<()> {
         Cmd::Suite(a) => run_suite(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
+        Cmd::AttnIntra(a) => run_attn_intra(a),
         Cmd::GdnProjMicro(a) => run_gdn_proj_micro(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
@@ -6098,6 +6120,407 @@ fn run_phase(args: PhaseArgs) -> Result<()> {
         let pct = ms / phase_sum * 100.0;
         println!("[phase ctx={target}]   {name:25} {ms:7.2} ms  ({pct:5.1}%)");
     }
+    Ok(())
+}
+
+fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
+    let AttnIntraArgs {
+        model,
+        ctx: target,
+        runs,
+        block,
+    } = args;
+    if runs == 0 {
+        return Err(anyhow!("--runs must be > 0"));
+    }
+
+    let mctx = MetalContext::new()?;
+    let g = GgufFile::open(&model)?;
+    let m = Model::from_gguf(&g)?;
+    let mm = MetalModel::load(&mctx, &g, &m)?;
+    let mf = MetalForward::new(&mctx, &mm);
+
+    let total_attn = mm
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, MetalBlock::Attn(_)))
+        .count();
+    let mut attn_seen = 0usize;
+    let mut selected: Option<(usize, usize)> = None;
+    for (idx, b) in mm.blocks.iter().enumerate() {
+        if matches!(b, MetalBlock::Attn(_)) {
+            if block.map_or(true, |want| want == idx) {
+                selected = Some((idx, attn_seen));
+                break;
+            }
+            attn_seen += 1;
+        }
+    }
+    let (block_idx, attn_idx_in_session) = selected.ok_or_else(|| match block {
+        Some(idx) => anyhow!("block {idx} is not a full-attention block"),
+        None => anyhow!("model has no full-attention blocks"),
+    })?;
+    let ab = match &mm.blocks[block_idx] {
+        MetalBlock::Attn(a) => a,
+        _ => unreachable!(),
+    };
+
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+    let head_dim = arch.attn_head_dim as usize;
+    let n_q = arch.n_q_heads as usize;
+    let n_kv = arch.n_kv_heads as usize;
+    let group = n_q / n_kv;
+    let q_dim = n_q * head_dim;
+    let kv_dim = n_kv * head_dim;
+    let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
+    if head_dim != 256 || !matches!(group, 4 | 6 | 8 | 16) {
+        return Err(anyhow!(
+            "attn-intra only supports attn_v4 shapes; got head_dim={head_dim} group={group}"
+        ));
+    }
+
+    {
+        let mut s = MetalSession::fresh(&mctx, &mm, 32)?;
+        for i in 0..3 {
+            let _ = mf.single_token(0, i as u32, &mut s)?;
+        }
+    }
+    let mut s = MetalSession::fresh(&mctx, &mm, target + runs + 16)?;
+    for p in 0..(target as u32) {
+        let _ = mf.single_token(0, p, &mut s)?;
+    }
+
+    let timed = |label: &str,
+                 cb: &dyn Fn(&KernelEncoder) -> Result<()>,
+                 phases: &mut Vec<(String, f64)>|
+     -> Result<()> {
+        let cmd = mctx.queue.commandBuffer().context("attn-intra cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        cb(&enc)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        phases.push((
+            label.to_string(),
+            (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+        ));
+        Ok(())
+    };
+
+    let mut agg: Vec<(String, f64)> = Vec::new();
+    for run in 0..runs {
+        let position = target as u32 + run as u32;
+        let mut phases: Vec<(String, f64)> = Vec::new();
+        timed(
+            "pre_norm (rms_norm)",
+            &|enc| {
+                Ok(encode_rms_norm_mul_f32(
+                    &mctx,
+                    enc,
+                    &s.x,
+                    &ab.attn_norm,
+                    &s.h,
+                    RMS_EPS,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "q_proj_2x (mat_vec)",
+            &|enc| {
+                Ok(encode_mat_vec_dispatch(
+                    &mctx,
+                    enc,
+                    &ab.q,
+                    &s.h,
+                    &s.attn_q_full,
+                    h,
+                    2 * q_dim,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "split_q_gate",
+            &|enc| {
+                Ok(encode_split_q_gate_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_q_full,
+                    &s.attn_q,
+                    &s.attn_gate,
+                    n_q,
+                    head_dim,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "q_norm (batched rms)",
+            &|enc| {
+                Ok(encode_rms_norm_batched_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_q,
+                    &ab.q_norm,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    RMS_EPS,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "k_proj (mat_vec)",
+            &|enc| {
+                Ok(encode_mat_vec_dispatch(
+                    &mctx,
+                    enc,
+                    &ab.k,
+                    &s.h,
+                    &s.attn_k_now,
+                    h,
+                    kv_dim,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "v_proj (mat_vec)",
+            &|enc| {
+                Ok(encode_mat_vec_dispatch(
+                    &mctx,
+                    enc,
+                    &ab.v,
+                    &s.h,
+                    &s.attn_v_now,
+                    h,
+                    kv_dim,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "k_norm (batched rms)",
+            &|enc| {
+                Ok(encode_rms_norm_batched_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_k_now,
+                    &ab.k_norm,
+                    &s.attn_k_normed,
+                    n_kv,
+                    head_dim,
+                    RMS_EPS,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "rope Q",
+            &|enc| {
+                Ok(encode_rope_neox_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_q_normed,
+                    n_q,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "rope K",
+            &|enc| {
+                Ok(encode_rope_neox_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_k_normed,
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    position,
+                    arch.rope_theta,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "kv scatter (fused)",
+            &|enc| {
+                Ok(encode_scatter_offset_f32_to_f16_kv(
+                    &mctx,
+                    enc,
+                    &s.attn_k_normed,
+                    &s.attn_v_now,
+                    &s.kv_k[attn_idx_in_session],
+                    &s.kv_v[attn_idx_in_session],
+                    (position as usize) * kv_dim,
+                    kv_dim,
+                )?)
+            },
+            &mut phases,
+        )?;
+        s.kv_n_pos[attn_idx_in_session] = position as usize + 1;
+        let n_pos = s.kv_n_pos[attn_idx_in_session];
+        let nwg = attn_v4_choose_nwg(n_pos, group);
+        let tile_c = attn_v4_choose_tile_c(n_pos, group);
+        timed(
+            "attn_decode_v4_main",
+            &|enc| {
+                Ok(encode_attn_decode_v4_main_only_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_q_normed,
+                    &s.kv_k[attn_idx_in_session],
+                    &s.kv_v[attn_idx_in_session],
+                    &s.attn_v4_o_partial,
+                    &s.attn_v4_ml_partial,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "attn_decode_v4_reduce",
+            &|enc| {
+                Ok(encode_attn_decode_v4_reduce_only_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_v4_o_partial,
+                    &s.attn_v4_ml_partial,
+                    &s.attn_o,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    nwg,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "gate sigmoid + mul",
+            &|enc| {
+                Ok(encode_sigmoid_mul_f32(
+                    &mctx,
+                    enc,
+                    &s.attn_gate,
+                    &s.attn_o,
+                    &s.attn_o,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "o_proj (mat_vec)",
+            &|enc| {
+                Ok(encode_mat_vec_dispatch(
+                    &mctx,
+                    enc,
+                    &ab.o,
+                    &s.attn_o,
+                    &s.mixer_out,
+                    q_dim,
+                    h,
+                )?)
+            },
+            &mut phases,
+        )?;
+        timed(
+            "residual_add #1",
+            &|enc| Ok(encode_add_inplace_f32(&mctx, enc, &s.x, &s.mixer_out)?),
+            &mut phases,
+        )?;
+        timed(
+            "post_norm (rms_norm)",
+            &|enc| {
+                Ok(encode_rms_norm_mul_f32(
+                    &mctx,
+                    enc,
+                    &s.x,
+                    &ab.post_attn_norm,
+                    &s.h,
+                    RMS_EPS,
+                )?)
+            },
+            &mut phases,
+        )?;
+
+        if agg.is_empty() {
+            agg = phases;
+        } else {
+            for ((_, total), (_, ms)) in agg.iter_mut().zip(phases) {
+                *total += ms;
+            }
+        }
+    }
+
+    let n_pos_est = target + runs;
+    let nwg = attn_v4_choose_nwg(n_pos_est, group);
+    let tile_c = attn_v4_choose_tile_c(n_pos_est, group);
+    let group_tile = attn_v4_choose_group_tile(n_pos_est, group);
+    let subgroups = group / group_tile.max(1);
+    let logical_kv_bytes = n_kv * n_pos_est * (head_dim + head_dim) * 2;
+    let subgroup_kv_bytes = logical_kv_bytes * subgroups;
+    let partial_bytes = n_kv * nwg * group * (head_dim * 4 + 2 * 4);
+    let reduce_bytes = partial_bytes + n_q * head_dim * 4;
+
+    let avgs: Vec<(String, f64)> = agg
+        .into_iter()
+        .map(|(name, ms)| (name, ms / runs as f64))
+        .collect();
+    let total: f64 = avgs.iter().map(|(_, ms)| *ms).sum();
+    println!(
+        "[attn-intra ctx={target}] block={block_idx} attn_idx={attn_idx_in_session} \
+         attn_layers={total_attn} runs={runs} n_q={n_q} n_kv={n_kv} group={group} \
+         group_tile={group_tile} nwg={nwg} tile_c={tile_c}"
+    );
+    println!(
+        "[attn-intra ctx={target}] bytes_est main_gb={:.4} reduce_gb={:.4} \
+         logical_kv_gb={:.4} subgroup_kv_gb={:.4}",
+        (subgroup_kv_bytes + partial_bytes) as f64 / 1e9,
+        reduce_bytes as f64 / 1e9,
+        logical_kv_bytes as f64 / 1e9,
+        subgroup_kv_bytes as f64 / 1e9,
+    );
+    println!(
+        "[attn-intra ctx={target}] one_layer_avg={total:.4} ms extrapolated={:.4} ms",
+        total * total_attn as f64
+    );
+    println!("phase\tavg_ms\tpct\textrapolated_ms\test_gb\test_gb_s");
+    for (name, ms) in &avgs {
+        let est_bytes = match name.as_str() {
+            "attn_decode_v4_main" => subgroup_kv_bytes + partial_bytes,
+            "attn_decode_v4_reduce" => reduce_bytes,
+            _ => 0,
+        };
+        if est_bytes > 0 && *ms > 0.0 {
+            let gb = est_bytes as f64 / 1e9;
+            println!(
+                "{name}\t{ms:.4}\t{:.2}\t{:.4}\t{gb:.4}\t{:.1}",
+                ms / total * 100.0,
+                ms * total_attn as f64,
+                gb / (*ms / 1000.0)
+            );
+        } else {
+            println!(
+                "{name}\t{ms:.4}\t{:.2}\t{:.4}\t\t",
+                ms / total * 100.0,
+                ms * total_attn as f64
+            );
+        }
+    }
+
     Ok(())
 }
 

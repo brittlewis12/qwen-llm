@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-27 - v0.342 True-Long Attention Rerank
+
+Status: refreshed A3B/A10B true-long decode attribution and added
+`qwen-bench attn-intra` as a visible per-attention-layer decode body probe.
+
+Artifact:
+
+- `docs/bench/2026-06-27-1845-v0342-true-long-attn-rerank/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- sequential A3B/A10B true-long `ctx-sweep`, `phase`, and `attn-intra` probes
+
+Context sweep, fresh-per-checkpoint, `window=4`:
+
+| Model | `ctx8192` | `ctx16384` | `ctx32768` |
+| --- | ---: | ---: | ---: |
+| A3B Q4_K_M | `93.1 t/s` | `85.2 t/s` | `72.8 t/s` |
+| A10B Q4_XL | `42.2 t/s` | `39.9 t/s` | `36.0 t/s` |
+
+Deep phase rerank:
+
+| Model/context | Attention | GDN qkv+z+out | Routed down |
+| --- | ---: | ---: | ---: |
+| A3B `ctx32768` | `5.49 ms` / `34.7%` | `2.66 ms` / `16.8%` | `1.65 ms` / `10.4%` |
+| A10B `ctx32768` | `8.22 ms` / `26.9%` | `8.18 ms` / `26.7%` | `2.72 ms` / `8.9%` |
+
+Attn-intra body probe at `ctx32768`:
+
+| Model | Main body | Main est BW | Reduce |
+| --- | ---: | ---: | ---: |
+| A3B | `0.416 ms/layer` | `649 GB/s` | `0.052 ms/layer` |
+| A10B | `0.465 ms/layer` | `583 GB/s` | `0.034 ms/layer` |
+
+Interpretation: attention is the true-long scaling limiter, but the v4 main body
+is already fast against estimated subgroup KV bytes. Do not promote a full
+same-byte attention rewrite from phase share alone; require byte reduction,
+hardware-counter evidence of hidden traffic, or a prototype that moves full-model
+`ctx32768`. The next mainline remains Q5/MoE tooling or structural GDN/attention
+byte reduction, not another local attention layout pass.
+
 ## 2026-06-27 - v0.341 MoE FFN Pipeline2 Negative
 
 Status: tested and removed a dirty MoE decode FFN pipeline proof. The proof split

@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-27 - v0.343 MoE Routed-Down Microbench
+
+Status: added `qwen-bench moe-down-micro` to isolate the exact Q5_K routed-down
+weighted-sum primitive without paying a long decode ramp for each experiment.
+
+Artifact:
+
+- `docs/bench/2026-06-27-2015-v0343-moe-down-micro/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- sequential A3B/A10B `moe-down-micro` sweeps, no parallel GPU workloads
+
+Token-count sweep:
+
+| Model | Q5 layers | `tokens=1` | `tokens=16` | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4_K_M | 37 | `1.1668 ms`, `182.9 GB/s` | `14.4364 ms`, `236.5 GB/s` | small-shape Q5 down remains weak |
+| A10B Q4_XL | 47 | `2.5013 ms`, `325.1 GB/s` | `37.4929 ms`, `347.0 GB/s` | larger shape is much healthier |
+
+Interpretation: `moe-down-micro` is now the fast primitive gate for Q5 routed-down
+ideas. Synthetic batching helps A3B but plateaus far below the stream roofline,
+so the next serious branch needs a different work unit or dequant/dataflow change
+rather than another same-kernel retune or full-model long-ramp smoke.
+
 ## 2026-06-27 - v0.342 True-Long Attention Rerank
 
 Status: refreshed A3B/A10B true-long decode attribution and added

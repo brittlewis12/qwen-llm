@@ -34,7 +34,8 @@ use qwen_llm::{
         encode_attn_decode_v4_f32, encode_attn_decode_v4_main_only_f32,
         encode_attn_decode_v4_reduce_only_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
         encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
-        encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32, encode_mul_f32,
+        encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32,
+        encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_mul_f32,
         encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_roofline_fma_f32,
         encode_roofline_stream_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
         encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
@@ -196,6 +197,8 @@ enum Cmd {
     AttnIntra(AttnIntraArgs),
     /// Exact-shape GDN projection primitive microbench.
     GdnProjMicro(GdnProjMicroArgs),
+    /// Exact-shape MoE routed-down primitive microbench.
+    MoeDownMicro(MoeDownMicroArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
     /// Warm to a target context, then wait for an external go signal before
@@ -510,6 +513,22 @@ struct GdnProjMicroArgs {
     /// Untimed warmup repetitions.
     #[arg(long, default_value = "5")]
     warmup: usize,
+}
+
+#[derive(Parser, Debug)]
+struct MoeDownMicroArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "20")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "5")]
+    warmup: usize,
+    /// Synthetic tokens routed through the packed-slots kernel.
+    #[arg(long, default_value = "1")]
+    tokens: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1425,6 +1444,7 @@ fn main() -> Result<()> {
         Cmd::Phase(a) => run_phase(a),
         Cmd::AttnIntra(a) => run_attn_intra(a),
         Cmd::GdnProjMicro(a) => run_gdn_proj_micro(a),
+        Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
@@ -1581,6 +1601,112 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
     })?;
     report("out", out_bytes, wall, gpu);
 
+    Ok(())
+}
+
+fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
+    let MoeDownMicroArgs {
+        model,
+        iters,
+        warmup,
+        tokens,
+    } = args;
+    if iters == 0 {
+        return Err(anyhow!("--iters must be >= 1"));
+    }
+    if tokens == 0 {
+        return Err(anyhow!("--tokens must be >= 1"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    let arch = &mm.arch;
+    if arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!("moe-down-micro requires an MoE model"));
+    }
+    let h = arch.hidden_size as usize;
+    let f_exp = arch.expert_feed_forward_length as usize;
+    let n_expert = arch.expert_count as usize;
+    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+    let q5_moes: Vec<_> = mm
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            MetalBlock::Gdn(g) => g.ffn_moe.as_ref(),
+            MetalBlock::Attn(a) => a.ffn_moe.as_ref(),
+        })
+        .filter(|moe| moe.down_exps.dtype == GgmlType::Q5_K)
+        .collect();
+    if q5_moes.is_empty() {
+        return Err(anyhow!("model has no Q5_K routed down expert banks"));
+    }
+
+    let slots = tokens * topk;
+    let inner = MetalTensor::zeros_f32(&ctx, vec![(slots * f_exp) as u64])?;
+    let topk_idx = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
+    let topk_w = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
+    let out = MetalTensor::zeros_f32(&ctx, vec![(tokens * h) as u64])?;
+    unsafe {
+        let inner_ptr = inner.buffer.contents().as_ptr() as *mut f32;
+        for i in 0..(slots * f_exp) {
+            *inner_ptr.add(i) = ((i % 17) as f32 - 8.0) * 0.0125;
+        }
+        let idx_ptr = topk_idx.buffer.contents().as_ptr() as *mut i32;
+        let w_ptr = topk_w.buffer.contents().as_ptr() as *mut f32;
+        for slot in 0..slots {
+            *idx_ptr.add(slot) = ((slot * 17) % n_expert) as i32;
+            *w_ptr.add(slot) = 1.0 / topk as f32;
+        }
+    }
+
+    let active_weight_bytes: f64 = q5_moes
+        .iter()
+        .map(|moe| moe.down_exps.n_bytes() as f64 * tokens as f64 * topk as f64 / n_expert as f64)
+        .sum();
+    let inner_bytes = (slots * f_exp * std::mem::size_of::<f32>()) as f64;
+    let out_bytes = (tokens * h * std::mem::size_of::<f32>()) as f64;
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for moe in &q5_moes {
+            encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                &ctx,
+                enc,
+                &moe.down_exps,
+                &inner,
+                &topk_idx,
+                &topk_w,
+                &out,
+                f_exp,
+                h,
+                n_expert,
+                topk,
+                tokens,
+            )?;
+        }
+        Ok(())
+    })?;
+
+    let weight_gb = active_weight_bytes / 1e9;
+    let activation_gb = (inner_bytes + out_bytes) * q5_moes.len() as f64 / 1e9;
+    println!(
+        "[moe-down-micro] model={} q5_layers={} h={} f_exp={} n_expert={} topk={} tokens={} warmup={} iters={}",
+        model.display(),
+        q5_moes.len(),
+        h,
+        f_exp,
+        n_expert,
+        topk,
+        tokens,
+        warmup,
+        iters
+    );
+    println!("phase\tactive_weight_gb\tactivation_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
+    println!(
+        "q5_down_weighted_sum\t{weight_gb:.4}\t{activation_gb:.4}\t{wall:.4}\t{gpu:.4}\t{:.1}",
+        weight_gb / (gpu / 1e3)
+    );
     Ok(())
 }
 

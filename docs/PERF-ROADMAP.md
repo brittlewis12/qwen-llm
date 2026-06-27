@@ -915,7 +915,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.342:
+Current rank after v0.343:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -948,11 +948,16 @@ Current rank after v0.342:
    A10B splits between attention (`8.22 ms`), GDN qkv+z+out (`8.18 ms`), and MoE
    FFN. Keep Q5/MoE as a tooling/counter branch, not a local-kernel branch. The
    next branch should bring counters or change byte movement materially rather
-   than retuning the same Q5 down kernel or adding split waves. Gate: `>=0.3
-   ms/token` total GPU improvement at A3B `ctx8192`, `>=0.8%` A10B `ctx8192`,
-   `ctx128/1024` neutral, and same-build rollback A/B via
-   `scripts/profile/decode_ctx_sweep.py` before declaring any long-decode kernel
-   win.
+   than retuning the same Q5 down kernel or adding split waves. v0.343 adds the
+   fast primitive gate: `qwen-bench moe-down-micro` times all Q5_K routed-down
+   expert banks without a long ramp. It matches the attribution scale and shows
+   A3B Q5 down at only `183 GB/s` for one token, improving to `236 GB/s` at
+   synthetic `tokens=16`, while A10B is already `325-354 GB/s`. This keeps A3B
+   Q5 down real but points away from command overhead and toward the small-shape
+   work unit/dequant dataflow. Gate: `>=0.3 ms/token` total GPU improvement at
+   A3B `ctx8192`, `>=0.8%` A10B `ctx8192`, `ctx128/1024` neutral, and same-build
+   rollback A/B via `scripts/profile/decode_ctx_sweep.py` before declaring any
+   long-decode kernel win.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in
@@ -1027,7 +1032,9 @@ Current rank after v0.342:
    v0.326 adds `scripts/profile/decode_ctx_sweep.py` for order-aware env-variant
    `ctx-sweep` packets, closing the measurement gap that let v0.325's false Q5
    R2 win survive too long. v0.342 adds visible `qwen-bench attn-intra` so
-   attention main/reduce body evidence is not trapped in ignored tests.
+   attention main/reduce body evidence is not trapped in ignored tests. v0.343
+   adds visible `qwen-bench moe-down-micro` for fast Q5 routed-down primitive
+   gates before full long-ramp decode sweeps.
    The first A3B Q4 `ctx8192` sample is `93.0 t/s`, `2.6215 GB/token`, and
    `243.8 GB/s` (`51.4%` of measured stream roofline); attention KV subgroup
    traffic is `0.6711 GB/token` at `294.3 GB/s`. Next, keep using this output to

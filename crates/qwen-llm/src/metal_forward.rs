@@ -38,11 +38,12 @@ use crate::metal::{
     encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
     encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
     encode_moe_down_bf16_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_down_weighted_sum_q6_K_f32,
-    encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32, encode_moe_mat_vec_iq3_s_f32,
-    encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_shared_accum_resid_f32,
-    encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
+    encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32,
+    encode_moe_mat_vec_iq3_s_f32, encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32,
+    encode_moe_shared_accum_resid_f32, encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32,
+    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
     encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
@@ -224,6 +225,16 @@ fn decode_moe_q5_down_fused_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_DECODE_MOE_Q5_DOWN_FUSED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn decode_moe_q5_down_k512_r2_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_MOE_Q5_DOWN_K512_R2").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -1804,20 +1815,37 @@ impl<'a> MetalForward<'a> {
         let pending = match moe.down_exps.dtype {
             GgmlType::Q5_K => {
                 if decode_moe_q5_down_fused_enabled() {
-                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
-                        self.ctx,
-                        enc,
-                        &moe.down_exps,
-                        &moe_inner,
-                        &topk_idx,
-                        &topk_w,
-                        &session.mixer_out,
-                        f_exp,
-                        h,
-                        n_expert,
-                        topk,
-                        1,
-                    )?;
+                    if f_exp == 512 && decode_moe_q5_down_k512_r2_enabled() {
+                        encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                            self.ctx,
+                            enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &topk_w,
+                            &session.mixer_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                            1,
+                        )?;
+                    } else {
+                        encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                            self.ctx,
+                            enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &topk_w,
+                            &session.mixer_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                            1,
+                        )?;
+                    }
                     false
                 } else {
                     encode_moe_down_q5_K_f32(
@@ -1935,20 +1963,37 @@ impl<'a> MetalForward<'a> {
             GgmlType::Q5_K => {
                 let enc = KernelEncoder::begin_concurrent(cmd_buf);
                 let pending = if decode_moe_q5_down_fused_enabled() {
-                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
-                        self.ctx,
-                        &enc,
-                        &moe.down_exps,
-                        &moe_inner,
-                        &topk_idx,
-                        &topk_w,
-                        &session.mixer_out,
-                        f_exp,
-                        h,
-                        n_expert,
-                        topk,
-                        1,
-                    )?;
+                    if f_exp == 512 && decode_moe_q5_down_k512_r2_enabled() {
+                        encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                            self.ctx,
+                            &enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &topk_w,
+                            &session.mixer_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                            1,
+                        )?;
+                    } else {
+                        encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                            self.ctx,
+                            &enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &topk_w,
+                            &session.mixer_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                            1,
+                        )?;
+                    }
                     false
                 } else {
                     encode_moe_down_q5_K_f32(

@@ -915,7 +915,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.343:
+Current rank after v0.344:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -954,10 +954,15 @@ Current rank after v0.343:
    A3B Q5 down at only `183 GB/s` for one token, improving to `236 GB/s` at
    synthetic `tokens=16`, while A10B is already `325-354 GB/s`. This keeps A3B
    Q5 down real but points away from command overhead and toward the small-shape
-   work unit/dequant dataflow. Gate: `>=0.3 ms/token` total GPU improvement at
-   A3B `ctx8192`, `>=0.8%` A10B `ctx8192`, `ctx128/1024` neutral, and same-build
-   rollback A/B via `scripts/profile/decode_ctx_sweep.py` before declaring any
-   long-decode kernel win.
+   work unit/dequant dataflow. v0.344 cracks that specific small-K issue: the
+   default Q5 down kernel used only two of four K-lane groups at `f_exp=512`, and
+   the new R2 kernel computes two output rows per simdgroup. Rollback is
+   `QWEN_DECODE_MOE_Q5_DOWN_K512_R2=0`. A3B default-vs-rollback improves
+   `ctx128` (`106.6/104.7 -> 108.2/109.8 t/s`), `ctx1024`
+   (`100.7/100.6 -> 103.7/104.0`), and `ctx8192`
+   (`93.8/94.0 -> 98.0/97.7`, `+4.0-4.5%`). This branch is now banked for
+   `f_exp=512`; future Q5 work should target new shapes or broader dataflow, not
+   reopen NSG/R2 variants for the same kernel.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

@@ -35,7 +35,8 @@ use qwen_llm::{
         encode_attn_decode_v4_reduce_only_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
         encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
         encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32,
-        encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_mul_f32,
+        encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+        encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2, encode_mul_f32,
         encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_roofline_fma_f32,
         encode_roofline_stream_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
         encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
@@ -529,6 +530,21 @@ struct MoeDownMicroArgs {
     /// Synthetic tokens routed through the packed-slots kernel.
     #[arg(long, default_value = "1")]
     tokens: usize,
+    /// Override routed-down K dimension with a synthetic zero Q5_K bank.
+    #[arg(long)]
+    synthetic_f_exp: Option<usize>,
+    /// Override routed-down output dimension with a synthetic zero Q5_K bank.
+    #[arg(long)]
+    synthetic_h: Option<usize>,
+    /// Number of synthetic layer dispatches. Defaults to the real Q5 layer count.
+    #[arg(long)]
+    synthetic_layers: Option<usize>,
+    /// Use the experimental f_exp=512 two-row-per-simdgroup Q5 down kernel.
+    #[arg(long)]
+    k512_r2: bool,
+    /// Compare default vs --k512-r2 output before timing.
+    #[arg(long)]
+    check_k512_r2: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1610,6 +1626,11 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         iters,
         warmup,
         tokens,
+        synthetic_f_exp,
+        synthetic_h,
+        synthetic_layers,
+        k512_r2,
+        check_k512_r2,
     } = args;
     if iters == 0 {
         return Err(anyhow!("--iters must be >= 1"));
@@ -1642,15 +1663,39 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     if q5_moes.is_empty() {
         return Err(anyhow!("model has no Q5_K routed down expert banks"));
     }
+    if synthetic_f_exp.is_some() != synthetic_h.is_some() {
+        return Err(anyhow!(
+            "--synthetic-f-exp and --synthetic-h must be passed together"
+        ));
+    }
+    let synthetic = synthetic_f_exp.is_some();
+    let f_run = synthetic_f_exp.unwrap_or(f_exp);
+    let h_run = synthetic_h.unwrap_or(h);
+    let layer_count = synthetic_layers.unwrap_or(q5_moes.len());
+    if synthetic && layer_count == 0 {
+        return Err(anyhow!("--synthetic-layers must be >= 1"));
+    }
+    if f_run % 256 != 0 {
+        return Err(anyhow!("routed-down f_exp must be divisible by 256"));
+    }
+    let synthetic_weight = if synthetic {
+        Some(MetalTensor::zeros_dtype(
+            &ctx,
+            vec![f_run as u64, h_run as u64, n_expert as u64, 1],
+            GgmlType::Q5_K,
+        )?)
+    } else {
+        None
+    };
 
     let slots = tokens * topk;
-    let inner = MetalTensor::zeros_f32(&ctx, vec![(slots * f_exp) as u64])?;
+    let inner = MetalTensor::zeros_f32(&ctx, vec![(slots * f_run) as u64])?;
     let topk_idx = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
     let topk_w = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
-    let out = MetalTensor::zeros_f32(&ctx, vec![(tokens * h) as u64])?;
+    let out = MetalTensor::zeros_f32(&ctx, vec![(tokens * h_run) as u64])?;
     unsafe {
         let inner_ptr = inner.buffer.contents().as_ptr() as *mut f32;
-        for i in 0..(slots * f_exp) {
+        for i in 0..(slots * f_run) {
             *inner_ptr.add(i) = ((i % 17) as f32 - 8.0) * 0.0125;
         }
         let idx_ptr = topk_idx.buffer.contents().as_ptr() as *mut i32;
@@ -1661,41 +1706,168 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         }
     }
 
-    let active_weight_bytes: f64 = q5_moes
-        .iter()
-        .map(|moe| moe.down_exps.n_bytes() as f64 * tokens as f64 * topk as f64 / n_expert as f64)
-        .sum();
-    let inner_bytes = (slots * f_exp * std::mem::size_of::<f32>()) as f64;
-    let out_bytes = (tokens * h * std::mem::size_of::<f32>()) as f64;
-
-    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
-        for moe in &q5_moes {
+    let active_weight_bytes: f64 = if let Some(weight) = synthetic_weight.as_ref() {
+        weight.n_bytes() as f64 * layer_count as f64 * tokens as f64 * topk as f64 / n_expert as f64
+    } else {
+        q5_moes
+            .iter()
+            .map(|moe| {
+                moe.down_exps.n_bytes() as f64 * tokens as f64 * topk as f64 / n_expert as f64
+            })
+            .sum()
+    };
+    let inner_bytes = (slots * f_run * std::mem::size_of::<f32>()) as f64;
+    let out_bytes = (tokens * h_run * std::mem::size_of::<f32>()) as f64;
+    let use_k512_r2 = k512_r2;
+    if use_k512_r2 && f_run != 512 {
+        return Err(anyhow!(
+            "QWEN_MOE_DOWN_Q5_K512_R2 requires f_exp=512, got {f_run}"
+        ));
+    }
+    if check_k512_r2 {
+        if f_run != 512 {
+            return Err(anyhow!(
+                "QWEN_MOE_DOWN_Q5_K512_R2_CHECK requires f_exp=512, got {f_run}"
+            ));
+        }
+        let ref_out = MetalTensor::zeros_f32(&ctx, vec![(tokens * h_run) as u64])?;
+        let alt_out = MetalTensor::zeros_f32(&ctx, vec![(tokens * h_run) as u64])?;
+        let cmd = ctx.queue.commandBuffer().context("moe-down check cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        if let Some(weight) = synthetic_weight.as_ref() {
+            encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                &ctx, &enc, weight, &inner, &topk_idx, &topk_w, &ref_out, f_run, h_run, n_expert,
+                topk, tokens,
+            )?;
+            encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                &ctx, &enc, weight, &inner, &topk_idx, &topk_w, &alt_out, f_run, h_run, n_expert,
+                topk, tokens,
+            )?;
+        } else {
+            let moe = q5_moes[0];
             encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
                 &ctx,
-                enc,
+                &enc,
                 &moe.down_exps,
                 &inner,
                 &topk_idx,
                 &topk_w,
-                &out,
-                f_exp,
-                h,
+                &ref_out,
+                f_run,
+                h_run,
+                n_expert,
+                topk,
+                tokens,
+            )?;
+            encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                &ctx,
+                &enc,
+                &moe.down_exps,
+                &inner,
+                &topk_idx,
+                &topk_w,
+                &alt_out,
+                f_run,
+                h_run,
                 n_expert,
                 topk,
                 tokens,
             )?;
         }
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        let read = |t: &MetalTensor| -> Vec<f32> {
+            let n = t.n_elements() as usize;
+            let mut xs = vec![0.0f32; n];
+            unsafe {
+                let src = (t.buffer.contents().as_ptr() as *const f32).add((t.offset / 4) as usize);
+                std::ptr::copy_nonoverlapping(src, xs.as_mut_ptr(), n);
+            }
+            xs
+        };
+        let a = read(&ref_out);
+        let b = read(&alt_out);
+        let max_abs = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        let dot: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        let na = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        let nb = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        let cos = if na > 0.0 && nb > 0.0 {
+            dot / (na * nb)
+        } else {
+            1.0
+        };
+        println!("[moe-down-micro-check] max_abs={max_abs:.6} cos={cos:.9}");
+    }
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        if let Some(weight) = synthetic_weight.as_ref() {
+            for _ in 0..layer_count {
+                if use_k512_r2 {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                        &ctx, enc, weight, &inner, &topk_idx, &topk_w, &out, f_run, h_run,
+                        n_expert, topk, tokens,
+                    )?;
+                } else {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                        &ctx, enc, weight, &inner, &topk_idx, &topk_w, &out, f_run, h_run,
+                        n_expert, topk, tokens,
+                    )?;
+                }
+            }
+        } else {
+            for moe in &q5_moes {
+                if use_k512_r2 {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                        &ctx,
+                        enc,
+                        &moe.down_exps,
+                        &inner,
+                        &topk_idx,
+                        &topk_w,
+                        &out,
+                        f_run,
+                        h_run,
+                        n_expert,
+                        topk,
+                        tokens,
+                    )?;
+                } else {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                        &ctx,
+                        enc,
+                        &moe.down_exps,
+                        &inner,
+                        &topk_idx,
+                        &topk_w,
+                        &out,
+                        f_run,
+                        h_run,
+                        n_expert,
+                        topk,
+                        tokens,
+                    )?;
+                }
+            }
+        }
         Ok(())
     })?;
 
     let weight_gb = active_weight_bytes / 1e9;
-    let activation_gb = (inner_bytes + out_bytes) * q5_moes.len() as f64 / 1e9;
+    let activation_gb = (inner_bytes + out_bytes) * layer_count as f64 / 1e9;
     println!(
-        "[moe-down-micro] model={} q5_layers={} h={} f_exp={} n_expert={} topk={} tokens={} warmup={} iters={}",
+        "[moe-down-micro] model={} mode={} kernel={} q5_layers={} layers={} h={} f_exp={} n_expert={} topk={} tokens={} warmup={} iters={}",
         model.display(),
+        if synthetic { "synthetic" } else { "real" },
+        if use_k512_r2 { "k512_r2" } else { "default" },
         q5_moes.len(),
-        h,
-        f_exp,
+        layer_count,
+        h_run,
+        f_run,
         n_expert,
         topk,
         tokens,

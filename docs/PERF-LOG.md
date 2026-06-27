@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-27 - v0.344 Q5 K512 Routed-Down R2 Default
+
+Status: added and defaulted a shape-guarded Q5_K routed-down R2 kernel for
+`f_exp=512`, with `QWEN_DECODE_MOE_Q5_DOWN_K512_R2=0` as rollback.
+
+Artifact:
+
+- `docs/bench/2026-06-27-2140-v0344-q5-k512-r2/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm metal_single_token_concurrent_gdn_moe_matches_serial_a3b -- --nocapture`
+- A3B `moe-down-micro --k512-r2 --check-k512-r2`
+- sequential A3B default-vs-rollback `ctx-sweep`, no parallel GPU workloads
+
+Key results:
+
+| Row | Rollback/default kernel | R2/default | Read |
+| --- | ---: | ---: | --- |
+| A3B Q5 down micro `tokens=1` | `1.1274 ms`, `189.3 GB/s` | `0.9147 ms`, `233.3 GB/s` | `+23%` primitive BW |
+| A3B Q5 down micro `tokens=16` | `14.4364 ms`, `236.5 GB/s` | `8.6434 ms`, `395.0 GB/s` | batch/verify lever |
+| A3B `ctx128` | `106.6 / 104.7 t/s` | `108.2 / 109.8 t/s` | positive |
+| A3B `ctx1024` | `100.7 / 100.6 t/s` | `103.7 / 104.0 t/s` | positive |
+| A3B `ctx8192` | `93.8 / 94.0 t/s` | `98.0 / 97.7 t/s` | `+4.0-4.5%` |
+
+Interpretation: the small-K diagnosis was right. The old Q5 down kernel left half
+the K-lane groups idle at `f_exp=512`; R2 computes two output rows per simdgroup
+to use those lanes. This clears the A3B long-decode gate and is shape-guarded, so
+A10B `f_exp=1024` remains on the existing path.
+
 ## 2026-06-27 - v0.343 MoE Routed-Down Microbench
 
 Status: added `qwen-bench moe-down-micro` to isolate the exact Q5_K routed-down

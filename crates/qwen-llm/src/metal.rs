@@ -5976,6 +5976,97 @@ pub fn encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    topk_w: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    if n_in != 512 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_weighted_sum_q5_K_k512_r2",
+            detail: format!("expected n_in=512, got {n_in}"),
+        });
+    }
+    if weight.dtype != GgmlType::Q5_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_weighted_sum_q5_K_k512_r2",
+            detail: format!("expected Q5_K expert down, got {:?}", weight.dtype),
+        });
+    }
+    let n_slots = n_tokens * topk;
+    if inner.n_elements() as usize != n_slots * n_in
+        || topk_idx.n_elements() as usize != n_slots
+        || topk_w.n_elements() as usize != n_slots
+        || out.n_elements() as usize != n_tokens * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_weighted_sum_q5_K_k512_r2",
+            detail: format!(
+                "shape mismatch: inner={} idx={} w={} out={} expected inner={} idx={} w={} out={}",
+                inner.n_elements(),
+                topk_idx.n_elements(),
+                topk_w.n_elements(),
+                out.n_elements(),
+                n_slots * n_in,
+                n_slots,
+                n_slots,
+                n_tokens * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, topk_w);
+    enc.set_tensor(5, out);
+
+    const ROWS_PER_TG: usize = 4;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(ROWS_PER_TG),
+            height: n_tokens,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_mat_vec_q5_K_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

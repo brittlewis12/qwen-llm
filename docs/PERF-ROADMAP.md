@@ -71,6 +71,18 @@ not the active decision spine. Broader long-context or quant-specific sweeps may
 still expose red cells, but near-term branches should be hardware-headroom driven
 unless a fresh paired repeat contradicts this spot.
 
+Dense decode update: v0.340 production-wires dense GDN front-projection overlap
+and defaults it with `QWEN_DECODE_DENSE_CONCURRENT_GDN=0` as rollback. Sequential
+`tg128` A/B improves the dense family by about `+2.4-3.8%`:
+
+| Model | Old default | Concurrent GDN | Ratio |
+| --- | ---: | ---: | ---: |
+| 0.8B | `360.36` | `372.23` | `1.033x` |
+| 2B | `218.35` | `226.60` | `1.038x` |
+| 4B | `112.57` | `116.81` | `1.038x` |
+| 9B | `72.09` | `73.93` | `1.026x` |
+| 27B | `24.28` | `24.86` | `1.024x` |
+
 Measured roofline anchors from v0.285 on M4 Max, AC power, high-power mode, no
 recorded warnings:
 
@@ -568,6 +580,11 @@ Prompt-only anchors, release `qwen-bench pp`, synthetic prompts:
 
 Recent confirmed wins:
 
+- Dense GDN front-projection overlap is now production-wired for logits and GPU
+  argmax decode. The old bench-only path becomes the dense default in v0.340 and
+  lifts `tg128` across measured dense Q4 models by `+2.4-3.8%`; rollback is
+  `QWEN_DECODE_DENSE_CONCURRENT_GDN=0`. This banks scheduling overlap, not a new
+  local Q8 mat-vec lane.
 - A3B had a silent optimized-path escape: three late routed down-expert layers
   (`blk.34`, `blk.38`, `blk.39`) are `Q6_K`, while grouped routed prefill only
   accepted `Q5_K` down. Adding grouped Q6_K down and dtype dispatch moves trace
@@ -892,7 +909,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.338:
+Current rank after v0.340:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -944,8 +961,9 @@ Current rank after v0.338:
    A3B `ctx16384/32768` and A10B `ctx8192/16384/32768`. Do not build production
    head-major KV sidecars without a new counter signal or a body rewrite that
    changes more than address order.
-3. GDN decode projection mechanics: v0.336 adds correctness-breaking no-op
-   attribution for the GDN projection lane. The recoverable lower-bound budget is
+3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds
+   correctness-breaking no-op attribution for the GDN projection lane. The
+   recoverable lower-bound budget is
    large at `ctx8192`: A3B front/out no-op moves GPU `10.19 -> 8.41/9.58 ms`, and
    A10B moves `23.06 -> 18.38/20.88 ms`. The subprojection ladder convicts QKV,
    Z, and OUT, while beta/alpha are flat/noise. Do not spend the next branch on
@@ -964,6 +982,10 @@ Current rank after v0.338:
    are `485/473/476/461 GB/s` versus the `474 GB/s` stream anchor, while A3B is
    `435/418/445/395 GB/s`. This demotes local GDN Q8 mat-vec retunes; reopen only
    for structural byte reduction or a primitive proof that beats this harness.
+   v0.340 banks the known dense scheduling overlap instead: default dense
+   concurrent-GDN moves `tg128` by `+2.4-3.8%` across 0.8B/2B/4B/9B/27B. The next
+   GDN branch must reduce bytes, fuse a larger dataflow, or prove a primitive win;
+   do not spend another pass on row-count retunes.
 4. A10B memory-capacity/tooling hygiene: v0.315 shows a `ctx-sweep` that allocates
    for `32768` up front can poison even A10B `ctx570/2464` rows (`~0.6 t/s`), while
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`
@@ -1965,6 +1987,8 @@ Optimizes: dense decode throughput and measurement integrity.
 
 Why it stays late:
 
+- v0.340 already banks the obvious dense GDN front-projection scheduling overlap
+  as a default, with `QWEN_DECODE_DENSE_CONCURRENT_GDN=0` rollback.
 - Dense decode is already competitive enough that prompt work dominates the
   scoreboard.
 - Prior FFN mega-fusion had weak payoff and GDN recurrence semantics are

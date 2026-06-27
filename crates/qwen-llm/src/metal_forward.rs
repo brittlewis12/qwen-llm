@@ -189,6 +189,16 @@ fn concurrent_gdn_moe_decode_enabled() -> bool {
     })
 }
 
+fn concurrent_gdn_dense_decode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_DENSE_CONCURRENT_GDN").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
 fn concurrent_shared_moe_decode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2281,6 +2291,149 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
+    pub fn single_token_argmax_profiled_concurrent_gdn_dense(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(i32, TokenProfile), MfError> {
+        let arch = &self.model.arch;
+        if arch.kind != ArchKind::Dense {
+            return Err(MfError::UnsupportedMoe);
+        }
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let ids_buf = session.ids_buf.clone();
+        let argmax_tok = session.argmax_tok.clone();
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_get_rows_f32(
+                self.ctx,
+                &enc,
+                &self.model.token_embd,
+                &ids_buf,
+                &session.x,
+                1,
+                h,
+            )?;
+            enc.end();
+        }
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            match block {
+                MetalBlock::Gdn(g) => {
+                    let i = gdn_idx;
+                    gdn_idx += 1;
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        enc.end();
+                    }
+                    {
+                        let enc = KernelEncoder::begin_concurrent(&cmd_buf);
+                        self.encode_gdn_front_projections(&enc, g, session)?;
+                        enc.end();
+                    }
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        self.encode_gdn_after_projections(&enc, g, i, session)?;
+                        self.encode_post_mixer_ffn(&enc, block, session)?;
+                        enc.end();
+                    }
+                }
+                MetalBlock::Attn(_) => {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    self.encode_block(
+                        &enc,
+                        0,
+                        block,
+                        &mut gdn_idx,
+                        &mut attn_idx,
+                        position,
+                        session,
+                    )?;
+                    enc.end();
+                }
+            }
+        }
+
+        {
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                arch.vocab_size as usize,
+            )?;
+            encode_argmax_f32(
+                self.ctx,
+                &enc,
+                &session.logits,
+                &argmax_tok,
+                1,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+        }
+
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let argmax = unsafe {
+            let src = argmax_tok.buffer.contents().as_ptr() as *const i32;
+            *src
+        };
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            argmax,
+            TokenProfile {
+                cpu_encode_ms,
+                cpu_to_gpu_complete_ms,
+                gpu_kernel_ms,
+                total_ms,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+        ))
+    }
+
     pub fn single_token_profiled_concurrent_gdn_moe(
         &self,
         token_id: i32,
@@ -2953,19 +3106,12 @@ impl<'a> MetalForward<'a> {
         Ok(argmax)
     }
 
-    pub fn single_token_argmax_profiled(
+    fn single_token_argmax_profiled_dense_serial(
         &self,
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(i32, TokenProfile), MfError> {
-        if self.model.arch.kind == ArchKind::Moe {
-            return if concurrent_gdn_moe_decode_enabled() {
-                self.single_token_argmax_profiled_concurrent_gdn_moe(token_id, position, session)
-            } else {
-                self.single_token_argmax_profiled_moe(token_id, position, session)
-            };
-        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -3010,6 +3156,26 @@ impl<'a> MetalForward<'a> {
                 moe_cmd_count: 1,
             },
         ))
+    }
+
+    pub fn single_token_argmax_profiled(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(i32, TokenProfile), MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return if concurrent_gdn_moe_decode_enabled() {
+                self.single_token_argmax_profiled_concurrent_gdn_moe(token_id, position, session)
+            } else {
+                self.single_token_argmax_profiled_moe(token_id, position, session)
+            };
+        }
+        if concurrent_gdn_dense_decode_enabled() {
+            return self
+                .single_token_argmax_profiled_concurrent_gdn_dense(token_id, position, session);
+        }
+        self.single_token_argmax_profiled_dense_serial(token_id, position, session)
     }
 
     pub fn encode_single_token_argmax(
@@ -4548,19 +4714,12 @@ impl<'a> MetalForward<'a> {
         Ok((out, total_ms, phases))
     }
 
-    pub fn single_token_profiled(
+    fn single_token_profiled_dense_serial(
         &self,
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(Vec<f32>, TokenProfile), MfError> {
-        if self.model.arch.kind == ArchKind::Moe {
-            return if concurrent_gdn_moe_decode_enabled() {
-                self.single_token_profiled_concurrent_gdn_moe(token_id, position, session)
-            } else {
-                self.single_token_profiled_moe(token_id, position, session)
-            };
-        }
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
@@ -4656,6 +4815,25 @@ impl<'a> MetalForward<'a> {
                 moe_cmd_count: 1,
             },
         ))
+    }
+
+    pub fn single_token_profiled(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        if self.model.arch.kind == ArchKind::Moe {
+            return if concurrent_gdn_moe_decode_enabled() {
+                self.single_token_profiled_concurrent_gdn_moe(token_id, position, session)
+            } else {
+                self.single_token_profiled_moe(token_id, position, session)
+            };
+        }
+        if concurrent_gdn_dense_decode_enabled() {
+            return self.single_token_profiled_concurrent_gdn_dense(token_id, position, session);
+        }
+        self.single_token_profiled_dense_serial(token_id, position, session)
     }
 
     pub fn encode_block(
@@ -6301,7 +6479,7 @@ mod tests {
 
         for (i, &tid) in ids.iter().enumerate() {
             let (serial, _) = mf
-                .single_token_profiled(tid, i as u32, &mut s_serial)
+                .single_token_profiled_moe(tid, i as u32, &mut s_serial)
                 .expect("serial prompt step");
             let (concurrent, _) = mf
                 .single_token_profiled_concurrent_gdn_moe(tid, i as u32, &mut s_conc)
@@ -6312,7 +6490,7 @@ mod tests {
 
         let next_tok = argmax_i32_local(&last_serial);
         let (serial, _) = mf
-            .single_token_profiled(next_tok, ids.len() as u32, &mut s_serial)
+            .single_token_profiled_moe(next_tok, ids.len() as u32, &mut s_serial)
             .expect("serial follow-up");
         let (concurrent, _) = mf
             .single_token_profiled_concurrent_gdn_moe(next_tok, ids.len() as u32, &mut s_conc)
@@ -6493,7 +6671,7 @@ mod tests {
         let mut s_conc = MetalSession::fresh(&ctx, &mm, 256).expect("session-concurrent");
 
         let (serial, _) = mf
-            .single_token_profiled(ids[0], 0, &mut s_serial)
+            .single_token_profiled_dense_serial(ids[0], 0, &mut s_serial)
             .expect("serial");
         let (concurrent, _) = mf
             .single_token_profiled_concurrent_gdn_dense(ids[0], 0, &mut s_conc)
@@ -6529,6 +6707,18 @@ mod tests {
         assert_eq!(argmax_serial, argmax_conc, "argmax disagreement");
         assert!(cos > 0.9999, "cos={cos} below threshold");
         assert!(max_abs < 0.05, "max|Δ|={max_abs} above noise floor");
+
+        let mut s_serial_argmax =
+            MetalSession::fresh(&ctx, &mm, 256).expect("session-serial-argmax");
+        let mut s_conc_argmax =
+            MetalSession::fresh(&ctx, &mm, 256).expect("session-concurrent-argmax");
+        let (serial_argmax, _) = mf
+            .single_token_argmax_profiled_dense_serial(ids[0], 0, &mut s_serial_argmax)
+            .expect("serial argmax");
+        let (concurrent_argmax, _) = mf
+            .single_token_argmax_profiled_concurrent_gdn_dense(ids[0], 0, &mut s_conc_argmax)
+            .expect("concurrent argmax");
+        assert_eq!(serial_argmax, concurrent_argmax, "GPU argmax disagreement");
     }
 
     #[test]
@@ -6557,7 +6747,7 @@ mod tests {
         let mut s_conc = MetalSession::fresh(&ctx, &mm, 256).expect("session-concurrent");
 
         let (serial, _) = mf
-            .single_token_profiled(ids[0], 0, &mut s_serial)
+            .single_token_profiled_dense_serial(ids[0], 0, &mut s_serial)
             .expect("serial");
         let (concurrent, _) = mf
             .single_token_profiled_concurrent_gdn_attn_dense(ids[0], 0, &mut s_conc)

@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-27 - v0.340 Dense Concurrent-GDN Decode Default
+
+Status: production-wired the existing dense GDN front-projection overlap path for
+both logits and argmax decode, then made it the dense default. Rollback is
+`QWEN_DECODE_DENSE_CONCURRENT_GDN=0`. The `qwen-bench tg --concurrent-gdn-proj`
+sidecar now also supports dense models.
+
+Artifact:
+
+- `docs/bench/2026-06-27-1640-v0340-dense-concurrent-gdn/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm metal_single_token_concurrent_gdn_matches_serial -- --nocapture`
+- sequential dense `tg128` A/B, no parallel GPU workloads
+
+Dense `tg128` sidecar A/B before default flip:
+
+| Model | Old default | Concurrent GDN | Ratio |
+| --- | ---: | ---: | ---: |
+| 0.8B | `360.36` | `372.23` | `1.033x` |
+| 2B | `218.35` | `226.60` | `1.038x` |
+| 4B | `112.57` | `116.81` | `1.038x` |
+| 9B | `72.09` | `73.93` | `1.026x` |
+| 27B | `24.28` | `24.86` | `1.024x` |
+
+Default/rollback check after flipping default:
+
+| Model | Default | Rollback | Ratio |
+| --- | ---: | ---: | ---: |
+| 0.8B | `370.26` | `357.36` | `1.036x` |
+| 27B | `25.05` | `24.23` | `1.034x` |
+
+Interpretation: bank the dense scheduling win. This improves decode across the
+dense family, but v0.338 still demotes local GDN Q8 mat-vec retunes because the
+projection primitive is already near the stream roofline. Future dense decode work
+needs structural byte reduction, attention/KV work, or larger graph changes.
+
 ## 2026-06-26 - v0.339 Paired Family Spot Refresh
 
 Status: ran a narrow paired qwen-vs-llama family spot after v0.338, using pinned
@@ -38,6 +78,7 @@ Paired spot ratios:
 
 Interpretation: the current narrow paired board is green. Do not steer from the
 old v0.203 family table. Near-term work should be hardware-headroom driven unless
+fresh broader, longer, or quant-specific sweeps expose a current red cell.
 
 ## 2026-06-26 - v0.338 GDN Projection Microbench
 

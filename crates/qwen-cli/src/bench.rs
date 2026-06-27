@@ -391,7 +391,7 @@ struct TgArgs {
     /// executing on the GPU. Commands are still committed serially.
     #[arg(long)]
     pipelined: bool,
-    /// Bench-only GDN front-projection overlap path. Currently MoE-only in tg.
+    /// Bench-only GDN front-projection overlap path.
     #[arg(long)]
     concurrent_gdn_proj: bool,
     /// Deterministic seed for random token selection.
@@ -4277,16 +4277,19 @@ fn run_tg(args: TgArgs) -> Result<()> {
                 // discarded; the next input is drawn from the seeded RNG, matching
                 // lcpp's `test_gen` (random tokens, no logits coupling).
                 let (_argmax, prof) = if concurrent_gdn_proj {
-                    if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
-                        return Err(anyhow!(
-                            "--concurrent-gdn-proj tg mode is currently MoE-only"
-                        ));
+                    if mm.arch.kind == qwen_llm::model::ArchKind::Dense {
+                        mf.single_token_argmax_profiled_concurrent_gdn_dense(
+                            tok,
+                            pos as u32,
+                            s.metal_session_mut(),
+                        )?
+                    } else {
+                        mf.single_token_argmax_profiled_concurrent_gdn_moe(
+                            tok,
+                            pos as u32,
+                            s.metal_session_mut(),
+                        )?
                     }
-                    mf.single_token_argmax_profiled_concurrent_gdn_moe(
-                        tok,
-                        pos as u32,
-                        s.metal_session_mut(),
-                    )?
                 } else {
                     mf.single_token_argmax_profiled(tok, pos as u32, s.metal_session_mut())?
                 };

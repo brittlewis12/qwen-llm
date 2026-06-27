@@ -827,6 +827,12 @@ Recent confirmed wins:
 
 Recent measured negatives:
 
+- v0.341 kills the naive MoE FFN expert-pipeline proof. Splitting top-k routed
+  experts into two groups and overlapping group-A down with group-B gate/up was
+  exact on the A3B serial-vs-pipeline smoke, but regressed `tg128`: A3B
+  `103.90 -> 100.64 t/s`, A10B `45.01 -> 44.09 t/s`. Do not revive this split
+  without a counter signal proving real overlap and a design that avoids the
+  extra group-B accumulation pass.
 - A3B long-context attention-v4 exposed knobs are exhausted after the v0.293 tile2
   default. At `ctx16384`, `QWEN_ATTN_V4_NWG=32` regressed attention sharply
   (`3.39 -> 4.89 ms`), `QWEN_ATTN_V4_TILE_C=32` was worse/flat, and
@@ -935,8 +941,10 @@ Current rank after v0.340:
    refresh: A3B `ctx8192` default/down-noop/fused-off is `93.1/100.4/91.8 t/s`,
    and A10B is `42.4/46.1/41.3 t/s`. Phase split still puts MoE FFN apply first
    (`25.3%` A3B, `29.3%` A10B), but the local Q5-down shelf remains exhausted.
-   The next branch should change execution granularity, byte movement, or overlap
-   rather than retuning the same Q5 down kernel. Gate: `>=0.3 ms/token` total GPU
+   v0.341 kills the simplest execution-granularity/overlap proof: a two-stage
+   expert pipeline was exact but regressed A3B/A10B `tg128`. The next branch
+   should bring counters or change byte movement materially rather than retuning
+   the same Q5 down kernel or adding split waves. Gate: `>=0.3 ms/token` total GPU
    improvement at A3B `ctx8192`, `>=0.8%` A10B `ctx8192`, `ctx128/1024` neutral,
    and same-build rollback A/B via `scripts/profile/decode_ctx_sweep.py` before
    declaring any long-decode kernel win.

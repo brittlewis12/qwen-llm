@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-27 - v0.341 MoE FFN Pipeline2 Negative
+
+Status: tested and removed a dirty MoE decode FFN pipeline proof. The proof split
+top-k routed experts into two groups, overlapped down for group A with gate/up for
+group B, ran shared down in the same wave, and accumulated group B before the
+final residual.
+
+Artifact:
+
+- `docs/bench/2026-06-27-1715-v0341-moe-pipeline2-negative/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `QWEN_DECODE_MOE_FFN_PIPELINE2=1 cargo test -p qwen-llm metal_single_token_concurrent_gdn_moe_matches_serial_a3b -- --nocapture`
+- sequential A3B/A10B `tg128` smoke A/B, no parallel GPU workloads
+
+Results:
+
+| Model | Default | Pipeline2 | Ratio |
+| --- | ---: | ---: | ---: |
+| A3B `tg128` | `103.90` | `100.64` | `0.969x` |
+| A10B `tg128` | `45.01` | `44.09` | `0.980x` |
+
+Interpretation: naive two-stage routed expert pipelining is correctness-safe but
+regresses before any long-context gate. Do not revive this split without a counter
+signal proving real overlap and a design that avoids the extra accumulation pass.
+
 ## 2026-06-27 - v0.340 Dense Concurrent-GDN Decode Default
 
 Status: production-wired the existing dense GDN front-projection overlap path for

@@ -966,7 +966,9 @@ Current rank after v0.345:
    reopen NSG/R2 variants for the same kernel. v0.345's fresh llama.cpp b9833
    guard keeps MoE decode green externally (`A3B tg128 1.42x`, `A10B tg128
    1.25x`), so continue this lane only for hardware-headroom/dataflow wins, not
-   parity panic.
+   parity panic. v0.346 kills the analogous Q8_0 K512 row-widening idea for MoE
+   shared down: the sidecar improved the named phase but regressed A3B `tg128`,
+   so do not promote shared-down-only micro/phase wins without an end-to-end gate.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

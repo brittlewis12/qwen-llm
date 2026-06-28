@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-28 - v0.346 Q8 K512 R4 Negative
+
+Status: tested and removed a Q8_0 `n_in=512` mat-vec sidecar for MoE shared
+down. The sidecar was exact and improved the named shared-down phase, but failed
+the end-to-end gate.
+
+Artifact:
+
+- `docs/bench/2026-06-28-1740-v0346-q8-k512-r4-negative/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- dirty sidecar correctness test reported `max|delta|=2.98e-8`
+- sequential A3B/A10B phase and ctx-sweep A/B, plus A3B `tg128` repeats
+
+Key results:
+
+| Row | Default sidecar | Rollback | Read |
+| --- | ---: | ---: | --- |
+| A3B shared down phase | `0.27 ms` | `0.56 ms` | phase win |
+| A10B shared down phase | `0.82 ms` | `1.36 ms` | phase win |
+| A3B `tg128` repeat 1 | `108.31 t/s` | `109.05 t/s` | regressed |
+| A3B `tg128` repeat 2 | `108.56 t/s` | `108.85 t/s` | regressed |
+| A10B `ctx8192` | `41.8 / 41.7 t/s` | `41.6 / 41.7 t/s` | neutral |
+
+Read: this is a useful cautionary negative. Small-K Q8 lane waste exists and
+can improve the isolated shared-down phase, but reducing that phase did not
+improve decode wall time. Do not pursue Q8 K512 row-widening again without
+counter evidence showing why the phase win failed to survive `tg128`.
+
 ## 2026-06-28 - v0.345 Fresh llama.cpp b9833 Rebaseline
 
 Status: re-anchored the no-spec family guard against fresh llama.cpp b9833

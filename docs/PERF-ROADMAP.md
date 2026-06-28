@@ -51,25 +51,26 @@ Primary guardrails:
 
 ## Latest Baseline Snapshot
 
-M4 Max, release `qwen-bench`, clean narrow family spot after `v0.338` against
-pinned llama.cpp b9481 (`bfb4308b`, `MTL,BLAS`). AC power, no recorded thermal or
+M4 Max, release `qwen-bench`, clean narrow family spot after `v0.344` against
+fresh llama.cpp b9833 (`c818263f2`, `MTL,BLAS`). No recorded thermal or
 performance warnings. Artifact:
-`docs/bench/2026-06-26-1804-v0338-spot-family/README.md`.
+`docs/bench/2026-06-28-1551-v0345-fresh-lcpp-c818-family/README.md`.
 
 | Model | `pp512` qwen/lcpp | `pp4096` qwen/lcpp | `tg128` qwen/lcpp | Notes |
 | --- | ---: | ---: | ---: | --- |
-| 0.8B dense | `1.08x` | `1.06x` | `1.25x` | runs=1 spot |
-| 2B dense | `1.04x` | `1.05x` | `1.13x` | runs=1 spot |
-| 4B dense | `1.04x` | `1.05x` | `1.14x` | runs=1 spot |
-| 9B dense | `1.02x` | `1.02x` | `1.08x` | runs=1 spot |
-| 27B dense | `1.06x` | `1.17x` | `1.24x` | runs=1 spot |
-| 35B A3B | `1.09x` | `1.20x` | `1.33x` | runs=1 spot |
-| 122B A10B | `1.00x` spot / `1.06x` repeat | `1.17x` | `1.26x` | pp512 repeat: `docs/bench/2026-06-26-1812-122B-A10B-v0338-pp512-repeat-family/README.md` |
+| 0.8B dense | `1.06x` | `1.07x` | `1.41x` | runs=1 spot |
+| 2B dense | `1.01x` | `1.05x` | `1.20x` | runs=1 spot |
+| 4B dense | `1.04x` | `1.05x` | `1.20x` | runs=1 spot |
+| 9B dense | `1.01x` | `1.01x` | `1.07x` | runs=1 spot |
+| 27B dense | `1.05x` | `1.15x` | `1.26x` | runs=1 spot |
+| 35B A3B | `1.07x` | `1.19x` | `1.42x` | v0.344 Q5 K512 R2 included |
+| 122B A10B | `1.02x` | `1.15x` | `1.25x` | runs=1 spot |
 
-Read: the current narrow paired board is green. Treat old v0.203 rows as history,
-not the active decision spine. Broader long-context or quant-specific sweeps may
-still expose red cells, but near-term branches should be hardware-headroom driven
-unless a fresh paired repeat contradicts this spot.
+Read: the current narrow paired board remains green after refreshing llama.cpp.
+Treat old v0.203/b9481 rows as history, not the active decision spine. Broader
+long-context, MTP/speculative, or quant-specific sweeps may still expose red
+cells, but near-term branches should be hardware-headroom driven unless a fresh
+paired repeat contradicts this spot.
 
 Dense decode update: v0.340 production-wires dense GDN front-projection overlap
 and defaults it with `QWEN_DECODE_DENSE_CONCURRENT_GDN=0` as rollback. Sequential
@@ -915,7 +916,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.344:
+Current rank after v0.345:
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -962,7 +963,10 @@ Current rank after v0.344:
    (`100.7/100.6 -> 103.7/104.0`), and `ctx8192`
    (`93.8/94.0 -> 98.0/97.7`, `+4.0-4.5%`). This branch is now banked for
    `f_exp=512`; future Q5 work should target new shapes or broader dataflow, not
-   reopen NSG/R2 variants for the same kernel.
+   reopen NSG/R2 variants for the same kernel. v0.345's fresh llama.cpp b9833
+   guard keeps MoE decode green externally (`A3B tg128 1.42x`, `A10B tg128
+   1.25x`), so continue this lane only for hardware-headroom/dataflow wins, not
+   parity panic.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in
@@ -1039,7 +1043,10 @@ Current rank after v0.344:
    R2 win survive too long. v0.342 adds visible `qwen-bench attn-intra` so
    attention main/reduce body evidence is not trapped in ignored tests. v0.343
    adds visible `qwen-bench moe-down-micro` for fast Q5 routed-down primitive
-   gates before full long-ramp decode sweeps.
+   gates before full long-ramp decode sweeps. v0.345 moves the pinned
+   llama.cpp lock to b9833 (`c818263f2`) and fixes family digests to use the
+   measured `474 GB/s` stream anchor, so future scoreboards should not silently
+   drift back to the stale May benchmark or the old `546 GB/s` spec-sheet peak.
    The first A3B Q4 `ctx8192` sample is `93.0 t/s`, `2.6215 GB/token`, and
    `243.8 GB/s` (`51.4%` of measured stream roofline); attention KV subgroup
    traffic is `0.6711 GB/token` at `294.3 GB/s`. Next, keep using this output to
@@ -1054,7 +1061,11 @@ Current rank after v0.344:
    interesting but not sufficient. Do not spend time on policy knobs; promote spec
    only if packed verify/KV restore/logits accounting identifies one removable
    structural villain and a proof can plausibly clear `>=1.25x` decode on real
-   prompts after full verify cost.
+   prompts after full verify cost. Fresh llama.cpp b9833 has a real
+   `llama-cli --spec-type draft-mtp` path, but the local smoke does not reset
+   priorities: no-spec 27B-MTP generation was `23.0 t/s`, while `draft-mtp`,
+   `n_max=3`, `p_min=0.75` was `23.8 t/s` and lower prompt throughput. Keep MTP
+   as a separate algorithmic target; do not mix it into no-spec parity boards.
 7. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen

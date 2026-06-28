@@ -1,0 +1,49 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "677009836",
+    "build_dirty": 0,
+    "test_time": "2026-06-28T15:55:30Z",
+    "model_filename": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+    "model_size": 16806250496,
+    "model_n_params": 26895998464,
+    "arch_kind": "dense",
+    "test": "pp512",
+    "n_tokens": 512,
+    "n_repetitions": 1,
+    "avg_ts": 234.7683523037266,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      234.7683523037266
+    ],
+    "samples_ns": [
+      2180873167
+    ],
+    "avg_ns": 2180873167,
+    "avg_compute_ns": 2180873167,
+    "avg_session_alloc_ns": 536374,
+    "avg_scratch_alloc_ns": 148209,
+    "avg_gpu_ns": 2174623624,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 512,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 80,
+      "battery_state": "AC attached",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

@@ -6,6 +6,52 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-28 - v0.345 Fresh llama.cpp b9833 Rebaseline
+
+Status: re-anchored the no-spec family guard against fresh llama.cpp b9833
+(`c818263f2`, build 9833, `MTL,BLAS`) after v0.344. Also moved the pinned
+benchmark lock to that tag and fixed `scripts/bench/digest.py` to use the
+measured M4 Max stream anchor (`474 GB/s`) instead of the old spec-sheet peak.
+
+Artifact:
+
+- `docs/bench/2026-06-28-1551-v0345-fresh-lcpp-c818-family/README.md`
+
+Validation:
+
+- `uv run scripts/bench/family.py --shapes pp512,pp4096,tg128 --runs 1 --cooldown-seconds 10 --run-tag v0345-fresh-lcpp-c818 --llama-bench /Users/tito/code/llama.cpp/build/bin/llama-bench --allow-unpinned-lcpp`
+- `uv run scripts/bench/ensure_llama_cpp.py --smoke-model /Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf --print-bin llama-bench`
+- direct pinned probe reports `build_commit=c818263f2a`, `build_number=9833`,
+  `backends=MTL,BLAS`, and `has tensor=false`
+
+Fresh no-spec board:
+
+| Model | `pp512` qwen/lcpp | `pp4096` qwen/lcpp | `tg128` qwen/lcpp |
+| --- | ---: | ---: | ---: |
+| 0.8B dense | `1.06x` | `1.07x` | `1.41x` |
+| 2B dense | `1.01x` | `1.05x` | `1.20x` |
+| 4B dense | `1.04x` | `1.05x` | `1.20x` |
+| 9B dense | `1.01x` | `1.01x` | `1.07x` |
+| 27B dense | `1.05x` | `1.15x` | `1.26x` |
+| 35B A3B | `1.07x` | `1.19x` | `1.42x` |
+| 122B A10B | `1.02x` | `1.15x` | `1.25x` |
+
+MTP comparator note:
+
+- `llama-cli --spec-type draft-mtp` on `Qwen3.6-27B-MTP-Q4_K_M.gguf` is the
+  credible local MTP smoke: no-spec generation was `23.0 t/s`; `draft-mtp`,
+  `n_max=3`, `p_min=0.75` was `23.8 t/s`, with prompt throughput lower
+  (`77.6 -> 72.3 t/s`). Treat this as a separate algorithmic target, not part
+  of the no-spec parity board.
+- `llama-speculative` is not a valid MTP comparator here: the example requires
+  `--model-draft`, and the base-plus-MTP-file run produced only `4.15 t/s` with
+  `11.6%` acceptance. Discard that as harness mismatch, not as MTP evidence.
+
+Read: the fresh no-spec llama update did not reopen a primary-family parity red
+cell. Continue ranking work by measured hardware headroom: MoE decode dataflow,
+context/session benchmark infrastructure, true-long attention/KV byte reduction,
+and structural GDN only when counters or phase splits justify it.
+
 ## 2026-06-27 - v0.344 Q5 K512 Routed-Down R2 Default
 
 Status: added and defaulted a shape-guarded Q5_K routed-down R2 kernel for

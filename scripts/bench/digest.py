@@ -20,7 +20,7 @@ from typing import Any
 
 # ----- helpers -----
 
-PEAK_GB_S = 546.0  # M4 Max published peak. Documented in docs/PLAN.md.
+PEAK_GB_S = 474.0  # M4 Max measured stream anchor. See docs/PERF-ROADMAP.md.
 
 
 def manifest_file_size_gib(model_entry: dict) -> float:

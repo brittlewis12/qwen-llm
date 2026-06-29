@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.365 A3B All-Quant Guard
+
+Status: ran a clean A3B quant-family `pp512/tg128` spot guard after the low-bit
+decode fixes. This is a `runs=1` breadth check, not a repeated release sweep.
+
+Artifact:
+
+- `docs/bench/2026-06-29-1918-v0365-a3b-all-quant-guard/README.md`
+
+Results:
+
+| A3B quant | pp512 qwen/lcpp | tg128 qwen/lcpp | Read |
+| --- | ---: | ---: | --- |
+| Q3_K_M | `1.08x` | `1.28x` | green |
+| Q4_K_M | `1.08x` | `1.39x` | green |
+| Q6_K | `1.05x` | `1.27x` | green |
+| Q8_0 | `1.08x` | `1.25x` | green |
+| UD-IQ4_XS | `1.05x` | `1.29x` | green |
+
+Read: all measured local A3B quant rows are now green for both `pp512` and
+`tg128`. Stop treating A3B low-bit decode as a parity/coverage branch; future
+A3B work should be hardware-headroom driven.
+
 ## 2026-06-29 - v0.364 A3B Low-Bit IQ4 Down Dataflow
 
 Status: defaulted a decode-native fast IQ4_XS routed-down kernel using the dense

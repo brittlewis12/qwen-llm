@@ -993,7 +993,11 @@ gated hardware-headroom probes.
    (`1.27x`); Q4 guard remains `107.26 t/s`. Routed down drops `2.13 ->
    0.64 ms` on Q3 and `2.12 -> 0.65 ms` on IQ4. Low-bit MoE expert-bank decode
    is no longer the local bottleneck; next quant work should be a broad guard or
-   hardware-headroom row, not more A3B low-bit coverage.
+   hardware-headroom row, not more A3B low-bit coverage. v0.365's clean A3B
+   all-quant spot guard keeps every measured local quant green at both `pp512`
+   and `tg128`: Q3/Q4/Q6/Q8/IQ4 are `1.05-1.08x` for prompt and `1.25-1.39x`
+   for decode. Retire A3B low-bit coverage from the active queue; keep it as a
+   recurring guardrail only.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

@@ -150,7 +150,14 @@ Current caveats:
   sweep is now `100.0/95.0/94.0/89.1/82.2 t/s` versus rollback
   `99.5/94.8/89.4/83.7/72.8`; `ctx16384` attention drops
   `4.80 -> 3.60 ms`. Attention is still the long-context slope term, but the
-  first split fix is now defaulted.
+  first split fix is now defaulted. v0.367 lowers the group-8/group-16
+  subgroup/NWG/C64 threshold to `ctx256` with
+  `QWEN_ATTN_V4_SUBGROUP_MIN_POS=4096` as rollback. This closes the medium-context
+  MoE valley: A3B `ctx3072` moves `94.1 -> 102.8 t/s`, and A10B `ctx3072` moves
+  `37.9 -> 43.7 t/s`; phase attribution says A10B attention drops
+  `7.29 -> 3.47 ms`. Stop threshold fiddling here unless a fresh context-slope
+  sweep finds a new valley; the next attention branch should be true-long KV or
+  layout pressure.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

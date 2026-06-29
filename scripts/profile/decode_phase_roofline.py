@@ -24,6 +24,11 @@ DTYPE_BYTES_PER_BLOCK: dict[str, tuple[int, int]] = {
     "Q4_K": (256, 144),
     "Q5_K": (256, 176),
     "Q6_K": (256, 210),
+    "IQ2_S": (256, 82),
+    "IQ3_XXS": (256, 98),
+    "IQ3_S": (256, 110),
+    "IQ4_NL": (32, 18),
+    "IQ4_XS": (256, 136),
 }
 
 
@@ -121,7 +126,9 @@ def count_from_phase_name(raw_name: str) -> int | None:
 
 
 def attn_v4_nwg(ctx_len: int, group: int) -> int:
-    if group in {4, 6, 8, 16} and ctx_len >= 4096:
+    if group in {8, 16} and ctx_len >= 256:
+        return 64
+    if group in {4, 6} and ctx_len >= 4096:
         return 64
     if ctx_len < 256:
         return 16
@@ -131,13 +138,13 @@ def attn_v4_nwg(ctx_len: int, group: int) -> int:
 def attn_v4_tile_c(ctx_len: int, group: int) -> int:
     if group == 16 and ctx_len >= 32768:
         return 128
-    if group in {8, 16} and ctx_len >= 4096:
+    if group in {8, 16} and ctx_len >= 256:
         return 64
     return 32
 
 
 def attn_v4_group_tile(ctx_len: int, group: int) -> int:
-    if ctx_len < 4096:
+    if ctx_len < 256:
         return group
     if group == 8:
         return 2
@@ -270,22 +277,21 @@ def category_bytes(
             )
         ),
     )
+    gdn_qkv = tensor_sum(rows, lambda r: "attn_qkv.weight" in r.name)
+    gdn_z = tensor_sum(rows, lambda r: "attn_gate.weight" in r.name)
+    gdn_beta = tensor_sum(rows, lambda r: "ssm_beta.weight" in r.name)
+    gdn_alpha = tensor_sum(rows, lambda r: "ssm_alpha.weight" in r.name)
+    gdn_front = gdn_qkv + gdn_z + gdn_beta + gdn_alpha
+
     return {
         "gdn front proj": (
-            tensor_sum(
-                rows,
-                lambda r: any(
-                    part in r.name
-                    for part in (
-                        "attn_qkv.weight",
-                        "attn_gate.weight",
-                        "ssm_alpha.weight",
-                        "ssm_beta.weight",
-                    )
-                ),
-            ),
+            gdn_front,
             "weights only; excludes activations",
         ),
+        "gdn qkv proj": (gdn_qkv, "QKV projection weights only"),
+        "gdn z proj": (gdn_z, "Z projection weights only"),
+        "gdn beta proj": (gdn_beta, "beta projection weights only"),
+        "gdn alpha proj": (gdn_alpha, "alpha projection weights only"),
         "gdn out_proj": (
             tensor_sum(rows, lambda r: "ssm_out.weight" in r.name),
             "weights only; excludes activations",

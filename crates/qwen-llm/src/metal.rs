@@ -46,6 +46,8 @@ use std::sync::{
 
 static KERNEL_TRACE_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
+const ATTN_V4_SUBGROUP_MIN_POS_DEFAULT: usize = 256;
+
 thread_local! {
     static ATTN_V4_GROUP_TILE_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static MATMAT_F16_HALF_ACT_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -10230,10 +10232,11 @@ pub fn encode_attn_decode_f16kv_f32(
 ///   - NWG=1 is catastrophically under-occupied (4 TGs total) — DO NOT
 ///     ship as performance config; useful only for correctness debugging.
 ///
-/// Current reduce supports NWG up to 64. Long-context MoE attention shapes
-/// (group 8 / 16) also benefit substantially from 64-way split in synthetic
-/// and whole-model sweeps.
+/// Current reduce supports NWG up to 64. Medium/long-context MoE attention
+/// shapes (group 8 / 16) also benefit substantially from 64-way split in
+/// synthetic and whole-model sweeps.
 /// `QWEN_ATTN_V4_NWG=1..64` is an A/B knob for whole-model sweeps.
+/// `QWEN_ATTN_V4_SUBGROUP_MIN_POS=4096` restores the older long-only threshold.
 pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
     static NWG_OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
     if let Some(nwg) = *NWG_OVERRIDE.get_or_init(|| {
@@ -10245,7 +10248,9 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
         return nwg;
     }
 
-    if matches!(group, 4 | 6 | 8 | 16) && n_pos >= 4096 {
+    if matches!(group, 8 | 16) && n_pos >= attn_v4_subgroup_min_pos() {
+        64
+    } else if matches!(group, 4 | 6) && n_pos >= 4096 {
         64
     } else if n_pos < 256 {
         16
@@ -10260,8 +10265,8 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
 /// Current tuning:
 /// - group=6 (27B dense): keep C=32 until we have fresh long-ctx sweep data.
 /// - group in {8,16} (35B A3B / 122B A10B): C=64 is the current best-known
-///   long-context choice. C=128 is experimental and should only be enabled if
-///   fresh sweeps beat 64 on real hardware.
+///   medium/long-context choice. C=128 is experimental and should only be
+///   enabled if fresh sweeps beat 64 on real hardware.
 ///
 /// `QWEN_ATTN_V4_TILE_C={16,32,64,128}` is an A/B knob for whole-model sweeps.
 pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
@@ -10277,7 +10282,7 @@ pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
 
     if group == 16 && n_pos >= 32768 {
         128
-    } else if matches!(group, 8 | 16) && n_pos >= 4096 {
+    } else if matches!(group, 8 | 16) && n_pos >= attn_v4_subgroup_min_pos() {
         64
     } else {
         32
@@ -10289,11 +10294,11 @@ pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
 /// The 122B A10B shape (`GROUP=16`) is faster when split across multiple
 /// threadgroups: tile4 trades extra K/V reads for much higher occupancy and
 /// lower register pressure. Keep `QWEN_ATTN_V4_G16_TILE` as a kill switch / A/B
-/// knob (`4`, `8`, or `16`), but default long-context group16 to tile4.
+/// knob (`4`, `8`, or `16`), but default medium/long-context group16 to tile4.
 ///
 /// The 35B A3B shape (`GROUP=8`) has the same long-context signature with a
 /// smaller best split. Keep `QWEN_ATTN_V4_G8_TILE` as a kill switch / A/B knob
-/// (`2`, `4`, or `8`), but default long-context group8 decode to tile2.
+/// (`2`, `4`, or `8`), but default medium/long-context group8 decode to tile2.
 fn attn_v4_g8_tile_override(var: &str) -> Option<usize> {
     std::env::var(var)
         .ok()
@@ -10301,11 +10306,22 @@ fn attn_v4_g8_tile_override(var: &str) -> Option<usize> {
         .filter(|v| matches!(*v, 2 | 4 | 8))
 }
 
+fn attn_v4_subgroup_min_pos() -> usize {
+    static MIN_POS: OnceLock<usize> = OnceLock::new();
+    *MIN_POS.get_or_init(|| {
+        std::env::var("QWEN_ATTN_V4_SUBGROUP_MIN_POS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(ATTN_V4_SUBGROUP_MIN_POS_DEFAULT)
+    })
+}
+
 pub fn attn_v4_choose_group_tile(n_pos: usize, group: usize) -> usize {
     if let Some(tile) = ATTN_V4_GROUP_TILE_OVERRIDE.with(|cell| cell.get()) {
         return tile;
     }
-    if n_pos < 4096 {
+    if n_pos < attn_v4_subgroup_min_pos() {
         return group;
     }
     if group == 8 {

@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.367 MoE Mid-Context Decode Attention Threshold
+
+Status: defaulted the group-8/group-16 v4 decode attention subgroup/NWG/C64
+threshold from `4096` positions to `256`. Rollback:
+`QWEN_ATTN_V4_SUBGROUP_MIN_POS=4096`.
+
+Artifact:
+
+- `docs/bench/2026-06-29-1740-v0367-moe-midctx-attn/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm attn_v4_matches_naive_f16kv --release -- --nocapture`
+- rollback correctness with `QWEN_ATTN_V4_SUBGROUP_MIN_POS=4096`
+- sequential A3B/A10B `ctx-sweep`, no concurrent GPU workloads
+- `tg128` and `pp512` spillover guards on A3B/A10B
+
+Results:
+
+| Model | Best affected row | Rollback | Default | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4_K_M | `ctx3072` | `94.1 t/s` | `102.8 t/s` | `1.09x` |
+| A10B Q4_K_XL | `ctx3072` | `37.9 t/s` | `43.7 t/s` | `1.15x` |
+
+Phase attribution at `ctx3072` shows the mechanism: A3B attention mixer drops
+`2.53 -> 1.67 ms`, and A10B drops `7.29 -> 3.47 ms`. Split GDN roofline says qkv/z
+front projections are already near stream rate, so the next hardware-headroom
+branch should not be naive GDN-front fusion. Spillover guards are flat/noise for
+short `tg128` and A3B `pp512`; A10B `pp512` is directionally positive
+(`336.5 -> 414.5 t/s`) because the shared `NWG`/`C64` helper also feeds that
+path.
+
 ## 2026-06-29 - v0.365 A3B All-Quant Guard
 
 Status: ran a clean A3B quant-family `pp512/tg128` spot guard after the low-bit

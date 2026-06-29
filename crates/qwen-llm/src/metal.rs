@@ -6645,6 +6645,92 @@ pub fn encode_moe_swiglu_iq3_xxs_f32(
     Ok(())
 }
 
+pub fn encode_moe_swiglu_iq3_xxs_f32_fast(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x: &MetalTensor,
+    topk_idx: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs_fast",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::IQ3_XXS || w_up.dtype != GgmlType::IQ3_XXS {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs_fast",
+            detail: format!(
+                "expected IQ3_XXS gate/up expert banks, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_in
+        || topk_idx.n_elements() as usize != topk
+        || inner.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs_fast",
+            detail: format!(
+                "shape mismatch: x={} idx={} inner={} expected x={n_in} idx={topk} inner={}",
+                x.n_elements(),
+                topk_idx.n_elements(),
+                inner.n_elements(),
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_iq3_xxs_f32_fast")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, topk_idx);
+    enc.set_tensor(5, inner);
+
+    const NR0: usize = 4;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_moe_swiglu_iq3_s_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -6718,6 +6804,92 @@ pub fn encode_moe_swiglu_iq3_s_f32(
     enc.dispatch(
         MTLSize {
             width: n_out.div_ceil(NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_moe_swiglu_iq3_s_f32_fast(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x: &MetalTensor,
+    topk_idx: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_s_fast",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::IQ3_S || w_up.dtype != GgmlType::IQ3_S {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_s_fast",
+            detail: format!(
+                "expected IQ3_S gate/up expert banks, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_in
+        || topk_idx.n_elements() as usize != topk
+        || inner.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_s_fast",
+            detail: format!(
+                "shape mismatch: x={} idx={} inner={} expected x={n_in} idx={topk} inner={}",
+                x.n_elements(),
+                topk_idx.n_elements(),
+                inner.n_elements(),
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_iq3_s_f32_fast")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, topk_idx);
+    enc.set_tensor(5, inner);
+
+    const NR0: usize = 4;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
             height: topk,
             depth: 1,
         },
@@ -15016,6 +15188,41 @@ mod tests {
         eprintln!("[moe-iq3-direct-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
         assert!(cos > 0.999, "cos={cos}");
         assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+
+        let out_fast_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("fast out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_xxs_f32_fast(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &topk_gpu,
+                &out_fast_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                1,
+            )
+        })
+        .expect("gpu fast direct iq3 swiglu");
+        let fast = read_back_f32(&out_fast_gpu.buffer, n_ffn);
+        let fast_max_abs = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let fast_dot: f64 = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let nf: f64 = fast.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let fast_cos = fast_dot / (nf.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3-fast-swiglu-oracle] cos={fast_cos:.6} max|delta|={fast_max_abs:.3e}");
+        assert!(fast_cos > 0.999, "fast cos={fast_cos}");
+        assert!(fast_max_abs < 2e-2, "fast max|delta|={fast_max_abs}");
     }
 
     #[test]
@@ -15326,6 +15533,41 @@ mod tests {
         eprintln!("[moe-iq3s-direct-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
         assert!(cos > 0.999, "cos={cos}");
         assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+
+        let out_fast_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("fast out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_s_f32_fast(
+                &ctx,
+                enc,
+                &gate_gpu,
+                &up_gpu,
+                &x_gpu,
+                &topk_gpu,
+                &out_fast_gpu,
+                n_in,
+                n_ffn,
+                n_expert,
+                1,
+            )
+        })
+        .expect("gpu fast direct iq3s swiglu");
+        let fast = read_back_f32(&out_fast_gpu.buffer, n_ffn);
+        let fast_max_abs = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let fast_dot: f64 = fast
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let nf: f64 = fast.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let fast_cos = fast_dot / (nf.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3s-fast-swiglu-oracle] cos={fast_cos:.6} max|delta|={fast_max_abs:.3e}");
+        assert!(fast_cos > 0.999, "fast cos={fast_cos}");
+        assert!(fast_max_abs < 2e-2, "fast max|delta|={fast_max_abs}");
     }
 
     #[test]

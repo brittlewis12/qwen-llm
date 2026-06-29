@@ -30,6 +30,8 @@ typedef matrix<bfloat, 2, 4> bfloat2x4;
 #define NR0_Q80 2
 #define NSG_Q80 4
 #define NQ_Q80 8
+#define NR0_IQ3_FAST 4
+#define NSG_IQ3_FAST 2
 #define NSG_MOE_F32 4
 #define NSG_MOE_IQ3_XXS 2
 #define NSG_MOE_IQ4_XS 4
@@ -3648,6 +3650,214 @@ kernel void kernel_moe_swiglu_iq3_s_f32(
     const float up_tot = simd_sum(up_sum);
     if (tiisg == 0) {
         inner[(ulong)slot * args.n_out + row] = moe_silu_f(gate_tot) * up_tot;
+    }
+}
+
+kernel void kernel_moe_swiglu_iq3_xxs_f32_fast(
+        constant moe_q4k_args & args      [[buffer(0)]],
+        device const uchar    * w_gate    [[buffer(1)]],
+        device const uchar    * w_up      [[buffer(2)]],
+        device const float    * x         [[buffer(3)]],
+        device const int      * top_idx   [[buffer(4)]],
+        device       float    * inner     [[buffer(5)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint first_row = (tgpig.x * NSG_IQ3_FAST + uint(sgitg)) * NR0_IQ3_FAST;
+    if (first_row >= args.n_out) return;
+
+    const uint nb = args.n_in / QK_K;
+    const uint nb32 = nb * 8u;
+    const ulong row_stride = (ulong)nb * IQ3XXS_BYTES;
+    const ulong expert_stride = (ulong)args.n_out * row_stride;
+    const ulong expert_base = (ulong)expert_i * expert_stride;
+
+    const uint ix = uint(tiisg);
+    device const float * x32 = x + 32u * ix;
+    float gate_sum[NR0_IQ3_FAST] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float up_sum[NR0_IQ3_FAST] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (uint ib32 = ix; ib32 < nb32; ib32 += 32u) {
+        float xl[32];
+        for (short i = 0; i < 32; ++i) {
+            xl[i] = x32[i];
+        }
+
+        const uint ibl = ib32 / 8u;
+        const uint ib = ib32 & 7u;
+
+        for (short row = 0; row < NR0_IQ3_FAST; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+
+            device const uchar * gate_blk = w_gate + expert_base + (ulong)out_row * row_stride
+                                                   + (ulong)ibl * IQ3XXS_BYTES;
+            device const uchar * up_blk = w_up + expert_base + (ulong)out_row * row_stride
+                                             + (ulong)ibl * IQ3XXS_BYTES;
+
+            const float gate_db = float(((device const half *)gate_blk)[0]);
+            const float up_db = float(((device const half *)up_blk)[0]);
+            device const uchar * gate_qs = gate_blk + 2;
+            device const uchar * up_qs = up_blk + 2;
+            device const uchar * gate_q3 = gate_qs + 8u * ib;
+            device const uchar * up_q3 = up_qs + 8u * ib;
+            device const ushort * gate_gas = (device const ushort *)(gate_qs + QK_K / 4) + 2u * ib;
+            device const ushort * up_gas = (device const ushort *)(up_qs + QK_K / 4) + 2u * ib;
+            const uint gate_aux = uint(gate_gas[0]) | (uint(gate_gas[1]) << 16);
+            const uint up_aux = uint(up_gas[0]) | (uint(up_gas[1]) << 16);
+            const float gate_d = gate_db * (0.5f + float(gate_aux >> 28));
+            const float up_d = up_db * (0.5f + float(up_aux >> 28));
+
+            float2 gate_part = {0.0f, 0.0f};
+            float2 up_part = {0.0f, 0.0f};
+            for (short l = 0; l < 4; ++l) {
+                constant uchar * gate_grid1 = (constant uchar *)(moe_iq3xxs_grid + gate_q3[2 * l + 0]);
+                constant uchar * gate_grid2 = (constant uchar *)(moe_iq3xxs_grid + gate_q3[2 * l + 1]);
+                constant uchar * up_grid1 = (constant uchar *)(moe_iq3xxs_grid + up_q3[2 * l + 0]);
+                constant uchar * up_grid2 = (constant uchar *)(moe_iq3xxs_grid + up_q3[2 * l + 1]);
+                const uint gate_signs = uint(moe_ksigns_iq2xs[(gate_aux >> uint(7 * l)) & 127u]);
+                const uint up_signs = uint(moe_ksigns_iq2xs[(up_aux >> uint(7 * l)) & 127u]);
+                for (short j = 0; j < 4; ++j) {
+                    const float gate_s1 = (gate_signs & uint(moe_kmask_iq2xs[j + 0])) ? -1.0f : 1.0f;
+                    const float gate_s2 = (gate_signs & uint(moe_kmask_iq2xs[j + 4])) ? -1.0f : 1.0f;
+                    const float up_s1 = (up_signs & uint(moe_kmask_iq2xs[j + 0])) ? -1.0f : 1.0f;
+                    const float up_s2 = (up_signs & uint(moe_kmask_iq2xs[j + 4])) ? -1.0f : 1.0f;
+                    const float x1 = xl[8 * l + j + 0];
+                    const float x2 = xl[8 * l + j + 4];
+                    gate_part[0] += x1 * float(gate_grid1[j]) * gate_s1;
+                    gate_part[1] += x2 * float(gate_grid2[j]) * gate_s2;
+                    up_part[0] += x1 * float(up_grid1[j]) * up_s1;
+                    up_part[1] += x2 * float(up_grid2[j]) * up_s2;
+                }
+            }
+            gate_sum[row] += gate_d * (gate_part[0] + gate_part[1]);
+            up_sum[row] += up_d * (up_part[0] + up_part[1]);
+        }
+
+        x32 += 32u * 32u;
+    }
+
+    for (short row = 0; row < NR0_IQ3_FAST; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float gate_tot = simd_sum(gate_sum[row]) * 0.5f;
+        const float up_tot = simd_sum(up_sum[row]) * 0.5f;
+        if (tiisg == 0) {
+            inner[(ulong)slot * args.n_out + out_row] = moe_silu_f(gate_tot) * up_tot;
+        }
+    }
+}
+
+kernel void kernel_moe_swiglu_iq3_s_f32_fast(
+        constant moe_q4k_args & args      [[buffer(0)]],
+        device const uchar    * w_gate    [[buffer(1)]],
+        device const uchar    * w_up      [[buffer(2)]],
+        device const float    * x         [[buffer(3)]],
+        device const int      * top_idx   [[buffer(4)]],
+        device       float    * inner     [[buffer(5)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint first_row = (tgpig.x * NSG_IQ3_FAST + uint(sgitg)) * NR0_IQ3_FAST;
+    if (first_row >= args.n_out) return;
+
+    const uint nb = args.n_in / QK_K;
+    const uint nb32 = nb * 8u;
+    const ulong row_stride = (ulong)nb * IQ3S_BYTES;
+    const ulong expert_stride = (ulong)args.n_out * row_stride;
+    const ulong expert_base = (ulong)expert_i * expert_stride;
+
+    const uint ix = uint(tiisg);
+    device const float * x32 = x + 32u * ix;
+    float gate_sum[NR0_IQ3_FAST] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float up_sum[NR0_IQ3_FAST] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (uint ib32 = ix; ib32 < nb32; ib32 += 32u) {
+        float xl[32];
+        for (short i = 0; i < 32; ++i) {
+            xl[i] = x32[i];
+        }
+
+        const uint ibl = ib32 / 8u;
+        const uint ib = ib32 & 7u;
+
+        for (short row = 0; row < NR0_IQ3_FAST; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+
+            device const uchar * gate_blk = w_gate + expert_base + (ulong)out_row * row_stride
+                                                   + (ulong)ibl * IQ3S_BYTES;
+            device const uchar * up_blk = w_up + expert_base + (ulong)out_row * row_stride
+                                             + (ulong)ibl * IQ3S_BYTES;
+
+            const float gate_db = float(((device const half *)gate_blk)[0]);
+            const float up_db = float(((device const half *)up_blk)[0]);
+            device const uchar * gate_qbase = gate_blk + 2;
+            device const uchar * up_qbase = up_blk + 2;
+            device const uchar * gate_qs = gate_qbase + 8u * ib;
+            device const uchar * up_qs = up_qbase + 8u * ib;
+            device const uchar * gate_qh = gate_qbase + QK_K / 4 + ib;
+            device const uchar * up_qh = up_qbase + QK_K / 4 + ib;
+            device const uchar * gate_signs = gate_qbase + QK_K / 4 + QK_K / 32 + 4u * ib;
+            device const uchar * up_signs = up_qbase + QK_K / 4 + QK_K / 32 + 4u * ib;
+            device const uchar * gate_scales = gate_qbase + QK_K / 4 + QK_K / 32 + QK_K / 8 + (ib >> 1);
+            device const uchar * up_scales = up_qbase + QK_K / 4 + QK_K / 32 + QK_K / 8 + (ib >> 1);
+            const float gate_d = gate_db * (1.0f + 2.0f * float((uint(gate_scales[0]) >> (4u * (ib & 1u))) & 0x0fu));
+            const float up_d = up_db * (1.0f + 2.0f * float((uint(up_scales[0]) >> (4u * (ib & 1u))) & 0x0fu));
+
+            float2 gate_part = {0.0f, 0.0f};
+            float2 up_part = {0.0f, 0.0f};
+            for (short l = 0; l < 4; ++l) {
+                const uint mask1 = uint(moe_kmask_iq2xs[2 * l + 0]);
+                const uint mask2 = uint(moe_kmask_iq2xs[2 * l + 1]);
+                const uint gate_idx1 = uint(gate_qs[2 * l + 0]) | (((uint(gate_qh[0]) & mask1) != 0u) ? 256u : 0u);
+                const uint gate_idx2 = uint(gate_qs[2 * l + 1]) | (((uint(gate_qh[0]) & mask2) != 0u) ? 256u : 0u);
+                const uint up_idx1 = uint(up_qs[2 * l + 0]) | (((uint(up_qh[0]) & mask1) != 0u) ? 256u : 0u);
+                const uint up_idx2 = uint(up_qs[2 * l + 1]) | (((uint(up_qh[0]) & mask2) != 0u) ? 256u : 0u);
+                constant uchar * gate_grid1 = (constant uchar *)(moe_iq3s_grid + gate_idx1);
+                constant uchar * gate_grid2 = (constant uchar *)(moe_iq3s_grid + gate_idx2);
+                constant uchar * up_grid1 = (constant uchar *)(moe_iq3s_grid + up_idx1);
+                constant uchar * up_grid2 = (constant uchar *)(moe_iq3s_grid + up_idx2);
+                for (short j = 0; j < 4; ++j) {
+                    const float gate_s1 = (uint(gate_signs[l]) & uint(moe_kmask_iq2xs[j + 0])) ? -1.0f : 1.0f;
+                    const float gate_s2 = (uint(gate_signs[l]) & uint(moe_kmask_iq2xs[j + 4])) ? -1.0f : 1.0f;
+                    const float up_s1 = (uint(up_signs[l]) & uint(moe_kmask_iq2xs[j + 0])) ? -1.0f : 1.0f;
+                    const float up_s2 = (uint(up_signs[l]) & uint(moe_kmask_iq2xs[j + 4])) ? -1.0f : 1.0f;
+                    const float x1 = xl[8 * l + j + 0];
+                    const float x2 = xl[8 * l + j + 4];
+                    gate_part[0] += x1 * float(gate_grid1[j]) * gate_s1;
+                    gate_part[1] += x2 * float(gate_grid2[j]) * gate_s2;
+                    up_part[0] += x1 * float(up_grid1[j]) * up_s1;
+                    up_part[1] += x2 * float(up_grid2[j]) * up_s2;
+                }
+            }
+            gate_sum[row] += gate_d * (gate_part[0] + gate_part[1]);
+            up_sum[row] += up_d * (up_part[0] + up_part[1]);
+        }
+
+        x32 += 32u * 32u;
+    }
+
+    for (short row = 0; row < NR0_IQ3_FAST; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float gate_tot = simd_sum(gate_sum[row]);
+        const float up_tot = simd_sum(up_sum[row]);
+        if (tiisg == 0) {
+            inner[(ulong)slot * args.n_out + out_row] = moe_silu_f(gate_tot) * up_tot;
+        }
     }
 }
 

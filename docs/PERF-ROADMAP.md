@@ -916,7 +916,18 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.356:
+Current rank after v0.356, plus the post-v0.356 hardware-headroom audit digest:
+
+External audit read: do not turn generic code-smell cleanup into the new top of
+queue without measured primary-row gates. The useful additions are narrower:
+RoPE precompute is a cheap correctness-bounded sidecar because the current
+kernels still compute `pow(theta, exponent)` per pair; PSO-cache locks,
+`view_subrange` allocation churn, and tensor clones need warmed CPU/alloc
+attribution before implementation because current hot decode rows are mostly GPU
+active; `[[max_total_threads_per_threadgroup]]` and simdgroup-barrier pruning are
+microbench candidates on exact active kernels, not blanket edits. Keep the active
+implementation spine on concrete quant/long-context rows, while adding these as
+gated hardware-headroom probes.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -1155,12 +1166,34 @@ Current rank after v0.356:
    defaults, fast-path coverage, residual-add fusion, N64 policy, shared-memory
    policy, GDN token-channel parallelization, command-buffer streaming, GDN
    matvec fallback, or HD128 normalization row count.
-11. Hardware-headroom watchlist: ICB/MTL4 encode-once decode, fused online-softmax
-   prefill attention, chunked delta-rule GDN, production residency/warm expert
-   banks, and epilogue fusions are all plausible paths to dominate beyond
-   llama.cpp. They need a trace-proven idle/bandwidth/phase gate before
-   implementation, not merely a green or red llama row. GDN prep falsifiers do not
-   falsify chunked `gdn_step`; they are different kernels and mechanisms.
+11. Hardware-headroom audit watchlist, gated by primary-row evidence: ICB/MTL4
+    encode-once decode, fused online-softmax prefill attention, chunked
+    delta-rule GDN, production residency/warm expert banks, RoPE precompute,
+    targeted kernel resource annotations, host encode allocation/PSO cleanup, and
+    structural decode fusions are all plausible paths to dominate beyond
+    llama.cpp. They need a trace-proven idle/bandwidth/phase gate before
+    implementation, not merely a green or red llama row. GDN prep falsifiers do
+    not falsify chunked `gdn_step`; they are different kernels and mechanisms.
+    The specific post-audit gates are:
+
+    - RoPE precompute: replace per-pair `pow` with inv-freq or sin/cos reuse only
+      if an isolated kernel win converts into `>=0.5-1%` end-to-end on at least
+      one primary decode or prefill row with no drift.
+    - PSO cache, `view_subrange`, and clone cleanup: first capture warmed CPU
+      encode/alloc evidence showing `>=0.3 ms/token` or `>=1%` wall in a primary
+      decode path; current GPU/wall rows do not justify an implementation branch
+      by themselves.
+    - `max_total_threads_per_threadgroup` and simdgroup-barrier pruning: test only
+      on exact hot kernels with primitive microbench wins, then run clean family
+      guards. Do not blanket-annotate kernels; a wrong cap can reduce occupancy.
+    - Decode fusions: prefer byte-reuse/dataflow fusions such as GDN `qkv+z` over
+      residual/elementwise shelves, but require a primitive proof that beats the
+      current near-roofline projection harness or a phase bucket of at least `5%`
+      with an end-to-end `>=1%` win.
+    - Mmap no-copy, heaps/residency sets, binary archives, and ICB/MTL4 remain
+      product/cold-start/encode-bubble work until traces show hot throughput is
+      host- or residency-limited.
+
 12. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their
    `tg128` decode sentinels, and v0.242 keeps adjacent 4B `Q3_K_M`, `IQ4_XS`,

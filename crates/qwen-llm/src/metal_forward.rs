@@ -42,8 +42,9 @@ use crate::metal::{
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32,
     encode_moe_mat_vec_iq3_s_f32, encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32,
-    encode_moe_shared_accum_resid_f32, encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32,
-    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_moe_shared_accum_resid_f32, encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_xxs_f32,
+    encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
     encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
@@ -220,6 +221,16 @@ fn decode_shared_swiglu_q8_enabled() -> bool {
     })
 }
 
+fn decode_moe_iq3_fused_swiglu_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_MOE_IQ3_FUSED_SWIGLU").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
 fn decode_moe_q5_down_fused_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -379,6 +390,18 @@ fn decode_moe_noop_routed_down_enabled() -> bool {
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
         )
     })
+}
+
+fn moe_routed_gate_up_decode_supported(gate: GgmlType, up: GgmlType) -> bool {
+    matches!(
+        (gate, up),
+        (GgmlType::Q4_K, GgmlType::Q4_K)
+            | (GgmlType::Q5_K, GgmlType::Q5_K)
+            | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
+            | (GgmlType::IQ3_S, GgmlType::IQ3_S)
+            | (GgmlType::BF16, GgmlType::BF16)
+            | (GgmlType::F32, GgmlType::F32)
+    )
 }
 
 thread_local! {
@@ -1259,15 +1282,8 @@ impl<'a> MetalForward<'a> {
         let n_expert = arch.expert_count as usize;
         let topk = arch.expert_used_count.min(arch.expert_count) as usize;
 
-        let gate_up_supported = matches!(
-            (moe.gate_exps.dtype, moe.up_exps.dtype),
-            (GgmlType::Q4_K, GgmlType::Q4_K)
-                | (GgmlType::Q5_K, GgmlType::Q5_K)
-                | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
-                | (GgmlType::IQ3_S, GgmlType::IQ3_S)
-                | (GgmlType::BF16, GgmlType::BF16)
-                | (GgmlType::F32, GgmlType::F32)
-        );
+        let gate_up_supported =
+            moe_routed_gate_up_decode_supported(moe.gate_exps.dtype, moe.up_exps.dtype);
         if !gate_up_supported {
             return Err(MfError::UnsupportedDtype {
                 name: "MoE routed gate/up expert banks".into(),
@@ -1293,186 +1309,10 @@ impl<'a> MetalForward<'a> {
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
-        match moe.gate_exps.dtype {
-            GgmlType::Q4_K => encode_moe_swiglu_q4_K_f32(
-                self.ctx,
-                enc,
-                &moe.gate_exps,
-                &moe.up_exps,
-                &session.h,
-                &topk_idx,
-                &moe_inner,
-                h,
-                f_exp,
-                n_expert,
-                topk,
-            )?,
-            GgmlType::Q5_K => {
-                let gate_pack = session
-                    .moe_expert_out
-                    .view_subrange(0, vec![(topk * f_exp) as u64]);
-                let up_pack = session
-                    .moe_expert_out
-                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
-                encode_moe_mat_vec_q5_K_f32(
-                    self.ctx,
-                    enc,
-                    &moe.gate_exps,
-                    &session.h,
-                    &topk_idx,
-                    &gate_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_moe_mat_vec_q5_K_f32(
-                    self.ctx,
-                    enc,
-                    &moe.up_exps,
-                    &session.h,
-                    &topk_idx,
-                    &up_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
-            }
-            GgmlType::IQ3_XXS => {
-                let gate_pack = session
-                    .moe_expert_out
-                    .view_subrange(0, vec![(topk * f_exp) as u64]);
-                let up_pack = session
-                    .moe_expert_out
-                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
-                encode_moe_mat_vec_iq3_xxs_f32(
-                    self.ctx,
-                    enc,
-                    &moe.gate_exps,
-                    &session.h,
-                    &topk_idx,
-                    &gate_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_moe_mat_vec_iq3_xxs_f32(
-                    self.ctx,
-                    enc,
-                    &moe.up_exps,
-                    &session.h,
-                    &topk_idx,
-                    &up_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
-            }
-            GgmlType::IQ3_S => {
-                let gate_pack = session
-                    .moe_expert_out
-                    .view_subrange(0, vec![(topk * f_exp) as u64]);
-                let up_pack = session
-                    .moe_expert_out
-                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
-                encode_moe_mat_vec_iq3_s_f32(
-                    self.ctx,
-                    enc,
-                    &moe.gate_exps,
-                    &session.h,
-                    &topk_idx,
-                    &gate_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_moe_mat_vec_iq3_s_f32(
-                    self.ctx,
-                    enc,
-                    &moe.up_exps,
-                    &session.h,
-                    &topk_idx,
-                    &up_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
-            }
-            GgmlType::F32 => {
-                let gate_pack = session
-                    .moe_expert_out
-                    .view_subrange(0, vec![(topk * f_exp) as u64]);
-                let up_pack = session
-                    .moe_expert_out
-                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
-                encode_moe_mat_vec_f32(
-                    self.ctx,
-                    enc,
-                    &moe.gate_exps,
-                    &session.h,
-                    &topk_idx,
-                    &gate_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_moe_mat_vec_f32(
-                    self.ctx,
-                    enc,
-                    &moe.up_exps,
-                    &session.h,
-                    &topk_idx,
-                    &up_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
-            }
-            GgmlType::BF16 => {
-                let gate_pack = session
-                    .moe_expert_out
-                    .view_subrange(0, vec![(topk * f_exp) as u64]);
-                let up_pack = session
-                    .moe_expert_out
-                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
-                encode_moe_mat_vec_bf16_f32(
-                    self.ctx,
-                    enc,
-                    &moe.gate_exps,
-                    &session.h,
-                    &topk_idx,
-                    &gate_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_moe_mat_vec_bf16_f32(
-                    self.ctx,
-                    enc,
-                    &moe.up_exps,
-                    &session.h,
-                    &topk_idx,
-                    &up_pack,
-                    h,
-                    f_exp,
-                    n_expert,
-                    topk,
-                )?;
-                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
-            }
-            _ => unreachable!(),
+        self.encode_moe_routed_gate_up_gpu(enc, session, moe)?;
+        if decode_moe_noop_routed_down_enabled() {
+            encode_fill_f32(self.ctx, enc, &session.mixer_out, 0.0)?;
+            return Ok(());
         }
         match moe.down_exps.dtype {
             GgmlType::Q5_K => {
@@ -1783,6 +1623,243 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?;
+        }
+        Ok(())
+    }
+
+    fn encode_moe_routed_gate_up_gpu(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+        let moe_inner = session
+            .moe_inner
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+
+        if decode_moe_noop_routed_gateup_enabled() {
+            encode_fill_f32(self.ctx, enc, &moe_inner, 0.0)?;
+            return Ok(());
+        }
+
+        match moe.gate_exps.dtype {
+            GgmlType::Q4_K => encode_moe_swiglu_q4_K_f32(
+                self.ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &session.h,
+                &topk_idx,
+                &moe_inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+            )?,
+            GgmlType::Q5_K => {
+                let gate_pack = session
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = session
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                encode_moe_mat_vec_q5_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &session.h,
+                    &topk_idx,
+                    &gate_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_mat_vec_q5_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.up_exps,
+                    &session.h,
+                    &topk_idx,
+                    &up_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+            }
+            GgmlType::IQ3_XXS => {
+                if decode_moe_iq3_fused_swiglu_enabled() {
+                    encode_moe_swiglu_iq3_xxs_f32(
+                        self.ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        &session.h,
+                        &topk_idx,
+                        &moe_inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                    )?;
+                } else {
+                    let gate_pack = session
+                        .moe_expert_out
+                        .view_subrange(0, vec![(topk * f_exp) as u64]);
+                    let up_pack = session
+                        .moe_expert_out
+                        .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                    encode_moe_mat_vec_iq3_xxs_f32(
+                        self.ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &session.h,
+                        &topk_idx,
+                        &gate_pack,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                    )?;
+                    encode_moe_mat_vec_iq3_xxs_f32(
+                        self.ctx,
+                        enc,
+                        &moe.up_exps,
+                        &session.h,
+                        &topk_idx,
+                        &up_pack,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                    )?;
+                    encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+                }
+            }
+            GgmlType::IQ3_S => {
+                if decode_moe_iq3_fused_swiglu_enabled() {
+                    encode_moe_swiglu_iq3_s_f32(
+                        self.ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        &session.h,
+                        &topk_idx,
+                        &moe_inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                    )?;
+                } else {
+                    let gate_pack = session
+                        .moe_expert_out
+                        .view_subrange(0, vec![(topk * f_exp) as u64]);
+                    let up_pack = session
+                        .moe_expert_out
+                        .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                    encode_moe_mat_vec_iq3_s_f32(
+                        self.ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &session.h,
+                        &topk_idx,
+                        &gate_pack,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                    )?;
+                    encode_moe_mat_vec_iq3_s_f32(
+                        self.ctx,
+                        enc,
+                        &moe.up_exps,
+                        &session.h,
+                        &topk_idx,
+                        &up_pack,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                    )?;
+                    encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+                }
+            }
+            GgmlType::F32 => {
+                let gate_pack = session
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = session
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                encode_moe_mat_vec_f32(
+                    self.ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &session.h,
+                    &topk_idx,
+                    &gate_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_mat_vec_f32(
+                    self.ctx,
+                    enc,
+                    &moe.up_exps,
+                    &session.h,
+                    &topk_idx,
+                    &up_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+            }
+            GgmlType::BF16 => {
+                let gate_pack = session
+                    .moe_expert_out
+                    .view_subrange(0, vec![(topk * f_exp) as u64]);
+                let up_pack = session
+                    .moe_expert_out
+                    .view_subrange((topk * f_exp) as u64, vec![(topk * f_exp) as u64]);
+                encode_moe_mat_vec_bf16_f32(
+                    self.ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &session.h,
+                    &topk_idx,
+                    &gate_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_mat_vec_bf16_f32(
+                    self.ctx,
+                    enc,
+                    &moe.up_exps,
+                    &session.h,
+                    &topk_idx,
+                    &up_pack,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_silu_mul_f32(self.ctx, enc, &gate_pack, &up_pack, &moe_inner)?;
+            }
+            _ => unreachable!(),
         }
         Ok(())
     }
@@ -4498,12 +4575,15 @@ impl<'a> MetalForward<'a> {
 
             if split_ffn_apply {
                 if deep_split_ffn_apply
-                    && moe.gate_exps.dtype == GgmlType::Q4_K
-                    && moe.up_exps.dtype == GgmlType::Q4_K
+                    && moe_routed_gate_up_decode_supported(moe.gate_exps.dtype, moe.up_exps.dtype)
+                    && matches!(
+                        moe.down_exps.dtype,
+                        GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::BF16
+                    )
                 {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
-                    self.encode_moe_routed_gate_up_q4_gpu(&enc, session, moe)?;
+                    self.encode_moe_routed_gate_up_gpu(&enc, session, moe)?;
                     enc.end();
                     cmd.commit();
                     cmd.waitUntilCompleted();

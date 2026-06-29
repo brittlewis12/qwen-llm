@@ -916,7 +916,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.352:
+Current rank after v0.353:
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -941,6 +941,15 @@ Current rank after v0.352:
    llama.cpp (`0.82x`/`0.75x`) despite prompt wins. Treat Q6/Q8 support and
    Q3/IQ4 decode attribution as the live quant-coverage branch; do not return to
    dense BF16 tile-shape work unless it repeats worse or gains a phase mechanism.
+   v0.353 attributes Q3/IQ4 decode to routed gate/up and defaults a decode-only
+   fused IQ3_XXS/IQ3_S SwiGLU kernel. Rollback is
+   `QWEN_DECODE_MOE_IQ3_FUSED_SWIGLU=0`. Q3 `tg128` moves
+   `66.54 -> 72.62 t/s` and IQ4 moves `60.50 -> 67.46 t/s`; routed gate/up drops
+   `4.93 -> 3.59 ms` on Q3 and `6.39 -> 4.60 ms` on IQ4. Reusing grouped prefill
+   IQ3 SwiGLU for one-token decode regressed, so do not reopen that shape. The
+   remaining low-bit MoE decode work should be either Q6/Q8 gate/up coverage or
+   a deeper decode-native IQ3/IQ4 dataflow proof, not another all-expert grouped
+   prefill transplant.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

@@ -3552,6 +3552,94 @@ kernel void kernel_moe_mat_vec_iq3_s_f32(
     }
 }
 
+kernel void kernel_moe_swiglu_iq3_xxs_f32(
+        constant moe_q4k_args & args      [[buffer(0)]],
+        device const uchar    * w_gate    [[buffer(1)]],
+        device const uchar    * w_up      [[buffer(2)]],
+        device const float    * x         [[buffer(3)]],
+        device const int      * top_idx   [[buffer(4)]],
+        device       float    * inner     [[buffer(5)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint row = tgpig.x * NSG_MOE_IQ3_XXS + sgitg;
+    if (row >= args.n_out) return;
+
+    const uint nb = args.n_in / QK_K;
+    const ulong row_stride_bytes = (ulong)nb * IQ3XXS_BYTES;
+    const ulong expert_stride_bytes = (ulong)args.n_out * row_stride_bytes;
+    device const uchar * gate_blocks = w_gate + (ulong)expert_i * expert_stride_bytes
+                                             + (ulong)row * row_stride_bytes;
+    device const uchar * up_blocks = w_up + (ulong)expert_i * expert_stride_bytes
+                                         + (ulong)row * row_stride_bytes;
+
+    float gate_sum = 0.0f;
+    float up_sum = 0.0f;
+    for (uint i = tiisg; i < args.n_in; i += 32) {
+        const uint bidx = i / QK_K;
+        const uint qidx = i - bidx * QK_K;
+        const float xv = x[i];
+        gate_sum += moe_deq_iq3_xxs(gate_blocks + (ulong)bidx * IQ3XXS_BYTES, qidx) * xv;
+        up_sum += moe_deq_iq3_xxs(up_blocks + (ulong)bidx * IQ3XXS_BYTES, qidx) * xv;
+    }
+
+    const float gate_tot = simd_sum(gate_sum);
+    const float up_tot = simd_sum(up_sum);
+    if (tiisg == 0) {
+        inner[(ulong)slot * args.n_out + row] = moe_silu_f(gate_tot) * up_tot;
+    }
+}
+
+kernel void kernel_moe_swiglu_iq3_s_f32(
+        constant moe_q4k_args & args      [[buffer(0)]],
+        device const uchar    * w_gate    [[buffer(1)]],
+        device const uchar    * w_up      [[buffer(2)]],
+        device const float    * x         [[buffer(3)]],
+        device const int      * top_idx   [[buffer(4)]],
+        device       float    * inner     [[buffer(5)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint row = tgpig.x * NSG_MOE_IQ3_XXS + sgitg;
+    if (row >= args.n_out) return;
+
+    const uint nb = args.n_in / QK_K;
+    const ulong row_stride_bytes = (ulong)nb * IQ3S_BYTES;
+    const ulong expert_stride_bytes = (ulong)args.n_out * row_stride_bytes;
+    device const uchar * gate_blocks = w_gate + (ulong)expert_i * expert_stride_bytes
+                                             + (ulong)row * row_stride_bytes;
+    device const uchar * up_blocks = w_up + (ulong)expert_i * expert_stride_bytes
+                                         + (ulong)row * row_stride_bytes;
+
+    float gate_sum = 0.0f;
+    float up_sum = 0.0f;
+    for (uint i = tiisg; i < args.n_in; i += 32) {
+        const uint bidx = i / QK_K;
+        const uint qidx = i - bidx * QK_K;
+        const float xv = x[i];
+        gate_sum += moe_deq_iq3_s(gate_blocks + (ulong)bidx * IQ3S_BYTES, qidx) * xv;
+        up_sum += moe_deq_iq3_s(up_blocks + (ulong)bidx * IQ3S_BYTES, qidx) * xv;
+    }
+
+    const float gate_tot = simd_sum(gate_sum);
+    const float up_tot = simd_sum(up_sum);
+    if (tiisg == 0) {
+        inner[(ulong)slot * args.n_out + row] = moe_silu_f(gate_tot) * up_tot;
+    }
+}
+
 kernel void kernel_moe_down_iq4_xs_f32(
         constant moe_iq4xs_args & args           [[buffer(0)]],
         device const block_iq4_xs_local * weight [[buffer(1)]],

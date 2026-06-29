@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.353 IQ3 MoE Decode SwiGLU
+
+Status: defaulted a decode-only fused routed SwiGLU kernel for IQ3_XXS/IQ3_S
+MoE gate/up expert banks. This attacks the v0.352 Q3/IQ4 decode red cells after
+phase attribution showed routed gate/up dominated the delta. Rollback:
+`QWEN_DECODE_MOE_IQ3_FUSED_SWIGLU=0`.
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm moe_swiglu_iq3_ --release -- --ignored --nocapture`
+- sequential Q3/IQ4 default-vs-rollback `tg128` A/B, no parallel GPU workloads
+
+Results:
+
+| A3B decode row | Rollback | New default | Read |
+| --- | ---: | ---: | --- |
+| Q3_K_M `tg128` | `66.54 t/s` | `72.62 t/s` | `+9.1%` |
+| IQ4_XS `tg128` | `60.50 t/s` | `67.46 t/s` | `+11.5%` |
+| Q4_K_M `tg128` guard | n/a | `107.29 t/s` | unaffected path |
+
+Phase attribution (`QWEN_PHASE_MOE_FFN_SPLIT=2`, `ctx128`):
+
+| A3B row | Routed gate/up before | Routed gate/up fused | Read |
+| --- | ---: | ---: | --- |
+| Q3_K_M | `4.93 ms` | `3.59 ms` | `-27%` |
+| IQ4_XS | `6.39 ms` | `4.60 ms` | `-28%` |
+
+Negative: reusing the existing grouped IQ3 prefill SwiGLU kernels for
+single-token decode via one-token buckets regressed and was not kept. Q3 `tg128`
+fell `66.66 -> 60.44 t/s`, IQ4 fell `60.60 -> 59.17 t/s`, and the routed
+gate/up phase got slower. The empty-expert grouped prefill grid is the wrong
+shape for this decode cell.
+
+Read: the fused scalar decode kernel clears the cx gate for a bounded
+quant-coverage branch, but it does not close Q3/IQ4 against llama.cpp by itself.
+The remaining low-bit MoE decode gap is still in routed gate/up dataflow plus
+IQ4_XS routed down; do not reopen grouped-prefill reuse for single-token decode.
+
 ## 2026-06-29 - v0.352 MoE Quant Guardrail
 
 Status: ran the MoE quant guardrail after dense quants turned broadly green. The

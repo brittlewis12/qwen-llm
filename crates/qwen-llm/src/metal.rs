@@ -6560,6 +6560,176 @@ pub fn encode_moe_mat_vec_iq3_s_f32(
     Ok(())
 }
 
+pub fn encode_moe_swiglu_iq3_xxs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x: &MetalTensor,
+    topk_idx: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::IQ3_XXS || w_up.dtype != GgmlType::IQ3_XXS {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs",
+            detail: format!(
+                "expected IQ3_XXS gate/up expert banks, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_in
+        || topk_idx.n_elements() as usize != topk
+        || inner.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_xxs",
+            detail: format!(
+                "shape mismatch: x={} idx={} inner={} expected x={n_in} idx={topk} inner={}",
+                x.n_elements(),
+                topk_idx.n_elements(),
+                inner.n_elements(),
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_iq3_xxs_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, topk_idx);
+    enc.set_tensor(5, inner);
+
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_moe_swiglu_iq3_s_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x: &MetalTensor,
+    topk_idx: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_s",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if w_gate.dtype != GgmlType::IQ3_S || w_up.dtype != GgmlType::IQ3_S {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_s",
+            detail: format!(
+                "expected IQ3_S gate/up expert banks, got {:?}/{:?}",
+                w_gate.dtype, w_up.dtype
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_in
+        || topk_idx.n_elements() as usize != topk
+        || inner.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_swiglu_iq3_s",
+            detail: format!(
+                "shape mismatch: x={} idx={} inner={} expected x={n_in} idx={topk} inner={}",
+                x.n_elements(),
+                topk_idx.n_elements(),
+                inner.n_elements(),
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_swiglu_iq3_s_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, w_gate);
+    enc.set_tensor(2, w_up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, topk_idx);
+    enc.set_tensor(5, inner);
+
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_moe_mat_vec_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -14487,6 +14657,109 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn moe_swiglu_iq3_xxs_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_Q3_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3-direct-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::IQ3_XXS)
+            .expect("missing IQ3_XXS MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let row_stride = (n_in / 256) * 98;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::IQ3_XXS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, &x);
+        let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, &x);
+        let mut cpu = vec![0.0f32; n_ffn];
+        for i in 0..n_ffn {
+            let g = gate[i];
+            cpu[i] = (g / (1.0 + (-g).exp())) * up[i];
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let expert_i = expert as i32;
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert_i]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_gpu = MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_xxs_f32(
+                &ctx, enc, &gate_gpu, &up_gpu, &x_gpu, &topk_gpu, &out_gpu, n_in, n_ffn, n_expert,
+                1,
+            )
+        })
+        .expect("gpu direct iq3 swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3-direct-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
     fn moe_grouped_swiglu_iq3_xxs_matches_f32_dequant_fixture() {
         let path = std::env::var("QWEN_A3B_Q3_MODEL")
             .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-Q3_K_M.gguf".into());
@@ -14690,6 +14963,109 @@ mod tests {
             .fold(0f32, f32::max);
         eprintln!("[moe-iq3s-oracle] max|delta|={max_abs:.3e}");
         assert!(max_abs < 2e-4, "max|delta|={max_abs}");
+    }
+
+    #[test]
+    #[ignore]
+    fn moe_swiglu_iq3_s_matches_f32_dequant_fixture() {
+        let path = std::env::var("QWEN_A3B_UDIQ4XS_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf".into());
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[moe-iq3s-direct-swiglu-oracle] skipped missing fixture {path}");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open fixture");
+        let gate_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_gate_exps.weight" && t.dtype == GgmlType::IQ3_S)
+            .expect("missing IQ3_S MoE gate tensor");
+        let up_t = g
+            .tensors
+            .iter()
+            .find(|t| t.name == "blk.0.ffn_up_exps.weight" && t.dtype == GgmlType::IQ3_S)
+            .expect("missing IQ3_S MoE up tensor");
+        let n_in = gate_t.shape[0] as usize;
+        let n_ffn = gate_t.shape[1] as usize;
+        let n_expert = gate_t.shape[2] as usize;
+        let expert = 7usize.min(n_expert - 1);
+        let row_stride = (n_in / 256) * 110;
+        let expert_stride = n_ffn * row_stride;
+        let gate_bytes_all = g.slice(gate_t);
+        let up_bytes_all = g.slice(up_t);
+        let gate_expert_bytes =
+            &gate_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let up_expert_bytes = &up_bytes_all[expert * expert_stride..(expert + 1) * expert_stride];
+        let expert_desc = crate::tensor::TensorDesc {
+            name: "blk.0.ffn_exps.weight.expert_oracle".into(),
+            shape: vec![n_in as u64, n_ffn as u64],
+            dtype: GgmlType::IQ3_S,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: expert_stride as u64,
+        };
+        let gate_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, gate_expert_bytes).expect("gate dequant");
+        let up_f32 =
+            crate::codec::dequant_to_f32(&expert_desc, up_expert_bytes).expect("up dequant");
+        let x: Vec<f32> = (0..n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.00625)
+            .collect();
+        let gate = crate::forward::mat_vec_pub(&gate_f32, n_in, n_ffn, &x);
+        let up = crate::forward::mat_vec_pub(&up_f32, n_in, n_ffn, &x);
+        let mut cpu = vec![0.0f32; n_ffn];
+        for i in 0..n_ffn {
+            let g = gate[i];
+            cpu[i] = (g / (1.0 + (-g).exp())) * up[i];
+        }
+
+        let gate_gpu = MetalTensor::from_gguf_tensor(&ctx, gate_t, gate_bytes_all).expect("gate");
+        let up_gpu = MetalTensor::from_gguf_tensor(&ctx, up_t, up_bytes_all).expect("up");
+        let x_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x tensor");
+        let expert_i = expert as i32;
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert_i]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let out_gpu = MetalTensor::zeros_f32(&ctx, vec![n_ffn as u64]).expect("out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_iq3_s_f32(
+                &ctx, enc, &gate_gpu, &up_gpu, &x_gpu, &topk_gpu, &out_gpu, n_in, n_ffn, n_expert,
+                1,
+            )
+        })
+        .expect("gpu direct iq3s swiglu");
+        let gpu = read_back_f32(&out_gpu.buffer, n_ffn);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let dot: f64 = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let ng: f64 = gpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc: f64 = cpu.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let cos = dot / (ng.sqrt() * nc.sqrt()).max(1e-12);
+        eprintln!("[moe-iq3s-direct-swiglu-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
+        assert!(cos > 0.999, "cos={cos}");
+        assert!(max_abs < 2e-2, "max|delta|={max_abs}");
     }
 
     #[test]

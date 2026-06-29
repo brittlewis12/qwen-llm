@@ -916,7 +916,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.353:
+Current rank after v0.354:
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -949,7 +949,11 @@ Current rank after v0.353:
    IQ3 SwiGLU for one-token decode regressed, so do not reopen that shape. The
    remaining low-bit MoE decode work should be either Q6/Q8 gate/up coverage or
    a deeper decode-native IQ3/IQ4 dataflow proof, not another all-expert grouped
-   prefill transplant.
+   prefill transplant. v0.354 clean low-bit spot confirms the external row moved:
+   Q3_K_M `tg128` is now `0.90x` llama.cpp and IQ4_XS is `0.84x`, while their
+   `pp512` rows remain green and Q4_K_M decode remains `1.41x`. These rows are
+   still red but no longer first-order catastrophic; continuing low-bit work now
+   requires a second concentrated bucket, not generic quant polishing.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

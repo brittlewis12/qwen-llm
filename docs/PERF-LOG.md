@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.354 Clean Low-Bit MoE Spot
+
+Status: rebuilt clean after v0.353 and reran the low-bit A3B MoE guardrail
+against pinned llama.cpp b9833.
+
+Artifact:
+
+- `docs/bench/2026-06-29-1419-v0354-moe-lowbit-iq3-default-family/README.md`
+
+Results:
+
+| A3B row | `pp512` qwen/lcpp | `tg128` qwen/lcpp | Read |
+| --- | ---: | ---: | --- |
+| Q3_K_M | `1.07x` | `0.90x` | decode still red, much closer |
+| Q4_K_M | `1.08x` | `1.41x` | guard green |
+| IQ4_XS | `1.05x` | `0.84x` | decode still red, much closer |
+
+Read: v0.353 materially narrows the low-bit MoE decode red cells but does not
+close them. The next low-bit branch needs a second named bucket: either deeper
+decode-native IQ3 gate/up dataflow or IQ4_XS routed-down/fused-weighted-sum. If
+we do not take that branch now, this artifact is the stop point for returning to
+true-long/session/roofline work.
+
 ## 2026-06-29 - v0.353 IQ3 MoE Decode SwiGLU
 
 Status: defaulted a decode-only fused routed SwiGLU kernel for IQ3_XXS/IQ3_S

@@ -7465,6 +7465,90 @@ pub fn encode_moe_down_iq4_xs_f32(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_down_iq4_xs_f32_fast(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    expert_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_iq4_xs_fast",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::IQ4_XS {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_iq4_xs_fast",
+            detail: format!("expected IQ4_XS expert down, got {:?}", weight.dtype),
+        });
+    }
+    if inner.n_elements() as usize != topk * n_in
+        || topk_idx.n_elements() as usize != topk
+        || expert_out.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_iq4_xs_fast",
+            detail: format!(
+                "shape mismatch: inner={} idx={} out={} expected inner={} idx={topk} out={}",
+                inner.n_elements(),
+                topk_idx.n_elements(),
+                expert_out.n_elements(),
+                topk * n_in,
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_iq4_xs_f32_fast")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, expert_out);
+    enc.set_threadgroup_memory(0, 32 * std::mem::size_of::<f32>());
+
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_down_weighted_sum_q6_K_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -15815,6 +15899,49 @@ mod tests {
         eprintln!("[moe-iq4xs-down-oracle] cos={cos:.6} max|delta|={max_abs:.3e}");
         assert!(cos > 0.999, "cos={cos}");
         assert!(max_abs < 2e-2, "max|delta|={max_abs}");
+
+        let topk_gpu = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[expert as i32]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .expect("topk tensor");
+        let x_one = x_gpu.view_subrange(0, vec![n_in as u64]);
+        let out_fast_gpu =
+            MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("fast out tensor");
+        one_shot(&ctx, |enc| {
+            encode_moe_down_iq4_xs_f32_fast(
+                &ctx,
+                enc,
+                &down_gpu,
+                &x_one,
+                &topk_gpu,
+                &out_fast_gpu,
+                n_in,
+                n_out,
+                n_expert,
+                1,
+            )
+        })
+        .expect("gpu fast iq4xs down");
+        let fast = read_back_f32(&out_fast_gpu.buffer, n_out);
+        let fast_max_abs = fast
+            .iter()
+            .zip(cpu[..n_out].iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let fast_dot: f64 = fast
+            .iter()
+            .zip(cpu[..n_out].iter())
+            .map(|(a, b)| *a as f64 * *b as f64)
+            .sum();
+        let nf: f64 = fast.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let nc_fast: f64 = cpu[..n_out].iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let fast_cos = fast_dot / (nf.sqrt() * nc_fast.sqrt()).max(1e-12);
+        eprintln!("[moe-iq4xs-fast-down-oracle] cos={fast_cos:.6} max|delta|={fast_max_abs:.3e}");
+        assert!(fast_cos > 0.999, "fast cos={fast_cos}");
+        assert!(fast_max_abs < 2e-2, "fast max|delta|={fast_max_abs}");
     }
 
     #[test]

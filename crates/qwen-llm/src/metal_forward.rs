@@ -37,8 +37,8 @@ use crate::metal::{
     encode_ffn_swiglu_q4_K_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
     encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
     encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
-    encode_moe_down_bf16_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    encode_moe_down_bf16_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
     encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32, encode_moe_mat_vec_iq3_s_f32,
@@ -248,6 +248,16 @@ fn decode_moe_q5_down_fused_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !matches!(
             std::env::var("QWEN_DECODE_MOE_Q5_DOWN_FUSED").as_deref(),
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+        )
+    })
+}
+
+fn decode_moe_iq4_down_fast_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("QWEN_DECODE_MOE_IQ4_DOWN_FAST").as_deref(),
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
@@ -1396,18 +1406,33 @@ impl<'a> MetalForward<'a> {
                 topk,
             )?,
             GgmlType::IQ4_XS => {
-                encode_moe_down_iq4_xs_f32(
-                    self.ctx,
-                    enc,
-                    &moe.down_exps,
-                    &moe_inner,
-                    &topk_idx,
-                    &moe_expert_out,
-                    f_exp,
-                    h,
-                    n_expert,
-                    topk,
-                )?;
+                if decode_moe_iq4_down_fast_enabled() {
+                    encode_moe_down_iq4_xs_f32_fast(
+                        self.ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &moe_expert_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                    )?;
+                } else {
+                    encode_moe_down_iq4_xs_f32(
+                        self.ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &moe_expert_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                    )?;
+                }
                 encode_moe_weighted_sum_f32(
                     self.ctx,
                     enc,
@@ -2054,18 +2079,33 @@ impl<'a> MetalForward<'a> {
                 false
             }
             GgmlType::IQ4_XS => {
-                encode_moe_down_iq4_xs_f32(
-                    self.ctx,
-                    enc,
-                    &moe.down_exps,
-                    &moe_inner,
-                    &topk_idx,
-                    &moe_expert_out,
-                    f_exp,
-                    h,
-                    n_expert,
-                    topk,
-                )?;
+                if decode_moe_iq4_down_fast_enabled() {
+                    encode_moe_down_iq4_xs_f32_fast(
+                        self.ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &moe_expert_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                    )?;
+                } else {
+                    encode_moe_down_iq4_xs_f32(
+                        self.ctx,
+                        enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &moe_expert_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                    )?;
+                }
                 true
             }
             GgmlType::BF16 => {
@@ -2228,18 +2268,33 @@ impl<'a> MetalForward<'a> {
             }
             GgmlType::IQ4_XS => {
                 let enc = KernelEncoder::begin_concurrent(cmd_buf);
-                encode_moe_down_iq4_xs_f32(
-                    self.ctx,
-                    &enc,
-                    &moe.down_exps,
-                    &moe_inner,
-                    &topk_idx,
-                    &moe_expert_out,
-                    f_exp,
-                    h,
-                    n_expert,
-                    topk,
-                )?;
+                if decode_moe_iq4_down_fast_enabled() {
+                    encode_moe_down_iq4_xs_f32_fast(
+                        self.ctx,
+                        &enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &moe_expert_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                    )?;
+                } else {
+                    encode_moe_down_iq4_xs_f32(
+                        self.ctx,
+                        &enc,
+                        &moe.down_exps,
+                        &moe_inner,
+                        &topk_idx,
+                        &moe_expert_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                    )?;
+                }
                 self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
                 enc.end();
                 true

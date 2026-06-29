@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.355 IQ4 Down Fused-Reduce Negative
+
+Status: tested and removed a dirty fused IQ4_XS routed-down weighted-sum sidecar
+for the remaining Q3/IQ4 MoE decode gap after v0.353. The branch tried to avoid
+writing `[topk, hidden]` expert output plus a separate weighted-sum pass.
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- sequential dirty Q3/IQ4 `tg128` and deep phase probes, no parallel GPU workloads
+
+Result:
+
+| A3B row | Current default | Dirty fused IQ4 down | Read |
+| --- | ---: | ---: | --- |
+| Q3_K_M `tg128` | `72.62 t/s` | `70.78 t/s` | regressed |
+| IQ4_XS `tg128` | `67.46 t/s` | `65.99 t/s` | regressed |
+| Q3 routed down phase | `2.13 ms` | `2.54 ms` | regressed |
+| IQ4 routed down phase | `2.13 ms` | `2.54 ms` | regressed |
+
+Read: the remaining IQ4_XS routed-down gap is not solved by simply fusing the
+weighted reduction into the scalar down kernel. The branch changed traffic but
+made the arithmetic work unit worse, so it was removed. Future IQ4 down work
+needs a deeper dequant/work-unit change or counters, not another final-pass
+fusion.
+
 ## 2026-06-29 - v0.354 Clean Low-Bit MoE Spot
 
 Status: rebuilt clean after v0.353 and reran the low-bit A3B MoE guardrail

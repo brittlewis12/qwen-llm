@@ -916,7 +916,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.354:
+Current rank after v0.355:
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -953,7 +953,11 @@ Current rank after v0.354:
    Q3_K_M `tg128` is now `0.90x` llama.cpp and IQ4_XS is `0.84x`, while their
    `pp512` rows remain green and Q4_K_M decode remains `1.41x`. These rows are
    still red but no longer first-order catastrophic; continuing low-bit work now
-   requires a second concentrated bucket, not generic quant polishing.
+   requires a second concentrated bucket, not generic quant polishing. v0.355
+   kills the simple IQ4_XS routed-down fused weighted-sum sidecar: Q3 `tg128`
+   regressed `72.62 -> 70.78 t/s`, IQ4 regressed `67.46 -> 65.99 t/s`, and the
+   routed-down phase worsened `2.13 -> 2.54 ms`. Do not reopen IQ4 down final-pass
+   fusion without a deeper dequant/work-unit change or counter signal.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

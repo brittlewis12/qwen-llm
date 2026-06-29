@@ -916,7 +916,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.355:
+Current rank after v0.356:
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -1037,6 +1037,17 @@ Current rank after v0.355:
    attention body only for byte reduction, hidden-traffic counters, or a
    full-model `ctx32768` prototype that moves throughput despite those body
    numbers.
+    v0.356 re-anchors current A3B true-long decode after the low-bit fixes:
+    Q4_K_M drops `107.7 -> 96.5 -> 76.2 t/s` at `ctx128/8192/32768`, and
+    `ctx32768` phase split puts attention first (`5.09 ms`, `38.0%`). The
+    `attn-intra` body matches that scale and estimates `~692 GB/s` on the main
+    pass, while reduce is only `0.34 ms` extrapolated. A dirty group8 Q8-KV
+    sidecar regressed badly (`ctx8192/32768` `96.5/76.2 -> 85.5/55.8 t/s`) and
+    forced F16 full-group tile8 also regressed (`89.8/62.0`), so do not reopen
+    Q8-KV by giving up the default group8 tile2 execution shape. The live
+    long-attention branch must reduce bytes while preserving occupancy, bring
+    counters for hidden traffic, or deliver an end-to-end `ctx32768` prototype;
+    same-byte retunes and reduce work stay deprioritized.
 3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds
    correctness-breaking no-op attribution for the GDN projection lane. The
    recoverable lower-bound budget is

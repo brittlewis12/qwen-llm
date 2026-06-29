@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.356 A3B True-Long Decode Recheck
+
+Status: ran a focused qwen-only true-long decode packet after the low-bit MoE
+decode fixes. This re-anchors the next hardware-headroom branch around primary
+Q4 long attention, not just short `tg128` parity.
+
+Artifact:
+
+- `docs/bench/2026-06-29-1438-v0356-a3b-true-long-decode/README.md`
+
+Results:
+
+| A3B row | ctx128 | ctx8192 | ctx32768 | Read |
+| --- | ---: | ---: | ---: | --- |
+| Q4_K_M | `107.7 t/s` | `96.5 t/s` | `76.2 t/s` | primary long slope |
+| Q3_K_M | `72.4 t/s` | `67.3 t/s` | `56.7 t/s` | low-bit FFN plus attention |
+| IQ4_XS | `67.4 t/s` | `62.9 t/s` | `53.6 t/s` | low-bit FFN plus attention |
+
+At `ctx32768`, Q4 phase split puts attention first: `5.09 ms` / `38.0%` of a
+`13.41 ms` phase sum. A3B Q4 `attn-intra` matches that scale: one attention
+layer is `0.5268 ms`, with `attn_decode_v4_main` at `0.3893 ms` per layer
+(`3.8932 ms` extrapolated) and reduce only `0.0340 ms` per layer. The main body
+already estimates `~692 GB/s`, so same-byte attention retunes remain low EV.
+
+Negative: a dirty group8 Q8-KV decode sidecar was tested and removed. With
+`QWEN_KV_Q8=1 QWEN_ATTN_V4_G8_TILE=8`, A3B Q4 `ctx8192/32768` regressed to
+`85.5/55.8 t/s` versus default `96.5/76.2`. Forced F16 tile8 was also slower
+(`89.8/62.0`), so the loss is both full-group execution shape and Q8 dequant
+overhead. Do not reopen group8 Q8-KV unless it preserves the default tile2
+subgroup shape or otherwise proves an end-to-end long-context win.
+
 ## 2026-06-29 - v0.355 IQ4 Down Fused-Reduce Negative
 
 Status: tested and removed a dirty fused IQ4_XS routed-down weighted-sum sidecar

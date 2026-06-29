@@ -3640,6 +3640,113 @@ kernel void kernel_moe_swiglu_iq3_s_f32(
     }
 }
 
+kernel void kernel_moe_swiglu_q6_K_f32(
+        constant moe_q6k_args & args    [[buffer(0)]],
+        device const uchar    * w_gate  [[buffer(1)]],
+        device const uchar    * w_up    [[buffer(2)]],
+        device const float    * x       [[buffer(3)]],
+        device const int      * top_idx [[buffer(4)]],
+        device       float    * inner   [[buffer(5)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uchar kmask1 = 0x03;
+    constexpr uchar kmask2 = 0x0C;
+    constexpr uchar kmask3 = 0x30;
+    constexpr uchar kmask4 = 0xC0;
+
+    const uint slot = tgpig.y;
+    if (slot >= args.topk) return;
+
+    const int expert_i = top_idx[slot];
+    if (expert_i < 0 || expert_i >= int(args.n_expert)) return;
+
+    const uint nb = args.n_in / QK_K;
+    const uint first_row = (tgpig.x * NSG_Q6K + sgitg) * NR0_Q6K;
+    if (first_row >= args.n_out) return;
+
+    const ulong row_stride_bytes = (ulong)nb * Q6K_BYTES;
+    const ulong expert_stride_bytes = (ulong)args.n_out * row_stride_bytes;
+    device const uchar * expert_gate = w_gate + (ulong)expert_i * expert_stride_bytes;
+    device const uchar * expert_up = w_up + (ulong)expert_i * expert_stride_bytes;
+
+    const ushort tid = tiisg / 2;
+    const ushort ix  = tiisg % 2;
+    const ushort ip  = tid / 8;
+    const ushort il  = tid % 8;
+    const ushort l0  = 4u * il;
+    const ushort is  = 8u * ip + l0 / 16u;
+    const ushort y_offset   = 128u * ip + l0;
+    const ushort q_offset_l =  64u * ip + l0;
+    const ushort q_offset_h =  32u * ip + l0;
+
+    float sumf_g[NR0_Q6K] = {0.f, 0.f};
+    float sumf_u[NR0_Q6K] = {0.f, 0.f};
+    float yl[16];
+
+    for (uint i = ix; i < nb; i += 2) {
+        device const float * y_blk = x + (ulong)i * QK_K + y_offset;
+        for (short l = 0; l < 4; ++l) {
+            yl[4*l + 0] = y_blk[l +  0];
+            yl[4*l + 1] = y_blk[l + 32];
+            yl[4*l + 2] = y_blk[l + 64];
+            yl[4*l + 3] = y_blk[l + 96];
+        }
+
+        for (short row = 0; row < NR0_Q6K; ++row) {
+            if (first_row + row >= args.n_out) break;
+
+            device const uchar * gate_blk = expert_gate + (ulong)(first_row + row) * row_stride_bytes
+                                           + (ulong)i * Q6K_BYTES;
+            device const uchar * up_blk = expert_up + (ulong)(first_row + row) * row_stride_bytes
+                                         + (ulong)i * Q6K_BYTES;
+            device const uchar  * gate_q1 = gate_blk + q_offset_l;
+            device const uchar  * gate_q2 = gate_q1 + 32;
+            device const uchar  * gate_qh = gate_blk + 128 + q_offset_h;
+            device const int8_t * gate_sc = (device const int8_t *)(gate_blk + 128 + 64) + is;
+            device const half   * gate_dh = (device const half *)(gate_blk + 128 + 64 + 16);
+            device const uchar  * up_q1 = up_blk + q_offset_l;
+            device const uchar  * up_q2 = up_q1 + 32;
+            device const uchar  * up_qh = up_blk + 128 + q_offset_h;
+            device const int8_t * up_sc = (device const int8_t *)(up_blk + 128 + 64) + is;
+            device const half   * up_dh = (device const half *)(up_blk + 128 + 64 + 16);
+
+            float4 gate_sums = {0.f, 0.f, 0.f, 0.f};
+            float4 up_sums = {0.f, 0.f, 0.f, 0.f};
+            for (short l = 0; l < 4; ++l) {
+                gate_sums[0] += yl[4*l + 0] * ((int8_t)((gate_q1[l] & 0xF) | ((gate_qh[l] & kmask1) << 4)) - 32);
+                gate_sums[1] += yl[4*l + 1] * ((int8_t)((gate_q2[l] & 0xF) | ((gate_qh[l] & kmask2) << 2)) - 32);
+                gate_sums[2] += yl[4*l + 2] * ((int8_t)((gate_q1[l]  >> 4) | ((gate_qh[l] & kmask3) << 0)) - 32);
+                gate_sums[3] += yl[4*l + 3] * ((int8_t)((gate_q2[l]  >> 4) | ((gate_qh[l] & kmask4) >> 2)) - 32);
+                up_sums[0] += yl[4*l + 0] * ((int8_t)((up_q1[l] & 0xF) | ((up_qh[l] & kmask1) << 4)) - 32);
+                up_sums[1] += yl[4*l + 1] * ((int8_t)((up_q2[l] & 0xF) | ((up_qh[l] & kmask2) << 2)) - 32);
+                up_sums[2] += yl[4*l + 2] * ((int8_t)((up_q1[l]  >> 4) | ((up_qh[l] & kmask3) << 0)) - 32);
+                up_sums[3] += yl[4*l + 3] * ((int8_t)((up_q2[l]  >> 4) | ((up_qh[l] & kmask4) >> 2)) - 32);
+            }
+            sumf_g[row] += (float)gate_dh[0] * (
+                  gate_sums[0] * (float)gate_sc[0]
+                + gate_sums[1] * (float)gate_sc[2]
+                + gate_sums[2] * (float)gate_sc[4]
+                + gate_sums[3] * (float)gate_sc[6]
+            );
+            sumf_u[row] += (float)up_dh[0] * (
+                  up_sums[0] * (float)up_sc[0]
+                + up_sums[1] * (float)up_sc[2]
+                + up_sums[2] * (float)up_sc[4]
+                + up_sums[3] * (float)up_sc[6]
+            );
+        }
+    }
+
+    for (short row = 0; row < NR0_Q6K; ++row) {
+        const float gate_total = simd_sum(sumf_g[row]);
+        const float up_total = simd_sum(sumf_u[row]);
+        if (tiisg == 0 && first_row + row < args.n_out) {
+            inner[(ulong)slot * args.n_out + first_row + row] = moe_silu_f(gate_total) * up_total;
+        }
+    }
+}
+
 kernel void kernel_moe_down_iq4_xs_f32(
         constant moe_iq4xs_args & args           [[buffer(0)]],
         device const block_iq4_xs_local * weight [[buffer(1)]],

@@ -18,6 +18,7 @@ F16, and flips the existing BF16 bfloat-activation path on by default for
 Artifact:
 
 - `docs/bench/2026-06-29-0017-v0347-0p8b-quants-family/README.md` (pre-fix red-cell discovery)
+- `docs/bench/2026-06-29-0054-v0347-clean-0p8b-quants-family/README.md` (clean post-fix rerun)
 
 Validation:
 
@@ -45,9 +46,9 @@ Drift gates:
 - BF16 model-level exact-vs-default: `logits_cos=0.999993`, `hidden_cos=0.999991`
 
 Read: static dtype coverage was necessary but not sufficient. The all-quant spot
-is now a required guardrail when claiming "fast across quants." This branch
-should be followed by a clean post-commit 0.8B all-quant rerun; Q4_0 may still be
-below llama.cpp at `pp512`, but the 6-16x cliffs are gone.
+is now a required guardrail when claiming "fast across quants." The clean
+post-fix rerun makes every 0.8B quant green/parity at `pp512` (`1.02-1.09x`) and
+green/parity at `tg128` (`1.01-1.42x`) against llama.cpp b9833.
 
 ## 2026-06-28 - v0.346 Q8 K512 R4 Negative
 

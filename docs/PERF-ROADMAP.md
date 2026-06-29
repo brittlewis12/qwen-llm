@@ -925,8 +925,10 @@ Current rank after v0.347:
    simdgroup-matrix shape used by the K-quants. The new Q4_0/Q4_1 legacy MM and
    F16/BF16 half/bfloat-activation defaults close the `5.8-14x` qwen-side cliffs
    with model-level drift gates (`logits_cos >= 0.999993` on BF16, exact-looking
-   cosines on F16/Q4). Keep an all-quant 0.8B paired spot as a recurring guardrail
-   before claiming broad quant wins; do not trust dtype coverage alone.
+   cosines on F16/Q4). The clean post-fix all-quant spot is green/parity across
+   all 12 local 0.8B quants at `pp512` and `tg128`. Keep an all-quant 0.8B paired
+   spot as a recurring guardrail before claiming broad quant wins; do not trust
+   dtype coverage alone.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

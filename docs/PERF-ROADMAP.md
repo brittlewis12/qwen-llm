@@ -973,7 +973,12 @@ gated hardware-headroom probes.
    SwiGLU kernel: clean A3B Q6_K `tg128` is `99.79 t/s` versus pinned llama.cpp
    `79.53 t/s` (`1.25x`), and the Q4 guard remains `107.00 t/s`. Q8_0 is now the
    remaining unsupported MoE decode quant because it still needs both routed
-   gate/up and routed down coverage.
+   gate/up and routed down coverage. v0.360 closes that Q8_0 coverage hole with
+   native routed SwiGLU and routed-down weighted-sum kernels: clean A3B Q8_0
+   `tg128` is `90.28 t/s` versus pinned llama.cpp `73.02 t/s` (`1.24x`), and the
+   Q4 guard remains `106.96 t/s`. The quant branch now returns to Q3/IQ4 low-bit
+   performance and recurring all-quant guardrails rather than unsupported Q6/Q8
+   coverage.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

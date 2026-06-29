@@ -978,7 +978,15 @@ gated hardware-headroom probes.
    `tg128` is `90.28 t/s` versus pinned llama.cpp `73.02 t/s` (`1.24x`), and the
    Q4 guard remains `106.96 t/s`. The quant branch now returns to Q3/IQ4 low-bit
    performance and recurring all-quant guardrails rather than unsupported Q6/Q8
-   coverage.
+   coverage. v0.362 cracks the Q3/IQ4 routed gate/up bucket by defaulting fast
+   IQ3_XXS/IQ3_S decode SwiGLU kernels based on the dense IQ3 row-reuse dataflow.
+   Clean A3B Q3_K_M `tg128` is now `89.34 t/s` versus pinned llama.cpp
+   `81.50 t/s` (`1.10x`), and UD-IQ4_XS is `89.00 t/s` versus `80.71 t/s`
+   (`1.10x`); Q4 guard remains `107.49 t/s`. The mechanism is concentrated:
+   Q3 routed gate/up drops `3.58 -> 1.07 ms`, and IQ4 drops `4.59 -> 1.12 ms`.
+   Low-bit MoE decode is now externally green; remaining low-bit work should
+   target routed-down dataflow only if it changes the work unit or appears as a
+   hardware-headroom row, not as a llama-parity panic.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

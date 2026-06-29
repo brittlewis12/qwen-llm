@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.362 A3B Low-Bit Decode Fast IQ3 SwiGLU
+
+Status: defaulted decode-native fast IQ3 routed SwiGLU kernels for `IQ3_XXS`
+and `IQ3_S` expert gate/up banks. Rollback:
+`QWEN_DECODE_MOE_IQ3_FAST_SWIGLU=0`.
+
+Artifact:
+
+- `docs/bench/2026-06-29-1818-v0362-a3b-lowbit-decode/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm moe_swiglu_iq3_xxs_matches_f32_dequant_fixture --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm moe_swiglu_iq3_s_matches_f32_dequant_fixture --release -- --ignored --nocapture`
+- clean qwen/lcpp `tg128` paired spots, no parallel GPU workloads
+
+Results:
+
+| A3B row | llama.cpp `tg128` | qwen `tg128` | Read |
+| --- | ---: | ---: | --- |
+| Q3_K_M | `81.50 t/s` | `89.34 t/s` (`1.10x`) | low-bit row now green |
+| UD-IQ4_XS | `80.71 t/s` | `89.00 t/s` (`1.10x`) | low-bit row now green |
+| Q4_K_M guard | n/a | `107.49 t/s` | unaffected path |
+
+Clean `ctx128` deep-split phase shows the mechanism: Q3 routed gate/up drops
+`3.58 -> 1.07 ms`, and IQ4 routed gate/up drops `4.59 -> 1.12 ms`. The
+remaining largest low-bit MoE FFN bucket is now routed down at `2.12 ms` on both
+rows, so the next low-bit branch should target IQ4_XS down dataflow or broader
+hardware-headroom rows, not scalar IQ3 gate/up.
+
 ## 2026-06-29 - v0.360 A3B Q8 MoE Decode Coverage
 
 Status: defaulted native Q8_0 routed gate/up and routed-down weighted-sum decode

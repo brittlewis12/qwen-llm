@@ -402,9 +402,9 @@ fn matmat_bf16_bfloat_act_enabled() -> bool {
     }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("QWEN_MATMAT_BF16_BFLOAT_ACT").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
         )
     })
 }
@@ -5890,7 +5890,7 @@ pub fn encode_mat_mat_dispatch(
         GgmlType::F16 => Ok(crate::metal::encode_mat_mat_f16_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
-        GgmlType::BF16 if matmat_bf16_bfloat_act_enabled() && n_in % 32 == 0 => {
+        GgmlType::BF16 if matmat_bf16_bfloat_act_enabled() && n_in % 32 == 0 && n_query >= 16 => {
             Ok(crate::metal::encode_mat_mat_bf16_bfloat_act_f32(
                 ctx, enc, weight, x, y, n_in, n_out, n_query,
             )?)

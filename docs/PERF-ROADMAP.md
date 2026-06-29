@@ -916,7 +916,17 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.345:
+Current rank after v0.347:
+
+0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
+   scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
+   but 0.8B Q4_0/Q4_1 and F16/BF16 `pp512` were still catastrophic because their
+   dense prefill mat-mat lowering used scalar row/query kernels instead of the
+   simdgroup-matrix shape used by the K-quants. The new Q4_0/Q4_1 legacy MM and
+   F16/BF16 half/bfloat-activation defaults close the `5.8-14x` qwen-side cliffs
+   with model-level drift gates (`logits_cos >= 0.999993` on BF16, exact-looking
+   cosines on F16/Q4). Keep an all-quant 0.8B paired spot as a recurring guardrail
+   before claiming broad quant wins; do not trust dtype coverage alone.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

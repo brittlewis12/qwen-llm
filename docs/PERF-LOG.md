@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.347 Dense All-Quant Prompt Hole
+
+Status: found and fixed stale dense-prefill quant holes that the static fast-path
+audit could not see. A 0.8B all-quant paired spot showed Q4_0/Q4_1 and F16/BF16
+prompt processing were catastrophically behind llama.cpp despite green decode.
+Default prompt mat-mat now uses simdgroup-matrix paths for legacy Q4_0/Q4_1 and
+F16, and flips the existing BF16 bfloat-activation path on by default for
+`n_query >= 16`; rollback envs remain available.
+
+Artifact:
+
+- `docs/bench/2026-06-29-0017-v0347-0p8b-quants-family/README.md` (pre-fix red-cell discovery)
+
+Validation:
+
+- `cargo fmt`
+- `cargo test -p qwen-llm mat_vec_and_mat_mat_half_weights_match_cpu -- --nocapture`
+- `cargo test -p qwen-llm mat_vec_and_mat_mat_q4_legacy_match_cpu -- --nocapture`
+- `cargo test -p qwen-llm prefill_f16_half_act_matches_exact_0_8b --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm prefill_q4_legacy_mm_matches_exact_0_8b --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm prefill_bf16_bfloat_act_matches_exact_0_8b --release -- --ignored --nocapture`
+- `cargo build --release --bin qwen-bench`
+
+Key results:
+
+| 0.8B `pp512` row | Old / rollback | New default | Read |
+| --- | ---: | ---: | --- |
+| Q4_0 | `1172-1175 t/s` | `6781-6791 t/s` | `~5.8x` speedup |
+| Q4_1 | `1159-1160 t/s` | `6890-7324 t/s` | `~6.1x` speedup |
+| F16 | `490-505 t/s` | `7060-7124 t/s` | `~14x` speedup |
+| BF16 | `488 t/s` | `6838-7305 t/s` | `~14x` speedup |
+
+Drift gates:
+
+- F16 model-level exact-vs-default: `logits_cos=1.000000`, `hidden_cos=1.000000`
+- Q4_0/Q4_1 model-level exact-vs-default: `logits_cos=1.000000`, `hidden_cos=1.000000`
+- BF16 model-level exact-vs-default: `logits_cos=0.999993`, `hidden_cos=0.999991`
+
+Read: static dtype coverage was necessary but not sufficient. The all-quant spot
+is now a required guardrail when claiming "fast across quants." This branch
+should be followed by a clean post-commit 0.8B all-quant rerun; Q4_0 may still be
+below llama.cpp at `pp512`, but the 6-16x cliffs are gone.
+
 ## 2026-06-28 - v0.346 Q8 K512 R4 Negative
 
 Status: tested and removed a Q8_0 `n_in=512` mat-vec sidecar for MoE shared

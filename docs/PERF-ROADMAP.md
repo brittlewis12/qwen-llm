@@ -986,7 +986,14 @@ gated hardware-headroom probes.
    Q3 routed gate/up drops `3.58 -> 1.07 ms`, and IQ4 drops `4.59 -> 1.12 ms`.
    Low-bit MoE decode is now externally green; remaining low-bit work should
    target routed-down dataflow only if it changes the work unit or appears as a
-   hardware-headroom row, not as a llama-parity panic.
+   hardware-headroom row, not as a llama-parity panic. v0.364 then proves that
+   routed-down dataflow branch by defaulting a dense-IQ4-style fast IQ4_XS down
+   kernel. Clean A3B Q3_K_M `tg128` is now `103.27 t/s` versus pinned llama.cpp
+   `81.54 t/s` (`1.27x`), and UD-IQ4_XS is `102.36 t/s` versus `80.46 t/s`
+   (`1.27x`); Q4 guard remains `107.26 t/s`. Routed down drops `2.13 ->
+   0.64 ms` on Q3 and `2.12 -> 0.65 ms` on IQ4. Low-bit MoE expert-bank decode
+   is no longer the local bottleneck; next quant work should be a broad guard or
+   hardware-headroom row, not more A3B low-bit coverage.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

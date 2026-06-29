@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.364 A3B Low-Bit IQ4 Down Dataflow
+
+Status: defaulted a decode-native fast IQ4_XS routed-down kernel using the dense
+IQ4_XS vectorized dataflow. Rollback: `QWEN_DECODE_MOE_IQ4_DOWN_FAST=0`.
+
+Artifact:
+
+- `docs/bench/2026-06-29-1845-v0364-a3b-lowbit-down/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm moe_grouped_down_iq4_xs_matches_f32_dequant_fixture --release -- --ignored --nocapture`
+- clean qwen/lcpp `tg128` paired spots, no parallel GPU workloads
+
+Results:
+
+| A3B row | llama.cpp `tg128` | qwen `tg128` | Read |
+| --- | ---: | ---: | --- |
+| Q3_K_M | `81.54 t/s` | `103.27 t/s` (`1.27x`) | low-bit decode now strong |
+| UD-IQ4_XS | `80.46 t/s` | `102.36 t/s` (`1.27x`) | low-bit decode now strong |
+| Q4_K_M guard | n/a | `107.26 t/s` | unaffected path |
+
+Clean `ctx128` deep-split phase shows the mechanism: Q3 routed down drops
+`2.13 -> 0.64 ms`, and IQ4 routed down drops `2.12 -> 0.65 ms`. Combined with
+v0.362, low-bit MoE expert-bank decode is no longer the local bottleneck; the
+next decode branch should move to shared GDN/attention hardware-headroom rows or
+a broader all-quant guard.
+
 ## 2026-06-29 - v0.362 A3B Low-Bit Decode Fast IQ3 SwiGLU
 
 Status: defaulted decode-native fast IQ3 routed SwiGLU kernels for `IQ3_XXS`

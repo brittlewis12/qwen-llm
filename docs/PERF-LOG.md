@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.349 BF16 Dense Scale Spot
+
+Status: checked whether the v0.347 BF16 prompt fix scales beyond the 0.8B
+canary. The catastrophic BF16 pp512 cliff is gone across local 0.8B/2B/4B/9B,
+but larger BF16 dense prefill remains slightly below llama.cpp.
+
+Artifact:
+
+- `docs/bench/2026-06-29-0058-v0348-bf16-dense-spot-family/README.md`
+
+Results:
+
+| BF16 dense row | `pp512` qwen/lcpp | `tg128` qwen/lcpp | Read |
+| --- | ---: | ---: | --- |
+| 0.8B | `0.96x` | `1.09x` | parity, noisy versus all-quant spot |
+| 2B | `0.99x` | `1.02x` | parity |
+| 4B | `0.93x` | `1.05x` | small prompt gap remains |
+| 9B | `0.95x` | `1.01x` | small prompt gap remains |
+
+Read: BF16 is no longer a catastrophic quant-family failure, but 4B/9B pp512
+should stay on the quant guardrail list. Treat it as a small dense-prefill tile
+shape gap, not as a reason to reopen the old scalar BF16/MoE diagnosis.
+
 ## 2026-06-29 - v0.347 Dense All-Quant Prompt Hole
 
 Status: found and fixed stale dense-prefill quant holes that the static fast-path

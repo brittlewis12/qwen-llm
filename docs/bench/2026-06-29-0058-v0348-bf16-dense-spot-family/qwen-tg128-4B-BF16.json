@@ -1,0 +1,49 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "0b50bd266",
+    "build_dirty": 0,
+    "test_time": "2026-06-29T01:00:13Z",
+    "model_filename": "/Users/tito/models/Qwen3.5-4B-BF16.gguf",
+    "model_size": 8413425664,
+    "model_n_params": 4205751296,
+    "arch_kind": "dense",
+    "test": "tg128",
+    "n_tokens": 128,
+    "n_repetitions": 1,
+    "avg_ts": 50.980989908969434,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      50.980989908969434
+    ],
+    "samples_ns": [
+      2510739792
+    ],
+    "avg_ns": 2510739792,
+    "avg_compute_ns": 2510739792,
+    "avg_session_alloc_ns": 348624,
+    "avg_scratch_alloc_ns": null,
+    "avg_gpu_ns": 2460089789,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": 428.92476887624844,
+    "prefill_chunk": null,
+    "decode_mode": "apples-lcpp",
+    "prefill_mode": null,
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 80,
+      "battery_state": "AC attached",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

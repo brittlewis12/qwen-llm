@@ -928,7 +928,9 @@ Current rank after v0.347:
    cosines on F16/Q4). The clean post-fix all-quant spot is green/parity across
    all 12 local 0.8B quants at `pp512` and `tg128`. Keep an all-quant 0.8B paired
    spot as a recurring guardrail before claiming broad quant wins; do not trust
-   dtype coverage alone.
+   dtype coverage alone. A follow-up BF16 dense spot shows 4B/9B pp512 still
+   `0.93-0.95x` llama.cpp, so BF16 is demoted from catastrophic to a small
+   dense-prefill tile-shape gap.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

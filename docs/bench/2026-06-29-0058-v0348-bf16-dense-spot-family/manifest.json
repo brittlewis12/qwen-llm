@@ -1,0 +1,294 @@
+{
+  "stamp": "2026-06-29-0058",
+  "host": {
+    "hostname": "zekrom",
+    "os": "Darwin zekrom.local 24.6.0 arm64",
+    "loadavg": "1.52 1.49 1.83",
+    "top_cpu_at_start": [
+      "  2.3 opencode",
+      "  1.6 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd",
+      "  1.3 /Users/tito/.cache/uv/environments-v2/family-c6fd03de05020498/bin/python3",
+      "  0.8 /Users/tito/.local/share/mise/installs/uv/0.9.26/uv-aarch64-apple-darwin/uv",
+      "  0.6 /usr/libexec/trustd"
+    ]
+  },
+  "engines": {
+    "qwen_llm": {
+      "binary": "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+      "build_commit": "0b50bd266",
+      "build_dirty": 0
+    },
+    "llama_cpp": {
+      "binary": "/Users/tito/.cache/qwen-llm/llama.cpp/build/c818263f2a5d/bin/llama-bench",
+      "build_commit": "c818263f2a",
+      "build_number": 9833,
+      "backends": "MTL,BLAS",
+      "gpu_info": "Apple M4 Max",
+      "cpu_info": "Accelerate, Apple M4 Max",
+      "locked": true
+    }
+  },
+  "llama_cpp_lock": {
+    "repo": "https://github.com/ggml-org/llama.cpp.git",
+    "ref": "refs/tags/b9833",
+    "commit": "c818263f2a5ddab028dea5f169ea2b2266421125",
+    "cmake_args": [
+      "-DCMAKE_BUILD_TYPE=Release"
+    ],
+    "targets": [
+      "llama-bench",
+      "llama-tokenize",
+      "llama-cli"
+    ],
+    "expected_build_commit": "c818263f2",
+    "expected_backends": [
+      "MTL",
+      "BLAS"
+    ]
+  },
+  "sweep": {
+    "pp_shapes": [
+      512
+    ],
+    "tg_shapes": [
+      128
+    ],
+    "runs": 1,
+    "cooldown_seconds": 10.0,
+    "tag_filter": "",
+    "engine_order": "per_model_lcpp_then_qwen_suite"
+  },
+  "qwen_env_at_start": {},
+  "command_records": [
+    {
+      "cmd": [
+        "/Users/tito/.cache/qwen-llm/llama.cpp/build/c818263f2a5d/bin/llama-bench",
+        "-m",
+        "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf",
+        "-p",
+        "512",
+        "-n",
+        "128",
+        "-r",
+        "1",
+        "-o",
+        "json"
+      ],
+      "cooldown_seconds": 0.0,
+      "outer_wall_s": 1.0765527919866145,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "engine": "llama.cpp",
+      "tag": "0.8B-BF16",
+      "test": "all"
+    },
+    {
+      "cmd": [
+        "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+        "suite",
+        "-m",
+        "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf",
+        "--runs",
+        "1",
+        "-o",
+        "json",
+        "--pp",
+        "512",
+        "--tg",
+        "128"
+      ],
+      "cooldown_seconds": 10.0,
+      "outer_wall_s": 1.6510075833648443,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "engine": "qwen",
+      "tag": "0.8B-BF16",
+      "test": "suite"
+    },
+    {
+      "cmd": [
+        "/Users/tito/.cache/qwen-llm/llama.cpp/build/c818263f2a5d/bin/llama-bench",
+        "-m",
+        "/Users/tito/models/Qwen3.5-2B-BF16.gguf",
+        "-p",
+        "512",
+        "-n",
+        "128",
+        "-r",
+        "1",
+        "-o",
+        "json"
+      ],
+      "cooldown_seconds": 10.0,
+      "outer_wall_s": 3.1843709582462907,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "engine": "llama.cpp",
+      "tag": "2B-BF16",
+      "test": "all"
+    },
+    {
+      "cmd": [
+        "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+        "suite",
+        "-m",
+        "/Users/tito/models/Qwen3.5-2B-BF16.gguf",
+        "--runs",
+        "1",
+        "-o",
+        "json",
+        "--pp",
+        "512",
+        "--tg",
+        "128"
+      ],
+      "cooldown_seconds": 10.0,
+      "outer_wall_s": 3.2542192921973765,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "engine": "qwen",
+      "tag": "2B-BF16",
+      "test": "suite"
+    },
+    {
+      "cmd": [
+        "/Users/tito/.cache/qwen-llm/llama.cpp/build/c818263f2a5d/bin/llama-bench",
+        "-m",
+        "/Users/tito/models/Qwen3.5-4B-BF16.gguf",
+        "-p",
+        "512",
+        "-n",
+        "128",
+        "-r",
+        "1",
+        "-o",
+        "json"
+      ],
+      "cooldown_seconds": 10.0,
+      "outer_wall_s": 6.7202906659804285,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 92%",
+      "engine": "llama.cpp",
+      "tag": "4B-BF16",
+      "test": "all"
+    },
+    {
+      "cmd": [
+        "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+        "suite",
+        "-m",
+        "/Users/tito/models/Qwen3.5-4B-BF16.gguf",
+        "--runs",
+        "1",
+        "-o",
+        "json",
+        "--pp",
+        "512",
+        "--tg",
+        "128"
+      ],
+      "cooldown_seconds": 10.0,
+      "outer_wall_s": 6.800472875125706,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "engine": "qwen",
+      "tag": "4B-BF16",
+      "test": "suite"
+    },
+    {
+      "cmd": [
+        "/Users/tito/.cache/qwen-llm/llama.cpp/build/c818263f2a5d/bin/llama-bench",
+        "-m",
+        "/Users/tito/models/Qwen3.5-9B-BF16.gguf",
+        "-p",
+        "512",
+        "-n",
+        "128",
+        "-r",
+        "1",
+        "-o",
+        "json"
+      ],
+      "cooldown_seconds": 10.0,
+      "outer_wall_s": 12.59858354087919,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 86%",
+      "engine": "llama.cpp",
+      "tag": "9B-BF16",
+      "test": "all"
+    },
+    {
+      "cmd": [
+        "/Users/tito/code/qwen-llm/target/release/qwen-bench",
+        "suite",
+        "-m",
+        "/Users/tito/models/Qwen3.5-9B-BF16.gguf",
+        "--runs",
+        "1",
+        "-o",
+        "json",
+        "--pp",
+        "512",
+        "--tg",
+        "128"
+      ],
+      "cooldown_seconds": 10.0,
+      "outer_wall_s": 12.309186124708503,
+      "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_after": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "memory_before": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "memory_after": "The system has 137438953472 (8388608 pages with a page size of 16384).\nSystem-wide memory free percentage: 96%",
+      "engine": "qwen",
+      "tag": "9B-BF16",
+      "test": "suite"
+    }
+  ],
+  "models": [
+    {
+      "tag": "0.8B-BF16",
+      "display": "Qwen3.5-0.8B BF16",
+      "kind": "dense",
+      "quant": "BF16",
+      "path": "/Users/tito/models/Qwen3.5-0.8B-BF16.gguf",
+      "file_size_bytes": 1516744736
+    },
+    {
+      "tag": "2B-BF16",
+      "display": "Qwen3.5-2B BF16",
+      "kind": "dense",
+      "quant": "BF16",
+      "path": "/Users/tito/models/Qwen3.5-2B-BF16.gguf",
+      "file_size_bytes": 3775709216
+    },
+    {
+      "tag": "4B-BF16",
+      "display": "Qwen3.5-4B BF16",
+      "kind": "dense",
+      "quant": "BF16",
+      "path": "/Users/tito/models/Qwen3.5-4B-BF16.gguf",
+      "file_size_bytes": 8424393632
+    },
+    {
+      "tag": "9B-BF16",
+      "display": "Qwen3.5-9B BF16",
+      "kind": "dense",
+      "quant": "BF16",
+      "path": "/Users/tito/models/Qwen3.5-9B-BF16.gguf",
+      "file_size_bytes": 17920697312
+    }
+  ]
+}

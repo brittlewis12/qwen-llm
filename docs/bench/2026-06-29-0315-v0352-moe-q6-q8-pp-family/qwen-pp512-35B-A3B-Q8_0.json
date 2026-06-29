@@ -1,0 +1,49 @@
+[
+  {
+    "schema_version": 1,
+    "engine": "qwen-llm",
+    "build_commit": "54d54224c",
+    "build_dirty": 0,
+    "test_time": "2026-06-29T03:16:59Z",
+    "model_filename": "/Users/tito/models/Qwen3.5-35B-A3B-Q8_0.gguf",
+    "model_size": 36892150272,
+    "model_n_params": 34660610688,
+    "arch_kind": "moe",
+    "test": "pp512",
+    "n_tokens": 512,
+    "n_repetitions": 1,
+    "avg_ts": 1566.4695959189185,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      1566.4695959189185
+    ],
+    "samples_ns": [
+      326849625
+    ],
+    "avg_ns": 326849625,
+    "avg_compute_ns": 326849625,
+    "avg_session_alloc_ns": 522917,
+    "avg_scratch_alloc_ns": 204709,
+    "avg_gpu_ns": 321761500,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 512,
+    "decode_mode": null,
+    "prefill_mode": "packed",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 80,
+      "battery_state": "AC attached",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {}
+  }
+]

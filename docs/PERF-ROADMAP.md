@@ -916,7 +916,7 @@ Recent measured negatives:
 
 ## Force-Ranked Next Bets
 
-Current rank after v0.347:
+Current rank after v0.352:
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -934,9 +934,13 @@ Current rank after v0.347:
    regressed 4B/9B BF16 pp512, so do not chase that copyout without counter
    evidence. v0.351 broadens the dense guardrail to local 2B/4B/9B quants:
    non-BF16 prompt rows are all `0.98-1.04x`, decode is all green/parity, and
-   BF16 4B/9B pp512 remains the only small dense quant softness. Per cx, run MoE
-   quant guardrails next; if those are clean, stop quant-specific fishing and
-   return to true-long/session/spec work.
+   BF16 4B/9B pp512 remains the only small dense quant softness. v0.352 runs the
+   MoE quant guardrail. Supported quantized prefill is green/parity except BF16,
+   but MoE decode now has three concrete quant gaps: A3B Q6_K/Q8_0 decode cannot
+   enter the routed gate/up path, and A3B Q3_K_M/IQ4_XS decode is behind
+   llama.cpp (`0.82x`/`0.75x`) despite prompt wins. Treat Q6/Q8 support and
+   Q3/IQ4 decode attribution as the live quant-coverage branch; do not return to
+   dense BF16 tile-shape work unless it repeats worse or gains a phase mechanism.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

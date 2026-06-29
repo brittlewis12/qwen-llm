@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.352 MoE Quant Guardrail
+
+Status: ran the MoE quant guardrail after dense quants turned broadly green. The
+supported prompt rows are mostly healthy, but MoE quant decode exposes real
+gaps: Q3/IQ4 decode is slower than llama.cpp, and Q6/Q8 decode is not supported
+by the current routed gate/up expert-bank path.
+
+Artifacts:
+
+- `docs/bench/2026-06-29-0309-v0352-moe-supported-spot-family/README.md`
+- `docs/bench/2026-06-29-0315-v0352-moe-q6-q8-pp-family/README.md`
+
+Results:
+
+| MoE row | `pp512` qwen/lcpp | `tg128` qwen/lcpp | Read |
+| --- | ---: | ---: | --- |
+| A3B Q4_K_M (3.6) | `1.07x` | `1.37x` | green |
+| A3B Q3_K_M | `1.08x` | `0.82x` | decode red |
+| A3B Q4_K_M (3.5) | `1.08x` | `1.38x` | green |
+| A3B IQ4_XS | `1.05x` | `0.75x` | decode red |
+| A3B BF16 | `0.57x` | `1.07x` | prefill red |
+| A3B Q6_K | `1.06x` | unsupported | decode gate/up missing |
+| A3B Q8_0 | `1.07x` | unsupported | decode gate/up missing |
+| A10B Q4_K_XL | `0.98x` | `1.24x` | parity/green |
+
+Read: MoE prefill is green for supported quantized A3B/A10B rows except BF16.
+The highest quant-specific gap is now MoE decode coverage/perf: Q6/Q8 gate/up
+decode is missing, and Q3/IQ4 decode is slower despite prompt wins. BF16 MoE
+prefill remains a known catastrophic red row, but it should still require named
+wall accounting before another BF16 implementation branch.
+
 ## 2026-06-29 - v0.351 Dense Quant Scale Spot
 
 Status: broadened the all-quant guardrail beyond the 0.8B canary to local

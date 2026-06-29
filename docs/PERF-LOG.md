@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.358 A3B Q6 MoE Decode Coverage
+
+Status: defaulted native Q6_K routed gate/up decode through a fused SwiGLU
+kernel, feeding the existing Q6 routed-down weighted-sum path. This closes the
+A3B Q6_K MoE decode coverage hole from v0.352.
+
+Artifact:
+
+- `docs/bench/2026-06-29-1645-v0358-a3b-q6-decode/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm moe_swiglu_q6_k_matches_f32_dequant_fixture --release -- --ignored --nocapture`
+- clean qwen/lcpp `tg128` paired spot, no parallel GPU workloads
+
+Results:
+
+| A3B row | llama.cpp `tg128` | qwen `tg128` | Read |
+| --- | ---: | ---: | --- |
+| Q6_K | `79.53 t/s` | `99.79 t/s` (`1.25x`) | coverage row now green |
+| Q4_K_M guard | n/a | `107.00 t/s` | unaffected path |
+
+Phase split on Q6_K at `ctx128` puts routed gate/up at `1.46 ms` / `14.5%` and
+routed down at `0.86 ms` / `8.6%` of the deep serial phase sum. Q8 remains the
+larger quant-coverage gap because it still needs both routed gate/up and routed
+down decode support.
+
 ## 2026-06-29 - v0.356 A3B True-Long Decode Recheck
 
 Status: ran a focused qwen-only true-long decode packet after the low-bit MoE

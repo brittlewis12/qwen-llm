@@ -968,7 +968,12 @@ gated hardware-headroom probes.
    kills the simple IQ4_XS routed-down fused weighted-sum sidecar: Q3 `tg128`
    regressed `72.62 -> 70.78 t/s`, IQ4 regressed `67.46 -> 65.99 t/s`, and the
    routed-down phase worsened `2.13 -> 2.54 ms`. Do not reopen IQ4 down final-pass
-   fusion without a deeper dequant/work-unit change or counter signal.
+   fusion without a deeper dequant/work-unit change or counter signal. v0.358
+   closes the Q6_K MoE decode coverage hole with a decode-native fused routed
+   SwiGLU kernel: clean A3B Q6_K `tg128` is `99.79 t/s` versus pinned llama.cpp
+   `79.53 t/s` (`1.25x`), and the Q4 guard remains `107.00 t/s`. Q8_0 is now the
+   remaining unsupported MoE decode quant because it still needs both routed
+   gate/up and routed down coverage.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN
@@ -1193,6 +1198,17 @@ gated hardware-headroom probes.
     - Mmap no-copy, heaps/residency sets, binary archives, and ICB/MTL4 remain
       product/cold-start/encode-bubble work until traces show hot throughput is
       host- or residency-limited.
+    - Kernel-bypass / persistent-megakernel framing is useful as a probe source,
+      not a roadmap reset while hot decode remains mostly GPU-active. Measure
+      abstraction ceilings directly: command/encoder/dispatch counts, warmed CPU
+      encode time, allocation count, and theoretical cycles/token. Only escalate
+      ICB, persistent work queues, argument buffers, or GPU-side graph traversal
+      if those probes show command starvation, host bubbles, or cross-op data reuse
+      that a normal kernel path cannot access.
+    - AMX/ANE coprocessor, hierarchical `lm_head`, layer skipping, sparse FFN,
+      KV clustering, attention-head skipping, and residual/GDN-state precision
+      changes are quality or fabric research lanes. They need explicit quality
+      gates and a measured phase ceiling before speed claims.
 
 12. Quant breadth guardrails: v0.240 proves prompt prefill for local 4B
    `UD-Q2_K_XL` and `UD-IQ2_M` at `pp512/1024/4096`, v0.241 proves their

@@ -932,7 +932,11 @@ Current rank after v0.347:
    `0.93-0.95x` llama.cpp, so BF16 is demoted from catastrophic to a small
    dense-prefill tile-shape gap. A dirty F16/BF16 direct-store epilogue proof
    regressed 4B/9B BF16 pp512, so do not chase that copyout without counter
-   evidence.
+   evidence. v0.351 broadens the dense guardrail to local 2B/4B/9B quants:
+   non-BF16 prompt rows are all `0.98-1.04x`, decode is all green/parity, and
+   BF16 4B/9B pp512 remains the only small dense quant softness. Per cx, run MoE
+   quant guardrails next; if those are clean, stop quant-specific fishing and
+   return to true-long/session/spec work.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

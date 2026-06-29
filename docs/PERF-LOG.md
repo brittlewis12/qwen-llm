@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.351 Dense Quant Scale Spot
+
+Status: broadened the all-quant guardrail beyond the 0.8B canary to local
+2B/4B/9B dense quants. This was a current, clean, sequential paired spot after
+rebuilding `qwen-bench` from v0.350.
+
+Artifact:
+
+- `docs/bench/2026-06-29-0253-v0351-dense-quant-spot-family/README.md`
+
+Results:
+
+| Group | `pp512` read | `tg128` read |
+| --- | --- | --- |
+| 2B dense quants | all `0.99-1.04x` | all `1.02-1.14x` |
+| 4B non-BF16 | all `0.99-1.04x` | all `1.15-1.20x` |
+| 9B non-BF16 | all `0.98-1.02x` | all `1.09-1.21x` |
+| 4B/9B BF16 | `0.94x` / `0.95x` | `1.05x` / `1.01x` |
+
+Read: dense quant coverage is now broadly green/parity. The only repeatable
+dense quant softness is BF16 pp512 on 4B/9B, which remains a small prompt tile
+shape gap rather than a catastrophic quant-family blocker. Per cx, the next
+quant-specific falsifier should be the MoE quant guardrail; do not chase this
+BF16 gap without repeated rows plus a specific phase/counter mechanism.
+
 ## 2026-06-29 - v0.350 BF16 Direct-Store Epilogue Negative
 
 Status: tested and reverted a dirty direct-store epilogue for the F16 half-act and

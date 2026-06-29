@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.350 BF16 Direct-Store Epilogue Negative
+
+Status: tested and reverted a dirty direct-store epilogue for the F16 half-act and
+BF16 bfloat-act prompt mat-mat kernels. The idea was to mirror the Q8/K-quant
+full-tile epilogue and avoid the threadgroup scratch plus `sgitg == 0` copyout.
+
+Validation:
+
+- `cargo test -p qwen-llm mat_vec_and_mat_mat_half_weights_match_cpu -- --nocapture`
+- `cargo test -p qwen-llm mat_mat_bf16_bfloat_act_matches_rounded_cpu -- --nocapture`
+- `cargo test -p qwen-llm prefill_f16_half_act_matches_exact_0_8b --release -- --ignored --nocapture`
+- `cargo test -p qwen-llm prefill_bf16_bfloat_act_matches_exact_0_8b --release -- --ignored --nocapture`
+- `cargo build --release --bin qwen-bench`
+
+Result:
+
+| BF16 `pp512` row | Clean v0.349 spot | Dirty direct-store proof | Read |
+| --- | ---: | ---: | --- |
+| 4B | `1454 t/s` | `1373 t/s` | regressed |
+| 9B | `853 t/s` | `823 t/s` | regressed |
+
+Read: the single-simdgroup scratch epilogue is not the obvious BF16 dense-prefill
+gap. Do not reopen direct full-tile stores for F16/BF16 without a paired A/B and
+a counter signal explaining why this dirty proof lost.
+
 ## 2026-06-29 - v0.349 BF16 Dense Scale Spot
 
 Status: checked whether the v0.347 BF16 prompt fix scales beyond the 0.8B

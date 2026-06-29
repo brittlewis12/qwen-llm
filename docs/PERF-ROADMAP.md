@@ -930,7 +930,9 @@ Current rank after v0.347:
    spot as a recurring guardrail before claiming broad quant wins; do not trust
    dtype coverage alone. A follow-up BF16 dense spot shows 4B/9B pp512 still
    `0.93-0.95x` llama.cpp, so BF16 is demoted from catastrophic to a small
-   dense-prefill tile-shape gap.
+   dense-prefill tile-shape gap. A dirty F16/BF16 direct-store epilogue proof
+   regressed 4B/9B BF16 pp512, so do not chase that copyout without counter
+   evidence.
 
 1. Decode long-context MoE FFN down/execution shape: v0.321 makes A3B Q4
    `ctx8192` a hardware-headroom row, not just a llama comparison row: MoE FFN

@@ -40,10 +40,11 @@ use crate::metal::{
     encode_moe_down_bf16_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
-    encode_moe_down_weighted_sum_q6_K_f32, encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32,
-    encode_moe_mat_vec_iq3_s_f32, encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32,
-    encode_moe_shared_accum_resid_f32, encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_xxs_f32,
-    encode_moe_swiglu_q4_K_f32, encode_moe_swiglu_q6_K_f32, encode_moe_weighted_sum_f32,
+    encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
+    encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32, encode_moe_mat_vec_iq3_s_f32,
+    encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_shared_accum_resid_f32,
+    encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_q4_K_f32,
+    encode_moe_swiglu_q6_K_f32, encode_moe_swiglu_q8_0_f32, encode_moe_weighted_sum_f32,
     encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
@@ -398,6 +399,7 @@ fn moe_routed_gate_up_decode_supported(gate: GgmlType, up: GgmlType) -> bool {
         (GgmlType::Q4_K, GgmlType::Q4_K)
             | (GgmlType::Q5_K, GgmlType::Q5_K)
             | (GgmlType::Q6_K, GgmlType::Q6_K)
+            | (GgmlType::Q8_0, GgmlType::Q8_0)
             | (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS)
             | (GgmlType::IQ3_S, GgmlType::IQ3_S)
             | (GgmlType::BF16, GgmlType::BF16)
@@ -1293,7 +1295,7 @@ impl<'a> MetalForward<'a> {
         }
         if !matches!(
             moe.down_exps.dtype,
-            GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::BF16
+            GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS | GgmlType::BF16
         ) {
             return Err(MfError::UnsupportedDtype {
                 name: "MoE routed down expert bank".into(),
@@ -1357,6 +1359,19 @@ impl<'a> MetalForward<'a> {
                 }
             }
             GgmlType::Q6_K => encode_moe_down_weighted_sum_q6_K_f32(
+                self.ctx,
+                enc,
+                &moe.down_exps,
+                &moe_inner,
+                &topk_idx,
+                &topk_w,
+                &session.mixer_out,
+                f_exp,
+                h,
+                n_expert,
+                topk,
+            )?,
+            GgmlType::Q8_0 => encode_moe_down_weighted_sum_q8_0_f32(
                 self.ctx,
                 enc,
                 &moe.down_exps,
@@ -1709,6 +1724,19 @@ impl<'a> MetalForward<'a> {
                 n_expert,
                 topk,
             )?,
+            GgmlType::Q8_0 => encode_moe_swiglu_q8_0_f32(
+                self.ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &session.h,
+                &topk_idx,
+                &moe_inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+            )?,
             GgmlType::IQ3_XXS => {
                 if decode_moe_iq3_fused_swiglu_enabled() {
                     encode_moe_swiglu_iq3_xxs_f32(
@@ -1970,6 +1998,22 @@ impl<'a> MetalForward<'a> {
                 )?;
                 false
             }
+            GgmlType::Q8_0 => {
+                encode_moe_down_weighted_sum_q8_0_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &topk_w,
+                    &session.mixer_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                false
+            }
             GgmlType::IQ4_XS => {
                 encode_moe_down_iq4_xs_f32(
                     self.ctx,
@@ -2108,6 +2152,25 @@ impl<'a> MetalForward<'a> {
             GgmlType::Q6_K => {
                 let enc = KernelEncoder::begin_concurrent(cmd_buf);
                 encode_moe_down_weighted_sum_q6_K_f32(
+                    self.ctx,
+                    &enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &topk_w,
+                    &session.mixer_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                enc.end();
+                false
+            }
+            GgmlType::Q8_0 => {
+                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                encode_moe_down_weighted_sum_q8_0_f32(
                     self.ctx,
                     &enc,
                     &moe.down_exps,
@@ -4592,7 +4655,11 @@ impl<'a> MetalForward<'a> {
                     && moe_routed_gate_up_decode_supported(moe.gate_exps.dtype, moe.up_exps.dtype)
                     && matches!(
                         moe.down_exps.dtype,
-                        GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::BF16
+                        GgmlType::Q5_K
+                            | GgmlType::Q6_K
+                            | GgmlType::Q8_0
+                            | GgmlType::IQ4_XS
+                            | GgmlType::BF16
                     )
                 {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");

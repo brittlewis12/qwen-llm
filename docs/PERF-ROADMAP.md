@@ -1070,6 +1070,11 @@ gated hardware-headroom probes.
    parity panic. v0.346 kills the analogous Q8_0 K512 row-widening idea for MoE
    shared down: the sidecar improved the named phase but regressed A3B `tg128`,
    so do not promote shared-down-only micro/phase wins without an end-to-end gate.
+   v0.371 kills the closest A10B analog, a dirty Q5 `f_exp=1024` row-pair down
+   sidecar. It is exact and helps batched `tokens=16` micro (`36.04 -> 31.95 ms`),
+   but single-token decode only moves `2.483 -> 2.424 ms`, far below the phase
+   gate. Future Q5 down work needs a different dataflow/counter signal, not
+   another row-packing variant.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

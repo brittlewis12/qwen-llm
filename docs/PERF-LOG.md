@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.371 A10B Q5 Down K1024 R2 Falsifier
+
+Status: killed a dirty `f_exp=1024` Q5 routed-down row-pair sidecar for A10B.
+The sidecar extended the banked A3B `f_exp=512` R2 mechanism by computing two
+output rows per simdgroup and looping over the two K halves.
+
+Artifact:
+
+- `docs/bench/2026-06-29-2338-v0371-a10b-k1024-r2-falsifier/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A10B `moe-down-micro --tokens 1/16` default versus dirty `--k1024-r2`
+- `--check-k1024-r2` exactness gate (`max_abs=0`, `cos=1.0`)
+
+Results:
+
+| A10B Q5 down micro | Default | Dirty K1024 R2 | Read |
+| --- | ---: | ---: | --- |
+| `tokens=1` GPU | `2.4830 ms` | `2.4242 ms` | `1.024x` |
+| `tokens=16` GPU | `36.0421 ms` | `31.9546 ms` | `1.128x` |
+
+Decision: do not retain or default the sidecar. The batched primitive is
+interesting, but decode is a single-token path and the relevant primitive saves
+only `0.059 ms` across all Q5 routed-down banks. That cannot clear the `>=0.25 ms`
+A10B phase gate.
+
 ## 2026-06-29 - v0.370 A3B HNorm Attention Partials Falsifier
 
 Status: killed a dirty normalized-half attention partial sidecar for A3B

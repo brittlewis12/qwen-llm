@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.389 Metal Counter Capability Probe
+
+Status: added `qwen-bench metal-counters` and rechecked whether autonomous
+hardware-counter evidence is available for the proposed saturation audit.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0389-metal-counter-capability/README.md`
+
+Validation:
+
+- `xcrun xctrace list templates`
+- `xcrun xctrace record --template "Metal System Trace" --instrument "Metal GPU Counters"`
+  smoke
+- `xcrun xctrace export --toc` plus `gpu-counter-value` export
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `target/release/qwen-bench metal-counters`
+
+Results:
+
+| Probe | Result | Read |
+| --- | --- | --- |
+| `xctrace` GPU counters | unsupported counter profile; empty counter rows | no autonomous hardware counters |
+| in-process counter sets | only `timestamp` / `GPUTimestamp` | no bandwidth/stall/occupancy counters |
+| sampling support | `stage=true`, `dispatch=false`, `blit=false` | dispatch-boundary samples unavailable |
+
+Decision: keep `metal-counters` as a cheap capability probe, but do not block the
+next branch on non-existent autonomous hardware counters. Hardware-counter-driven
+claims need manual Xcode GPU capture or another external profiler; otherwise use
+phase, no-op, microbench, trace-count, and roofline gates.
+
 ## 2026-06-30 - v0.388 Attention True-Long Audit
 
 Status: refreshed A3B `ctx32768` `attn-intra` against the current default and

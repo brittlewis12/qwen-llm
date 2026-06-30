@@ -48,6 +48,11 @@ Primary guardrails:
   model should be loaded once across many pp/tg shapes. It still allocates fresh
   sequence state per measured row; keep env-variant A/B as process-per-variant
   until hot-path knobs move out of process-global env caches.
+- v0.389 shows autonomous hardware counters are not available on this M4 Max via
+  `xctrace` or in-process `MTLCounterSampleBuffer`: only timestamp sampling is
+  exposed, and dispatch-boundary sampling is unsupported. Counter-driven claims
+  need manual Xcode GPU capture or another external profiler; routine branch
+  selection should keep using phase/no-op/microbench/trace-count/roofline gates.
 
 ## Latest Baseline Snapshot
 
@@ -949,6 +954,17 @@ microbench candidates on exact active kernels, not blanket edits. Keep the activ
 implementation spine on concrete quant/long-context rows, while adding these as
 gated hardware-headroom probes.
 
+v0.389 counter-pivot read: autonomous Metal hardware counters are unavailable on
+this M4 Max beyond timestamps, so do not wait for counter tables that cannot be
+captured. Use existing software gates instead. The immediate implementation rank
+is: (1) route only if the change removes a whole materialization/synchronization
+boundary rather than another local top-k rewrite; (2) captured MoE gate/up/down
+micro work if route cannot identify such a boundary quickly; (3) a bounded
+attention read-once prototype only if it changes the main-body memory shape.
+Local route barrier/candidate variants, GDN row-shape work, attention tile/NWG
+knobs, and host-only cleanup stay closed unless fresh phase/no-op/microbench
+evidence reopens them.
+
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
    but 0.8B Q4_0/Q4_1 and F16/BF16 `pp512` were still catastrophic because their
@@ -1337,7 +1353,10 @@ gated hardware-headroom probes.
       encode time, allocation count, and theoretical cycles/token. Only escalate
       ICB, persistent work queues, argument buffers, or GPU-side graph traversal
       if those probes show command starvation, host bubbles, or cross-op data reuse
-      that a normal kernel path cannot access.
+      that a normal kernel path cannot access. v0.389 proves autonomous hardware
+      counters are not currently available here beyond timestamps, so hidden-stall
+      or bandwidth-counter claims require manual Xcode GPU capture rather than
+      routine `xctrace` or in-process counter sampling.
     - AMX/ANE coprocessor, hierarchical `lm_head`, layer skipping, sparse FFN,
       KV clustering, attention-head skipping, and residual/GDN-state precision
       changes are quality or fabric research lanes. They need explicit quality

@@ -205,6 +205,8 @@ enum Cmd {
     MoeGateupMicro(MoeGateupMicroArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
+    /// Report Metal counter-set availability for in-process counter probes.
+    MetalCounters(MetalCountersArgs),
     /// Warm to a target context, then wait for an external go signal before
     /// running a fixed decode window. Intended for attach-mode tracing so the
     /// recorder can skip the long ramp.
@@ -311,6 +313,9 @@ struct DecodeArgs {
     #[arg(short = 'o', long, value_enum, default_value = "text")]
     output: OutputFormat,
 }
+
+#[derive(Parser, Debug)]
+struct MetalCountersArgs {}
 
 #[derive(Parser, Debug)]
 struct PpArgs {
@@ -1482,6 +1487,7 @@ fn main() -> Result<()> {
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::Roofline(a) => run_roofline(a),
+        Cmd::MetalCounters(a) => run_metal_counters(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
@@ -1493,6 +1499,29 @@ fn main() -> Result<()> {
         Cmd::PpFfnAb(a) => run_pp_ffn_ab(a),
         Cmd::PpWait(a) => run_pp_wait(a),
     }
+}
+
+fn run_metal_counters(_args: MetalCountersArgs) -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let caps = ctx.counter_capabilities();
+    println!("device\t{}", ctx.describe());
+    println!(
+        "sampling\tstage={}\tdispatch={}\tblit={}",
+        caps.supports_stage_boundary, caps.supports_dispatch_boundary, caps.supports_blit_boundary
+    );
+    println!("counter_sets\t{}", caps.sets.len());
+    for set in &caps.sets {
+        println!(
+            "set\t{}\tcounters={}\tsample_buffer={}",
+            set.name,
+            set.counters.len(),
+            set.sample_buffer_status
+        );
+        for counter in &set.counters {
+            println!("counter\t{}\t{}", set.name, counter);
+        }
+    }
+    Ok(())
 }
 
 fn time_gpu_reps<F>(

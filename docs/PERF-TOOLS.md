@@ -384,6 +384,10 @@ contain rows before drawing conclusions.
 
 Counter guidance:
 
+- First run `target/release/qwen-bench metal-counters`. On the current M4 Max,
+  v0.389 reports only the `timestamp`/`GPUTimestamp` counter set, with
+  `stage=true`, `dispatch=false`, and `blit=false`; this is timing-only, not
+  bandwidth/stall/occupancy evidence.
 - Keep `Metal System Trace` as the primary timeline tool for queue gaps,
   command-buffer cadence, and GPU ownership.
 - Use `qwen-bench phase` or `qwen-bench dflash --profile` for model-aware phase
@@ -398,9 +402,10 @@ Counter guidance:
   Counters"` can warn `Selected counter profile is not supported on target
   device` and produce empty counter tables. Treat that as a tooling miss, not a
   kernel conclusion.
-- For autonomous GPU efficiency and memory bandwidth, prefer in-process
-  `MTLCounterSampleBuffer` support behind a feature or bench flag once the
-  project needs stable counter data.
+- v0.389 adds the in-process probe and shows `MTLCounterSampleBuffer` exposes no
+  useful performance counters on this target either. For autonomous GPU
+  efficiency and memory bandwidth, use phase/microbench/roofline proxies unless a
+  manual Xcode GPU capture or another external profiler is available.
 
 `.trace` versus `.gputrace`:
 

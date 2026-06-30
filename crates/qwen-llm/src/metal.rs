@@ -33,8 +33,10 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLDispatchType, MTLFence, MTLLibrary, MTLResourceOptions, MTLSize,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCounter,
+    MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLDispatchType, MTLFence, MTLLibrary,
+    MTLResourceOptions, MTLSize,
 };
 use parking_lot::Mutex;
 use std::cell::Cell;
@@ -282,6 +284,21 @@ type Pipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 pub type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 pub type Fence = Retained<ProtocolObject<dyn MTLFence>>;
 
+#[derive(Clone, Debug)]
+pub struct MetalCounterSetInfo {
+    pub name: String,
+    pub counters: Vec<String>,
+    pub sample_buffer_status: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MetalCounterCapabilities {
+    pub supports_stage_boundary: bool,
+    pub supports_dispatch_boundary: bool,
+    pub supports_blit_boundary: bool,
+    pub sets: Vec<MetalCounterSetInfo>,
+}
+
 // ===========================================================================
 // MetalContext
 // ===========================================================================
@@ -379,6 +396,49 @@ impl MetalContext {
         let max_tg = self.device.maxThreadgroupMemoryLength();
         let unified = self.device.hasUnifiedMemory();
         format!("{name} | unified_memory={unified} | max_threadgroup_memory={max_tg} bytes")
+    }
+
+    pub fn counter_capabilities(&self) -> MetalCounterCapabilities {
+        let mut sets = Vec::new();
+        if let Some(counter_sets) = self.device.counterSets() {
+            for i in 0..counter_sets.len() {
+                let set = counter_sets.objectAtIndex(i);
+                let counters_obj = set.counters();
+                let mut counters = Vec::with_capacity(counters_obj.len());
+                for j in 0..counters_obj.len() {
+                    counters.push(counters_obj.objectAtIndex(j).name().to_string());
+                }
+                let desc = MTLCounterSampleBufferDescriptor::new();
+                desc.setCounterSet(Some(&set));
+                // SAFETY: the descriptor owns the sample-count field and `2` is
+                // the minimum useful before/after probe for future dispatch tests.
+                unsafe { desc.setSampleCount(2) };
+                let sample_buffer_status = match self
+                    .device
+                    .newCounterSampleBufferWithDescriptor_error(&desc)
+                {
+                    Ok(_) => "ok".to_string(),
+                    Err(e) => e.localizedDescription().to_string(),
+                };
+                sets.push(MetalCounterSetInfo {
+                    name: set.name().to_string(),
+                    counters,
+                    sample_buffer_status,
+                });
+            }
+        }
+        MetalCounterCapabilities {
+            supports_stage_boundary: self
+                .device
+                .supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary),
+            supports_dispatch_boundary: self
+                .device
+                .supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary),
+            supports_blit_boundary: self
+                .device
+                .supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
+            sets,
+        }
     }
 }
 

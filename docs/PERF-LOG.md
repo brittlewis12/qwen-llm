@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.370 A3B HNorm Attention Partials Falsifier
+
+Status: killed a dirty normalized-half attention partial sidecar for A3B
+true-long decode. The sidecar stored `o_partial/l_partial` as F16 and kept `(m,l)`
+metadata in F32, then reduced with `o_norm * l_part * exp(m_part-m_global)`.
+
+Artifact:
+
+- `docs/bench/2026-06-29-2203-v0370-a3b-hnorm-partials/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- `QWEN_ATTN_V4_HNORM_PARTIALS=1 QWEN_ATTN_V4_G8_TILE=4 cargo test -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv --release -- --ignored --nocapture`
+- A3B `attn-intra --ctx 32768 --runs 3` with the dirty sidecar
+
+Results:
+
+| A3B `ctx32768` attn-intra | v0.369 F32 partials | Dirty hnorm partials | Read |
+| --- | ---: | ---: | --- |
+| one layer | `0.3457 ms` | `0.3408 ms` | `1.014x` |
+| main | `0.1743 ms` | `0.1729 ms` | flat |
+| reduce | `0.0677 ms` | `0.0641 ms` | small |
+
+Decision: do not retain or default the sidecar. It is correctness-safe in the
+oracle (`max|delta|=2.48e-7`, `cos=0.999994` on the hnorm case), but the win is far
+below the `~1.06x` per-layer keep gate. After v0.368/v0.369, remaining A3B
+true-long attention partial traffic is not the next high-EV branch.
+
 ## 2026-06-29 - v0.369 A3B True-Long Attention H2 Reduce
 
 Status: defaulted a two-threadgroup decode v4 reduce for `NWG >= 128`, splitting

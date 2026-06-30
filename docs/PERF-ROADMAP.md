@@ -166,7 +166,11 @@ Current caveats:
   follow-up for that selector: the two-threadgroup reduce moves A3B `ctx16384`
   `91.2 -> 95.0 t/s` and `ctx32768` `85.4 -> 88.2 t/s`. Further attention work
   now needs a structural read-once or partial-traffic reduction, not another local
-  reduce split.
+  reduce split. v0.370 kills the concrete normalized-half partial-traffic proof:
+  it is correctness-safe, but A3B `ctx32768` `attn-intra` only moves
+  `0.3457 -> 0.3408 ms/layer` (`1.014x`). Do not keep drilling partial storage;
+  switch back to MoE/GDN dataflow unless a genuinely new read-once attention
+  execution shape appears.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B
@@ -1103,7 +1107,12 @@ gated hardware-headroom probes.
     Q8-KV by giving up the default group8 tile2 execution shape. The live
     long-attention branch must reduce bytes while preserving occupancy, bring
     counters for hidden traffic, or deliver an end-to-end `ctx32768` prototype;
-    same-byte retunes and reduce work stay deprioritized.
+    same-byte retunes and reduce work stay deprioritized. v0.367-v0.369 bank the
+    concrete medium/true-long attention wins, but v0.370 kills the next partial
+    byte-reduction proof: normalized-half partials are exact enough, yet only move
+    A3B `ctx32768` `attn-intra` `1.014x`. Keep attention below MoE/GDN unless the
+    next proposal changes the main-pass read-once execution shape rather than
+    partial storage.
 3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds
    correctness-breaking no-op attribution for the GDN projection lane. The
    recoverable lower-bound budget is

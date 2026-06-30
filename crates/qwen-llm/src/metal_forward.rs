@@ -414,6 +414,16 @@ fn phase_moe_route_split_enabled() -> bool {
     })
 }
 
+fn decode_moe_noop_route_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_DECODE_MOE_NOOP_ROUTE").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 fn decode_moe_noop_routed_gateup_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1082,6 +1092,9 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
         moe: &MetalMoeFfn,
     ) -> Result<(), MfError> {
+        if decode_moe_noop_route_enabled() {
+            return Ok(());
+        }
         self.encode_moe_router_logits(enc, session, moe)?;
         self.encode_moe_topk_and_shared_from_logits(enc, session, moe)?;
         Ok(())

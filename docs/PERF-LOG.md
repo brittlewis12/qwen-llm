@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.374 MoE Route No-Op Lower Bound
+
+Status: added `QWEN_DECODE_MOE_NOOP_ROUTE=1` as an unsafe, perf-only decode
+diagnostic. It skips route preparation and reuses zero or stale route buffers, so
+it is not correctness-preserving.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0374-route-noop-lower-bound/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A3B `ctx128` route-noop smoke
+- A10B `ctx8192` base/noop-route context sweep
+- A3B `ctx32768` base/noop-route context sweep
+- A10B/A3B phase with route no-op and deep split diagnostics
+
+Results:
+
+| Model row | Base GPU | No-op GPU | Read |
+| --- | ---: | ---: | --- |
+| A10B `ctx8192` | `22.71 ms` | `20.37 ms` | `43.1 -> 47.9 t/s` |
+| A3B `ctx32768` | `10.82 ms` | `9.32 ms` | `88.5 -> 102.3 t/s` |
+
+Decision: route-plus-consumer coupling clears the lower-bound gate, but the no-op
+path overstates exact headroom by changing hidden states and expert/cache
+locality. A dirty sorted-topk sidecar was killed (`43.1 -> 42.9 t/s` on A10B
+`ctx8192`), so slot order alone is not the win. Next route work needs exact
+route-cache replay or a deeper top-k/shared-gate split.
+
 ## 2026-06-30 - v0.373 MoE Route Split Attribution
 
 Status: added `QWEN_PHASE_MOE_ROUTE_SPLIT=1` for `qwen-bench phase`. This splits

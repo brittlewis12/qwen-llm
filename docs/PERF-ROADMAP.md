@@ -1074,7 +1074,12 @@ gated hardware-headroom probes.
    sidecar. It is exact and helps batched `tokens=16` micro (`36.04 -> 31.95 ms`),
    but single-token decode only moves `2.483 -> 2.424 ms`, far below the phase
    gate. Future Q5 down work needs a different dataflow/counter signal, not
-   another row-packing variant.
+   another row-packing variant. v0.373 splits the route bucket: A10B `ctx8192`
+   route logits are `0.48 ms`, while top-k/shared preparation is `0.86 ms`; A3B
+   `ctx32768` splits `0.30/0.68 ms`. Do not reopen router-logits mat-vec work,
+   but keep post-logits route/slot-prep layout as a measured secondary branch if
+   a deeper split or cached-route lower bound shows a recoverable `>=0.15 ms`
+   on A10B or `>=0.10 ms` on A3B.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

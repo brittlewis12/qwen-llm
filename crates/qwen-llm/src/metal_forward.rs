@@ -404,6 +404,16 @@ fn phase_gdn_tail_split_enabled() -> bool {
     })
 }
 
+fn phase_moe_route_split_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_MOE_ROUTE_SPLIT").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 fn decode_moe_noop_routed_gateup_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4496,6 +4506,8 @@ impl<'a> MetalForward<'a> {
         let mut gdn_resid_post_total_ms = 0.0f64;
         let mut attn_mixer_total_ms = 0.0f64;
         let mut route_total_ms = 0.0f64;
+        let mut route_logits_total_ms = 0.0f64;
+        let mut route_topk_total_ms = 0.0f64;
         let mut ffn_apply_total_ms = 0.0f64;
         let mut ffn_gate_up_wave_total_ms = 0.0f64;
         let mut ffn_shared_silu_total_ms = 0.0f64;
@@ -4513,6 +4525,7 @@ impl<'a> MetalForward<'a> {
         let mut attn_idx = 0usize;
         let split_gdn_proj = phase_gdn_proj_split_enabled();
         let split_gdn_tail = phase_gdn_tail_split_enabled();
+        let split_route = phase_moe_route_split_enabled();
         let split_ffn_apply = phase_moe_ffn_split_enabled();
         let deep_split_ffn_apply = phase_moe_ffn_deep_split_enabled();
         for block in &self.model.blocks {
@@ -4848,13 +4861,31 @@ impl<'a> MetalForward<'a> {
             }
 
             {
-                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
-                let enc = KernelEncoder::begin(&cmd);
-                self.encode_moe_route_prepare(&enc, session, moe)?;
-                enc.end();
-                cmd.commit();
-                cmd.waitUntilCompleted();
-                route_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                if split_route {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_router_logits(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    route_logits_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_topk_and_shared_from_logits(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    route_topk_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                } else {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_route_prepare(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    route_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                }
             }
 
             if split_ffn_apply {
@@ -5054,7 +5085,12 @@ impl<'a> MetalForward<'a> {
             gdn_resid_post_total_ms,
         ));
         phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
-        phases.push(("moe route".into(), route_total_ms));
+        if split_route {
+            phases.push(("moe route logits".into(), route_logits_total_ms));
+            phases.push(("moe route topk/shared".into(), route_topk_total_ms));
+        } else {
+            phases.push(("moe route".into(), route_total_ms));
+        }
         if split_ffn_apply {
             if ffn_routed_gate_up_total_ms > 0.0 {
                 phases.push(("moe ffn routed gate/up".into(), ffn_routed_gate_up_total_ms));

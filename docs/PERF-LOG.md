@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.373 MoE Route Split Attribution
+
+Status: added `QWEN_PHASE_MOE_ROUTE_SPLIT=1` for `qwen-bench phase`. This splits
+the aggregate `moe route` bucket into router logits and post-logits top-k/shared
+preparation. It is phase-only instrumentation.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0373-moe-route-split/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A10B `ctx8192` phase with route, GDN projection/tail, and MoE FFN deep split
+- A3B `ctx32768` phase with route, GDN projection/tail, and MoE FFN deep split
+
+Results:
+
+| Model row | route logits | route topk/shared | Read |
+| --- | ---: | ---: | --- |
+| A10B `ctx8192` | `0.48 ms` | `0.86 ms` | post-logits route work dominates route |
+| A3B `ctx32768` | `0.30 ms` | `0.68 ms` | topk/shared is a real small bucket |
+
+Decision: keep route logits out of the implementation queue, but stop treating
+route work as fully solved. If reopened, target the post-logits top-k/shared or
+slot-prep layout path, and require a lower-bound split/no-op before writing a
+production kernel.
+
 ## 2026-06-29 - v0.372 GDN Tail Split Attribution
 
 Status: added `QWEN_PHASE_GDN_TAIL_SPLIT=1` for `qwen-bench phase`. This splits

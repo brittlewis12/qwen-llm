@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.385 Exact GPU Route Replay
+
+Status: added `QWEN_PHASE_MOE_ROUTE_REPLAY=1` for `qwen-bench phase`. The real
+GPU route kernels still run to populate exact route buffers, but their time is
+excluded from phase accounting so downstream MoE consumers remain unperturbed.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0385-route-replay/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A10B ctx8192 default and replay deep FFN phase
+- A3B ctx32768 default and replay deep FFN phase
+
+Results:
+
+| Row | Default phase sum | Replay phase sum | Route row | Read |
+| --- | ---: | ---: | ---: | --- |
+| A10B ctx8192 | `23.98 ms` | `22.62 ms` | `1.33 -> 0.00 ms` | exact recoverable |
+| A3B ctx32768 | `11.76 ms` | `10.75 ms` | `0.95 -> 0.00 ms` | exact recoverable |
+
+Decision: route is a real decode bucket with exact recoverable budget. Prior CPU
+route was not clean because consumers moved; exact GPU replay keeps routed
+gate/up/down and shared phases stable. Production route work is now justified,
+with a hard gate of `>=0.25 ms` A10B or `>=0.15 ms` A3B clean phase savings plus
+end-to-end movement.
+
 ## 2026-06-30 - v0.383 GDN Front Roofline Refresh
 
 Status: refreshed `gdn-proj-micro` and A10B ctx8192 split phase before starting

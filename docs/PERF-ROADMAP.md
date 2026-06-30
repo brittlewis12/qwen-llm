@@ -1099,6 +1099,14 @@ gated hardware-headroom probes.
    22.63 ms` A10B, `11.82 -> 10.90 ms` A3B), but routed gate/up worsens, so it is
    not exact replay. Keep it as infrastructure; pivot route implementation work
    to exact GPU replay later and move active optimization back to larger buckets.
+   v0.385 adds exact GPU route replay for phase mode: the real route kernels still
+   populate top-k/weight/shared buffers, but their time is excluded from the phase
+   sum. This keeps consumers stable while showing exact recoverable budget: A10B
+   ctx8192 phase sum moves `23.98 -> 22.62 ms` with routed gate/up/down unchanged,
+   and A3B ctx32768 moves `11.76 -> 10.75 ms` with consumers unchanged. Production
+   route work is now justified, but only for a post-logits/top-k/shared route
+   design that saves `>=0.25 ms` A10B or `>=0.15 ms` A3B and moves end-to-end
+   decode without perturbing MoE consumers.
    v0.378 adds `moe-gateup-micro` as the next active harness. A10B Q4 gate/up
    micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
    gate/up shape probes can use it. A3B synthetic top-k is not representative yet

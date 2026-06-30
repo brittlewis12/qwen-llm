@@ -435,6 +435,16 @@ fn phase_moe_cpu_route_enabled() -> bool {
     })
 }
 
+fn phase_moe_route_replay_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_MOE_ROUTE_REPLAY").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 fn phase_lm_argmax_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4743,8 +4753,9 @@ impl<'a> MetalForward<'a> {
         let mut attn_idx = 0usize;
         let split_gdn_proj = phase_gdn_proj_split_enabled();
         let split_gdn_tail = phase_gdn_tail_split_enabled();
-        let split_route_deep = phase_moe_route_deep_split_enabled();
-        let split_route = phase_moe_route_split_enabled() || split_route_deep;
+        let route_replay = phase_moe_route_replay_enabled();
+        let split_route_deep = !route_replay && phase_moe_route_deep_split_enabled();
+        let split_route = !route_replay && (phase_moe_route_split_enabled() || split_route_deep);
         let cpu_route = phase_moe_cpu_route_enabled();
         let split_ffn_apply = phase_moe_ffn_split_enabled();
         let deep_split_ffn_apply = phase_moe_ffn_deep_split_enabled();
@@ -5084,6 +5095,13 @@ impl<'a> MetalForward<'a> {
                 if cpu_route {
                     let route = self.route_moe_block(&session.h, moe);
                     self.write_moe_route_result(session, &route);
+                } else if route_replay {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_route_prepare(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
                 } else if split_route_deep {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
@@ -5332,7 +5350,9 @@ impl<'a> MetalForward<'a> {
             gdn_resid_post_total_ms,
         ));
         phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
-        if split_route {
+        if route_replay {
+            phases.push(("moe route replay (excluded)".into(), route_total_ms));
+        } else if split_route {
             phases.push(("moe route logits".into(), route_logits_total_ms));
             if split_route_deep {
                 phases.push(("moe route topk".into(), route_topk_total_ms));

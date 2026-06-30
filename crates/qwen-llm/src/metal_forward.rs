@@ -627,6 +627,13 @@ struct MoeRouteDecision {
     shared_gate_scalar: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct MoeRouteReplayRow {
+    pub topk_idx: Vec<i32>,
+    pub topk_weight: Vec<f32>,
+    pub hidden: Vec<f32>,
+}
+
 impl MetalModel {
     /// Load weights from an `loader::Model` view. Native-quant path:
     /// keeps weight tensors at their on-disk dtype (Q4_K, Q6_K, F32,
@@ -4566,8 +4573,8 @@ impl<'a> MetalForward<'a> {
         Ok((out, total_ms, phases))
     }
 
-    /// Decode one MoE token and return the per-layer post-norm hidden vector
-    /// plus routed expert ids after each real route kernel. This is bench-only
+    /// Decode one MoE token and return per-layer post-norm hidden vectors plus
+    /// routed expert ids/weights after each real route kernel. This is bench-only
     /// instrumentation for replaying realistic route patterns in isolated MoE
     /// microbenches.
     pub fn capture_moe_gateup_replay_for_token(
@@ -4575,7 +4582,7 @@ impl<'a> MetalForward<'a> {
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
-    ) -> Result<Vec<(Vec<i32>, Vec<f32>)>, MfError> {
+    ) -> Result<Vec<MoeRouteReplayRow>, MfError> {
         let arch = &self.model.arch;
         if arch.kind != ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
@@ -4658,7 +4665,12 @@ impl<'a> MetalForward<'a> {
                 .iter()
                 .map(|&(expert, _)| expert as i32)
                 .collect();
-            routes.push((topk_idx, hidden));
+            let topk_weight = route.ranked.iter().map(|&(_, weight)| weight).collect();
+            routes.push(MoeRouteReplayRow {
+                topk_idx,
+                topk_weight,
+                hidden,
+            });
 
             {
                 let cmd = self.ctx.queue.commandBuffer().expect("cmd");

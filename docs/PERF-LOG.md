@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.391 Captured MoE Down Microbench
+
+Status: extended captured MoE replay to routed down by recording top-k weights as
+well as ids/hidden states, and made `moe-down-micro` default to the production
+Q5 K512 R2 path for `f_exp=512`.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0391-captured-moe-down-micro/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B captured `moe-down-micro --route-capture-ctx 1024`
+- A3B/A10B captured `moe-gateup-micro --route-capture-ctx 1024`
+
+Results:
+
+| Model | Harness | Captured micro | Phase row | Read |
+| --- | --- | ---: | ---: | --- |
+| A3B Q4 | Q4 gate/up | `1.0794 ms` | `1.08 ms` | faithful |
+| A3B Q4 | Q5 down R2 | `0.8144 ms` | `0.82 ms` | faithful |
+| A10B Q4_XL | Q4 gate/up | `3.1068 ms` | `3.21 ms` | faithful |
+| A10B Q4_XL | Q5 down | `2.5946 ms` | `2.56 ms` | faithful |
+
+Decision: captured MoE gate/up/down microbenching is now the next implementation
+gate. Require a `5-10%` captured micro win before full phase promotion; synthetic
+MoE micro wins remain non-promotional unless captured replay agrees.
+
 ## 2026-06-30 - v0.390 Route Structural Audit
 
 Status: rechecked current A3B/A10B route replay and decomposed the remaining

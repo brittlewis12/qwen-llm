@@ -966,6 +966,11 @@ shape; (3) exact route only if a prototype can save `>=0.4 ms` A3B or `>=0.5 ms`
 A10B route total without consumer movement. Local route barrier/candidate
 variants, GDN row-shape work, attention tile/NWG knobs, and host-only cleanup
 stay closed unless fresh phase/no-op/microbench evidence reopens them.
+v0.391 adds the missing captured down gate and aligns it with production R2 for
+`f_exp=512`: A3B/A10B captured gate/up and down micro rows now match phase within
+noise (`1.079/0.814 ms` versus `1.08/0.82`, and `3.107/2.595 ms` versus
+`3.21/2.56`). Use captured MoE micro first for compute-branch proposals, with a
+required `5-10%` micro win before full phase promotion.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -1164,6 +1169,11 @@ stay closed unless fresh phase/no-op/microbench evidence reopens them.
    positive (`1.1014 ms` captured versus `1.0836 ms` default). Use captured
    replay as a gate for future Q4 gate/up variants, but do not keep mining
    row-width tweaks without a structural byte/dataflow rationale.
+   v0.391 extends the same captured-route discipline to routed down and makes the
+   down microbench production-faithful: A3B Q5 down captured R2 is `0.814 ms`
+   versus phase `0.82 ms`, and A10B captured Q5 down is `2.595 ms` versus phase
+   `2.56 ms`. Future MoE compute variants should clear captured gate/up or down
+   before phase promotion; synthetic-only wins remain non-promotional.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

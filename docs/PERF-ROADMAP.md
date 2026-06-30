@@ -956,14 +956,16 @@ gated hardware-headroom probes.
 
 v0.389 counter-pivot read: autonomous Metal hardware counters are unavailable on
 this M4 Max beyond timestamps, so do not wait for counter tables that cannot be
-captured. Use existing software gates instead. The immediate implementation rank
-is: (1) route only if the change removes a whole materialization/synchronization
-boundary rather than another local top-k rewrite; (2) captured MoE gate/up/down
-micro work if route cannot identify such a boundary quickly; (3) a bounded
-attention read-once prototype only if it changes the main-body memory shape.
-Local route barrier/candidate variants, GDN row-shape work, attention tile/NWG
-knobs, and host-only cleanup stay closed unless fresh phase/no-op/microbench
-evidence reopens them.
+captured. Use existing software gates instead. v0.390 then demotes exact route
+from the main branch: A3B/A10B route replay still repeats (`1.01/1.34 ms`), but
+production already fuses the high-value topk/shared half and the only remaining
+exact boundary is router logits into global exact top-k. The immediate
+implementation rank is now: (1) captured MoE gate/up/down micro work; (2) a
+bounded attention read-once prototype only if it changes the main-body memory
+shape; (3) exact route only if a prototype can save `>=0.4 ms` A3B or `>=0.5 ms`
+A10B route total without consumer movement. Local route barrier/candidate
+variants, GDN row-shape work, attention tile/NWG knobs, and host-only cleanup
+stay closed unless fresh phase/no-op/microbench evidence reopens them.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -1131,7 +1133,14 @@ evidence reopens them.
    exact simdgroup-local candidate lists plus a single-thread merge regressed
    A10B `moe route topk/shared` `0.86 -> 3.87 ms`. Together with v0.376 and
    v0.386, this closes local top-k rewrites as the next route bet unless new
-   counters identify a different mechanism.
+   counters identify a different mechanism. v0.390 repeats the exact route budget
+   on current code but demotes exact route implementation: A3B route split is
+   logits `0.30 ms` plus fused topk/shared `0.68 ms`, A10B is `0.48 + 0.86 ms`,
+   and replay deltas are `1.01/1.34 ms`. A3B deep split shows the existing
+   topk/shared fusion is already the important structural overlap (`1.43 ms`
+   separate versus `0.68 ms` fused). Reopen exact route only for a prototype that
+   saves `>=0.4 ms` A3B or `>=0.5 ms` A10B route total without moving time into
+   consumers; otherwise pivot to captured MoE compute work.
    v0.378 adds `moe-gateup-micro` as the next active harness. A10B Q4 gate/up
    micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
    gate/up shape probes can use it. A3B synthetic top-k is not representative yet

@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.390 Route Structural Audit
+
+Status: rechecked current A3B/A10B route replay and decomposed the remaining
+exact route boundary after the local route rewrites failed.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0390-route-structural-audit/README.md`
+
+Validation:
+
+- A3B `ctx1024` route split, route replay, and deep route split
+- A10B `ctx1024` route split and route replay
+
+Results:
+
+| Model | Route split | Logits | Topk/shared | Replay | Delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B Q4 | `9.90 ms` phase | `0.30 ms` | `0.68 ms` | `8.89 ms` | `1.01 ms` |
+| A10B Q4_XL | `22.80 ms` phase | `0.48 ms` | `0.86 ms` | `21.46 ms` | `1.34 ms` |
+
+A3B deep split shows separate topk plus shared gate is much worse than the
+production fused topk/shared row (`1.43 ms` versus `0.68 ms` for that half), so
+the route path has already captured the obvious structural overlap.
+
+Decision: demote exact route work from the main branch. The remaining exact
+boundary is router logits into global exact top-k, which is not a clean one-kernel
+fusion without sacrificing occupancy or adding atomics/reduction machinery. Pivot
+next to captured MoE gate/up/down microbenching.
+
 ## 2026-06-30 - v0.389 Metal Counter Capability Probe
 
 Status: added `qwen-bench metal-counters` and rechecked whether autonomous

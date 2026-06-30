@@ -1111,7 +1111,11 @@ gated hardware-headroom probes.
    moved A10B ctx8192 `moe route topk/shared` `0.86 -> 0.82 ms` and phase sum
    `23.98 -> 23.92 ms`, far below gate. Do not reopen barrier-only route kernels;
    the next route implementation needs a materially different top-k work shape or
-   a new counter signal.
+   a new counter signal. v0.387 kills the obvious candidate-compression variant:
+   exact simdgroup-local candidate lists plus a single-thread merge regressed
+   A10B `moe route topk/shared` `0.86 -> 3.87 ms`. Together with v0.376 and
+   v0.386, this closes local top-k rewrites as the next route bet unless new
+   counters identify a different mechanism.
    v0.378 adds `moe-gateup-micro` as the next active harness. A10B Q4 gate/up
    micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
    gate/up shape probes can use it. A3B synthetic top-k is not representative yet

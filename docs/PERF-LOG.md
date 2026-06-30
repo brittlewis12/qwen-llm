@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.387 Route Candidate-Compression Falsifier
+
+Status: tested and removed an exact fused route sidecar where each simdgroup
+computed local top-k candidates and one thread merged the candidate lists.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0387-route-candidate-compression-falsifier/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A10B ctx8192 dirty candidate-compression route-split phase
+- Sidecar removed and canonical release rebuilt
+
+Results:
+
+| A10B ctx8192 row | Default | Dirty candidate | Delta |
+| --- | ---: | ---: | ---: |
+| `moe route topk/shared` | `0.86 ms` | `3.87 ms` | `+3.01 ms` |
+| phase sum | `23.98 ms` | `27.05 ms` | `+3.07 ms` |
+
+Decision: kill candidate compression. The single-thread local/merge work shape is
+far worse than the current iterative threadgroup reductions. Route remains
+recoverable, but obvious exact top-k rewrites are now a poor bet without a new
+mechanism or counter signal.
+
 ## 2026-06-30 - v0.386 Route Barrier-Diet Falsifier
 
 Status: tested and removed an exact fused route sidecar that reduced obvious

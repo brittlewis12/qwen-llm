@@ -1144,7 +1144,10 @@ gated hardware-headroom probes.
    keeps structural GDN byte reduction alive for A10B long decode because
    qkv+z+out totals `8.18 ms` / `26.7%` at `ctx32768`, but the branch must reduce
    bytes, fuse a larger dataflow, or prove a primitive win; do not spend another
-   pass on row-count retunes.
+   pass on row-count retunes. v0.372 splits the GDN tail and demotes local tail
+   work: A10B `ctx8192` tail step is only `0.69 ms`, and A3B `ctx32768` tail step
+   is only `0.34 ms`; conv, L2, and norm are smaller. GDN remains a projection or
+   structural byte/dataflow branch, not a tail microkernel branch.
 4. A10B memory-capacity/tooling hygiene: v0.315 shows a `ctx-sweep` that allocates
    for `32768` up front can poison even A10B `ctx570/2464` rows (`~0.6 t/s`), while
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`

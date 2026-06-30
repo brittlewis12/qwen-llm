@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.372 GDN Tail Split Attribution
+
+Status: added `QWEN_PHASE_GDN_TAIL_SPLIT=1` for `qwen-bench phase`. This splits
+the aggregate GDN tail bucket into conv, q/k L2, recurrence step, and gated norm.
+It is phase-only instrumentation.
+
+Artifact:
+
+- `docs/bench/2026-06-29-2358-v0372-gdn-tail-split/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A10B `ctx8192` phase with GDN projection/tail and MoE FFN deep split
+- A3B `ctx32768` phase with GDN projection/tail and MoE FFN deep split
+
+Results:
+
+| Model row | conv | l2 | step | norm | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A10B `ctx8192` | `0.14 ms` | `0.17 ms` | `0.69 ms` | `0.17 ms` | step largest, still small |
+| A3B `ctx32768` | `0.11 ms` | `0.15 ms` | `0.34 ms` | `0.14 ms` | no large tail villain |
+
+Decision: keep the diagnostic, but do not make GDN tail the next implementation
+branch. The recurrence step is the largest tail subphase, yet it is smaller than
+attention, routed gate/up, routed down, GDN projection, and lm-head buckets.
+
 ## 2026-06-29 - v0.371 A10B Q5 Down K1024 R2 Falsifier
 
 Status: killed a dirty `f_exp=1024` Q5 routed-down row-pair sidecar for A10B.

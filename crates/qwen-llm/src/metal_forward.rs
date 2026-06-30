@@ -425,6 +425,16 @@ fn phase_moe_route_deep_split_enabled() -> bool {
     })
 }
 
+fn phase_moe_cpu_route_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_MOE_CPU_ROUTE").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 fn decode_moe_noop_route_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1094,6 +1104,22 @@ impl<'a> MetalForward<'a> {
                 ranked,
                 shared_gate_scalar,
             }
+        }
+    }
+
+    fn write_moe_route_result(&self, session: &mut MetalSession, route: &MoeRouteDecision) {
+        unsafe {
+            let idx_ptr = (session.moe_topk_idx.buffer.contents().as_ptr() as *mut i32)
+                .add((session.moe_topk_idx.offset / 4) as usize);
+            let w_ptr = (session.moe_topk_weight.buffer.contents().as_ptr() as *mut f32)
+                .add((session.moe_topk_weight.offset / 4) as usize);
+            for (i, &(expert, weight)) in route.ranked.iter().enumerate() {
+                *idx_ptr.add(i) = expert as i32;
+                *w_ptr.add(i) = weight;
+            }
+            let shared_ptr = (session.moe_shared_gate.buffer.contents().as_ptr() as *mut f32)
+                .add((session.moe_shared_gate.offset / 4) as usize);
+            *shared_ptr = route.shared_gate_scalar;
         }
     }
 
@@ -4579,6 +4605,7 @@ impl<'a> MetalForward<'a> {
         let split_gdn_tail = phase_gdn_tail_split_enabled();
         let split_route_deep = phase_moe_route_deep_split_enabled();
         let split_route = phase_moe_route_split_enabled() || split_route_deep;
+        let cpu_route = phase_moe_cpu_route_enabled();
         let split_ffn_apply = phase_moe_ffn_split_enabled();
         let deep_split_ffn_apply = phase_moe_ffn_deep_split_enabled();
         for block in &self.model.blocks {
@@ -4914,7 +4941,10 @@ impl<'a> MetalForward<'a> {
             }
 
             {
-                if split_route_deep {
+                if cpu_route {
+                    let route = self.route_moe_block(&session.h, moe);
+                    self.write_moe_route_result(session, &route);
+                } else if split_route_deep {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
                     self.encode_moe_router_logits(&enc, session, moe)?;

@@ -1094,6 +1094,11 @@ gated hardware-headroom probes.
    the simple fused SG top-k version: it is correctness-safe in an A3B smoke but
    regresses fused route topk/shared to `1.25 ms` on A10B and `1.00 ms` on A3B.
    Route now needs exact route-cache replay before more route kernels.
+   v0.377 adds a CPU-route phase diagnostic that removes GPU route while writing
+   CPU-computed route buffers. It saves roughly the route bucket (`23.85 ->
+   22.63 ms` A10B, `11.82 -> 10.90 ms` A3B), but routed gate/up worsens, so it is
+   not exact replay. Keep it as infrastructure; pivot route implementation work
+   to exact GPU replay later and move active optimization back to larger buckets.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

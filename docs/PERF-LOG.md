@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.377 CPU Route Phase Diagnostic
+
+Status: added `QWEN_PHASE_MOE_CPU_ROUTE=1` for `qwen-bench phase`. This skips GPU
+route kernels and writes CPU-computed route buffers into the downstream MoE path.
+It is phase-only; wall time is intentionally invalid because it reads back hidden
+state and computes route on CPU per layer.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0377-cpu-route-phase/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A10B `ctx8192` phase with CPU route and deep splits
+- A3B `ctx32768` phase with CPU route and deep splits
+
+Results:
+
+| Model row | Base phase | CPU-route phase | Read |
+| --- | ---: | ---: | --- |
+| A10B `ctx8192` | `23.85 ms` | `22.63 ms` | route removed, gate/up worsened |
+| A3B `ctx32768` | `11.82 ms` | `10.90 ms` | route removed, gate/up worsened |
+
+Decision: keep as a route-bucket diagnostic, not as exact replay. The route bucket
+is real, but CPU route perturbs downstream timing and the SG top-k kernel already
+failed. Stop route microkernels until exact GPU route-cache replay exists.
+
 ## 2026-06-30 - v0.376 SG Top-K Route Falsifier
 
 Status: killed a dirty fused simdgroup-local top-k route sidecar. The sidecar kept

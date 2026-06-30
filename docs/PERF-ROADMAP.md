@@ -1111,6 +1111,11 @@ gated hardware-headroom probes.
    `0.06 ms` on A10B and `0.05 ms` on A3B, so exact `lm_head+argmax` fusion is
    below the implementation gate. Treat lm-head as projection-weight-read work,
    not sampler overhead.
+   v0.381 recalibrates current decode slopes: A3B drops `107.8 -> 88.7 t/s` from
+   `ctx128` to `ctx32768`, A10B drops `45.2 -> 40.7 t/s` from `ctx128` to
+   `ctx16384`, and dense 27B drops `25.6 -> 23.2 t/s` from `ctx128` to `ctx8192`.
+   No new cliff appears; use phase-budgeted structural branches, not more local
+   route/gateup row tweaks.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

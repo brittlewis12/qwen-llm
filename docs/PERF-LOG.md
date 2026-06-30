@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.381 Decode Context Recalibration
+
+Status: ran a bounded current-HEAD decode context sweep across A3B, A10B, and
+dense 27B after the route/gateup/lm-head falsifiers.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0381-decode-ctx-recalibration/README.md`
+
+Results:
+
+| Model | Context row | GPU ms | t/s | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4_K_M | `128 -> 32768` | `8.80 -> 10.80` | `107.8 -> 88.7` | orderly slope |
+| A10B Q4_XL | `128 -> 16384` | `21.65 -> 24.04` | `45.2 -> 40.7` | non-attn still large |
+| 27B Q4_K_M | `128 -> 8192` | `38.65 -> 42.64` | `25.6 -> 23.2` | keep dense guardrail |
+
+Decision: no new cliff was exposed. Stop route and simple row-shape microkernels;
+the next useful work is either captured-route replay for gate/up fidelity or a
+structural byte-reduction branch with a clear phase budget.
+
 ## 2026-06-30 - v0.380 LM Argmax Phase Diagnostic
 
 Status: added `QWEN_PHASE_LM_ARGMAX=1` for `qwen-bench phase`. This appends an

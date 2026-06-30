@@ -1102,11 +1102,11 @@ gated hardware-headroom probes.
    v0.378 adds `moe-gateup-micro` as the next active harness. A10B Q4 gate/up
    micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
    gate/up shape probes can use it. A3B synthetic top-k is not representative yet
-    (`1.5179 ms` micro versus `1.07 ms` phase), so A3B promotion still requires
-    captured route-pattern replay or full phase/ctx confirmation. v0.379 proves
-    that guardrail: dirty `NR0_Q4K=4` improves A3B synthetic micro (`1.5179 ->
-    1.3430 ms`) but fails full phase (`1.07 -> 1.09 ms`) and regresses/noises A10B.
-    Do not continue row-widening without captured route patterns.
+   (`1.5179 ms` micro versus `1.07 ms` phase), so A3B promotion still requires
+   captured route-pattern replay or full phase/ctx confirmation. v0.379 proves
+   that guardrail: dirty `NR0_Q4K=4` improves A3B synthetic micro (`1.5179 ->
+   1.3430 ms`) but fails full phase (`1.07 -> 1.09 ms`) and regresses/noises A10B.
+   Do not continue row-widening without captured route patterns.
    v0.380 bounds the lm-head greedy-fusion shelf: `lm argmax` is only
    `0.06 ms` on A10B and `0.05 ms` on A3B, so exact `lm_head+argmax` fusion is
    below the implementation gate. Treat lm-head as projection-weight-read work,
@@ -1194,7 +1194,13 @@ gated hardware-headroom probes.
    pass on row-count retunes. v0.372 splits the GDN tail and demotes local tail
    work: A10B `ctx8192` tail step is only `0.69 ms`, and A3B `ctx32768` tail step
    is only `0.34 ms`; conv, L2, and norm are smaller. GDN remains a projection or
-   structural byte/dataflow branch, not a tail microkernel branch.
+   structural byte/dataflow branch, not a tail microkernel branch. v0.383 refreshes
+   that projection gate on current HEAD: A10B `qkv+z` micro runs `2.4065 GB` in
+   `4.8675 ms` (`494.4 GB/s`) and A3B runs `0.8022 GB` in `1.7949 ms`
+   (`446.9 GB/s`), while A10B beta+alpha projections are only `0.39 ms` in the
+   ctx8192 split. Do not build local GDN projection row-shape or `qkv+z` fusion
+   branches without byte elimination, an algorithmic dataflow change, or counter
+   evidence beyond weight streaming.
 4. A10B memory-capacity/tooling hygiene: v0.315 shows a `ctx-sweep` that allocates
    for `32768` up front can poison even A10B `ctx570/2464` rows (`~0.6 t/s`), while
    capped sweeps are normal (`43.8/38.4/43.1 t/s` through `4096`, `41.6/39.9 t/s`

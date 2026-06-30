@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.383 GDN Front Roofline Refresh
+
+Status: refreshed `gdn-proj-micro` and A10B ctx8192 split phase before starting
+any GDN projection rewrite.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0383-gdn-front-roofline-refresh/README.md`
+
+Validation:
+
+- A3B/A10B `gdn-proj-micro --warmup 5 --iters 20`
+- A10B ctx8192 phase with `QWEN_PHASE_GDN_PROJ_SPLIT=1` and deep FFN split
+
+Results:
+
+| Model | Projection | GPU | Nominal BW | Read |
+| --- | --- | ---: | ---: | --- |
+| A3B | `qkv+z` | `1.7949 ms` | `446.9 GB/s` | near stream |
+| A10B | `qkv+z` | `4.8675 ms` | `494.4 GB/s` | at stream |
+| A10B | `beta+alpha proj` | `0.39 ms` | n/a | small shelf |
+| A10B | `out` | `2.0671 ms` | `465.7 GB/s` | near stream |
+
+Decision: do not start a local GDN projection row-shape or `qkv+z` fusion
+branch. The visible front bucket is mostly mandatory Q8_0 weight streaming;
+activation reuse is too small to clear the gate. Future GDN work needs byte
+elimination, a recurrence/dataflow change, or a counter signal beyond bandwidth.
+
 ## 2026-06-30 - v0.382 Gate/Up Captured Replay
 
 Status: added `--route-capture-ctx` to `qwen-bench moe-gateup-micro`. The mode

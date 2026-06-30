@@ -435,6 +435,16 @@ fn phase_moe_cpu_route_enabled() -> bool {
     })
 }
 
+fn phase_lm_argmax_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_LM_ARGMAX").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 fn decode_moe_noop_route_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4519,6 +4529,24 @@ impl<'a> MetalForward<'a> {
             phases.push(("lm head".into(), ms));
         }
 
+        if phase_lm_argmax_enabled() {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_f32(
+                self.ctx,
+                &enc,
+                &session.logits,
+                &session.argmax_tok,
+                1,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            phases.push(("lm argmax".into(), ms));
+        }
+
         let mut out = vec![0.0f32; arch.vocab_size as usize];
         unsafe {
             let src = session.logits.buffer.contents().as_ptr() as *const f32;
@@ -5278,6 +5306,26 @@ impl<'a> MetalForward<'a> {
             cmd.waitUntilCompleted();
             phases.push((
                 "lm head".into(),
+                (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
+            ));
+        }
+
+        if phase_lm_argmax_enabled() {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_f32(
+                self.ctx,
+                &enc,
+                &session.logits,
+                &session.argmax_tok,
+                1,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            phases.push((
+                "lm argmax".into(),
                 (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3,
             ));
         }

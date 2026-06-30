@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.380 LM Argmax Phase Diagnostic
+
+Status: added `QWEN_PHASE_LM_ARGMAX=1` for `qwen-bench phase`. This appends an
+`lm argmax` row after the existing `lm head` mat-vec row.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0380-lm-argmax-phase/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A10B `ctx8192` phase with `QWEN_PHASE_LM_ARGMAX=1`
+- A3B `ctx32768` phase with `QWEN_PHASE_LM_ARGMAX=1`
+
+Results:
+
+| Model row | lm head | lm argmax | Read |
+| --- | ---: | ---: | --- |
+| A10B `ctx8192` | `1.57 ms` | `0.06 ms` | below gate |
+| A3B `ctx32768` | `0.82 ms` | `0.05 ms` | below gate |
+
+Decision: keep the diagnostic and deprioritize exact greedy `lm_head+argmax`
+fusion. The visible removable pass is too small; the lm-head bucket is mostly the
+projection weight read.
+
 ## 2026-06-30 - v0.379 Q4 Gate/Up NR4 Falsifier
 
 Status: killed a dirty routed Q4_K gate/up row-widening sidecar that changed

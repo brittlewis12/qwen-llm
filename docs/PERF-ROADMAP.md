@@ -1107,6 +1107,10 @@ gated hardware-headroom probes.
    that guardrail: dirty `NR0_Q4K=4` improves A3B synthetic micro (`1.5179 ->
    1.3430 ms`) but fails full phase (`1.07 -> 1.09 ms`) and regresses/noises A10B.
    Do not continue row-widening without captured route patterns.
+   v0.380 bounds the lm-head greedy-fusion shelf: `lm argmax` is only
+   `0.06 ms` on A10B and `0.05 ms` on A3B, so exact `lm_head+argmax` fusion is
+   below the implementation gate. Treat lm-head as projection-weight-read work,
+   not sampler overhead.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

@@ -1086,6 +1086,11 @@ gated hardware-headroom probes.
    2.41 ms` on A10B), but a dirty sorted-topk sidecar regresses, so slot order
    alone is falsified. The next route branch must be exact route-cache replay or a
    top-k/shared-gate split; do not jump straight to a production route kernel.
+   v0.375 adds that top-k/shared-gate split: separate shared-gate is far slower
+   than the fused route kernel (`1.50 ms` A10B and `1.04 ms` A3B versus fused
+   topk/shared `0.86/0.68 ms`), so production should keep shared gate fused. The
+   remaining route kernel hypothesis is a fused simdgroup-local top-k or exact
+   route-cache replay; do not build a split shared-gate route path.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

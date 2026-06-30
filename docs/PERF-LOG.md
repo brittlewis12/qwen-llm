@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.375 MoE Route Deep Split
+
+Status: added `QWEN_PHASE_MOE_ROUTE_SPLIT=deep` for `qwen-bench phase`. This
+keeps the default route path unchanged and uses a phase-only parallel top-k kernel
+to separate post-logits top-k/softmax from shared-gate dot cost.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0375-route-deep-split/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A10B `ctx8192` phase with route deep split
+- A3B `ctx32768` phase with route deep split
+
+Results:
+
+| Model row | route logits | topk-only | shared gate | Prior fused topk/shared |
+| --- | ---: | ---: | ---: | ---: |
+| A10B `ctx8192` | `0.48 ms` | `0.67 ms` | `1.50 ms` | `0.86 ms` |
+| A3B `ctx32768` | `0.32 ms` | `0.60 ms` | `1.04 ms` | `0.68 ms` |
+
+Decision: do not split shared-gate out of the production route kernel. The fused
+kernel makes shared-gate dot cheap; the expensive-looking split is a diagnostic
+artifact. Route work remains live only for exact replay or a fused simdgroup-top-k
+proof that removes top-k reduction barriers without losing the cheap shared gate.
+
 ## 2026-06-30 - v0.374 MoE Route No-Op Lower Bound
 
 Status: added `QWEN_DECODE_MOE_NOOP_ROUTE=1` as an unsafe, perf-only decode

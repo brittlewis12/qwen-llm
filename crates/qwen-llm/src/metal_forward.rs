@@ -51,6 +51,7 @@ use crate::metal::{
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
     encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
     encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
+    encode_topk_logits_softmax_parallel_f32,
 };
 use crate::model::ArchKind;
 use objc2::rc::Retained;
@@ -410,6 +411,16 @@ fn phase_moe_route_split_enabled() -> bool {
         matches!(
             std::env::var("QWEN_PHASE_MOE_ROUTE_SPLIT").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
+fn phase_moe_route_deep_split_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_PHASE_MOE_ROUTE_SPLIT").as_deref(),
+            Ok("2") | Ok("deep") | Ok("DEEP")
         )
     })
 }
@@ -1142,6 +1153,33 @@ impl<'a> MetalForward<'a> {
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
         encode_topk_logits_softmax_f32(
+            self.ctx,
+            enc,
+            &router_probs,
+            &topk_idx,
+            &topk_w,
+            n_expert,
+            topk,
+        )?;
+        Ok(())
+    }
+
+    fn encode_moe_topk_parallel_from_logits(
+        &self,
+        enc: &KernelEncoder,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+
+        let router_probs = session
+            .moe_router_probs
+            .view_subrange(0, vec![n_expert as u64]);
+        let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
+        let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
+
+        encode_topk_logits_softmax_parallel_f32(
             self.ctx,
             enc,
             &router_probs,
@@ -4521,6 +4559,7 @@ impl<'a> MetalForward<'a> {
         let mut route_total_ms = 0.0f64;
         let mut route_logits_total_ms = 0.0f64;
         let mut route_topk_total_ms = 0.0f64;
+        let mut route_shared_total_ms = 0.0f64;
         let mut ffn_apply_total_ms = 0.0f64;
         let mut ffn_gate_up_wave_total_ms = 0.0f64;
         let mut ffn_shared_silu_total_ms = 0.0f64;
@@ -4538,7 +4577,8 @@ impl<'a> MetalForward<'a> {
         let mut attn_idx = 0usize;
         let split_gdn_proj = phase_gdn_proj_split_enabled();
         let split_gdn_tail = phase_gdn_tail_split_enabled();
-        let split_route = phase_moe_route_split_enabled();
+        let split_route_deep = phase_moe_route_deep_split_enabled();
+        let split_route = phase_moe_route_split_enabled() || split_route_deep;
         let split_ffn_apply = phase_moe_ffn_split_enabled();
         let deep_split_ffn_apply = phase_moe_ffn_deep_split_enabled();
         for block in &self.model.blocks {
@@ -4874,7 +4914,31 @@ impl<'a> MetalForward<'a> {
             }
 
             {
-                if split_route {
+                if split_route_deep {
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_router_logits(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    route_logits_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_topk_parallel_from_logits(&enc, session)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    route_topk_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+                    let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_shared_gate(&enc, session, moe)?;
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    route_shared_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                } else if split_route {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                     let enc = KernelEncoder::begin(&cmd);
                     self.encode_moe_router_logits(&enc, session, moe)?;
@@ -5100,7 +5164,12 @@ impl<'a> MetalForward<'a> {
         phases.push((format!("attn mixer (x{attn_count})"), attn_mixer_total_ms));
         if split_route {
             phases.push(("moe route logits".into(), route_logits_total_ms));
-            phases.push(("moe route topk/shared".into(), route_topk_total_ms));
+            if split_route_deep {
+                phases.push(("moe route topk".into(), route_topk_total_ms));
+                phases.push(("moe route shared gate".into(), route_shared_total_ms));
+            } else {
+                phases.push(("moe route topk/shared".into(), route_topk_total_ms));
+            }
         } else {
             phases.push(("moe route".into(), route_total_ms));
         }

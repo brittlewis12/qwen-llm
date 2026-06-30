@@ -8137,6 +8137,74 @@ pub fn encode_topk_logits_softmax_f32(
     Ok(())
 }
 
+pub fn encode_topk_logits_softmax_parallel_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    n: usize,
+    k: usize,
+) -> Result<(), MetalError> {
+    if logits.n_elements() as usize != n {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax_parallel",
+            detail: format!("logits.n_elements={} != n={n}", logits.n_elements()),
+        });
+    }
+    if out_idx.n_elements() as usize != k || out_w.n_elements() as usize != k {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax_parallel",
+            detail: format!(
+                "out_idx/out_w expected {k} elements, got {}/{}",
+                out_idx.n_elements(),
+                out_w.n_elements()
+            ),
+        });
+    }
+    if n == 0 || n > 256 || k == 0 || k > 16 || k > n {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax_parallel",
+            detail: format!("expected 1 <= k <= n <= 256 and k <= 16, got n={n} k={k}"),
+        });
+    }
+    let pso = ctx.pipeline("kernel_topk_logits_softmax_parallel_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        k: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            k: k as u32,
+        },
+    );
+    enc.set_tensor(1, logits);
+    enc.set_tensor(2, out_idx);
+    enc.set_tensor(3, out_w);
+    const THREADS: usize = 256;
+    enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, THREADS * std::mem::size_of::<i32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_dot_sigmoid_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

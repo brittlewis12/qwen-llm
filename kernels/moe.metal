@@ -375,6 +375,68 @@ kernel void kernel_topk_logits_softmax_f32(
     }
 }
 
+inline bool moe_better_pair(float cand_v, int cand_i, float best_v, int best_i) {
+    return cand_i >= 0 && (best_i < 0 || cand_v > best_v || (cand_v == best_v && cand_i < best_i));
+}
+
+kernel void kernel_topk_logits_softmax_parallel_f32(
+        constant topk_logits_args & args [[buffer(0)]],
+        device const float       * logits [[buffer(1)]],
+        device       int         * out_idx [[buffer(2)]],
+        device       float       * out_w   [[buffer(3)]],
+        threadgroup  float       * sh_score [[threadgroup(0)]],
+        threadgroup  float       * red_val  [[threadgroup(1)]],
+        threadgroup  int         * red_idx  [[threadgroup(2)]],
+        uint  tid [[thread_position_in_threadgroup]],
+        uint  ntg [[threads_per_threadgroup]]) {
+    const uint MAX_K = 16;
+    if (args.n > ntg || args.k == 0 || args.k > MAX_K) return;
+
+    sh_score[tid] = tid < args.n ? logits[tid] : -INFINITY;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint slot = 0; slot < args.k; ++slot) {
+        red_val[tid] = sh_score[tid];
+        red_idx[tid] = tid < args.n ? int(tid) : -1;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint stride = ntg >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                const float cand_v = red_val[tid + stride];
+                const int cand_i = red_idx[tid + stride];
+                if (moe_better_pair(cand_v, cand_i, red_val[tid], red_idx[tid])) {
+                    red_val[tid] = cand_v;
+                    red_idx[tid] = cand_i;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        if (tid == 0) {
+            out_idx[slot] = max(red_idx[0], 0);
+            out_w[slot] = red_val[0];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        const float max_top = out_w[0];
+        float sum = 0.0f;
+        float exp_val[MAX_K];
+        for (uint i = 0; i < args.k; ++i) {
+            exp_val[i] = exp(out_w[i] - max_top);
+            sum += exp_val[i];
+        }
+        sum = max(sum, 6.103515625e-5f);
+        for (uint i = 0; i < args.k; ++i) {
+            out_w[i] = exp_val[i] / sum;
+        }
+    }
+}
+
 kernel void kernel_dot_sigmoid_f32(
         constant dot_sigmoid_args & args [[buffer(0)]],
         device const float       * weight [[buffer(1)]],
@@ -389,10 +451,6 @@ kernel void kernel_dot_sigmoid_f32(
     if (tiisg == 0) {
         out[0] = 1.0f / (1.0f + exp(-sum));
     }
-}
-
-inline bool moe_better_pair(float cand_v, int cand_i, float best_v, int best_i) {
-    return cand_i >= 0 && (best_i < 0 || cand_v > best_v || (cand_v == best_v && cand_i < best_i));
 }
 
 kernel void kernel_topk_logits_softmax_dot_sigmoid_f32(

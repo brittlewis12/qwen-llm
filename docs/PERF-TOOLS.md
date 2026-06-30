@@ -523,12 +523,14 @@ per-layer hidden vectors plus route ids/weights from a decode context.
 target/release/qwen-bench moe-gateup-micro \
   -m "$MODEL" \
   --route-capture-ctx 1024 \
+  --tokens 1 \
   --warmup 3 \
   --iters 10
 
 target/release/qwen-bench moe-down-micro \
   -m "$MODEL" \
   --route-capture-ctx 1024 \
+  --tokens 1 \
   --warmup 3 \
   --iters 10
 
@@ -544,6 +546,9 @@ Rules:
 
 - Treat captured replay as the microbench promotion gate for MoE compute work.
 - Require a `5-10%` captured micro win before running long full-phase promotion.
+- Use `--tokens 1/4/16` to distinguish single-token projection wins from
+  active-token batching wins; do not extrapolate MoE micro gains to end-to-end
+  continuous batching without scheduler/KV measurements.
 - `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
   `--legacy-k512` only for explicit rollback attribution.
 - `--fused-routed-q4q5` times the existing one-token monolith as a falsifier; do

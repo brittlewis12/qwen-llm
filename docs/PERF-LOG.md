@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.394 Captured MoE Token-Batching Probe
+
+Status: extended captured MoE gate/up and down microbenches to replay multiple
+real decode tokens from one captured context, then measured whether the production
+split projection kernels get better per-token throughput with active-token
+batching.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0394-captured-moe-token-batching/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B captured `moe-gateup-micro` / `moe-down-micro` at tokens `4` and `16`
+- A10B captured `moe-gateup-micro` / `moe-down-micro` at tokens `4` and `16`
+- `cx ask` adversarial review, session `019f1af1-2bf9-7e20-b717-942fd17e3c2a`
+
+Results:
+
+| Model | Tokens | Gate/up per tok | Down per tok | Combined per tok | vs t1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B Q4 | `1` | `1.0794 ms` | `0.8144 ms` | `1.8938 ms` | `1.00x` |
+| A3B Q4 | `4` | `0.6566 ms` | `0.6354 ms` | `1.2920 ms` | `1.47x` |
+| A3B Q4 | `16` | `0.6114 ms` | `0.5868 ms` | `1.1982 ms` | `1.58x` |
+| A10B Q4_XL | `1` | `3.1068 ms` | `2.5946 ms` | `5.7014 ms` | `1.00x` |
+| A10B Q4_XL | `4` | `2.1129 ms` | `2.3781 ms` | `4.4910 ms` | `1.27x` |
+| A10B Q4_XL | `16` | `2.0777 ms` | `2.3723 ms` | `4.4500 ms` | `1.28x` |
+
+Decision: captured-route batching is real and no longer synthetic-only, but it is
+micro evidence, not an end-to-end production batching claim. Promote a captured
+batching suite with token counts, prompts, contexts, layer histograms, and expert
+occupancy before building full continuous-batching machinery around this trace.
+Keep projection-kernel work alive because it improves both single-token and
+batched decode.
+
 ## 2026-06-30 - v0.393 Captured MoE Monolith Falsifier
 
 Status: added a captured `moe-down-micro --fused-routed-q4q5` harness lane for

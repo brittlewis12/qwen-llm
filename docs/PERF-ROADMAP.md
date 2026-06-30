@@ -979,6 +979,13 @@ serializes the active weight stream into one threadgroup per token/layer. It doe
 not rule out projection-kernel changes, active token/expert batching, or tiled
 fusion that preserves split-path parallelism; require `>=10%` full captured MoE
 improvement before reopening another monolith-shaped decode branch.
+v0.394 proves active-token batching is a real captured-route MoE lever: A3B split
+gate/up+down improves from `1.894 ms/token` at one token to `1.198 ms/token` at
+sixteen tokens, and A10B improves from `5.701` to `4.450 ms/token`. This justifies
+a batching suite and multi-slot architecture branch, but not an end-to-end claim:
+same-context route correlation, scheduler/KV overhead, layer variance, and expert
+occupancy histograms remain unmeasured. Keep projection-kernel work active because
+it benefits both single-token and batched decode.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

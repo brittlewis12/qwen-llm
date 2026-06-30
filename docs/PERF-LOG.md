@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.368 A3B True-Long Decode Attention NWG256
+
+Status: defaulted A3B group-8 decode attention to tile4/NWG256 at
+`ctx >= 16384`, keeping the v0.367 tile2/NWG64 medium-context path below that
+threshold. Rollback: `QWEN_ATTN_V4_G8_TILE=2 QWEN_ATTN_V4_NWG=64`.
+
+Artifact:
+
+- `docs/bench/2026-06-29-2029-v0368-a3b-true-long-attn/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm attn_v4_matches_naive_f16kv --release -- --nocapture`
+- A3B `attn-intra --ctx 32768` tile/NWG probes
+- A3B `ctx-sweep` through `32768`, no concurrent GPU workloads
+
+Results:
+
+| A3B Q4_K_M row | v0.367 | v0.368 | Read |
+| --- | ---: | ---: | --- |
+| `ctx16384` | `88.4 t/s` | `91.2 t/s` | `1.03x` |
+| `ctx32768` | `75.7 t/s` | `85.4 t/s` | `1.13x` |
+
+At `ctx32768`, attention drops `5.14 -> 3.68 ms` and phase sum drops
+`13.59 -> 12.05 ms`; GDN and MoE phases are unchanged. The branch halves repeated
+KV reads versus tile2 while keeping enough occupancy with NWG256. Tile8/NWG256
+is still slower, so a fully read-once shape needs a better occupancy/reduce plan
+before it can replace tile4.
+
 ## 2026-06-29 - v0.367 MoE Mid-Context Decode Attention Threshold
 
 Status: defaulted the group-8/group-16 v4 decode attention subgroup/NWG/C64

@@ -126,6 +126,8 @@ def count_from_phase_name(raw_name: str) -> int | None:
 
 
 def attn_v4_nwg(ctx_len: int, group: int) -> int:
+    if group == 8 and ctx_len >= 16384:
+        return 256
     if group in {8, 16} and ctx_len >= 256:
         return 64
     if group in {4, 6} and ctx_len >= 4096:
@@ -147,6 +149,8 @@ def attn_v4_group_tile(ctx_len: int, group: int) -> int:
     if ctx_len < 256:
         return group
     if group == 8:
+        if ctx_len >= 16384:
+            return 4
         return 2
     if group == 16:
         return 4

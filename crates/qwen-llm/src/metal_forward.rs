@@ -60,7 +60,7 @@ use std::{cell::Cell, sync::OnceLock};
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
 /// `attn_v4_choose_nwg` for the selection heuristic.
-pub const ATTN_V4_MAX_NWG: usize = 64;
+pub const ATTN_V4_MAX_NWG: usize = 256;
 use crate::tensor::{GgmlType, TensorDesc};
 
 /// Single source of truth for which weight dtypes the loader keeps in

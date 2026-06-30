@@ -1805,9 +1805,9 @@ kernel void kernel_attn_prefill_v4_reduce_rows_g16_f32(
 //
 // Grid: (n_q_heads, 1, 1).  Threadgroup: 32 lanes (one simdgroup).
 //
-// Constraint v1: NWG <= 64. The reduce path uses threadgroup scratch to hold
-// up to 64 per-partition factors, so the main-pass split-K count can now go
-// beyond one simdgroup if the synthetic sweeps justify it.
+// The reduce path uses threadgroup scratch sized by the host for NWG
+// per-partition factors, so the main-pass split-K count can go beyond one
+// simdgroup when long-context occupancy needs it.
 
 struct attn_v4_reduce_args {
     uint n_q_heads;
@@ -1833,17 +1833,13 @@ inline void attn_v4_reduce_body(
     const uint g = qh % GROUP;
     const uint nwg = args.n_partitions;
 
-    // Load up to two partitions per lane into threadgroup scratch.
-    for (ushort pass = 0; pass < 2; ++pass) {
-        const uint part = tiisg + pass * 32;
+    for (uint part = tiisg; part < nwg; part += 32) {
         float m_part = -INFINITY;
         float l_part = 0.0f;
-        if (part < nwg) {
-            device const float * ml_base = ml_partial
-                + ((ulong)kvh * nwg + part) * GROUP * 2;
-            m_part = ml_base[g * 2 + 0];
-            l_part = ml_base[g * 2 + 1];
-        }
+        device const float * ml_base = ml_partial
+            + ((ulong)kvh * nwg + part) * GROUP * 2;
+        m_part = ml_base[g * 2 + 0];
+        l_part = ml_base[g * 2 + 1];
         sh_m[part] = m_part;
         sh_l[part] = l_part;
     }

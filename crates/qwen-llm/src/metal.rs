@@ -47,6 +47,7 @@ use std::sync::{
 static KERNEL_TRACE_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
 const ATTN_V4_SUBGROUP_MIN_POS_DEFAULT: usize = 256;
+const ATTN_V4_NWG_MAX: usize = 256;
 
 thread_local! {
     static ATTN_V4_GROUP_TILE_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
@@ -10243,12 +10244,14 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
         std::env::var("QWEN_ATTN_V4_NWG")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .filter(|v| (1..=64).contains(v))
+            .filter(|v| (1..=ATTN_V4_NWG_MAX).contains(v))
     }) {
         return nwg;
     }
 
-    if matches!(group, 8 | 16) && n_pos >= attn_v4_subgroup_min_pos() {
+    if group == 8 && n_pos >= 16_384 {
+        256
+    } else if matches!(group, 8 | 16) && n_pos >= attn_v4_subgroup_min_pos() {
         64
     } else if matches!(group, 4 | 6) && n_pos >= 4096 {
         64
@@ -10298,7 +10301,8 @@ pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
 ///
 /// The 35B A3B shape (`GROUP=8`) has the same long-context signature with a
 /// smaller best split. Keep `QWEN_ATTN_V4_G8_TILE` as a kill switch / A/B knob
-/// (`2`, `4`, or `8`), but default medium/long-context group8 decode to tile2.
+/// (`2`, `4`, or `8`): default medium-context group8 decode to tile2, then use
+/// tile4 at true-long contexts where NWG=256 recovers enough occupancy.
 fn attn_v4_g8_tile_override(var: &str) -> Option<usize> {
     std::env::var(var)
         .ok()
@@ -10326,9 +10330,10 @@ pub fn attn_v4_choose_group_tile(n_pos: usize, group: usize) -> usize {
     }
     if group == 8 {
         static G8_TILE: OnceLock<Option<usize>> = OnceLock::new();
+        let default_tile = if n_pos >= 16_384 { 4 } else { 2 };
         return G8_TILE
             .get_or_init(|| attn_v4_g8_tile_override("QWEN_ATTN_V4_G8_TILE"))
-            .unwrap_or(2);
+            .unwrap_or(default_tile);
     }
     if group != 16 {
         return group;
@@ -10430,10 +10435,10 @@ pub fn encode_attn_decode_v4_f32(
             detail: format!("q/out expected {want_q} elements"),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
     let group_tile = attn_v4_choose_group_tile(n_pos, group);
@@ -10638,9 +10643,9 @@ pub fn encode_attn_decode_v4_f32(
     enc.set_tensor(1, o_partial);
     enc.set_tensor(2, ml_partial);
     enc.set_tensor(3, out);
-    enc.set_threadgroup_memory(0, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(1, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(2, 64 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(0, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, nwg * std::mem::size_of::<f32>());
 
     enc.dispatch(
         MTLSize {
@@ -10712,10 +10717,10 @@ pub fn encode_attn_decode_v4_main_only_f32(
             detail: format!("q expected {want_q} elements"),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
     let group_tile = attn_v4_choose_group_tile(n_pos, group);
@@ -10944,10 +10949,10 @@ pub fn encode_attn_decode_v4_main_only_f32_head_major(
             ),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main_hm",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
 
@@ -11058,10 +11063,10 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
             detail: format!("out expected {want_q} elements"),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_reduce",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
     let want_o_partial = (n_kv_heads * nwg * group * head_dim) as u64;
@@ -11106,9 +11111,9 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
     enc.set_tensor(1, o_partial);
     enc.set_tensor(2, ml_partial);
     enc.set_tensor(3, out);
-    enc.set_threadgroup_memory(0, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(1, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(2, 64 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(0, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, nwg * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
             width: n_q_heads,
@@ -11159,10 +11164,10 @@ pub fn encode_attn_prefill_v4_g8_t2_q2_c64_main_only_f32(
             ),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_prefill_v4_g8_t2_q2_c64",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
     let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
@@ -11388,10 +11393,10 @@ pub fn encode_attn_prefill_v4_g8_t2_q4_c64_main_only_f32(
             ),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_prefill_v4_g8_t2_q4_c64",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
     let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
@@ -11530,10 +11535,10 @@ pub fn encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
             ),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_prefill_v4_g16_t4_q2_c64",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
     let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
@@ -11754,10 +11759,10 @@ pub fn encode_attn_prefill_v4_g16_t4_q4_c64_main_only_f32(
             ),
         });
     }
-    if nwg == 0 || nwg > 64 {
+    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
         return Err(MetalError::BadShape {
             kernel: "attn_prefill_v4_g16_t4_q4_c64",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
         });
     }
     let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
@@ -20704,6 +20709,8 @@ mod tests {
                 (256, 4),
                 (1024, 8),
                 (1024, 64),
+                (1024, 128),
+                (1024, 256),
                 (4096, 16),
                 (4096, 64),
             ];

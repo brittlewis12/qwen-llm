@@ -157,7 +157,12 @@ Current caveats:
   `37.9 -> 43.7 t/s`; phase attribution says A10B attention drops
   `7.29 -> 3.47 ms`. Stop threshold fiddling here unless a fresh context-slope
   sweep finds a new valley; the next attention branch should be true-long KV or
-  layout pressure.
+  layout pressure. v0.368 then defaults A3B group-8 true-long decode to
+  tile4/NWG256 at `ctx >= 16384`; A3B `ctx32768` moves `75.7 -> 85.4 t/s`, and
+  attention drops `5.14 -> 3.68 ms`. This validates KV byte-reduction as the
+  right true-long lens, but tile8/NWG256 remains slower than tile4/NWG256. The
+  next A3B attention branch needs a better read-once/group-fused occupancy plan;
+  otherwise switch to the broader MoE-down branch.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

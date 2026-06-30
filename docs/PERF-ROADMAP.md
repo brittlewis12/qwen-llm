@@ -1179,9 +1179,15 @@ gated hardware-headroom probes.
     same-byte retunes and reduce work stay deprioritized. v0.367-v0.369 bank the
     concrete medium/true-long attention wins, but v0.370 kills the next partial
     byte-reduction proof: normalized-half partials are exact enough, yet only move
-    A3B `ctx32768` `attn-intra` `1.014x`. Keep attention below MoE/GDN unless the
-    next proposal changes the main-pass read-once execution shape rather than
-    partial storage.
+    A3B `ctx32768` `attn-intra` `1.014x`. v0.388 refreshes current `ctx32768`
+    `attn-intra` knobs and keeps the default tile4/NWG256 path best: default is
+    `0.3469 ms/layer` (`3.47 ms` extrapolated), while tile2/NWG64 is
+    `0.5265 ms`, tile8/NWG256 is `0.3971 ms`, and tile4/NWG128 is `0.3810 ms`.
+    `NWG=128` halves reduce but slows the main body; tile8 reads fewer logical
+    bytes but loses occupancy. Existing group-tile/NWG retunes remain closed.
+    Keep attention below MoE/GDN unless the next proposal brings hidden-traffic
+    counters, a main-pass read-once execution shape, or an end-to-end `ctx32768`
+    prototype that moves throughput rather than partial storage or reduce rows.
 3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds
    correctness-breaking no-op attribution for the GDN projection lane. The
    recoverable lower-bound budget is

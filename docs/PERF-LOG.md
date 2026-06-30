@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.388 Attention True-Long Audit
+
+Status: refreshed A3B `ctx32768` `attn-intra` against the current default and
+the remaining obvious `attn_v4` group8 tile/`NWG` knobs.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0388-attention-true-long-audit/README.md`
+
+Validation:
+
+- A3B `attn-intra --ctx 32768 --runs 3` default
+- A3B `attn-intra --ctx 32768 --runs 3` with tile2/NWG64
+- A3B `attn-intra --ctx 32768 --runs 3` with tile8/NWG256
+- A3B `attn-intra --ctx 32768 --runs 3` with tile4/NWG128
+
+Results:
+
+| A3B ctx32768 shape | One layer | Extrapolated | Main | Reduce | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| default tile4/NWG256 | `0.3469 ms` | `3.4686 ms` | `0.1752 ms` | `0.0676 ms` | best |
+| tile2/NWG64 | `0.5265 ms` | `5.2647 ms` | `0.3887 ms` | `0.0344 ms` | loses main badly |
+| tile8/NWG256 | `0.3971 ms` | `3.9710 ms` | `0.2243 ms` | `0.0675 ms` | fewer bytes, worse occupancy |
+| tile4/NWG128 | `0.3810 ms` | `3.8100 ms` | `0.2411 ms` | `0.0353 ms` | reduce win, net loss |
+
+Decision: keep the current default. Existing shape/NWG retunes remain closed for
+true-long attention. Reopen only with hidden-traffic counters, a read-once body
+rewrite that preserves occupancy, or an end-to-end `ctx32768` prototype.
+
 ## 2026-06-30 - v0.387 Route Candidate-Compression Falsifier
 
 Status: tested and removed an exact fused route sidecar where each simdgroup

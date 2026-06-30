@@ -36,12 +36,13 @@ use qwen_llm::{
         encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
         encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
-        encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2, encode_mul_f32,
-        encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_roofline_fma_f32,
-        encode_roofline_stream_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
-        encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-        encode_sigmoid_mul_f32, encode_split_q_gate_f32, encode_touch_bytes_f32,
-        kernel_trace_begin, kernel_trace_snapshot, with_attn_v4_group_tile_override,
+        encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2, encode_moe_swiglu_q4_K_f32,
+        encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
+        encode_roofline_fma_f32, encode_roofline_stream_f32, encode_rope_neox_f32,
+        encode_rope_neox_f32_packed_consecutive, encode_scatter_offset_f32_to_f16,
+        encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_sigmoid_mul_f32,
+        encode_split_q_gate_f32, encode_touch_bytes_f32, kernel_trace_begin, kernel_trace_snapshot,
+        with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -200,6 +201,8 @@ enum Cmd {
     GdnProjMicro(GdnProjMicroArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
+    /// Exact-shape MoE routed gate/up primitive microbench.
+    MoeGateupMicro(MoeGateupMicroArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
     /// Warm to a target context, then wait for an external go signal before
@@ -545,6 +548,19 @@ struct MoeDownMicroArgs {
     /// Compare default vs --k512-r2 output before timing.
     #[arg(long)]
     check_k512_r2: bool,
+}
+
+#[derive(Parser, Debug)]
+struct MoeGateupMicroArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "20")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "5")]
+    warmup: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1461,6 +1477,7 @@ fn main() -> Result<()> {
         Cmd::AttnIntra(a) => run_attn_intra(a),
         Cmd::GdnProjMicro(a) => run_gdn_proj_micro(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
+        Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
@@ -1877,6 +1894,103 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     println!("phase\tactive_weight_gb\tactivation_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
     println!(
         "q5_down_weighted_sum\t{weight_gb:.4}\t{activation_gb:.4}\t{wall:.4}\t{gpu:.4}\t{:.1}",
+        weight_gb / (gpu / 1e3)
+    );
+    Ok(())
+}
+
+fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
+    let MoeGateupMicroArgs {
+        model,
+        iters,
+        warmup,
+    } = args;
+    if iters == 0 {
+        return Err(anyhow!("--iters must be >= 1"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    let arch = &mm.arch;
+    if arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!("moe-gateup-micro requires an MoE model"));
+    }
+    let h = arch.hidden_size as usize;
+    let f_exp = arch.expert_feed_forward_length as usize;
+    let n_expert = arch.expert_count as usize;
+    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+    let q4_moes: Vec<_> = mm
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            MetalBlock::Gdn(g) => g.ffn_moe.as_ref(),
+            MetalBlock::Attn(a) => a.ffn_moe.as_ref(),
+        })
+        .filter(|moe| moe.gate_exps.dtype == GgmlType::Q4_K && moe.up_exps.dtype == GgmlType::Q4_K)
+        .collect();
+    if q4_moes.is_empty() {
+        return Err(anyhow!("model has no Q4_K routed gate/up expert banks"));
+    }
+
+    let x = MetalTensor::zeros_f32(&ctx, vec![h as u64])?;
+    let topk_idx = MetalTensor::zeros_f32(&ctx, vec![topk as u64])?;
+    let inner = MetalTensor::zeros_f32(&ctx, vec![(topk * f_exp) as u64])?;
+    unsafe {
+        let x_ptr = x.buffer.contents().as_ptr() as *mut f32;
+        for i in 0..h {
+            *x_ptr.add(i) = ((i % 31) as f32 - 15.0) * 0.01;
+        }
+        let idx_ptr = topk_idx.buffer.contents().as_ptr() as *mut i32;
+        for slot in 0..topk {
+            *idx_ptr.add(slot) = ((slot * 17) % n_expert) as i32;
+        }
+    }
+
+    let active_weight_bytes: f64 = q4_moes
+        .iter()
+        .map(|moe| {
+            (moe.gate_exps.n_bytes() + moe.up_exps.n_bytes()) as f64 * topk as f64 / n_expert as f64
+        })
+        .sum();
+    let activation_gb =
+        ((h + topk * f_exp) * std::mem::size_of::<f32>()) as f64 * q4_moes.len() as f64 / 1e9;
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for moe in &q4_moes {
+            encode_moe_swiglu_q4_K_f32(
+                &ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &x,
+                &topk_idx,
+                &inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+            )?;
+        }
+        Ok(())
+    })?;
+
+    let weight_gb = active_weight_bytes / 1e9;
+    println!(
+        "[moe-gateup-micro] model={} q4_layers={} h={} f_exp={} n_expert={} topk={} warmup={} iters={}",
+        model.display(),
+        q4_moes.len(),
+        h,
+        f_exp,
+        n_expert,
+        topk,
+        warmup,
+        iters
+    );
+    println!("phase\tactive_weight_gb\tactivation_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
+    println!(
+        "q4_gateup_swiglu\t{weight_gb:.4}\t{activation_gb:.4}\t{wall:.4}\t{gpu:.4}\t{:.1}",
         weight_gb / (gpu / 1e3)
     );
     Ok(())

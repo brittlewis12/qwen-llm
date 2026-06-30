@@ -1099,6 +1099,11 @@ gated hardware-headroom probes.
    22.63 ms` A10B, `11.82 -> 10.90 ms` A3B), but routed gate/up worsens, so it is
    not exact replay. Keep it as infrastructure; pivot route implementation work
    to exact GPU replay later and move active optimization back to larger buckets.
+   v0.378 adds `moe-gateup-micro` as the next active harness. A10B Q4 gate/up
+   micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
+   gate/up shape probes can use it. A3B synthetic top-k is not representative yet
+   (`1.5179 ms` micro versus `1.07 ms` phase), so A3B promotion still requires
+   captured route-pattern replay or full phase/ctx confirmation.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

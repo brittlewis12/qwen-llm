@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.378 MoE Gate/Up Microbench
+
+Status: added `qwen-bench moe-gateup-micro` for exact-shape routed Q4_K gate/up
+SwiGLU decode timing. This is the routed gate/up analogue of `moe-down-micro`.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0378-moe-gateup-micro/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- A10B `moe-gateup-micro --warmup 3 --iters 10`
+- A3B `moe-gateup-micro --warmup 3 --iters 10`
+
+Results:
+
+| Model row | Q4 layers | GPU | Weight BW | Read |
+| --- | ---: | ---: | ---: | --- |
+| A10B | `47` | `3.0399 ms` | `437.7 GB/s` | close to phase |
+| A3B | `40` | `1.5179 ms` | `248.7 GB/s` | synthetic pattern overstates phase |
+
+Decision: use the harness for bounded A10B gate/up probes, but require captured
+route-pattern replay or full A3B phase confirmation before promoting variants.
+
 ## 2026-06-30 - v0.377 CPU Route Phase Diagnostic
 
 Status: added `QWEN_PHASE_MOE_CPU_ROUTE=1` for `qwen-bench phase`. This skips GPU

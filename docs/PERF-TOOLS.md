@@ -513,6 +513,34 @@ Rules:
 - Keep this separate from throughput timing; traced runs are attribution and
   coverage evidence, not promotion numbers.
 
+### Captured MoE micro lane
+
+Use captured MoE microbenches before promoting routed compute changes. Synthetic
+expert-id patterns have produced false positives; captured rows replay real
+per-layer hidden vectors plus route ids/weights from a decode context.
+
+```sh
+target/release/qwen-bench moe-gateup-micro \
+  -m "$MODEL" \
+  --route-capture-ctx 1024 \
+  --warmup 3 \
+  --iters 10
+
+target/release/qwen-bench moe-down-micro \
+  -m "$MODEL" \
+  --route-capture-ctx 1024 \
+  --warmup 3 \
+  --iters 10
+```
+
+Rules:
+
+- Treat captured replay as the microbench promotion gate for MoE compute work.
+- Require a `5-10%` captured micro win before running long full-phase promotion.
+- `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
+  `--legacy-k512` only for explicit rollback attribution.
+- Synthetic micro wins are triage only unless captured replay agrees.
+
 When long-prompt variants are close enough that run-order drift or thermal sag
 can flip the ranking, use the cooled sweep harness instead of ad hoc shell
 loops:

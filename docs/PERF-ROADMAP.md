@@ -960,17 +960,25 @@ captured. Use existing software gates instead. v0.390 then demotes exact route
 from the main branch: A3B/A10B route replay still repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
 exact boundary is router logits into global exact top-k. The immediate
-implementation rank is now: (1) captured MoE gate/up/down micro work; (2) a
-bounded attention read-once prototype only if it changes the main-body memory
-shape; (3) exact route only if a prototype can save `>=0.4 ms` A3B or `>=0.5 ms`
-A10B route total without consumer movement. Local route barrier/candidate
-variants, GDN row-shape work, attention tile/NWG knobs, and host-only cleanup
-stay closed unless fresh phase/no-op/microbench evidence reopens them.
+implementation rank is now: (1) captured MoE gate/up/down projection throughput
+and active-token/expert batching; (2) a bounded attention read-once prototype only
+if it changes the main-body memory shape; (3) exact route only if a prototype can
+save `>=0.4 ms` A3B or `>=0.5 ms` A10B route total without consumer movement.
+Local route barrier/candidate variants, GDN row-shape work, attention tile/NWG
+knobs, and host-only cleanup stay closed unless fresh phase/no-op/microbench
+evidence reopens them.
 v0.391 adds the missing captured down gate and aligns it with production R2 for
 `f_exp=512`: A3B/A10B captured gate/up and down micro rows now match phase within
 noise (`1.079/0.814 ms` versus `1.08/0.82`, and `3.107/2.595 ms` versus
 `3.21/2.56`). Use captured MoE micro first for compute-branch proposals, with a
 required `5-10%` micro win before full phase promotion.
+v0.393 then kills the existing one-token Q4/Q5 routed FFN monolith under captured
+routes: A3B fused is `80.513 ms` versus split captured `1.894 ms`, and A10B fused
+is `210.142 ms` versus split captured `5.701 ms`. This rules out fusion that
+serializes the active weight stream into one threadgroup per token/layer. It does
+not rule out projection-kernel changes, active token/expert batching, or tiled
+fusion that preserves split-path parallelism; require `>=10%` full captured MoE
+improvement before reopening another monolith-shaped decode branch.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

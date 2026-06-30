@@ -531,6 +531,13 @@ target/release/qwen-bench moe-down-micro \
   --route-capture-ctx 1024 \
   --warmup 3 \
   --iters 10
+
+target/release/qwen-bench moe-down-micro \
+  -m "$MODEL" \
+  --route-capture-ctx 1024 \
+  --fused-routed-q4q5 \
+  --warmup 3 \
+  --iters 10
 ```
 
 Rules:
@@ -539,6 +546,9 @@ Rules:
 - Require a `5-10%` captured micro win before running long full-phase promotion.
 - `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
   `--legacy-k512` only for explicit rollback attribution.
+- `--fused-routed-q4q5` times the existing one-token monolith as a falsifier; do
+  not treat it as a promotion path unless it beats the split captured gate/up plus
+  down rows by `>=10%` while preserving both A3B and A10B coverage.
 - Synthetic micro wins are triage only unless captured replay agrees.
 
 When long-prompt variants are close enough that run-order drift or thermal sag

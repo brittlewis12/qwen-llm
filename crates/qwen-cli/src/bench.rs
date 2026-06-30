@@ -36,13 +36,13 @@ use qwen_llm::{
         encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
         encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
-        encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2, encode_moe_swiglu_q4_K_f32,
-        encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32,
-        encode_roofline_fma_f32, encode_roofline_stream_f32, encode_rope_neox_f32,
-        encode_rope_neox_f32_packed_consecutive, encode_scatter_offset_f32_to_f16,
-        encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_sigmoid_mul_f32,
-        encode_split_q_gate_f32, encode_touch_bytes_f32, kernel_trace_begin, kernel_trace_snapshot,
-        with_attn_v4_group_tile_override,
+        encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
+        encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32, encode_mul_f32,
+        encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_roofline_fma_f32,
+        encode_roofline_stream_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
+        encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+        encode_sigmoid_mul_f32, encode_split_q_gate_f32, encode_touch_bytes_f32,
+        kernel_trace_begin, kernel_trace_snapshot, with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -538,6 +538,9 @@ struct MoeDownMicroArgs {
     /// Synthetic tokens routed through the packed-slots kernel.
     #[arg(long, default_value = "1")]
     tokens: usize,
+    /// Time the existing one-token fused Q4/Q5 routed FFN monolith.
+    #[arg(long)]
+    fused_routed_q4q5: bool,
     /// Capture per-layer route ids/weights at this decode context.
     #[arg(long)]
     route_capture_ctx: Option<usize>,
@@ -1681,6 +1684,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         iters,
         warmup,
         tokens,
+        fused_routed_q4q5,
         route_capture_ctx,
         synthetic_f_exp,
         synthetic_h,
@@ -1694,6 +1698,9 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     }
     if tokens == 0 {
         return Err(anyhow!("--tokens must be >= 1"));
+    }
+    if fused_routed_q4q5 && tokens != 1 {
+        return Err(anyhow!("--fused-routed-q4q5 currently requires --tokens 1"));
     }
 
     let ctx = MetalContext::new().context("init MetalContext")?;
@@ -1721,8 +1728,27 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         .copied()
         .filter(|moe| moe.down_exps.dtype == GgmlType::Q5_K)
         .collect();
-    if q5_moes.is_empty() {
-        return Err(anyhow!("model has no Q5_K routed down expert banks"));
+    let q4q5_moes: Vec<_> = moe_blocks
+        .iter()
+        .copied()
+        .filter(|moe| {
+            moe.gate_exps.dtype == GgmlType::Q4_K
+                && moe.up_exps.dtype == GgmlType::Q4_K
+                && moe.down_exps.dtype == GgmlType::Q5_K
+        })
+        .collect();
+    let bench_moes = if fused_routed_q4q5 {
+        &q4q5_moes
+    } else {
+        &q5_moes
+    };
+    if bench_moes.is_empty() {
+        let wanted = if fused_routed_q4q5 {
+            "Q4_K/Q4_K/Q5_K routed expert banks"
+        } else {
+            "Q5_K routed down expert banks"
+        };
+        return Err(anyhow!("model has no eligible {wanted}"));
     }
     if synthetic_f_exp.is_some() != synthetic_h.is_some() {
         return Err(anyhow!(
@@ -1730,6 +1756,11 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         ));
     }
     let synthetic = synthetic_f_exp.is_some();
+    if fused_routed_q4q5 && synthetic {
+        return Err(anyhow!(
+            "--fused-routed-q4q5 requires real Q4/Q5 expert banks"
+        ));
+    }
     if synthetic && route_capture_ctx.is_some() {
         return Err(anyhow!(
             "--route-capture-ctx is only supported for real routed-down layers"
@@ -1737,7 +1768,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     }
     let f_run = synthetic_f_exp.unwrap_or(f_exp);
     let h_run = synthetic_h.unwrap_or(h);
-    let layer_count = synthetic_layers.unwrap_or(q5_moes.len());
+    let layer_count = synthetic_layers.unwrap_or(bench_moes.len());
     if synthetic && layer_count == 0 {
         return Err(anyhow!("--synthetic-layers must be >= 1"));
     }
@@ -1756,10 +1787,15 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
 
     let slots = tokens * topk;
     let inner = MetalTensor::zeros_f32(&ctx, vec![(slots * f_run) as u64])?;
+    let x = MetalTensor::zeros_f32(&ctx, vec![(tokens * h_run) as u64])?;
     let topk_idx = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
     let topk_w = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
     let out = MetalTensor::zeros_f32(&ctx, vec![(tokens * h_run) as u64])?;
     unsafe {
+        let x_ptr = x.buffer.contents().as_ptr() as *mut f32;
+        for i in 0..(tokens * h_run) {
+            *x_ptr.add(i) = ((i % 31) as f32 - 15.0) * 0.01;
+        }
         let inner_ptr = inner.buffer.contents().as_ptr() as *mut f32;
         for i in 0..(slots * f_run) {
             *inner_ptr.add(i) = ((i % 17) as f32 - 8.0) * 0.0125;
@@ -1772,7 +1808,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         }
     }
 
-    let captured_routes: Option<(usize, Vec<(MetalTensor, MetalTensor)>)> =
+    let captured_routes: Option<(usize, Vec<(MetalTensor, MetalTensor, MetalTensor)>)> =
         if let Some(capture_ctx) = route_capture_ctx {
             let mf = MetalForward::new(&ctx, &mm);
             let mut capture_s = MetalSession::fresh(&ctx, &mm, capture_ctx + 16)
@@ -1789,27 +1825,30 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
                     moe_blocks.len()
                 ));
             }
-            let q5_routes: Vec<_> = moe_blocks
+            let captured_for_bench: Vec<_> = moe_blocks
                 .iter()
                 .zip(all_routes.iter())
                 .filter_map(|(moe, route)| {
-                    if moe.down_exps.dtype == GgmlType::Q5_K {
-                        Some(route)
+                    let eligible = if fused_routed_q4q5 {
+                        moe.gate_exps.dtype == GgmlType::Q4_K
+                            && moe.up_exps.dtype == GgmlType::Q4_K
+                            && moe.down_exps.dtype == GgmlType::Q5_K
                     } else {
-                        None
-                    }
+                        moe.down_exps.dtype == GgmlType::Q5_K
+                    };
+                    if eligible { Some(route) } else { None }
                 })
                 .collect();
-            if q5_routes.len() != q5_moes.len() {
+            if captured_for_bench.len() != bench_moes.len() {
                 return Err(anyhow!(
-                    "captured {} Q5 down route rows, expected {}",
-                    q5_routes.len(),
-                    q5_moes.len()
+                    "captured {} eligible route rows, expected {}",
+                    captured_for_bench.len(),
+                    bench_moes.len()
                 ));
             }
 
-            let mut tensors = Vec::with_capacity(q5_routes.len());
-            for route in q5_routes {
+            let mut tensors = Vec::with_capacity(captured_for_bench.len());
+            for route in captured_for_bench {
                 if route.topk_idx.len() != topk || route.topk_weight.len() != topk {
                     return Err(anyhow!(
                         "captured route has idx={} weight={}, expected topk={topk}",
@@ -1817,11 +1856,20 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
                         route.topk_weight.len()
                     ));
                 }
+                if route.hidden.len() != h_run {
+                    return Err(anyhow!(
+                        "captured hidden has {}, expected h={h_run}",
+                        route.hidden.len()
+                    ));
+                }
                 let idx = MetalTensor::zeros_f32(&ctx, vec![topk as u64])?;
                 let weight = MetalTensor::zeros_f32(&ctx, vec![topk as u64])?;
+                let hidden = MetalTensor::zeros_f32(&ctx, vec![h_run as u64])?;
                 unsafe {
                     let idx_ptr = idx.buffer.contents().as_ptr() as *mut i32;
                     let w_ptr = weight.buffer.contents().as_ptr() as *mut f32;
+                    let h_ptr = hidden.buffer.contents().as_ptr() as *mut f32;
+                    std::ptr::copy_nonoverlapping(route.hidden.as_ptr(), h_ptr, h_run);
                     for slot in 0..topk {
                         let expert = route.topk_idx[slot];
                         if expert < 0 || expert as usize >= n_expert {
@@ -1833,7 +1881,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
                         *w_ptr.add(slot) = route.topk_weight[slot];
                     }
                 }
-                tensors.push((idx, weight));
+                tensors.push((idx, weight, hidden));
             }
             Some((capture_ctx, tensors))
         } else {
@@ -1842,8 +1890,18 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
 
     let active_weight_bytes: f64 = if let Some(weight) = synthetic_weight.as_ref() {
         weight.n_bytes() as f64 * layer_count as f64 * tokens as f64 * topk as f64 / n_expert as f64
+    } else if fused_routed_q4q5 {
+        bench_moes
+            .iter()
+            .map(|moe| {
+                (moe.gate_exps.n_bytes() + moe.up_exps.n_bytes() + moe.down_exps.n_bytes()) as f64
+                    * topk as f64
+                    * tokens as f64
+                    / n_expert as f64
+            })
+            .sum()
     } else {
-        q5_moes
+        bench_moes
             .iter()
             .map(|moe| {
                 moe.down_exps.n_bytes() as f64 * tokens as f64 * topk as f64 / n_expert as f64
@@ -1942,7 +2000,30 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     }
 
     let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
-        if let Some(weight) = synthetic_weight.as_ref() {
+        if fused_routed_q4q5 {
+            for (layer_i, moe) in bench_moes.iter().enumerate() {
+                let (route_idx, route_w, layer_x) = captured_routes
+                    .as_ref()
+                    .map(|(_, routes)| (&routes[layer_i].0, &routes[layer_i].1, &routes[layer_i].2))
+                    .unwrap_or((&topk_idx, &topk_w, &x));
+                encode_moe_fused_routed_q4q5_token_f32(
+                    &ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &moe.up_exps,
+                    &moe.down_exps,
+                    layer_x,
+                    route_idx,
+                    route_w,
+                    &out,
+                    h_run,
+                    f_run,
+                    n_expert,
+                    topk,
+                    tokens,
+                )?;
+            }
+        } else if let Some(weight) = synthetic_weight.as_ref() {
             for _ in 0..layer_count {
                 if use_k512_r2 {
                     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
@@ -1957,7 +2038,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
                 }
             }
         } else {
-            for (layer_i, moe) in q5_moes.iter().enumerate() {
+            for (layer_i, moe) in bench_moes.iter().enumerate() {
                 let (route_idx, route_w) = captured_routes
                     .as_ref()
                     .map(|(_, routes)| (&routes[layer_i].0, &routes[layer_i].1))
@@ -1999,7 +2080,11 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     })?;
 
     let weight_gb = active_weight_bytes / 1e9;
-    let activation_gb = (inner_bytes + out_bytes) * layer_count as f64 / 1e9;
+    let activation_gb = if fused_routed_q4q5 {
+        out_bytes * 2.0 * layer_count as f64 / 1e9
+    } else {
+        (inner_bytes + out_bytes) * layer_count as f64 / 1e9
+    };
     let route_mode = captured_routes
         .as_ref()
         .map(|(ctx, _)| format!("captured(ctx={ctx})"))
@@ -2009,8 +2094,14 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         model.display(),
         if synthetic { "synthetic" } else { "real" },
         route_mode,
-        if use_k512_r2 { "k512_r2" } else { "default" },
-        q5_moes.len(),
+        if fused_routed_q4q5 {
+            "fused_q4q5"
+        } else if use_k512_r2 {
+            "k512_r2"
+        } else {
+            "default"
+        },
+        bench_moes.len(),
         layer_count,
         h_run,
         f_run,
@@ -2021,8 +2112,13 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         iters
     );
     println!("phase\tactive_weight_gb\tactivation_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
+    let phase = if fused_routed_q4q5 {
+        "q4q5_fused_routed"
+    } else {
+        "q5_down_weighted_sum"
+    };
     println!(
-        "q5_down_weighted_sum\t{weight_gb:.4}\t{activation_gb:.4}\t{wall:.4}\t{gpu:.4}\t{:.1}",
+        "{phase}\t{weight_gb:.4}\t{activation_gb:.4}\t{wall:.4}\t{gpu:.4}\t{:.1}",
         weight_gb / (gpu / 1e3)
     );
     Ok(())

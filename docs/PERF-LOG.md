@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.393 Captured MoE Monolith Falsifier
+
+Status: added a captured `moe-down-micro --fused-routed-q4q5` harness lane for
+the existing one-token Q4/Q5 routed FFN monolith and tested it against the
+production-faithful split gate/up plus down captured rows.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0393-moe-monolith-falsifier/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B captured `moe-down-micro --route-capture-ctx 1024 --fused-routed-q4q5`
+- `cx ask` adversarial review, session `019f1ad5-c571-7ab1-b141-6ce8fccb787d`
+
+Results:
+
+| Model | Split captured gate/up+down | Fused monolith | Read |
+| --- | ---: | ---: | --- |
+| A3B Q4 | `1.8938 ms` | `80.5129 ms` | catastrophic occupancy collapse |
+| A10B Q4_XL | `5.7014 ms` | `210.1424 ms` | catastrophic occupancy collapse |
+
+Decision: the existing one-token monolith is not a viable MoE decode fusion
+direction. It rules out fusion that serializes the active weight stream into one
+threadgroup per token/layer; it does not rule out projection-kernel work, batching
+active tokens/experts, or fusion that preserves split-path parallelism. Keep the
+captured micro gate and require `>=10%` full captured MoE improvement before
+promoting another routed compute shape.
+
 ## 2026-06-30 - v0.391 Captured MoE Down Microbench
 
 Status: extended captured MoE replay to routed down by recording top-k weights as

@@ -10622,11 +10622,16 @@ pub fn encode_attn_decode_v4_f32(
         head_dim: u32,
         n_partitions: u32,
     }
-    let red_pipeline_name = match group {
-        4 => "kernel_attn_decode_v4_reduce_g4_f32",
-        6 => "kernel_attn_decode_v4_reduce_f32",
-        8 => "kernel_attn_decode_v4_reduce_g8_f32",
-        16 => "kernel_attn_decode_v4_reduce_g16_f32",
+    let reduce_h2 = nwg >= 128;
+    let red_pipeline_name = match (group, reduce_h2) {
+        (4, false) => "kernel_attn_decode_v4_reduce_g4_f32",
+        (6, false) => "kernel_attn_decode_v4_reduce_f32",
+        (8, false) => "kernel_attn_decode_v4_reduce_g8_f32",
+        (16, false) => "kernel_attn_decode_v4_reduce_g16_f32",
+        (4, true) => "kernel_attn_decode_v4_reduce_h2_g4_f32",
+        (6, true) => "kernel_attn_decode_v4_reduce_h2_g6_f32",
+        (8, true) => "kernel_attn_decode_v4_reduce_h2_g8_f32",
+        (16, true) => "kernel_attn_decode_v4_reduce_h2_g16_f32",
         _ => unreachable!(),
     };
     let pso_red = ctx.pipeline(red_pipeline_name)?;
@@ -10650,7 +10655,7 @@ pub fn encode_attn_decode_v4_f32(
     enc.dispatch(
         MTLSize {
             width: n_q_heads,
-            height: 1,
+            height: if reduce_h2 { 2 } else { 1 },
             depth: 1,
         },
         MTLSize {
@@ -11090,11 +11095,16 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
         head_dim: u32,
         n_partitions: u32,
     }
-    let red_pipeline_name = match group {
-        4 => "kernel_attn_decode_v4_reduce_g4_f32",
-        6 => "kernel_attn_decode_v4_reduce_f32",
-        8 => "kernel_attn_decode_v4_reduce_g8_f32",
-        16 => "kernel_attn_decode_v4_reduce_g16_f32",
+    let reduce_h2 = nwg >= 128;
+    let red_pipeline_name = match (group, reduce_h2) {
+        (4, false) => "kernel_attn_decode_v4_reduce_g4_f32",
+        (6, false) => "kernel_attn_decode_v4_reduce_f32",
+        (8, false) => "kernel_attn_decode_v4_reduce_g8_f32",
+        (16, false) => "kernel_attn_decode_v4_reduce_g16_f32",
+        (4, true) => "kernel_attn_decode_v4_reduce_h2_g4_f32",
+        (6, true) => "kernel_attn_decode_v4_reduce_h2_g6_f32",
+        (8, true) => "kernel_attn_decode_v4_reduce_h2_g8_f32",
+        (16, true) => "kernel_attn_decode_v4_reduce_h2_g16_f32",
         _ => unreachable!(),
     };
     let pso_red = ctx.pipeline(red_pipeline_name)?;
@@ -11117,7 +11127,7 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
     enc.dispatch(
         MTLSize {
             width: n_q_heads,
-            height: 1,
+            height: if reduce_h2 { 2 } else { 1 },
             depth: 1,
         },
         MTLSize {

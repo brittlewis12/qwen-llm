@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-29 - v0.369 A3B True-Long Attention H2 Reduce
+
+Status: defaulted a two-threadgroup decode v4 reduce for `NWG >= 128`, splitting
+the `head_dim=256` output work in half. This follows v0.368's tile4/NWG256 A3B
+true-long selector.
+
+Artifact:
+
+- `docs/bench/2026-06-29-2109-v0369-a3b-h2-reduce/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo build --release --bin qwen-bench`
+- `cargo test -p qwen-llm attn_v4_matches_naive_f16kv --release -- --nocapture`
+- A3B `attn-intra --ctx 32768 --runs 3`
+- A3B `ctx-sweep --checkpoints 4096,8192,16384,32768 --window 16`
+
+Results:
+
+| A3B Q4_K_M row | v0.368 | v0.369 | Read |
+| --- | ---: | ---: | --- |
+| `ctx16384` | `91.2 t/s` | `95.0 t/s` | `1.04x` |
+| `ctx32768` | `85.4 t/s` | `88.2 t/s` | `1.03x` |
+
+`attn-intra` at `ctx32768` shows the reduce pass drops `0.1284 -> 0.0677 ms` per
+attention layer while the main pass stays flat. Whole-model attention drops
+`3.68 -> 3.33 ms` in the phase trace.
+
 ## 2026-06-29 - v0.368 A3B True-Long Decode Attention NWG256
 
 Status: defaulted A3B group-8 decode attention to tile4/NWG256 at

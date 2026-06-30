@@ -162,7 +162,11 @@ Current caveats:
   attention drops `5.14 -> 3.68 ms`. This validates KV byte-reduction as the
   right true-long lens, but tile8/NWG256 remains slower than tile4/NWG256. The
   next A3B attention branch needs a better read-once/group-fused occupancy plan;
-  otherwise switch to the broader MoE-down branch.
+  otherwise switch to the broader MoE-down branch. v0.369 banks the cheap reduce
+  follow-up for that selector: the two-threadgroup reduce moves A3B `ctx16384`
+  `91.2 -> 95.0 t/s` and `ctx32768` `85.4 -> 88.2 t/s`. Further attention work
+  now needs a structural read-once or partial-traffic reduction, not another local
+  reduce split.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

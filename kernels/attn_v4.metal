@@ -1881,6 +1881,65 @@ inline void attn_v4_reduce_body(
     }
 }
 
+template <ushort GROUP>
+inline void attn_v4_reduce_h2_body(
+        constant attn_v4_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint qh = tgpig.x;
+    if (qh >= args.n_q_heads) return;
+    const uint kvh = qh / GROUP;
+    const uint g = qh % GROUP;
+    const uint nwg = args.n_partitions;
+    const uint half_idx = tgpig.y;
+
+    for (uint part = tiisg; part < nwg; part += 32) {
+        device const float * ml_base = ml_partial
+            + ((ulong)kvh * nwg + part) * GROUP * 2;
+        sh_m[part] = ml_base[g * 2 + 0];
+        sh_l[part] = ml_base[g * 2 + 1];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float m_local = -INFINITY;
+    for (uint part = tiisg; part < nwg; part += 32) {
+        m_local = max(m_local, sh_m[part]);
+    }
+    const float m_global = simd_max(m_local);
+
+    float l_local = 0.0f;
+    for (uint part = tiisg; part < nwg; part += 32) {
+        const float ef = (sh_m[part] == -INFINITY || m_global == -INFINITY)
+            ? 0.0f
+            : exp2(sh_m[part] - m_global);
+        sh_ef[part] = ef;
+        l_local += sh_l[part] * ef;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float l_global = simd_sum(l_local);
+    const float inv_l = (l_global > 0.0f) ? (1.0f / l_global) : 0.0f;
+    const uint d = half_idx * 128 + uint(tiisg) * 4;
+
+    float4 acc = float4(0.0f);
+    for (uint i = 0; i < nwg; ++i) {
+        const float ef = sh_ef[i];
+        const ulong off = ((ulong)kvh * nwg + i) * GROUP * DV
+                        + (ulong)g * DV
+                        + (ulong)d;
+        const device float4 * src4 = (device const float4 *)(o_partial + off);
+        acc += (*src4) * ef;
+    }
+    device float4 * out4 = (device float4 *)(out + (ulong)qh * DV + (ulong)d);
+    *out4 = acc * inv_l;
+}
+
 kernel void kernel_attn_decode_v4_reduce_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -1931,4 +1990,56 @@ kernel void kernel_attn_decode_v4_reduce_g16_f32(
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]]) {
     attn_v4_reduce_body<16>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
+}
+
+kernel void kernel_attn_decode_v4_reduce_h2_g4_f32(
+        constant attn_v4_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_reduce_h2_body<4>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
+}
+
+kernel void kernel_attn_decode_v4_reduce_h2_g6_f32(
+        constant attn_v4_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_reduce_h2_body<6>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
+}
+
+kernel void kernel_attn_decode_v4_reduce_h2_g8_f32(
+        constant attn_v4_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_reduce_h2_body<8>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
+}
+
+kernel void kernel_attn_decode_v4_reduce_h2_g16_f32(
+        constant attn_v4_reduce_args & args [[buffer(0)]],
+        device const float * o_partial   [[buffer(1)]],
+        device const float * ml_partial  [[buffer(2)]],
+        device       float * out         [[buffer(3)]],
+        threadgroup  float * sh_m        [[threadgroup(0)]],
+        threadgroup  float * sh_l        [[threadgroup(1)]],
+        threadgroup  float * sh_ef       [[threadgroup(2)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    attn_v4_reduce_h2_body<16>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }

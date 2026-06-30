@@ -1090,7 +1090,10 @@ gated hardware-headroom probes.
    than the fused route kernel (`1.50 ms` A10B and `1.04 ms` A3B versus fused
    topk/shared `0.86/0.68 ms`), so production should keep shared gate fused. The
    remaining route kernel hypothesis is a fused simdgroup-local top-k or exact
-   route-cache replay; do not build a split shared-gate route path.
+   route-cache replay; do not build a split shared-gate route path. v0.376 kills
+   the simple fused SG top-k version: it is correctness-safe in an A3B smoke but
+   regresses fused route topk/shared to `1.25 ms` on A10B and `1.00 ms` on A3B.
+   Route now needs exact route-cache replay before more route kernels.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.376 SG Top-K Route Falsifier
+
+Status: killed a dirty fused simdgroup-local top-k route sidecar. The sidecar kept
+shared-gate dot fused but replaced the threadgroup-wide top-k reductions with a
+single-simdgroup selector.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0376-sg-topk-falsifier/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli`
+- `cargo build -p qwen-cli --bin qwen-bench --release`
+- Dirty `QWEN_DECODE_MOE_SG_TOPK=1` A3B CPU smoke
+- Dirty A10B `ctx8192` phase with route split
+- Dirty A3B `ctx32768` phase with route split
+
+Results:
+
+| Model row | Default route topk/shared | Dirty SG topk/shared | Read |
+| --- | ---: | ---: | --- |
+| A10B `ctx8192` | `0.86 ms` | `1.25 ms` | regressed |
+| A3B `ctx32768` | `0.68 ms` | `1.00 ms` | regressed |
+
+Decision: do not keep the sidecar. Route remains interesting because no-op replay
+clears the lower-bound gate, but the simple SG selector is not the production
+kernel. The next route gate is exact route-cache replay, not another top-k local
+rewrite.
+
 ## 2026-06-30 - v0.375 MoE Route Deep Split
 
 Status: added `QWEN_PHASE_MOE_ROUTE_SPLIT=deep` for `qwen-bench phase`. This

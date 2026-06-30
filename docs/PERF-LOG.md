@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.386 Route Barrier-Diet Falsifier
+
+Status: tested and removed an exact fused route sidecar that reduced obvious
+barriers in `kernel_topk_logits_softmax_dot_sigmoid_f32` while preserving shared
+gate fusion, tie semantics, and output layout.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0386-route-barrier-diet-falsifier/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A10B ctx8192 default and dirty v2 route-split phase
+- Sidecar removed and canonical release rebuilt
+
+Results:
+
+| A10B ctx8192 row | Default | Dirty v2 | Delta |
+| --- | ---: | ---: | ---: |
+| `moe route topk/shared` | `0.86 ms` | `0.82 ms` | `-0.04 ms` |
+| phase sum | `23.98 ms` | `23.92 ms` | `-0.06 ms` |
+| routed gate/up | `3.20 ms` | `3.21 ms` | noise |
+| routed down | `2.56 ms` | `2.57 ms` | noise |
+
+Decision: kill the barrier-diet route sidecar. v0.385 proves route has exact
+recoverable budget, but this implementation does not clear the production gate.
+Do not retry barrier-only route kernels without a new counter signal.
+
 ## 2026-06-30 - v0.385 Exact GPU Route Replay
 
 Status: added `QWEN_PHASE_MOE_ROUTE_REPLAY=1` for `qwen-bench phase`. The real

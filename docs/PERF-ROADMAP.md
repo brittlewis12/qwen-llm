@@ -1106,7 +1106,12 @@ gated hardware-headroom probes.
    and A3B ctx32768 moves `11.76 -> 10.75 ms` with consumers unchanged. Production
    route work is now justified, but only for a post-logits/top-k/shared route
    design that saves `>=0.25 ms` A10B or `>=0.15 ms` A3B and moves end-to-end
-   decode without perturbing MoE consumers.
+   decode without perturbing MoE consumers. v0.386 kills the lowest-risk
+   production attempt: a dirty exact fused top-k/shared barrier-diet sidecar only
+   moved A10B ctx8192 `moe route topk/shared` `0.86 -> 0.82 ms` and phase sum
+   `23.98 -> 23.92 ms`, far below gate. Do not reopen barrier-only route kernels;
+   the next route implementation needs a materially different top-k work shape or
+   a new counter signal.
    v0.378 adds `moe-gateup-micro` as the next active harness. A10B Q4 gate/up
    micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
    gate/up shape probes can use it. A3B synthetic top-k is not representative yet

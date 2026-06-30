@@ -1102,11 +1102,11 @@ gated hardware-headroom probes.
    v0.378 adds `moe-gateup-micro` as the next active harness. A10B Q4 gate/up
    micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
    gate/up shape probes can use it. A3B synthetic top-k is not representative yet
-   (`1.5179 ms` micro versus `1.07 ms` phase), so A3B promotion still requires
-   captured route-pattern replay or full phase/ctx confirmation. v0.379 proves
-   that guardrail: dirty `NR0_Q4K=4` improves A3B synthetic micro (`1.5179 ->
-   1.3430 ms`) but fails full phase (`1.07 -> 1.09 ms`) and regresses/noises A10B.
-   Do not continue row-widening without captured route patterns.
+    (`1.5179 ms` micro versus `1.07 ms` phase), so A3B promotion still requires
+    captured route-pattern replay or full phase/ctx confirmation. v0.379 proves
+    that guardrail: dirty `NR0_Q4K=4` improves A3B synthetic micro (`1.5179 ->
+    1.3430 ms`) but fails full phase (`1.07 -> 1.09 ms`) and regresses/noises A10B.
+    Do not continue row-widening without captured route patterns.
    v0.380 bounds the lm-head greedy-fusion shelf: `lm argmax` is only
    `0.06 ms` on A10B and `0.05 ms` on A3B, so exact `lm_head+argmax` fusion is
    below the implementation gate. Treat lm-head as projection-weight-read work,
@@ -1115,7 +1115,13 @@ gated hardware-headroom probes.
    `ctx128` to `ctx32768`, A10B drops `45.2 -> 40.7 t/s` from `ctx128` to
    `ctx16384`, and dense 27B drops `25.6 -> 23.2 t/s` from `ctx128` to `ctx8192`.
    No new cliff appears; use phase-budgeted structural branches, not more local
-   route/gateup row tweaks.
+   route/gateup row tweaks. v0.382 adds captured hidden+route replay to
+   `moe-gateup-micro`, which makes the harness phase-faithful on A3B ctx8192
+   (`1.0836 ms` replay versus `1.08 ms` phase) and A10B ctx8192 (`3.1147 ms`
+   replay versus `3.19 ms` phase). It also rejects the known dirty NR4 false
+   positive (`1.1014 ms` captured versus `1.0836 ms` default). Use captured
+   replay as a gate for future Q4 gate/up variants, but do not keep mining
+   row-width tweaks without a structural byte/dataflow rationale.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

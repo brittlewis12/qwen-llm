@@ -4556,6 +4556,118 @@ impl<'a> MetalForward<'a> {
         Ok((out, total_ms, phases))
     }
 
+    /// Decode one MoE token and return the per-layer post-norm hidden vector
+    /// plus routed expert ids after each real route kernel. This is bench-only
+    /// instrumentation for replaying realistic route patterns in isolated MoE
+    /// microbenches.
+    pub fn capture_moe_gateup_replay_for_token(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<Vec<(Vec<i32>, Vec<f32>)>, MfError> {
+        let arch = &self.model.arch;
+        if arch.kind != ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        {
+            let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_get_rows_f32(
+                self.ctx,
+                &enc,
+                &self.model.token_embd,
+                &session.ids_buf,
+                &session.x,
+                1,
+                h,
+            )?;
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+        }
+
+        let mut routes = Vec::new();
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for block in &self.model.blocks {
+            let slot = match block {
+                MetalBlock::Gdn(_) => {
+                    let s = MixerSlot::Gdn(gdn_idx);
+                    gdn_idx += 1;
+                    s
+                }
+                MetalBlock::Attn(_) => {
+                    let s = MixerSlot::Attn(attn_idx);
+                    attn_idx += 1;
+                    s
+                }
+            };
+            let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+                MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+                MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+            };
+            let moe = moe.ok_or(MfError::UnsupportedMoe)?;
+
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+            }
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                self.encode_moe_route_prepare(&enc, session, moe)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+            }
+
+            let route = self.read_moe_route_result(session, topk);
+            let hidden = unsafe {
+                let src = (session.h.buffer.contents().as_ptr() as *const f32)
+                    .add((session.h.offset / 4) as usize);
+                std::slice::from_raw_parts(src, h).to_vec()
+            };
+            let topk_idx = route
+                .ranked
+                .iter()
+                .map(|&(expert, _)| expert as i32)
+                .collect();
+            routes.push((topk_idx, hidden));
+
+            {
+                let cmd = self.ctx.queue.commandBuffer().expect("cmd");
+                if concurrent_shared_moe_decode_enabled() {
+                    self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                        &cmd, session, ffn_gate, ffn_up, ffn_down, moe,
+                    )?;
+                } else {
+                    let enc = KernelEncoder::begin(&cmd);
+                    self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
+                    enc.end();
+                }
+                cmd.commit();
+                cmd.waitUntilCompleted();
+            }
+        }
+        Ok(routes)
+    }
+
     fn single_token_phase_profiled_moe(
         &self,
         token_id: i32,

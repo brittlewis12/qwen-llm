@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.382 Gate/Up Captured Replay
+
+Status: added `--route-capture-ctx` to `qwen-bench moe-gateup-micro`. The mode
+ramps a real decode session, captures each Q4 routed gate/up layer's post-norm
+hidden vector plus top-k expert ids, and replays them in the isolated microbench.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0382-gateup-captured-replay/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B synthetic and captured ctx8192 `moe-gateup-micro`
+- A3B/A10B ctx8192 deep FFN phase profiles
+- Dirty NR4 captured-replay falsifier, then reverted
+
+Results:
+
+| Row | Gate/up GPU | Comparator | Read |
+| --- | ---: | ---: | --- |
+| A3B synthetic micro | `1.3617 ms` | phase `1.08 ms` | still misleading |
+| A3B captured ctx8192 | `1.0836 ms` | phase `1.08 ms` | phase-faithful |
+| A10B captured ctx8192 | `3.1147 ms` | phase `3.19 ms` | within gate |
+| A3B dirty NR4 captured | `1.1014 ms` | default `1.0836 ms` | false positive rejected |
+
+Decision: require captured hidden+route replay before trusting any future Q4
+routed gate/up micro win. Expert ids alone were not enough; input distribution
+was the missing confound. Since captured replay now shows default gate/up close
+to the phase budget, prefer structural byte/dataflow work over more row-shape
+tweaks.
+
 ## 2026-06-30 - v0.381 Decode Context Recalibration
 
 Status: ran a bounded current-HEAD decode context sweep across A3B, A10B, and

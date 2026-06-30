@@ -561,6 +561,9 @@ struct MoeGateupMicroArgs {
     /// Untimed warmup repetitions.
     #[arg(long, default_value = "5")]
     warmup: usize,
+    /// Capture per-layer hidden activations and top-k ids at this decode context.
+    #[arg(long)]
+    route_capture_ctx: Option<usize>,
 }
 
 #[derive(Parser, Debug)]
@@ -1904,6 +1907,7 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
         model,
         iters,
         warmup,
+        route_capture_ctx,
     } = args;
     if iters == 0 {
         return Err(anyhow!("--iters must be >= 1"));
@@ -1921,13 +1925,17 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
     let f_exp = arch.expert_feed_forward_length as usize;
     let n_expert = arch.expert_count as usize;
     let topk = arch.expert_used_count.min(arch.expert_count) as usize;
-    let q4_moes: Vec<_> = mm
+    let moe_blocks: Vec<_> = mm
         .blocks
         .iter()
         .filter_map(|b| match b {
             MetalBlock::Gdn(g) => g.ffn_moe.as_ref(),
             MetalBlock::Attn(a) => a.ffn_moe.as_ref(),
         })
+        .collect();
+    let q4_moes: Vec<_> = moe_blocks
+        .iter()
+        .copied()
         .filter(|moe| moe.gate_exps.dtype == GgmlType::Q4_K && moe.up_exps.dtype == GgmlType::Q4_K)
         .collect();
     if q4_moes.is_empty() {
@@ -1948,6 +1956,81 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
         }
     }
 
+    let captured_inputs: Option<(usize, Vec<(MetalTensor, MetalTensor)>)> =
+        if let Some(capture_ctx) = route_capture_ctx {
+            let mf = MetalForward::new(&ctx, &mm);
+            let mut capture_s = MetalSession::fresh(&ctx, &mm, capture_ctx + 16)
+                .context("route-capture session")?;
+            for pos in 0..capture_ctx {
+                let _ = mf.single_token(0, pos as u32, &mut capture_s)?;
+            }
+            let all_routes =
+                mf.capture_moe_gateup_replay_for_token(0, capture_ctx as u32, &mut capture_s)?;
+            if all_routes.len() != moe_blocks.len() {
+                return Err(anyhow!(
+                    "captured {} MoE route rows, expected {}",
+                    all_routes.len(),
+                    moe_blocks.len()
+                ));
+            }
+            let q4_routes: Vec<_> = moe_blocks
+                .iter()
+                .zip(all_routes.iter())
+                .filter_map(|(moe, route)| {
+                    if moe.gate_exps.dtype == GgmlType::Q4_K && moe.up_exps.dtype == GgmlType::Q4_K
+                    {
+                        Some(route)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if q4_routes.len() != q4_moes.len() {
+                return Err(anyhow!(
+                    "captured {} Q4 route rows, expected {}",
+                    q4_routes.len(),
+                    q4_moes.len()
+                ));
+            }
+
+            let mut tensors = Vec::with_capacity(q4_routes.len());
+            for (route, hidden) in q4_routes {
+                if route.len() != topk {
+                    return Err(anyhow!(
+                        "captured route has {} experts, expected topk={topk}",
+                        route.len()
+                    ));
+                }
+                if hidden.len() != h {
+                    return Err(anyhow!(
+                        "captured hidden has {} elements, expected h={h}",
+                        hidden.len()
+                    ));
+                }
+                let hidden_t = MetalTensor::zeros_f32(&ctx, vec![h as u64])?;
+                unsafe {
+                    let dst = hidden_t.buffer.contents().as_ptr() as *mut f32;
+                    std::ptr::copy_nonoverlapping(hidden.as_ptr(), dst, h);
+                }
+                let idx = MetalTensor::zeros_f32(&ctx, vec![topk as u64])?;
+                unsafe {
+                    let ptr = idx.buffer.contents().as_ptr() as *mut i32;
+                    for (slot, &expert) in route.iter().enumerate() {
+                        if expert < 0 || expert as usize >= n_expert {
+                            return Err(anyhow!(
+                                "captured expert id {expert} outside n_expert={n_expert}"
+                            ));
+                        }
+                        *ptr.add(slot) = expert;
+                    }
+                }
+                tensors.push((hidden_t, idx));
+            }
+            Some((capture_ctx, tensors))
+        } else {
+            None
+        };
+
     let active_weight_bytes: f64 = q4_moes
         .iter()
         .map(|moe| {
@@ -1958,14 +2041,18 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
         ((h + topk * f_exp) * std::mem::size_of::<f32>()) as f64 * q4_moes.len() as f64 / 1e9;
 
     let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
-        for moe in &q4_moes {
+        for (layer_i, moe) in q4_moes.iter().enumerate() {
+            let (layer_x, route_idx) = captured_inputs
+                .as_ref()
+                .map(|(_, idx)| (&idx[layer_i].0, &idx[layer_i].1))
+                .unwrap_or((&x, &topk_idx));
             encode_moe_swiglu_q4_K_f32(
                 &ctx,
                 enc,
                 &moe.gate_exps,
                 &moe.up_exps,
-                &x,
-                &topk_idx,
+                layer_x,
+                route_idx,
                 &inner,
                 h,
                 f_exp,
@@ -1977,9 +2064,14 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
     })?;
 
     let weight_gb = active_weight_bytes / 1e9;
+    let route_mode = captured_inputs
+        .as_ref()
+        .map(|(ctx, _)| format!("captured(ctx={ctx})"))
+        .unwrap_or_else(|| "synthetic".to_string());
     println!(
-        "[moe-gateup-micro] model={} q4_layers={} h={} f_exp={} n_expert={} topk={} warmup={} iters={}",
+        "[moe-gateup-micro] model={} mode={} q4_layers={} h={} f_exp={} n_expert={} topk={} warmup={} iters={}",
         model.display(),
+        route_mode,
         q4_moes.len(),
         h,
         f_exp,

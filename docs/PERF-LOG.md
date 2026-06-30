@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.379 Q4 Gate/Up NR4 Falsifier
+
+Status: killed a dirty routed Q4_K gate/up row-widening sidecar that changed
+`NR0_Q4K` from 2 to 4.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0379-q4-gateup-nr4-falsifier/README.md`
+
+Validation:
+
+- `cargo build -p qwen-cli --bin qwen-bench --release` with dirty NR4
+- A10B/A3B `moe-gateup-micro --warmup 3 --iters 10`
+- A10B `ctx8192` and A3B `ctx32768` phase with dirty NR4
+
+Results:
+
+| Model row | Default micro | Dirty micro | Default phase gate/up | Dirty phase gate/up |
+| --- | ---: | ---: | ---: | ---: |
+| A10B | `3.0399 ms` | `3.0744 ms` | `3.18 ms` | `3.22 ms` |
+| A3B | `1.5179 ms` | `1.3430 ms` | `1.07 ms` | `1.09 ms` |
+
+Decision: do not keep row-widening. The synthetic A3B micro win did not transfer
+to full phase, and A10B did not improve. Gate/up variants need captured route
+patterns or a stronger dataflow signal before more row-shape tweaks.
+
 ## 2026-06-30 - v0.378 MoE Gate/Up Microbench
 
 Status: added `qwen-bench moe-gateup-micro` for exact-shape routed Q4_K gate/up

@@ -1103,7 +1103,10 @@ gated hardware-headroom probes.
    micro is close to phase (`3.0399 ms` versus `3.18 ms`), so bounded A10B Q4
    gate/up shape probes can use it. A3B synthetic top-k is not representative yet
    (`1.5179 ms` micro versus `1.07 ms` phase), so A3B promotion still requires
-   captured route-pattern replay or full phase/ctx confirmation.
+   captured route-pattern replay or full phase/ctx confirmation. v0.379 proves
+   that guardrail: dirty `NR0_Q4K=4` improves A3B synthetic micro (`1.5179 ->
+   1.3430 ms`) but fails full phase (`1.07 -> 1.09 ms`) and regresses/noises A10B.
+   Do not continue row-widening without captured route patterns.
 2. Decode long-context attention/KV second pass: v0.293 proves A3B group8 decode
    attention still had high-EV execution-shape headroom (`ctx16384` attention
    `4.80 -> 3.60 ms`, throughput `72.8 -> 82.2 t/s`). Attention remains large in

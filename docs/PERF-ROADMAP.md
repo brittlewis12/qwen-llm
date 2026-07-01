@@ -1116,6 +1116,14 @@ continuation signal, not a scheduler gate: absolute one-layer timings do not map
 directly to full-model phase rows, block-0 may be favorable, and full occupancy is
 idealized. Next: measure representative GDN layers, then MoE/FFN replay with route
 divergence, before full integrated phase replay or scheduler architecture.
+v0.412 removes the block-0 concern: first/middle/last A3B GDN layers all pass
+all-slot correctness and save about `0.033-0.035 ms/token/layer` at `S=8`, and
+`0.068-0.079 ms/token/layer` at `S=16`. This makes the GDN economics plausible,
+but the next highest-leverage question is integration, not more isolated layers.
+Build an integrated multi-block decode slice with ragged masks; promote only if
+it preserves at least `0.5 ms/token` at `S=8` or `1.0 ms/token` at `S=16` on A3B,
+and kill/deprioritize if integrated savings fall below roughly `25%` of the naive
+sample extrapolation or correctness drifts across chained layers/tokens.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

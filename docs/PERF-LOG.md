@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.412 GDN Layer Sample
+
+Status: extended `decode-gdn-layer-replay` with `--gdn-index` and
+`--sample-gdn-layers` so representative GDN layers can be measured in one model
+load.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0412-gdn-layer-sample/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- 0.8B sampled-layer smoke
+- A3B sampled-layer replay at `S=8/16`
+- `cx ask` review, session `019f1ecb-cc4d-7970-b04c-a65b69b962b4`
+
+Results:
+
+| Block | GDN index | S | Baseline seq | Replay | Save | Save % |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0` | `0` | `8` | `0.1488` | `0.1160` | `0.0327` | `22.0` |
+| `20` | `15` | `8` | `0.1416` | `0.1064` | `0.0352` | `24.9` |
+| `38` | `29` | `8` | `0.1376` | `0.1028` | `0.0348` | `25.3` |
+
+Decision: GDN replay economics are not block-0-specific. The more representative
+`S=8` signal is about `0.033-0.035 ms/token/layer`, or roughly `1.0 ms/token`
+under a naive 30-layer extrapolation. Next gate: integrated multi-block replay
+with ragged masks; more isolated GDN sampling is lower value.
+
 ## 2026-07-01 - v0.411 GDN Layer Replay
 
 Status: added `decode-gdn-layer-replay`, the first real Metal replay probe for

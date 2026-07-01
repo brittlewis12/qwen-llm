@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.411 GDN Layer Replay
+
+Status: added `decode-gdn-layer-replay`, the first real Metal replay probe for
+multi-slot decode batching. It compares a per-slot GDN block against a path that
+packs slot activations, batches qkv/z/out projections, and keeps beta/alpha,
+GDN tail, residual add, and post-norm real.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0411-gdn-layer-replay/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- 0.8B smoke with all-slot correctness check at `S=2`
+- A3B block-0 replay with all-slot correctness check at `S=16`
+- `cx ask` review, session `019f1ebe-14eb-7162-aaa5-a3d5b256eaf5`
+
+Results:
+
+| S | Baseline seq | Replay | Save | Save % |
+| ---: | ---: | ---: | ---: | ---: |
+| `4` | `0.4264` | `0.4715` | `-0.0452` | `-10.6` |
+| `8` | `0.3146` | `0.1783` | `0.1363` | `43.3` |
+| `16` | `0.1862` | `0.0855` | `0.1007` | `54.1` |
+
+Decision: continue replay experiments. This proves GDN projection batching survives
+real tail/state/residual/layout overhead for one A3B layer at `S>=8`; it does not
+yet prove scheduler viability. Next gate: representative GDN layers and divergent
+MoE/FFN replay before integrated scheduler work.
+
 ## 2026-07-01 - v0.410 Projection Layout Charge
 
 Status: extended `decode-proj-batch` with explicit GPU blit pack/scatter rows and

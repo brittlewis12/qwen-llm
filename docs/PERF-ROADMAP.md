@@ -1108,6 +1108,14 @@ bound still saves `2.4151 ms/token` at `S=8` (`19.18%`, ideal `1.237x`). Copy-on
 layout is not the branch killer. Do not spend another isolated-layout cycle; the
 next artifact must be actual `decode-phase-batch` replay with attention body/KV,
 route/topk, GDN tail, routed MoE, logits/sampling, and ragged occupancy visible.
+v0.411 lands the first real replay slice: one GDN layer with per-slot pre/post
+norms, real GDN tail/state mutation, packed qkv/z/out projections, and all-slot
+correctness checks. A3B block-0 remains negative at `S=4` but wins at `S=8/16`
+(`0.1363/0.1007 ms/token` saved in the one-layer harness, `43-54%`). This is a
+continuation signal, not a scheduler gate: absolute one-layer timings do not map
+directly to full-model phase rows, block-0 may be favorable, and full occupancy is
+idealized. Next: measure representative GDN layers, then MoE/FFN replay with route
+divergence, before full integrated phase replay or scheduler architecture.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

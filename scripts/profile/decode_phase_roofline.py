@@ -381,6 +381,12 @@ def active_decode_weight_bytes(estimates: dict[str, tuple[int, str]]) -> int:
     )
 
 
+def stream_min_ms(nbytes: int, peak_gb_s: float) -> float:
+    if nbytes <= 0 or peak_gb_s <= 0.0:
+        return 0.0
+    return (nbytes / 1e9) / peak_gb_s * 1000.0
+
+
 def _first_bench_record(data: Any) -> dict[str, Any]:
     if isinstance(data, list):
         if not data:
@@ -424,6 +430,7 @@ def print_decode_roofline_summary(
     n_tokens = bench.get("n_tokens") or bench.get("n_gen")
     avg_ns = bench.get("avg_ns")
     avg_gpu_ns = bench.get("avg_gpu_ns")
+    gpu_ms_token = avg_gpu_ms_token
     if avg_wall_ms_token is not None:
         print(f"decode_avg_wall_ms_token\t{avg_wall_ms_token:.4f}")
     if avg_gpu_ms_token is not None:
@@ -431,9 +438,15 @@ def print_decode_roofline_summary(
     if avg_wall_ms_token is None and n_tokens and avg_ns is not None:
         print(f"decode_avg_wall_ms_token\t{float(avg_ns) / float(n_tokens) / 1e6:.4f}")
     if avg_gpu_ms_token is None and n_tokens and avg_gpu_ns is not None:
-        print(
-            f"decode_avg_gpu_ms_token\t{float(avg_gpu_ns) / float(n_tokens) / 1e6:.4f}"
-        )
+        gpu_ms_token = float(avg_gpu_ns) / float(n_tokens) / 1e6
+        print(f"decode_avg_gpu_ms_token\t{gpu_ms_token:.4f}")
+    min_ms = stream_min_ms(active_bytes, peak_gb_s)
+    if min_ms > 0.0:
+        print(f"decode_active_weight_stream_min_ms_token\t{min_ms:.4f}")
+        if gpu_ms_token is not None:
+            print(
+                f"decode_active_weight_x_stream_min\t{float(gpu_ms_token) / min_ms:.2f}"
+            )
     for key in (
         "kernel_trace_command_buffers_per_token",
         "kernel_trace_encoders_per_token",
@@ -511,19 +524,27 @@ def main() -> None:
         args.nwg,
         args.tile_c,
     )
-    print("phase\tms\tpct\test_weight_gb\test_gb_s\tpct_stream\tnote")
+    print(
+        "phase\tms\tpct\test_weight_gb\test_gb_s\tpct_stream\t"
+        "stream_min_ms\tx_stream_min\tnote"
+    )
     for phase in phases:
         nbytes, note = estimates.get(phase.base_name, (0, "unestimated"))
         if nbytes > 0 and phase.ms > 0:
             gb = nbytes / 1e9
             gb_s = gb / (phase.ms / 1000.0)
             pct_stream = gb_s / args.peak_gb_s * 100.0
+            min_ms = stream_min_ms(nbytes, args.peak_gb_s)
+            x_min = phase.ms / min_ms if min_ms > 0.0 else 0.0
             print(
                 f"{phase.raw_name}\t{phase.ms:.4f}\t{phase.pct:.2f}\t"
-                f"{gb:.4f}\t{gb_s:.1f}\t{pct_stream:.1f}\t{note}"
+                f"{gb:.4f}\t{gb_s:.1f}\t{pct_stream:.1f}\t"
+                f"{min_ms:.4f}\t{x_min:.2f}\t{note}"
             )
         else:
-            print(f"{phase.raw_name}\t{phase.ms:.4f}\t{phase.pct:.2f}\t\t\t\t{note}")
+            print(
+                f"{phase.raw_name}\t{phase.ms:.4f}\t{phase.pct:.2f}\t\t\t\t\t\t{note}"
+            )
 
 
 if __name__ == "__main__":

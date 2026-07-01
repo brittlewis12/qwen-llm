@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.408 Kernel-Bypass Triage Digest
+
+Status: incorporated the kernel-bypass / "coordination layer as bottleneck"
+frame into the active roadmap and profiling guide without resetting the current
+v0.407 batching spine.
+
+Validation:
+
+- `uv run python -m py_compile scripts/profile/decode_phase_roofline.py`
+- `uv run scripts/profile/decode_phase_roofline.py --help`
+- `cx ask` review, session `019f1e5d-c0d8-7351-982f-79e75713fa77`
+
+Changes:
+
+- `decode_phase_roofline.py` now reports stream lower-bound `ms/token` and
+  `x_stream_min` columns for active decode weight and estimated phase rows.
+- `docs/PERF-TOOLS.md` now has a kernel-bypass triage lane that ranks full
+  `decode-phase-batch`, ragged occupancy, MoE pack/scatter, `lm_head+argmax`,
+  resource/no-allocation audits, and later megakernel/persistent proofs.
+- `docs/PERF-ROADMAP.md` records the filtered read: the near-term target remains
+  net full-decode `ms/token` at realistic slot occupancy, not isolated dispatch
+  avoidance or model-behavior shortcuts.
+
+Decision: keep the top implementation gate on fuller decode-phase batching. Use
+the kernel-bypass frame to ask which abstraction layer is capping throughput, but
+only escalate ICB, persistent kernels, GPU-side graph traversal, argument buffers,
+AMX/ANE, or approximate "do less" policies after the measured replay or quality
+gates show they are the dominant remaining ceiling.
+
 ## 2026-07-01 - v0.407 Decode Projection Batch Gate
 
 Status: added `decode-proj-batch`, a broader projection-only kill gate for

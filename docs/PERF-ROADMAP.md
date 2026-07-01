@@ -1073,6 +1073,23 @@ the highest-leverage architecture gate, but not a scheduler implementation yet.
 The next replay must charge attention body/KV, routed-MoE capture/replay,
 routing/topk, slot pack/scatter, layout copies, and ragged occupancy; require net
 `S=8` savings to stay above `>=10%` or `>=1.0 ms/token` before scheduler work.
+v0.408 digests the kernel-bypass audit against that result. The frame is useful,
+but it does not outrank the measured batching gate: warm single-token decode has
+historically been `~95.8-97.8%` GPU-active, so command-stack bypass is not yet the
+dominant proven limiter. Add these profiling targets, in order: (1) full
+`decode-phase-batch` replay with command/dispatch counts and net `ms/token`;
+(2) ragged continuous-batching occupancy mixes (`50/75/90%` active, joins/exits,
+mixed context lengths); (3) MoE route/pack/scatter/expert-utilization accounting;
+(4) fused `lm_head+argmax/top-k` as an exact "do not materialize logits" probe;
+(5) no-allocation/resource-binding audit for steady decode; (6) memory-format
+experiments such as GDN/KV/residual BF16 only with correctness and quality gates;
+(7) one-layer megakernel or persistent-work-queue proof only after the charged
+replay shows command/encoder overhead is the remaining ceiling. Deprioritize
+AMX/ANE coprocessor paths, GPU-side graph traversal, hierarchical `lm_head`,
+layer skipping, KV clustering, sparse FFN, gate-based attention skipping, and
+near-zero drafters until they have explicit quality gates and a measured phase
+ceiling. `decode_phase_roofline.py` now reports stream lower-bound columns so the
+"cycles per token" question can be asked from existing phase artifacts.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

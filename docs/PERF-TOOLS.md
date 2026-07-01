@@ -649,6 +649,41 @@ Rules:
 - Before scheduler work, require a fuller `decode-phase-batch` replay to preserve
   at least `>=10%` or `>=1.0 ms/token` net savings at sustained `S=8`.
 
+### Kernel-bypass triage lane
+
+Use this lane when a proposal claims the Metal command/dispatch/resource layer is
+the bottleneck. The frame is useful, but current warmed single-token decode has
+usually been GPU-active enough that bypass work must be earned by attribution.
+
+Required report fields for the next `decode-phase-batch` replay:
+
+- `S=1/2/4/8/16` net `ms/token`, aggregate tokens/s, and GPU timestamp time.
+- Command buffers, encoders, concurrent encoders, dispatches, and buffer binds per
+  token where available.
+- Attention body/KV cost, route/topk cost, routed-MoE replay cost, slot
+  pack/scatter cost, layout-copy cost, `lm_head`, and sampling/readback.
+- Ragged occupancy variants: `50/75/90%` active slots, joins/exits, and mixed
+  context lengths.
+- `decode_phase_roofline.py` stream lower-bound columns (`stream_min_ms`,
+  `x_stream_min`) for phase artifacts that feed the decision.
+
+Force-rank:
+
+1. Full `decode-phase-batch` replay: direct continuation of v0.407.
+2. Ragged continuous-batching occupancy: proves whether `S>=8` is realistic.
+3. MoE route/pack/scatter and expert-utilization accounting: charges the main
+   MoE-specific risk.
+4. Exact `lm_head+argmax/top-k`: avoids materializing logits when greedy/top-k is
+   enough.
+5. No-allocation/resource audit: enforce steady decode budgets before ICB work.
+6. One-layer megakernel or persistent-work-queue proof: only after charged replay
+   shows command/encoder overhead is the remaining ceiling.
+
+Do not promote AMX/ANE coprocessor paths, GPU-side graph traversal,
+hierarchical `lm_head`, layer skipping, KV clustering, sparse FFN, gate-based
+attention skipping, or near-zero drafters from perf intuition alone. Those are
+quality/research lanes first, perf lanes second.
+
 When long-prompt variants are close enough that run-order drift or thermal sag
 can flip the ranking, use the cooled sweep harness instead of ad hoc shell
 loops:

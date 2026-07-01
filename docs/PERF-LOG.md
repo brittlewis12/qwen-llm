@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.416 Audit Roadmap Digest
+
+Status: digested an external hardware-saturation audit with `cx ask` review and
+updated `docs/PERF-ROADMAP.md` ordering.
+
+Validation:
+
+- `cx ask` review, session `019f1f51-f5fe-74c2-b5ff-28129ec8c33b`
+
+Decision: route/topk fingerprints and per-block boundary deltas stay first
+because v0.415 localized a live multi-slot replay correctness cliff. KV-Q8 is
+reopened only as a narrow `attn-intra` reader micro-oracle; chunked GDN prefill,
+packed verify attention, and FA2 prefill attention remain gated research lanes.
+Manual Xcode GPU captures are now required for major roofline claims, but not as
+a standalone sprint.
+
 ## 2026-07-01 - v0.415 Block Slice Positions
 
 Status: extended `decode-block-slice-replay` to size KV capacity for nonzero

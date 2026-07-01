@@ -1145,6 +1145,20 @@ attention block 39 is exact. Treat late windows as unsafe until route/topk ids,
 route margins, and per-block boundary deltas identify whether replay drift flips
 discrete MoE routing or gets amplified by attention. Scheduler gates must be
 window-specific; do not generalize early/mid wins to late layers.
+v0.416 external-audit + cx digest: do not let the new hardware-saturation audit
+displace the cheapest live uncertainty. Finish route/topk fingerprints and
+per-block boundary deltas first; v0.415 localized a correctness cliff, not a
+global kill. Keep multi-slot decode replay as the top active hardware-headroom
+branch for A3B/serving, but treat it as a product-shaped multi-slot feature, not
+a single-stream speed claim. Add these gates before major new rewrites: manual
+Xcode GPU captures for large roofline claims; a narrow `attn-intra` win before
+reopening KV-Q8; an exact one-layer row/block micro-oracle before chunked GDN
+prefill; profile proof that verify attention dominates before packed-N verify
+attention; and a same-shape long-prefill win before FA2-style fused prefill
+attention. Current ordering: (1) route/topk and boundary diagnostics for replay,
+(2) ragged/realistic replay gates if that passes, (3) KV-Q8 reader micro-oracle,
+(4) chunked GDN prefill micro-oracle, (5) packed verify attention behind KV-Q8,
+(6) FA2 prefill attention behind a fresh long-prefill phase gate.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -2413,6 +2427,11 @@ Priority rule:
 - Keep this behind the current dense/MoE prompt push.
 - When returning to speculative work, do not lead with policy/schedule tuning;
   lead with kernel work that removes repeated long-context attention cost.
+- v0.416 audit digest reorders the speculative kernel queue: prove a better
+  KV-Q8 reader before packed-N verify attention. KV compression helps no-spec
+  long-context decode and moves the context threshold where DFlash must turn off;
+  packed verify attention only matters after the KV reader and profiles show
+  verify attention is still the dominant cost.
 
 What the latest analysis says:
 
@@ -2423,13 +2442,15 @@ What the latest analysis says:
 
 Highest-EV speculative kernel targets:
 
-1. Target packed-verify multi-query attention so consecutive verify queries share
+1. KV-Q8 / compressed-KV attention reader that beats the tuned F16 path in
+   `attn-intra` without repeating the old scalar-reader regression.
+2. Target packed-verify multi-query attention so consecutive verify queries share
    KV reads.
-2. DFlash two-range attention reading ctx-cache and noise directly, without
+3. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-3. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+4. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
    show N16 mat-mat-heavy surfaces remain material after the attention fixes.
-4. Adaptive draft compute width, not only adaptive verify width.
+5. Adaptive draft compute width, not only adaptive verify width.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4
 
@@ -2458,6 +2479,11 @@ Current read:
 - Codex-wrap review says the likely cause is structural: scalar Q8 dequant/load
   overhead is overpowering stored-byte savings against an already-strong F16
   vectorized path.
+- v0.416 audit + cx review reopens KV-Q8 only as a narrow reader micro-oracle,
+  not as a broad retry of the falsified implementation. The reason to keep it
+  alive is cross-cutting: it can reduce no-spec long-context attention bytes,
+  lower KV memory pressure, and raise the context length where DFlash/MTP verify
+  remains viable.
 
 Expected payoff: still potentially large in theory, but only if a materially
 different reader structure wins. Do not spend more blind sweep time on the
@@ -2471,8 +2497,12 @@ Risks and constraints:
 
 Acceptance gates:
 
-- Revisit only with a concrete new kernel structure and a fast feedback plan.
-- Cut again quickly if attention does not beat F16 at 32K or 64K.
+- Revisit only with a concrete reader structure and a fast `attn-intra` feedback
+  plan that preserves Q-head grid parallelism and avoids large staged-KV TGM.
+- Cut again quickly if the reader does not beat tuned F16 at 32K or 64K before
+  end-to-end wiring.
+- Promote only after a no-spec long-context row improves and DFlash/verify phase
+  attribution shows the new reader moves the adaptive context threshold.
 
 ### 14. Dense Decode Surgery And Small Decode Hygiene
 

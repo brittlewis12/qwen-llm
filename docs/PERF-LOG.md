@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.413 GDN Chain Replay
+
+Status: added `decode-gdn-chain-replay`, which chains consecutive GDN layers on
+the same per-slot sessions so residual stream, conv state, and GDN state carry
+through multiple replayed layers.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0413-gdn-chain-replay/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- 0.8B two-layer smoke
+- A3B four-layer GDN chain replay at `S=8/16`
+- `cx ask` review, session `019f1ed4-ad69-73d3-98ac-2735704bf54c`
+
+Results:
+
+| S | Baseline seq | Replay | Save | Save % |
+| ---: | ---: | ---: | ---: | ---: |
+| `8` | `0.4811` | `0.3217` | `0.1594` | `33.1` |
+| `16` | `0.4783` | `0.2247` | `0.2536` | `53.0` |
+
+Decision: chained GDN replay preserves correctness (`min_cos_h=0.999999509` at
+`S=16`) and keeps the S-scaling signal. Next highest-EV gate is a full block-slice
+that keeps normal attention/MoE in place and replaces only the GDN subpath.
+
 ## 2026-07-01 - v0.412 GDN Layer Sample
 
 Status: extended `decode-gdn-layer-replay` with `--gdn-index` and

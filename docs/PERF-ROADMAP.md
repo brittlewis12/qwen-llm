@@ -1124,6 +1124,13 @@ Build an integrated multi-block decode slice with ragged masks; promote only if
 it preserves at least `0.5 ms/token` at `S=8` or `1.0 ms/token` at `S=16` on A3B,
 and kill/deprioritize if integrated savings fall below roughly `25%` of the naive
 sample extrapolation or correctness drifts across chained layers/tokens.
+v0.413 adds that chained-state bridge for GDN-only replay: four consecutive GDN
+layers preserve all-slot correctness (`min_cos_h=0.999999509`) and save
+`0.1594 ms/token` at `S=8` and `0.2536 ms/token` at `S=16`. This raises confidence
+that the GDN subpath is real, but it still skips attention/MoE blocks. Next exact
+step: a full block-slice for 2-4 consecutive real blocks that executes normal
+attention/MoE and swaps only GDN for replay. Ragged masks and scheduler work wait
+until that block-slice shows net wall-clock savings.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

@@ -710,13 +710,40 @@ impl MetalTensor {
 /// kernel just appends dispatches.
 pub struct KernelEncoder {
     pub raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    /// True when created via [`KernelEncoder::begin_concurrent`]. Concurrent
+    /// passes provide NO ordering between dispatches, so every dispatch pair
+    /// must be independent (disjoint writes; no dispatch reads another's
+    /// output). That invariant is a convention, not a type-system property —
+    /// the debug-only `note_read`/`note_write` hazard tracker below turns a
+    /// future violation into a loud panic instead of a silent GPU race.
+    pub concurrent: bool,
+    #[cfg(debug_assertions)]
+    hazard_writes: std::cell::RefCell<Vec<(usize, u64, u64)>>,
+    #[cfg(debug_assertions)]
+    hazard_reads: std::cell::RefCell<Vec<(usize, u64, u64)>>,
+}
+
+#[cfg(debug_assertions)]
+fn ranges_overlap(a_off: u64, a_len: u64, b_off: u64, b_len: u64) -> bool {
+    a_off < b_off + b_len && b_off < a_off + a_len
 }
 
 impl KernelEncoder {
+    fn new(raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>, concurrent: bool) -> Self {
+        Self {
+            raw,
+            concurrent,
+            #[cfg(debug_assertions)]
+            hazard_writes: std::cell::RefCell::new(Vec::new()),
+            #[cfg(debug_assertions)]
+            hazard_reads: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
     pub fn begin(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
         let raw = cmd.computeCommandEncoder().expect("compute encoder");
         kernel_trace_record_encoder(false);
-        Self { raw }
+        Self::new(raw, false)
     }
 
     pub fn begin_concurrent(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
@@ -724,7 +751,76 @@ impl KernelEncoder {
             .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
             .expect("concurrent compute encoder");
         kernel_trace_record_encoder(true);
-        Self { raw }
+        Self::new(raw, true)
+    }
+
+    /// Debug-only hazard note: declare that a dispatch in this encoder
+    /// WRITES `tensor`'s byte range. On a concurrent encoder, panics if the
+    /// range overlaps any previously noted write or read — either would be
+    /// an unsynchronized data race inside the concurrent pass. No-op in
+    /// release builds and on serial encoders.
+    #[inline]
+    pub fn note_write(&self, tensor: &MetalTensor) {
+        #[cfg(debug_assertions)]
+        {
+            if !self.concurrent {
+                return;
+            }
+            let buf = Retained::as_ptr(&tensor.buffer) as *const () as usize;
+            let off = tensor.offset;
+            let len = tensor.n_bytes();
+            for &(b, o, l) in self.hazard_writes.borrow().iter() {
+                assert!(
+                    b != buf || !ranges_overlap(off, len, o, l),
+                    "concurrent-encoder hazard: write/write overlap on buffer {buf:#x} \
+                     (new write off={off} len={len}, prior write off={o} len={l}); \
+                     dependent dispatches must not share a Concurrent pass"
+                );
+            }
+            for &(b, o, l) in self.hazard_reads.borrow().iter() {
+                assert!(
+                    b != buf || !ranges_overlap(off, len, o, l),
+                    "concurrent-encoder hazard: write overlaps a noted read on buffer {buf:#x} \
+                     (write off={off} len={len}, prior read off={o} len={l}); \
+                     dependent dispatches must not share a Concurrent pass"
+                );
+            }
+            self.hazard_writes.borrow_mut().push((buf, off, len));
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = tensor;
+        }
+    }
+
+    /// Debug-only hazard note: declare that a dispatch in this encoder
+    /// READS `tensor`'s byte range. Panics on a concurrent encoder if the
+    /// range overlaps a previously noted write (read-after-write inside a
+    /// Concurrent pass is unordered). Overlapping reads are fine.
+    #[inline]
+    pub fn note_read(&self, tensor: &MetalTensor) {
+        #[cfg(debug_assertions)]
+        {
+            if !self.concurrent {
+                return;
+            }
+            let buf = Retained::as_ptr(&tensor.buffer) as *const () as usize;
+            let off = tensor.offset;
+            let len = tensor.n_bytes();
+            for &(b, o, l) in self.hazard_writes.borrow().iter() {
+                assert!(
+                    b != buf || !ranges_overlap(off, len, o, l),
+                    "concurrent-encoder hazard: read overlaps a noted write on buffer {buf:#x} \
+                     (read off={off} len={len}, prior write off={o} len={l}); \
+                     dependent dispatches must not share a Concurrent pass"
+                );
+            }
+            self.hazard_reads.borrow_mut().push((buf, off, len));
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = tensor;
+        }
     }
 
     pub fn set_label(&self, label: &str) {
@@ -15198,6 +15294,95 @@ mod tests {
             Err(e) => panic!("unexpected error: {e}"),
         };
         eprintln!("[metal] {}", ctx.describe());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn concurrent_hazard_guard_allows_disjoint_and_shared_reads() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let shared_in = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let out_a = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let out_b = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+        let enc = KernelEncoder::begin_concurrent(&cmd);
+        // The production concurrent-pass shape: shared read-only input,
+        // pairwise-disjoint outputs. Must not panic.
+        enc.note_read(&shared_in);
+        enc.note_write(&out_a);
+        enc.note_read(&shared_in);
+        enc.note_write(&out_b);
+        enc.end();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn concurrent_hazard_guard_panics_on_read_after_write() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let a = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+        let enc = KernelEncoder::begin_concurrent(&cmd);
+        enc.note_write(&a);
+        let hazard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            enc.note_read(&a);
+        }));
+        assert!(
+            hazard.is_err(),
+            "read of a tensor written in the same Concurrent pass must panic"
+        );
+        enc.end();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn concurrent_hazard_guard_ignores_serial_encoders() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let a = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+        let enc = KernelEncoder::begin(&cmd);
+        // Serial encoders order dispatches; write-then-read is the normal
+        // dataflow and must not trip the guard.
+        enc.note_write(&a);
+        enc.note_read(&a);
+        enc.note_write(&a);
+        enc.end();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn concurrent_hazard_guard_allows_disjoint_views_of_one_buffer() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let arena = MetalTensor::zeros_f32(&ctx, vec![128]).unwrap();
+        let lo = arena.view_subrange(0, vec![64]);
+        let hi = arena.view_subrange(64, vec![64]);
+        let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+        let enc = KernelEncoder::begin_concurrent(&cmd);
+        // Disjoint sub-views of one arena are the packed-scratch pattern;
+        // byte-range tracking (not buffer identity) must permit this.
+        enc.note_write(&lo);
+        enc.note_write(&hi);
+        // But an overlapping second write must panic.
+        let overlap = arena.view_subrange(32, vec![64]);
+        let hazard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            enc.note_write(&overlap);
+        }));
+        assert!(hazard.is_err(), "overlapping concurrent writes must panic");
+        enc.end();
     }
 
     #[test]

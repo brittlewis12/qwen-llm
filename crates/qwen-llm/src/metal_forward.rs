@@ -6589,6 +6589,14 @@ pub fn encode_mat_vec_dispatch(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MfError> {
+    // Debug-only concurrent-pass hazard tracking (no-op on serial encoders
+    // and in release builds). This is the chokepoint for the concurrent
+    // GDN/attention front-projection encoders; a future edit that makes one
+    // projection consume another's output inside the same Concurrent pass
+    // will panic here instead of racing on the GPU.
+    enc.note_read(weight);
+    enc.note_read(x);
+    enc.note_write(y);
     match weight.dtype {
         GgmlType::F32 => Ok(encode_mat_vec_f32(ctx, enc, weight, x, y, n_in, n_out)?),
         GgmlType::F16 => Ok(crate::metal::encode_mat_vec_f16_f32(

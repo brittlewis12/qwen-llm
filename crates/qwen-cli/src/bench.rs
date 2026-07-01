@@ -439,6 +439,8 @@ enum Cmd {
     DecodeGdnChainReplay(DecodeGdnChainReplayArgs),
     /// MoE block-slice replay probe with normal attention/MoE around GDN replay.
     DecodeBlockSliceReplay(DecodeBlockSliceReplayArgs),
+    /// Diagnostic route/topk trace for block-slice replay correctness cliffs.
+    DecodeBlockSliceTrace(DecodeBlockSliceTraceArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
@@ -864,6 +866,25 @@ struct DecodeBlockSliceReplayArgs {
     /// Skip the all-slot correctness comparison between baseline and replay.
     #[arg(long)]
     no_check: bool,
+}
+
+#[derive(Parser, Debug)]
+struct DecodeBlockSliceTraceArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Number of synthetic slots to trace.
+    #[arg(long, default_value = "8")]
+    tokens: usize,
+    /// First absolute transformer block index in the slice.
+    #[arg(long, default_value = "0")]
+    start_block: usize,
+    /// Number of consecutive absolute blocks in the slice.
+    #[arg(long = "blocks", default_value = "4")]
+    n_blocks: usize,
+    /// Synthetic decode position for attention blocks in the slice.
+    #[arg(long, default_value = "0")]
+    position: u32,
 }
 
 #[derive(Parser, Debug)]
@@ -1885,6 +1906,7 @@ fn main() -> Result<()> {
         Cmd::DecodeGdnLayerReplay(a) => run_decode_gdn_layer_replay(a),
         Cmd::DecodeGdnChainReplay(a) => run_decode_gdn_chain_replay(a),
         Cmd::DecodeBlockSliceReplay(a) => run_decode_block_slice_replay(a),
+        Cmd::DecodeBlockSliceTrace(a) => run_decode_block_slice_trace(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
@@ -3021,6 +3043,87 @@ fn read_f32_tensor(t: &MetalTensor) -> Vec<f32> {
     xs
 }
 
+fn read_f32_tensor_prefix(t: &MetalTensor, n: usize) -> Vec<f32> {
+    let n = n.min(t.n_elements() as usize);
+    let mut xs = vec![0.0f32; n];
+    unsafe {
+        let src = (t.buffer.contents().as_ptr() as *const f32).add((t.offset / 4) as usize);
+        std::ptr::copy_nonoverlapping(src, xs.as_mut_ptr(), n);
+    }
+    xs
+}
+
+fn read_i32_tensor_prefix(t: &MetalTensor, n: usize) -> Vec<i32> {
+    let n = n.min(t.n_elements() as usize);
+    let mut xs = vec![0i32; n];
+    unsafe {
+        let src = (t.buffer.contents().as_ptr() as *const i32).add((t.offset / 4) as usize);
+        std::ptr::copy_nonoverlapping(src, xs.as_mut_ptr(), n);
+    }
+    xs
+}
+
+fn fmt_i32_csv(xs: &[i32]) -> String {
+    xs.iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+struct RouteFingerprint {
+    idx: Vec<i32>,
+    weight: Vec<f32>,
+    shared_gate: f32,
+    logit_margin: f32,
+}
+
+fn topk_logit_margin(logits: &[f32], topk: usize) -> f32 {
+    if topk == 0 || logits.len() <= topk {
+        return 0.0;
+    }
+    let mut ranked: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    ranked[topk - 1].1 - ranked[topk].1
+}
+
+fn read_route_fingerprint(s: &MetalSession, topk: usize, n_expert: usize) -> RouteFingerprint {
+    let idx = read_i32_tensor_prefix(&s.moe_topk_idx, topk);
+    let weight = read_f32_tensor_prefix(&s.moe_topk_weight, topk);
+    let shared_gate = read_f32_tensor_prefix(&s.moe_shared_gate, 1)
+        .into_iter()
+        .next()
+        .unwrap_or(0.0);
+    let logits = read_f32_tensor_prefix(&s.moe_router_probs, n_expert);
+    RouteFingerprint {
+        idx,
+        weight,
+        shared_gate,
+        logit_margin: topk_logit_margin(&logits, topk),
+    }
+}
+
+fn route_weight_max_abs(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
+}
+
+fn same_i32_set(a: &[i32], b: &[i32]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut aa = a.to_vec();
+    let mut bb = b.to_vec();
+    aa.sort_unstable();
+    bb.sort_unstable();
+    aa == bb
+}
+
 fn cosine_max_abs(a: &[f32], b: &[f32]) -> (f64, f32) {
     let max_abs = a
         .iter()
@@ -3741,29 +3844,49 @@ fn encode_block_slice_replay(
     v_dim: usize,
 ) -> Result<()> {
     for block_i in start_block..start_block + n_blocks {
-        match &mm.blocks[block_i] {
-            MetalBlock::Gdn(gb) => {
-                let gdn_i = gdn_layers
-                    .iter()
-                    .find(|layer| layer.block_i == block_i)
-                    .map(|layer| layer.gdn_i)
-                    .ok_or_else(|| anyhow!("missing GDN index for block {block_i}"))?;
-                encode_gdn_layer_replay(
-                    ctx, mf, cmd, gb, gdn_i, sessions, scratch, h, conv_dim, v_dim,
-                )?;
-                let enc = KernelEncoder::begin(cmd);
-                for s in sessions.iter_mut() {
-                    mf.encode_moe_ffn_after_mixer_by_index(&enc, block_i, s)?;
-                }
-                enc.end();
+        encode_one_block_replay(
+            ctx, mf, mm, cmd, block_i, position, sessions, scratch, gdn_layers, h, conv_dim, v_dim,
+        )?;
+    }
+    Ok(())
+}
+
+fn encode_one_block_replay(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    mm: &MetalModel,
+    cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    block_i: usize,
+    position: u32,
+    sessions: &mut [MetalSession],
+    scratch: &GdnLayerReplayScratch,
+    gdn_layers: &[SelectedGdnLayer<'_>],
+    h: usize,
+    conv_dim: usize,
+    v_dim: usize,
+) -> Result<()> {
+    match &mm.blocks[block_i] {
+        MetalBlock::Gdn(gb) => {
+            let gdn_i = gdn_layers
+                .iter()
+                .find(|layer| layer.block_i == block_i)
+                .map(|layer| layer.gdn_i)
+                .ok_or_else(|| anyhow!("missing GDN index for block {block_i}"))?;
+            encode_gdn_layer_replay(
+                ctx, mf, cmd, gb, gdn_i, sessions, scratch, h, conv_dim, v_dim,
+            )?;
+            let enc = KernelEncoder::begin(cmd);
+            for s in sessions.iter_mut() {
+                mf.encode_moe_ffn_after_mixer_by_index(&enc, block_i, s)?;
             }
-            MetalBlock::Attn(_) => {
-                let enc = KernelEncoder::begin(cmd);
-                for s in sessions.iter_mut() {
-                    mf.encode_moe_block_by_index(&enc, block_i, position, s)?;
-                }
-                enc.end();
+            enc.end();
+        }
+        MetalBlock::Attn(_) => {
+            let enc = KernelEncoder::begin(cmd);
+            for s in sessions.iter_mut() {
+                mf.encode_moe_block_by_index(&enc, block_i, position, s)?;
             }
+            enc.end();
         }
     }
     Ok(())
@@ -3995,6 +4118,197 @@ fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) -> Result<()>
             pct
         );
     }
+
+    Ok(())
+}
+
+fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
+    let DecodeBlockSliceTraceArgs {
+        model,
+        tokens,
+        start_block,
+        n_blocks,
+        position,
+    } = args;
+    if tokens == 0 {
+        return Err(anyhow!("--tokens must be >= 1"));
+    }
+    if n_blocks == 0 {
+        return Err(anyhow!("--blocks must be >= 1"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!(
+            "decode-block-slice-trace currently requires an MoE model"
+        ));
+    }
+    let end_block = start_block
+        .checked_add(n_blocks)
+        .ok_or_else(|| anyhow!("start_block + blocks overflow"))?;
+    if end_block > mm.blocks.len() {
+        return Err(anyhow!(
+            "block slice {}..{} outside available 0..{}",
+            start_block,
+            end_block,
+            mm.blocks.len()
+        ));
+    }
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+    let n_v = arch.gdn_n_v_heads as usize;
+    let n_k = arch.gdn_n_k_heads as usize;
+    let head_dim = arch.gdn_head_dim as usize;
+    let conv_dim = (2 * n_k + n_v) * head_dim;
+    let v_dim = n_v * head_dim;
+    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+    let n_expert = arch.expert_count as usize;
+    let kv_capacity = (position as usize)
+        .checked_add(32)
+        .ok_or_else(|| anyhow!("position + KV slack overflow"))?;
+    let gdn_layers = collect_gdn_layers(&mm);
+
+    println!(
+        "[decode-block-slice-trace] model={} start_block={} blocks={} position={} kv_capacity={} tokens={} topk={} experts={} h={} conv_dim={} v_dim={}",
+        model.display(),
+        start_block,
+        n_blocks,
+        position,
+        kv_capacity,
+        tokens,
+        topk,
+        n_expert,
+        h,
+        conv_dim,
+        v_dim
+    );
+
+    let mut base = fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, tokens, kv_capacity)?;
+    let mut replay = fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, tokens, kv_capacity)?;
+    fill_gdn_replay_inputs(&ctx, &base)?;
+    fill_gdn_replay_inputs(&ctx, &replay)?;
+    let scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
+
+    println!(
+        "block\tkind\tslot\troute_order_equal\troute_set_equal\tbase_idx\treplay_idx\tweight_max_abs\tshared_abs\tbase_margin\treplay_margin\th_cos\th_max_abs\tx_cos\tx_max_abs"
+    );
+
+    let mut route_order_mismatches = 0usize;
+    let mut route_set_mismatches = 0usize;
+    let mut first_order_mismatch: Option<(usize, usize)> = None;
+    let mut first_set_mismatch: Option<(usize, usize)> = None;
+    let mut min_h_cos = 1.0f64;
+    let mut min_x_cos = 1.0f64;
+    let mut max_h_abs = 0.0f32;
+    let mut max_x_abs = 0.0f32;
+
+    for block_i in start_block..end_block {
+        let kind = match &mm.blocks[block_i] {
+            MetalBlock::Gdn(_) => "gdn",
+            MetalBlock::Attn(_) => "attn",
+        };
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("block trace baseline cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_block_slice_baseline(&mf, &enc, block_i, 1, position, &mut base)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("block trace replay cmd")?;
+        encode_one_block_replay(
+            &ctx,
+            &mf,
+            &mm,
+            &cmd,
+            block_i,
+            position,
+            &mut replay,
+            &scratch,
+            &gdn_layers,
+            h,
+            conv_dim,
+            v_dim,
+        )?;
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        for slot in 0..tokens {
+            let base_route = read_route_fingerprint(&base[slot], topk, n_expert);
+            let replay_route = read_route_fingerprint(&replay[slot], topk, n_expert);
+            let route_order_equal = base_route.idx == replay_route.idx;
+            let route_set_equal = same_i32_set(&base_route.idx, &replay_route.idx);
+            if !route_order_equal {
+                route_order_mismatches += 1;
+                first_order_mismatch.get_or_insert((block_i, slot));
+            }
+            if !route_set_equal {
+                route_set_mismatches += 1;
+                first_set_mismatch.get_or_insert((block_i, slot));
+            }
+            let weight_max_abs = route_weight_max_abs(&base_route.weight, &replay_route.weight);
+            let shared_abs = (base_route.shared_gate - replay_route.shared_gate).abs();
+            let (h_cos, h_abs) = cosine_max_abs(
+                &read_f32_tensor(&base[slot].h),
+                &read_f32_tensor(&replay[slot].h),
+            );
+            let (x_cos, x_abs) = cosine_max_abs(
+                &read_f32_tensor(&base[slot].x),
+                &read_f32_tensor(&replay[slot].x),
+            );
+            min_h_cos = min_h_cos.min(h_cos);
+            min_x_cos = min_x_cos.min(x_cos);
+            max_h_abs = max_h_abs.max(h_abs);
+            max_x_abs = max_x_abs.max(x_abs);
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.9}\t{:.6}\t{:.9}\t{:.6}",
+                block_i,
+                kind,
+                slot,
+                route_order_equal,
+                route_set_equal,
+                fmt_i32_csv(&base_route.idx),
+                fmt_i32_csv(&replay_route.idx),
+                weight_max_abs,
+                shared_abs,
+                base_route.logit_margin,
+                replay_route.logit_margin,
+                h_cos,
+                h_abs,
+                x_cos,
+                x_abs
+            );
+        }
+    }
+
+    let first_order = first_order_mismatch
+        .map(|(block, slot)| format!("block={block},slot={slot}"))
+        .unwrap_or_else(|| "none".to_string());
+    let first_set = first_set_mismatch
+        .map(|(block, slot)| format!("block={block},slot={slot}"))
+        .unwrap_or_else(|| "none".to_string());
+    println!(
+        "summary\troute_order_mismatches={}\troute_set_mismatches={}\tfirst_order_mismatch={}\tfirst_set_mismatch={}\tmin_h_cos={:.9}\tmax_h_abs={:.6}\tmin_x_cos={:.9}\tmax_x_abs={:.6}",
+        route_order_mismatches,
+        route_set_mismatches,
+        first_order,
+        first_set,
+        min_h_cos,
+        max_h_abs,
+        min_x_cos,
+        max_x_abs
+    );
 
     Ok(())
 }

@@ -1159,6 +1159,17 @@ attention. Current ordering: (1) route/topk and boundary diagnostics for replay,
 (2) ragged/realistic replay gates if that passes, (3) KV-Q8 reader micro-oracle,
 (4) chunked GDN prefill micro-oracle, (5) packed verify attention behind KV-Q8,
 (6) FA2 prefill attention behind a fresh long-prefill phase gate.
+v0.417 localizes the late-window failure mechanism: the visible cliff is
+mediated by route-set flips at near-tie topk boundaries. Passing controls
+(`block20..24` and `block36..39`) have zero route-set mismatches, while failing
+windows first flip a single expert set at margins around `0.0001-0.0003`
+(`block37 slot1` or `block39 slot3`) and then amplify through MoE/attention.
+Do not treat route-order changes with the same expert set as semantic failures.
+Next scheduler gate should be a conservative two-layer policy: static early/mid
+block eligibility first, late blocks exact-only, and then a replay-side route
+margin guard with rollback to exact pre-window state before ragged occupancy
+work. Calibrate the margin threshold from exact-vs-replay router-logit deltas and
+margin histograms, not from the observed failing margins alone.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

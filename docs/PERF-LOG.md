@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.417 Block Slice Route Trace
+
+Status: added `decode-block-slice-trace` to fingerprint route/topk divergence
+and per-block boundary drift for block-slice replay.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0417-block-slice-route-trace/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B passing and failing route-trace probes
+- `cx ask` review, session `019f1f66-6a6e-7f42-ae97-134062c1aea5`
+
+Results:
+
+| Window | Position | Route-set mismatches | First set mismatch | Min `x` cos |
+| --- | ---: | ---: | --- | ---: |
+| `block20..24` | `4096` | `0` | none | `0.999999667` |
+| `block36..39` | `4096` | `0` | none | `0.999997721` |
+| `block36..40` | `4096` | `1` | `block39 slot3` | `0.997359190` |
+| `block37..40` | `0` | `5` | `block37 slot1` | `0.958538922` |
+| `block37..40` | `4096` | `3` | `block37 slot1` | `0.942962219` |
+
+Decision: the visible late replay cliff is mediated by route-set instability at
+near-tie topk boundaries. The first true expert-set flips have route margins
+around `0.0001-0.0003`; late windows stay exact for now, while any early/mid
+promotion needs more coverage plus a replay-side route-margin guard with exact
+pre-window rollback.
+
 ## 2026-07-01 - v0.416 Audit Roadmap Digest
 
 Status: digested an external hardware-saturation audit with `cx ask` review and

@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.420 Blocks=2 Margin Sweep
+
+Status: ran `decode-block-slice-margin-sweep` with `blocks=2` to test whether
+shorter replay windows reduce late route-set instability.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0420-blocks2-margin-sweep/README.md`
+
+Validation:
+
+- A3B loaded-once `blocks=2` margin sweep at `pos0` and `pos4096`
+
+Results: `blocks=2` removes the `pos4096` route-set flips seen with `blocks=4`,
+but `block38..40 pos0` still flips one route set and drops `min_x_cos` to
+`0.985815558`.
+
+Decision: shorter windows are a mitigation, not a correctness policy. Late replay
+still needs a margin guard and exact fallback, and the next decision needs real
+prompt fallback-rate plus savings accounting.
+
 ## 2026-07-01 - v0.419 Block Slice Margin Sweep
 
 Status: added `decode-block-slice-margin-sweep`, a loaded-once summary sweep for

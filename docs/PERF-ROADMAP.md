@@ -1184,6 +1184,12 @@ at `pos0` still fails. Treat absolute block index as a coarse risk feature, not 
 complete policy. The next replay work should measure fallback frequency under a
 candidate replay-side margin threshold across real prompts/positions before any
 ragged scheduler implementation.
+v0.420 shows smaller `blocks=2` windows remove the `pos4096` flips from the
+synthetic sweep, but still fail at `block38..40 pos0` (`min_x_cos=0.985815558`).
+Therefore shorter windows are only a mitigation. The live replay branch now needs
+product-shaped economics: real prompt slot sets, candidate margin thresholds,
+fallback frequency, and net savings after exact fallback. Do not keep tuning
+synthetic late windows without that fallback-rate accounting.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

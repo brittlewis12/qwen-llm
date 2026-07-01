@@ -10361,10 +10361,10 @@ pub fn encode_attn_decode_f16kv_f32(
 ///   - NWG=1 is catastrophically under-occupied (4 TGs total) — DO NOT
 ///     ship as performance config; useful only for correctness debugging.
 ///
-/// Current reduce supports NWG up to 64. Medium/long-context MoE attention
-/// shapes (group 8 / 16) also benefit substantially from 64-way split in
-/// synthetic and whole-model sweeps.
-/// `QWEN_ATTN_V4_NWG=1..64` is an A/B knob for whole-model sweeps.
+/// Long-context group=8 can use NWG=256 with the two-threadgroup reduce path;
+/// smaller overrides such as 128/192 remain useful A/B knobs when validating
+/// the main-vs-reduce split.
+/// `QWEN_ATTN_V4_NWG=1..ATTN_V4_NWG_MAX` is an A/B knob for whole-model sweeps.
 /// `QWEN_ATTN_V4_SUBGROUP_MIN_POS=4096` restores the older long-only threshold.
 pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
     static NWG_OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();

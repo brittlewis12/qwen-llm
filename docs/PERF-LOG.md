@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.404 A3B Attention Intra Gate
+
+Status: decomposed A3B group-8 decode attention at `ctx8192`, `ctx16384`, and
+`ctx32768`, then ran a bounded NWG interpolation probe and phase check.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0404-a3b-attn-intra-gate/README.md`
+
+Validation:
+
+- AC power check
+- `attn-intra` default at `ctx8192/16384/32768`, `runs=5`
+- `attn-intra` NWG128/NWG192/NWG224 at `ctx16384`
+- `attn-intra` NWG192 at `ctx32768`
+- A3B deep phase NWG192 at `ctx16384/32768`
+- `cx ask` review, session `019f1dbf-a094-7e52-841b-7b0b9c49a80a`
+
+Results:
+
+| Ctx | Variant | Layer ms | Main ms | Reduce ms | Phase read |
+| ---: | --- | ---: | ---: | ---: | --- |
+| `8192` | default NWG64 | `0.2392` | `0.1051` | `0.0341` | phase-faithful |
+| `16384` | default NWG256 | `0.2686` | `0.0987` | `0.0675` | phase-faithful |
+| `16384` | NWG192 | `0.2515` | `0.0975` | `0.0516` | `10.94 ms` phase sum |
+| `32768` | default NWG256 | `0.3466` | `0.1758` | `0.0676` | phase-faithful |
+| `32768` | NWG192 | `0.3277` | `0.1735` | `0.0515` | `11.65 ms` phase sum |
+
+Decision: A3B attention remains live, but local selector/reduce retuning is not
+the highest-leverage branch. NWG192 is the best local override and saves only
+about `0.13-0.15 ms` in phase at long context, below the `>=0.30-0.40 ms`
+production-rewrite gate. The next attention work needs a main-body KV/partial
+traffic oracle; otherwise pivot back to broad decode byte-reduction work.
+
 ## 2026-07-01 - v0.403 A3B Deep Roofline Refresh
 
 Status: refreshed A3B long-context decode attribution with deep MoE route/FFN

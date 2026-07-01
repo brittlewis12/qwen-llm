@@ -175,7 +175,11 @@ Current caveats:
   it is correctness-safe, but A3B `ctx32768` `attn-intra` only moves
   `0.3457 -> 0.3408 ms/layer` (`1.014x`). Do not keep drilling partial storage;
   switch back to MoE/GDN dataflow unless a genuinely new read-once attention
-  execution shape appears.
+  execution shape appears. v0.403/v0.404 refreshes the A3B long-context board:
+  attention is still phase-faithful and the largest slope term, but another local
+  NWG/reduce selector is small. NWG192 saves only `0.13-0.15 ms` phase time at
+  `ctx16384/32768`; the next attention branch must be a main-body KV/partial
+  traffic oracle that clears `>=0.30-0.40 ms` full-decode-equivalent savings.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

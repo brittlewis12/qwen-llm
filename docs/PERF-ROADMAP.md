@@ -1190,6 +1190,17 @@ Therefore shorter windows are only a mitigation. The live replay branch now need
 product-shaped economics: real prompt slot sets, candidate margin thresholds,
 fallback frequency, and net savings after exact fallback. Do not keep tuning
 synthetic late windows without that fallback-rate accounting.
+v0.426 adds the first real-prompt margin harness and broadens the initial sample:
+32 non-smoke A3B rows across markdown rollouts, contexts `128/512/2048/3072`, and
+windows `block0..4`, `20..24`, `28..32`, `32..36`, `36..40` show zero route-set
+mismatches. Route order differs in 2 rows, worst `min_replay_margin` is
+`0.000047`, and min `x` cosine is `0.999999965`. A window-level margin guard
+would fallback on `3.12%/12.50%/25.00%/53.12%` of rows at
+`1e-4/3e-4/1e-3/5e-3`. This keeps replay alive and suggests synthetic
+constant-hidden fixtures are adversarial stressors, but cx session
+`019f1ffe-1f3a-7120-a872-f068a90fd92d` correctly warns that this is still not a
+scheduler gate. Next: widen prompt classes beyond markdown rollouts and pair the
+margin table with net replay savings after exact fallback.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

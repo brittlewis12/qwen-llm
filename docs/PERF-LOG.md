@@ -42,6 +42,37 @@ Process note: this gate was red for ~5 weeks because commit validation uses
 targeted test lists. Full-suite runs should happen at least at audit/refactor
 checkpoints; a standing guard is deferred as separate scope.
 
+## 2026-07-01 - v0.426 Real-Prompt Margin Harness
+
+Status: added `decode-block-slice-real-margin`, which runs exact real-prompt
+prefix decode, clones recurrent/KV state, prepares slots to a block boundary,
+and compares exact block-slice execution against GDN replay.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0426-real-margin-harness/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B smoke, single-prompt c512/c2048/c3072, four-file c128/c512, and
+  three-file c2048 real-margin probes
+- `cx ask` adversarial review, session `019f1ffe-1f3a-7120-a872-f068a90fd92d`
+
+Results: focused real-prompt probes had zero route-set mismatches across 32
+non-smoke rows covering contexts `128`, `512`, `2048`, and `3072`; route order
+differed in 2 rows, but expert sets stayed stable. Worst `min_replay_margin` was
+`0.000047`; min `x` cosine was `0.999999965`. A window-level replay-margin guard
+would fallback on `3.12%` of rows at `1e-4`, `12.50%` at `3e-4`, `25.00%` at
+`1e-3`, and `53.12%` at `5e-3`.
+
+Decision: real-prompt margin/fallback measurement is now the right decision
+surface. The small markdown-rollout sample is encouraging, but cx correctly
+warned that it is not yet a scheduler gate. Broaden prompt classes and model net
+replay savings after fallback before scheduler work.
+
 ## 2026-07-01 - v0.420 Blocks=2 Margin Sweep
 
 Status: ran `decode-block-slice-margin-sweep` with `blocks=2` to test whether

@@ -35,7 +35,7 @@ use qwen_llm::{
         encode_attn_decode_v4_reduce_only_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
         encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
         encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
-        encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+        encode_get_rows_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
         encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_rms_norm_batched_f32,
@@ -443,6 +443,8 @@ enum Cmd {
     DecodeBlockSliceTrace(DecodeBlockSliceTraceArgs),
     /// Loaded-once summary sweep for block-slice replay route margins.
     DecodeBlockSliceMarginSweep(DecodeBlockSliceMarginSweepArgs),
+    /// Real-prompt summary sweep for block-slice replay route margins.
+    DecodeBlockSliceRealMargin(DecodeBlockSliceRealMarginArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
@@ -906,6 +908,31 @@ struct DecodeBlockSliceMarginSweepArgs {
     /// Synthetic decode positions to sweep.
     #[arg(long = "position", value_delimiter = ',', default_value = "0,4096")]
     positions: Vec<u32>,
+}
+
+#[derive(Parser, Debug)]
+struct DecodeBlockSliceRealMarginArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Read one or more real prompt token streams from text files.
+    #[arg(long)]
+    file: Vec<PathBuf>,
+    /// Number of consecutive prompt positions to use as slots.
+    #[arg(long, default_value = "4")]
+    tokens: usize,
+    /// Prompt context positions to sweep.
+    #[arg(long = "context", value_delimiter = ',', default_value = "512")]
+    contexts: Vec<usize>,
+    /// Position stride between slots when single-file multi-slot support lands.
+    #[arg(long, default_value = "1")]
+    stride: usize,
+    /// Start blocks to sweep. If omitted, uses a non-overlapping stride.
+    #[arg(long = "start-block", value_delimiter = ',')]
+    start_blocks: Vec<usize>,
+    /// Number of consecutive absolute blocks per replay window.
+    #[arg(long = "blocks", default_value = "4")]
+    n_blocks: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1929,6 +1956,7 @@ fn main() -> Result<()> {
         Cmd::DecodeBlockSliceReplay(a) => run_decode_block_slice_replay(a),
         Cmd::DecodeBlockSliceTrace(a) => run_decode_block_slice_trace(a),
         Cmd::DecodeBlockSliceMarginSweep(a) => run_decode_block_slice_margin_sweep(a),
+        Cmd::DecodeBlockSliceRealMargin(a) => run_decode_block_slice_real_margin(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
@@ -4512,6 +4540,156 @@ fn trace_block_slice_summary(
     Ok(out)
 }
 
+fn copy_recurrent_session_state(
+    ctx: &MetalContext,
+    src: &MetalSession,
+    dst: &mut MetalSession,
+) -> Result<()> {
+    if src.gdn_conv.len() != dst.gdn_conv.len()
+        || src.gdn_state.len() != dst.gdn_state.len()
+        || src.kv_k.len() != dst.kv_k.len()
+        || src.kv_v.len() != dst.kv_v.len()
+    {
+        return Err(anyhow!("session state vector lengths differ"));
+    }
+    let cmd = ctx
+        .queue
+        .commandBuffer()
+        .context("copy session state cmd")?;
+    let blit = BlitEncoder::begin(&cmd);
+    for (a, b) in src.gdn_conv.iter().zip(dst.gdn_conv.iter()) {
+        blit.copy_buffer(&a.buffer, a.offset, &b.buffer, b.offset, a.n_bytes());
+    }
+    for (a, b) in src.gdn_state.iter().zip(dst.gdn_state.iter()) {
+        blit.copy_buffer(&a.buffer, a.offset, &b.buffer, b.offset, a.n_bytes());
+    }
+    for (a, b) in src.kv_k.iter().zip(dst.kv_k.iter()) {
+        blit.copy_buffer(&a.buffer, a.offset, &b.buffer, b.offset, a.n_bytes());
+    }
+    for (a, b) in src.kv_v.iter().zip(dst.kv_v.iter()) {
+        blit.copy_buffer(&a.buffer, a.offset, &b.buffer, b.offset, a.n_bytes());
+    }
+    blit.end();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+    dst.kv_n_pos.clone_from(&src.kv_n_pos);
+    Ok(())
+}
+
+fn prepare_moe_session_to_block(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    mm: &MetalModel,
+    token_id: i32,
+    position: u32,
+    start_block: usize,
+    session: &mut MetalSession,
+    h: usize,
+) -> Result<()> {
+    unsafe {
+        let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+        *ptr = token_id;
+    }
+    let cmd = ctx
+        .queue
+        .commandBuffer()
+        .context("prepare block-slice session cmd")?;
+    let enc = KernelEncoder::begin(&cmd);
+    encode_get_rows_f32(
+        ctx,
+        &enc,
+        &mm.token_embd,
+        &session.ids_buf,
+        &session.x,
+        1,
+        h,
+    )?;
+    for block_i in 0..start_block {
+        mf.encode_moe_block_by_index(&enc, block_i, position, session)?;
+    }
+    enc.end();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+    Ok(())
+}
+
+fn trace_prepared_block_slice_summary(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    mm: &MetalModel,
+    start_block: usize,
+    n_blocks: usize,
+    position: u32,
+    base: &mut [MetalSession],
+    replay: &mut [MetalSession],
+    scratch: &GdnLayerReplayScratch,
+    h: usize,
+    conv_dim: usize,
+    v_dim: usize,
+    topk: usize,
+    n_expert: usize,
+    gdn_layers: &[SelectedGdnLayer<'_>],
+) -> Result<BlockSliceTraceSummary> {
+    if base.len() != replay.len() {
+        return Err(anyhow!("base/replay slot counts differ"));
+    }
+    let mut out = BlockSliceTraceSummary::default();
+    for block_i in start_block..start_block + n_blocks {
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("real margin baseline cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_block_slice_baseline(mf, &enc, block_i, 1, position, base)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("real margin replay cmd")?;
+        encode_one_block_replay(
+            ctx, mf, mm, &cmd, block_i, position, replay, scratch, gdn_layers, h, conv_dim, v_dim,
+        )?;
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        for slot in 0..base.len() {
+            let base_route = read_route_fingerprint(&base[slot], topk, n_expert);
+            let replay_route = read_route_fingerprint(&replay[slot], topk, n_expert);
+            let route_order_equal = base_route.idx == replay_route.idx;
+            let route_set_equal = same_i32_set(&base_route.idx, &replay_route.idx);
+            if !route_order_equal {
+                out.route_order_mismatches += 1;
+            }
+            if !route_set_equal {
+                out.route_set_mismatches += 1;
+                out.first_set_mismatch.get_or_insert((block_i, slot));
+            }
+            let logit_max_abs = f32_max_abs_delta(&base_route.logits, &replay_route.logits);
+            let logit_rms = f32_rms_delta(&base_route.logits, &replay_route.logits);
+            out.max_logit_abs = out.max_logit_abs.max(logit_max_abs);
+            out.max_logit_rms = out.max_logit_rms.max(logit_rms);
+            out.min_base_margin = out.min_base_margin.min(base_route.logit_margin);
+            out.min_replay_margin = out.min_replay_margin.min(replay_route.logit_margin);
+            if replay_route.logit_margin < 0.001 {
+                out.replay_margin_lt_1e3 += 1;
+            }
+            if replay_route.logit_margin < 0.005 {
+                out.replay_margin_lt_5e3 += 1;
+            }
+            let (x_cos, x_abs) = cosine_max_abs(
+                &read_f32_tensor(&base[slot].x),
+                &read_f32_tensor(&replay[slot].x),
+            );
+            out.min_x_cos = out.min_x_cos.min(x_cos);
+            out.max_x_abs = out.max_x_abs.max(x_abs);
+        }
+    }
+    Ok(out)
+}
+
 fn run_decode_block_slice_margin_sweep(args: DecodeBlockSliceMarginSweepArgs) -> Result<()> {
     let DecodeBlockSliceMarginSweepArgs {
         model,
@@ -4622,6 +4800,235 @@ fn run_decode_block_slice_margin_sweep(args: DecodeBlockSliceMarginSweepArgs) ->
                 start_block,
                 start_block + n_blocks,
                 position,
+                tokens,
+                summary.route_order_mismatches,
+                summary.route_set_mismatches,
+                first_set,
+                summary.max_logit_abs,
+                summary.max_logit_rms,
+                summary.min_base_margin,
+                summary.min_replay_margin,
+                summary.replay_margin_lt_1e3,
+                summary.replay_margin_lt_5e3,
+                summary.min_x_cos,
+                summary.max_x_abs,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> Result<()> {
+    let DecodeBlockSliceRealMarginArgs {
+        model,
+        file,
+        tokens,
+        mut contexts,
+        stride,
+        mut start_blocks,
+        n_blocks,
+    } = args;
+    if tokens == 0 {
+        return Err(anyhow!("--tokens must be >= 1"));
+    }
+    if stride == 0 {
+        return Err(anyhow!("--stride must be >= 1"));
+    }
+    if file.is_empty() {
+        return Err(anyhow!("--file must include at least one prompt"));
+    }
+    if file.len() == 1 && tokens != 1 {
+        return Err(anyhow!(
+            "single-file real margin currently requires --tokens 1; pass multiple --file entries for multi-slot same-context rows"
+        ));
+    }
+    if file.len() > 1 && file.len() < tokens {
+        return Err(anyhow!(
+            "got {} --file entries, need at least --tokens {tokens}",
+            file.len()
+        ));
+    }
+    if n_blocks == 0 {
+        return Err(anyhow!("--blocks must be >= 1"));
+    }
+    if contexts.is_empty() {
+        return Err(anyhow!("--context must include at least one entry"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!(
+            "decode-block-slice-real-margin currently requires an MoE model"
+        ));
+    }
+    if start_blocks.is_empty() {
+        start_blocks = (0..mm.blocks.len())
+            .step_by(n_blocks)
+            .filter(|&i| i + n_blocks <= mm.blocks.len())
+            .collect();
+    }
+    start_blocks.sort_unstable();
+    start_blocks.dedup();
+    contexts.sort_unstable();
+    contexts.dedup();
+    for &start_block in &start_blocks {
+        let end_block = start_block
+            .checked_add(n_blocks)
+            .ok_or_else(|| anyhow!("start_block + blocks overflow"))?;
+        if end_block > mm.blocks.len() {
+            return Err(anyhow!(
+                "block slice {}..{} outside available 0..{}",
+                start_block,
+                end_block,
+                mm.blocks.len()
+            ));
+        }
+    }
+
+    let tok = NativeTokenizer::from_gguf(&g).context("open native GGUF tokenizer")?;
+    let mut prompt_ids = Vec::with_capacity(file.len());
+    for path in &file {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let ids = tok
+            .encode(&text, false)
+            .with_context(|| format!("tokenize {}", path.display()))?;
+        prompt_ids.push(ids);
+    }
+    let max_context = *contexts.last().expect("non-empty contexts");
+    let last_needed = max_context;
+    for (path, ids) in file.iter().zip(prompt_ids.iter()).take(tokens) {
+        if ids.len() <= last_needed {
+            return Err(anyhow!(
+                "prompt {} has {} tokens, need at least {} for context sweep",
+                path.display(),
+                ids.len(),
+                last_needed + 1
+            ));
+        }
+    }
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+    let n_v = arch.gdn_n_v_heads as usize;
+    let n_k = arch.gdn_n_k_heads as usize;
+    let head_dim = arch.gdn_head_dim as usize;
+    let conv_dim = (2 * n_k + n_v) * head_dim;
+    let v_dim = n_v * head_dim;
+    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+    let n_expert = arch.expert_count as usize;
+    let gdn_layers = collect_gdn_layers(&mm);
+
+    println!(
+        "[decode-block-slice-real-margin] model={} files={} first_prompt_tokens={} contexts={} windows={} tokens={} stride={} blocks={} topk={} experts={} h={} conv_dim={} v_dim={}",
+        model.display(),
+        file.len(),
+        prompt_ids[0].len(),
+        contexts
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        start_blocks.len(),
+        tokens,
+        stride,
+        n_blocks,
+        topk,
+        n_expert,
+        h,
+        conv_dim,
+        v_dim
+    );
+    println!(
+        "start_block\tend_block\tcontext\tslots\troute_order_mismatches\troute_set_mismatches\tfirst_set_mismatch\tmax_logit_abs\tmax_logit_rms\tmin_base_margin\tmin_replay_margin\treplay_margin_lt_1e3\treplay_margin_lt_5e3\tmin_x_cos\tmax_x_abs"
+    );
+
+    for &context in &contexts {
+        let kv_capacity = last_needed + 32;
+        let mut prefix_sessions = Vec::with_capacity(tokens);
+        for slot in 0..tokens {
+            let ids = if prompt_ids.len() == 1 {
+                &prompt_ids[0]
+            } else {
+                &prompt_ids[slot]
+            };
+            let pos = context;
+            let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
+                .with_context(|| format!("real prefix session slot {slot}"))?;
+            for (p, &token_id) in ids.iter().take(pos).enumerate() {
+                let _ = mf.single_token_argmax_profiled(token_id, p as u32, &mut s)?;
+            }
+            prefix_sessions.push(s);
+        }
+
+        for &start_block in &start_blocks {
+            let mut base = fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, tokens, kv_capacity)?;
+            let mut replay =
+                fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, tokens, kv_capacity)?;
+            for slot in 0..tokens {
+                copy_recurrent_session_state(&ctx, &prefix_sessions[slot], &mut base[slot])?;
+                copy_recurrent_session_state(&ctx, &prefix_sessions[slot], &mut replay[slot])?;
+                let ids = if prompt_ids.len() == 1 {
+                    &prompt_ids[0]
+                } else {
+                    &prompt_ids[slot]
+                };
+                let pos = context;
+                let token_id = ids[pos];
+                prepare_moe_session_to_block(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    token_id,
+                    pos as u32,
+                    start_block,
+                    &mut base[slot],
+                    h,
+                )?;
+                prepare_moe_session_to_block(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    token_id,
+                    pos as u32,
+                    start_block,
+                    &mut replay[slot],
+                    h,
+                )?;
+            }
+
+            let scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
+            let summary = trace_prepared_block_slice_summary(
+                &ctx,
+                &mf,
+                &mm,
+                start_block,
+                n_blocks,
+                context as u32,
+                &mut base,
+                &mut replay,
+                &scratch,
+                h,
+                conv_dim,
+                v_dim,
+                topk,
+                n_expert,
+                &gdn_layers,
+            )?;
+            let first_set = summary
+                .first_set_mismatch
+                .map(|(block, slot)| format!("block={block},slot={slot}"))
+                .unwrap_or_else(|| "none".to_string());
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{:.9}\t{:.6}",
+                start_block,
+                start_block + n_blocks,
+                context,
                 tokens,
                 summary.route_order_mismatches,
                 summary.route_set_mismatches,

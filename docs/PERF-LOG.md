@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.401 MoE Batch Upper-Bound Gate
+
+Status: added `scripts/profile/moe_batch_upper_bound.py` to combine a
+production decode phase profile with `moe-batch-sweep` rows. The tool estimates
+the ideal end-to-end ceiling for routed MoE batching, including a simple fallback
+term for down-projection layers that the packed Q5 path does not cover.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0401-moe-batch-upper-bound/README.md`
+
+Validation:
+
+- A3B `ctx512` and `ctx2048` production-wave phase profiles
+- `uv run scripts/profile/moe_batch_upper_bound.py` on both profiles
+- `cx ask` upper-bound review, session `019f1bc4-b08e-7030-8a44-367e056a197e`
+
+Results:
+
+| Ctx | Slots | Projected routed ms | Saved ms | Saved phase | Ideal speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 4 | `1.3613` | `0.6987` | `7.50%` | `1.081x` |
+| 512 | 8 | `1.2856` | `0.7744` | `8.31%` | `1.091x` |
+| 2048 | 4 | `1.3613` | `0.6987` | `7.39%` | `1.080x` |
+| 2048 | 8 | `1.2856` | `0.7744` | `8.19%` | `1.089x` |
+
+Decision: the A3B batching micro win is real but too localized to justify a
+full multi-slot scheduler as the immediate top branch. The ideal routed-FFN-only
+ceiling is about `8-9%` before any real pack/scatter, scheduler, KV, attention,
+shared-FFN, or sampling overhead. Keep batching as a later system feature, but
+pivot immediate decode work to larger single-token byte-reduction or fusion
+targets unless a future upper-bound row clears `>=12-15%` credible savings.
+
 ## 2026-06-30 - v0.400 Expert-Sorted Slot-Order Kill-Test
 
 Status: added `moe-batch-sweep --slot-order` with an

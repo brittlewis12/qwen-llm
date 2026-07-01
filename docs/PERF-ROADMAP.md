@@ -1021,6 +1021,14 @@ A10B stays flat at b2 (`4.725 -> 4.723 ms/token`) and regresses at b4/b8
 (`4.840 -> 4.945`, `5.135 -> 5.223`), which kills expert sorting as the A10B
 rescue for this workload. A3B sees only sub-1% sorted changes; keep the next
 batching branch focused on exact A3B end-to-end overhead, not route ordering.
+v0.401 adds a routed-FFN batching upper-bound calculator and applies it to A3B
+`ctx512/2048`. Even the optimistic b8 estimate, including Q6 down fallback, is
+only `~0.77 ms/token` saved (`8.2-8.3%` of phase sum, ideal `~1.09x`) before any
+real scheduler, pack/scatter, command-buffer, KV, attention, shared-FFN, or
+sampling overhead. This demotes the immediate A3B multi-slot scheduler prototype:
+batching remains a later system feature, but the top decode branch should return
+to larger single-token byte-reduction/fusion unless a future upper-bound row
+clears `>=12-15%` credible end-to-end savings.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

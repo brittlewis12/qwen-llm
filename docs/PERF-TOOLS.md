@@ -560,6 +560,10 @@ target/release/qwen-bench moe-batch-sweep \
   --tokens 1,2,4,8,16 \
   --warmup 3 \
   --iters 10
+
+uv run scripts/profile/moe_batch_upper_bound.py \
+  --phase target/profiles/a3b-phase.out \
+  --sweep target/profiles/a3b-moe-batch-sweep.out
 ```
 
 Rules:
@@ -580,6 +584,12 @@ Rules:
   survives disjoint positions instead of only adjacent-token route locality.
 - Pass repeated `--file` entries to test independent prompt slots. Each file gets
   a fresh session and contributes one captured slot to the sweep.
+- Use `--slot-order exact,expert-sorted-perf-only` only as a locality kill-test.
+  The expert-sorted mode is not correctness-preserving with the current kernels;
+  it is a generous upper bound for whether exact route sorting deserves work.
+- Run `moe_batch_upper_bound.py` before a multi-slot architecture branch. It
+  combines production phase timing with captured sweep rows and should show
+  `>=12-15%` credible end-to-end savings before scheduler work becomes top EV.
 - `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
   `--legacy-k512` only for explicit rollback attribution.
 - `--fused-routed-q4q5` times the existing one-token monolith as a falsifier; do

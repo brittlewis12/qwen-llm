@@ -999,6 +999,11 @@ The useful knee is around t8, and t16 adds little. Batching is now a serious
 architecture branch, but the next gate is real-prompt/multi-context capture plus
 end-to-end decode overhead; do not promote production multi-slot decode from MoE
 micro evidence alone.
+v0.397 closes the first realism gap with a contiguous real prompt from
+`the_current.md`: A3B is `1.885 -> 1.215 ms/token` from t1 to t16 and A10B is
+`5.710 -> 4.508 ms/token`, essentially matching ramp. This justifies the next
+gate, not production yet: run independent prompt/disjoint-context captures to
+test cross-context packing before building a scheduler architecture branch.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

@@ -785,6 +785,9 @@ struct MoeBatchSweepArgs {
     /// Capture per-layer hidden activations and top-k ids at this decode context.
     #[arg(long, default_value = "1024")]
     route_capture_ctx: usize,
+    /// Read a real prompt token stream from a text file.
+    #[arg(long)]
+    file: Option<PathBuf>,
     /// Token-id pattern used for captured replay tokens.
     #[arg(long, value_enum, default_value = "ramp")]
     route_capture_token_pattern: CaptureTokenPattern,
@@ -2378,6 +2381,7 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
         warmup,
         mut tokens,
         route_capture_ctx,
+        file,
         route_capture_token_pattern,
     } = args;
     if iters == 0 {
@@ -2452,15 +2456,38 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     }
     let use_k512_r2 = f_exp == 512;
 
+    let prompt_ids = if let Some(path) = file.as_ref() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let tok = NativeTokenizer::from_gguf(&g).context("open native GGUF tokenizer")?;
+        let ids = tok.encode(&text, false).context("tokenize prompt file")?;
+        let need = route_capture_ctx + max_tokens;
+        if ids.len() < need {
+            return Err(anyhow!(
+                "prompt file has {} tokens, need at least route_capture_ctx + max(tokens) = {need}",
+                ids.len()
+            ));
+        }
+        Some(ids)
+    } else {
+        None
+    };
+
     let mf = MetalForward::new(&ctx, &mm);
     let mut capture_s = MetalSession::fresh(&ctx, &mm, route_capture_ctx + max_tokens + 16)
         .context("route-capture session")?;
     for pos in 0..route_capture_ctx {
-        let _ = mf.single_token(0, pos as u32, &mut capture_s)?;
+        let token_id = prompt_ids.as_ref().map(|ids| ids[pos]).unwrap_or(0);
+        let _ = mf.single_token(token_id, pos as u32, &mut capture_s)?;
     }
     let mut all_routes_by_token = Vec::with_capacity(max_tokens);
     for tok in 0..max_tokens {
-        let token_id = capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size);
+        let token_id = prompt_ids
+            .as_ref()
+            .map(|ids| ids[route_capture_ctx + tok])
+            .unwrap_or_else(|| {
+                capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size)
+            });
         let all_routes = mf.capture_moe_gateup_replay_for_token(
             token_id,
             (route_capture_ctx + tok) as u32,
@@ -2492,10 +2519,20 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
         / 1e9;
 
     println!(
-        "[moe-batch-sweep] model={} route_mode=captured(ctx={},pattern={:?}) q4_layers={} q5_layers={} h={} f_exp={} n_expert={} topk={} warmup={} iters={}",
+        "[moe-batch-sweep] model={} route_mode={} q4_layers={} q5_layers={} h={} f_exp={} n_expert={} topk={} warmup={} iters={}",
         model.display(),
-        route_capture_ctx,
-        route_capture_token_pattern,
+        if let Some(path) = file.as_ref() {
+            format!(
+                "captured(ctx={},file={})",
+                route_capture_ctx,
+                path.display()
+            )
+        } else {
+            format!(
+                "captured(ctx={},pattern={:?})",
+                route_capture_ctx, route_capture_token_pattern
+            )
+        },
         q4_moes.len(),
         q5_moes.len(),
         h,

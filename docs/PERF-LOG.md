@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.397 Real-Prompt MoE Batch Sweep
+
+Status: added `--file` support to `moe-batch-sweep` so route capture can warm and
+replay a real prompt token stream, then ran A3B/A10B sweeps on `the_current.md`.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0397-real-prompt-moe-batch-sweep/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B `moe-batch-sweep --file /Users/tito/code/llm/game/the_current.md`
+- `cx ask` adversarial review, session `019f1b61-4fee-7e33-b5ae-79a087a838fe`
+
+Results:
+
+| Model | t1 combined | t4 combined | t8 combined | t16 combined | t16/t1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B Q4 | `1.8848 ms/tok` | `1.3453` | `1.2553` | `1.2153` | `1.55x` |
+| A10B Q4_XL | `5.7095 ms/tok` | `4.6753` | `4.5944` | `4.5078` | `1.27x` |
+
+Decision: real contiguous prompt tokens closely match ramp synthetic, so the
+synthetic ramp control was not misleading for this prompt/span. This still does
+not prove production multi-slot batching: the next gate is independent prompt or
+disjoint-context captures, then a thin end-to-end scheduler skeleton if that gate
+passes.
+
 ## 2026-06-30 - v0.396 Loaded-Once Captured MoE Batch Sweep
 
 Status: added `qwen-bench moe-batch-sweep`, which loads the model once, captures

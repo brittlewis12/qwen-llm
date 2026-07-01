@@ -1177,6 +1177,13 @@ ready: the next gate is a broader margin/fallback-rate histogram over early/mid
 blocks, prompts, positions, and slot counts. Do not promote a replay-side guard
 from the five-window sample; static early/mid allowlist plus late exact-only stays
 the current safe policy.
+v0.419 adds the loaded-once margin sweep and complicates a naive static allowlist:
+`pos4096` non-overlap windows ending at `block31`, `block35`, and `block39` can
+flip route sets, while `pos0` non-overlap windows do not; targeted `block37..40`
+at `pos0` still fails. Treat absolute block index as a coarse risk feature, not a
+complete policy. The next replay work should measure fallback frequency under a
+candidate replay-side margin threshold across real prompts/positions before any
+ragged scheduler implementation.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

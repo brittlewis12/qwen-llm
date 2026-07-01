@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.419 Block Slice Margin Sweep
+
+Status: added `decode-block-slice-margin-sweep`, a loaded-once summary sweep for
+route-set mismatches and margin/fallback signals across block windows.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0419-margin-sweep/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B loaded-once non-overlap and late-overlap margin sweeps
+
+Results: non-overlap `blocks=4` at `pos4096` finds route-set flips in windows
+ending at `block31`, `block35`, and `block39`, while `pos0` non-overlap has no
+set flips. Overlapping late windows show the failure is not a simple absolute
+block cutoff; it depends on window input, position, and near-tie route margins.
+
+Decision: keep late windows exact by default. Dynamic margin fallback remains the
+more principled production shape, but it needs broader margin histograms and
+fallback-rate estimates before scheduler work.
+
 ## 2026-07-01 - v0.418 Route Margin Calibration
 
 Status: extended `decode-block-slice-trace` with router-logit max/rms deltas,

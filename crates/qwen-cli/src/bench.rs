@@ -441,6 +441,8 @@ enum Cmd {
     DecodeBlockSliceReplay(DecodeBlockSliceReplayArgs),
     /// Diagnostic route/topk trace for block-slice replay correctness cliffs.
     DecodeBlockSliceTrace(DecodeBlockSliceTraceArgs),
+    /// Loaded-once summary sweep for block-slice replay route margins.
+    DecodeBlockSliceMarginSweep(DecodeBlockSliceMarginSweepArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
@@ -885,6 +887,25 @@ struct DecodeBlockSliceTraceArgs {
     /// Synthetic decode position for attention blocks in the slice.
     #[arg(long, default_value = "0")]
     position: u32,
+}
+
+#[derive(Parser, Debug)]
+struct DecodeBlockSliceMarginSweepArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Number of synthetic slots per traced window.
+    #[arg(long, default_value = "8")]
+    tokens: usize,
+    /// Start blocks to sweep. If omitted, uses a non-overlapping stride.
+    #[arg(long = "start-block", value_delimiter = ',')]
+    start_blocks: Vec<usize>,
+    /// Number of consecutive absolute blocks per window.
+    #[arg(long = "blocks", default_value = "4")]
+    n_blocks: usize,
+    /// Synthetic decode positions to sweep.
+    #[arg(long = "position", value_delimiter = ',', default_value = "0,4096")]
+    positions: Vec<u32>,
 }
 
 #[derive(Parser, Debug)]
@@ -1907,6 +1928,7 @@ fn main() -> Result<()> {
         Cmd::DecodeGdnChainReplay(a) => run_decode_gdn_chain_replay(a),
         Cmd::DecodeBlockSliceReplay(a) => run_decode_block_slice_replay(a),
         Cmd::DecodeBlockSliceTrace(a) => run_decode_block_slice_trace(a),
+        Cmd::DecodeBlockSliceMarginSweep(a) => run_decode_block_slice_margin_sweep(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
@@ -4361,6 +4383,260 @@ fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
         min_x_cos,
         max_x_abs
     );
+
+    Ok(())
+}
+
+struct BlockSliceTraceSummary {
+    route_order_mismatches: usize,
+    route_set_mismatches: usize,
+    first_set_mismatch: Option<(usize, usize)>,
+    max_logit_abs: f32,
+    max_logit_rms: f64,
+    min_base_margin: f32,
+    min_replay_margin: f32,
+    replay_margin_lt_1e3: usize,
+    replay_margin_lt_5e3: usize,
+    min_x_cos: f64,
+    max_x_abs: f32,
+}
+
+impl Default for BlockSliceTraceSummary {
+    fn default() -> Self {
+        Self {
+            route_order_mismatches: 0,
+            route_set_mismatches: 0,
+            first_set_mismatch: None,
+            max_logit_abs: 0.0,
+            max_logit_rms: 0.0,
+            min_base_margin: f32::INFINITY,
+            min_replay_margin: f32::INFINITY,
+            replay_margin_lt_1e3: 0,
+            replay_margin_lt_5e3: 0,
+            min_x_cos: 1.0,
+            max_x_abs: 0.0,
+        }
+    }
+}
+
+fn trace_block_slice_summary(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    mm: &MetalModel,
+    start_block: usize,
+    n_blocks: usize,
+    position: u32,
+    tokens: usize,
+    h: usize,
+    conv_dim: usize,
+    v_dim: usize,
+    topk: usize,
+    n_expert: usize,
+    gdn_layers: &[SelectedGdnLayer<'_>],
+) -> Result<BlockSliceTraceSummary> {
+    let kv_capacity = (position as usize)
+        .checked_add(32)
+        .ok_or_else(|| anyhow!("position + KV slack overflow"))?;
+    let mut base = fresh_gdn_replay_sessions_with_capacity(ctx, mm, tokens, kv_capacity)?;
+    let mut replay = fresh_gdn_replay_sessions_with_capacity(ctx, mm, tokens, kv_capacity)?;
+    fill_gdn_replay_inputs(ctx, &base)?;
+    fill_gdn_replay_inputs(ctx, &replay)?;
+    let scratch = GdnLayerReplayScratch::new(ctx, tokens, h, conv_dim, v_dim)?;
+    let mut out = BlockSliceTraceSummary::default();
+
+    for block_i in start_block..start_block + n_blocks {
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("block margin sweep baseline cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_block_slice_baseline(mf, &enc, block_i, 1, position, &mut base)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("block margin sweep replay cmd")?;
+        encode_one_block_replay(
+            ctx,
+            mf,
+            mm,
+            &cmd,
+            block_i,
+            position,
+            &mut replay,
+            &scratch,
+            gdn_layers,
+            h,
+            conv_dim,
+            v_dim,
+        )?;
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        for slot in 0..tokens {
+            let base_route = read_route_fingerprint(&base[slot], topk, n_expert);
+            let replay_route = read_route_fingerprint(&replay[slot], topk, n_expert);
+            let route_order_equal = base_route.idx == replay_route.idx;
+            let route_set_equal = same_i32_set(&base_route.idx, &replay_route.idx);
+            if !route_order_equal {
+                out.route_order_mismatches += 1;
+            }
+            if !route_set_equal {
+                out.route_set_mismatches += 1;
+                out.first_set_mismatch.get_or_insert((block_i, slot));
+            }
+            let logit_max_abs = f32_max_abs_delta(&base_route.logits, &replay_route.logits);
+            let logit_rms = f32_rms_delta(&base_route.logits, &replay_route.logits);
+            out.max_logit_abs = out.max_logit_abs.max(logit_max_abs);
+            out.max_logit_rms = out.max_logit_rms.max(logit_rms);
+            out.min_base_margin = out.min_base_margin.min(base_route.logit_margin);
+            out.min_replay_margin = out.min_replay_margin.min(replay_route.logit_margin);
+            if replay_route.logit_margin < 0.001 {
+                out.replay_margin_lt_1e3 += 1;
+            }
+            if replay_route.logit_margin < 0.005 {
+                out.replay_margin_lt_5e3 += 1;
+            }
+            let (x_cos, x_abs) = cosine_max_abs(
+                &read_f32_tensor(&base[slot].x),
+                &read_f32_tensor(&replay[slot].x),
+            );
+            out.min_x_cos = out.min_x_cos.min(x_cos);
+            out.max_x_abs = out.max_x_abs.max(x_abs);
+        }
+    }
+
+    Ok(out)
+}
+
+fn run_decode_block_slice_margin_sweep(args: DecodeBlockSliceMarginSweepArgs) -> Result<()> {
+    let DecodeBlockSliceMarginSweepArgs {
+        model,
+        tokens,
+        mut start_blocks,
+        n_blocks,
+        mut positions,
+    } = args;
+    if tokens == 0 {
+        return Err(anyhow!("--tokens must be >= 1"));
+    }
+    if n_blocks == 0 {
+        return Err(anyhow!("--blocks must be >= 1"));
+    }
+    if positions.is_empty() {
+        return Err(anyhow!("--position must include at least one entry"));
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!(
+            "decode-block-slice-margin-sweep currently requires an MoE model"
+        ));
+    }
+    if start_blocks.is_empty() {
+        start_blocks = (0..mm.blocks.len())
+            .step_by(n_blocks)
+            .filter(|&i| i + n_blocks <= mm.blocks.len())
+            .collect();
+    }
+    start_blocks.sort_unstable();
+    start_blocks.dedup();
+    positions.sort_unstable();
+    positions.dedup();
+    for &start_block in &start_blocks {
+        let end_block = start_block
+            .checked_add(n_blocks)
+            .ok_or_else(|| anyhow!("start_block + blocks overflow"))?;
+        if end_block > mm.blocks.len() {
+            return Err(anyhow!(
+                "block slice {}..{} outside available 0..{}",
+                start_block,
+                end_block,
+                mm.blocks.len()
+            ));
+        }
+    }
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+    let n_v = arch.gdn_n_v_heads as usize;
+    let n_k = arch.gdn_n_k_heads as usize;
+    let head_dim = arch.gdn_head_dim as usize;
+    let conv_dim = (2 * n_k + n_v) * head_dim;
+    let v_dim = n_v * head_dim;
+    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+    let n_expert = arch.expert_count as usize;
+    let gdn_layers = collect_gdn_layers(&mm);
+
+    println!(
+        "[decode-block-slice-margin-sweep] model={} windows={} positions={} tokens={} blocks={} topk={} experts={} h={} conv_dim={} v_dim={}",
+        model.display(),
+        start_blocks.len(),
+        positions
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        tokens,
+        n_blocks,
+        topk,
+        n_expert,
+        h,
+        conv_dim,
+        v_dim
+    );
+    println!(
+        "start_block\tend_block\tposition\ttokens\troute_order_mismatches\troute_set_mismatches\tfirst_set_mismatch\tmax_logit_abs\tmax_logit_rms\tmin_base_margin\tmin_replay_margin\treplay_margin_lt_1e3\treplay_margin_lt_5e3\tmin_x_cos\tmax_x_abs"
+    );
+
+    for &position in &positions {
+        for &start_block in &start_blocks {
+            let summary = trace_block_slice_summary(
+                &ctx,
+                &mf,
+                &mm,
+                start_block,
+                n_blocks,
+                position,
+                tokens,
+                h,
+                conv_dim,
+                v_dim,
+                topk,
+                n_expert,
+                &gdn_layers,
+            )?;
+            let first_set = summary
+                .first_set_mismatch
+                .map(|(block, slot)| format!("block={block},slot={slot}"))
+                .unwrap_or_else(|| "none".to_string());
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{:.9}\t{:.6}",
+                start_block,
+                start_block + n_blocks,
+                position,
+                tokens,
+                summary.route_order_mismatches,
+                summary.route_set_mismatches,
+                first_set,
+                summary.max_logit_abs,
+                summary.max_logit_rms,
+                summary.min_base_margin,
+                summary.min_replay_margin,
+                summary.replay_margin_lt_1e3,
+                summary.replay_margin_lt_5e3,
+                summary.min_x_cos,
+                summary.max_x_abs,
+            );
+        }
+    }
 
     Ok(())
 }

@@ -2527,6 +2527,70 @@ impl<'a> MetalForward<'a> {
         self.encode_moe_ffn_apply_gpu(enc, session, ffn_gate, ffn_up, ffn_down, moe)
     }
 
+    fn moe_block_slot_by_index(
+        &self,
+        block_idx: usize,
+    ) -> Result<(&MetalBlock, MixerSlot), MfError> {
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (i, block) in self.model.blocks.iter().enumerate() {
+            match block {
+                MetalBlock::Gdn(_) => {
+                    if i == block_idx {
+                        return Ok((block, MixerSlot::Gdn(gdn_idx)));
+                    }
+                    gdn_idx += 1;
+                }
+                MetalBlock::Attn(_) => {
+                    if i == block_idx {
+                        return Ok((block, MixerSlot::Attn(attn_idx)));
+                    }
+                    attn_idx += 1;
+                }
+            }
+        }
+        Err(MfError::Metal(MetalError::BadShape {
+            kernel: "encode_moe_block_by_index",
+            detail: format!(
+                "block index {block_idx} >= n_layer {}",
+                self.model.blocks.len()
+            ),
+        }))
+    }
+
+    /// Bench hook: encode one MoE block by absolute block index.
+    ///
+    /// This keeps the public surface free of the internal `MixerSlot` enum while
+    /// allowing block-slice microbenchmarks to execute normal attention/MoE work.
+    pub fn encode_moe_block_by_index(
+        &self,
+        enc: &KernelEncoder,
+        block_idx: usize,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let (block, slot) = self.moe_block_slot_by_index(block_idx)?;
+        self.encode_moe_block_gpu(enc, block, slot, position, session)
+    }
+
+    /// Bench hook: run the route + MoE FFN tail after a caller has already
+    /// computed mixer residual and post-mixer norm for this block.
+    pub fn encode_moe_ffn_after_mixer_by_index(
+        &self,
+        enc: &KernelEncoder,
+        block_idx: usize,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let (block, _) = self.moe_block_slot_by_index(block_idx)?;
+        let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+            MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+            MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+        };
+        let moe = moe.ok_or(MfError::UnsupportedMoe)?;
+        self.encode_moe_route_prepare(enc, session, moe)?;
+        self.encode_moe_ffn_apply_gpu(enc, session, ffn_gate, ffn_up, ffn_down, moe)
+    }
+
     fn encode_moe_mixer_prep(
         &self,
         enc: &KernelEncoder,

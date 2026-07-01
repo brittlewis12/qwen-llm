@@ -1131,6 +1131,12 @@ that the GDN subpath is real, but it still skips attention/MoE blocks. Next exac
 step: a full block-slice for 2-4 consecutive real blocks that executes normal
 attention/MoE and swaps only GDN for replay. Ragged masks and scheduler work wait
 until that block-slice shows net wall-clock savings.
+v0.414 clears that first integration gate: a four-block A3B MoE slice with three
+GDN blocks and one attention block, normal MoE route/FFN, and only GDN mixer replay
+saves `0.1409 ms/token` at `S=8` and `0.1899 ms/token` at `S=16`, with
+`min_cos_x=0.999999329`. Continue, but do not promote to scheduler yet. The next
+decisive tests are nonzero/long attention positions, mid/late block windows, and
+ragged active-slot masks; position-0 full occupancy is still a friendly case.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

@@ -437,6 +437,8 @@ enum Cmd {
     DecodeGdnLayerReplay(DecodeGdnLayerReplayArgs),
     /// Chained multi-GDN replay probe with batched qkv/z/out projections.
     DecodeGdnChainReplay(DecodeGdnChainReplayArgs),
+    /// MoE block-slice replay probe with normal attention/MoE around GDN replay.
+    DecodeBlockSliceReplay(DecodeBlockSliceReplayArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
@@ -825,6 +827,34 @@ struct DecodeGdnChainReplayArgs {
     /// Number of consecutive GDN layers to chain.
     #[arg(long = "layers", default_value = "4")]
     n_layers: usize,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "3")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "1")]
+    warmup: usize,
+    /// Skip the all-slot correctness comparison between baseline and replay.
+    #[arg(long)]
+    no_check: bool,
+}
+
+#[derive(Parser, Debug)]
+struct DecodeBlockSliceReplayArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Comma-separated token counts to replay through the block slice.
+    #[arg(long, value_delimiter = ',', default_value = "8,16")]
+    tokens: Vec<usize>,
+    /// First absolute transformer block index in the slice.
+    #[arg(long, default_value = "0")]
+    start_block: usize,
+    /// Number of consecutive absolute blocks in the slice.
+    #[arg(long = "blocks", default_value = "4")]
+    n_blocks: usize,
+    /// Synthetic decode position for attention blocks in the slice.
+    #[arg(long, default_value = "0")]
+    position: u32,
     /// Timed repetitions after warmup.
     #[arg(long, default_value = "3")]
     iters: usize,
@@ -1854,6 +1884,7 @@ fn main() -> Result<()> {
         Cmd::DecodeProjBatch(a) => run_decode_proj_batch(a),
         Cmd::DecodeGdnLayerReplay(a) => run_decode_gdn_layer_replay(a),
         Cmd::DecodeGdnChainReplay(a) => run_decode_gdn_chain_replay(a),
+        Cmd::DecodeBlockSliceReplay(a) => run_decode_block_slice_replay(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
@@ -3655,6 +3686,288 @@ fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Result<()> {
             n_layers,
             3 * n_layers,
             (12.0 + 3.0 / n_tokens as f64) * n_layers as f64,
+            replay.avg_wall_ms,
+            replay.avg_gpu_ms,
+            replay_per_tok,
+            replay.p50_gpu_ms / n_tokens as f64,
+            replay.p90_gpu_ms / n_tokens as f64,
+            replay.max_gpu_ms / n_tokens as f64,
+            save,
+            pct
+        );
+    }
+
+    Ok(())
+}
+
+fn encode_block_slice_baseline(
+    mf: &MetalForward<'_>,
+    enc: &KernelEncoder,
+    start_block: usize,
+    n_blocks: usize,
+    position: u32,
+    sessions: &mut [MetalSession],
+) -> Result<()> {
+    for block_i in start_block..start_block + n_blocks {
+        for s in sessions.iter_mut() {
+            mf.encode_moe_block_by_index(enc, block_i, position, s)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_block_slice_replay(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    mm: &MetalModel,
+    cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    start_block: usize,
+    n_blocks: usize,
+    position: u32,
+    sessions: &mut [MetalSession],
+    scratch: &GdnLayerReplayScratch,
+    gdn_layers: &[SelectedGdnLayer<'_>],
+    h: usize,
+    conv_dim: usize,
+    v_dim: usize,
+) -> Result<()> {
+    for block_i in start_block..start_block + n_blocks {
+        match &mm.blocks[block_i] {
+            MetalBlock::Gdn(gb) => {
+                let gdn_i = gdn_layers
+                    .iter()
+                    .find(|layer| layer.block_i == block_i)
+                    .map(|layer| layer.gdn_i)
+                    .ok_or_else(|| anyhow!("missing GDN index for block {block_i}"))?;
+                encode_gdn_layer_replay(
+                    ctx, mf, cmd, gb, gdn_i, sessions, scratch, h, conv_dim, v_dim,
+                )?;
+                let enc = KernelEncoder::begin(cmd);
+                for s in sessions.iter_mut() {
+                    mf.encode_moe_ffn_after_mixer_by_index(&enc, block_i, s)?;
+                }
+                enc.end();
+            }
+            MetalBlock::Attn(_) => {
+                let enc = KernelEncoder::begin(cmd);
+                for s in sessions.iter_mut() {
+                    mf.encode_moe_block_by_index(&enc, block_i, position, s)?;
+                }
+                enc.end();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) -> Result<()> {
+    let DecodeBlockSliceReplayArgs {
+        model,
+        mut tokens,
+        start_block,
+        n_blocks,
+        position,
+        iters,
+        warmup,
+        no_check,
+    } = args;
+    if iters == 0 {
+        return Err(anyhow!("--iters must be >= 1"));
+    }
+    if n_blocks == 0 {
+        return Err(anyhow!("--blocks must be >= 1"));
+    }
+    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+        return Err(anyhow!("--tokens entries must be >= 1"));
+    }
+    tokens.sort_unstable();
+    tokens.dedup();
+    let max_tokens = *tokens.last().expect("non-empty tokens");
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!(
+            "decode-block-slice-replay currently requires an MoE model"
+        ));
+    }
+    let end_block = start_block
+        .checked_add(n_blocks)
+        .ok_or_else(|| anyhow!("start_block + blocks overflow"))?;
+    if end_block > mm.blocks.len() {
+        return Err(anyhow!(
+            "block slice {}..{} outside available 0..{}",
+            start_block,
+            end_block,
+            mm.blocks.len()
+        ));
+    }
+    let mf = MetalForward::new(&ctx, &mm);
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+    let n_v = arch.gdn_n_v_heads as usize;
+    let n_k = arch.gdn_n_k_heads as usize;
+    let head_dim = arch.gdn_head_dim as usize;
+    let conv_dim = (2 * n_k + n_v) * head_dim;
+    let v_dim = n_v * head_dim;
+    let gdn_layers = collect_gdn_layers(&mm);
+    let n_gdn_in_slice = (start_block..end_block)
+        .filter(|&i| matches!(mm.blocks[i], MetalBlock::Gdn(_)))
+        .count();
+    let n_attn_in_slice = n_blocks - n_gdn_in_slice;
+
+    println!(
+        "[decode-block-slice-replay] model={} start_block={} blocks={} gdn_blocks={} attn_blocks={} position={} h={} conv_dim={} v_dim={} tokens={} warmup={} iters={}",
+        model.display(),
+        start_block,
+        n_blocks,
+        n_gdn_in_slice,
+        n_attn_in_slice,
+        position,
+        h,
+        conv_dim,
+        v_dim,
+        tokens
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        warmup,
+        iters
+    );
+
+    if !no_check {
+        let check_tokens = max_tokens;
+        let mut base = fresh_gdn_replay_sessions(&ctx, &mm, check_tokens)?;
+        let mut replay = fresh_gdn_replay_sessions(&ctx, &mm, check_tokens)?;
+        fill_gdn_replay_inputs(&ctx, &base)?;
+        fill_gdn_replay_inputs(&ctx, &replay)?;
+        let scratch = GdnLayerReplayScratch::new(&ctx, check_tokens, h, conv_dim, v_dim)?;
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("block slice check baseline cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_block_slice_baseline(&mf, &enc, start_block, n_blocks, position, &mut base)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .context("block slice check replay cmd")?;
+        encode_block_slice_replay(
+            &ctx,
+            &mf,
+            &mm,
+            &cmd,
+            start_block,
+            n_blocks,
+            position,
+            &mut replay,
+            &scratch,
+            &gdn_layers,
+            h,
+            conv_dim,
+            v_dim,
+        )?;
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let mut min_cos = 1.0f64;
+        let mut max_abs_all = 0.0f32;
+        let mut worst_slot = 0usize;
+        for i in 0..check_tokens {
+            let (cos, max_abs) =
+                cosine_max_abs(&read_f32_tensor(&base[i].x), &read_f32_tensor(&replay[i].x));
+            if cos < min_cos || max_abs > max_abs_all {
+                worst_slot = i;
+            }
+            min_cos = min_cos.min(cos);
+            max_abs_all = max_abs_all.max(max_abs);
+        }
+        println!(
+            "check\ttokens={check_tokens}\tmin_cos_x={min_cos:.9}\tmax_abs_x={max_abs_all:.6}\tworst_slot={worst_slot}"
+        );
+        if min_cos < 0.999 || max_abs_all > 5e-2 {
+            return Err(anyhow!(
+                "block slice replay check failed: min_cos_x={min_cos:.9} max_abs_x={max_abs_all:.6}"
+            ));
+        }
+    }
+
+    let mut baseline_sessions = fresh_gdn_replay_sessions(&ctx, &mm, max_tokens)?;
+    let mut replay_sessions = fresh_gdn_replay_sessions(&ctx, &mm, max_tokens)?;
+    fill_gdn_replay_inputs(&ctx, &baseline_sessions)?;
+    fill_gdn_replay_inputs(&ctx, &replay_sessions)?;
+    let scratch = GdnLayerReplayScratch::new(&ctx, max_tokens, h, conv_dim, v_dim)?;
+
+    println!(
+        "mode\ttokens\tblocks\tgdn_blocks\tattn_blocks\tavg_wall_ms\tavg_gpu_ms\tavg_gpu_ms_per_tok\tp50_gpu_ms_per_tok\tp90_gpu_ms_per_tok\tmax_gpu_ms_per_tok\tsaving_ms_per_tok\tsaving_pct"
+    );
+    for &n_tokens in &tokens {
+        let baseline = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+            let enc = KernelEncoder::begin(cmd);
+            encode_block_slice_baseline(
+                &mf,
+                &enc,
+                start_block,
+                n_blocks,
+                position,
+                &mut baseline_sessions[..n_tokens],
+            )?;
+            enc.end();
+            Ok(())
+        })?;
+        let replay = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+            encode_block_slice_replay(
+                &ctx,
+                &mf,
+                &mm,
+                cmd,
+                start_block,
+                n_blocks,
+                position,
+                &mut replay_sessions[..n_tokens],
+                &scratch,
+                &gdn_layers,
+                h,
+                conv_dim,
+                v_dim,
+            )
+        })?;
+
+        let baseline_per_tok = baseline.avg_gpu_ms / n_tokens as f64;
+        let replay_per_tok = replay.avg_gpu_ms / n_tokens as f64;
+        let save = baseline_per_tok - replay_per_tok;
+        let pct = if baseline_per_tok > 0.0 {
+            save / baseline_per_tok * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "baseline_seq\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t0.0000\t0.0",
+            n_tokens,
+            n_blocks,
+            n_gdn_in_slice,
+            n_attn_in_slice,
+            baseline.avg_wall_ms,
+            baseline.avg_gpu_ms,
+            baseline_per_tok,
+            baseline.p50_gpu_ms / n_tokens as f64,
+            baseline.p90_gpu_ms / n_tokens as f64,
+            baseline.max_gpu_ms / n_tokens as f64,
+        );
+        println!(
+            "replay_gdn_batched\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}",
+            n_tokens,
+            n_blocks,
+            n_gdn_in_slice,
+            n_attn_in_slice,
             replay.avg_wall_ms,
             replay.avg_gpu_ms,
             replay_per_tok,

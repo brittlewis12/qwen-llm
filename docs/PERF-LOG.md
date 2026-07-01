@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.414 Block Slice Replay
+
+Status: added `decode-block-slice-replay`, a real MoE block-slice probe that keeps
+normal attention and normal MoE route/FFN execution in place while replacing only
+the GDN mixer subpath with packed multi-slot qkv/z/out replay.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0414-block-slice-replay/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B two-block `S=1` smoke
+- A3B four-block block-slice replay at `S=8/16`
+- `cx ask` review, session `019f1edf-f3df-7e73-9b44-a9dbeceb6278`
+
+Results:
+
+| S | Baseline seq | Replay | Save | Save % |
+| ---: | ---: | ---: | ---: | ---: |
+| `8` | `0.8986` | `0.7577` | `0.1409` | `15.7` |
+| `16` | `0.8733` | `0.6834` | `0.1899` | `21.7` |
+
+Decision: GDN replay survives the first integrated block-slice gate. Keep pushing
+the path, but do not promote scheduler work yet; next gates are nonzero context
+positions, mid/late windows, and ragged active slots.
+
 ## 2026-07-01 - v0.413 GDN Chain Replay
 
 Status: added `decode-gdn-chain-replay`, which chains consecutive GDN layers on

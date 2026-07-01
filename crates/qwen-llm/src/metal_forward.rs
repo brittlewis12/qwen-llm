@@ -168,14 +168,10 @@ pub(crate) fn checked_u64_div_exact(
     Ok(numerator / denominator)
 }
 
+crate::env_flag!(default_off kv_q8_flag, "QWEN_KV_Q8");
+
 fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
-    static KV_Q8: OnceLock<bool> = OnceLock::new();
-    let enabled = *KV_Q8.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_KV_Q8").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    });
+    let enabled = kv_q8_flag();
     let group = (arch.n_q_heads / arch.n_kv_heads.max(1)) as usize;
     if enabled && arch.kind == ArchKind::Dense && arch.attn_head_dim == 256 && group == 6 {
         GgmlType::Q8_0
@@ -184,178 +180,47 @@ fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
     }
 }
 
-fn concurrent_gdn_moe_decode_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_CONCURRENT_GDN").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+// Cached QWEN_* boolean knobs. Polarity is part of the declaration:
+// `default_on` flags ship enabled and the env var is a rollback lever;
+// `default_off` flags are opt-in diagnostics/experiments. Semantics are
+// identical to the hand-rolled OnceLock blocks these replace (latch on
+// first read; unrecognized values resolve to the default). See
+// `crate::env_flag` for the shared parser and the macro definition.
+crate::env_flag!(default_on concurrent_gdn_moe_decode_enabled, "QWEN_DECODE_MOE_CONCURRENT_GDN");
+crate::env_flag!(default_on concurrent_gdn_dense_decode_enabled, "QWEN_DECODE_DENSE_CONCURRENT_GDN");
+crate::env_flag!(default_on concurrent_shared_moe_decode_enabled, "QWEN_DECODE_MOE_CONCURRENT_SHARED");
+crate::env_flag!(default_on decode_shared_swiglu_q8_enabled, "QWEN_DECODE_SHARED_SWIGLU_Q8");
+crate::env_flag!(default_on decode_moe_iq3_fused_swiglu_enabled, "QWEN_DECODE_MOE_IQ3_FUSED_SWIGLU");
+crate::env_flag!(default_on decode_moe_iq3_fast_swiglu_enabled, "QWEN_DECODE_MOE_IQ3_FAST_SWIGLU");
+crate::env_flag!(default_on decode_moe_q5_down_fused_enabled, "QWEN_DECODE_MOE_Q5_DOWN_FUSED");
+crate::env_flag!(default_on decode_moe_iq4_down_fast_enabled, "QWEN_DECODE_MOE_IQ4_DOWN_FAST");
+crate::env_flag!(default_on decode_moe_q5_down_k512_r2_enabled, "QWEN_DECODE_MOE_Q5_DOWN_K512_R2");
+crate::env_flag!(default_on decode_moe_fused_finalizer_enabled, "QWEN_DECODE_MOE_FUSED_FINALIZER");
+crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
+crate::env_flag!(default_off decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
+crate::env_flag!(default_off decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
 
-fn concurrent_gdn_dense_decode_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_DENSE_CONCURRENT_GDN").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn concurrent_shared_moe_decode_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_CONCURRENT_SHARED").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_shared_swiglu_q8_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_SHARED_SWIGLU_Q8").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_moe_iq3_fused_swiglu_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_IQ3_FUSED_SWIGLU").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_moe_iq3_fast_swiglu_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_IQ3_FAST_SWIGLU").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_moe_q5_down_fused_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_Q5_DOWN_FUSED").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_moe_iq4_down_fast_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_IQ4_DOWN_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_moe_q5_down_k512_r2_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_Q5_DOWN_K512_R2").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_moe_fused_finalizer_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_MOE_FUSED_FINALIZER").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_attn_sigmoid_mul_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DECODE_ATTN_SIGMOID_MUL").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn decode_gdn_noop_front_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_DECODE_GDN_NOOP_FRONT").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-fn decode_gdn_noop_out_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_DECODE_GDN_NOOP_OUT").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
+// Per-projection GDN no-op ablations: each is its own opt-in flag, OR'd
+// with the broad `..NOOP_FRONT` umbrella flag above.
+crate::env_flag!(default_off decode_gdn_noop_qkv_flag, "QWEN_DECODE_GDN_NOOP_QKV");
+crate::env_flag!(default_off decode_gdn_noop_z_flag, "QWEN_DECODE_GDN_NOOP_Z");
+crate::env_flag!(default_off decode_gdn_noop_beta_flag, "QWEN_DECODE_GDN_NOOP_BETA");
+crate::env_flag!(default_off decode_gdn_noop_alpha_flag, "QWEN_DECODE_GDN_NOOP_ALPHA");
 
 fn decode_gdn_noop_qkv_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    decode_gdn_noop_front_enabled()
-        || *ENABLED.get_or_init(|| {
-            matches!(
-                std::env::var("QWEN_DECODE_GDN_NOOP_QKV").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            )
-        })
+    decode_gdn_noop_front_enabled() || decode_gdn_noop_qkv_flag()
 }
 
 fn decode_gdn_noop_z_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    decode_gdn_noop_front_enabled()
-        || *ENABLED.get_or_init(|| {
-            matches!(
-                std::env::var("QWEN_DECODE_GDN_NOOP_Z").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            )
-        })
+    decode_gdn_noop_front_enabled() || decode_gdn_noop_z_flag()
 }
 
 fn decode_gdn_noop_beta_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    decode_gdn_noop_front_enabled()
-        || *ENABLED.get_or_init(|| {
-            matches!(
-                std::env::var("QWEN_DECODE_GDN_NOOP_BETA").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            )
-        })
+    decode_gdn_noop_front_enabled() || decode_gdn_noop_beta_flag()
 }
 
 fn decode_gdn_noop_alpha_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    decode_gdn_noop_front_enabled()
-        || *ENABLED.get_or_init(|| {
-            matches!(
-                std::env::var("QWEN_DECODE_GDN_NOOP_ALPHA").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            )
-        })
+    decode_gdn_noop_front_enabled() || decode_gdn_noop_alpha_flag()
 }
 
 fn phase_moe_ffn_split_enabled() -> bool {
@@ -385,25 +250,8 @@ fn phase_moe_ffn_deep_split_enabled() -> bool {
     })
 }
 
-fn phase_gdn_proj_split_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_PHASE_GDN_PROJ_SPLIT").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-fn phase_gdn_tail_split_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_PHASE_GDN_TAIL_SPLIT").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
+crate::env_flag!(default_off phase_gdn_proj_split_enabled, "QWEN_PHASE_GDN_PROJ_SPLIT");
+crate::env_flag!(default_off phase_gdn_tail_split_enabled, "QWEN_PHASE_GDN_TAIL_SPLIT");
 
 fn phase_moe_route_split_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -425,65 +273,12 @@ fn phase_moe_route_deep_split_enabled() -> bool {
     })
 }
 
-fn phase_moe_cpu_route_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_PHASE_MOE_CPU_ROUTE").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-fn phase_moe_route_replay_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_PHASE_MOE_ROUTE_REPLAY").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-fn phase_lm_argmax_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_PHASE_LM_ARGMAX").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-fn decode_moe_noop_route_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_DECODE_MOE_NOOP_ROUTE").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-fn decode_moe_noop_routed_gateup_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-fn decode_moe_noop_routed_down_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_DECODE_MOE_NOOP_ROUTED_DOWN").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
+crate::env_flag!(default_off phase_moe_cpu_route_enabled, "QWEN_PHASE_MOE_CPU_ROUTE");
+crate::env_flag!(default_off phase_moe_route_replay_enabled, "QWEN_PHASE_MOE_ROUTE_REPLAY");
+crate::env_flag!(default_off phase_lm_argmax_enabled, "QWEN_PHASE_LM_ARGMAX");
+crate::env_flag!(default_off decode_moe_noop_route_enabled, "QWEN_DECODE_MOE_NOOP_ROUTE");
+crate::env_flag!(default_off decode_moe_noop_routed_gateup_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP");
+crate::env_flag!(default_off decode_moe_noop_routed_down_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_DOWN");
 
 fn moe_routed_gate_up_decode_supported(gate: GgmlType, up: GgmlType) -> bool {
     matches!(
@@ -519,12 +314,7 @@ fn matmat_bf16_bfloat_act_enabled() -> bool {
         return enabled;
     }
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_BF16_BFLOAT_ACT").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
+    *ENABLED.get_or_init(|| crate::env_flag::read_default_on("QWEN_MATMAT_BF16_BFLOAT_ACT"))
 }
 
 /// Return type for [`MetalForward::single_token_phase_profiled`]:

@@ -15,10 +15,33 @@ pub struct PrefixCacheHit<'a> {
     pub exact: bool,
 }
 
-#[derive(Default)]
+/// Session snapshots are large (KV arenas + GDN state — tens to hundreds of
+/// MiB each on 27B-class models), so an unbounded cache is a reliability
+/// hazard in any long-running process. `PrefixCache` therefore carries a
+/// byte budget and evicts least-recently-used entries on insert.
+///
+/// `DEFAULT_MAX_BYTES` is deliberately generous (16 GiB) so existing bench
+/// workflows never see eviction, while still bounding a runaway session.
+/// Product callers should size it explicitly via [`PrefixCache::with_max_bytes`].
+pub const DEFAULT_MAX_BYTES: u64 = 16 << 30;
+
 pub struct PrefixCache {
     buckets: HashMap<PrefixCacheKey, Vec<SessionSnapshot>>,
     total_bytes: u64,
+    max_bytes: u64,
+    /// Monotonic logical clock for LRU accounting. Bumped on insert and on
+    /// lookup hit; per-entry stamps live in `last_used`.
+    clock: u64,
+    /// Last-used stamp per (key, prefix_tokens) entry, keyed by the same
+    /// bucket key plus the index within the bucket's Vec. Rebuilt lazily on
+    /// eviction; kept as a parallel map to avoid widening `SessionSnapshot`.
+    last_used: HashMap<(PrefixCacheKey, usize), u64>,
+}
+
+impl Default for PrefixCache {
+    fn default() -> Self {
+        Self::with_max_bytes(DEFAULT_MAX_BYTES)
+    }
 }
 
 impl PrefixCache {
@@ -26,8 +49,26 @@ impl PrefixCache {
         Self::default()
     }
 
+    /// A cache bounded at `max_bytes`. Inserting a snapshot larger than the
+    /// budget evicts everything else and stores the oversized snapshot alone
+    /// (the newest entry is never rejected: the caller just produced it and
+    /// a cold cache would be strictly worse).
+    pub fn with_max_bytes(max_bytes: u64) -> Self {
+        Self {
+            buckets: HashMap::new(),
+            total_bytes: 0,
+            max_bytes,
+            clock: 0,
+            last_used: HashMap::new(),
+        }
+    }
+
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes
+    }
+
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
     }
 
     pub fn len(&self) -> usize {
@@ -44,21 +85,64 @@ impl PrefixCache {
             prefix_len: snap.prefix_len(),
             prefix_hash: hash_tokens(&snap.prefix_tokens),
         };
-        let bucket = self.buckets.entry(key).or_default();
-        if let Some(existing) = bucket
+        self.clock += 1;
+        let stamp = self.clock;
+        let bucket = self.buckets.entry(key.clone()).or_default();
+        if let Some((idx, existing)) = bucket
             .iter_mut()
-            .find(|s| s.prefix_tokens == snap.prefix_tokens)
+            .enumerate()
+            .find(|(_, s)| s.prefix_tokens == snap.prefix_tokens)
         {
             self.total_bytes = self.total_bytes + snap.n_bytes() - existing.n_bytes();
             *existing = snap;
+            self.last_used.insert((key, idx), stamp);
         } else {
             self.total_bytes += snap.n_bytes();
+            let idx = bucket.len();
             bucket.push(snap);
+            self.last_used.insert((key, idx), stamp);
+        }
+        self.evict_to_budget();
+    }
+
+    /// Evict least-recently-used entries until `total_bytes <= max_bytes`,
+    /// never evicting the most-recently-stamped entry (the one just
+    /// inserted/updated).
+    fn evict_to_budget(&mut self) {
+        while self.total_bytes > self.max_bytes && self.len() > 1 {
+            // Find the (key, idx) with the smallest stamp, excluding the max.
+            let newest = self.last_used.values().copied().max().unwrap_or(0);
+            let victim = self
+                .last_used
+                .iter()
+                .filter(|&(_, &stamp)| stamp != newest)
+                .min_by_key(|&(_, &stamp)| stamp)
+                .map(|(k, _)| k.clone());
+            let Some((vkey, vidx)) = victim else { break };
+            let Some(bucket) = self.buckets.get_mut(&vkey) else {
+                self.last_used.remove(&(vkey, vidx));
+                continue;
+            };
+            if vidx >= bucket.len() {
+                self.last_used.remove(&(vkey, vidx));
+                continue;
+            }
+            let removed = bucket.swap_remove(vidx);
+            self.total_bytes -= removed.n_bytes();
+            self.last_used.remove(&(vkey.clone(), vidx));
+            // swap_remove moved the former last element into vidx; fix its stamp key.
+            let moved_from = bucket.len();
+            if let Some(stamp) = self.last_used.remove(&(vkey.clone(), moved_from)) {
+                self.last_used.insert((vkey.clone(), vidx), stamp);
+            }
+            if bucket.is_empty() {
+                self.buckets.remove(&vkey);
+            }
         }
     }
 
     pub fn lookup_longest<'a>(
-        &'a self,
+        &'a mut self,
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
     ) -> Option<PrefixCacheHit<'a>> {
@@ -72,16 +156,22 @@ impl PrefixCache {
                 prefix_len,
                 prefix_hash: prefix_hashes[prefix_len - 1],
             };
-            if let Some(bucket) = self.buckets.get(&key) {
-                for snap in bucket {
-                    if snap.prefix_tokens == request_tokens[..prefix_len] {
-                        return Some(PrefixCacheHit {
-                            snapshot: snap,
-                            matched_prefix_len: prefix_len,
-                            exact: prefix_len == request_tokens.len(),
-                        });
-                    }
-                }
+            let hit_idx = self.buckets.get(&key).and_then(|bucket| {
+                bucket
+                    .iter()
+                    .position(|snap| snap.prefix_tokens == request_tokens[..prefix_len])
+            });
+            if let Some(idx) = hit_idx {
+                // Bump LRU stamp so hot prefixes survive eviction pressure.
+                self.clock += 1;
+                let stamp = self.clock;
+                self.last_used.insert((key.clone(), idx), stamp);
+                let snap = &self.buckets[&key][idx];
+                return Some(PrefixCacheHit {
+                    snapshot: snap,
+                    matched_prefix_len: prefix_len,
+                    exact: prefix_len == request_tokens.len(),
+                });
             }
         }
         None
@@ -182,5 +272,54 @@ mod tests {
         assert!(cache.total_bytes() > before);
         let hit = cache.lookup_longest(&id, &[1, 2, 3]).expect("exact hit");
         assert!(hit.exact);
+    }
+
+    fn snap_bytes(prefix: &[i32], bytes: usize) -> u64 {
+        // Mirror of SessionSnapshot::n_bytes accounting for our fixture:
+        // arenas (kv_k + kv_v = `bytes`, conv 8, state 12) + logits.
+        let s = snap(ident(1), prefix, bytes);
+        s.n_bytes()
+    }
+
+    #[test]
+    fn eviction_respects_byte_budget_and_lru_order() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        // Budget fits exactly two entries.
+        let mut cache = PrefixCache::with_max_bytes(2 * one);
+        cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        assert_eq!(cache.len(), 2);
+        // Touch [1] so [2] becomes LRU.
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
+        cache.insert(snap(id.clone(), &[3], 64));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.total_bytes() <= cache.max_bytes());
+        // [2] was least-recently used and must be gone; [1] and [3] survive.
+        assert!(cache.lookup_longest(&id, &[2]).is_none());
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
+        assert!(cache.lookup_longest(&id, &[3]).is_some());
+    }
+
+    #[test]
+    fn oversized_snapshot_is_kept_alone() {
+        let id = ident(1);
+        let mut cache = PrefixCache::with_max_bytes(1); // absurdly small
+        cache.insert(snap(id.clone(), &[1, 2], 64));
+        // The newest entry is never rejected, even over budget.
+        assert_eq!(cache.len(), 1);
+        assert!(cache.lookup_longest(&id, &[1, 2]).is_some());
+        // A second insert evicts the first (still keeps the newest).
+        cache.insert(snap(id.clone(), &[3, 4], 64));
+        assert_eq!(cache.len(), 1);
+        assert!(cache.lookup_longest(&id, &[1, 2]).is_none());
+        assert!(cache.lookup_longest(&id, &[3, 4]).is_some());
+    }
+
+    #[test]
+    fn default_budget_is_generous() {
+        // Guard against accidentally shipping a tiny default that would
+        // silently change bench behavior.
+        assert!(super::DEFAULT_MAX_BYTES >= (8u64 << 30));
     }
 }

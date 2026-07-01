@@ -1009,6 +1009,11 @@ v0.398 runs that stronger disjoint-position gate with stride128. A3B still passe
 t16 (`5.751 -> 5.510 ms/token`, versus `4.508` contiguous). Generic production
 batching is demoted; keep A3B batching alive, and require A10B route-aware
 packing/kernel evidence before any broad scheduler work.
+v0.399 adds independent-file capture with one fresh session per prompt file. A3B
+passes again at ctx512 (`1.885 -> 1.264 ms/token` at b8), while A10B only has a
+useful b2 row (`5.727 -> 4.756`) and weakens at b4/b8. Production batching should
+be model-specific: A3B can proceed to a targeted prototype gate; A10B should cap
+at b2 or stay disabled above b2 unless an expert-sorted microproof beats that cap.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

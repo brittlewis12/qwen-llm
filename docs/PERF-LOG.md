@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.399 Independent-File MoE Batch Gate
+
+Status: extended `moe-batch-sweep --file` to accept repeated files and capture
+one independent prompt slot per file, each with its own fresh session. This is the
+strongest MoE micro gate so far for production multi-slot batching.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0399-independent-file-moe-batch-gate/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B independent-file sweeps over 8 game prompt files at `ctx512`
+- `cx ask` adversarial review, session `019f1b7d-9103-7872-ba93-b9ed1c4db7dd`
+
+Results:
+
+| Model | t1 combined | t2 combined | t4 combined | t8 combined | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A3B Q4 | `1.8851 ms/tok` | `1.4516` | `1.3422` | `1.2640` | targeted prototype passes |
+| A10B Q4_XL | `5.7266 ms/tok` | `4.7561` | `4.9123` | `5.2305` | cap at 2 or disable |
+
+Decision: A3B batching survives independent prompt slots and is now eligible for
+a targeted prototype gate. A10B does not survive beyond batch 2; generic
+multi-slot batching remains demoted for A10B until an expert-sorted or route-aware
+microproof beats the simple batch-2 cap.
+
 ## 2026-06-30 - v0.398 Strided Real-Context MoE Batch Gate
 
 Status: added `--route-capture-stride` to `moe-batch-sweep` and used it to sample

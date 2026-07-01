@@ -554,6 +554,7 @@ target/release/qwen-bench moe-batch-sweep \
 target/release/qwen-bench moe-batch-sweep \
   -m "$MODEL" \
   --file /path/to/prompt.txt \
+  --file /path/to/another-prompt.txt \
   --route-capture-ctx 1024 \
   --route-capture-stride 128 \
   --tokens 1,2,4,8,16 \
@@ -577,6 +578,8 @@ Rules:
   prompt token stream before drawing architecture conclusions from ramp.
 - Use `--route-capture-stride` with real prompt files to test whether batching
   survives disjoint positions instead of only adjacent-token route locality.
+- Pass repeated `--file` entries to test independent prompt slots. Each file gets
+  a fresh session and contributes one captured slot to the sweep.
 - `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
   `--legacy-k512` only for explicit rollback attribution.
 - `--fused-routed-q4q5` times the existing one-token monolith as a falsifier; do

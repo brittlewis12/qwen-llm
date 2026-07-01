@@ -788,9 +788,9 @@ struct MoeBatchSweepArgs {
     /// Position stride between captured replay tokens.
     #[arg(long, default_value = "1")]
     route_capture_stride: usize,
-    /// Read a real prompt token stream from a text file.
+    /// Read one or more real prompt token streams from text files.
     #[arg(long)]
-    file: Option<PathBuf>,
+    file: Vec<PathBuf>,
     /// Token-id pattern used for captured replay tokens.
     #[arg(long, value_enum, default_value = "ramp")]
     route_capture_token_pattern: CaptureTokenPattern,
@@ -2464,55 +2464,107 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     let use_k512_r2 = f_exp == 512;
 
     let last_capture_pos = route_capture_ctx + (max_tokens - 1) * route_capture_stride;
-    let prompt_ids = if let Some(path) = file.as_ref() {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let prompt_ids = if file.is_empty() {
+        Vec::new()
+    } else {
         let tok = NativeTokenizer::from_gguf(&g).context("open native GGUF tokenizer")?;
-        let ids = tok.encode(&text, false).context("tokenize prompt file")?;
+        let mut all = Vec::with_capacity(file.len());
+        for path in &file {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("read {}", path.display()))?;
+            let ids = tok
+                .encode(&text, false)
+                .with_context(|| format!("tokenize {}", path.display()))?;
+            all.push(ids);
+        }
+        all
+    };
+    if prompt_ids.len() == 1 {
         let need = last_capture_pos + 1;
-        if ids.len() < need {
+        if prompt_ids[0].len() < need {
             return Err(anyhow!(
                 "prompt file has {} tokens, need at least last capture position + 1 = {need}",
-                ids.len()
+                prompt_ids[0].len()
             ));
         }
-        Some(ids)
-    } else {
-        None
-    };
+    } else if prompt_ids.len() > 1 {
+        if prompt_ids.len() < max_tokens {
+            return Err(anyhow!(
+                "got {} --file entries, need at least max(tokens) = {max_tokens}",
+                prompt_ids.len()
+            ));
+        }
+        let need = route_capture_ctx + 1;
+        for (path, ids) in file.iter().zip(prompt_ids.iter()) {
+            if ids.len() < need {
+                return Err(anyhow!(
+                    "prompt file {} has {} tokens, need at least route_capture_ctx + 1 = {need}",
+                    path.display(),
+                    ids.len()
+                ));
+            }
+        }
+    }
 
     let mf = MetalForward::new(&ctx, &mm);
-    let mut capture_s =
-        MetalSession::fresh(&ctx, &mm, last_capture_pos + 17).context("route-capture session")?;
-    for pos in 0..route_capture_ctx {
-        let token_id = prompt_ids.as_ref().map(|ids| ids[pos]).unwrap_or(0);
-        let _ = mf.single_token(token_id, pos as u32, &mut capture_s)?;
-    }
     let mut all_routes_by_token = Vec::with_capacity(max_tokens);
-    let mut next_pos = route_capture_ctx;
-    for tok in 0..max_tokens {
-        let target_pos = route_capture_ctx + tok * route_capture_stride;
-        for pos in next_pos..target_pos {
-            let token_id = prompt_ids.as_ref().map(|ids| ids[pos]).unwrap_or(0);
+    if prompt_ids.len() > 1 {
+        for tok in 0..max_tokens {
+            let ids = &prompt_ids[tok];
+            let mut capture_s = MetalSession::fresh(&ctx, &mm, route_capture_ctx + 17)
+                .context("route-capture session")?;
+            for (pos, &token_id) in ids.iter().take(route_capture_ctx).enumerate() {
+                let _ = mf.single_token(token_id, pos as u32, &mut capture_s)?;
+            }
+            let all_routes = mf.capture_moe_gateup_replay_for_token(
+                ids[route_capture_ctx],
+                route_capture_ctx as u32,
+                &mut capture_s,
+            )?;
+            if all_routes.len() != moe_blocks.len() {
+                return Err(anyhow!(
+                    "captured {} MoE route rows, expected {}",
+                    all_routes.len(),
+                    moe_blocks.len()
+                ));
+            }
+            all_routes_by_token.push(all_routes);
+        }
+    } else {
+        let mut capture_s = MetalSession::fresh(&ctx, &mm, last_capture_pos + 17)
+            .context("route-capture session")?;
+        for pos in 0..route_capture_ctx {
+            let token_id = prompt_ids.first().map(|ids| ids[pos]).unwrap_or(0);
             let _ = mf.single_token(token_id, pos as u32, &mut capture_s)?;
         }
-        let token_id = prompt_ids
-            .as_ref()
-            .map(|ids| ids[target_pos])
-            .unwrap_or_else(|| {
-                capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size)
-            });
-        let all_routes =
-            mf.capture_moe_gateup_replay_for_token(token_id, target_pos as u32, &mut capture_s)?;
-        if all_routes.len() != moe_blocks.len() {
-            return Err(anyhow!(
-                "captured {} MoE route rows, expected {}",
-                all_routes.len(),
-                moe_blocks.len()
-            ));
+        let mut next_pos = route_capture_ctx;
+        for tok in 0..max_tokens {
+            let target_pos = route_capture_ctx + tok * route_capture_stride;
+            for pos in next_pos..target_pos {
+                let token_id = prompt_ids.first().map(|ids| ids[pos]).unwrap_or(0);
+                let _ = mf.single_token(token_id, pos as u32, &mut capture_s)?;
+            }
+            let token_id = prompt_ids
+                .first()
+                .map(|ids| ids[target_pos])
+                .unwrap_or_else(|| {
+                    capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size)
+                });
+            let all_routes = mf.capture_moe_gateup_replay_for_token(
+                token_id,
+                target_pos as u32,
+                &mut capture_s,
+            )?;
+            if all_routes.len() != moe_blocks.len() {
+                return Err(anyhow!(
+                    "captured {} MoE route rows, expected {}",
+                    all_routes.len(),
+                    moe_blocks.len()
+                ));
+            }
+            all_routes_by_token.push(all_routes);
+            next_pos = target_pos + 1;
         }
-        all_routes_by_token.push(all_routes);
-        next_pos = target_pos + 1;
     }
 
     let gateup_weight_gb_per_token: f64 = q4_moes
@@ -2533,7 +2585,13 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     println!(
         "[moe-batch-sweep] model={} route_mode={} q4_layers={} q5_layers={} h={} f_exp={} n_expert={} topk={} warmup={} iters={}",
         model.display(),
-        if let Some(path) = file.as_ref() {
+        if file.len() > 1 {
+            format!(
+                "captured(ctx={},independent_files={})",
+                route_capture_ctx,
+                file.len()
+            )
+        } else if let Some(path) = file.first() {
             format!(
                 "captured(ctx={},stride={},file={})",
                 route_capture_ctx,

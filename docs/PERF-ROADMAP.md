@@ -992,6 +992,13 @@ captures overstated expert reuse: A10B t16 avg unique experts jumps `8.34 ->
 `37.96 -> 37.40 ms`. Therefore the batching win is primarily packed-slot
 shape/occupancy, not repeated-token expert reuse. Use ramp or real prompt traces
 for future timing; high-reuse synthetic wins alone are not promotion evidence.
+v0.396 adds a loaded-once `moe-batch-sweep` to map that knee without repeated
+loads. Ramp sweeps show A3B combined MoE projection time improves `1.889 ->
+1.211 ms/token` from t1 to t16, while A10B improves `5.659 -> 4.481 ms/token`.
+The useful knee is around t8, and t16 adds little. Batching is now a serious
+architecture branch, but the next gate is real-prompt/multi-context capture plus
+end-to-end decode overhead; do not promote production multi-slot decode from MoE
+micro evidence alone.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

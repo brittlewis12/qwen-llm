@@ -152,6 +152,100 @@ fn capture_replay_token(pattern: CaptureTokenPattern, tok: usize, vocab_size: u3
     }
 }
 
+fn captured_gateup_tensors(
+    ctx: &MetalContext,
+    routes_by_token: &[Vec<MoeRouteReplayRow>],
+    eligible_indices: &[usize],
+    h: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<Vec<(MetalTensor, MetalTensor)>> {
+    let tokens = routes_by_token.len();
+    let slots = tokens * topk;
+    let mut tensors = Vec::with_capacity(eligible_indices.len());
+    for &moe_i in eligible_indices {
+        let hidden_t = MetalTensor::zeros_f32(ctx, vec![(tokens * h) as u64])?;
+        let idx = MetalTensor::zeros_f32(ctx, vec![slots as u64])?;
+        unsafe {
+            let dst = hidden_t.buffer.contents().as_ptr() as *mut f32;
+            let ptr = idx.buffer.contents().as_ptr() as *mut i32;
+            for tok in 0..tokens {
+                let route = routes_by_token[tok]
+                    .get(moe_i)
+                    .ok_or_else(|| anyhow!("captured route missing layer {moe_i}"))?;
+                if route.hidden.len() != h {
+                    return Err(anyhow!(
+                        "captured hidden has {} elements, expected h={h}",
+                        route.hidden.len()
+                    ));
+                }
+                if route.topk_idx.len() != topk {
+                    return Err(anyhow!(
+                        "captured route has {} experts, expected topk={topk}",
+                        route.topk_idx.len()
+                    ));
+                }
+                std::ptr::copy_nonoverlapping(route.hidden.as_ptr(), dst.add(tok * h), h);
+                for (slot, &expert) in route.topk_idx.iter().enumerate() {
+                    if expert < 0 || expert as usize >= n_expert {
+                        return Err(anyhow!(
+                            "captured expert id {expert} outside n_expert={n_expert}"
+                        ));
+                    }
+                    *ptr.add(tok * topk + slot) = expert;
+                }
+            }
+        }
+        tensors.push((hidden_t, idx));
+    }
+    Ok(tensors)
+}
+
+fn captured_down_tensors(
+    ctx: &MetalContext,
+    routes_by_token: &[Vec<MoeRouteReplayRow>],
+    eligible_indices: &[usize],
+    n_expert: usize,
+    topk: usize,
+) -> Result<Vec<(MetalTensor, MetalTensor)>> {
+    let tokens = routes_by_token.len();
+    let slots = tokens * topk;
+    let mut tensors = Vec::with_capacity(eligible_indices.len());
+    for &moe_i in eligible_indices {
+        let idx = MetalTensor::zeros_f32(ctx, vec![slots as u64])?;
+        let weight = MetalTensor::zeros_f32(ctx, vec![slots as u64])?;
+        unsafe {
+            let idx_ptr = idx.buffer.contents().as_ptr() as *mut i32;
+            let w_ptr = weight.buffer.contents().as_ptr() as *mut f32;
+            for tok in 0..tokens {
+                let route = routes_by_token[tok]
+                    .get(moe_i)
+                    .ok_or_else(|| anyhow!("captured route missing layer {moe_i}"))?;
+                if route.topk_idx.len() != topk || route.topk_weight.len() != topk {
+                    return Err(anyhow!(
+                        "captured route has idx={} weight={}, expected topk={topk}",
+                        route.topk_idx.len(),
+                        route.topk_weight.len()
+                    ));
+                }
+                for slot in 0..topk {
+                    let expert = route.topk_idx[slot];
+                    if expert < 0 || expert as usize >= n_expert {
+                        return Err(anyhow!(
+                            "captured expert id {expert} outside n_expert={n_expert}"
+                        ));
+                    }
+                    let out_slot = tok * topk + slot;
+                    *idx_ptr.add(out_slot) = expert;
+                    *w_ptr.add(out_slot) = route.topk_weight[slot];
+                }
+            }
+        }
+        tensors.push((idx, weight));
+    }
+    Ok(tensors)
+}
+
 fn pp_warm_moe_weight_banks(ctx: &MetalContext, mf: &MetalForward<'_>) -> Result<usize> {
     let stride_bytes = std::env::var("QWEN_PP_TOUCH_STRIDE")
         .ok()
@@ -286,6 +380,8 @@ enum Cmd {
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
     MoeGateupMicro(MoeGateupMicroArgs),
+    /// Loaded-once captured MoE token-batching sweep.
+    MoeBatchSweep(MoeBatchSweepArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
     /// Report Metal counter-set availability for in-process counter probes.
@@ -669,6 +765,28 @@ struct MoeGateupMicroArgs {
     route_capture_ctx: Option<usize>,
     /// Token-id pattern used for captured replay tokens.
     #[arg(long, value_enum, default_value = "zero")]
+    route_capture_token_pattern: CaptureTokenPattern,
+}
+
+#[derive(Parser, Debug)]
+struct MoeBatchSweepArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "10")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "3")]
+    warmup: usize,
+    /// Comma-separated token counts to replay.
+    #[arg(long, value_delimiter = ',', default_value = "1,2,4,8,16")]
+    tokens: Vec<usize>,
+    /// Capture per-layer hidden activations and top-k ids at this decode context.
+    #[arg(long, default_value = "1024")]
+    route_capture_ctx: usize,
+    /// Token-id pattern used for captured replay tokens.
+    #[arg(long, value_enum, default_value = "ramp")]
     route_capture_token_pattern: CaptureTokenPattern,
 }
 
@@ -1587,6 +1705,7 @@ fn main() -> Result<()> {
         Cmd::GdnProjMicro(a) => run_gdn_proj_micro(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
+        Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::MetalCounters(a) => run_metal_counters(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
@@ -2249,6 +2368,258 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         "{phase}\t{weight_gb:.4}\t{activation_gb:.4}\t{wall:.4}\t{gpu:.4}\t{:.1}",
         weight_gb / (gpu / 1e3)
     );
+    Ok(())
+}
+
+fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
+    let MoeBatchSweepArgs {
+        model,
+        iters,
+        warmup,
+        mut tokens,
+        route_capture_ctx,
+        route_capture_token_pattern,
+    } = args;
+    if iters == 0 {
+        return Err(anyhow!("--iters must be >= 1"));
+    }
+    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+        return Err(anyhow!("--tokens entries must be >= 1"));
+    }
+    tokens.sort_unstable();
+    tokens.dedup();
+    let max_tokens = *tokens.last().expect("non-empty tokens");
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    let arch = &mm.arch;
+    if arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!("moe-batch-sweep requires an MoE model"));
+    }
+    let h = arch.hidden_size as usize;
+    let f_exp = arch.expert_feed_forward_length as usize;
+    let n_expert = arch.expert_count as usize;
+    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+    let moe_blocks: Vec<_> = mm
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            MetalBlock::Gdn(g) => g.ffn_moe.as_ref(),
+            MetalBlock::Attn(a) => a.ffn_moe.as_ref(),
+        })
+        .collect();
+    let q4_moes: Vec<_> = moe_blocks
+        .iter()
+        .copied()
+        .filter(|moe| moe.gate_exps.dtype == GgmlType::Q4_K && moe.up_exps.dtype == GgmlType::Q4_K)
+        .collect();
+    let q4_indices: Vec<_> = moe_blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, moe)| {
+            if moe.gate_exps.dtype == GgmlType::Q4_K && moe.up_exps.dtype == GgmlType::Q4_K {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let q5_moes: Vec<_> = moe_blocks
+        .iter()
+        .copied()
+        .filter(|moe| moe.down_exps.dtype == GgmlType::Q5_K)
+        .collect();
+    let q5_indices: Vec<_> = moe_blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, moe)| {
+            if moe.down_exps.dtype == GgmlType::Q5_K {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if q4_moes.is_empty() || q5_moes.is_empty() {
+        return Err(anyhow!(
+            "moe-batch-sweep requires Q4_K gate/up and Q5_K down expert banks"
+        ));
+    }
+    if f_exp % 256 != 0 {
+        return Err(anyhow!("routed f_exp must be divisible by 256"));
+    }
+    let use_k512_r2 = f_exp == 512;
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let mut capture_s = MetalSession::fresh(&ctx, &mm, route_capture_ctx + max_tokens + 16)
+        .context("route-capture session")?;
+    for pos in 0..route_capture_ctx {
+        let _ = mf.single_token(0, pos as u32, &mut capture_s)?;
+    }
+    let mut all_routes_by_token = Vec::with_capacity(max_tokens);
+    for tok in 0..max_tokens {
+        let token_id = capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size);
+        let all_routes = mf.capture_moe_gateup_replay_for_token(
+            token_id,
+            (route_capture_ctx + tok) as u32,
+            &mut capture_s,
+        )?;
+        if all_routes.len() != moe_blocks.len() {
+            return Err(anyhow!(
+                "captured {} MoE route rows, expected {}",
+                all_routes.len(),
+                moe_blocks.len()
+            ));
+        }
+        all_routes_by_token.push(all_routes);
+    }
+
+    let gateup_weight_gb_per_token: f64 = q4_moes
+        .iter()
+        .map(|moe| (moe.gate_exps.n_bytes() + moe.up_exps.n_bytes()) as f64)
+        .sum::<f64>()
+        * topk as f64
+        / n_expert as f64
+        / 1e9;
+    let down_weight_gb_per_token: f64 = q5_moes
+        .iter()
+        .map(|moe| moe.down_exps.n_bytes() as f64)
+        .sum::<f64>()
+        * topk as f64
+        / n_expert as f64
+        / 1e9;
+
+    println!(
+        "[moe-batch-sweep] model={} route_mode=captured(ctx={},pattern={:?}) q4_layers={} q5_layers={} h={} f_exp={} n_expert={} topk={} warmup={} iters={}",
+        model.display(),
+        route_capture_ctx,
+        route_capture_token_pattern,
+        q4_moes.len(),
+        q5_moes.len(),
+        h,
+        f_exp,
+        n_expert,
+        topk,
+        warmup,
+        iters
+    );
+    println!(
+        "tokens\tgateup_gpu_ms\tdown_gpu_ms\tcombined_ms_per_token\tgateup_gb_s\tdown_gb_s\tq4_unique\tq4_max\tq4_reuse\tq5_unique\tq5_max\tq5_reuse"
+    );
+
+    for &n_tokens in &tokens {
+        let routes = &all_routes_by_token[..n_tokens];
+        let q4_stats = summarize_moe_route_batch(routes, &q4_indices, n_expert, topk)?;
+        let q5_stats = summarize_moe_route_batch(routes, &q5_indices, n_expert, topk)?;
+        let slots = n_tokens * topk;
+        let gateup_inputs = captured_gateup_tensors(&ctx, routes, &q4_indices, h, n_expert, topk)?;
+        let down_inputs = captured_down_tensors(&ctx, routes, &q5_indices, n_expert, topk)?;
+        let inner = MetalTensor::zeros_f32(&ctx, vec![(slots * f_exp) as u64])?;
+        let down_out = MetalTensor::zeros_f32(&ctx, vec![(n_tokens * h) as u64])?;
+        unsafe {
+            let inner_ptr = inner.buffer.contents().as_ptr() as *mut f32;
+            for i in 0..(slots * f_exp) {
+                *inner_ptr.add(i) = ((i % 17) as f32 - 8.0) * 0.0125;
+            }
+        }
+
+        let (_gateup_wall, gateup_gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+            for (layer_i, moe) in q4_moes.iter().enumerate() {
+                let (layer_x, route_idx) = (&gateup_inputs[layer_i].0, &gateup_inputs[layer_i].1);
+                if n_tokens == 1 {
+                    encode_moe_swiglu_q4_K_f32(
+                        &ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        layer_x,
+                        route_idx,
+                        &inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                    )?;
+                } else {
+                    encode_moe_swiglu_q4_K_f32_packed_slots(
+                        &ctx,
+                        enc,
+                        &moe.gate_exps,
+                        &moe.up_exps,
+                        layer_x,
+                        route_idx,
+                        &inner,
+                        h,
+                        f_exp,
+                        n_expert,
+                        topk,
+                        n_tokens,
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+
+        let (_down_wall, down_gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+            for (layer_i, moe) in q5_moes.iter().enumerate() {
+                let (route_idx, route_w) = (&down_inputs[layer_i].0, &down_inputs[layer_i].1);
+                if use_k512_r2 {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                        &ctx,
+                        enc,
+                        &moe.down_exps,
+                        &inner,
+                        route_idx,
+                        route_w,
+                        &down_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                        n_tokens,
+                    )?;
+                } else {
+                    encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
+                        &ctx,
+                        enc,
+                        &moe.down_exps,
+                        &inner,
+                        route_idx,
+                        route_w,
+                        &down_out,
+                        f_exp,
+                        h,
+                        n_expert,
+                        topk,
+                        n_tokens,
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+
+        let combined_per_token = (gateup_gpu + down_gpu) / n_tokens as f64;
+        let gateup_gb_s = gateup_weight_gb_per_token * n_tokens as f64 / (gateup_gpu / 1e3);
+        let down_gb_s = down_weight_gb_per_token * n_tokens as f64 / (down_gpu / 1e3);
+        println!(
+            "{}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}",
+            n_tokens,
+            gateup_gpu,
+            down_gpu,
+            combined_per_token,
+            gateup_gb_s,
+            down_gb_s,
+            q4_stats.avg_unique_experts,
+            q4_stats.avg_max_slots,
+            q4_stats.avg_reuse,
+            q5_stats.avg_unique_experts,
+            q5_stats.avg_max_slots,
+            q5_stats.avg_reuse
+        );
+    }
+
     Ok(())
 }
 

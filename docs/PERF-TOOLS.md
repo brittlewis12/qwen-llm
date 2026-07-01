@@ -542,6 +542,14 @@ target/release/qwen-bench moe-down-micro \
   --fused-routed-q4q5 \
   --warmup 3 \
   --iters 10
+
+target/release/qwen-bench moe-batch-sweep \
+  -m "$MODEL" \
+  --route-capture-ctx 1024 \
+  --route-capture-token-pattern ramp \
+  --tokens 1,2,4,8,16 \
+  --warmup 3 \
+  --iters 10
 ```
 
 Rules:
@@ -554,6 +562,8 @@ Rules:
 - Prefer `--route-capture-token-pattern ramp` for timing controls. The default
   zero-token pattern is useful as a locality stress case, but it overstates route
   reuse when replaying several captured tokens.
+- Use `moe-batch-sweep` when comparing token counts; it loads the model once and
+  captures the max route window once, avoiding repeated load/capture noise.
 - `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
   `--legacy-k512` only for explicit rollback attribution.
 - `--fused-routed-q4q5` times the existing one-token monolith as a falsifier; do

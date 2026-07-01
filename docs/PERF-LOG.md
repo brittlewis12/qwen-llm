@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.396 Loaded-Once Captured MoE Batch Sweep
+
+Status: added `qwen-bench moe-batch-sweep`, which loads the model once, captures
+the max token route window once, then times captured gate/up and down projection
+rows across token counts in one process.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0396-loaded-once-moe-batch-sweep/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B smoke sweep at `ctx32`, tokens `1,2`
+- A3B/A10B ramp sweeps at `ctx1024`, tokens `1,2,4,8,16`
+- `cx ask` adversarial review, session `019f1b57-0285-7be2-9967-71cdfe33fd22`
+
+Results:
+
+| Model | t1 combined | t4 combined | t8 combined | t16 combined | t16/t1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3B Q4 | `1.8891 ms/tok` | `1.3420` | `1.2483` | `1.2114` | `1.56x` |
+| A10B Q4_XL | `5.6588 ms/tok` | `4.6551` | `4.5605` | `4.4813` | `1.26x` |
+
+Decision: loaded-once ramp sweeps confirm the batching knee and make the next
+evidence cheap. The useful knee is around `t8`; `t16` adds only `~3%` A3B and
+`~2%` A10B over `t8`. Do not start full production multi-slot decode from MoE
+micros alone. Next gate is real-prompt and multi-context captured sweeps plus
+packed-slot shape controls; require representative `t4/t8` MoE gains and an
+end-to-end decode win before scheduler architecture work becomes mainline.
+
 ## 2026-06-30 - v0.395 Captured MoE Route-Stats Control
 
 Status: added route occupancy stats and a deterministic nonzero token pattern to

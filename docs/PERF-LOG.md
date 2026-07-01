@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.425 Fix Stale Bitwise Packed-Verify Gate
+
+Status: triaged and fixed the red `dflash_packed_verify_layer_major_matches_
+token_major` gate. The full non-ignored release suite is green again for the
+first time since late May.
+
+Root cause: the test demanded bit-exact logits + GDN state between token-major
+and layer-major packed verify on 0.8B-F32, a premise silently invalidated by
+v0.154 (`b053d18`), which added `F32` to `prefill_mat_mat_dispatch_eligible`.
+Since then layer-major runs batched F32 simdgroup-matrix mat-mat for
+projections/FFN/lm_head while token-major runs per-token mat-vec — different
+FP32 reduction trees, last-ulps divergence, bitwise equality unattainable by
+design. Both paths stage F32 in threadgroup memory (no half cast); this is
+pure reorder noise, not precision loss.
+
+Isolation evidence: excluding F32 from the eligibility set restores
+bit-exactness; forcing only the lm_head tail back to mat-vec does not (the
+batched front projections feed the GDN recurrence, so state diverges too).
+An initial bisect fingered v0.264, falsified on clean-tree re-probe — every
+commit from v0.233 onward fails deterministically once dirty-tree checkout
+artifacts are removed.
+
+Measured envelope (0.8B-F32, M=2/N=4): logits `max|Δ|=7.7e-4` /
+`min_cos=0.9999999978`; `gdn_state max|Δ|<=1.6e-4`; `gdn_conv
+max|Δ|<=7.3e-4`; argmax + kv_n_pos exact. Fix per cx adversarial review
+(session `019f1faa-9bb2`): keep argmax/kv_n_pos bitwise; relax logits and
+GDN state/conv to ~5x the measured envelope (`4e-3`/`0.9999999`, `1e-3`,
+`4e-3`); assert the mat-mat-eligibility test premise so a future eligibility
+change re-triggers the bitwise question; correct two stale "F32 oracle path
+is bit-exact" comments. Shape-bug coverage survives: a transposed layout
+destroys cosine and max|Δ| by orders of magnitude.
+
+Process note: this gate was red for ~5 weeks because commit validation uses
+targeted test lists. Full-suite runs should happen at least at audit/refactor
+checkpoints; a standing guard is deferred as separate scope.
+
 ## 2026-07-01 - v0.420 Blocks=2 Margin Sweep
 
 Status: ran `decode-block-slice-margin-sweep` with `blocks=2` to test whether

@@ -4199,9 +4199,13 @@ pub fn encode_packed_verify_layer_major_inner(
                         enc.end();
                     }
                 } else {
-                    // F32 oracle / mixed-dtype fall-through: existing per-token
-                    // encode_gdn pattern, unchanged. Keeps the 0.8B oracle path
-                    // bit-exact.
+                    // Mixed-dtype fall-through: existing per-token
+                    // encode_gdn pattern, unchanged. NOTE (v0.425): since
+                    // v0.154 added F32 to the mat-mat eligibility set, F32
+                    // models take the batched branch above, NOT this one —
+                    // the 0.8B "oracle path" is no longer bit-exact vs
+                    // token-major (FP32 reduction order differs; see the
+                    // layer-major-vs-token-major test doc).
                     for n_idx in 0..n {
                         // Compute pass: stage row, run mixer, capture row.
                         {
@@ -4580,13 +4584,14 @@ pub fn encode_packed_verify_layer_major_inner(
         //                  row-major (= mat-mat output bit-equivalent),
         //                  then silu_mul on flat N*F elements,
         //                  then mat-mat ffn_down → ffn_out_pack [N, H].
-        //   F32 weights   → per-token mat-vec loop using the existing
-        //                  fused encode_block path is wasteful for the
-        //                  layer-major case; just call the existing
-        //                  per-token encode_mat_vec_dispatch in a loop.
-        //                  At 0.8B sizes this is still substantial weight
-        //                  re-read but it's the F32 oracle path, NOT a
-        //                  perf target.
+        //   F32 weights   → since v0.154 F32 is mat-mat eligible and
+        //                  takes the batched path like the K-quants; the
+        //                  per-token mat-vec loop below is only the
+        //                  fall-through for dtypes without a mat-mat
+        //                  kernel. (Historically F32 was kept per-token
+        //                  as a bit-exact oracle path; that guarantee is
+        //                  gone — see the layer-major-vs-token-major
+        //                  test doc.)
         let (g_w, u_w, d_w) = match block {
             MetalBlock::Gdn(g) => (&g.ffn_gate, &g.ffn_up, &g.ffn_down),
             MetalBlock::Attn(a) => (&a.ffn_gate, &a.ffn_up, &a.ffn_down),
@@ -19248,22 +19253,40 @@ mod tests {
     }
 
     /// H5.3b.4-5 headline correctness gate: layer-major
-    /// `packed_verify` produces BIT-EXACT identical argmaxes AND
-    /// session state to the token-major oracle on the same inputs.
+    /// `packed_verify` produces identical argmax tokens and
+    /// tight-tolerance-equal logits + session state vs the
+    /// token-major oracle on the same inputs.
     ///
-    /// The two paths use the same kernels with different scheduling
-    /// (token-major: outer-loop over tokens, inner-loop over layers;
-    /// layer-major: outer-loop over layers, inner-loop or batched
-    /// across tokens). On F32 weights both should produce bit-
-    /// identical bytes because the math is identical — only the
-    /// dispatch order differs, and same-encoder same-stream Metal
-    /// dispatches are deterministic.
+    /// HISTORY OF THE COMPARISON STRENGTH (v0.425 triage): this gate
+    /// was originally BIT-EXACT on everything, and legitimately so —
+    /// both paths ran the same per-token F32 mat-vec kernels in a
+    /// different dispatch order, and same-stream Metal dispatches are
+    /// deterministic. That premise died at v0.154 (`b053d18`), which
+    /// added `GgmlType::F32` to `prefill_mat_mat_dispatch_eligible`:
+    /// since then layer-major uses batched F32 simdgroup-matrix
+    /// mat-mat for GDN/attention projections, FFN, and the lm_head
+    /// tail, while token-major still runs per-token mat-vec. Both
+    /// stage in F32 (no half-precision casting — see
+    /// `kernel_mat_mat_f32_f32`); the divergence is purely FP32
+    /// reduction-order. Worst-case reorder envelope for K=5120 dots
+    /// is on the order of `gamma_K ~= K * 2^-24 ~= 3e-4` relative to
+    /// the absolute-value dot mass; measured deltas on this fixture
+    /// are `logits max|Δ|=7.7e-4 / min_cos=0.9999999978`,
+    /// `gdn_state max|Δ|<=1.6e-4`, `gdn_conv max|Δ|<=7.3e-4`.
+    /// Note the batched projections feed the GDN recurrence, so
+    /// session state diverges at the same reorder scale as logits —
+    /// state comparisons cannot be bitwise either.
     ///
     /// Per codex Q4 + the codex layer-major partner-session failure-
     /// mode prediction: "argmax + final-state gates can mask shape-
     /// only bugs on lucky logits." Therefore this test ALSO compares
     /// raw `[N, V]` logits row-by-row via the `_with_logits` debug
-    /// variants, requiring bit-exact match.
+    /// variants. A transposed/wrong-stride layout bug destroys row
+    /// cosine and max|Δ| by many orders of magnitude, so the
+    /// tolerance gate preserves the original shape-bug coverage;
+    /// tolerances are ~5x the measured reorder envelope so real bugs
+    /// (which produce deltas at the 1e-1..1e+1 scale) cannot hide.
+    /// Argmax tokens and `kv_n_pos` remain exact-equality gates.
     ///
     /// 0.8B-F32, M=2 prime + N=4 verify. ≤ 2 s.
     #[test]
@@ -19346,30 +19369,72 @@ mod tests {
             "layer-major argmax tokens diverge from token-major"
         );
 
-        // Bit-exact raw logits (codex's intermediate-layer paranoia
+        // Test-premise guard: the tolerance gate below is only justified
+        // while layer-major actually takes the batched F32 mat-mat tail.
+        // If F32 ever leaves the eligibility set, this comparison should
+        // be restored to bitwise (see doc comment).
+        assert!(
+            prefill_mat_mat_dispatch_eligible(mm.lm_head.dtype),
+            "test premise changed: lm_head dtype {:?} no longer mat-mat \
+             eligible; restore the bitwise logits/state gates",
+            mm.lm_head.dtype
+        );
+
+        // Tight-tolerance raw logits (codex's intermediate-layer paranoia
         // gate; argmax alone could pass even if intermediate layouts
-        // were silently transposed for some shapes).
+        // were silently transposed for some shapes). Bounds are ~5x the
+        // measured v0.424 FP32 reduction-order envelope (max|Δ|=7.7e-4,
+        // min_cos=0.9999999978); real layout bugs blow through both by
+        // orders of magnitude.
+        const LOGITS_MAX_ABS: f32 = 4e-3;
+        const LOGITS_MIN_COS: f64 = 0.999_999_9;
         let v = m.arch.vocab_size as usize;
         unsafe {
-            let p_tok = dbg_tok.debug_logits.buffer.contents().as_ptr() as *const u32;
-            let p_lm = dbg_lm.debug_logits.buffer.contents().as_ptr() as *const u32;
-            for i in 0..(N as usize) * v {
-                let t = *p_tok.add(i);
-                let l = *p_lm.add(i);
-                if t != l {
-                    let n_idx = i / v;
-                    let vocab_idx = i % v;
-                    panic!(
-                        "logits bit-mismatch at n_idx={n_idx} vocab_idx={vocab_idx}: \
-                         token-major=0x{t:08x} (={}) layer-major=0x{l:08x} (={})",
-                        f32::from_bits(t),
-                        f32::from_bits(l)
-                    );
+            let p_tok = dbg_tok.debug_logits.buffer.contents().as_ptr() as *const f32;
+            let p_lm = dbg_lm.debug_logits.buffer.contents().as_ptr() as *const f32;
+            let mut max_abs = 0f32;
+            let mut min_cos = f64::INFINITY;
+            for n_idx in 0..(N as usize) {
+                let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
+                for i in 0..v {
+                    let a = *p_tok.add(n_idx * v + i);
+                    let b = *p_lm.add(n_idx * v + i);
+                    let d = (a - b).abs();
+                    if d > max_abs {
+                        max_abs = d;
+                    }
+                    dot += (a as f64) * (b as f64);
+                    na += (a as f64) * (a as f64);
+                    nb += (b as f64) * (b as f64);
+                }
+                let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+                if cos < min_cos {
+                    min_cos = cos;
                 }
             }
+            eprintln!(
+                "[layer-major-vs-token-major] logits max|Δ|={max_abs:.3e} \
+                 min_cos={min_cos:.10}"
+            );
+            assert!(
+                max_abs <= LOGITS_MAX_ABS,
+                "logits max|Δ|={max_abs:.3e} > {LOGITS_MAX_ABS:.0e}: beyond the \
+                 FP32 reduction-order envelope — likely a real layout/kernel bug"
+            );
+            assert!(
+                min_cos >= LOGITS_MIN_COS,
+                "logits min per-row cos={min_cos:.10} < {LOGITS_MIN_COS}"
+            );
         }
 
-        // Bit-exact session state.
+        // Tight-tolerance GDN session state. NOT bitwise since v0.154:
+        // batched F32 mat-mat front projections feed the GDN recurrence
+        // in layer-major, so reorder noise propagates into state (see
+        // doc comment; measured gdn_state max|Δ|<=1.6e-4, gdn_conv
+        // max|Δ|<=7.3e-4). Divergence beyond ~5x that envelope is a
+        // real correctness failure.
+        const GDN_STATE_MAX_ABS: f32 = 1e-3;
+        const GDN_CONV_MAX_ABS: f32 = 4e-3;
         for (i, (a, b)) in sess_tok
             .gdn_state
             .iter()
@@ -19377,17 +19442,21 @@ mod tests {
             .enumerate()
         {
             unsafe {
-                let pa = a.buffer.contents().as_ptr() as *const u32;
-                let pb = b.buffer.contents().as_ptr() as *const u32;
+                let pa = a.buffer.contents().as_ptr() as *const f32;
+                let pb = b.buffer.contents().as_ptr() as *const f32;
                 let n_elems = a.n_elements() as usize;
+                let mut max_abs = 0f32;
                 for j in 0..n_elems {
-                    if *pa.add(j) != *pb.add(j) {
-                        panic!(
-                            "gdn_state[{i}][{j}] diverges between token-major and \
-                             layer-major after the same N-token batch"
-                        );
+                    let d = (*pa.add(j) - *pb.add(j)).abs();
+                    if d > max_abs {
+                        max_abs = d;
                     }
                 }
+                assert!(
+                    max_abs <= GDN_STATE_MAX_ABS,
+                    "gdn_state[{i}] max|Δ|={max_abs:.3e} > {GDN_STATE_MAX_ABS:.0e} \
+                     between token-major and layer-major after the same N-token batch"
+                );
             }
         }
         for (i, (a, b)) in sess_tok
@@ -19397,17 +19466,21 @@ mod tests {
             .enumerate()
         {
             unsafe {
-                let pa = a.buffer.contents().as_ptr() as *const u32;
-                let pb = b.buffer.contents().as_ptr() as *const u32;
+                let pa = a.buffer.contents().as_ptr() as *const f32;
+                let pb = b.buffer.contents().as_ptr() as *const f32;
                 let n_elems = a.n_elements() as usize;
+                let mut max_abs = 0f32;
                 for j in 0..n_elems {
-                    if *pa.add(j) != *pb.add(j) {
-                        panic!(
-                            "gdn_conv[{i}][{j}] diverges between token-major and \
-                             layer-major"
-                        );
+                    let d = (*pa.add(j) - *pb.add(j)).abs();
+                    if d > max_abs {
+                        max_abs = d;
                     }
                 }
+                assert!(
+                    max_abs <= GDN_CONV_MAX_ABS,
+                    "gdn_conv[{i}] max|Δ|={max_abs:.3e} > {GDN_CONV_MAX_ABS:.0e} \
+                     between token-major and layer-major"
+                );
             }
         }
         assert_eq!(

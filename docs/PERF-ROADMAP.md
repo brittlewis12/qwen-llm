@@ -1048,6 +1048,13 @@ route topk/shared is real but locally falsified (`0.67-0.68 ms`), and routed
 gate/down remains moderate but constrained by recent monolith/batching gates. The
 next A3B long-context branch should be an attention main-body KV-read shape
 change with an `attn-intra`/oracle gate; more tile/NWG/reduce retunes stay closed.
+v0.404 then shows the local NWG shelf is small: NWG192 saves only
+`0.13-0.15 ms` in phase at `ctx16384/32768`. v0.405 kills the concrete read-once
+S2 oracle: correctness is exact, but staging K/V once for two simdgroups regresses
+the main body by `3.7-5.6x`. Do not reopen attention read-once work by adding
+large threadgroup-memory staging or reducing Q-head grid parallelism; the next
+hardware-saturation branch should move to A3B multi-slot batching or a broad
+decode byte/fusion audit unless a new attention idea avoids this failure mode.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

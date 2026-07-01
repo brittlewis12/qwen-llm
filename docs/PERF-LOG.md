@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.405 Group8 S2 Read-Once Kill
+
+Status: built and reverted a harness-only A3B group8 attention oracle that staged
+K/V tiles once in threadgroup memory for two four-head simdgroups.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0405-g8-s2-read-once-kill/README.md`
+
+Validation:
+
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- ignored group8 attention correctness test with `QWEN_ATTN_V4_G8_S2_ORACLE=1`
+- A3B `attn-intra` S2 oracle at `ctx16384/32768`
+- `cx ask` review, session `019f1e10-a733-73b1-9f89-dbd01eeb55bd`
+
+Results:
+
+| Ctx | Variant | Layer ms | Main ms | Reduce ms | Read |
+| ---: | --- | ---: | ---: | ---: | --- |
+| `16384` | default C64 | `0.2686` | `0.0987` | `0.0675` | baseline |
+| `16384` | S2 C64 | `0.7116` | `0.5410` | `0.0680` | killed |
+| `16384` | S2 C32 | `0.5313` | `0.3621` | `0.0680` | killed |
+| `32768` | default C64 | `0.3466` | `0.1758` | `0.0676` | baseline |
+| `32768` | S2 C64 | `1.1475` | `0.9768` | `0.0678` | killed |
+
+Decision: cooperative TGM read-once attention is killed. The exact oracle
+regressed the main body by `3.7-5.6x`, so theoretical K/V byte reduction is not
+worth the lost grid parallelism, TGM traffic, barriers, and occupancy. Keep only
+narrow attention ideas that avoid this failure mode; shift the next
+hardware-saturation branch to A3B multi-slot batching or broad decode byte/fusion
+auditing.
+
 ## 2026-07-01 - v0.404 A3B Attention Intra Gate
 
 Status: decomposed A3B group-8 decode attention at `ctx8192`, `ctx16384`, and

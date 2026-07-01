@@ -3043,10 +3043,19 @@ fn fresh_gdn_replay_sessions(
     mm: &MetalModel,
     n: usize,
 ) -> Result<Vec<MetalSession>> {
+    fresh_gdn_replay_sessions_with_capacity(ctx, mm, n, 32)
+}
+
+fn fresh_gdn_replay_sessions_with_capacity(
+    ctx: &MetalContext,
+    mm: &MetalModel,
+    n: usize,
+    kv_capacity: usize,
+) -> Result<Vec<MetalSession>> {
     let mut sessions = Vec::with_capacity(n);
     for i in 0..n {
         sessions.push(
-            MetalSession::fresh(ctx, mm, 32)
+            MetalSession::fresh(ctx, mm, kv_capacity)
                 .with_context(|| format!("fresh replay session {i}"))?,
         );
     }
@@ -3817,15 +3826,19 @@ fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) -> Result<()>
         .filter(|&i| matches!(mm.blocks[i], MetalBlock::Gdn(_)))
         .count();
     let n_attn_in_slice = n_blocks - n_gdn_in_slice;
+    let kv_capacity = (position as usize)
+        .checked_add(32)
+        .ok_or_else(|| anyhow!("position + KV slack overflow"))?;
 
     println!(
-        "[decode-block-slice-replay] model={} start_block={} blocks={} gdn_blocks={} attn_blocks={} position={} h={} conv_dim={} v_dim={} tokens={} warmup={} iters={}",
+        "[decode-block-slice-replay] model={} start_block={} blocks={} gdn_blocks={} attn_blocks={} position={} kv_capacity={} h={} conv_dim={} v_dim={} tokens={} warmup={} iters={}",
         model.display(),
         start_block,
         n_blocks,
         n_gdn_in_slice,
         n_attn_in_slice,
         position,
+        kv_capacity,
         h,
         conv_dim,
         v_dim,
@@ -3840,8 +3853,10 @@ fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) -> Result<()>
 
     if !no_check {
         let check_tokens = max_tokens;
-        let mut base = fresh_gdn_replay_sessions(&ctx, &mm, check_tokens)?;
-        let mut replay = fresh_gdn_replay_sessions(&ctx, &mm, check_tokens)?;
+        let mut base =
+            fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, check_tokens, kv_capacity)?;
+        let mut replay =
+            fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, check_tokens, kv_capacity)?;
         fill_gdn_replay_inputs(&ctx, &base)?;
         fill_gdn_replay_inputs(&ctx, &replay)?;
         let scratch = GdnLayerReplayScratch::new(&ctx, check_tokens, h, conv_dim, v_dim)?;
@@ -3900,8 +3915,10 @@ fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) -> Result<()>
         }
     }
 
-    let mut baseline_sessions = fresh_gdn_replay_sessions(&ctx, &mm, max_tokens)?;
-    let mut replay_sessions = fresh_gdn_replay_sessions(&ctx, &mm, max_tokens)?;
+    let mut baseline_sessions =
+        fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, max_tokens, kv_capacity)?;
+    let mut replay_sessions =
+        fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, max_tokens, kv_capacity)?;
     fill_gdn_replay_inputs(&ctx, &baseline_sessions)?;
     fill_gdn_replay_inputs(&ctx, &replay_sessions)?;
     let scratch = GdnLayerReplayScratch::new(&ctx, max_tokens, h, conv_dim, v_dim)?;

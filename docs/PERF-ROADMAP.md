@@ -1137,6 +1137,14 @@ saves `0.1409 ms/token` at `S=8` and `0.1899 ms/token` at `S=16`, with
 `min_cos_x=0.999999329`. Continue, but do not promote to scheduler yet. The next
 decisive tests are nonzero/long attention positions, mid/late block windows, and
 ragged active-slot masks; position-0 full occupancy is still a friendly case.
+v0.415 keeps the early/mid path alive and quarantines late GDN-before-attention:
+early `block0..4` still saves `0.1522 ms/token` at synthetic `pos4096` and
+`0.1539` at `pos16384`, while mid `block20..24` saves `0.1375` at `pos4096`.
+Late `block37..40` fails correctness at both `pos0` and `pos4096`, while pure
+attention block 39 is exact. Treat late windows as unsafe until route/topk ids,
+route margins, and per-block boundary deltas identify whether replay drift flips
+discrete MoE routing or gets amplified by attention. Scheduler gates must be
+window-specific; do not generalize early/mid wins to late layers.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

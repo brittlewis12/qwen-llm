@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.415 Block Slice Positions
+
+Status: extended `decode-block-slice-replay` to size KV capacity for nonzero
+synthetic attention positions and measured early/mid/late A3B windows.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0415-block-slice-positions/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- Early and mid A3B block-slice position probes
+- Late-window correctness probes, including negative rows
+- `cx ask` review, session `019f1eea-0af8-70e0-877e-d77e5efae969`
+
+Results:
+
+| Window | Position | S | Save | Save % | Correctness |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `block0..4` | `4096` | `8` | `0.1522` | `16.1` | pass |
+| `block0..4` | `16384` | `8` | `0.1539` | `14.8` | pass |
+| `block20..24` | `4096` | `8` | `0.1375` | `15.5` | pass |
+| `block37..40` | `4096` | `8` | n/a | n/a | fail, `min_cos=0.942962219` |
+
+Decision: early/mid replay survives nonzero/long synthetic positions, but late
+GDN-before-attention windows are quarantined. Next diagnostic is route/topk
+fingerprinting plus per-block boundary deltas for failing late windows.
+
 ## 2026-07-01 - v0.414 Block Slice Replay
 
 Status: added `decode-block-slice-replay`, a real MoE block-slice probe that keeps

@@ -1101,6 +1101,13 @@ The replay must report net `ms/token`, wall/GPU split, command/encoder/dispatch
 counts, attention body/KV, route/topk, routed MoE, GDN tail, pack/scatter, layout,
 logits/sampling, and ragged occupancy. Promotion gate remains `S=8 >=10%` and
 `>=1.0 ms/token` under realistic active-slot availability.
+v0.410 charges the obvious projection layout hole directly. `decode-proj-batch`
+now times GPU blit pack/scatter plus matmat, and A3B `S=8/16` only loses
+`0.0747/0.0638 ms/token` versus pure batched matmat. The layout-charged upper
+bound still saves `2.4151 ms/token` at `S=8` (`19.18%`, ideal `1.237x`). Copy-only
+layout is not the branch killer. Do not spend another isolated-layout cycle; the
+next artifact must be actual `decode-phase-batch` replay with attention body/KV,
+route/topk, GDN tail, routed MoE, logits/sampling, and ragged occupancy visible.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

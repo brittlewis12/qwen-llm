@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.410 Projection Layout Charge
+
+Status: extended `decode-proj-batch` with explicit GPU blit pack/scatter rows and
+extended `decode_batch_upper_bound.py` with `--projection-mode` so the charged
+estimate can use layout-inclusive projection rows.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0410-projection-layout-charge/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- 0.8B `decode-proj-batch` layout smoke at `S=1`
+- A3B `decode-proj-batch` layout rows at `S=8/16`
+- `uv run python -m py_compile scripts/profile/decode_batch_upper_bound.py`
+- layout-charged upper-bound estimate
+- `cx ask` review, session `019f1e94-6a65-7840-8fc1-ea3d8bd317ad`
+
+Results:
+
+| S | Matvec seq | Matmat batch | With layout | Layout haircut | With-layout save |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `8` | `4.7551` | `2.8882` | `2.9629` | `0.0747` | `1.7922` |
+| `16` | `4.7131` | `1.2456` | `1.3094` | `0.0638` | `3.4037` |
+
+Decision: explicit GPU-copy layout is not the dominant remaining uncertainty.
+The `S=8` layout-charged estimate still saves `2.4151 ms/token` (`19.18%`) after
+routed-MoE charge. Move to the real `decode-phase-batch` replay; stop adding
+isolated layout charges unless that replay exposes a concrete bottleneck.
+
 ## 2026-07-01 - v0.409 Decode Batch Upper Bound
 
 Status: added `scripts/profile/decode_batch_upper_bound.py` and used it to charge

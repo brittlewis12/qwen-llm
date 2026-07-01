@@ -29,9 +29,9 @@ use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
     metal::{
-        KernelEncoder, KernelTraceCounters, MetalContext, MetalTensor, attn_v4_choose_group_tile,
-        attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
-        encode_attn_decode_v4_f32, encode_attn_decode_v4_main_only_f32,
+        BlitEncoder, KernelEncoder, KernelTraceCounters, MetalContext, MetalTensor,
+        attn_v4_choose_group_tile, attn_v4_choose_nwg, attn_v4_choose_tile_c,
+        encode_add_inplace_f32, encode_attn_decode_v4_f32, encode_attn_decode_v4_main_only_f32,
         encode_attn_decode_v4_reduce_only_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
         encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
         encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32,
@@ -1931,6 +1931,46 @@ where
     })
 }
 
+fn time_cmd_reps_stats<F>(
+    ctx: &MetalContext,
+    warmup: usize,
+    iters: usize,
+    mut encode: F,
+) -> Result<TimedGpuStats>
+where
+    F: FnMut(&Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Result<()>,
+{
+    for _ in 0..warmup {
+        let cmd = ctx.queue.commandBuffer().context("warmup cmd")?;
+        encode(&cmd)?;
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+
+    let mut wall_samples = Vec::with_capacity(iters);
+    let mut gpu_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let cmd = ctx.queue.commandBuffer().context("timed cmd")?;
+        encode(&cmd)?;
+        let t = Instant::now();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        wall_samples.push(t.elapsed().as_secs_f64() * 1e3);
+        gpu_samples.push((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
+    }
+
+    let avg_wall_ms = wall_samples.iter().sum::<f64>() / iters as f64;
+    let avg_gpu_ms = gpu_samples.iter().sum::<f64>() / iters as f64;
+    gpu_samples.sort_by(|a, b| a.total_cmp(b));
+    Ok(TimedGpuStats {
+        avg_wall_ms,
+        avg_gpu_ms,
+        p50_gpu_ms: percentile(&gpu_samples, 0.50),
+        p90_gpu_ms: percentile(&gpu_samples, 0.90),
+        max_gpu_ms: *gpu_samples.last().unwrap_or(&0.0),
+    })
+}
+
 #[derive(Clone, Copy)]
 struct ProjectionWeight<'a> {
     weight: &'a MetalTensor,
@@ -1941,11 +1981,14 @@ struct ProjectionBatchBench<'a> {
     name: &'static str,
     n_in: usize,
     max_out: usize,
+    input_pack_count: usize,
     weights: Vec<ProjectionWeight<'a>>,
     x_single: MetalTensor,
     x_batch: MetalTensor,
+    x_slots: Vec<MetalTensor>,
     y_single: Vec<MetalTensor>,
     y_batch: Vec<MetalTensor>,
+    y_sink: MetalTensor,
     weight_bytes: u64,
 }
 
@@ -1955,6 +1998,7 @@ impl<'a> ProjectionBatchBench<'a> {
         name: &'static str,
         n_in: usize,
         max_tokens: usize,
+        input_pack_count: usize,
         weights: Vec<ProjectionWeight<'a>>,
     ) -> Result<Self> {
         if weights.is_empty() {
@@ -1971,18 +2015,71 @@ impl<'a> ProjectionBatchBench<'a> {
                 vec![(max_tokens * w.n_out) as u64],
             )?);
         }
+        let mut x_slots = Vec::with_capacity(max_tokens);
+        for _ in 0..max_tokens {
+            x_slots.push(MetalTensor::zeros_f32(ctx, vec![n_in as u64])?);
+        }
         Ok(Self {
             name,
             n_in,
             max_out,
+            input_pack_count,
             weights,
             x_single: MetalTensor::zeros_f32(ctx, vec![n_in as u64])?,
             x_batch: MetalTensor::zeros_f32(ctx, vec![(max_tokens * n_in) as u64])?,
+            x_slots,
             y_single,
             y_batch,
+            y_sink: MetalTensor::zeros_f32(ctx, vec![(max_tokens * max_out) as u64])?,
             weight_bytes,
         })
     }
+}
+
+fn blit_projection_group_pack(blit: &BlitEncoder, group: &ProjectionBatchBench<'_>, tokens: usize) {
+    let row_bytes = (group.n_in * 4) as u64;
+    for _ in 0..group.input_pack_count {
+        for tok in 0..tokens {
+            let dst_offset = group.x_batch.offset + tok as u64 * row_bytes;
+            blit.copy_buffer(
+                &group.x_slots[tok].buffer,
+                group.x_slots[tok].offset,
+                &group.x_batch.buffer,
+                dst_offset,
+                row_bytes,
+            );
+        }
+    }
+}
+
+fn blit_projection_group_scatter(
+    blit: &BlitEncoder,
+    group: &ProjectionBatchBench<'_>,
+    tokens: usize,
+) {
+    for (i, w) in group.weights.iter().enumerate() {
+        let row_bytes = (w.n_out * 4) as u64;
+        let sink_row_bytes = (group.max_out * 4) as u64;
+        for tok in 0..tokens {
+            let src_offset = group.y_batch[i].offset + tok as u64 * row_bytes;
+            let dst_offset = group.y_sink.offset + tok as u64 * sink_row_bytes;
+            blit.copy_buffer(
+                &group.y_batch[i].buffer,
+                src_offset,
+                &group.y_sink.buffer,
+                dst_offset,
+                row_bytes,
+            );
+        }
+    }
+}
+
+fn projection_group_pack_bytes(group: &ProjectionBatchBench<'_>) -> u64 {
+    (group.input_pack_count * group.n_in * 4) as u64
+}
+
+fn projection_group_scatter_bytes(group: &ProjectionBatchBench<'_>) -> u64 {
+    group.weights.iter().map(|w| (w.n_out * 4) as u64).sum()
 }
 
 fn encode_projection_group_matvec_seq(
@@ -2032,6 +2129,9 @@ fn projection_fill_inputs(ctx: &MetalContext, groups: &[ProjectionBatchBench<'_>
         let v = 0.03125 + (i as f32) * 0.00390625;
         encode_fill_f32(ctx, &enc, &group.x_single, v)?;
         encode_fill_f32(ctx, &enc, &group.x_batch, v)?;
+        for slot in &group.x_slots {
+            encode_fill_f32(ctx, &enc, slot, v)?;
+        }
     }
     enc.end();
     cmd.commit();
@@ -2329,6 +2429,7 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             "gdn_qkv_z",
             h,
             max_tokens,
+            gdn_blocks.len(),
             weights,
         )?);
 
@@ -2340,7 +2441,12 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             })
             .collect();
         groups.push(ProjectionBatchBench::new(
-            &ctx, "gdn_out", v_dim, max_tokens, weights,
+            &ctx,
+            "gdn_out",
+            v_dim,
+            max_tokens,
+            gdn_blocks.len(),
+            weights,
         )?);
     }
 
@@ -2361,7 +2467,12 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             });
         }
         groups.push(ProjectionBatchBench::new(
-            &ctx, "attn_qkv", h, max_tokens, weights,
+            &ctx,
+            "attn_qkv",
+            h,
+            max_tokens,
+            attn_blocks.len(),
+            weights,
         )?);
 
         let weights = attn_blocks
@@ -2372,7 +2483,12 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             })
             .collect();
         groups.push(ProjectionBatchBench::new(
-            &ctx, "attn_o", q_dim, max_tokens, weights,
+            &ctx,
+            "attn_o",
+            q_dim,
+            max_tokens,
+            attn_blocks.len(),
+            weights,
         )?);
     }
 
@@ -2416,6 +2532,7 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             "ffn_gate_up_dense_or_shared",
             h,
             max_tokens,
+            mm.blocks.len(),
             gate_up,
         )?);
         groups.push(ProjectionBatchBench::new(
@@ -2423,6 +2540,7 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             "ffn_down_dense_or_shared",
             ffn_dim,
             max_tokens,
+            mm.blocks.len(),
             down,
         )?);
     }
@@ -2432,6 +2550,7 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
         "lm_head",
         h,
         max_tokens,
+        1,
         vec![ProjectionWeight {
             weight: &mm.lm_head,
             n_out: arch.vocab_size as usize,
@@ -2492,6 +2611,43 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             let batch_gb_s = weight_gb * n_tokens as f64 / (batch.avg_gpu_ms / 1e3);
             let seq_dispatch = group.weights.len() as f64;
             let batch_dispatch = group.weights.len() as f64 / n_tokens as f64;
+            let pack_bytes = projection_group_pack_bytes(group);
+            let scatter_bytes = projection_group_scatter_bytes(group);
+            let pack = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+                let blit = BlitEncoder::begin(cmd);
+                blit_projection_group_pack(&blit, group, n_tokens);
+                blit.end();
+                Ok(())
+            })?;
+            let scatter = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+                let blit = BlitEncoder::begin(cmd);
+                blit_projection_group_scatter(&blit, group, n_tokens);
+                blit.end();
+                Ok(())
+            })?;
+            let with_layout = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+                let blit = BlitEncoder::begin(cmd);
+                blit_projection_group_pack(&blit, group, n_tokens);
+                blit.end();
+                let enc = KernelEncoder::begin(cmd);
+                encode_projection_group_matmat_batch(&ctx, &enc, group, n_tokens)?;
+                enc.end();
+                let blit = BlitEncoder::begin(cmd);
+                blit_projection_group_scatter(&blit, group, n_tokens);
+                blit.end();
+                Ok(())
+            })?;
+            let pack_gb = pack_bytes as f64 / 1e9;
+            let scatter_gb = scatter_bytes as f64 / 1e9;
+            let pack_gb_s = pack_gb * n_tokens as f64 / (pack.avg_gpu_ms / 1e3);
+            let scatter_gb_s = scatter_gb * n_tokens as f64 / (scatter.avg_gpu_ms / 1e3);
+            let with_layout_per_tok = with_layout.avg_gpu_ms / n_tokens as f64;
+            let with_layout_save = seq_per_tok - with_layout_per_tok;
+            let with_layout_pct = if seq_per_tok > 0.0 {
+                with_layout_save / seq_per_tok * 100.0
+            } else {
+                0.0
+            };
             println!(
                 "{}\tmatvec_seq\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
                 group.name,
@@ -2530,6 +2686,64 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
                 save,
                 pct
             );
+            println!(
+                "{}\tlayout_pack\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
+                group.name,
+                n_tokens,
+                group.n_in,
+                group.max_out,
+                group.input_pack_count,
+                pack_gb,
+                group.input_pack_count as f64,
+                pack.avg_wall_ms,
+                pack.avg_gpu_ms,
+                pack.avg_gpu_ms / n_tokens as f64,
+                pack.p50_gpu_ms / n_tokens as f64,
+                pack.p90_gpu_ms / n_tokens as f64,
+                pack.max_gpu_ms / n_tokens as f64,
+                pack_gb_s,
+                0.0,
+                0.0
+            );
+            println!(
+                "{}\tlayout_scatter\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
+                group.name,
+                n_tokens,
+                group.n_in,
+                group.max_out,
+                group.weights.len(),
+                scatter_gb,
+                group.weights.len() as f64,
+                scatter.avg_wall_ms,
+                scatter.avg_gpu_ms,
+                scatter.avg_gpu_ms / n_tokens as f64,
+                scatter.p50_gpu_ms / n_tokens as f64,
+                scatter.p90_gpu_ms / n_tokens as f64,
+                scatter.max_gpu_ms / n_tokens as f64,
+                scatter_gb_s,
+                0.0,
+                0.0
+            );
+            println!(
+                "{}\tmatmat_with_layout\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
+                group.name,
+                n_tokens,
+                group.n_in,
+                group.max_out,
+                group.weights.len(),
+                weight_gb + pack_gb + scatter_gb,
+                batch_dispatch + group.input_pack_count as f64 + group.weights.len() as f64,
+                with_layout.avg_wall_ms,
+                with_layout.avg_gpu_ms,
+                with_layout_per_tok,
+                with_layout.p50_gpu_ms / n_tokens as f64,
+                with_layout.p90_gpu_ms / n_tokens as f64,
+                with_layout.max_gpu_ms / n_tokens as f64,
+                (weight_gb + pack_gb + scatter_gb) * n_tokens as f64
+                    / (with_layout.avg_gpu_ms / 1e3),
+                with_layout_save,
+                with_layout_pct
+            );
             sum_seq_gpu += seq.avg_gpu_ms;
             sum_batch_gpu += batch.avg_gpu_ms;
             total_weight_bytes += group.weight_bytes;
@@ -2548,17 +2762,47 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             }
             Ok(())
         })?;
+        let with_layout_all = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+            let blit = BlitEncoder::begin(cmd);
+            for group in &groups {
+                blit_projection_group_pack(&blit, group, n_tokens);
+            }
+            blit.end();
+            let enc = KernelEncoder::begin(cmd);
+            for group in &groups {
+                encode_projection_group_matmat_batch(&ctx, &enc, group, n_tokens)?;
+            }
+            enc.end();
+            let blit = BlitEncoder::begin(cmd);
+            for group in &groups {
+                blit_projection_group_scatter(&blit, group, n_tokens);
+            }
+            blit.end();
+            Ok(())
+        })?;
 
         let isolated_save = (sum_seq_gpu - sum_batch_gpu) / n_tokens as f64;
         let one_encoder_seq_per_tok = seq_all.avg_gpu_ms / n_tokens as f64;
         let one_encoder_batch_per_tok = batch_all.avg_gpu_ms / n_tokens as f64;
         let one_encoder_save = one_encoder_seq_per_tok - one_encoder_batch_per_tok;
+        let with_layout_per_tok = with_layout_all.avg_gpu_ms / n_tokens as f64;
+        let with_layout_save = one_encoder_seq_per_tok - with_layout_per_tok;
         let one_encoder_pct = if one_encoder_seq_per_tok > 0.0 {
             one_encoder_save / one_encoder_seq_per_tok * 100.0
         } else {
             0.0
         };
+        let with_layout_pct = if one_encoder_seq_per_tok > 0.0 {
+            with_layout_save / one_encoder_seq_per_tok * 100.0
+        } else {
+            0.0
+        };
         let weight_gb = total_weight_bytes as f64 / 1e9;
+        let layout_bytes: u64 = groups
+            .iter()
+            .map(|group| projection_group_pack_bytes(group) + projection_group_scatter_bytes(group))
+            .sum();
+        let layout_gb = layout_bytes as f64 / 1e9;
         let seq_gb_s = weight_gb * n_tokens as f64 / (seq_all.avg_gpu_ms / 1e3);
         let batch_gb_s = weight_gb * n_tokens as f64 / (batch_all.avg_gpu_ms / 1e3);
         println!(
@@ -2616,6 +2860,22 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
             batch_gb_s,
             one_encoder_save,
             one_encoder_pct
+        );
+        println!(
+            "aggregate_one_encoder\tmatmat_with_layout\t{}\t0\t0\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
+            n_tokens,
+            total_weights,
+            weight_gb + layout_gb,
+            total_weights as f64 / n_tokens as f64,
+            with_layout_all.avg_wall_ms,
+            with_layout_all.avg_gpu_ms,
+            with_layout_per_tok,
+            with_layout_all.p50_gpu_ms / n_tokens as f64,
+            with_layout_all.p90_gpu_ms / n_tokens as f64,
+            with_layout_all.max_gpu_ms / n_tokens as f64,
+            (weight_gb + layout_gb) * n_tokens as f64 / (with_layout_all.avg_gpu_ms / 1e3),
+            with_layout_save,
+            with_layout_pct
         );
     }
 

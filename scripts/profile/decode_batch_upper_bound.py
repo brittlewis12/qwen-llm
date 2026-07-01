@@ -137,17 +137,19 @@ def moe_rows_by_tokens(sweep: MoeSweep, slot_order: str) -> dict[int, MoeSweepRo
     return {row.tokens: row for row in sweep.rows if row.slot_order == slot_order}
 
 
-def aggregate_projection_save(rows: dict[tuple[str, str], ProjRow]) -> float:
-    row = rows.get(("aggregate_one_encoder", "matmat_batch"))
+def aggregate_projection_save(rows: dict[tuple[str, str], ProjRow], mode: str) -> float:
+    row = rows.get(("aggregate_one_encoder", mode))
     if row is None:
         raise SystemExit(
-            "decode-proj-batch output missing aggregate_one_encoder matmat row"
+            f"decode-proj-batch output missing aggregate_one_encoder {mode} row"
         )
     return row.saving_ms_per_tok
 
 
-def component_save(rows: dict[tuple[str, str], ProjRow], component: str) -> float:
-    row = rows.get((component, "matmat_batch"))
+def component_save(
+    rows: dict[tuple[str, str], ProjRow], component: str, mode: str
+) -> float:
+    row = rows.get((component, mode))
     return row.saving_ms_per_tok if row is not None else 0.0
 
 
@@ -162,6 +164,12 @@ def main() -> None:
         "--slot-order",
         default="exact",
         help="moe-batch-sweep slot_order to use when --moe-sweep is present",
+    )
+    parser.add_argument(
+        "--projection-mode",
+        default="matmat_batch",
+        choices=("matmat_batch", "matmat_with_layout"),
+        help="decode-proj-batch projection row to use (default: matmat_batch)",
     )
     args = parser.parse_args()
 
@@ -184,7 +192,7 @@ def main() -> None:
     )
     for tokens in sorted(proj):
         rows = proj[tokens]
-        projection_save = aggregate_projection_save(rows)
+        projection_save = aggregate_projection_save(rows, args.projection_mode)
         routed_projected = 0.0
         routed_save = 0.0
         if moe_sweep is not None:
@@ -198,12 +206,16 @@ def main() -> None:
         charged_ms = phase.phase_sum_ms - saved_ms
         saved_pct = saved_ms / phase.phase_sum_ms * 100.0
         ideal_speedup = phase.phase_sum_ms / charged_ms if charged_ms > 0.0 else 0.0
-        gdn_save = component_save(rows, "gdn_qkv_z") + component_save(rows, "gdn_out")
-        attn_save = component_save(rows, "attn_qkv") + component_save(rows, "attn_o")
+        gdn_save = component_save(
+            rows, "gdn_qkv_z", args.projection_mode
+        ) + component_save(rows, "gdn_out", args.projection_mode)
+        attn_save = component_save(
+            rows, "attn_qkv", args.projection_mode
+        ) + component_save(rows, "attn_o", args.projection_mode)
         shared_ffn_save = component_save(
-            rows, "ffn_gate_up_dense_or_shared"
-        ) + component_save(rows, "ffn_down_dense_or_shared")
-        lm_head_save = component_save(rows, "lm_head")
+            rows, "ffn_gate_up_dense_or_shared", args.projection_mode
+        ) + component_save(rows, "ffn_down_dense_or_shared", args.projection_mode)
+        lm_head_save = component_save(rows, "lm_head", args.projection_mode)
         print(
             f"{tokens}\t{phase.phase_sum_ms:.4f}\t{projection_save:.4f}\t"
             f"{routed_save:.4f}\t{charged_ms:.4f}\t{saved_ms:.4f}\t"

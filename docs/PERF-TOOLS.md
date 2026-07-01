@@ -656,14 +656,18 @@ to charge a phase profile before writing replay code:
 uv run scripts/profile/decode_batch_upper_bound.py \
   --phase target/profiles/a3b-deep-phase.out \
   --proj target/profiles/a3b-decode-proj-batch.out \
-  --moe-sweep target/profiles/a3b-moe-batch-sweep.out
+  --moe-sweep target/profiles/a3b-moe-batch-sweep.out \
+  --projection-mode matmat_with_layout
 ```
 
 Rules:
 
 - Treat this as an upper bound. It subtracts measured projection and routed-MoE
-  saves from measured phase, but does not charge real pack/scatter or scheduler
-  overhead.
+  saves from measured phase; with `matmat_with_layout` it charges synthetic GPU
+  copy layout, but still not real scheduler or ragged-occupancy overhead.
+- Use `--projection-mode matmat_with_layout` after v0.410 when the
+  `decode-proj-batch` input includes layout rows; use default `matmat_batch` only
+  for older artifacts.
 - Proceed to a real `decode-phase-batch` replay only if `S=8` still clears
   `>=10%` or `>=1.0 ms/token` after the charged estimate.
 

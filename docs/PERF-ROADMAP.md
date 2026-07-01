@@ -1063,6 +1063,16 @@ kernels. That is an always-on `~1.17-1.93 ms/token` primitive saving at
 gate a production-shaped decode-phase batch replay over `S={1,2,4,8,16}`; promote
 multi-slot/layer-batched decode only if `S=8` clears `>=10%` or `>=1.0 ms/token`
 phase-equivalent savings after attention, LM head, MoE routing, and layout costs.
+v0.407 broadens that primitive gate with `decode-proj-batch`: A3B projection-only
+aggregate remains negative through `S=4`, then crosses over hard at `S=8`
+(`4.7255 -> 2.8866 ms/token`, `+1.8389 ms`) and `S=16`
+(`4.6600 -> 1.2346`, `+3.4254 ms`). A10B and dense 27B confirmations are larger
+(`+5.94/+9.55 ms` and `+11.23/+26.29 ms` at `S=8/16`). This passes the
+projection-only kill gate and re-promotes a fuller decode-phase batch replay as
+the highest-leverage architecture gate, but not a scheduler implementation yet.
+The next replay must charge attention body/KV, routed-MoE capture/replay,
+routing/topk, slot pack/scatter, layout copies, and ragged occupancy; require net
+`S=8` savings to stay above `>=10%` or `>=1.0 ms/token` before scheduler work.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

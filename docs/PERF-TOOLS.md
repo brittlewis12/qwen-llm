@@ -622,6 +622,33 @@ Rules:
   production-shaped decode-phase batch replay that includes attention, LM head,
   MoE projections, routing, and layout overheads.
 
+### Decode projection batch lane
+
+Use `decode-proj-batch` as the broader projection-only kill gate for
+multi-slot/layer-batched decode. It times repeated decode-shaped matvecs against
+existing prompt-shaped matmat kernels for GDN projections, attention projections,
+dense/shared FFN projections, and `lm_head`.
+
+```sh
+target/release/qwen-bench decode-proj-batch \
+  -m "$MODEL" \
+  --tokens 1,2,4,8,16 \
+  --warmup 2 \
+  --iters 5
+```
+
+Rules:
+
+- Treat it as a kill gate, not as scheduler evidence: it excludes attention
+  body/KV, routed-MoE route capture/replay, slot packing/scatter, layout copies,
+  and real slot availability.
+- Use `aggregate_one_encoder` rows for the main decision. `aggregate_isolated`
+  is a component sanity check only.
+- The A3B v0.407 gate says `S<=4` is below crossover and `S=8` is the first
+  credible production-relevant batch size.
+- Before scheduler work, require a fuller `decode-phase-batch` replay to preserve
+  at least `>=10%` or `>=1.0 ms/token` net savings at sustained `S=8`.
+
 When long-prompt variants are close enough that run-order drift or thermal sag
 can flip the ranking, use the cooled sweep harness instead of ad hoc shell
 loops:

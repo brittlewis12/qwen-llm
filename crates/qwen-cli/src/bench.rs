@@ -431,6 +431,8 @@ enum Cmd {
     AttnIntra(AttnIntraArgs),
     /// Exact-shape GDN projection primitive microbench.
     GdnProjMicro(GdnProjMicroArgs),
+    /// Decode projection batching probe across GDN, attention, FFN, and lm_head.
+    DecodeProjBatch(DecodeProjBatchArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
@@ -759,6 +761,22 @@ struct GdnProjMicroArgs {
     /// Synthetic token rows for the mat-mat batch path.
     #[arg(long, default_value = "1")]
     tokens: usize,
+}
+
+#[derive(Parser, Debug)]
+struct DecodeProjBatchArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Comma-separated token counts to replay through batched mat-mat kernels.
+    #[arg(long, value_delimiter = ',', default_value = "1,2,4,8,16")]
+    tokens: Vec<usize>,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "10")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "3")]
+    warmup: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1776,6 +1794,7 @@ fn main() -> Result<()> {
         Cmd::Phase(a) => run_phase(a),
         Cmd::AttnIntra(a) => run_attn_intra(a),
         Cmd::GdnProjMicro(a) => run_gdn_proj_micro(a),
+        Cmd::DecodeProjBatch(a) => run_decode_proj_batch(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
@@ -1849,6 +1868,175 @@ where
         gpu_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
     }
     Ok((wall_ms / iters as f64, gpu_ms / iters as f64))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimedGpuStats {
+    avg_wall_ms: f64,
+    avg_gpu_ms: f64,
+    p50_gpu_ms: f64,
+    p90_gpu_ms: f64,
+    max_gpu_ms: f64,
+}
+
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * q).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn time_gpu_reps_stats<F>(
+    ctx: &MetalContext,
+    warmup: usize,
+    iters: usize,
+    mut encode: F,
+) -> Result<TimedGpuStats>
+where
+    F: FnMut(&KernelEncoder) -> Result<()>,
+{
+    for _ in 0..warmup {
+        let cmd = ctx.queue.commandBuffer().context("warmup cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode(&enc)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+
+    let mut wall_samples = Vec::with_capacity(iters);
+    let mut gpu_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let cmd = ctx.queue.commandBuffer().context("timed cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode(&enc)?;
+        enc.end();
+        let t = Instant::now();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        wall_samples.push(t.elapsed().as_secs_f64() * 1e3);
+        gpu_samples.push((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3);
+    }
+
+    let avg_wall_ms = wall_samples.iter().sum::<f64>() / iters as f64;
+    let avg_gpu_ms = gpu_samples.iter().sum::<f64>() / iters as f64;
+    gpu_samples.sort_by(|a, b| a.total_cmp(b));
+    Ok(TimedGpuStats {
+        avg_wall_ms,
+        avg_gpu_ms,
+        p50_gpu_ms: percentile(&gpu_samples, 0.50),
+        p90_gpu_ms: percentile(&gpu_samples, 0.90),
+        max_gpu_ms: *gpu_samples.last().unwrap_or(&0.0),
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ProjectionWeight<'a> {
+    weight: &'a MetalTensor,
+    n_out: usize,
+}
+
+struct ProjectionBatchBench<'a> {
+    name: &'static str,
+    n_in: usize,
+    max_out: usize,
+    weights: Vec<ProjectionWeight<'a>>,
+    x_single: MetalTensor,
+    x_batch: MetalTensor,
+    y_single: Vec<MetalTensor>,
+    y_batch: Vec<MetalTensor>,
+    weight_bytes: u64,
+}
+
+impl<'a> ProjectionBatchBench<'a> {
+    fn new(
+        ctx: &MetalContext,
+        name: &'static str,
+        n_in: usize,
+        max_tokens: usize,
+        weights: Vec<ProjectionWeight<'a>>,
+    ) -> Result<Self> {
+        if weights.is_empty() {
+            return Err(anyhow!("projection group {name} has no weights"));
+        }
+        let max_out = weights.iter().map(|w| w.n_out).max().unwrap_or(1);
+        let weight_bytes = weights.iter().map(|w| w.weight.n_bytes()).sum();
+        let mut y_single = Vec::with_capacity(weights.len());
+        let mut y_batch = Vec::with_capacity(weights.len());
+        for w in &weights {
+            y_single.push(MetalTensor::zeros_f32(ctx, vec![w.n_out as u64])?);
+            y_batch.push(MetalTensor::zeros_f32(
+                ctx,
+                vec![(max_tokens * w.n_out) as u64],
+            )?);
+        }
+        Ok(Self {
+            name,
+            n_in,
+            max_out,
+            weights,
+            x_single: MetalTensor::zeros_f32(ctx, vec![n_in as u64])?,
+            x_batch: MetalTensor::zeros_f32(ctx, vec![(max_tokens * n_in) as u64])?,
+            y_single,
+            y_batch,
+            weight_bytes,
+        })
+    }
+}
+
+fn encode_projection_group_matvec_seq(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    group: &ProjectionBatchBench<'_>,
+    tokens: usize,
+) -> Result<()> {
+    for _ in 0..tokens {
+        for (i, w) in group.weights.iter().enumerate() {
+            encode_mat_vec_dispatch(
+                ctx,
+                enc,
+                w.weight,
+                &group.x_single,
+                &group.y_single[i],
+                group.n_in,
+                w.n_out,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_projection_group_matmat_batch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    group: &ProjectionBatchBench<'_>,
+    tokens: usize,
+) -> Result<()> {
+    let x_batch = group
+        .x_batch
+        .view_subrange(0, vec![(tokens * group.n_in) as u64]);
+    for (i, w) in group.weights.iter().enumerate() {
+        let y_batch = group.y_batch[i].view_subrange(0, vec![(tokens * w.n_out) as u64]);
+        encode_mat_mat_dispatch(
+            ctx, enc, w.weight, &x_batch, &y_batch, group.n_in, w.n_out, tokens,
+        )?;
+    }
+    Ok(())
+}
+
+fn projection_fill_inputs(ctx: &MetalContext, groups: &[ProjectionBatchBench<'_>]) -> Result<()> {
+    let cmd = ctx.queue.commandBuffer().context("projection fill cmd")?;
+    let enc = KernelEncoder::begin(&cmd);
+    for (i, group) in groups.iter().enumerate() {
+        let v = 0.03125 + (i as f32) * 0.00390625;
+        encode_fill_f32(ctx, &enc, &group.x_single, v)?;
+        encode_fill_f32(ctx, &enc, &group.x_batch, v)?;
+    }
+    enc.end();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+    Ok(())
 }
 
 fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
@@ -2063,6 +2251,373 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
         Ok(())
     })?;
     report("out", "matmat_batch", out_bytes, wall, gpu);
+
+    Ok(())
+}
+
+fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
+    let DecodeProjBatchArgs {
+        model,
+        mut tokens,
+        iters,
+        warmup,
+    } = args;
+    if iters == 0 {
+        return Err(anyhow!("--iters must be >= 1"));
+    }
+    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+        return Err(anyhow!("--tokens entries must be >= 1"));
+    }
+    tokens.sort_unstable();
+    tokens.dedup();
+    let max_tokens = *tokens.last().expect("non-empty tokens");
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    let arch = &mm.arch;
+    let h = arch.hidden_size as usize;
+    let head_dim = arch.attn_head_dim as usize;
+    let n_q = arch.n_q_heads as usize;
+    let n_kv = arch.n_kv_heads as usize;
+    let q_dim = n_q * head_dim;
+    let kv_dim = n_kv * head_dim;
+    let n_v = arch.gdn_n_v_heads as usize;
+    let n_k = arch.gdn_n_k_heads as usize;
+    let gdn_head_dim = arch.gdn_head_dim as usize;
+    let conv_dim = (2 * n_k + n_v) * gdn_head_dim;
+    let v_dim = n_v * gdn_head_dim;
+    let ffn_dim = if arch.kind == qwen_llm::model::ArchKind::Moe {
+        arch.expert_shared_feed_forward_length as usize
+    } else {
+        arch.intermediate_size as usize
+    };
+
+    let gdn_blocks: Vec<_> = mm
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            MetalBlock::Gdn(g) => Some(g),
+            MetalBlock::Attn(_) => None,
+        })
+        .collect();
+    let attn_blocks: Vec<_> = mm
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            MetalBlock::Gdn(_) => None,
+            MetalBlock::Attn(a) => Some(a),
+        })
+        .collect();
+
+    let mut groups = Vec::new();
+    if !gdn_blocks.is_empty() {
+        let mut weights = Vec::with_capacity(gdn_blocks.len() * 2);
+        for gb in &gdn_blocks {
+            weights.push(ProjectionWeight {
+                weight: &gb.in_proj_qkv,
+                n_out: conv_dim,
+            });
+            weights.push(ProjectionWeight {
+                weight: &gb.in_proj_z,
+                n_out: v_dim,
+            });
+        }
+        groups.push(ProjectionBatchBench::new(
+            &ctx,
+            "gdn_qkv_z",
+            h,
+            max_tokens,
+            weights,
+        )?);
+
+        let weights = gdn_blocks
+            .iter()
+            .map(|gb| ProjectionWeight {
+                weight: &gb.out_proj,
+                n_out: h,
+            })
+            .collect();
+        groups.push(ProjectionBatchBench::new(
+            &ctx, "gdn_out", v_dim, max_tokens, weights,
+        )?);
+    }
+
+    if !attn_blocks.is_empty() {
+        let mut weights = Vec::with_capacity(attn_blocks.len() * 3);
+        for ab in &attn_blocks {
+            weights.push(ProjectionWeight {
+                weight: &ab.q,
+                n_out: 2 * q_dim,
+            });
+            weights.push(ProjectionWeight {
+                weight: &ab.k,
+                n_out: kv_dim,
+            });
+            weights.push(ProjectionWeight {
+                weight: &ab.v,
+                n_out: kv_dim,
+            });
+        }
+        groups.push(ProjectionBatchBench::new(
+            &ctx, "attn_qkv", h, max_tokens, weights,
+        )?);
+
+        let weights = attn_blocks
+            .iter()
+            .map(|ab| ProjectionWeight {
+                weight: &ab.o,
+                n_out: h,
+            })
+            .collect();
+        groups.push(ProjectionBatchBench::new(
+            &ctx, "attn_o", q_dim, max_tokens, weights,
+        )?);
+    }
+
+    if ffn_dim > 0 {
+        let mut gate_up = Vec::with_capacity(mm.blocks.len() * 2);
+        let mut down = Vec::with_capacity(mm.blocks.len());
+        for block in &mm.blocks {
+            match block {
+                MetalBlock::Gdn(gb) => {
+                    gate_up.push(ProjectionWeight {
+                        weight: &gb.ffn_gate,
+                        n_out: ffn_dim,
+                    });
+                    gate_up.push(ProjectionWeight {
+                        weight: &gb.ffn_up,
+                        n_out: ffn_dim,
+                    });
+                    down.push(ProjectionWeight {
+                        weight: &gb.ffn_down,
+                        n_out: h,
+                    });
+                }
+                MetalBlock::Attn(ab) => {
+                    gate_up.push(ProjectionWeight {
+                        weight: &ab.ffn_gate,
+                        n_out: ffn_dim,
+                    });
+                    gate_up.push(ProjectionWeight {
+                        weight: &ab.ffn_up,
+                        n_out: ffn_dim,
+                    });
+                    down.push(ProjectionWeight {
+                        weight: &ab.ffn_down,
+                        n_out: h,
+                    });
+                }
+            }
+        }
+        groups.push(ProjectionBatchBench::new(
+            &ctx,
+            "ffn_gate_up_dense_or_shared",
+            h,
+            max_tokens,
+            gate_up,
+        )?);
+        groups.push(ProjectionBatchBench::new(
+            &ctx,
+            "ffn_down_dense_or_shared",
+            ffn_dim,
+            max_tokens,
+            down,
+        )?);
+    }
+
+    groups.push(ProjectionBatchBench::new(
+        &ctx,
+        "lm_head",
+        h,
+        max_tokens,
+        vec![ProjectionWeight {
+            weight: &mm.lm_head,
+            n_out: arch.vocab_size as usize,
+        }],
+    )?);
+
+    projection_fill_inputs(&ctx, &groups)?;
+
+    println!(
+        "[decode-proj-batch] model={} kind={:?} layers={} gdn_layers={} attn_layers={} h={} q_dim={} kv_dim={} conv_dim={} v_dim={} ffn_dim={} vocab={} tokens={} warmup={} iters={}",
+        model.display(),
+        arch.kind,
+        mm.blocks.len(),
+        gdn_blocks.len(),
+        attn_blocks.len(),
+        h,
+        q_dim,
+        kv_dim,
+        conv_dim,
+        v_dim,
+        ffn_dim,
+        arch.vocab_size,
+        tokens
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        warmup,
+        iters
+    );
+    println!(
+        "component\tmode\ttokens\tn_in\tmax_out\tweights\tweight_gb_per_token\tdispatches_per_token\tavg_wall_ms\tavg_gpu_ms\tavg_gpu_ms_per_tok\tp50_gpu_ms_per_tok\tp90_gpu_ms_per_tok\tmax_gpu_ms_per_tok\teff_weight_gb_s\tsaving_ms_per_tok\tsaving_pct"
+    );
+
+    for &n_tokens in &tokens {
+        let mut sum_seq_gpu = 0.0f64;
+        let mut sum_batch_gpu = 0.0f64;
+        let mut total_weight_bytes = 0u64;
+        let mut total_weights = 0usize;
+
+        for group in &groups {
+            let seq = time_gpu_reps_stats(&ctx, warmup, iters, |enc| {
+                encode_projection_group_matvec_seq(&ctx, enc, group, n_tokens)
+            })?;
+            let batch = time_gpu_reps_stats(&ctx, warmup, iters, |enc| {
+                encode_projection_group_matmat_batch(&ctx, enc, group, n_tokens)
+            })?;
+            let seq_per_tok = seq.avg_gpu_ms / n_tokens as f64;
+            let batch_per_tok = batch.avg_gpu_ms / n_tokens as f64;
+            let save = seq_per_tok - batch_per_tok;
+            let pct = if seq_per_tok > 0.0 {
+                save / seq_per_tok * 100.0
+            } else {
+                0.0
+            };
+            let weight_gb = group.weight_bytes as f64 / 1e9;
+            let seq_gb_s = weight_gb * n_tokens as f64 / (seq.avg_gpu_ms / 1e3);
+            let batch_gb_s = weight_gb * n_tokens as f64 / (batch.avg_gpu_ms / 1e3);
+            let seq_dispatch = group.weights.len() as f64;
+            let batch_dispatch = group.weights.len() as f64 / n_tokens as f64;
+            println!(
+                "{}\tmatvec_seq\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
+                group.name,
+                n_tokens,
+                group.n_in,
+                group.max_out,
+                group.weights.len(),
+                weight_gb,
+                seq_dispatch,
+                seq.avg_wall_ms,
+                seq.avg_gpu_ms,
+                seq_per_tok,
+                seq.p50_gpu_ms / n_tokens as f64,
+                seq.p90_gpu_ms / n_tokens as f64,
+                seq.max_gpu_ms / n_tokens as f64,
+                seq_gb_s,
+                0.0,
+                0.0
+            );
+            println!(
+                "{}\tmatmat_batch\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
+                group.name,
+                n_tokens,
+                group.n_in,
+                group.max_out,
+                group.weights.len(),
+                weight_gb,
+                batch_dispatch,
+                batch.avg_wall_ms,
+                batch.avg_gpu_ms,
+                batch_per_tok,
+                batch.p50_gpu_ms / n_tokens as f64,
+                batch.p90_gpu_ms / n_tokens as f64,
+                batch.max_gpu_ms / n_tokens as f64,
+                batch_gb_s,
+                save,
+                pct
+            );
+            sum_seq_gpu += seq.avg_gpu_ms;
+            sum_batch_gpu += batch.avg_gpu_ms;
+            total_weight_bytes += group.weight_bytes;
+            total_weights += group.weights.len();
+        }
+
+        let seq_all = time_gpu_reps_stats(&ctx, warmup, iters, |enc| {
+            for group in &groups {
+                encode_projection_group_matvec_seq(&ctx, enc, group, n_tokens)?;
+            }
+            Ok(())
+        })?;
+        let batch_all = time_gpu_reps_stats(&ctx, warmup, iters, |enc| {
+            for group in &groups {
+                encode_projection_group_matmat_batch(&ctx, enc, group, n_tokens)?;
+            }
+            Ok(())
+        })?;
+
+        let isolated_save = (sum_seq_gpu - sum_batch_gpu) / n_tokens as f64;
+        let one_encoder_seq_per_tok = seq_all.avg_gpu_ms / n_tokens as f64;
+        let one_encoder_batch_per_tok = batch_all.avg_gpu_ms / n_tokens as f64;
+        let one_encoder_save = one_encoder_seq_per_tok - one_encoder_batch_per_tok;
+        let one_encoder_pct = if one_encoder_seq_per_tok > 0.0 {
+            one_encoder_save / one_encoder_seq_per_tok * 100.0
+        } else {
+            0.0
+        };
+        let weight_gb = total_weight_bytes as f64 / 1e9;
+        let seq_gb_s = weight_gb * n_tokens as f64 / (seq_all.avg_gpu_ms / 1e3);
+        let batch_gb_s = weight_gb * n_tokens as f64 / (batch_all.avg_gpu_ms / 1e3);
+        println!(
+            "aggregate_isolated\tsummed_groups\t{}\t0\t0\t{}\t{:.4}\t{:.2}\t0.0000\t{:.4}\t{:.4}\t0.0000\t0.0000\t0.0000\t0.0\t{:.4}\t0.0",
+            n_tokens,
+            total_weights,
+            weight_gb,
+            total_weights as f64,
+            sum_seq_gpu,
+            sum_seq_gpu / n_tokens as f64,
+            isolated_save
+        );
+        println!(
+            "aggregate_isolated\tsummed_matmat\t{}\t0\t0\t{}\t{:.4}\t{:.2}\t0.0000\t{:.4}\t{:.4}\t0.0000\t0.0000\t0.0000\t0.0\t{:.4}\t{:.1}",
+            n_tokens,
+            total_weights,
+            weight_gb,
+            total_weights as f64 / n_tokens as f64,
+            sum_batch_gpu,
+            sum_batch_gpu / n_tokens as f64,
+            isolated_save,
+            if sum_seq_gpu > 0.0 {
+                (sum_seq_gpu - sum_batch_gpu) / sum_seq_gpu * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!(
+            "aggregate_one_encoder\tmatvec_seq\t{}\t0\t0\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t0.0",
+            n_tokens,
+            total_weights,
+            weight_gb,
+            total_weights as f64,
+            seq_all.avg_wall_ms,
+            seq_all.avg_gpu_ms,
+            one_encoder_seq_per_tok,
+            seq_all.p50_gpu_ms / n_tokens as f64,
+            seq_all.p90_gpu_ms / n_tokens as f64,
+            seq_all.max_gpu_ms / n_tokens as f64,
+            seq_gb_s,
+            0.0
+        );
+        println!(
+            "aggregate_one_encoder\tmatmat_batch\t{}\t0\t0\t{}\t{:.4}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{:.4}\t{:.1}",
+            n_tokens,
+            total_weights,
+            weight_gb,
+            total_weights as f64 / n_tokens as f64,
+            batch_all.avg_wall_ms,
+            batch_all.avg_gpu_ms,
+            one_encoder_batch_per_tok,
+            batch_all.p50_gpu_ms / n_tokens as f64,
+            batch_all.p90_gpu_ms / n_tokens as f64,
+            batch_all.max_gpu_ms / n_tokens as f64,
+            batch_gb_s,
+            one_encoder_save,
+            one_encoder_pct
+        );
+    }
 
     Ok(())
 }

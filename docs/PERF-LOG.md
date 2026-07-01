@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.407 Decode Projection Batch Gate
+
+Status: added `decode-proj-batch`, a broader projection-only kill gate for
+multi-slot/layer-batched decode. The harness compares repeated decode-shaped
+matvecs against existing prompt-shaped matmat kernels for GDN projections,
+attention projections, dense/shared FFN projections, and `lm_head`.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0407-decode-proj-batch/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- 0.8B smoke with `--tokens 1,2 --warmup 0 --iters 1`
+- A3B `decode-proj-batch --tokens 1,2,4,8,16`
+- A10B and 27B confirmation rows at `--tokens 8,16`
+- `cx ask` reviews, sessions `019f1e3d-d249-7201-b59a-e3fa0c3d2716` and
+  `019f1e4b-e27f-7542-a2ad-976af24958fa`
+
+Results:
+
+| Model | S | Matvec seq | Matmat batch | Save | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A3B | `4` | `4.7274` | `5.7171` | negative | below crossover |
+| A3B | `8` | `4.7255` | `2.8866` | `1.8389` | passes kill gate |
+| A3B | `16` | `4.6600` | `1.2346` | `3.4254` | strong upside |
+| A10B | `8` | `12.2232` | `6.2833` | `5.9399` | strong confirm |
+| A10B | `16` | `12.1893` | `2.6360` | `9.5533` | strong confirm |
+| 27B | `8` | `35.9055` | `24.6742` | `11.2313` | dense confirm |
+| 27B | `16` | `35.6295` | `9.3377` | `26.2918` | dense confirm |
+
+Decision: projection batching passes the immediate kill gate, but only as a
+viability signal. A3B crosses over near `S=8`, where the projection-only save is
+`1.84 ms/token` (`~15.6%` of the current `ctx32768` phase baseline). Do not jump
+to scheduler architecture yet; build a fuller `decode-phase-batch` replay that
+charges attention body/KV, routing/topk, routed MoE, slot packing/scatter, layout,
+and ragged occupancy costs.
+
 ## 2026-07-01 - v0.406 GDN Projection Batch Scaling
 
 Status: extended `gdn-proj-micro` with `--tokens` to compare repeated

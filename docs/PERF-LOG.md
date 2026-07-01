@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.400 Expert-Sorted Slot-Order Kill-Test
+
+Status: added `moe-batch-sweep --slot-order` with an
+`expert-sorted-perf-only` mode that sorts captured packed MoE slots by expert id
+before replay. This mode is explicitly not correctness-preserving with the
+current kernels; it is a generous locality upper-bound kill-test for whether
+A10B should get an exact expert-sorted batching branch.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0400-expert-sorted-slot-order/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B smoke sweep with both slot orders
+- A3B/A10B independent-file `ctx512` sweeps over 8 game prompt files
+- `cx ask` adversarial review, session `019f1bb9-5bef-73d1-b5ef-5e51e7164c78`
+
+Results:
+
+| Model | Slots | Exact ms/tok | Expert-sorted ms/tok | Decision |
+| --- | ---: | ---: | ---: | --- |
+| A10B Q4_XL | 2 | `4.7254` | `4.7231` | flat |
+| A10B Q4_XL | 4 | `4.8401` | `4.9445` | slower |
+| A10B Q4_XL | 8 | `5.1352` | `5.2233` | slower |
+| A3B Q4 | 4 | `1.2968` | `1.2921` | tiny |
+| A3B Q4 | 8 | `1.2211` | `1.2146` | tiny |
+
+Decision: A10B expert-sorted rescue is killed for the tested independent-prompt
+batching workload. If a locality-only upper bound is flat/slower, an exact
+sorted path is unlikely to beat the simpler `b2` cap after paying correctness
+gather/scatter overhead. A3B exact batching remains alive, but expert sorting is
+not the lever; the next batching gate is an A3B targeted end-to-end prototype.
+
 ## 2026-06-30 - v0.399 Independent-File MoE Batch Gate
 
 Status: extended `moe-batch-sweep --file` to accept repeated files and capture

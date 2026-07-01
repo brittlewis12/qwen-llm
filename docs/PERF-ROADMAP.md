@@ -1014,6 +1014,13 @@ passes again at ctx512 (`1.885 -> 1.264 ms/token` at b8), while A10B only has a
 useful b2 row (`5.727 -> 4.756`) and weakens at b4/b8. Production batching should
 be model-specific: A3B can proceed to a targeted prototype gate; A10B should cap
 at b2 or stay disabled above b2 unless an expert-sorted microproof beats that cap.
+v0.400 runs that A10B expert-sorted kill-test as a perf-only locality upper
+bound. It sorts captured slots by expert id without preserving exact token/slot
+semantics, so an exact implementation would have to pay additional overhead.
+A10B stays flat at b2 (`4.725 -> 4.723 ms/token`) and regresses at b4/b8
+(`4.840 -> 4.945`, `5.135 -> 5.223`), which kills expert sorting as the A10B
+rescue for this workload. A3B sees only sub-1% sorted changes; keep the next
+batching branch focused on exact A3B end-to-end overhead, not route ordering.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

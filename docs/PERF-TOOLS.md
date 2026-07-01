@@ -649,6 +649,24 @@ Rules:
 - Before scheduler work, require a fuller `decode-phase-batch` replay to preserve
   at least `>=10%` or `>=1.0 ms/token` net savings at sustained `S=8`.
 
+Use `decode_batch_upper_bound.py` after `decode-proj-batch` and `moe-batch-sweep`
+to charge a phase profile before writing replay code:
+
+```sh
+uv run scripts/profile/decode_batch_upper_bound.py \
+  --phase target/profiles/a3b-deep-phase.out \
+  --proj target/profiles/a3b-decode-proj-batch.out \
+  --moe-sweep target/profiles/a3b-moe-batch-sweep.out
+```
+
+Rules:
+
+- Treat this as an upper bound. It subtracts measured projection and routed-MoE
+  saves from measured phase, but does not charge real pack/scatter or scheduler
+  overhead.
+- Proceed to a real `decode-phase-batch` replay only if `S=8` still clears
+  `>=10%` or `>=1.0 ms/token` after the charged estimate.
+
 ### Kernel-bypass triage lane
 
 Use this lane when a proposal claims the Metal command/dispatch/resource layer is

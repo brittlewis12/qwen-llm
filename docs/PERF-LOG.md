@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.409 Decode Batch Upper Bound
+
+Status: added `scripts/profile/decode_batch_upper_bound.py` and used it to charge
+the v0.407 projection-batching signal against fresh A3B `ctx32768` phase and
+routed-MoE replay rows.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0409-decode-batch-upper-bound/README.md`
+
+Validation:
+
+- `uv run python -m py_compile scripts/profile/decode_batch_upper_bound.py`
+- `uv run scripts/profile/decode_batch_upper_bound.py --help`
+- A3B `ctx32768` deep phase profile
+- A3B `ctx32768` `moe-batch-sweep`
+- A3B charged upper-bound estimate
+- `cx ask` review, session `019f1e7b-fd47-7aa2-a7be-db3cff7d32c4`
+
+Results:
+
+| S | Projection save | Routed save | Charged ms | Saved ms | Saved % |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `4` | `-0.9898` | `0.5310` | `13.0488` | `-0.4588` | `-3.64` |
+| `8` | `1.8389` | `0.6229` | `10.1282` | `2.4618` | `19.55` |
+| `16` | `3.4254` | `0.6604` | `8.5042` | `4.0858` | `32.45` |
+
+Decision: the charged estimate clears the continuation gate. It is still an
+upper bound, not scheduler evidence, but `S=8` has enough surplus (`2.46 ms/token`)
+to justify building the real `decode-phase-batch` replay that charges attention
+body/KV, route/topk, routed MoE, GDN tail, pack/scatter, layout, logits/sampling,
+and ragged occupancy.
+
 ## 2026-07-01 - v0.408 Kernel-Bypass Triage Digest
 
 Status: incorporated the kernel-bypass / "coordination layer as bottleneck"

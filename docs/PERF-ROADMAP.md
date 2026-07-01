@@ -1090,6 +1090,17 @@ layer skipping, KV clustering, sparse FFN, gate-based attention skipping, and
 near-zero drafters until they have explicit quality gates and a measured phase
 ceiling. `decode_phase_roofline.py` now reports stream lower-bound columns so the
 "cycles per token" question can be asked from existing phase artifacts.
+v0.409 adds a charged `decode_batch_upper_bound.py` estimator and applies it to
+A3B `ctx32768` using fresh deep phase plus same-context routed-MoE replay. The
+charged `S=8` row saves `2.4618 ms/token` (`19.55%`, ideal `1.243x`) after leaving
+attention body/KV, route/topk/shared gate, GDN tail, residual/norm/layout, and all
+other unmodeled work at baseline. `S=4` is still negative and `S=16` is strong
+(`4.0858 ms`, `32.45%`). This clears the continuation gate for a real
+`decode-phase-batch` replay, but still does not justify scheduler architecture.
+The replay must report net `ms/token`, wall/GPU split, command/encoder/dispatch
+counts, attention body/KV, route/topk, routed MoE, GDN tail, pack/scatter, layout,
+logits/sampling, and ragged occupancy. Promotion gate remains `S=8 >=10%` and
+`>=1.0 ms/token` under realistic active-slot availability.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

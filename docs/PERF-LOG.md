@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.406 GDN Projection Batch Scaling
+
+Status: extended `gdn-proj-micro` with `--tokens` to compare repeated
+decode-shaped matvecs against existing matmat kernels for A3B GDN projections.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0406-gdn-proj-batch-scaling/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B `gdn-proj-micro --tokens 1/2/4/8/16`
+- `cx ask` review, session `019f1e1c-46e4-7f60-afd9-459c0526cb03`
+
+Results:
+
+| Tokens | QKV+Z matvec | QKV+Z matmat | Out matvec | Out matmat | Combined save |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `4` | `1.7858` | `1.5935` | `0.6845` | `0.9196` | negative/flat |
+| `8` | `1.7868` | `0.7982` | `0.6522` | `0.4660` | `~1.17 ms/token` |
+| `16` | `1.7872` | `0.3003` | `0.6958` | `0.2479` | `~1.93 ms/token` |
+
+Decision: multi-slot/layer-batched decode is reopened as the leading
+hardware-saturation architecture branch. The prior routed-MoE-only upper bound
+missed an always-on GDN projection surface: at A3B `ctx32768`, GDN `qkv/z/out`
+is about `2.49 ms` of phase time, and existing matmat kernels show large
+per-token reuse at `tokens=8/16`. The next gate is a production-shaped
+decode-phase batch replay before scheduler work.
+
 ## 2026-07-01 - v0.405 Group8 S2 Read-Once Kill
 
 Status: built and reverted a harness-only A3B group8 attention oracle that staged

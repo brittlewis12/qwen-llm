@@ -597,6 +597,31 @@ Rules:
   down rows by `>=10%` while preserving both A3B and A10B coverage.
 - Synthetic micro wins are triage only unless captured replay agrees.
 
+### GDN projection batch lane
+
+Use `gdn-proj-micro --tokens` to test whether layer-batched decode can reuse GDN
+projection weights across active slots. The command reports repeated matvecs
+(`matvec_seq`) against existing prompt-shaped matmat kernels (`matmat_batch`) for
+`qkv`, `z`, `qkv+z`, and `out` over all GDN layers.
+
+```sh
+target/release/qwen-bench gdn-proj-micro \
+  -m "$MODEL" \
+  --tokens 8 \
+  --warmup 3 \
+  --iters 10
+```
+
+Rules:
+
+- Treat `tokens=1/2` as expected matmat underfill; the architecture question is
+  whether realistic slot availability reaches the `tokens=8/16` knee.
+- Compare `avg_gpu_ms_per_tok`, not total `avg_gpu_ms`, when estimating phase
+  savings.
+- This is a primitive gate only. Before scheduler work, require a
+  production-shaped decode-phase batch replay that includes attention, LM head,
+  MoE projections, routing, and layout overheads.
+
 When long-prompt variants are close enough that run-order drift or thermal sag
 can flip the ranking, use the cooled sweep harness instead of ad hoc shell
 loops:

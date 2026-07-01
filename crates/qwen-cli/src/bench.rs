@@ -756,6 +756,9 @@ struct GdnProjMicroArgs {
     /// Untimed warmup repetitions.
     #[arg(long, default_value = "5")]
     warmup: usize,
+    /// Synthetic token rows for the mat-mat batch path.
+    #[arg(long, default_value = "1")]
+    tokens: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1853,9 +1856,13 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
         model,
         iters,
         warmup,
+        tokens,
     } = args;
     if iters == 0 {
         return Err(anyhow!("--iters must be >= 1"));
+    }
+    if tokens == 0 {
+        return Err(anyhow!("--tokens must be >= 1"));
     }
 
     let ctx = MetalContext::new().context("init MetalContext")?;
@@ -1883,11 +1890,19 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
         return Err(anyhow!("model has no GDN blocks"));
     }
 
+    let h_batch = MetalTensor::zeros_f32(&ctx, vec![(tokens * h) as u64])?;
+    let gdn_normed_batch = MetalTensor::zeros_f32(&ctx, vec![(tokens * v_dim) as u64])?;
+    let qkv_batch = MetalTensor::zeros_f32(&ctx, vec![(tokens * conv_dim) as u64])?;
+    let z_batch = MetalTensor::zeros_f32(&ctx, vec![(tokens * v_dim) as u64])?;
+    let out_batch = MetalTensor::zeros_f32(&ctx, vec![(tokens * h) as u64])?;
+
     {
         let cmd = ctx.queue.commandBuffer().context("init fill cmd")?;
         let enc = KernelEncoder::begin(&cmd);
         encode_fill_f32(&ctx, &enc, &s.h, 0.125)?;
         encode_fill_f32(&ctx, &enc, &s.gdn_normed, 0.0625)?;
+        encode_fill_f32(&ctx, &enc, &h_batch, 0.125)?;
+        encode_fill_f32(&ctx, &enc, &gdn_normed_batch, 0.0625)?;
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
@@ -1898,63 +1913,156 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
     let out_bytes: u64 = gdn_blocks.iter().map(|gb| gb.out_proj.n_bytes()).sum();
 
     println!(
-        "[gdn-proj-micro] model={} layers={} h={} conv_dim={} v_dim={} warmup={} iters={}",
+        "[gdn-proj-micro] model={} layers={} h={} conv_dim={} v_dim={} tokens={} warmup={} iters={}",
         model.display(),
         gdn_blocks.len(),
         h,
         conv_dim,
         v_dim,
+        tokens,
         warmup,
         iters
     );
-    println!("phase\tbytes_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
+    println!(
+        "phase\tmode\ttokens\tbytes_gb_per_token\tavg_wall_ms\tavg_gpu_ms\tavg_gpu_ms_per_tok\teff_weight_gb_s"
+    );
 
-    let report = |label: &str, bytes: u64, wall_ms: f64, gpu_ms: f64| {
-        let bytes_gb = bytes as f64 / 1e9;
-        let gb_s = bytes_gb / (gpu_ms / 1e3);
-        println!("{label}\t{bytes_gb:.4}\t{wall_ms:.4}\t{gpu_ms:.4}\t{gb_s:.1}");
+    let report = |label: &str, mode: &str, bytes_per_token: u64, wall_ms: f64, gpu_ms: f64| {
+        let bytes_gb = bytes_per_token as f64 / 1e9;
+        let eff_gb = bytes_gb * tokens as f64;
+        let gpu_per_tok = gpu_ms / tokens as f64;
+        let gb_s = eff_gb / (gpu_ms / 1e3);
+        println!(
+            "{label}\t{mode}\t{tokens}\t{bytes_gb:.4}\t{wall_ms:.4}\t{gpu_ms:.4}\t{gpu_per_tok:.4}\t{gb_s:.1}"
+        );
     };
 
     let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
-        for gb in &gdn_blocks {
-            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_qkv, &s.h, &s.gdn_qkv, h, conv_dim)?;
+        for _ in 0..tokens {
+            for gb in &gdn_blocks {
+                encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_qkv, &s.h, &s.gdn_qkv, h, conv_dim)?;
+            }
         }
         Ok(())
     })?;
-    report("qkv", qkv_bytes, wall, gpu);
+    report("qkv", "matvec_seq", qkv_bytes, wall, gpu);
 
     let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
         for gb in &gdn_blocks {
-            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
-        }
-        Ok(())
-    })?;
-    report("z", z_bytes, wall, gpu);
-
-    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
-        for gb in &gdn_blocks {
-            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_qkv, &s.h, &s.gdn_qkv, h, conv_dim)?;
-            encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
-        }
-        Ok(())
-    })?;
-    report("qkv+z", qkv_bytes + z_bytes, wall, gpu);
-
-    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
-        for gb in &gdn_blocks {
-            encode_mat_vec_dispatch(
+            encode_mat_mat_dispatch(
                 &ctx,
                 enc,
-                &gb.out_proj,
-                &s.gdn_normed,
-                &s.mixer_out,
-                v_dim,
+                &gb.in_proj_qkv,
+                &h_batch,
+                &qkv_batch,
                 h,
+                conv_dim,
+                tokens,
             )?;
         }
         Ok(())
     })?;
-    report("out", out_bytes, wall, gpu);
+    report("qkv", "matmat_batch", qkv_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for _ in 0..tokens {
+            for gb in &gdn_blocks {
+                encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
+            }
+        }
+        Ok(())
+    })?;
+    report("z", "matvec_seq", z_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for gb in &gdn_blocks {
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &gb.in_proj_z,
+                &h_batch,
+                &z_batch,
+                h,
+                v_dim,
+                tokens,
+            )?;
+        }
+        Ok(())
+    })?;
+    report("z", "matmat_batch", z_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for _ in 0..tokens {
+            for gb in &gdn_blocks {
+                encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_qkv, &s.h, &s.gdn_qkv, h, conv_dim)?;
+                encode_mat_vec_dispatch(&ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
+            }
+        }
+        Ok(())
+    })?;
+    report("qkv+z", "matvec_seq", qkv_bytes + z_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for gb in &gdn_blocks {
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &gb.in_proj_qkv,
+                &h_batch,
+                &qkv_batch,
+                h,
+                conv_dim,
+                tokens,
+            )?;
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &gb.in_proj_z,
+                &h_batch,
+                &z_batch,
+                h,
+                v_dim,
+                tokens,
+            )?;
+        }
+        Ok(())
+    })?;
+    report("qkv+z", "matmat_batch", qkv_bytes + z_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for _ in 0..tokens {
+            for gb in &gdn_blocks {
+                encode_mat_vec_dispatch(
+                    &ctx,
+                    enc,
+                    &gb.out_proj,
+                    &s.gdn_normed,
+                    &s.mixer_out,
+                    v_dim,
+                    h,
+                )?;
+            }
+        }
+        Ok(())
+    })?;
+    report("out", "matvec_seq", out_bytes, wall, gpu);
+
+    let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+        for gb in &gdn_blocks {
+            encode_mat_mat_dispatch(
+                &ctx,
+                enc,
+                &gb.out_proj,
+                &gdn_normed_batch,
+                &out_batch,
+                v_dim,
+                h,
+                tokens,
+            )?;
+        }
+        Ok(())
+    })?;
+    report("out", "matmat_batch", out_bytes, wall, gpu);
 
     Ok(())
 }

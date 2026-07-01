@@ -1055,6 +1055,14 @@ the main body by `3.7-5.6x`. Do not reopen attention read-once work by adding
 large threadgroup-memory staging or reducing Q-head grid parallelism; the next
 hardware-saturation branch should move to A3B multi-slot batching or a broad
 decode byte/fusion audit unless a new attention idea avoids this failure mode.
+v0.406 supplies the missing broader batching signal: A3B GDN `qkv+z+out` over all
+30 GDN layers improves from about `2.44-2.48 ms/token` as repeated matvecs to
+`1.26 ms/token` at batch 8 and `0.55 ms/token` at batch 16 using existing matmat
+kernels. That is an always-on `~1.17-1.93 ms/token` primitive saving at
+`ctx32768`, larger than the routed-MoE-only bound. Make the next architecture
+gate a production-shaped decode-phase batch replay over `S={1,2,4,8,16}`; promote
+multi-slot/layer-batched decode only if `S=8` clears `>=10%` or `>=1.0 ms/token`
+phase-equivalent savings after attention, LM head, MoE routing, and layout costs.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

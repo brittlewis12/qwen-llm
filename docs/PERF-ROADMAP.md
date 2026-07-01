@@ -1170,6 +1170,13 @@ block eligibility first, late blocks exact-only, and then a replay-side route
 margin guard with rollback to exact pre-window state before ragged occupancy
 work. Calibrate the margin threshold from exact-vs-replay router-logit deltas and
 margin histograms, not from the observed failing margins alone.
+v0.418 adds that first calibration hook. The observed failing route-set flips all
+have replay margins below `1e-3`, but a passing `block20..24` control also has two
+safe low-margin rows below `1e-3`. Therefore a dynamic guard is plausible but not
+ready: the next gate is a broader margin/fallback-rate histogram over early/mid
+blocks, prompts, positions, and slot counts. Do not promote a replay-side guard
+from the five-window sample; static early/mid allowlist plus late exact-only stays
+the current safe policy.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

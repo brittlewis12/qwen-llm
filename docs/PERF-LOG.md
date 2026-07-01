@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.418 Route Margin Calibration
+
+Status: extended `decode-block-slice-trace` with router-logit max/rms deltas,
+minimum route margins, and low-margin counts for candidate replay guards.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0418-route-margin-calibration/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B route-logit delta and margin summary probes
+
+Results: observed failing route-set flips are caught by replay margins below
+`1e-3`, but `block20..24` also has two safe rows below `1e-3`. A dynamic margin
+guard is plausible but not calibrated; static early/mid eligibility and late
+exact-only remain the safe near-term policy.
+
 ## 2026-07-01 - v0.417 Block Slice Route Trace
 
 Status: added `decode-block-slice-trace` to fingerprint route/topk divergence

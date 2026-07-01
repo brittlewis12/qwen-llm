@@ -3075,6 +3075,7 @@ struct RouteFingerprint {
     weight: Vec<f32>,
     shared_gate: f32,
     logit_margin: f32,
+    logits: Vec<f32>,
 }
 
 fn topk_logit_margin(logits: &[f32], topk: usize) -> f32 {
@@ -3103,7 +3104,32 @@ fn read_route_fingerprint(s: &MetalSession, topk: usize, n_expert: usize) -> Rou
         weight,
         shared_gate,
         logit_margin: topk_logit_margin(&logits, topk),
+        logits,
     }
+}
+
+fn f32_max_abs_delta(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
+}
+
+fn f32_rms_delta(a: &[f32], b: &[f32]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let ss = a
+        .iter()
+        .zip(b)
+        .take(n)
+        .map(|(x, y)| {
+            let d = *x as f64 - *y as f64;
+            d * d
+        })
+        .sum::<f64>();
+    (ss / n as f64).sqrt()
 }
 
 fn route_weight_max_abs(a: &[f32], b: &[f32]) -> f32 {
@@ -4195,7 +4221,7 @@ fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
     let scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
 
     println!(
-        "block\tkind\tslot\troute_order_equal\troute_set_equal\tbase_idx\treplay_idx\tweight_max_abs\tshared_abs\tbase_margin\treplay_margin\th_cos\th_max_abs\tx_cos\tx_max_abs"
+        "block\tkind\tslot\troute_order_equal\troute_set_equal\tbase_idx\treplay_idx\tweight_max_abs\tshared_abs\tbase_margin\treplay_margin\tlogit_max_abs\tlogit_rms\th_cos\th_max_abs\tx_cos\tx_max_abs"
     );
 
     let mut route_order_mismatches = 0usize;
@@ -4206,6 +4232,12 @@ fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
     let mut min_x_cos = 1.0f64;
     let mut max_h_abs = 0.0f32;
     let mut max_x_abs = 0.0f32;
+    let mut max_logit_abs = 0.0f32;
+    let mut max_logit_rms = 0.0f64;
+    let mut min_base_margin = f32::INFINITY;
+    let mut min_replay_margin = f32::INFINITY;
+    let mut replay_margin_lt_1e3 = 0usize;
+    let mut replay_margin_lt_5e3 = 0usize;
 
     for block_i in start_block..end_block {
         let kind = match &mm.blocks[block_i] {
@@ -4259,6 +4291,18 @@ fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
             }
             let weight_max_abs = route_weight_max_abs(&base_route.weight, &replay_route.weight);
             let shared_abs = (base_route.shared_gate - replay_route.shared_gate).abs();
+            let logit_max_abs = f32_max_abs_delta(&base_route.logits, &replay_route.logits);
+            let logit_rms = f32_rms_delta(&base_route.logits, &replay_route.logits);
+            max_logit_abs = max_logit_abs.max(logit_max_abs);
+            max_logit_rms = max_logit_rms.max(logit_rms);
+            min_base_margin = min_base_margin.min(base_route.logit_margin);
+            min_replay_margin = min_replay_margin.min(replay_route.logit_margin);
+            if replay_route.logit_margin < 0.001 {
+                replay_margin_lt_1e3 += 1;
+            }
+            if replay_route.logit_margin < 0.005 {
+                replay_margin_lt_5e3 += 1;
+            }
             let (h_cos, h_abs) = cosine_max_abs(
                 &read_f32_tensor(&base[slot].h),
                 &read_f32_tensor(&replay[slot].h),
@@ -4272,7 +4316,7 @@ fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
             max_h_abs = max_h_abs.max(h_abs);
             max_x_abs = max_x_abs.max(x_abs);
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.9}\t{:.6}\t{:.9}\t{:.6}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.9}\t{:.6}\t{:.9}\t{:.6}",
                 block_i,
                 kind,
                 slot,
@@ -4284,6 +4328,8 @@ fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
                 shared_abs,
                 base_route.logit_margin,
                 replay_route.logit_margin,
+                logit_max_abs,
+                logit_rms,
                 h_cos,
                 h_abs,
                 x_cos,
@@ -4299,11 +4345,17 @@ fn run_decode_block_slice_trace(args: DecodeBlockSliceTraceArgs) -> Result<()> {
         .map(|(block, slot)| format!("block={block},slot={slot}"))
         .unwrap_or_else(|| "none".to_string());
     println!(
-        "summary\troute_order_mismatches={}\troute_set_mismatches={}\tfirst_order_mismatch={}\tfirst_set_mismatch={}\tmin_h_cos={:.9}\tmax_h_abs={:.6}\tmin_x_cos={:.9}\tmax_x_abs={:.6}",
+        "summary\troute_order_mismatches={}\troute_set_mismatches={}\tfirst_order_mismatch={}\tfirst_set_mismatch={}\tmax_logit_abs={:.6}\tmax_logit_rms={:.6}\tmin_base_margin={:.6}\tmin_replay_margin={:.6}\treplay_margin_lt_1e3={}\treplay_margin_lt_5e3={}\tmin_h_cos={:.9}\tmax_h_abs={:.6}\tmin_x_cos={:.9}\tmax_x_abs={:.6}",
         route_order_mismatches,
         route_set_mismatches,
         first_order,
         first_set,
+        max_logit_abs,
+        max_logit_rms,
+        min_base_margin,
+        min_replay_margin,
+        replay_margin_lt_1e3,
+        replay_margin_lt_5e3,
         min_h_cos,
         max_h_abs,
         min_x_cos,

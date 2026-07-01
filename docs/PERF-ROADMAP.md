@@ -1036,6 +1036,14 @@ but A3B independent-file captured rows are flat (`b1 1.824 -> 1.828 ms/token`,
 small batch-only `b8` improvement, but `b8` remains slower than `b2` and
 single-token is flat/slower. Do not blanket-annotate kernels without manual
 shader-profiler evidence or a named-kernel micro win.
+v0.403 refreshes A3B long-context deep phase/roofline at `ctx8192/16384` after
+the batching and annotation demotions. Attention is now the largest structural
+slope term (`2.30 -> 2.53 ms`, `21-23%`), with KV subgroup+partial estimates only
+`~282-296 GB/s`. GDN QKV/Z and LM head are near stream shelves (`424-515 GB/s`),
+route topk/shared is real but locally falsified (`0.67-0.68 ms`), and routed
+gate/down remains moderate but constrained by recent monolith/batching gates. The
+next A3B long-context branch should be an attention main-body KV-read shape
+change with an `attn-intra`/oracle gate; more tile/NWG/reduce retunes stay closed.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-01 - v0.403 A3B Deep Roofline Refresh
+
+Status: refreshed A3B long-context decode attribution with deep MoE route/FFN
+and GDN projection/tail splits at `ctx8192` and `ctx16384`, then ran the decode
+phase roofline summary.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0403-a3b-deep-roofline-refresh/README.md`
+
+Validation:
+
+- A3B deep phase at `ctx8192`
+- A3B deep phase at `ctx16384`
+- `decode_phase_roofline.py` summaries for both contexts
+- `cx ask` interpretation, session `019f1be9-2e89-7d13-9157-ba847a9916bd`
+
+Results:
+
+| Phase | ctx8192 | ctx16384 | Read |
+| --- | ---: | ---: | --- |
+| Attention mixer | `2.30 ms` | `2.53 ms` | largest slope term |
+| GDN QKV/Z/OUT | `2.52 ms` | `2.53 ms` | mostly weight-streaming |
+| Route topk/shared | `0.67 ms` | `0.68 ms` | real, local variants falsified |
+| Routed gate/up+down | `1.88 ms` | `1.90 ms` | moderate headroom |
+| LM head | `0.82 ms` | `0.81 ms` | weight-streaming |
+
+Decision: attention body/KV traffic is the top A3B long-context structural
+branch. GDN QKV/Z and LM head are near stream shelves, route is real but locally
+falsified, and MoE batching no longer has enough end-to-end ceiling. The next
+attention branch needs a main-body KV-read shape change, not another tile/NWG or
+reduce retune.
+
 ## 2026-06-30 - v0.402 MoE `max_total_threads` Kill-Test
 
 Status: tested a dirty patch adding

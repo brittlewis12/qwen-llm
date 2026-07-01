@@ -51,7 +51,9 @@ use qwen_llm::{
         prefill_tokens_with_multi_hidden, prefill_tokens_with_multi_hidden_profiled,
         with_prefill_dense_ffn_fused_swiglu_q4_override,
     },
-    metal_forward::{MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS},
+    metal_forward::{
+        MetalBlock, MetalForward, MetalModel, MetalSession, MoeRouteReplayRow, RMS_EPS,
+    },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
     prefix_cache::PrefixCache,
@@ -68,6 +70,86 @@ fn env_flag_enabled(name: &str) -> bool {
         std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
     )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MoeRouteBatchStats {
+    layers: usize,
+    tokens: usize,
+    slots_per_layer: usize,
+    avg_unique_experts: f64,
+    avg_max_slots: f64,
+    avg_reuse: f64,
+}
+
+fn summarize_moe_route_batch(
+    routes_by_token: &[Vec<MoeRouteReplayRow>],
+    eligible_indices: &[usize],
+    n_expert: usize,
+    topk: usize,
+) -> Result<MoeRouteBatchStats> {
+    let tokens = routes_by_token.len();
+    if tokens == 0 || eligible_indices.is_empty() {
+        return Err(anyhow!("captured route batch is empty"));
+    }
+
+    let mut unique_sum = 0usize;
+    let mut max_sum = 0usize;
+    let mut reuse_sum = 0.0f64;
+    let slots_per_layer = tokens * topk;
+    for &moe_i in eligible_indices {
+        let mut counts = vec![0usize; n_expert];
+        for routes in routes_by_token {
+            let route = routes
+                .get(moe_i)
+                .ok_or_else(|| anyhow!("captured route missing layer {moe_i}"))?;
+            if route.topk_idx.len() != topk {
+                return Err(anyhow!(
+                    "captured route has {} experts, expected topk={topk}",
+                    route.topk_idx.len()
+                ));
+            }
+            for &expert in &route.topk_idx {
+                if expert < 0 || expert as usize >= n_expert {
+                    return Err(anyhow!(
+                        "captured expert id {expert} outside n_expert={n_expert}"
+                    ));
+                }
+                counts[expert as usize] += 1;
+            }
+        }
+        let unique = counts.iter().filter(|&&c| c > 0).count();
+        let max_count = counts.iter().copied().max().unwrap_or(0);
+        unique_sum += unique;
+        max_sum += max_count;
+        reuse_sum += if unique > 0 {
+            slots_per_layer as f64 / unique as f64
+        } else {
+            0.0
+        };
+    }
+    let layers = eligible_indices.len();
+    Ok(MoeRouteBatchStats {
+        layers,
+        tokens,
+        slots_per_layer,
+        avg_unique_experts: unique_sum as f64 / layers as f64,
+        avg_max_slots: max_sum as f64 / layers as f64,
+        avg_reuse: reuse_sum / layers as f64,
+    })
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum CaptureTokenPattern {
+    Zero,
+    Ramp,
+}
+
+fn capture_replay_token(pattern: CaptureTokenPattern, tok: usize, vocab_size: u32) -> i32 {
+    match pattern {
+        CaptureTokenPattern::Zero => 0,
+        CaptureTokenPattern::Ramp => ((1 + tok * 7919) % vocab_size as usize) as i32,
+    }
 }
 
 fn pp_warm_moe_weight_banks(ctx: &MetalContext, mf: &MetalForward<'_>) -> Result<usize> {
@@ -545,6 +627,9 @@ struct MoeDownMicroArgs {
     /// Capture per-layer route ids/weights at this decode context.
     #[arg(long)]
     route_capture_ctx: Option<usize>,
+    /// Token-id pattern used for captured replay tokens.
+    #[arg(long, value_enum, default_value = "zero")]
+    route_capture_token_pattern: CaptureTokenPattern,
     /// Override routed-down K dimension with a synthetic zero Q5_K bank.
     #[arg(long)]
     synthetic_f_exp: Option<usize>,
@@ -582,6 +667,9 @@ struct MoeGateupMicroArgs {
     /// Capture per-layer hidden activations and top-k ids at this decode context.
     #[arg(long)]
     route_capture_ctx: Option<usize>,
+    /// Token-id pattern used for captured replay tokens.
+    #[arg(long, value_enum, default_value = "zero")]
+    route_capture_token_pattern: CaptureTokenPattern,
 }
 
 #[derive(Parser, Debug)]
@@ -1690,6 +1778,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         tokens,
         fused_routed_q4q5,
         route_capture_ctx,
+        route_capture_token_pattern,
         synthetic_f_exp,
         synthetic_h,
         synthetic_layers,
@@ -1812,6 +1901,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         }
     }
 
+    let mut captured_route_stats = None;
     let captured_routes: Option<(usize, Vec<(MetalTensor, MetalTensor, MetalTensor)>)> =
         if let Some(capture_ctx) = route_capture_ctx {
             let mf = MetalForward::new(&ctx, &mm);
@@ -1822,8 +1912,10 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
             }
             let mut all_routes_by_token = Vec::with_capacity(tokens);
             for tok in 0..tokens {
+                let token_id =
+                    capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size);
                 let all_routes = mf.capture_moe_gateup_replay_for_token(
-                    0,
+                    token_id,
                     (capture_ctx + tok) as u32,
                     &mut capture_s,
                 )?;
@@ -1857,6 +1949,12 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
                     bench_moes.len()
                 ));
             }
+            captured_route_stats = Some(summarize_moe_route_batch(
+                &all_routes_by_token,
+                &eligible_indices,
+                n_expert,
+                topk,
+            )?);
 
             let mut tensors = Vec::with_capacity(eligible_indices.len());
             for &moe_i in &eligible_indices {
@@ -2106,7 +2204,7 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     };
     let route_mode = captured_routes
         .as_ref()
-        .map(|(ctx, _)| format!("captured(ctx={ctx})"))
+        .map(|(ctx, _)| format!("captured(ctx={ctx},pattern={route_capture_token_pattern:?})"))
         .unwrap_or_else(|| "synthetic".to_string());
     println!(
         "[moe-down-micro] model={} mode={} route_mode={} kernel={} q5_layers={} layers={} h={} f_exp={} n_expert={} topk={} tokens={} warmup={} iters={}",
@@ -2130,6 +2228,17 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
         warmup,
         iters
     );
+    if let Some(stats) = captured_route_stats {
+        println!(
+            "[moe-down-route-stats] layers={} tokens={} slots_per_layer={} avg_unique_experts={:.2} avg_max_slots={:.2} avg_reuse={:.2}",
+            stats.layers,
+            stats.tokens,
+            stats.slots_per_layer,
+            stats.avg_unique_experts,
+            stats.avg_max_slots,
+            stats.avg_reuse
+        );
+    }
     println!("phase\tactive_weight_gb\tactivation_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
     let phase = if fused_routed_q4q5 {
         "q4q5_fused_routed"
@@ -2150,6 +2259,7 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
         warmup,
         tokens,
         route_capture_ctx,
+        route_capture_token_pattern,
     } = args;
     if iters == 0 {
         return Err(anyhow!("--iters must be >= 1"));
@@ -2202,6 +2312,7 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
         }
     }
 
+    let mut captured_route_stats = None;
     let captured_inputs: Option<(usize, Vec<(MetalTensor, MetalTensor)>)> =
         if let Some(capture_ctx) = route_capture_ctx {
             let mf = MetalForward::new(&ctx, &mm);
@@ -2212,8 +2323,10 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
             }
             let mut all_routes_by_token = Vec::with_capacity(tokens);
             for tok in 0..tokens {
+                let token_id =
+                    capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size);
                 let all_routes = mf.capture_moe_gateup_replay_for_token(
-                    0,
+                    token_id,
                     (capture_ctx + tok) as u32,
                     &mut capture_s,
                 )?;
@@ -2245,6 +2358,12 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
                     q4_moes.len()
                 ));
             }
+            captured_route_stats = Some(summarize_moe_route_batch(
+                &all_routes_by_token,
+                &q4_indices,
+                n_expert,
+                topk,
+            )?);
 
             let mut tensors = Vec::with_capacity(q4_indices.len());
             for &moe_i in &q4_indices {
@@ -2339,7 +2458,7 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
     let weight_gb = active_weight_bytes / 1e9;
     let route_mode = captured_inputs
         .as_ref()
-        .map(|(ctx, _)| format!("captured(ctx={ctx})"))
+        .map(|(ctx, _)| format!("captured(ctx={ctx},pattern={route_capture_token_pattern:?})"))
         .unwrap_or_else(|| "synthetic".to_string());
     println!(
         "[moe-gateup-micro] model={} mode={} q4_layers={} h={} f_exp={} n_expert={} topk={} tokens={} warmup={} iters={}",
@@ -2354,6 +2473,17 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
         warmup,
         iters
     );
+    if let Some(stats) = captured_route_stats {
+        println!(
+            "[moe-gateup-route-stats] layers={} tokens={} slots_per_layer={} avg_unique_experts={:.2} avg_max_slots={:.2} avg_reuse={:.2}",
+            stats.layers,
+            stats.tokens,
+            stats.slots_per_layer,
+            stats.avg_unique_experts,
+            stats.avg_max_slots,
+            stats.avg_reuse
+        );
+    }
     println!("phase\tactive_weight_gb\tactivation_gb\tavg_wall_ms\tavg_gpu_ms\tweight_gb_s");
     println!(
         "q4_gateup_swiglu\t{weight_gb:.4}\t{activation_gb:.4}\t{wall:.4}\t{gpu:.4}\t{:.1}",

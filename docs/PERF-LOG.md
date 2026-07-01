@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.395 Captured MoE Route-Stats Control
+
+Status: added route occupancy stats and a deterministic nonzero token pattern to
+the captured MoE microbenches, then checked whether the token-batching win depends
+on repeated-token expert reuse.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0395-captured-moe-route-stats/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B captured `moe-gateup-micro --tokens 4/16` route-stat probes
+- A3B/A10B captured `moe-gateup-micro` and `moe-down-micro` t16 ramp controls
+- `cx ask` adversarial review, session `019f1b0a-9f3a-76e0-a09f-8ac837ad5556`
+
+Results:
+
+| Model | Pattern | Avg unique | Avg max | Avg reuse | Gate/up | Down |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| A3B t16 | zero | `19.52` | `15.40` | `8.22` | `9.7817 ms` | `9.3886 ms` |
+| A3B t16 | ramp | `50.30` | `12.68` | `2.72` | `10.0725 ms` | `9.3001 ms` |
+| A10B t16 | zero | `8.34` | `16.00` | `15.42` | `33.2432 ms` | `37.9571 ms` |
+| A10B t16 | ramp | `54.40` | `13.53` | `2.45` | `34.5369 ms` | `37.3997 ms` |
+
+Decision: repeated `token_id=0` overstated expert reuse. The batching win does
+not require high reuse: ramp greatly increases unique experts while timings move
+only marginally. Treat future captured timing with the ramp token pattern as the
+default synthetic control, and interpret batching as packed-slot shape/occupancy
+improvement first, expert reuse/locality second.
+
 ## 2026-06-30 - v0.394 Captured MoE Token-Batching Probe
 
 Status: extended captured MoE gate/up and down microbenches to replay multiple

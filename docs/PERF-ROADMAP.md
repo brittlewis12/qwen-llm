@@ -986,6 +986,12 @@ a batching suite and multi-slot architecture branch, but not an end-to-end claim
 same-context route correlation, scheduler/KV overhead, layer variance, and expert
 occupancy histograms remain unmeasured. Keep projection-kernel work active because
 it benefits both single-token and batched decode.
+v0.395 adds route occupancy stats and a ramp token-id control. The repeated-zero
+captures overstated expert reuse: A10B t16 avg unique experts jumps `8.34 ->
+54.40` under ramp, but gate/up only slows `33.24 -> 34.54 ms` and down improves
+`37.96 -> 37.40 ms`. Therefore the batching win is primarily packed-slot
+shape/occupancy, not repeated-token expert reuse. Use ramp or real prompt traces
+for future timing; high-reuse synthetic wins alone are not promotion evidence.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

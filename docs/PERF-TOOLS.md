@@ -523,6 +523,7 @@ per-layer hidden vectors plus route ids/weights from a decode context.
 target/release/qwen-bench moe-gateup-micro \
   -m "$MODEL" \
   --route-capture-ctx 1024 \
+  --route-capture-token-pattern ramp \
   --tokens 1 \
   --warmup 3 \
   --iters 10
@@ -530,6 +531,7 @@ target/release/qwen-bench moe-gateup-micro \
 target/release/qwen-bench moe-down-micro \
   -m "$MODEL" \
   --route-capture-ctx 1024 \
+  --route-capture-token-pattern ramp \
   --tokens 1 \
   --warmup 3 \
   --iters 10
@@ -549,6 +551,9 @@ Rules:
 - Use `--tokens 1/4/16` to distinguish single-token projection wins from
   active-token batching wins; do not extrapolate MoE micro gains to end-to-end
   continuous batching without scheduler/KV measurements.
+- Prefer `--route-capture-token-pattern ramp` for timing controls. The default
+  zero-token pattern is useful as a locality stress case, but it overstates route
+  reuse when replaying several captured tokens.
 - `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
   `--legacy-k512` only for explicit rollback attribution.
 - `--fused-routed-q4q5` times the existing one-token monolith as a falsifier; do

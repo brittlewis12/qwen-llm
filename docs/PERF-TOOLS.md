@@ -555,6 +555,7 @@ target/release/qwen-bench moe-batch-sweep \
   -m "$MODEL" \
   --file /path/to/prompt.txt \
   --route-capture-ctx 1024 \
+  --route-capture-stride 128 \
   --tokens 1,2,4,8,16 \
   --warmup 3 \
   --iters 10
@@ -574,6 +575,8 @@ Rules:
   captures the max route window once, avoiding repeated load/capture noise.
 - Use `moe-batch-sweep --file` to close the first realism gap with an actual
   prompt token stream before drawing architecture conclusions from ramp.
+- Use `--route-capture-stride` with real prompt files to test whether batching
+  survives disjoint positions instead of only adjacent-token route locality.
 - `moe-down-micro` defaults `f_exp=512` Q5 down to the production R2 path; use
   `--legacy-k512` only for explicit rollback attribution.
 - `--fused-routed-q4q5` times the existing one-token monolith as a falsifier; do

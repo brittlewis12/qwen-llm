@@ -785,6 +785,9 @@ struct MoeBatchSweepArgs {
     /// Capture per-layer hidden activations and top-k ids at this decode context.
     #[arg(long, default_value = "1024")]
     route_capture_ctx: usize,
+    /// Position stride between captured replay tokens.
+    #[arg(long, default_value = "1")]
+    route_capture_stride: usize,
     /// Read a real prompt token stream from a text file.
     #[arg(long)]
     file: Option<PathBuf>,
@@ -2381,6 +2384,7 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
         warmup,
         mut tokens,
         route_capture_ctx,
+        route_capture_stride,
         file,
         route_capture_token_pattern,
     } = args;
@@ -2389,6 +2393,9 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     }
     if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
         return Err(anyhow!("--tokens entries must be >= 1"));
+    }
+    if route_capture_stride == 0 {
+        return Err(anyhow!("--route-capture-stride must be >= 1"));
     }
     tokens.sort_unstable();
     tokens.dedup();
@@ -2456,15 +2463,16 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     }
     let use_k512_r2 = f_exp == 512;
 
+    let last_capture_pos = route_capture_ctx + (max_tokens - 1) * route_capture_stride;
     let prompt_ids = if let Some(path) = file.as_ref() {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let tok = NativeTokenizer::from_gguf(&g).context("open native GGUF tokenizer")?;
         let ids = tok.encode(&text, false).context("tokenize prompt file")?;
-        let need = route_capture_ctx + max_tokens;
+        let need = last_capture_pos + 1;
         if ids.len() < need {
             return Err(anyhow!(
-                "prompt file has {} tokens, need at least route_capture_ctx + max(tokens) = {need}",
+                "prompt file has {} tokens, need at least last capture position + 1 = {need}",
                 ids.len()
             ));
         }
@@ -2474,25 +2482,28 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     };
 
     let mf = MetalForward::new(&ctx, &mm);
-    let mut capture_s = MetalSession::fresh(&ctx, &mm, route_capture_ctx + max_tokens + 16)
-        .context("route-capture session")?;
+    let mut capture_s =
+        MetalSession::fresh(&ctx, &mm, last_capture_pos + 17).context("route-capture session")?;
     for pos in 0..route_capture_ctx {
         let token_id = prompt_ids.as_ref().map(|ids| ids[pos]).unwrap_or(0);
         let _ = mf.single_token(token_id, pos as u32, &mut capture_s)?;
     }
     let mut all_routes_by_token = Vec::with_capacity(max_tokens);
+    let mut next_pos = route_capture_ctx;
     for tok in 0..max_tokens {
+        let target_pos = route_capture_ctx + tok * route_capture_stride;
+        for pos in next_pos..target_pos {
+            let token_id = prompt_ids.as_ref().map(|ids| ids[pos]).unwrap_or(0);
+            let _ = mf.single_token(token_id, pos as u32, &mut capture_s)?;
+        }
         let token_id = prompt_ids
             .as_ref()
-            .map(|ids| ids[route_capture_ctx + tok])
+            .map(|ids| ids[target_pos])
             .unwrap_or_else(|| {
                 capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size)
             });
-        let all_routes = mf.capture_moe_gateup_replay_for_token(
-            token_id,
-            (route_capture_ctx + tok) as u32,
-            &mut capture_s,
-        )?;
+        let all_routes =
+            mf.capture_moe_gateup_replay_for_token(token_id, target_pos as u32, &mut capture_s)?;
         if all_routes.len() != moe_blocks.len() {
             return Err(anyhow!(
                 "captured {} MoE route rows, expected {}",
@@ -2501,6 +2512,7 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
             ));
         }
         all_routes_by_token.push(all_routes);
+        next_pos = target_pos + 1;
     }
 
     let gateup_weight_gb_per_token: f64 = q4_moes
@@ -2523,14 +2535,15 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
         model.display(),
         if let Some(path) = file.as_ref() {
             format!(
-                "captured(ctx={},file={})",
+                "captured(ctx={},stride={},file={})",
                 route_capture_ctx,
+                route_capture_stride,
                 path.display()
             )
         } else {
             format!(
-                "captured(ctx={},pattern={:?})",
-                route_capture_ctx, route_capture_token_pattern
+                "captured(ctx={},stride={},pattern={:?})",
+                route_capture_ctx, route_capture_stride, route_capture_token_pattern
             )
         },
         q4_moes.len(),

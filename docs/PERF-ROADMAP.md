@@ -1004,6 +1004,11 @@ v0.397 closes the first realism gap with a contiguous real prompt from
 `5.710 -> 4.508 ms/token`, essentially matching ramp. This justifies the next
 gate, not production yet: run independent prompt/disjoint-context captures to
 test cross-context packing before building a scheduler architecture branch.
+v0.398 runs that stronger disjoint-position gate with stride128. A3B still passes
+(`1.870 -> 1.219 ms/token` at t16), but A10B collapses after t4 and regresses at
+t16 (`5.751 -> 5.510 ms/token`, versus `4.508` contiguous). Generic production
+batching is demoted; keep A3B batching alive, and require A10B route-aware
+packing/kernel evidence before any broad scheduler work.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.398 Strided Real-Context MoE Batch Gate
+
+Status: added `--route-capture-stride` to `moe-batch-sweep` and used it to sample
+disjoint positions from `the_current.md`, executing intervening tokens normally.
+This is a stronger proxy for multi-slot route heterogeneity than adjacent prompt
+tokens, while still staying in one loaded process.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0398-strided-real-context-moe-batch-gate/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B `moe-batch-sweep --file the_current.md --route-capture-stride 128`
+- `cx ask` adversarial review, session `019f1b6f-2750-7b10-ba2a-49432b48810b`
+
+Results:
+
+| Model | t1 combined | t4 combined | t8 combined | t16 combined | Read |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A3B Q4 | `1.8704 ms/tok` | `1.3788` | `1.2722` | `1.2194` | robust batching |
+| A10B Q4_XL | `5.7513 ms/tok` | `5.1531` | `5.2007` | `5.5098` | collapses after t4 |
+
+Decision: generic production batching is demoted. A3B passes the stronger
+strided-context MoE micro gate; A10B does not. The next batching work should be
+independent multi-document slots and A10B route/kernel sensitivity, not a broad
+production scheduler branch based on adjacent-token locality.
+
 ## 2026-06-30 - v0.397 Real-Prompt MoE Batch Sweep
 
 Status: added `--file` support to `moe-batch-sweep` so route capture can warm and

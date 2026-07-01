@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-06-30 - v0.402 MoE `max_total_threads` Kill-Test
+
+Status: tested a dirty patch adding
+`[[max_total_threads_per_threadgroup(64)]]` to the hot 64-thread MoE Q4
+SwiGLU and Q5 down packed kernels. The patch built, but did not clear the
+single-token micro/phase gate and was removed.
+
+Artifact:
+
+- `docs/bench/2026-06-30-v0402-maxthreads-kill-test/README.md`
+
+Validation:
+
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B independent-file `moe-batch-sweep` at `ctx512`
+- A3B/A10B MoE FFN split phase at `ctx512`
+- `cx ask` probe ranking, session `019f1bcd-144e-73b0-9f07-b6008d46c1d4`
+
+Results:
+
+| Model | Slots | v0.400 exact | Dirty annotated | Read |
+| --- | ---: | ---: | ---: | --- |
+| A3B Q4 | 1 | `1.8244` | `1.8279` | flat/slower |
+| A3B Q4 | 8 | `1.2211` | `1.2201` | flat |
+| A10B Q4_XL | 1 | `5.7233` | `5.7328` | flat/slower |
+| A10B Q4_XL | 8 | `5.1352` | `4.9861` | batch-only |
+
+Decision: do not keep or broaden the annotation patch. A3B single-token and
+phase rows are flat, while the A10B batch-only improvement does not rescue
+batching because `b8` remains worse than `b2`. Future `max_total_threads` probes
+need a named-kernel micro win or manual shader-profiler evidence before source
+changes.
+
 ## 2026-06-30 - v0.401 MoE Batch Upper-Bound Gate
 
 Status: added `scripts/profile/moe_batch_upper_bound.py` to combine a

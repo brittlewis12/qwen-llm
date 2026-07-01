@@ -1029,6 +1029,13 @@ sampling overhead. This demotes the immediate A3B multi-slot scheduler prototype
 batching remains a later system feature, but the top decode branch should return
 to larger single-token byte-reduction/fusion unless a future upper-bound row
 clears `>=12-15%` credible end-to-end savings.
+v0.402 kills the cheap MoE `max_total_threads_per_threadgroup(64)` annotation
+probe on the exact hot Q4 SwiGLU and Q5 down packed kernels. The patch builds,
+but A3B independent-file captured rows are flat (`b1 1.824 -> 1.828 ms/token`,
+`b8 1.221 -> 1.220`) and A3B phase is flat (`9.32 -> 9.34 ms`). A10B shows a
+small batch-only `b8` improvement, but `b8` remains slower than `b2` and
+single-token is flat/slower. Do not blanket-annotate kernels without manual
+shader-profiler evidence or a named-kernel micro win.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

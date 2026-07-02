@@ -1237,6 +1237,13 @@ win. Replay therefore has one remaining high-EV gate: measure the actual
 validation/fallback path and a realistic ragged occupancy trace. If that mechanism
 gate does not preserve S>=6 `blocks=2` above `>5-8%` end-to-end, stop the replay
 scheduler branch and return to broader hardware-headroom items.
+v0.438 runs that first real-window mechanism gate. The validated path splits
+replay by block, reads replay route margins after each block, and charges exact
+fallback slots at threshold `3e-4`. On real prompts, S8 blocks=2 still nets
+`~11.5-20.3%` before broader fallback and roughly `~4.8-13.7%` after applying the
+new `1/15 = 6.67%` S8 blocks=2 fallback packet. S6 is only `~2.7-5.5%` before
+broader fallback, and S4 is negative. Update the live policy: replay is S8-only
+unless future work lowers validation overhead or proves much lower fallback.
 v0.430-v0.432 digest a do-less implementation audit (fixed roofline, fewer
 bytes/dispatches) across decode, prefill, and kernels. Banked defaults:
 matrix-attention causal tile skip generalized from G6 to all matrix groups
@@ -1336,6 +1343,11 @@ are negative: `ctx8192` main `0.1113 -> 0.1221 ms`, `ctx32768` main
 `0.1767 -> 0.2213 ms`. Keep `QWEN_KV_Q8=1` default-off as an oracle only. Future
 compressed-KV work needs a materially different layout/body or a capture signal;
 do not spend more blind time on Q8_0 reader variants.
+v0.438 then returns to the top replay uncertainty and adds real-window economics
+timing to `decode-block-slice-real-margin`. S8 blocks=2 survives the conservative
+validated path, S6 is marginal, and S4 is dead. The next replay branch must be an
+S8/ragged-occupancy scheduler sketch or nothing; do not spend implementation time
+on low-occupancy replay.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

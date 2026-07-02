@@ -937,6 +937,16 @@ struct DecodeBlockSliceRealMarginArgs {
     /// Number of consecutive absolute blocks per replay window.
     #[arg(long = "blocks", default_value = "4")]
     n_blocks: usize,
+    /// Timed repetitions for optional real-window economics. Zero keeps this as
+    /// a margin-only probe.
+    #[arg(long, default_value = "0")]
+    timing_iters: usize,
+    /// Untimed warmup repetitions for optional real-window economics.
+    #[arg(long, default_value = "1")]
+    timing_warmup: usize,
+    /// Replay-margin threshold used by optional economics fallback modeling.
+    #[arg(long, default_value = "0.0003")]
+    margin_threshold: f32,
 }
 
 #[derive(Parser, Debug)]
@@ -4634,6 +4644,111 @@ fn prepare_moe_session_to_block(
     Ok(())
 }
 
+fn prepare_real_block_slice_sessions(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    mm: &MetalModel,
+    prefix_sessions: &[MetalSession],
+    prompt_ids: &[Vec<i32>],
+    context: usize,
+    tokens: usize,
+    start_block: usize,
+    kv_capacity: usize,
+    h: usize,
+) -> Result<Vec<MetalSession>> {
+    let mut sessions = fresh_gdn_replay_sessions_with_capacity(ctx, mm, tokens, kv_capacity)?;
+    for slot in 0..tokens {
+        copy_recurrent_session_state(ctx, &prefix_sessions[slot], &mut sessions[slot])?;
+        let ids = if prompt_ids.len() == 1 {
+            &prompt_ids[0]
+        } else {
+            &prompt_ids[slot]
+        };
+        let token_id = ids[context];
+        prepare_moe_session_to_block(
+            ctx,
+            mf,
+            mm,
+            token_id,
+            context as u32,
+            start_block,
+            &mut sessions[slot],
+            h,
+        )?;
+    }
+    Ok(sessions)
+}
+
+struct ValidatedReplayStats {
+    avg_wall_ms: f64,
+    avg_gpu_ms: f64,
+    avg_fallback_slots: f64,
+}
+
+fn time_validated_block_slice_replay(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    mm: &MetalModel,
+    start_block: usize,
+    n_blocks: usize,
+    position: u32,
+    sessions: &mut [MetalSession],
+    scratch: &GdnLayerReplayScratch,
+    gdn_layers: &[SelectedGdnLayer<'_>],
+    h: usize,
+    conv_dim: usize,
+    v_dim: usize,
+    topk: usize,
+    n_expert: usize,
+    margin_threshold: f32,
+    warmup: usize,
+    iters: usize,
+) -> Result<ValidatedReplayStats> {
+    let mut wall_samples = Vec::with_capacity(iters);
+    let mut gpu_samples = Vec::with_capacity(iters);
+    let mut fallback_samples = Vec::with_capacity(iters);
+
+    for rep in 0..warmup + iters {
+        let timed = rep >= warmup;
+        let start = Instant::now();
+        let mut gpu_ms = 0.0f64;
+        let mut fallback_slots = vec![false; sessions.len()];
+
+        for block_i in start_block..start_block + n_blocks {
+            let cmd = ctx
+                .queue
+                .commandBuffer()
+                .context("validated replay block cmd")?;
+            encode_one_block_replay(
+                ctx, mf, mm, &cmd, block_i, position, sessions, scratch, gdn_layers, h, conv_dim,
+                v_dim,
+            )?;
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            gpu_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+
+            for (slot, session) in sessions.iter().enumerate() {
+                let route = read_route_fingerprint(session, topk, n_expert);
+                if route.logit_margin < margin_threshold {
+                    fallback_slots[slot] = true;
+                }
+            }
+        }
+
+        if timed {
+            wall_samples.push(start.elapsed().as_secs_f64() * 1e3);
+            gpu_samples.push(gpu_ms);
+            fallback_samples.push(fallback_slots.iter().filter(|&&v| v).count() as f64);
+        }
+    }
+
+    Ok(ValidatedReplayStats {
+        avg_wall_ms: wall_samples.iter().sum::<f64>() / iters as f64,
+        avg_gpu_ms: gpu_samples.iter().sum::<f64>() / iters as f64,
+        avg_fallback_slots: fallback_samples.iter().sum::<f64>() / iters as f64,
+    })
+}
+
 fn trace_prepared_block_slice_summary(
     ctx: &MetalContext,
     mf: &MetalForward<'_>,
@@ -4849,6 +4964,9 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
         stride,
         mut start_blocks,
         n_blocks,
+        timing_iters,
+        timing_warmup,
+        margin_threshold,
     } = args;
     if tokens == 0 {
         return Err(anyhow!("--tokens must be >= 1"));
@@ -4872,6 +4990,16 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
     }
     if n_blocks == 0 {
         return Err(anyhow!("--blocks must be >= 1"));
+    }
+    if timing_iters == 0 && timing_warmup != 1 {
+        return Err(anyhow!(
+            "--timing-warmup is only meaningful when --timing-iters > 0"
+        ));
+    }
+    if !(margin_threshold.is_finite() && margin_threshold >= 0.0) {
+        return Err(anyhow!(
+            "--margin-threshold must be a finite non-negative value"
+        ));
     }
     if contexts.is_empty() {
         return Err(anyhow!("--context must include at least one entry"));
@@ -4946,7 +5074,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
     let gdn_layers = collect_gdn_layers(&mm);
 
     println!(
-        "[decode-block-slice-real-margin] model={} files={} first_prompt_tokens={} contexts={} windows={} tokens={} stride={} blocks={} topk={} experts={} h={} conv_dim={} v_dim={}",
+        "[decode-block-slice-real-margin] model={} files={} first_prompt_tokens={} contexts={} windows={} tokens={} stride={} blocks={} topk={} experts={} h={} conv_dim={} v_dim={} timing_iters={} timing_warmup={} margin_threshold={:.6}",
         model.display(),
         file.len(),
         prompt_ids[0].len(),
@@ -4963,10 +5091,13 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
         n_expert,
         h,
         conv_dim,
-        v_dim
+        v_dim,
+        timing_iters,
+        timing_warmup,
+        margin_threshold,
     );
     println!(
-        "start_block\tend_block\tcontext\tslots\troute_order_mismatches\troute_set_mismatches\tfirst_set_mismatch\tmax_logit_abs\tmax_logit_rms\tmin_base_margin\tmin_replay_margin\treplay_margin_lt_1e3\treplay_margin_lt_5e3\tmin_x_cos\tmax_x_abs"
+        "start_block\tend_block\tcontext\tslots\troute_order_mismatches\troute_set_mismatches\tfirst_set_mismatch\tmax_logit_abs\tmax_logit_rms\tmin_base_margin\tmin_replay_margin\treplay_margin_lt_1e3\treplay_margin_lt_5e3\tmin_x_cos\tmax_x_abs\tbaseline_wall_ms_per_tok\treplay_wall_ms_per_tok\tgross_wall_save_pct\tvalidated_wall_ms_per_tok\tvalidated_gpu_ms_per_tok\tfallback_slots_avg\tfallback_pct\tnet_wall_save_pct"
     );
 
     for &context in &contexts {
@@ -4988,40 +5119,30 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
         }
 
         for &start_block in &start_blocks {
-            let mut base = fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, tokens, kv_capacity)?;
-            let mut replay =
-                fresh_gdn_replay_sessions_with_capacity(&ctx, &mm, tokens, kv_capacity)?;
-            for slot in 0..tokens {
-                copy_recurrent_session_state(&ctx, &prefix_sessions[slot], &mut base[slot])?;
-                copy_recurrent_session_state(&ctx, &prefix_sessions[slot], &mut replay[slot])?;
-                let ids = if prompt_ids.len() == 1 {
-                    &prompt_ids[0]
-                } else {
-                    &prompt_ids[slot]
-                };
-                let pos = context;
-                let token_id = ids[pos];
-                prepare_moe_session_to_block(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    token_id,
-                    pos as u32,
-                    start_block,
-                    &mut base[slot],
-                    h,
-                )?;
-                prepare_moe_session_to_block(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    token_id,
-                    pos as u32,
-                    start_block,
-                    &mut replay[slot],
-                    h,
-                )?;
-            }
+            let mut base = prepare_real_block_slice_sessions(
+                &ctx,
+                &mf,
+                &mm,
+                &prefix_sessions,
+                &prompt_ids,
+                context,
+                tokens,
+                start_block,
+                kv_capacity,
+                h,
+            )?;
+            let mut replay = prepare_real_block_slice_sessions(
+                &ctx,
+                &mf,
+                &mm,
+                &prefix_sessions,
+                &prompt_ids,
+                context,
+                tokens,
+                start_block,
+                kv_capacity,
+                h,
+            )?;
 
             let scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
             let summary = trace_prepared_block_slice_summary(
@@ -5041,12 +5162,147 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 n_expert,
                 &gdn_layers,
             )?;
+            let timing = if timing_iters > 0 {
+                let mut timing_base = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    context,
+                    tokens,
+                    start_block,
+                    kv_capacity,
+                    h,
+                )?;
+                let mut timing_replay = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    context,
+                    tokens,
+                    start_block,
+                    kv_capacity,
+                    h,
+                )?;
+                let mut timing_validated = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    context,
+                    tokens,
+                    start_block,
+                    kv_capacity,
+                    h,
+                )?;
+                let timing_scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
+                let baseline = time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
+                    let enc = KernelEncoder::begin(cmd);
+                    encode_block_slice_baseline(
+                        &mf,
+                        &enc,
+                        start_block,
+                        n_blocks,
+                        context as u32,
+                        &mut timing_base,
+                    )?;
+                    enc.end();
+                    Ok(())
+                })?;
+                let replay_stats = time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
+                    encode_block_slice_replay(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        cmd,
+                        start_block,
+                        n_blocks,
+                        context as u32,
+                        &mut timing_replay,
+                        &timing_scratch,
+                        &gdn_layers,
+                        h,
+                        conv_dim,
+                        v_dim,
+                    )
+                })?;
+                let validated = time_validated_block_slice_replay(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    start_block,
+                    n_blocks,
+                    context as u32,
+                    &mut timing_validated,
+                    &timing_scratch,
+                    &gdn_layers,
+                    h,
+                    conv_dim,
+                    v_dim,
+                    topk,
+                    n_expert,
+                    margin_threshold,
+                    timing_warmup,
+                    timing_iters,
+                )?;
+                let baseline_per_tok = baseline.avg_wall_ms / tokens as f64;
+                let replay_per_tok = replay_stats.avg_wall_ms / tokens as f64;
+                let validated_wall_per_tok = validated.avg_wall_ms / tokens as f64;
+                let validated_gpu_per_tok = validated.avg_gpu_ms / tokens as f64;
+                let fallback_pct = validated.avg_fallback_slots / tokens as f64;
+                let fallback_exact_per_tok = fallback_pct * baseline_per_tok;
+                let gross_save_pct = if baseline_per_tok > 0.0 {
+                    (baseline_per_tok - replay_per_tok) / baseline_per_tok * 100.0
+                } else {
+                    0.0
+                };
+                let net_save_pct = if baseline_per_tok > 0.0 {
+                    (baseline_per_tok - validated_wall_per_tok - fallback_exact_per_tok)
+                        / baseline_per_tok
+                        * 100.0
+                } else {
+                    0.0
+                };
+                Some((
+                    baseline_per_tok,
+                    replay_per_tok,
+                    gross_save_pct,
+                    validated_wall_per_tok,
+                    validated_gpu_per_tok,
+                    validated.avg_fallback_slots,
+                    fallback_pct * 100.0,
+                    net_save_pct,
+                ))
+            } else {
+                None
+            };
             let first_set = summary
                 .first_set_mismatch
                 .map(|(block, slot)| format!("block={block},slot={slot}"))
                 .unwrap_or_else(|| "none".to_string());
+            let timing_cols = timing.map_or_else(
+                || "\t\t\t\t\t\t\t\t".to_string(),
+                |(
+                    baseline_per_tok,
+                    replay_per_tok,
+                    gross_save_pct,
+                    validated_wall_per_tok,
+                    validated_gpu_per_tok,
+                    fallback_slots_avg,
+                    fallback_pct,
+                    net_save_pct,
+                )| {
+                    format!(
+                        "\t{baseline_per_tok:.4}\t{replay_per_tok:.4}\t{gross_save_pct:.2}\t{validated_wall_per_tok:.4}\t{validated_gpu_per_tok:.4}\t{fallback_slots_avg:.2}\t{fallback_pct:.2}\t{net_save_pct:.2}"
+                    )
+                },
+            );
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{:.9}\t{:.6}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{:.9}\t{:.6}{}",
                 start_block,
                 start_block + n_blocks,
                 context,
@@ -5062,6 +5318,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 summary.replay_margin_lt_5e3,
                 summary.min_x_cos,
                 summary.max_x_abs,
+                timing_cols,
             );
         }
     }

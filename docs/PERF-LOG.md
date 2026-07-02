@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.438 Replay Real-Window Economics Gate
+
+Status: extended `decode-block-slice-real-margin` with optional timing columns so
+real-prompt replay windows can report gross replay savings, validated replay cost,
+fallback slots under a margin threshold, and net wall savings after charging exact
+fallback.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0438-replay-real-economics/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B real-prompt S4/S6/S8 economics probes at contexts `512/2048`
+- A3B broader S8 blocks=2 real-margin packet at contexts `128/512/2048`
+- `cx ask` ranking session `019f24af-a733-71c1-b218-f2878ff8e3dd`
+
+Results: S8 blocks=2 remains alive after validation overhead: the four timed real
+rows show gross `~21.2-27.6%` and validated net `~11.5-20.3%` with no fallback
+slots at threshold `3e-4`. S6 is marginal (`~2.7-5.5%` net), and S4 is negative
+(`~-11.8%` to `-14.2%`). A broader S8 blocks=2 margin packet has zero route-set
+mismatch rows, one route-order-only row, worst `min_replay_margin=4.7e-05`, and a
+`3e-4` fallback rate of `1/15 = 6.67%`.
+
+Decision: replay remains a high-occupancy-only branch. S8 blocks=2 can still clear
+the `>5-8%` gate in favorable rows after applying the broader fallback rate, but
+S6 is too thin and S4 is dead under the conservative validated path. Next replay
+work should be S8-only scheduler/ragged-occupancy modeling, not a general
+low-occupancy scheduler.
+
 ## 2026-07-02 - v0.437 KV-Q8x4 Attention Falsifier
 
 Status: implemented a default-off `QWEN_KV_Q8=1` MoE/group8 attention reader

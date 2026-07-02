@@ -1290,6 +1290,19 @@ load-flaky with a real numerical divergence at `group=4 n_pos=1024 nwg=64
 C=16` (`cos=0.9662`; passes isolated) — suspected uninitialized-partials
 sensitivity (`zeros_f32` is uninit); needs a scratch-init proof or zero-init
 before the next attn-v4 branch trusts suite-load results.
+v0.433 resolves that test-infra uncertainty by serializing the suite and
+falsifying the uninitialized-partials hypothesis with a permanent NaN-prime gate;
+rotating parallel GPU-test victims point at cross-test buffer corruption, not a
+specific attn_v4 kernel bug. v0.434 then tests the router-repack bet. The F16
+router is top-k safe in the measured packet (A3B 480 checks and A10B 384 checks,
+zero order/set mismatches) and prefill-safe after adding F16 to the packed-route
+eligibility, but it does not pay as a default: A3B/A10B decode is flat/noise,
+A3B prefill is only `~+1%`, and A10B `pp1024` regresses `129.23 -> 114.53`
+because F16 loses the F32 E8xP32 route-logits specialization. Keep
+`QWEN_MOE_ROUTER_F16=1` plus `decode-moe-router-repack-check` as an opt-in
+diagnostic harness, but demote router repack and do not widen to BF16. The
+highest-EV do-less item is now the fused online-softmax matrix attention body;
+decode glue remains a single bundled A/B only.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

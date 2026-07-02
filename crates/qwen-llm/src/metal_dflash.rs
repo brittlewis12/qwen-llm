@@ -7185,6 +7185,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     matches!(
                         dtype,
                         GgmlType::F32
+                            | GgmlType::F16
                             | GgmlType::BF16
                             | GgmlType::Q4_K
                             | GgmlType::Q5_K

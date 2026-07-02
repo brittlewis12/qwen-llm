@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.434 MoE Router F16 Repack Falsifier
+
+Status: implemented `QWEN_MOE_ROUTER_F16=1` as an opt-in load-time repack for
+MoE router `gate_inp`, keeping CPU F32 weights for reference, and added
+`decode-moe-router-repack-check` to compare GPU route top-k against CPU F32 logits
+on real post-mixer hidden states.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0434-moe-router-f16-repack/README.md`
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B/A10B real-prompt route top-k checks with `QWEN_MOE_ROUTER_F16=1`
+- A3B ignored MoE prefill-vs-single gate with `QWEN_MOE_ROUTER_F16=1`
+- `cx ask` review, session `019f2399-2e38-7c73-adb1-6e4ace1b29d3`
+
+Results: top-k route equivalence is encouraging: A3B mixed prompts at contexts
+`128/512/2048` had `480` route checks with zero order/set mismatches; A10B mixed
+prompts at `128/512` had `384` checks with zero mismatches. Max router-logit abs
+delta was `2.0e-5` A3B and `5.2e-5` A10B; A10B min F32 route margin reached
+`5.7e-5`. Decode did not move: A3B `tg128` ABBA was flat/noise
+(`107.91/108.03` base vs `108.24/108.02` F16), A10B `tg128` was similarly flat
+(`45.10 -> 45.21`). A3B prefill shows a small positive (`pp4096` `~+1%`), but
+A10B `pp1024` regresses hard (`129.23 -> 114.53`) because F16 loses the F32
+E8xP32 router mat-mat specialization.
+
+Decision: do not default and do not widen to BF16. Keep the flag and route-check
+harness as diagnostic machinery; demote router repack as a perf branch. The next
+do-less bet is fused online-softmax matrix prefill attention.
+
 ## 2026-07-02 - v0.433 Serialize Test Suite; GPU Cross-Test Corruption Triage
 
 Status: reliability checkpoint. The full non-ignored suite is only

@@ -26,6 +26,7 @@ use objc2_metal::{
     MTLResidencySetDescriptor,
 };
 use qwen_llm::{
+    forward::mat_vec_pub,
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
     metal::{
@@ -52,7 +53,7 @@ use qwen_llm::{
         with_prefill_dense_ffn_fused_swiglu_q4_override,
     },
     metal_forward::{
-        MetalBlock, MetalForward, MetalModel, MetalSession, MoeRouteReplayRow, RMS_EPS,
+        MetalBlock, MetalForward, MetalModel, MetalMoeFfn, MetalSession, MoeRouteReplayRow, RMS_EPS,
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
@@ -445,6 +446,8 @@ enum Cmd {
     DecodeBlockSliceMarginSweep(DecodeBlockSliceMarginSweepArgs),
     /// Real-prompt summary sweep for block-slice replay route margins.
     DecodeBlockSliceRealMargin(DecodeBlockSliceRealMarginArgs),
+    /// Real-prompt top-k check for opt-in F16 MoE router repacks.
+    DecodeMoeRouterRepackCheck(DecodeMoeRouterRepackCheckArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
@@ -933,6 +936,22 @@ struct DecodeBlockSliceRealMarginArgs {
     /// Number of consecutive absolute blocks per replay window.
     #[arg(long = "blocks", default_value = "4")]
     n_blocks: usize,
+}
+
+#[derive(Parser, Debug)]
+struct DecodeMoeRouterRepackCheckArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Read one or more real prompt token streams from text files.
+    #[arg(long)]
+    file: Vec<PathBuf>,
+    /// Number of prompt files to use as independent slots.
+    #[arg(long, default_value = "4")]
+    tokens: usize,
+    /// Prompt context positions to sweep.
+    #[arg(long = "context", value_delimiter = ',', default_value = "512")]
+    contexts: Vec<usize>,
 }
 
 #[derive(Parser, Debug)]
@@ -1957,6 +1976,7 @@ fn main() -> Result<()> {
         Cmd::DecodeBlockSliceTrace(a) => run_decode_block_slice_trace(a),
         Cmd::DecodeBlockSliceMarginSweep(a) => run_decode_block_slice_margin_sweep(a),
         Cmd::DecodeBlockSliceRealMargin(a) => run_decode_block_slice_real_margin(a),
+        Cmd::DecodeMoeRouterRepackCheck(a) => run_decode_moe_router_repack_check(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
@@ -5043,6 +5063,269 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 summary.max_x_abs,
             );
         }
+    }
+
+    Ok(())
+}
+
+fn moe_for_block(mm: &MetalModel, block_idx: usize) -> Result<Option<&MetalMoeFfn>> {
+    let block = mm
+        .blocks
+        .get(block_idx)
+        .ok_or_else(|| anyhow!("block index {block_idx} >= {}", mm.blocks.len()))?;
+    Ok(match block {
+        MetalBlock::Gdn(b) => b.ffn_moe.as_ref(),
+        MetalBlock::Attn(b) => b.ffn_moe.as_ref(),
+    })
+}
+
+fn cpu_route_fingerprint(
+    moe: &MetalMoeFfn,
+    h_cpu: &[f32],
+    topk: usize,
+    n_expert: usize,
+) -> RouteFingerprint {
+    let mut logits = mat_vec_pub(&moe.gate_inp_cpu, h_cpu.len(), n_expert, h_cpu);
+    let mut ranked: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    ranked.truncate(topk);
+    let max_top = ranked.first().map(|&(_, v)| v).unwrap_or(f32::NEG_INFINITY);
+    let mut sum = 0.0f32;
+    let mut exp_vals = Vec::with_capacity(ranked.len());
+    for &(_, v) in &ranked {
+        let e = (v - max_top).exp();
+        exp_vals.push(e);
+        sum += e;
+    }
+    let inv = 1.0 / sum.max(6.103515625e-5);
+    let shared_dot: f32 = h_cpu
+        .iter()
+        .zip(&moe.gate_inp_shexp_cpu[..h_cpu.len()])
+        .map(|(a, b)| a * b)
+        .sum();
+    let idx = ranked.iter().map(|&(expert, _)| expert as i32).collect();
+    let weight = exp_vals.into_iter().map(|v| v * inv).collect();
+    let logit_margin = topk_logit_margin(&logits, topk);
+    RouteFingerprint {
+        idx,
+        weight,
+        shared_gate: 1.0 / (1.0 + (-shared_dot).exp()),
+        logit_margin,
+        logits: std::mem::take(&mut logits),
+    }
+}
+
+fn seed_session_current_token(
+    ctx: &MetalContext,
+    mm: &MetalModel,
+    session: &mut MetalSession,
+    token_id: i32,
+    h: usize,
+) -> Result<()> {
+    unsafe {
+        let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+        *ptr = token_id;
+    }
+    let cmd = ctx.queue.commandBuffer().context("router check seed cmd")?;
+    let enc = KernelEncoder::begin(&cmd);
+    encode_get_rows_f32(
+        ctx,
+        &enc,
+        &mm.token_embd,
+        &session.ids_buf,
+        &session.x,
+        1,
+        h,
+    )?;
+    enc.end();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+    Ok(())
+}
+
+fn run_decode_moe_router_repack_check(args: DecodeMoeRouterRepackCheckArgs) -> Result<()> {
+    let DecodeMoeRouterRepackCheckArgs {
+        model,
+        file,
+        tokens,
+        mut contexts,
+    } = args;
+    if tokens == 0 {
+        return Err(anyhow!("--tokens must be >= 1"));
+    }
+    if file.is_empty() {
+        return Err(anyhow!("--file must include at least one prompt"));
+    }
+    if file.len() < tokens {
+        return Err(anyhow!(
+            "got {} --file entries, need at least --tokens {tokens}",
+            file.len()
+        ));
+    }
+    if contexts.is_empty() {
+        return Err(anyhow!("--context must include at least one entry"));
+    }
+    contexts.sort_unstable();
+    contexts.dedup();
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+    if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
+        return Err(anyhow!(
+            "decode-moe-router-repack-check currently requires an MoE model"
+        ));
+    }
+    let mf = MetalForward::new(&ctx, &mm);
+    let tok = NativeTokenizer::from_gguf(&g).context("open native GGUF tokenizer")?;
+    let mut prompt_ids = Vec::with_capacity(file.len());
+    for path in &file {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let ids = tok
+            .encode(&text, false)
+            .with_context(|| format!("tokenize {}", path.display()))?;
+        prompt_ids.push(ids);
+    }
+    let max_context = *contexts.last().expect("non-empty contexts");
+    for (path, ids) in file.iter().zip(prompt_ids.iter()).take(tokens) {
+        if ids.len() <= max_context {
+            return Err(anyhow!(
+                "prompt {} has {} tokens, need at least {} for context sweep",
+                path.display(),
+                ids.len(),
+                max_context + 1
+            ));
+        }
+    }
+
+    let h = mm.arch.hidden_size as usize;
+    let topk = mm.arch.expert_used_count.min(mm.arch.expert_count) as usize;
+    let n_expert = mm.arch.expert_count as usize;
+    let first_moe = (0..mm.blocks.len())
+        .find_map(|i| moe_for_block(&mm, i).ok().flatten())
+        .ok_or_else(|| anyhow!("model has no MoE FFN blocks"))?;
+    let router_dtype = first_moe.gate_inp.dtype;
+
+    println!(
+        "[decode-moe-router-repack-check] model={} files={} contexts={} slots={} blocks={} topk={} experts={} router_dtype={:?} env_QWEN_MOE_ROUTER_F16={}",
+        model.display(),
+        file.len(),
+        contexts
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        tokens,
+        mm.blocks.len(),
+        topk,
+        n_expert,
+        router_dtype,
+        env_flag_enabled("QWEN_MOE_ROUTER_F16"),
+    );
+    println!(
+        "context\tslots\troute_checks\troute_order_mismatches\troute_set_mismatches\tfirst_set_mismatch\tmax_logit_abs\tmax_logit_rms\tmin_f32_margin\tmin_gpu_margin\tmax_weight_abs\tmax_shared_abs"
+    );
+
+    for &context in &contexts {
+        let kv_capacity = context + 32;
+        let mut sessions = Vec::with_capacity(tokens);
+        for slot in 0..tokens {
+            let ids = &prompt_ids[slot];
+            let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
+                .with_context(|| format!("router check session slot {slot}"))?;
+            for (p, &token_id) in ids.iter().take(context).enumerate() {
+                let _ = mf.single_token_argmax_profiled(token_id, p as u32, &mut s)?;
+            }
+            seed_session_current_token(&ctx, &mm, &mut s, ids[context], h)?;
+            sessions.push(s);
+        }
+
+        let mut route_checks = 0usize;
+        let mut order_mismatches = 0usize;
+        let mut set_mismatches = 0usize;
+        let mut first_set_mismatch: Option<(usize, usize)> = None;
+        let mut max_logit_abs = 0.0f32;
+        let mut max_logit_rms = 0.0f64;
+        let mut min_f32_margin = f32::INFINITY;
+        let mut min_gpu_margin = f32::INFINITY;
+        let mut max_weight_abs = 0.0f32;
+        let mut max_shared_abs = 0.0f32;
+
+        for block_i in 0..mm.blocks.len() {
+            let Some(moe) = moe_for_block(&mm, block_i)? else {
+                continue;
+            };
+            for (slot, session) in sessions.iter_mut().enumerate() {
+                let cmd = ctx.queue.commandBuffer().context("router mixer cmd")?;
+                let enc = KernelEncoder::begin(&cmd);
+                mf.encode_moe_mixer_prep_by_index(&enc, block_i, context as u32, session)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+
+                let h_cpu = read_f32_tensor_prefix(&session.h, h);
+                let f32_route = cpu_route_fingerprint(moe, &h_cpu, topk, n_expert);
+
+                let cmd = ctx.queue.commandBuffer().context("router route cmd")?;
+                let enc = KernelEncoder::begin(&cmd);
+                mf.encode_moe_route_prepare_by_index(&enc, block_i, session)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+
+                let gpu_route = read_route_fingerprint(session, topk, n_expert);
+                route_checks += 1;
+                if f32_route.idx != gpu_route.idx {
+                    order_mismatches += 1;
+                }
+                if !same_i32_set(&f32_route.idx, &gpu_route.idx) {
+                    set_mismatches += 1;
+                    first_set_mismatch.get_or_insert((block_i, slot));
+                }
+                max_logit_abs =
+                    max_logit_abs.max(f32_max_abs_delta(&f32_route.logits, &gpu_route.logits));
+                max_logit_rms =
+                    max_logit_rms.max(f32_rms_delta(&f32_route.logits, &gpu_route.logits));
+                min_f32_margin = min_f32_margin.min(f32_route.logit_margin);
+                min_gpu_margin = min_gpu_margin.min(gpu_route.logit_margin);
+                max_weight_abs =
+                    max_weight_abs.max(route_weight_max_abs(&f32_route.weight, &gpu_route.weight));
+                max_shared_abs =
+                    max_shared_abs.max((f32_route.shared_gate - gpu_route.shared_gate).abs());
+
+                let cmd = ctx.queue.commandBuffer().context("router ffn cmd")?;
+                let enc = KernelEncoder::begin(&cmd);
+                mf.encode_moe_ffn_after_mixer_by_index(&enc, block_i, session)?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+            }
+        }
+
+        let first_set = first_set_mismatch
+            .map(|(block, slot)| format!("block={block},slot={slot}"))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+            context,
+            tokens,
+            route_checks,
+            order_mismatches,
+            set_mismatches,
+            first_set,
+            max_logit_abs,
+            max_logit_rms,
+            min_f32_margin,
+            min_gpu_margin,
+            max_weight_abs,
+            max_shared_abs,
+        );
     }
 
     Ok(())

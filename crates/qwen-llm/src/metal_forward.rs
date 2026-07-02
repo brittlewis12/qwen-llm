@@ -197,6 +197,7 @@ crate::env_flag!(default_on decode_moe_iq4_down_fast_enabled, "QWEN_DECODE_MOE_I
 crate::env_flag!(default_on decode_moe_q5_down_k512_r2_enabled, "QWEN_DECODE_MOE_Q5_DOWN_K512_R2");
 crate::env_flag!(default_on decode_moe_fused_finalizer_enabled, "QWEN_DECODE_MOE_FUSED_FINALIZER");
 crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
+crate::env_flag!(default_off moe_router_f16_enabled, "QWEN_MOE_ROUTER_F16");
 crate::env_flag!(default_off decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
 crate::env_flag!(default_off decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
 
@@ -473,6 +474,19 @@ impl MetalModel {
         };
         // Existing alias for the call sites below.
         let load_tensor = load_f32;
+        let load_router_weight = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
+            if !moe_router_f16_enabled() {
+                return load_f32(desc);
+            }
+            let f32 = crate::codec::dequant_to_f32(desc, gguf.slice(desc))?;
+            let f16: Vec<half::f16> = f32.iter().copied().map(half::f16::from_f32).collect();
+            Ok(MetalTensor::from_bytes(
+                ctx,
+                bytemuck::cast_slice(&f16),
+                desc.shape.clone(),
+                GgmlType::F16,
+            )?)
+        };
 
         // Embedding has native get_rows kernels for F32/F16/BF16. Quantized
         // embeddings still dequant to F32 until they get native get_rows.
@@ -491,7 +505,7 @@ impl MetalModel {
         };
         let load_moe = |moe: &MoeFfn<'_>| -> Result<MetalMoeFfn, MfError> {
             Ok(MetalMoeFfn {
-                gate_inp: load_f32(moe.gate_inp)?,
+                gate_inp: load_router_weight(moe.gate_inp)?,
                 gate_exps: load_moe_expert(moe.gate_exps)?,
                 up_exps: load_moe_expert(moe.up_exps)?,
                 down_exps: load_weight(moe.down_exps)?,
@@ -2361,6 +2375,34 @@ impl<'a> MetalForward<'a> {
     ) -> Result<(), MfError> {
         let (block, slot) = self.moe_block_slot_by_index(block_idx)?;
         self.encode_moe_block_gpu(enc, block, slot, position, session)
+    }
+
+    /// Bench hook: run only the mixer + post-mixer norm for an absolute block.
+    /// The caller may inspect `session.h` before running route/FFN.
+    pub fn encode_moe_mixer_prep_by_index(
+        &self,
+        enc: &KernelEncoder,
+        block_idx: usize,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let (block, slot) = self.moe_block_slot_by_index(block_idx)?;
+        self.encode_moe_mixer_prep(enc, block, slot, position, session)
+    }
+
+    /// Bench hook: run only the route preparation for an absolute block.
+    pub fn encode_moe_route_prepare_by_index(
+        &self,
+        enc: &KernelEncoder,
+        block_idx: usize,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let (block, _) = self.moe_block_slot_by_index(block_idx)?;
+        let moe = match block {
+            MetalBlock::Gdn(b) => b.ffn_moe.as_ref(),
+            MetalBlock::Attn(b) => b.ffn_moe.as_ref(),
+        };
+        self.encode_moe_route_prepare(enc, session, moe.ok_or(MfError::UnsupportedMoe)?)
     }
 
     /// Bench hook: run the route + MoE FFN tail after a caller has already

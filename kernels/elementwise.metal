@@ -247,6 +247,54 @@ kernel void kernel_sigmoid_mul_f32(
     out[tid] = x[tid] / (1.0f + exp(-g));
 }
 
+// Gated attention with a strided gate source (v0.432): reads the gate half
+// of the interleaved q_proj output ([head_dim Q, head_dim gate] per head)
+// in place, deleting the split_q_gate layout copy. Logical element i maps
+// to gate[gate_offset + (i / head_dim) * gate_stride + (i % head_dim)];
+// x/out stay compact. Same arithmetic as kernel_sigmoid_mul_f32.
+struct sigmoid_mul_gate_strided_args {
+    uint n;           // total elements = n_rows * head_dim
+    uint head_dim;
+    uint gate_stride; // elements between consecutive gate rows
+    uint gate_offset; // element offset of gate row 0
+};
+
+// Batched hidden-capture copy (v0.432): copy `n_rows` contiguous source
+// rows of `row_len` floats into dst rows at `dst_base + row * dst_stride`.
+// Replaces a per-row encode_scatter_offset_f32 loop (chunk_p dispatches ->
+// 1) in the DFlash prefill hidden-capture tap.
+struct copy_rows_dst_strided_args {
+    uint n_rows;
+    uint row_len;
+    uint dst_stride; // elements between consecutive dst rows
+    uint dst_base;   // element offset of dst row 0
+};
+
+kernel void kernel_copy_rows_dst_strided_f32(
+        constant copy_rows_dst_strided_args & args [[buffer(0)]],
+        device const float * src [[buffer(1)]], // [n_rows, row_len] contiguous
+        device       float * dst [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    const uint total = args.n_rows * args.row_len;
+    if (tid >= total) return;
+    const uint row = tid / args.row_len;
+    const uint d = tid - row * args.row_len;
+    dst[(ulong)args.dst_base + (ulong)row * args.dst_stride + d] = src[tid];
+}
+
+kernel void kernel_sigmoid_mul_gate_strided_f32(
+        constant sigmoid_mul_gate_strided_args & args [[buffer(0)]],
+        device const float * gate [[buffer(1)]],
+        device const float * x    [[buffer(2)]],
+        device       float * out  [[buffer(3)]],
+        uint tid [[thread_position_in_grid]]) {
+    if (tid >= args.n) return;
+    const uint row = tid / args.head_dim;
+    const uint d = tid - row * args.head_dim;
+    const float g = gate[(ulong)args.gate_offset + (ulong)row * args.gate_stride + d];
+    out[tid] = x[tid] / (1.0f + exp(-g));
+}
+
 // Softmax along the (only) dimension. One threadgroup; up to 1024 threads.
 // Used for attention scores (n = context_len, typically ≤ 4-256K). For
 // large n we'd want a 2-pass shared-memory reduce; this version does one

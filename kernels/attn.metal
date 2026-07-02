@@ -68,6 +68,59 @@ kernel void kernel_rms_norm_batched_f32(
     }
 }
 
+// ---- per-head RMSNorm reading strided source rows ---------------------------
+//
+// v0.432: same math as kernel_rms_norm_batched_f32, but row `hi` of the
+// source lives at `x[src_offset + hi * src_stride .. + head_dim]`. This
+// lets the q-norm read the Q halves of the interleaved q_proj output
+// ([head_dim Q, head_dim gate] per head) directly, deleting the
+// split_q_gate layout-copy dispatch. Per-row arithmetic order is
+// identical to the compact kernel, so results are bit-identical.
+
+struct rms_norm_batched_strided_args {
+    uint n_heads;
+    uint head_dim;
+    uint src_stride; // elements between consecutive source rows
+    uint src_offset; // element offset of source row 0
+    float eps;
+};
+
+kernel void kernel_rms_norm_batched_src_strided_f32(
+        constant rms_norm_batched_strided_args & args [[buffer(0)]],
+        device const float * x      [[buffer(1)]], // strided rows (see args)
+        device const float * weight [[buffer(2)]], // [head_dim]
+        device       float * y      [[buffer(3)]], // [n_heads, head_dim] compact
+        threadgroup  float * shmem  [[threadgroup(0)]],
+        uint  tgpig [[threadgroup_position_in_grid]],
+        uint  tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint  ntg   [[threads_per_threadgroup]]) {
+    const uint hi = tgpig;
+    if (hi >= args.n_heads) return;
+
+    device const float * x_h = x + (ulong)args.src_offset + (ulong)hi * args.src_stride;
+    device       float * y_h = y + (ulong)hi * args.head_dim;
+
+    float sumsq = 0.0f;
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        const float v = x_h[i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+    if (tiisg == 0) shmem[sgitg] = sumsq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = (tiisg < (ntg + 31) / 32) ? shmem[tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+
+    const float mean = sumsq / float(args.head_dim);
+    const float scale = 1.0f / sqrt(mean + args.eps);
+
+    for (uint i = tpitg; i < args.head_dim; i += ntg) {
+        y_h[i] = (x_h[i] * scale) * weight[i];
+    }
+}
+
 // ---- split Q + gate from interleaved layout --------------------------------
 //
 // q_full layout (per Q head): [head_dim Q values, head_dim gate values]
@@ -79,6 +132,11 @@ kernel void kernel_rms_norm_batched_f32(
 //
 // Grid: (n_heads * head_dim) — one thread per output element of one tensor.
 // Both writes happen per thread (same source row).
+//
+// v0.432: production attention paths no longer dispatch this — the q-norm
+// reads Q halves via kernel_rms_norm_batched_src_strided_f32 and the gate
+// consumer reads gate halves via kernel_sigmoid_mul_gate_strided_f32
+// (elementwise.metal). Kept for tests/tools.
 
 struct split_q_gate_args {
     uint n_heads;

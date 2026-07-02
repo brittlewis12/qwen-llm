@@ -46,12 +46,12 @@ use crate::metal::{
     encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_s_f32_fast, encode_moe_swiglu_iq3_xxs_f32,
     encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_q4_K_f32, encode_moe_swiglu_q6_K_f32,
     encode_moe_swiglu_q8_0_f32, encode_moe_weighted_sum_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
+    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
-    encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
-    encode_topk_logits_softmax_parallel_f32,
+    encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
+    encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
+    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32,
 };
 use crate::model::ArchKind;
 use objc2::rc::Retained;
@@ -5672,25 +5672,47 @@ impl<'a> MetalForward<'a> {
         let kv_dim = n_kv * head_dim;
         let n_rot = (head_dim as f32 * arch.partial_rotary_factor) as usize;
 
-        encode_split_q_gate_f32(
-            self.ctx,
-            enc,
-            &s.attn_q_full,
-            &s.attn_q,
-            &s.attn_gate,
-            n_q,
-            head_dim,
-        )?;
-        encode_rms_norm_batched_f32(
-            self.ctx,
-            enc,
-            &s.attn_q,
-            &ab.q_norm,
-            &s.attn_q_normed,
-            n_q,
-            head_dim,
-            RMS_EPS,
-        )?;
+        // v0.432: the default path reads the interleaved q_proj output
+        // ([head_dim Q, head_dim gate] per head) directly — Q halves via
+        // the strided q-norm here, gate halves via the strided sigmoid_mul
+        // at the attention epilogue — deleting the split_q_gate layout
+        // copy (one dispatch + a 2*q_dim round-trip per attn layer). The
+        // QWEN_DECODE_ATTN_SIGMOID_MUL=0 rollback branch still consumes a
+        // compact attn_gate, so it keeps the split.
+        if decode_attn_sigmoid_mul_enabled() {
+            encode_rms_norm_batched_src_strided_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_full,
+                &ab.q_norm,
+                &s.attn_q_normed,
+                n_q,
+                head_dim,
+                2 * head_dim,
+                0,
+                RMS_EPS,
+            )?;
+        } else {
+            encode_split_q_gate_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_full,
+                &s.attn_q,
+                &s.attn_gate,
+                n_q,
+                head_dim,
+            )?;
+            encode_rms_norm_batched_f32(
+                self.ctx,
+                enc,
+                &s.attn_q,
+                &ab.q_norm,
+                &s.attn_q_normed,
+                n_q,
+                head_dim,
+                RMS_EPS,
+            )?;
+        }
         encode_rms_norm_batched_f32(
             self.ctx,
             enc,
@@ -5798,7 +5820,19 @@ impl<'a> MetalForward<'a> {
         }
 
         if decode_attn_sigmoid_mul_enabled() {
-            encode_sigmoid_mul_f32(self.ctx, enc, &s.attn_gate, &s.attn_o, &s.attn_o)?;
+            // Strided gate read from the interleaved q_proj output (see the
+            // v0.432 comment at the q-norm above).
+            encode_sigmoid_mul_gate_strided_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_full,
+                &s.attn_o,
+                &s.attn_o,
+                n_q,
+                head_dim,
+                2 * head_dim,
+                head_dim,
+            )?;
         } else {
             encode_sigmoid_f32(self.ctx, enc, &s.attn_gate, &s.attn_q)?;
             encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
@@ -6085,28 +6119,44 @@ impl<'a> MetalForward<'a> {
         // (1) Q projection: outputs 2 * q_dim (Q + gate interleaved per head).
         encode_mat_vec_dispatch(self.ctx, enc, &ab.q, &s.h, &s.attn_q_full, h, 2 * q_dim)?;
 
-        // (2) Split into Q and gate.
-        encode_split_q_gate_f32(
-            self.ctx,
-            enc,
-            &s.attn_q_full,
-            &s.attn_q,
-            &s.attn_gate,
-            n_q,
-            head_dim,
-        )?;
-
-        // (3) Q-norm (per-head RMSNorm, shared per-channel weight).
-        encode_rms_norm_batched_f32(
-            self.ctx,
-            enc,
-            &s.attn_q,
-            &ab.q_norm,
-            &s.attn_q_normed,
-            n_q,
-            head_dim,
-            RMS_EPS,
-        )?;
+        // (2)+(3) Q-norm reading the interleaved q_proj output directly
+        // (v0.432: replaces split_q_gate + compact q-norm on the default
+        // path; the QWEN_DECODE_ATTN_SIGMOID_MUL=0 rollback keeps the
+        // split because its gate consumer needs a compact attn_gate).
+        if decode_attn_sigmoid_mul_enabled() {
+            encode_rms_norm_batched_src_strided_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_full,
+                &ab.q_norm,
+                &s.attn_q_normed,
+                n_q,
+                head_dim,
+                2 * head_dim,
+                0,
+                RMS_EPS,
+            )?;
+        } else {
+            encode_split_q_gate_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_full,
+                &s.attn_q,
+                &s.attn_gate,
+                n_q,
+                head_dim,
+            )?;
+            encode_rms_norm_batched_f32(
+                self.ctx,
+                enc,
+                &s.attn_q,
+                &ab.q_norm,
+                &s.attn_q_normed,
+                n_q,
+                head_dim,
+                RMS_EPS,
+            )?;
+        }
 
         // (4) K, V projections.
         encode_mat_vec_dispatch(self.ctx, enc, &ab.k, &s.h, &s.attn_k_now, h, kv_dim)?;
@@ -6259,7 +6309,17 @@ impl<'a> MetalForward<'a> {
 
         // (9) Apply gated-attention sigmoid gate: attn_o *= sigmoid(gate).
         if decode_attn_sigmoid_mul_enabled() {
-            encode_sigmoid_mul_f32(self.ctx, enc, &s.attn_gate, &s.attn_o, &s.attn_o)?;
+            encode_sigmoid_mul_gate_strided_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_full,
+                &s.attn_o,
+                &s.attn_o,
+                n_q,
+                head_dim,
+                2 * head_dim,
+                head_dim,
+            )?;
         } else {
             encode_sigmoid_f32(self.ctx, enc, &s.attn_gate, &s.attn_q)?;
             encode_mul_f32(self.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)?;
@@ -6275,6 +6335,78 @@ impl<'a> MetalForward<'a> {
 /// Inverse of `copy_offset` (which gathers). Used to write into the KV
 /// cache slot for the current position, and (via the metal_mtp module)
 /// to assemble the `[e_normed, h_normed]` concat for the eh_proj input.
+/// Copy `n_rows` contiguous F32 source rows of `row_len` elements into
+/// `dst` rows at `dst_base + row * dst_stride` (v0.432). One dispatch
+/// replaces a per-row `encode_scatter_offset_f32` loop in the DFlash
+/// prefill hidden-capture tap (chunk_p dispatches per capture layer per
+/// chunk -> 1).
+pub fn encode_copy_rows_dst_strided_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    dst: &MetalTensor,
+    n_rows: usize,
+    row_len: usize,
+    dst_stride: usize,
+    dst_base: usize,
+) -> Result<(), MetalError> {
+    if n_rows == 0 || row_len == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "copy_rows_dst_strided",
+            detail: "n_rows/row_len must be nonzero".to_string(),
+        });
+    }
+    let total = (n_rows * row_len) as u64;
+    if src.n_elements() < total {
+        return Err(MetalError::BadShape {
+            kernel: "copy_rows_dst_strided",
+            detail: format!("src has {} elements, needs >= {total}", src.n_elements()),
+        });
+    }
+    let dst_need = dst_base as u64 + (n_rows as u64 - 1) * dst_stride as u64 + row_len as u64;
+    if dst.n_elements() < dst_need {
+        return Err(MetalError::BadShape {
+            kernel: "copy_rows_dst_strided",
+            detail: format!("dst has {} elements, needs >= {dst_need}", dst.n_elements()),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_rows: u32,
+        row_len: u32,
+        dst_stride: u32,
+        dst_base: u32,
+    }
+    let pso = ctx.pipeline("kernel_copy_rows_dst_strided_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_rows: n_rows as u32,
+            row_len: row_len as u32,
+            dst_stride: dst_stride as u32,
+            dst_base: dst_base as u32,
+        },
+    );
+    enc.set_tensor(1, src);
+    enc.set_tensor(2, dst);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: (total as usize).div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_scatter_offset_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -8227,37 +8359,58 @@ mod tests {
             &mut phases,
         )?;
         // Split Q + gate.
-        timed(
-            "split_q_gate",
-            &|enc| {
-                encode_split_q_gate_f32(
-                    mf.ctx,
-                    enc,
-                    &s.attn_q_full,
-                    &s.attn_q,
-                    &s.attn_gate,
-                    n_q,
-                    head_dim,
-                )
-                .map_err(MfError::from)
-            },
-            &mut phases,
-        )?;
+        // v0.432: default path skips split_q_gate (strided q-norm +
+        // strided gate sigmoid_mul read the interleave directly); the
+        // phase name is kept only for the rollback branch.
+        if !decode_attn_sigmoid_mul_enabled() {
+            timed(
+                "split_q_gate",
+                &|enc| {
+                    encode_split_q_gate_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_q_full,
+                        &s.attn_q,
+                        &s.attn_gate,
+                        n_q,
+                        head_dim,
+                    )
+                    .map_err(MfError::from)
+                },
+                &mut phases,
+            )?;
+        }
         // Q-norm.
         timed(
             "q_norm (batched rms)",
             &|enc| {
-                encode_rms_norm_batched_f32(
-                    mf.ctx,
-                    enc,
-                    &s.attn_q,
-                    &ab.q_norm,
-                    &s.attn_q_normed,
-                    n_q,
-                    head_dim,
-                    RMS_EPS,
-                )
-                .map_err(MfError::from)
+                if decode_attn_sigmoid_mul_enabled() {
+                    encode_rms_norm_batched_src_strided_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_q_full,
+                        &ab.q_norm,
+                        &s.attn_q_normed,
+                        n_q,
+                        head_dim,
+                        2 * head_dim,
+                        0,
+                        RMS_EPS,
+                    )
+                    .map_err(MfError::from)
+                } else {
+                    encode_rms_norm_batched_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_q,
+                        &ab.q_norm,
+                        &s.attn_q_normed,
+                        n_q,
+                        head_dim,
+                        RMS_EPS,
+                    )
+                    .map_err(MfError::from)
+                }
             },
             &mut phases,
         )?;
@@ -8420,8 +8573,18 @@ mod tests {
             "gate sigmoid + mul",
             &|enc| {
                 if decode_attn_sigmoid_mul_enabled() {
-                    encode_sigmoid_mul_f32(mf.ctx, enc, &s.attn_gate, &s.attn_o, &s.attn_o)
-                        .map_err(MfError::from)
+                    encode_sigmoid_mul_gate_strided_f32(
+                        mf.ctx,
+                        enc,
+                        &s.attn_q_full,
+                        &s.attn_o,
+                        &s.attn_o,
+                        n_q,
+                        head_dim,
+                        2 * head_dim,
+                        head_dim,
+                    )
+                    .map_err(MfError::from)
                 } else {
                     encode_sigmoid_f32(mf.ctx, enc, &s.attn_gate, &s.attn_q)?;
                     encode_mul_f32(mf.ctx, enc, &s.attn_o, &s.attn_q, &s.attn_o)

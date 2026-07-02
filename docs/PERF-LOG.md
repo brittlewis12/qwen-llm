@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.432 Delete Attention Layout-Copy Dispatches
+
+Status: default checkpoint from the do-less implementation audit. The
+gated-attention q_proj output ([head_dim Q, head_dim gate] interleaved per
+head) is now consumed in place: a strided-source batched q-norm
+(`kernel_rms_norm_batched_src_strided_f32`) reads the Q halves and a strided
+fused gate epilogue (`kernel_sigmoid_mul_gate_strided_f32`) reads the gate
+halves, deleting the `split_q_gate` layout copy (one dispatch plus a
+2*q_dim round-trip per attn layer) from dense/MoE decode, packed prefill
+(traced + untraced, fused-qkv and split projections), and layer-major packed
+verify. The prefill/verify epilogue also collapses sigmoid-into-temp + mul
+into the fused kernel and stops using `attn_q_pack` as a temp; the
+`QWEN_DECODE_ATTN_SIGMOID_MUL=0` rollback branch keeps the old split path.
+Equivalence status, stated precisely: the strided q-norm is addressing-only
+(bit-identical per-row math, proven by a dedicated bitwise kernel test);
+the fused gate epilogue changes `x * (1/(1+e^-g))` into `x / (1+e^-g)` —
+last-ulp equivalent, matching the decode default since v0.334, covered by a
+tolerance kernel test plus the cross-path oracle below. MTP keeps the split
+(cold path). `attn_q_pack`/`attn_gate_pack` remain allocated though unused
+on converted paths — logged as remaining scratch debt. The DFlash prefill
+hidden-capture tap also drops from `chunk_p` scatter dispatches per capture
+layer per chunk to one strided-row copy (`kernel_copy_rows_dst_strided_f32`).
+
+Validation:
+
+- cargo test --release -p qwen-llm (full suite green: 152 lib + 7
+  dflash_correctness + 8 eos_gap; see v0.433 for the parallel-execution
+  caveat discovered while timing these runs)
+- dedicated kernel equivalence gates:
+  `rms_norm_batched_src_strided_matches_split_path_bitwise` (bit-identical)
+  and `sigmoid_mul_gate_strided_matches_split_path` (`max|delta| < 1e-6`)
+- cross-path oracle: 27B prefill-vs-single with
+  `QWEN_DECODE_ATTN_SIGMOID_MUL=0` forces the single-token side through the
+  OLD split path against strided prefill — green
+- A3B post-change spots: `pp512 1511.04 t/s`, `pp4096 1611.24 t/s`
+  (consistent with same-session pre-change rows)
+- cx ask review, session recorded in the commit
+
 ## 2026-07-02 - v0.431 Stub Packed-Slot MoE Fallback Packs
 
 Status: default memory checkpoint. `moe_inner_pack` / `moe_expert_out_pack`

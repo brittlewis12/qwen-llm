@@ -38,10 +38,10 @@ use crate::metal::{
     encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
     encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
+    encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
+    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
-    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32, encode_split_qkv_fused_f32,
+    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_qkv_fused_f32,
     encode_topk_logits_softmax_dot_sigmoid_packed_f32, kernel_trace_begin, kernel_trace_snapshot,
     kernel_trace_take_delta,
 };
@@ -4325,12 +4325,9 @@ pub fn encode_packed_verify_layer_major_inner(
                     let attn_q_full_pack = layer_scratch
                         .attn_q_full_pack
                         .view_subrange(0, vec![(n * 2 * q_dim) as u64]);
-                    let attn_q_pack = layer_scratch
-                        .attn_q_pack
-                        .view_subrange(0, vec![(n * q_dim) as u64]);
-                    let attn_gate_pack = layer_scratch
-                        .attn_gate_pack
-                        .view_subrange(0, vec![(n * q_dim) as u64]);
+                    // v0.432: attn_q_pack / attn_gate_pack views deleted —
+                    // the strided q-norm and strided gate epilogue read the
+                    // interleaved attn_q_full_pack directly.
                     let attn_q_normed_pack = layer_scratch
                         .attn_q_normed_pack
                         .view_subrange(0, vec![(n * q_dim) as u64]);
@@ -4362,20 +4359,10 @@ pub fn encode_packed_verify_layer_major_inner(
                             2 * q_dim,
                             n,
                         )?;
-                        // Split q + gate into separate packs. The
-                        // single-token kernel deinterleaves per-head;
-                        // pass `n_heads = N * n_q` so it processes all
-                        // N rows in one dispatch (per-head layout
-                        // repeats identically across rows).
-                        encode_split_q_gate_f32(
-                            base.ctx,
-                            &enc,
-                            &attn_q_full_pack,
-                            &attn_q_pack,
-                            &attn_gate_pack,
-                            n * n_q,
-                            head_dim,
-                        )?;
+                        // v0.432: no split_q_gate — the strided q-norm below
+                        // reads the Q halves of the interleave directly
+                        // (n_heads = N * n_q rows at stride 2*head_dim), and
+                        // Step C's strided sigmoid_mul reads the gate halves.
                         // K, V projections.
                         encode_mat_mat_dispatch(
                             base.ctx,
@@ -4397,15 +4384,17 @@ pub fn encode_packed_verify_layer_major_inner(
                             kv_dim,
                             n,
                         )?;
-                        // Q-norm (per-head); n_heads = N * n_q.
-                        encode_rms_norm_batched_f32(
+                        // Q-norm (per-head, strided source); n_heads = N * n_q.
+                        encode_rms_norm_batched_src_strided_f32(
                             base.ctx,
                             &enc,
-                            &attn_q_pack,
+                            &attn_q_full_pack,
                             &a.q_norm,
                             &attn_q_normed_pack,
                             n * n_q,
                             head_dim,
+                            2 * head_dim,
+                            0,
                             RMS_EPS,
                         )?;
                         // K-norm (per-head); n_heads = N * n_kv.
@@ -4527,18 +4516,20 @@ pub fn encode_packed_verify_layer_major_inner(
                     // followed by batched o_proj mat-mat. One encoder per layer.
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        // attn_gate_pack -> sigmoid into a scratch view of
-                        // attn_q_pack (no longer needed; q_pack is dead after
-                        // attn-v4). Same in-place reuse pattern as the
-                        // single-token encode_attn (line 1399 of metal_forward.rs).
-                        encode_sigmoid_f32(base.ctx, &enc, &attn_gate_pack, &attn_q_pack)?;
-                        // attn_o_pack *= sigmoid(gate_pack), elementwise on N*q_dim.
-                        crate::metal::encode_mul_f32(
+                        // v0.432: fused strided gate epilogue — reads the gate
+                        // halves of the interleaved q_proj output in place and
+                        // fuses sigmoid+mul (was: split + sigmoid-into-temp +
+                        // mul). Matches the single-token default gate math.
+                        crate::metal::encode_sigmoid_mul_gate_strided_f32(
                             base.ctx,
                             &enc,
+                            &attn_q_full_pack,
                             &attn_o_pack,
-                            &attn_q_pack,
                             &attn_o_pack,
+                            n * n_q,
+                            head_dim,
+                            2 * head_dim,
+                            head_dim,
                         )?;
                         // Batched O projection: attn_o_pack [N, q_dim] -> mixer_out_pack [N, H].
                         encode_mat_mat_dispatch(
@@ -6024,12 +6015,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         let q_full_pack_p = layer_scratch
                             .attn_q_full_pack
                             .view_subrange(0, vec![(chunk_p * 2 * q_dim) as u64]);
-                        let q_pack_p = layer_scratch
-                            .attn_q_pack
-                            .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
-                        let gate_pack_p = layer_scratch
-                            .attn_gate_pack
-                            .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
+                        // v0.432: attn_q_pack / attn_gate_pack views deleted —
+                        // the strided q-norm and strided gate epilogue read
+                        // the interleaved q_full pack directly.
                         let q_normed_pack_p = layer_scratch
                             .attn_q_normed_pack
                             .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
@@ -6112,17 +6100,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         chunk_p,
                                     )?;
                                 }
-                                if !use_fused_qkv {
-                                    encode_split_q_gate_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &q_full_pack_p,
-                                        &q_pack_p,
-                                        &gate_pack_p,
-                                        chunk_p * n_q,
-                                        head_dim,
-                                    )?;
-                                }
+                                // v0.432: no split_q_gate — the q-norm below
+                                // reads the interleaved Q halves directly and
+                                // the attn epilogue reads the gate halves.
                                 enc.end();
                             }
                             flush_prefill_phase(
@@ -6137,57 +6117,16 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             );
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                if use_fused_qkv {
-                                    let fused_qkv_pack = layer_scratch
-                                        .attn_qkv_fused_pack
-                                        .view_subrange(0, vec![(chunk_p * qkv_fused_dim) as u64]);
-                                    encode_split_qkv_fused_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &fused_qkv_pack,
-                                        &q_full_pack_p,
-                                        &k_now_pack_p,
-                                        &v_now_pack_p,
-                                        chunk_p,
-                                        attn_q_full_dim,
-                                        kv_dim,
-                                    )?;
-                                }
-                                encode_split_q_gate_f32(
+                                encode_rms_norm_batched_src_strided_f32(
                                     base.ctx,
                                     &enc,
                                     &q_full_pack_p,
-                                    &q_pack_p,
-                                    &gate_pack_p,
-                                    chunk_p * n_q,
-                                    head_dim,
-                                )?;
-                                enc.end();
-                            }
-                            flush_prefill_phase(
-                                base.ctx,
-                                &mut cmd_buf,
-                                &mut prefill_gpu_total_ms,
-                                trace_attn_phases,
-                                chunk_idx,
-                                chunk_start,
-                                il,
-                                if use_fused_qkv {
-                                    "split"
-                                } else {
-                                    "split_q_gate"
-                                },
-                            );
-                            {
-                                let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_rms_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &q_pack_p,
                                     &a.q_norm,
                                     &q_normed_pack_p,
                                     chunk_p * n_q,
                                     head_dim,
+                                    2 * head_dim,
+                                    0,
                                     RMS_EPS,
                                 )?;
                                 encode_rms_norm_batched_f32(
@@ -6272,23 +6211,19 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         chunk_p,
                                     )?;
                                 }
-                                encode_split_q_gate_f32(
+                                // v0.432: strided q-norm replaces split_q_gate
+                                // + compact q-norm (gate halves are read by the
+                                // strided sigmoid_mul at the attn epilogue).
+                                encode_rms_norm_batched_src_strided_f32(
                                     base.ctx,
                                     &enc,
                                     &q_full_pack_p,
-                                    &q_pack_p,
-                                    &gate_pack_p,
-                                    chunk_p * n_q,
-                                    head_dim,
-                                )?;
-                                encode_rms_norm_batched_f32(
-                                    base.ctx,
-                                    &enc,
-                                    &q_pack_p,
                                     &a.q_norm,
                                     &q_normed_pack_p,
                                     chunk_p * n_q,
                                     head_dim,
+                                    2 * head_dim,
+                                    0,
                                     RMS_EPS,
                                 )?;
                                 encode_rms_norm_batched_f32(
@@ -7097,13 +7032,20 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             }
 
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_sigmoid_f32(base.ctx, &enc, &gate_pack_p, &q_pack_p)?;
-                            crate::metal::encode_mul_f32(
+                            // v0.432: fused strided gate epilogue — reads the
+                            // gate halves of the interleaved q_proj output in
+                            // place (no split_q_gate) and fuses sigmoid+mul
+                            // (was: sigmoid into q_pack temp, then mul).
+                            crate::metal::encode_sigmoid_mul_gate_strided_f32(
                                 base.ctx,
                                 &enc,
+                                &q_full_pack_p,
                                 &attn_o_pack_p,
-                                &q_pack_p,
                                 &attn_o_pack_p,
+                                chunk_p * n_q,
+                                head_dim,
+                                2 * head_dim,
+                                head_dim,
                             )?;
                             encode_mat_mat_dispatch(
                                 base.ctx,
@@ -9254,18 +9196,24 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     // offset ((global_idx * K + k_idx) * H), where
                     // global_idx = chunk_base + n_idx. Skipped entirely when
                     // hidden_dst is None (no-spec ref path).
+                    //
+                    // v0.432: one strided-row copy per capture layer instead
+                    // of chunk_p scatter dispatches — dst rows for
+                    // consecutive n_idx are uniformly strided by K * H.
                     if let Some(dst) = hidden_dst {
                         for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
                             if lid as usize == il {
-                                for n_idx in 0..chunk_p {
-                                    let global_idx = chunk_base + n_idx;
-                                    let elem_off = (global_idx * k_target + k_idx) * h;
-                                    let row_view =
-                                        x_pack_p.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                                    encode_scatter_offset_f32(
-                                        base.ctx, &enc, &row_view, dst, elem_off, h,
-                                    )?;
-                                }
+                                let dst_base = (chunk_base * k_target + k_idx) * h;
+                                crate::metal_forward::encode_copy_rows_dst_strided_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &x_pack_p,
+                                    dst,
+                                    chunk_p,
+                                    h,
+                                    k_target * h,
+                                    dst_base,
+                                )?;
                             }
                         }
                     }

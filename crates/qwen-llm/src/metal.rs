@@ -10201,10 +10201,185 @@ pub fn encode_rms_norm_batched_f32(
     Ok(())
 }
 
+/// Per-head RMSNorm reading strided source rows: row `hi` lives at
+/// `x[src_offset + hi * src_stride .. + head_dim]`; output `y` is compact
+/// `[n_heads, head_dim]`. Used to read the Q halves of the interleaved
+/// gated-attention q_proj output directly (src_stride = 2*head_dim,
+/// src_offset = 0), deleting the split_q_gate layout copy (v0.432).
+/// Bit-identical per-row math to `encode_rms_norm_batched_f32`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_rms_norm_batched_src_strided_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    weight: &MetalTensor,
+    y: &MetalTensor,
+    n_heads: usize,
+    head_dim: usize,
+    src_stride: usize,
+    src_offset: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    if n_heads == 0 || head_dim == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_batched_src_strided",
+            detail: "n_heads/head_dim must be nonzero".to_string(),
+        });
+    }
+    // Source must cover the last strided row end-to-end.
+    let src_need = src_offset as u64 + (n_heads as u64 - 1) * src_stride as u64 + head_dim as u64;
+    if x.n_elements() < src_need {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_batched_src_strided",
+            detail: format!(
+                "x has {} elements, needs >= {src_need} \
+                 (offset={src_offset} stride={src_stride} rows={n_heads} head_dim={head_dim})",
+                x.n_elements()
+            ),
+        });
+    }
+    let want = (n_heads * head_dim) as u64;
+    if y.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_batched_src_strided",
+            detail: format!("y expected {want} elements"),
+        });
+    }
+    if weight.n_elements() as usize != head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_batched_src_strided",
+            detail: format!("weight expected {head_dim} elements"),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        head_dim: u32,
+        src_stride: u32,
+        src_offset: u32,
+        eps: f32,
+    }
+    let pso = ctx.pipeline("kernel_rms_norm_batched_src_strided_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: n_heads as u32,
+            head_dim: head_dim as u32,
+            src_stride: src_stride as u32,
+            src_offset: src_offset as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: n_heads,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Gated attention `out = x * sigmoid(gate)` where the gate rows live
+/// strided inside a larger tensor (the interleaved q_proj output's gate
+/// halves: gate_stride = 2*head_dim, gate_offset = head_dim). `x`/`out`
+/// are compact `n_rows * head_dim` elements (v0.432; replaces
+/// split_q_gate + compact sigmoid_mul).
+pub fn encode_sigmoid_mul_gate_strided_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    x: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    head_dim: usize,
+    gate_stride: usize,
+    gate_offset: usize,
+) -> Result<(), MetalError> {
+    if n_rows == 0 || head_dim == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "sigmoid_mul_gate_strided",
+            detail: "n_rows/head_dim must be nonzero".to_string(),
+        });
+    }
+    let n = (n_rows * head_dim) as u64;
+    if x.n_elements() != n || out.n_elements() != n {
+        return Err(MetalError::BadShape {
+            kernel: "sigmoid_mul_gate_strided",
+            detail: format!("x/out expected {n} elements"),
+        });
+    }
+    let gate_need = gate_offset as u64 + (n_rows as u64 - 1) * gate_stride as u64 + head_dim as u64;
+    if gate.n_elements() < gate_need {
+        return Err(MetalError::BadShape {
+            kernel: "sigmoid_mul_gate_strided",
+            detail: format!(
+                "gate has {} elements, needs >= {gate_need}",
+                gate.n_elements()
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        head_dim: u32,
+        gate_stride: u32,
+        gate_offset: u32,
+    }
+    let pso = ctx.pipeline("kernel_sigmoid_mul_gate_strided_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            head_dim: head_dim as u32,
+            gate_stride: gate_stride as u32,
+            gate_offset: gate_offset as u32,
+        },
+    );
+    enc.set_tensor(1, gate);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, out);
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: (n as usize).div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Split the gated-attention Q-projection output into separate Q and
 /// gate tensors. Input layout per head: `[head_dim Q, head_dim gate]`,
 /// total length `n_heads * 2 * head_dim`. Outputs are
 /// `[n_heads, head_dim]` each.
+///
+/// v0.432: production attention paths read the interleaved layout
+/// directly (strided q-norm + strided gate sigmoid_mul); this kernel
+/// remains for tests and as the reference for the interleave layout.
 pub fn encode_split_q_gate_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -21001,6 +21176,270 @@ mod tests {
             max_abs < 1e-3,
             "chained encoding diverged: max|Δ|={max_abs}"
         );
+    }
+
+    /// v0.432 equivalence gate: the strided-source batched q-norm reading
+    /// the Q halves of an interleaved `[head_dim Q, head_dim gate]` layout
+    /// must be BIT-IDENTICAL to split_q_gate followed by the compact
+    /// batched q-norm (pure addressing change, same per-row arithmetic).
+    #[test]
+    fn rms_norm_batched_src_strided_matches_split_path_bitwise() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &(n_heads, head_dim) in &[(24usize, 256usize), (16, 256), (8, 64)] {
+            let full: Vec<f32> = (0..n_heads * 2 * head_dim)
+                .map(|i| ((i % 41) as f32 - 20.0) * 3e-2)
+                .collect();
+            let weight: Vec<f32> = (0..head_dim).map(|i| 0.5 + (i % 7) as f32 * 0.1).collect();
+            let full_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&full),
+                vec![(n_heads * 2 * head_dim) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let w_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&weight),
+                vec![head_dim as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let q_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let gate_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let y_split = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let y_strided =
+                MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+            let eps = 1e-6f32;
+            one_shot(&ctx, |enc| {
+                encode_split_q_gate_f32(&ctx, enc, &full_t, &q_t, &gate_t, n_heads, head_dim)?;
+                encode_rms_norm_batched_f32(&ctx, enc, &q_t, &w_t, &y_split, n_heads, head_dim, eps)
+            })
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_rms_norm_batched_src_strided_f32(
+                    &ctx,
+                    enc,
+                    &full_t,
+                    &w_t,
+                    &y_strided,
+                    n_heads,
+                    head_dim,
+                    2 * head_dim,
+                    0,
+                    eps,
+                )
+            })
+            .unwrap();
+            let a = read_back_f32(&y_split.buffer, n_heads * head_dim);
+            let b = read_back_f32(&y_strided.buffer, n_heads * head_dim);
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "strided q-norm not bit-identical at [{i}] (n_heads={n_heads}, \
+                     head_dim={head_dim}): split={x} strided={y}"
+                );
+            }
+        }
+    }
+
+    /// v0.432 equivalence gate: the fused strided gate epilogue
+    /// (`out = x / (1 + e^-gate)`) vs the old split + sigmoid-into-temp +
+    /// mul (`out = x * (1 / (1 + e^-gate))`). Different last-ulp rounding
+    /// (division vs reciprocal-multiply), so tolerance-based, tight.
+    #[test]
+    fn sigmoid_mul_gate_strided_matches_split_path() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let (n_heads, head_dim) = (24usize, 256usize);
+        let full: Vec<f32> = (0..n_heads * 2 * head_dim)
+            .map(|i| ((i % 37) as f32 - 18.0) * 5e-2)
+            .collect();
+        let x: Vec<f32> = (0..n_heads * head_dim)
+            .map(|i| ((i % 29) as f32 - 14.0) * 4e-2)
+            .collect();
+        let full_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&full),
+            vec![(n_heads * 2 * head_dim) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_heads * head_dim) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let q_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let gate_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let sig_t = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let y_split = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        let y_fused = MetalTensor::zeros_f32(&ctx, vec![(n_heads * head_dim) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_split_q_gate_f32(&ctx, enc, &full_t, &q_t, &gate_t, n_heads, head_dim)?;
+            encode_sigmoid_f32(&ctx, enc, &gate_t, &sig_t)?;
+            encode_mul_f32(&ctx, enc, &x_t, &sig_t, &y_split)
+        })
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_sigmoid_mul_gate_strided_f32(
+                &ctx,
+                enc,
+                &full_t,
+                &x_t,
+                &y_fused,
+                n_heads,
+                head_dim,
+                2 * head_dim,
+                head_dim,
+            )
+        })
+        .unwrap();
+        let a = read_back_f32(&y_split.buffer, n_heads * head_dim);
+        let b = read_back_f32(&y_fused.buffer, n_heads * head_dim);
+        let max_abs = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_abs < 1e-6,
+            "fused strided gate epilogue diverged beyond ulp scale: max|Δ|={max_abs:.3e}"
+        );
+    }
+
+    /// v0.433 triage repro for the `attn_v4_matches_naive_f16kv` load-flake:
+    /// NaN-prime the o/ml partials scratch before dispatch at the exact
+    /// config that failed under parallel-suite load (`group=4 n_pos=1024
+    /// nwg=64 C=16`, cos=0.9662). `zeros_f32` is documented-uninitialized,
+    /// so isolated runs see fresh zero pages while loaded runs see recycled
+    /// garbage; if any kernel cell is read without being written, this test
+    /// fails deterministically instead of 50%-of-suite-runs.
+    #[test]
+    fn attn_v4_partials_fully_written_nan_prime() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let hd = 256usize;
+        // The observed failing config plus its close neighbors.
+        let cases: &[(usize, usize, usize, usize, usize)] = &[
+            // (n_q, n_kv, n_pos, nwg, tile_c)
+            (8, 2, 1024, 64, 16),
+            (8, 2, 1024, 64, 32),
+            (8, 2, 1024, 128, 16),
+            (8, 2, 1024, 256, 16),
+            (24, 4, 1024, 64, 16),
+        ];
+        for &(n_q, n_kv, n_pos, nwg, tile_c) in cases {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            let q: Vec<f32> = (0..n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+                .collect();
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(src_f32.as_slice()),
+                    vec![src_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                })
+                .unwrap();
+            }
+            let y_naive_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_f16kv_f32(
+                    &ctx, enc, &q_t, &k_cache, &v_cache, &y_naive_t, n_q, n_kv, hd, n_pos,
+                )
+            })
+            .unwrap();
+            let y_naive = read_back_f32(&y_naive_t.buffer, n_q * hd);
+
+            let o_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64]).unwrap();
+            let ml_partial =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64]).unwrap();
+            let y_v4_t = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
+            // NaN-prime everything the kernels are supposed to fully write.
+            unsafe {
+                for t in [&o_partial, &ml_partial, &y_v4_t] {
+                    let p = t.buffer.contents().as_ptr() as *mut f32;
+                    for i in 0..t.n_elements() as usize {
+                        *p.add(i) = f32::NAN;
+                    }
+                }
+            }
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_cache,
+                    &v_cache,
+                    &o_partial,
+                    &ml_partial,
+                    &y_v4_t,
+                    n_q,
+                    n_kv,
+                    hd,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )
+            })
+            .unwrap();
+            let y_v4 = read_back_f32(&y_v4_t.buffer, n_q * hd);
+            let nan_count = y_v4.iter().filter(|x| x.is_nan()).count();
+            let max_abs = y_v4
+                .iter()
+                .zip(y_naive.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!(
+                "[v4-nan-prime group={group} n_pos={n_pos} nwg={nwg} C={tile_c}] \
+                 nans={nan_count} max|Δ|={max_abs:.2e}"
+            );
+            assert_eq!(
+                nan_count, 0,
+                "v4 output contains NaN after NaN-priming partials: some partial \
+                 cell is read without being written (group={group} n_pos={n_pos} \
+                 nwg={nwg} C={tile_c})"
+            );
+            assert!(
+                max_abs < 5e-3,
+                "v4 diverged from naive with NaN-primed partials: max|Δ|={max_abs} \
+                 (group={group} n_pos={n_pos} nwg={nwg} C={tile_c})"
+            );
+        }
     }
 
     /// v4 flash-attn (GQA-dedup + online softmax + split-K) vs production

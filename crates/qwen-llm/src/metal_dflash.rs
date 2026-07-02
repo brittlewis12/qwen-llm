@@ -6534,8 +6534,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
-                                            prefill_attn_matrix_causal_skip_enabled()
-                                                && use_matrix_g6,
+                                            // v0.430: causal tile skip is group-generic in the
+                                            // kernels (row_last/group + base_pos); enable for all
+                                            // matrix groups, not only dense G6. Rollback:
+                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                            prefill_attn_matrix_causal_skip_enabled(),
                                         )?;
                                         enc.end();
                                     }
@@ -6619,8 +6622,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
-                                            prefill_attn_matrix_causal_skip_enabled()
-                                                && use_matrix_g6,
+                                            // v0.430: causal tile skip is group-generic in the
+                                            // kernels (row_last/group + base_pos); enable for all
+                                            // matrix groups, not only dense G6. Rollback:
+                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                            prefill_attn_matrix_causal_skip_enabled(),
                                         )?;
                                         enc.end();
                                     }
@@ -6696,8 +6702,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
-                                            prefill_attn_matrix_causal_skip_enabled()
-                                                && use_matrix_g6,
+                                            // v0.430: causal tile skip is group-generic in the
+                                            // kernels (row_last/group + base_pos); enable for all
+                                            // matrix groups, not only dense G6. Rollback:
+                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                            prefill_attn_matrix_causal_skip_enabled(),
                                         )?;
                                         crate::metal::encode_attn_matrix_softmax_f32(
                                             base.ctx,
@@ -6725,8 +6734,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                             n_kv,
                                             group,
                                             head_dim,
-                                            prefill_attn_matrix_causal_skip_enabled()
-                                                && use_matrix_g6,
+                                            // v0.430: causal tile skip is group-generic in the
+                                            // kernels (row_last/group + base_pos); enable for all
+                                            // matrix groups, not only dense G6. Rollback:
+                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                            prefill_attn_matrix_causal_skip_enabled(),
                                         )?;
                                     } else {
                                         for row_base in (0..chunk_p).step_by(packed_rows) {

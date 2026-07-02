@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.430 Generalize Matrix Attention Causal Skip
+
+Status: default checkpoint from the do-less implementation audit. The
+KQ/KQV causal tile skip (`QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP`, default
+on) was gated to the dense G6 matrix path at all four call sites even
+though the kernels implement the skip generically (`row_last / group +
+base_pos`); G8/G4/G16 burned full score-tile traffic on provably-future
+tiles. Enabled for every matrix group.
+
+Validation:
+
+- correctness: 0.8B bit-exact prefill gate, A3B G8 + 27B prefill-vs-single,
+  A10B G16 smoke all green
+- A3B `pp4096` phase pairs (off -> on): KQ `413.0/426.3 -> 360.4/339.3 ms`,
+  KQV `416.5/425.1 -> 361.3/343.2 ms`, softmax flat — matrix body `~-14%`
+- A10B `pp1024` phase pair: KQ `92.4 -> 49.2 ms`, KQV `92.2 -> 48.5 ms`
+  (`~-47%`; single chunk means nearly half the tiles are strictly future)
+- A3B `pp4096` e2e alternating pairs: means `1566.8 -> 1581.4 t/s` (`+0.9%`,
+  within pair noise; the phase rows are the decisive signal)
+
 ## 2026-07-01 - v0.425 Fix Stale Bitwise Packed-Verify Gate
 
 Status: triaged and fixed the red `dflash_packed_verify_layer_major_matches_

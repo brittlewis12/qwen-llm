@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.436 GDN RB4 TGM16 Staging Falsifier
+
+Status: dirty-tested and removed a one-layer packed GDN recurrence variant that
+staged `T=16` Q/K tiles in threadgroup memory across the active four-row NSG4
+threadgroup shape. The goal was to isolate whether duplicated Q/K loads, not the
+serial recurrence itself, were a cheap remaining GDN prefill lever.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0436-gdn-rb4-tgm16-falsifier/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- 0.8B prefill-vs-single with the dirty RB4 TGM16 env
+- 0.8B and 27B prefill sweeps
+- `cx ask` review, session `019f241f-6c1a-73b3-ba6a-c24f049fbe7a`
+
+Results: correctness was green, but perf failed decisively. 0.8B `pp512`
+regressed from `8181.82/8205.72` to `7286.46/7326.54 t/s`; 27B `pp512` with G6
+matrix attention regressed `244.24 -> 237.86 t/s`. The 0.8B phase trace made the
+mechanism visible: `gdn_step` worsened `21.93 -> 32.59 ms` (`+48.6%`).
+
+Decision: keep no flag and no dead kernel. The active NSG4 packed recurrence
+already captures the big row-residency win; TGM Q/K staging adds barriers and
+threadgroup traffic that outweigh duplicated Q/K loads. Do not pursue local
+row/block GDN staging unless a future floor/no-op ladder proves Q/K loads dominate.
+
 ## 2026-07-02 - v0.435 Hot Kernel Max Threadgroup Hints
 
 Status: added `[[max_total_threads_per_threadgroup(N)]]` to fixed-threadgroup

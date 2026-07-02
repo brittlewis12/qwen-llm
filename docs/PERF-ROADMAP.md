@@ -1312,6 +1312,14 @@ pushes back on a softmax+KQV matrix bridge: with current KQV `head_dim/64`
 y-tiling, a bridge would either recompute probabilities per y-tile or sacrifice
 parallelism, so it is likely to teach the wrong lesson. Treat FA2-style matrix
 attention as a serious design/capture branch, not a quick intermediate.
+v0.436 dirty-tests cx's narrow GDN row/block oracle (`rb4_tgm16`: keep four
+state rows resident like NSG4, stage `T=16` Q/K tiles in threadgroup memory) and
+kills it. Correctness is green, but 0.8B `pp512` regresses `~11%`, 27B `pp512`
+G6 matrix regresses `~2.6%`, and a 0.8B trace shows `gdn_step` itself worsens
+`21.93 -> 32.59 ms`. Do not keep the flag/kernel. The active packed NSG4 kernel
+already captures the easy row-residency win; Q/K load duplication is not worth
+TGM barriers. If GDN recurrence is reopened, start with a floor/no-op ladder or
+a genuinely chunked delta-rule formulation, not local Q/K staging.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

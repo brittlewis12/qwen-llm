@@ -1201,6 +1201,18 @@ constant-hidden fixtures are adversarial stressors, but cx session
 `019f1ffe-1f3a-7120-a872-f068a90fd92d` correctly warns that this is still not a
 scheduler gate. Next: widen prompt classes beyond markdown rollouts and pair the
 margin table with net replay savings after exact fallback.
+v0.427 broadens that packet beyond narrative markdown to mixed narrative/code/
+docs/JSON prompts. The combined 47-row A3B sample still has zero route-set
+mismatches, 3 route-order-only mismatches, worst replay margin `0.000047`, and
+min `x` cosine `0.999999889`. Window fallback rates are
+`2.13%/8.51%/23.40%/44.68%/61.70%` at `1e-4/3e-4/1e-3/3e-3/5e-3`. Per cx
+session `019f201d-9777-7810-9b23-dbdbeb6dbeae`, treat this as a keep-alive
+signal, not safety proof: `0/47` remains weak, synthetic flips remain real, and
+the next live gate is net replay economics. Model validation overhead, exact
+fallback cost, and ragged slot occupancy before building any production
+scheduler. A first plausible threshold to model is `3e-4`; `1e-4` is too close to
+known failure margins, while `1e-3` probably burns the win unless fallback can
+abort before most replay work.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

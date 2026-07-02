@@ -42,6 +42,33 @@ Process note: this gate was red for ~5 weeks because commit validation uses
 targeted test lists. Full-suite runs should happen at least at audit/refactor
 checkpoints; a standing guard is deferred as separate scope.
 
+## 2026-07-01 - v0.427 Mixed-Prompt Replay Margins
+
+Status: expanded the real-prompt replay-margin packet beyond narrative markdown
+rollouts to mixed narrative/code/docs/JSON prompts.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0427-real-margin-mixed-prompts/README.md`
+
+Validation:
+
+- A3B mixed-prompt real-margin probes at contexts `128`, `512`, and `2048`
+- `uv run scripts/profile/block_slice_margin_summary.py` over v0.426 + v0.427
+- `cx ask` adversarial review, session `019f201d-9777-7810-9b23-dbdbeb6dbeae`
+
+Results: the combined 47-row sample still has zero route-set mismatches. Route
+order differs in 3 rows. Worst `min_replay_margin` remains `0.000047`, min `x`
+cosine is now `0.999999889`, and max router-logit abs delta is `0.002356`.
+Window-level margin fallback rates are `2.13%` at `1e-4`, `8.51%` at `3e-4`,
+`23.40%` at `1e-3`, `44.68%` at `3e-3`, and `61.70%` at `5e-3`.
+
+Decision: replay remains live, but the next gate is economics, not a scheduler
+implementation. cx's adversarial read is that `0/47` is still statistically weak
+and synthetic flips remain real. First plausible policy point is around `3e-4`:
+high enough to cover known synthetic failure margins, low enough that a rough
+`16% - 8.5%` post-replay fallback model still leaves positive slice savings.
+
 ## 2026-07-01 - v0.426 Real-Prompt Margin Harness
 
 Status: added `decode-block-slice-real-margin`, which runs exact real-prompt

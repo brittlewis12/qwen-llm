@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.440 Replay Timing Reset and Policy Model
+
+Status: fixed the real-window replay economics timing harness so each timed and
+warmup repetition starts from an identical prepared block-slice state. The v0.438
+timing rows reused sessions after a prior repetition had already mutated `x`, KV,
+and GDN state; that was fine as shape smoke, but too confounded for scheduler
+economics. `scripts/profile/replay_economics.py` now parses timed real-margin rows
+and can apply fallback packets plus simple active-slot occupancy mixes.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0440-replay-economics-reset/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B corrected real-prompt S4/S6/S8 economics probes at contexts `512/2048`
+- `replay_economics.py` policy-model smoke on the corrected rows
+
+Results: corrected S8 blocks=2 still has gross `~20.9-21.7%` and validated net
+`~10.8-12.8%` before broader fallback. Applying the broader `3e-4` fallback packet
+from v0.438 (`1/15 = 6.67%`) narrows S8 to `~4.1-6.1%`, averaging `~4.9%`. S6
+averages only `~4.0%` before broader fallback and becomes negative after it; S4
+remains negative.
+
+Decision: the replay branch is narrower than v0.438 suggested. Do not build a
+general replay scheduler. The only live product branch is a shadow S8-only policy
+model with real occupancy traces, and it must clear `>=5-8%` blended net after
+fallback and p95 effects before promotion.
+
 ## 2026-07-02 - v0.439 Two-Pass Online-Softmax Matrix Prefill Attention
 
 Status: default checkpoint on the queue-top do-less bet (the matrix-attention

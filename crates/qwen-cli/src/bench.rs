@@ -4607,6 +4607,89 @@ fn copy_recurrent_session_state(
     Ok(())
 }
 
+fn reset_block_slice_sessions(
+    ctx: &MetalContext,
+    src: &[MetalSession],
+    dst: &mut [MetalSession],
+) -> Result<()> {
+    if src.len() != dst.len() {
+        return Err(anyhow!(
+            "session reset length mismatch: {} source versus {} destination",
+            src.len(),
+            dst.len()
+        ));
+    }
+
+    for (a, b) in src.iter().zip(dst.iter()) {
+        if a.gdn_conv.len() != b.gdn_conv.len()
+            || a.gdn_state.len() != b.gdn_state.len()
+            || a.kv_k.len() != b.kv_k.len()
+            || a.kv_v.len() != b.kv_v.len()
+            || a.x.n_bytes() != b.x.n_bytes()
+        {
+            return Err(anyhow!("block-slice session reset shape mismatch"));
+        }
+    }
+
+    let cmd = ctx
+        .queue
+        .commandBuffer()
+        .context("reset block-slice sessions cmd")?;
+    let blit = BlitEncoder::begin(&cmd);
+    for (a, b) in src.iter().zip(dst.iter()) {
+        blit.copy_buffer(
+            &a.x.buffer,
+            a.x.offset,
+            &b.x.buffer,
+            b.x.offset,
+            a.x.n_bytes(),
+        );
+        for (src_t, dst_t) in a.gdn_conv.iter().zip(b.gdn_conv.iter()) {
+            blit.copy_buffer(
+                &src_t.buffer,
+                src_t.offset,
+                &dst_t.buffer,
+                dst_t.offset,
+                src_t.n_bytes(),
+            );
+        }
+        for (src_t, dst_t) in a.gdn_state.iter().zip(b.gdn_state.iter()) {
+            blit.copy_buffer(
+                &src_t.buffer,
+                src_t.offset,
+                &dst_t.buffer,
+                dst_t.offset,
+                src_t.n_bytes(),
+            );
+        }
+        for (src_t, dst_t) in a.kv_k.iter().zip(b.kv_k.iter()) {
+            blit.copy_buffer(
+                &src_t.buffer,
+                src_t.offset,
+                &dst_t.buffer,
+                dst_t.offset,
+                src_t.n_bytes(),
+            );
+        }
+        for (src_t, dst_t) in a.kv_v.iter().zip(b.kv_v.iter()) {
+            blit.copy_buffer(
+                &src_t.buffer,
+                src_t.offset,
+                &dst_t.buffer,
+                dst_t.offset,
+                src_t.n_bytes(),
+            );
+        }
+    }
+    blit.end();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+    for (a, b) in src.iter().zip(dst.iter_mut()) {
+        b.kv_n_pos.clone_from(&a.kv_n_pos);
+    }
+    Ok(())
+}
+
 fn prepare_moe_session_to_block(
     ctx: &MetalContext,
     mf: &MetalForward<'_>,
@@ -4692,6 +4775,7 @@ fn time_validated_block_slice_replay(
     start_block: usize,
     n_blocks: usize,
     position: u32,
+    seed_sessions: &[MetalSession],
     sessions: &mut [MetalSession],
     scratch: &GdnLayerReplayScratch,
     gdn_layers: &[SelectedGdnLayer<'_>],
@@ -4710,6 +4794,7 @@ fn time_validated_block_slice_replay(
 
     for rep in 0..warmup + iters {
         let timed = rep >= warmup;
+        reset_block_slice_sessions(ctx, seed_sessions, sessions)?;
         let start = Instant::now();
         let mut gpu_ms = 0.0f64;
         let mut fallback_slots = vec![false; sessions.len()];
@@ -5163,6 +5248,18 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 &gdn_layers,
             )?;
             let timing = if timing_iters > 0 {
+                let timing_base_seed = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    context,
+                    tokens,
+                    start_block,
+                    kv_capacity,
+                    h,
+                )?;
                 let mut timing_base = prepare_real_block_slice_sessions(
                     &ctx,
                     &mf,
@@ -5175,7 +5272,31 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     kv_capacity,
                     h,
                 )?;
+                let timing_replay_seed = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    context,
+                    tokens,
+                    start_block,
+                    kv_capacity,
+                    h,
+                )?;
                 let mut timing_replay = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    context,
+                    tokens,
+                    start_block,
+                    kv_capacity,
+                    h,
+                )?;
+                let timing_validated_seed = prepare_real_block_slice_sessions(
                     &ctx,
                     &mf,
                     &mm,
@@ -5201,6 +5322,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 )?;
                 let timing_scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
                 let baseline = time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
+                    reset_block_slice_sessions(&ctx, &timing_base_seed, &mut timing_base)?;
                     let enc = KernelEncoder::begin(cmd);
                     encode_block_slice_baseline(
                         &mf,
@@ -5214,6 +5336,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     Ok(())
                 })?;
                 let replay_stats = time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
+                    reset_block_slice_sessions(&ctx, &timing_replay_seed, &mut timing_replay)?;
                     encode_block_slice_replay(
                         &ctx,
                         &mf,
@@ -5237,6 +5360,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     start_block,
                     n_blocks,
                     context as u32,
+                    &timing_validated_seed,
                     &mut timing_validated,
                     &timing_scratch,
                     &gdn_layers,

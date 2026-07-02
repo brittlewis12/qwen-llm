@@ -1380,6 +1380,16 @@ issue or a latent timing-sensitive race exposed by contention. Methodology
 update: correctness gates require a quiet box (no concurrent GPU processes);
 the hunt's next probes should include a cross-process load generator as the
 reproducer instead of parallel tests.
+v0.440 corrects the v0.438 replay timing confound: timed real-window repetitions
+now reset `x`, KV, and GDN state from an immutable prepared seed before every
+warmup/timed rep. Corrected S8 blocks=2 is still alive but much narrower:
+validated net `~10.8-12.8%` before broader fallback and `~4.1-6.1%` after the
+v0.438 `3e-4` fallback packet (`1/15 = 6.67%`). S6 averages only `~4.0%` before
+fallback and becomes negative after it; S4 stays negative. `replay_economics.py`
+now parses real-margin timing rows and can apply simple active-slot occupancy
+mixes. Update the live gate again: replay is shadow-model only, S8-only, and must
+clear `>=5-8%` blended net on a real occupancy/p95 trace before any production
+scheduler work.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

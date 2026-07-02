@@ -1,5 +1,11 @@
 # v0.438 Replay Real-Window Economics Gate
 
+Correction: v0.440 found that the timed rows in this artifact reused sessions
+after previous warmup/timed repetitions had mutated `x`, KV, and GDN state. Treat
+these rows as mechanism smoke only. Use
+`docs/bench/2026-07-02-v0440-replay-economics-reset/README.md` for corrected
+policy economics.
+
 Goal: move block-slice replay from gross synthetic savings toward a production
 policy gate by measuring real-prompt windows with validation overhead, exact
 fallback modeling, and ragged active-slot counts.

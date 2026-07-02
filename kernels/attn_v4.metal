@@ -617,6 +617,7 @@ inline void attn_v4_main_subgroup_body(
 // =============================================================================
 
 #define ATTN_V4_KERNEL_G(NAME, GROUP_VAL, C_VAL) \
+[[max_total_threads_per_threadgroup(32)]] \
 kernel void NAME( \
         constant attn_v4_args & args      [[buffer(0)]], \
         device const float    * q          [[buffer(1)]], \
@@ -643,6 +644,7 @@ ATTN_V4_KERNEL_G(kernel_attn_decode_v4_c64_f32, 6, 64)
 ATTN_V4_KERNEL_G(kernel_attn_decode_v4_c128_f32, 6, 128)
 
 #define ATTN_V4_Q8_KERNEL(NAME, C_VAL) \
+[[max_total_threads_per_threadgroup(32)]] \
 kernel void NAME( \
         constant attn_v4_args & args      [[buffer(0)]], \
         device const float    * q          [[buffer(1)]], \
@@ -663,6 +665,7 @@ ATTN_V4_Q8_KERNEL(kernel_attn_decode_v4_q8_f32,     32)
 ATTN_V4_Q8_KERNEL(kernel_attn_decode_v4_q8_c64_f32, 64)
 ATTN_V4_Q8_KERNEL(kernel_attn_decode_v4_q8_c128_f32, 128)
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g8_c16_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -677,6 +680,7 @@ kernel void kernel_attn_decode_v4_g8_c16_f32(
     attn_v4_main_body<8, 16>(args, q, k_cache, v_cache, o_partial, ml_partial, sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g8_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -691,6 +695,7 @@ kernel void kernel_attn_decode_v4_g8_f32(
     attn_v4_main_body<8, 32>(args, q, k_cache, v_cache, o_partial, ml_partial, sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g8_c64_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -705,6 +710,7 @@ kernel void kernel_attn_decode_v4_g8_c64_f32(
     attn_v4_main_body<8, 64>(args, q, k_cache, v_cache, o_partial, ml_partial, sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g8_c128_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -719,6 +725,7 @@ kernel void kernel_attn_decode_v4_g8_c128_f32(
     attn_v4_main_body<8, 128>(args, q, k_cache, v_cache, o_partial, ml_partial, sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g16_c16_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -733,6 +740,7 @@ kernel void kernel_attn_decode_v4_g16_c16_f32(
     attn_v4_main_body<16, 16>(args, q, k_cache, v_cache, o_partial, ml_partial, sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g16_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -747,6 +755,7 @@ kernel void kernel_attn_decode_v4_g16_f32(
     attn_v4_main_body<16, 32>(args, q, k_cache, v_cache, o_partial, ml_partial, sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g16_c64_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -761,6 +770,7 @@ kernel void kernel_attn_decode_v4_g16_c64_f32(
     attn_v4_main_body<16, 64>(args, q, k_cache, v_cache, o_partial, ml_partial, sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_g16_c128_f32(
         constant attn_v4_args & args      [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -776,6 +786,7 @@ kernel void kernel_attn_decode_v4_g16_c128_f32(
 }
 
 #define ATTN_V4_G16_SUBGROUP_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
+[[max_total_threads_per_threadgroup(32)]] \
 kernel void NAME( \
         constant attn_v4_args & args      [[buffer(0)]], \
         device const float    * q          [[buffer(1)]], \
@@ -801,6 +812,7 @@ ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_c64_f32,   4, 64)
 ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_c128_f32,  4, 128)
 
 #define ATTN_V4_G8_SUBGROUP_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
+[[max_total_threads_per_threadgroup(32)]] \
 kernel void NAME( \
         constant attn_v4_args & args      [[buffer(0)]], \
         device const float    * q          [[buffer(1)]], \
@@ -1107,6 +1119,7 @@ inline void attn_v4_prefill_main_subgroup_c64_body(
     }
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_prefill_v4_g8_t2_q2_c64_f32(
         constant attn_v4_prefill_args & args [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -1122,6 +1135,7 @@ kernel void kernel_attn_prefill_v4_g8_t2_q2_c64_f32(
                                                     sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_prefill_v4_g8_t2_q4_c64_f32(
         constant attn_v4_prefill_args & args [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -1137,6 +1151,7 @@ kernel void kernel_attn_prefill_v4_g8_t2_q4_c64_f32(
                                                     sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_prefill_v4_g16_t4_q2_c64_f32(
         constant attn_v4_prefill_args & args [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -1152,6 +1167,7 @@ kernel void kernel_attn_prefill_v4_g16_t4_q2_c64_f32(
                                                      sq, ss, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_prefill_v4_g16_t4_q4_c64_f32(
         constant attn_v4_prefill_args & args [[buffer(0)]],
         device const float    * q          [[buffer(1)]],
@@ -1211,6 +1227,7 @@ kernel void kernel_attn_matrix_transpose_v_f16(
         v_cache[(ulong)pos * args.kv_stride + (ulong)kvh * args.head_dim + d];
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_attn_matrix_kq_f32(
         constant attn_matrix_args & args [[buffer(0)]],
         device const float * q       [[buffer(1)]],
@@ -1339,6 +1356,7 @@ kernel void kernel_attn_matrix_kq_f32(
     }
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_attn_matrix_kq_f32_full_tiles(
         constant attn_matrix_args & args [[buffer(0)]],
         device const float * q       [[buffer(1)]],
@@ -1434,6 +1452,7 @@ kernel void kernel_attn_matrix_kq_f32_full_tiles(
     }
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void kernel_attn_matrix_softmax_f32(
         constant attn_matrix_args & args [[buffer(0)]],
         device float * scores [[buffer(1)]],
@@ -1477,6 +1496,7 @@ kernel void kernel_attn_matrix_softmax_f32(
     }
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_attn_matrix_kqv_f32(
         constant attn_matrix_args & args [[buffer(0)]],
         device const float * probs [[buffer(1)]],
@@ -1599,6 +1619,7 @@ kernel void kernel_attn_matrix_kqv_f32(
     }
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_attn_matrix_kqv_f32_full_tiles(
         constant attn_matrix_args & args [[buffer(0)]],
         device const float * probs [[buffer(1)]],
@@ -1774,6 +1795,7 @@ inline void attn_v4_prefill_reduce_rows_body(
     }
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_prefill_v4_reduce_rows_g8_f32(
         constant attn_v4_prefill_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -1787,6 +1809,7 @@ kernel void kernel_attn_prefill_v4_reduce_rows_g8_f32(
     attn_v4_prefill_reduce_rows_body<8>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_prefill_v4_reduce_rows_g16_f32(
         constant attn_v4_prefill_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -1940,6 +1963,7 @@ inline void attn_v4_reduce_h2_body(
     *out4 = acc * inv_l;
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -1953,6 +1977,7 @@ kernel void kernel_attn_decode_v4_reduce_f32(
     attn_v4_reduce_body<6>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_g4_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -1966,6 +1991,7 @@ kernel void kernel_attn_decode_v4_reduce_g4_f32(
     attn_v4_reduce_body<4>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_g8_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -1979,6 +2005,7 @@ kernel void kernel_attn_decode_v4_reduce_g8_f32(
     attn_v4_reduce_body<8>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_g16_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -1992,6 +2019,7 @@ kernel void kernel_attn_decode_v4_reduce_g16_f32(
     attn_v4_reduce_body<16>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_h2_g4_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -2005,6 +2033,7 @@ kernel void kernel_attn_decode_v4_reduce_h2_g4_f32(
     attn_v4_reduce_h2_body<4>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_h2_g6_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -2018,6 +2047,7 @@ kernel void kernel_attn_decode_v4_reduce_h2_g6_f32(
     attn_v4_reduce_h2_body<6>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_h2_g8_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],
@@ -2031,6 +2061,7 @@ kernel void kernel_attn_decode_v4_reduce_h2_g8_f32(
     attn_v4_reduce_h2_body<8>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_attn_decode_v4_reduce_h2_g16_f32(
         constant attn_v4_reduce_args & args [[buffer(0)]],
         device const float * o_partial   [[buffer(1)]],

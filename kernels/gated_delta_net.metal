@@ -47,6 +47,7 @@ struct gdn_step_packed_args {
     uint n_k_heads;
 };
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_gdn_step_f32(
         constant gdn_step_args & args  [[buffer(0)]],
         device const float     * q     [[buffer(1)]], // [n_k_heads, head_dim]
@@ -128,6 +129,7 @@ kernel void kernel_gdn_step_f32(
     }
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_gdn_step_decay_f32(
         constant gdn_step_args & args    [[buffer(0)]],
         device const float     * q       [[buffer(1)]], // [n_k_heads, head_dim]
@@ -193,6 +195,7 @@ kernel void kernel_gdn_step_decay_f32(
     }
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_gdn_step_decay_packed_f32(
         constant gdn_step_packed_args & args [[buffer(0)]],
         device const float * q_pack   [[buffer(1)]], // [n_tokens, n_k_heads, head_dim]
@@ -276,6 +279,7 @@ kernel void kernel_gdn_step_decay_packed_f32(
     }
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_gdn_step_decay_packed_nsg4_f32(
         constant gdn_step_packed_args & args [[buffer(0)]],
         device const float * q_pack   [[buffer(1)]], // [n_tokens, n_k_heads, head_dim]

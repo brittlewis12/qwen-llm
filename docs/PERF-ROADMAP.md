@@ -1303,6 +1303,15 @@ because F16 loses the F32 E8xP32 route-logits specialization. Keep
 diagnostic harness, but demote router repack and do not widen to BF16. The
 highest-EV do-less item is now the fused online-softmax matrix attention body;
 decode glue remains a single bundled A/B only.
+v0.435 executes the cheap `max_total_threads_per_threadgroup` audit on fixed hot
+kernels (attn_v4 decode/packed/matrix entries plus GDN recurrence). It is
+correctness-clean and keeps warmed A3B `tg128`/`pp512` and 27B G6-matrix `pp512`
+inside the expected band, but it does not show a visible win. Keep the hints as
+fixed-dispatch contracts; do not rank this as a broad hidden lever. cx also
+pushes back on a softmax+KQV matrix bridge: with current KQV `head_dim/64`
+y-tiling, a bridge would either recompute probabilities per y-tile or sacrifice
+parallelism, so it is likely to teach the wrong lesson. Treat FA2-style matrix
+attention as a serious design/capture branch, not a quick intermediate.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

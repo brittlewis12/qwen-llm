@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.435 Hot Kernel Max Threadgroup Hints
+
+Status: added `[[max_total_threads_per_threadgroup(N)]]` to fixed-threadgroup
+hot kernels in `attn_v4` and GDN recurrence paths. This addresses the cheap
+compiler-hygiene audit item without changing algorithms or host dispatch shape.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0435-max-total-threads/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `attn_v4_matches_naive_f16kv`
+- `gdn_step_matches_cpu`
+- A3B ignored MoE prefill-vs-single gate
+- `cx ask` review, session `019f23fb-c5e2-7eb2-a45b-b5d2d732f8a4`
+
+Results: correctness is unchanged. Warmed spots show no regression but also no
+step-function win: A3B `tg128` `109.10 t/s`, A3B `pp512` `1527.64 t/s`, and 27B
+`pp512` with G6 matrix attention `239.77 t/s` with a noisy third sample. Treat
+the annotations as a safe fixed-dispatch contract and compiler hint, not a
+ranked perf branch.
+
+Decision: keep the hints, but demote `max_total_threads` as a hidden broad win.
+cx also killed the tempting fused softmax+KQV bridge over materialized scores:
+it would either recompute softmax weights per `head_dim/64` KQV tile or collapse
+current y-parallelism. FA2-style matrix attention remains live only as a serious
+design branch; the quick bridge is parked.
+
 ## 2026-07-02 - v0.434 MoE Router F16 Repack Falsifier
 
 Status: implemented `QWEN_MOE_ROUTER_F16=1` as an opt-in load-time repack for

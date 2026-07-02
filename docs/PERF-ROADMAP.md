@@ -1223,6 +1223,13 @@ S<=4 is not scheduler-worthy without a fixed-overhead reduction. Next replay wor
 should quantify validation overhead and exact fallback cost, then model a realistic
 ragged occupancy distribution. If that does not clear a durable `>5-8%` net gate,
 park replay and move to the next hardware-headroom branch.
+v0.429 codifies the conservative net model. At `3e-4`, S=8 `blocks=2` models at
+`~14.6-14.8%` net, S=6 `blocks=2` at `~10.4-11.1%`, and S=8 `blocks=4` at
+`~7.7-8.3%`; S=6 `blocks=4` is thin, S<=4 is negative, and `1e-3` erases the
+win. Replay therefore has one remaining high-EV gate: measure the actual
+validation/fallback path and a realistic ragged occupancy trace. If that mechanism
+gate does not preserve S>=6 `blocks=2` above `>5-8%` end-to-end, stop the replay
+scheduler branch and return to broader hardware-headroom items.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

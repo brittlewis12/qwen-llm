@@ -42,6 +42,31 @@ Process note: this gate was red for ~5 weeks because commit validation uses
 targeted test lists. Full-suite runs should happen at least at audit/refactor
 checkpoints; a standing guard is deferred as separate scope.
 
+## 2026-07-01 - v0.429 Replay Economics Model
+
+Status: added `scripts/profile/replay_economics.py` to combine measured replay
+gross savings with measured real-prompt fallback rates under cx's conservative
+post-replay fallback model.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0429-replay-economics-model/README.md`
+
+Validation:
+
+- `uv run scripts/profile/replay_economics.py` over v0.427/v0.428 artifacts
+
+Results: at the first plausible `3e-4` margin point, S=8 `blocks=2` GDN-only
+pairs model at `~14.6-14.8%` net savings, S=6 `blocks=2` at `~10.4-11.1%`, and
+S=8 `blocks=4` at `~7.7-8.3%`. S=6 `blocks=4` is thin (`~2.5-3.1%`), every
+S<=4 row is negative at `3e-4`, and `1e-3` erases all S=6 rows plus leaves S=8
+`blocks=2` around parity.
+
+Decision: replay remains worth one mechanism gate, but only in a narrow envelope:
+S>=6, margin threshold near `3e-4`, and preferably `blocks=2` GDN-only pairs. The
+next unknown is validation/fallback mechanism cost and realistic ragged occupancy,
+not more arithmetic modeling.
+
 ## 2026-07-01 - v0.428 Replay Occupancy Economics
 
 Status: measured A3B block-slice replay savings versus active slot count for

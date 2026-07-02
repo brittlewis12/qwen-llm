@@ -2648,9 +2648,27 @@ pub struct MetalDFlashLayerMajorScratch {
     /// `[N]` F32 — packed shared expert gate per token.
     pub moe_shared_gate_pack: MetalTensor,
     /// `[N * topk, F_exp]` F32 — packed routed expert inner activations.
+    ///
+    /// v0.431: only the packed-slot FALLBACK branches (exotic quant
+    /// combinations, `QWEN_PREFILL_MOE_HOT_*` / packed-down-sum env
+    /// overrides) read this; the default grouped path uses
+    /// `moe_group_inner_pack`. Production prefill (`fresh_prefill*`)
+    /// therefore allocates a 1-element stub and lazily grows it via
+    /// [`Self::ensure_moe_packed_fallback`] the first time a fallback
+    /// branch runs — saving ~17 MB (A3B) / ~34 MB (A10B) resident per
+    /// scratch. Test/spec constructors (`fresh`) keep the full
+    /// allocation so direct field access in tests stays valid.
     pub moe_inner_pack: MetalTensor,
-    /// `[N * topk, H]` F32 — packed routed expert outputs before tokenwise reduction.
+    /// `[N * topk, H]` F32 — packed routed expert outputs before tokenwise
+    /// reduction. Same fallback-only story as `moe_inner_pack`: production
+    /// prefill stubs it (~67 MB A3B / ~128 MB A10B saved) and lazily grows
+    /// on first fallback use.
     pub moe_expert_out_pack: MetalTensor,
+    /// Full sizes for the two fallback packs above, kept so
+    /// `ensure_moe_packed_fallback` can grow stubs without re-deriving
+    /// arch math.
+    moe_inner_full_elems: u64,
+    moe_out_full_elems: u64,
     /// `[N * topk]` i32-in-F32 buffer — grouped routed slot ids.
     pub moe_group_slot_idx_pack: MetalTensor,
     /// `[n_expert]` i32-in-F32 buffer — grouped routed slot counts per expert.
@@ -2756,7 +2774,14 @@ impl MetalDFlashLayerMajorScratch {
         ctx: &MetalContext,
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
-        include_final_logits_pack: bool,
+        // True for spec-decode/test scratch (`fresh`): allocate the full
+        // `[N, V]` logits pack AND the packed-slot MoE fallback packs
+        // eagerly (tests poke the fields directly). False for production
+        // prompt prefill (`fresh_prefill*`): logits pack is a stub (the
+        // tail uses per-token mat-vec) and the MoE fallback packs start
+        // as stubs, lazily grown by `ensure_moe_packed_fallback` only if
+        // a fallback branch actually runs.
+        include_spec_packs: bool,
         attn_matrix_max_pos_override: Option<usize>,
     ) -> Result<Self, MetalError> {
         let arch = &target_model.arch;
@@ -2912,8 +2937,22 @@ impl MetalDFlashLayerMajorScratch {
             gdn_head_dim.max(1),
             "layer-major gdn_k_dim overflow",
         )?;
-        let final_logits_shape = if include_final_logits_pack {
+        let final_logits_shape = if include_spec_packs {
             vec![n, v]
+        } else {
+            vec![1]
+        };
+        // v0.431: packed-slot MoE fallback packs are stubbed on the
+        // production prefill path (grouped default never touches them)
+        // and lazily grown on first fallback use. ~84 MB (A3B) /
+        // ~160 MB (A10B) resident savings per prefill scratch.
+        let moe_inner_shape = if include_spec_packs {
+            vec![moe_inner_elems]
+        } else {
+            vec![1]
+        };
+        let moe_out_shape = if include_spec_packs {
+            vec![moe_out_elems]
         } else {
             vec![1]
         };
@@ -2967,8 +3006,10 @@ impl MetalDFlashLayerMajorScratch {
             )?,
             moe_topk_weight_pack: MetalTensor::zeros_f32(ctx, vec![moe_slot_elems])?,
             moe_shared_gate_pack: MetalTensor::zeros_f32(ctx, vec![n])?,
-            moe_inner_pack: MetalTensor::zeros_f32(ctx, vec![moe_inner_elems])?,
-            moe_expert_out_pack: MetalTensor::zeros_f32(ctx, vec![moe_out_elems])?,
+            moe_inner_pack: MetalTensor::zeros_f32(ctx, moe_inner_shape)?,
+            moe_expert_out_pack: MetalTensor::zeros_f32(ctx, moe_out_shape)?,
+            moe_inner_full_elems: moe_inner_elems,
+            moe_out_full_elems: moe_out_elems,
             moe_group_slot_idx_pack: MetalTensor::zeros_f32(ctx, vec![moe_slot_elems])?,
             moe_group_count_pack: MetalTensor::zeros_f32(
                 ctx,
@@ -3029,6 +3070,21 @@ impl MetalDFlashLayerMajorScratch {
         matrix_max_pos: usize,
     ) -> Result<Self, MetalError> {
         Self::fresh_inner(ctx, target_model, block_size, false, Some(matrix_max_pos))
+    }
+
+    /// Grow the packed-slot MoE fallback packs to full size if this scratch
+    /// was built by a `fresh_prefill*` constructor (which stubs them; see
+    /// `fresh_inner`). Called at the top of every packed-slot fallback
+    /// branch in the prefill MoE tail. Idempotent; the dropped stub was
+    /// never encoded into any command buffer, so replacing it is safe.
+    pub fn ensure_moe_packed_fallback(&mut self, ctx: &MetalContext) -> Result<(), MetalError> {
+        if self.moe_inner_pack.n_elements() < self.moe_inner_full_elems {
+            self.moe_inner_pack = MetalTensor::zeros_f32(ctx, vec![self.moe_inner_full_elems])?;
+        }
+        if self.moe_expert_out_pack.n_elements() < self.moe_out_full_elems {
+            self.moe_expert_out_pack = MetalTensor::zeros_f32(ctx, vec![self.moe_out_full_elems])?;
+        }
+        Ok(())
     }
 
     /// Zero-copy view of row n of `x_pack` ([H] elements).
@@ -7274,15 +7330,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     let moe_shared_gate_pack_p = layer_scratch
                         .moe_shared_gate_pack
                         .view_subrange(0, vec![chunk_p as u64]);
-                    let moe_inner_pack_p = layer_scratch
-                        .moe_inner_pack
-                        .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
+                    // v0.431: moe_inner_pack / moe_expert_out_pack views are
+                    // built lazily inside the packed-slot fallback branches
+                    // below (production prefill stubs those packs; the
+                    // grouped default never reads them).
                     let moe_mixer_out_pack_p = layer_scratch
                         .mixer_out_pack
                         .view_subrange(0, vec![(chunk_p * h) as u64]);
-                    let moe_expert_out_pack_p = layer_scratch
-                        .moe_expert_out_pack
-                        .view_subrange(0, vec![(chunk_p * topk * h) as u64]);
                     let moe_group_slot_idx_pack_p = layer_scratch
                         .moe_group_slot_idx_pack
                         .view_subrange(0, vec![(chunk_p * topk) as u64]);
@@ -8037,6 +8091,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             );
                         }
                     } else if let Some(hot_threshold) = hot_expert_min_slots {
+                        layer_scratch.ensure_moe_packed_fallback(base.ctx)?;
+                        let moe_inner_pack_p = layer_scratch
+                            .moe_inner_pack
+                            .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-cpu-hot");
                         encode_moe_swiglu_q4_K_f32_packed_slots(
@@ -8164,6 +8222,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             "routed_cpu_hot_down",
                         );
                     } else if prefill_moe_packed_down_sum_enabled() {
+                        layer_scratch.ensure_moe_packed_fallback(base.ctx)?;
+                        let moe_inner_pack_p = layer_scratch
+                            .moe_inner_pack
+                            .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-packed-down-sum");
                         encode_moe_swiglu_q4_K_f32_packed_slots(
@@ -8207,6 +8269,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             "routed_packed_down_sum",
                         );
                     } else {
+                        layer_scratch.ensure_moe_packed_fallback(base.ctx)?;
+                        let moe_inner_pack_p = layer_scratch
+                            .moe_inner_pack
+                            .view_subrange(0, vec![(chunk_p * topk * f_exp) as u64]);
+                        let moe_expert_out_pack_p = layer_scratch
+                            .moe_expert_out_pack
+                            .view_subrange(0, vec![(chunk_p * topk * h) as u64]);
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-token-loop");
                         encode_moe_swiglu_q4_K_f32_packed_slots(

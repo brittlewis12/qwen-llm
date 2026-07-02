@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.431 Stub Packed-Slot MoE Fallback Packs
+
+Status: default memory checkpoint. `moe_inner_pack` / `moe_expert_out_pack`
+are only read by the packed-slot fallback branches (exotic quant combos or
+`QWEN_PREFILL_MOE_HOT_*` / packed-down-sum overrides); the default grouped
+path uses the separate `moe_group_*` packs. Production prefill scratch
+(`fresh_prefill*`) now allocates 1-element stubs and lazily grows them via
+`ensure_moe_packed_fallback` the first time a fallback branch runs, saving
+~84 MB (A3B) / ~160 MB (A10B) resident per prefill scratch. Test/spec
+constructors (`fresh`) keep full allocation so direct field access in tests
+stays valid; the `include_final_logits_pack` flag was renamed
+`include_spec_packs` to match its real meaning.
+
+Validation:
+
+- `QWEN_PREFILL_MOE_GROUPED=0` A3B `pp256` exercises the lazy grow through
+  the cpu-hot fallback branch (575.03 t/s, no panic)
+- A3B + 0.8B prefill-vs-single gates green on the grouped default
+- full suite green (see v0.432)
+
 ## 2026-07-02 - v0.430 Generalize Matrix Attention Causal Skip
 
 Status: default checkpoint from the do-less implementation audit. The

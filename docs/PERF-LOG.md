@@ -42,6 +42,33 @@ Process note: this gate was red for ~5 weeks because commit validation uses
 targeted test lists. Full-suite runs should happen at least at audit/refactor
 checkpoints; a standing guard is deferred as separate scope.
 
+## 2026-07-01 - v0.428 Replay Occupancy Economics
+
+Status: measured A3B block-slice replay savings versus active slot count for
+`blocks=4` and `blocks=2` windows at `position=4096`.
+
+Artifact:
+
+- `docs/bench/2026-07-01-v0428-replay-occupancy-economics/README.md`
+
+Validation:
+
+- A3B synthetic block-slice replay occupancy sweeps at `S=1,2,3,4,6,8`
+- Built-in S=8 correctness checks from `decode-block-slice-replay`
+
+Results: replay is strongly occupancy-sensitive. `blocks=4` windows (`3` GDN +
+`1` attention block) lose at S=1/2/3, barely win at S=4 (`+2.5-3.8%`), and win
+materially at S=6/8 (`+11.0-11.6%` / `+16.2-16.8%`). `blocks=2` GDN-only pairs
+also lose at S=1/2/3, barely win at S=4 (`+0.4-1.4%`), and win more at S=6/8
+(`+18.9-19.6%` / `+23.1-23.3%`).
+
+Decision: replay should not run below roughly 6 active slots unless fixed
+overhead falls. Combining v0.427 fallback rates with cx's conservative
+post-replay fallback model makes `3e-4` the first plausible margin point: S=8
+`blocks=4` nets roughly `~8%`; S=8 `blocks=2` nets roughly `~15%`. `1e-3`
+likely burns the win. `blocks=2` is now worth reconsidering because it improves
+both measured economics and prior synthetic stability.
+
 ## 2026-07-01 - v0.427 Mixed-Prompt Replay Margins
 
 Status: expanded the real-prompt replay-margin packet beyond narrative markdown

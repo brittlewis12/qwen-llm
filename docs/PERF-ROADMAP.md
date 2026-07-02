@@ -1213,6 +1213,16 @@ fallback cost, and ragged slot occupancy before building any production
 scheduler. A first plausible threshold to model is `3e-4`; `1e-4` is too close to
 known failure margins, while `1e-3` probably burns the win unless fallback can
 abort before most replay work.
+v0.428 adds that first occupancy-economics gate. Replay is a high-occupancy tool,
+not a general slot filler: `blocks=4` loses at S=1/2/3, barely wins at S=4, and
+only becomes material at S=6/8 (`~11-17%` gross). `blocks=2` GDN-only pairs show
+the same low-occupancy loss but better S=6/8 gross savings (`~19-23%`) and were
+already safer in the v0.420 synthetic margin sweep. Treat S>=6 plus a `3e-4`
+margin guard as the first policy point to model; `1e-3` likely erases the win and
+S<=4 is not scheduler-worthy without a fixed-overhead reduction. Next replay work
+should quantify validation overhead and exact fallback cost, then model a realistic
+ragged occupancy distribution. If that does not clear a durable `>5-8%` net gate,
+park replay and move to the next hardware-headroom branch.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

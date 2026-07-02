@@ -12594,6 +12594,240 @@ pub fn encode_attn_matrix_softmax_f32(
     Ok(())
 }
 
+/// Number of F32 elements required for the per-(query, 64-pos-tile) (m, l)
+/// sidecar consumed by the two-pass online matrix attention kernels.
+pub fn attn_matrix_ml_elems(n_rows: usize, n_q_heads: usize, n_pos: usize) -> usize {
+    n_rows * n_q_heads * n_pos.div_ceil(64) * 2
+}
+
+/// KQ with fused online softmax (`kernel_attn_matrix_kq_online_f32` in
+/// kernels/attn_matrix_online.metal): same GEMM as [`encode_attn_matrix_kq_f32`]
+/// but the epilogue applies scale + causal mask and stores
+/// `P~ = exp2(s*scale - m_tile)` as F16 plus a per-(query, tile) (m, l)
+/// sidecar. Replaces the separate softmax dispatch; pair with
+/// [`encode_attn_matrix_kqv_norm_f32`].
+#[allow(clippy::too_many_arguments)]
+pub fn encode_attn_matrix_kq_online_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_rows: &MetalTensor,
+    k_cache: &MetalTensor,
+    scores_h: &MetalTensor,
+    ml: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+    kv_stride: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group: usize,
+    head_dim: usize,
+    causal_skip: bool,
+) -> Result<(), MetalError> {
+    validate_attn_matrix_common(
+        "attn_matrix_kq_online",
+        n_rows,
+        n_pos,
+        base_pos,
+        n_q_heads,
+        n_kv_heads,
+        group,
+        head_dim,
+    )?;
+    if q_rows.dtype != GgmlType::F32
+        || scores_h.dtype != GgmlType::F16
+        || ml.dtype != GgmlType::F32
+        || k_cache.dtype != GgmlType::F16
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kq_online",
+            detail: format!(
+                "expected q F32, scores F16, ml F32, k F16; got {:?}/{:?}/{:?}/{:?}",
+                q_rows.dtype, scores_h.dtype, ml.dtype, k_cache.dtype
+            ),
+        });
+    }
+    let want_q = n_rows * n_q_heads * head_dim;
+    let want_scores = n_kv_heads * n_rows * group * n_pos;
+    let want_ml = attn_matrix_ml_elems(n_rows, n_q_heads, n_pos);
+    if q_rows.n_elements() != want_q as u64
+        || scores_h.n_elements() < want_scores as u64
+        || ml.n_elements() < want_ml as u64
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kq_online",
+            detail: format!(
+                "bad sizes: q have {} need {want_q}, scores have {} need >= {want_scores}, ml have {} need >= {want_ml}",
+                q_rows.n_elements(),
+                scores_h.n_elements(),
+                ml.n_elements()
+            ),
+        });
+    }
+    let scale = (1.0f32 / (head_dim as f32).sqrt()) * std::f32::consts::LOG2_E;
+    let full_tiles = n_pos % 64 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let kernel = if full_tiles {
+        "kernel_attn_matrix_kq_online_f32_full_tiles"
+    } else {
+        "kernel_attn_matrix_kq_online_f32"
+    };
+    let pso = ctx.pipeline(kernel)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &AttnMatrixArgs {
+            n_rows: n_rows as u32,
+            n_pos: n_pos as u32,
+            base_pos: base_pos as u32,
+            kv_stride: kv_stride as u32,
+            vt_stride: 0,
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            group: group as u32,
+            head_dim: head_dim as u32,
+            scale,
+            causal_skip: causal_skip as u32,
+        },
+    );
+    enc.set_tensor(1, q_rows);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, scores_h);
+    enc.set_tensor(4, ml);
+    // AMO_KQ_TG_BYTES in kernels/attn_matrix_online.metal.
+    enc.set_threadgroup_memory(0, 9728);
+    enc.dispatch(
+        MTLSize {
+            width: (n_rows * group).div_ceil(32),
+            height: n_pos.div_ceil(64),
+            depth: n_kv_heads,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// KQV with fused normalization (`kernel_attn_matrix_kqv_norm_f32` in
+/// kernels/attn_matrix_online.metal): same GEMM as
+/// [`encode_attn_matrix_kqv_f32`] but reads the F16 `P~` produced by
+/// [`encode_attn_matrix_kq_online_f32`], rescales it by
+/// `exp2(m_tile - m_glob)` during staging, and divides by the global `l` in
+/// the epilogue.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_attn_matrix_kqv_norm_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    probs_h: &MetalTensor,
+    ml: &MetalTensor,
+    v_t: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+    vt_stride: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group: usize,
+    head_dim: usize,
+    causal_skip: bool,
+) -> Result<(), MetalError> {
+    validate_attn_matrix_common(
+        "attn_matrix_kqv_norm",
+        n_rows,
+        n_pos,
+        base_pos,
+        n_q_heads,
+        n_kv_heads,
+        group,
+        head_dim,
+    )?;
+    if vt_stride < n_pos {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kqv_norm",
+            detail: format!("vt_stride={vt_stride} < n_pos={n_pos}"),
+        });
+    }
+    let want_probs = n_rows * n_q_heads * n_pos;
+    let want_ml = attn_matrix_ml_elems(n_rows, n_q_heads, n_pos);
+    let want_vt = n_kv_heads * head_dim * vt_stride;
+    let want_out = n_rows * n_q_heads * head_dim;
+    if probs_h.dtype != GgmlType::F16
+        || ml.dtype != GgmlType::F32
+        || out.dtype != GgmlType::F32
+        || v_t.dtype != GgmlType::F16
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kqv_norm",
+            detail: format!(
+                "expected probs F16, ml F32, out F32, v_t F16; got {:?}/{:?}/{:?}/{:?}",
+                probs_h.dtype, ml.dtype, out.dtype, v_t.dtype
+            ),
+        });
+    }
+    if probs_h.n_elements() < want_probs as u64
+        || ml.n_elements() < want_ml as u64
+        || v_t.n_elements() < want_vt as u64
+        || out.n_elements() != want_out as u64
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kqv_norm",
+            detail: format!(
+                "bad sizes: probs {} need >= {want_probs}, ml {} need >= {want_ml}, v_t {} need >= {want_vt}, out {} need {want_out}",
+                probs_h.n_elements(),
+                ml.n_elements(),
+                v_t.n_elements(),
+                out.n_elements()
+            ),
+        });
+    }
+    let full_tiles = n_pos % 32 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let kernel = if full_tiles {
+        "kernel_attn_matrix_kqv_norm_f32_full_tiles"
+    } else {
+        "kernel_attn_matrix_kqv_norm_f32"
+    };
+    let pso = ctx.pipeline(kernel)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &AttnMatrixArgs {
+            n_rows: n_rows as u32,
+            n_pos: n_pos as u32,
+            base_pos: base_pos as u32,
+            kv_stride: 0,
+            vt_stride: vt_stride as u32,
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            group: group as u32,
+            head_dim: head_dim as u32,
+            scale: 0.0,
+            causal_skip: causal_skip as u32,
+        },
+    );
+    enc.set_tensor(1, probs_h);
+    enc.set_tensor(2, ml);
+    enc.set_tensor(3, v_t);
+    enc.set_tensor(4, out);
+    // AMO_KQV_TG_BYTES in kernels/attn_matrix_online.metal.
+    enc.set_threadgroup_memory(0, 8320);
+    enc.dispatch(
+        MTLSize {
+            width: (n_rows * group).div_ceil(32),
+            height: head_dim.div_ceil(64),
+            depth: n_kv_heads,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_attn_matrix_kqv_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -21647,6 +21881,507 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// CPU f64 reference for the matrix-attention sidecar semantics: causal
+    /// multi-row attention over an F16 KV prefix with per-row visibility
+    /// `base_pos + row + 1`, softmax of `q·k / sqrt(head_dim)`.
+    ///
+    /// Inputs must already be f16-representable (pre-rounded) so the GPU's
+    /// half demotion inside the GEMMs is exact and tolerances measure reduction
+    /// order + the probs half demotion, not input rounding.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_matrix_attn_reference(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_rows: usize,
+        base_pos: usize,
+        n_pos: usize,
+        n_q: usize,
+        n_kv: usize,
+        group: usize,
+        hd: usize,
+    ) -> Vec<f32> {
+        let kv_dim = n_kv * hd;
+        let scale = 1.0f64 / (hd as f64).sqrt();
+        let mut out = vec![0f32; n_rows * n_q * hd];
+        for kvh in 0..n_kv {
+            for row in 0..n_rows {
+                for g in 0..group {
+                    let qh = kvh * group + g;
+                    let visible = (base_pos + row + 1).min(n_pos);
+                    let qv = &q[(row * n_q + qh) * hd..][..hd];
+                    let mut s = vec![0f64; visible];
+                    for (p, sp) in s.iter_mut().enumerate() {
+                        let kb = &k[p * kv_dim + kvh * hd..][..hd];
+                        *sp = qv
+                            .iter()
+                            .zip(kb)
+                            .map(|(a, b)| (*a as f64) * (*b as f64))
+                            .sum::<f64>()
+                            * scale;
+                    }
+                    let m = s.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    let mut probs: Vec<f64> = s.iter().map(|&x| (x - m).exp()).collect();
+                    let sum: f64 = probs.iter().sum();
+                    let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+                    let mut acc = vec![0f64; hd];
+                    for (p, pr) in probs.iter_mut().enumerate() {
+                        let w = *pr * inv;
+                        let vb = &v[p * kv_dim + kvh * hd..][..hd];
+                        for (a, x) in acc.iter_mut().zip(vb) {
+                            *a += w * (*x as f64);
+                        }
+                    }
+                    let ob = &mut out[(row * n_q + qh) * hd..][..hd];
+                    for (o, a) in ob.iter_mut().zip(&acc) {
+                        *o = *a as f32;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Micro-oracle for the non-flash matrix-attention sidecar
+    /// (`kernel_attn_matrix_{transpose_v,kq,softmax,kqv}_f32`): the packed
+    /// prefill attention body. Previously this path had only end-to-end
+    /// coverage (27B G6 prefix gate + runtime packed oracle); this gate pins
+    /// the kernels in isolation against a CPU f64 reference across all four
+    /// production group shapes, full/edge tile geometries, and mid-sequence
+    /// `base_pos > 0` chunks (including the tiny-chunk/long-prefix shape).
+    ///
+    /// Also asserts `causal_skip` on/off produce bitwise-identical output:
+    /// skipped KQ tiles are exactly the rows the softmax zero-masks, and
+    /// skipped KQV K-tiles multiply exact-zero probs.
+    #[test]
+    fn attn_matrix_path_matches_cpu_reference() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let hd = 256usize;
+        // (n_q, n_kv): G4 small dense, G6 27B, G8 A3B, G16 A10B.
+        let shapes: &[(usize, usize)] = &[(8, 2), (24, 4), (16, 2), (32, 2)];
+        // (n_rows, base_pos); n_pos = base_pos + n_rows as in production
+        // (chunk attends to the whole prefix incl. itself).
+        //  - (32, 0): first chunk, n_pos < 64 → KQ edge tiles
+        //  - (64, 0): full 64-pos KQ tile; N edge depends on group
+        //  - (17, 47): odd everything (M/N edge tiles, base_pos > 0)
+        //  - (128, 896): full tiles, mid-sequence, n_pos = 1024
+        //  - (8, 1016): tiny chunk over long prefix (prefix-gate shape)
+        //  - (100, 156): n_pos = 256; N edge for G6/G4, full N for G8/G16
+        let cases: &[(usize, usize)] = &[
+            (32, 0),
+            (64, 0),
+            (17, 47),
+            (128, 896),
+            (8, 1016),
+            (100, 156),
+        ];
+
+        for &(n_q, n_kv) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            for &(n_rows, base_pos) in cases {
+                let n_pos = base_pos + n_rows;
+                let round16 = |x: f32| half::f16::from_f32(x).to_f32();
+                let q: Vec<f32> = (0..n_rows * n_q * hd)
+                    .map(|i| round16(((i % 31) as f32 - 15.0) * 1e-2 + ((i % 7) as f32) * 3e-3))
+                    .collect();
+                let k_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| round16(((i % 23) as f32 - 11.0) * 1.5e-2))
+                    .collect();
+                let v_f32: Vec<f32> = (0..n_pos * kv_dim)
+                    .map(|i| round16(((i % 17) as f32 - 8.0) * 2e-2))
+                    .collect();
+
+                let q_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q),
+                    vec![(n_rows * n_q * hd) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+                let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+                for (src_f32, dst) in [(&k_f32, &k_cache), (&v_f32, &v_cache)] {
+                    let src_t = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(src_f32.as_slice()),
+                        vec![src_f32.len() as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    one_shot(&ctx, |enc| {
+                        encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, src_f32.len())
+                    })
+                    .unwrap();
+                }
+                let vt_stride = n_pos;
+                let v_t =
+                    MetalTensor::zeros_f16(&ctx, vec![(n_kv * hd * vt_stride) as u64]).unwrap();
+                let scores =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64])
+                        .unwrap();
+                let out_t = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+
+                let run_path = |causal_skip: bool| -> Vec<f32> {
+                    one_shot(&ctx, |enc| {
+                        encode_attn_matrix_transpose_v_f16(
+                            &ctx, enc, &v_cache, &v_t, 0, n_pos, n_pos, kv_dim, vt_stride, n_kv, hd,
+                        )?;
+                        encode_attn_matrix_kq_f32(
+                            &ctx,
+                            enc,
+                            &q_t,
+                            &k_cache,
+                            &scores,
+                            n_rows,
+                            base_pos,
+                            n_pos,
+                            kv_dim,
+                            n_q,
+                            n_kv,
+                            group,
+                            hd,
+                            causal_skip,
+                        )?;
+                        encode_attn_matrix_softmax_f32(
+                            &ctx, enc, &scores, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                        )?;
+                        encode_attn_matrix_kqv_f32(
+                            &ctx,
+                            enc,
+                            &scores,
+                            &v_t,
+                            &out_t,
+                            n_rows,
+                            base_pos,
+                            n_pos,
+                            vt_stride,
+                            n_q,
+                            n_kv,
+                            group,
+                            hd,
+                            causal_skip,
+                        )
+                    })
+                    .unwrap();
+                    read_back_f32(&out_t.buffer, n_rows * n_q * hd)
+                };
+
+                let y_gpu = run_path(true);
+                let y_ref = cpu_matrix_attn_reference(
+                    &q, &k_f32, &v_f32, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                );
+
+                let max_abs = y_gpu
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                let dot: f64 = y_gpu
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (*a as f64) * (*b as f64))
+                    .sum();
+                let na: f64 = y_gpu
+                    .iter()
+                    .map(|x| (*x as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let nb: f64 = y_ref
+                    .iter()
+                    .map(|x| (*x as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let cos = dot / (na * nb);
+                eprintln!(
+                    "[matrix group={group:>2} n_rows={n_rows:>4} base={base_pos:>4} n_pos={n_pos:>4}] max|Δ|={max_abs:.2e}  cos={cos:.7}"
+                );
+                assert!(
+                    cos > 0.9999,
+                    "matrix path vs CPU ref cos too low (group={group} n_rows={n_rows} base={base_pos}): {cos}"
+                );
+                assert!(
+                    max_abs < 5e-3,
+                    "matrix path vs CPU ref max|Δ| too high (group={group} n_rows={n_rows} base={base_pos}): {max_abs}"
+                );
+
+                // causal_skip must be a pure perf feature: bitwise-identical out.
+                if matches!((n_rows, base_pos), (64, 0) | (8, 1016)) {
+                    let y_noskip = run_path(false);
+                    assert!(
+                        y_gpu == y_noskip,
+                        "causal_skip changed matrix attention output (group={group} n_rows={n_rows} base={base_pos})"
+                    );
+                }
+
+                // Two-pass online kernels: KQ folds the softmax into its
+                // epilogue (F16 P~ + (m,l) sidecar), KQV normalizes during
+                // staging. Must sit in the same envelope vs the CPU reference
+                // (the P~ half demotion mirrors the sidecar's half probs).
+                let scores_h_t =
+                    MetalTensor::zeros_f16(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64])
+                        .unwrap();
+                let ml_t = MetalTensor::zeros_f32(
+                    &ctx,
+                    vec![attn_matrix_ml_elems(n_rows, n_q, n_pos) as u64],
+                )
+                .unwrap();
+                let fused_t =
+                    MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_attn_matrix_kq_online_f32(
+                        &ctx,
+                        enc,
+                        &q_t,
+                        &k_cache,
+                        &scores_h_t,
+                        &ml_t,
+                        n_rows,
+                        base_pos,
+                        n_pos,
+                        kv_dim,
+                        n_q,
+                        n_kv,
+                        group,
+                        hd,
+                        true,
+                    )?;
+                    encode_attn_matrix_kqv_norm_f32(
+                        &ctx,
+                        enc,
+                        &scores_h_t,
+                        &ml_t,
+                        &v_t,
+                        &fused_t,
+                        n_rows,
+                        base_pos,
+                        n_pos,
+                        vt_stride,
+                        n_q,
+                        n_kv,
+                        group,
+                        hd,
+                        true,
+                    )
+                })
+                .unwrap();
+                let y_fused = read_back_f32(&fused_t.buffer, n_rows * n_q * hd);
+                let fmax_abs = y_fused
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                let fdot: f64 = y_fused
+                    .iter()
+                    .zip(y_ref.iter())
+                    .map(|(a, b)| (*a as f64) * (*b as f64))
+                    .sum();
+                let fna: f64 = y_fused
+                    .iter()
+                    .map(|x| (*x as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let fcos = fdot / (fna * nb);
+                let gpu_max_abs = y_fused
+                    .iter()
+                    .zip(y_gpu.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                eprintln!(
+                    "[online group={group:>2} n_rows={n_rows:>4} base={base_pos:>4} n_pos={n_pos:>4}] max|Δ|={fmax_abs:.2e}  cos={fcos:.7}  vs3k|Δ|={gpu_max_abs:.2e}"
+                );
+                assert!(
+                    fcos > 0.9999,
+                    "online matrix attn vs CPU ref cos too low (group={group} n_rows={n_rows} base={base_pos}): {fcos}"
+                );
+                assert!(
+                    fmax_abs < 5e-3,
+                    "online matrix attn vs CPU ref max|Δ| too high (group={group} n_rows={n_rows} base={base_pos}): {fmax_abs}"
+                );
+                assert!(
+                    gpu_max_abs < 5e-3,
+                    "online vs 3-kernel matrix attn diverged (group={group} n_rows={n_rows} base={base_pos}): {gpu_max_abs}"
+                );
+            }
+        }
+    }
+
+    /// Kill-gate microbench for the two-pass online-softmax matrix attention
+    /// kernels vs the three-kernel sidecar (KQ + softmax + KQV) at production
+    /// chunk shapes. The promotion bar is >= 1.2x on the summed sidecar time.
+    /// Vᵀ transpose/maintenance is excluded from both sides: both variants
+    /// consume the same Vᵀ sidecar, so its upkeep cancels.
+    ///
+    /// `cargo test -p qwen-llm --release attn_matrix_online_vs_sidecar_microbench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn attn_matrix_online_vs_sidecar_microbench() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let hd = 256usize;
+
+        fn timed_gpu<F>(ctx: &MetalContext, iters: usize, encode: F) -> f64
+        where
+            F: Fn(&KernelEncoder) -> Result<(), MetalError>,
+        {
+            let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&cmd_buf);
+            for _ in 0..iters {
+                encode(&enc).unwrap();
+            }
+            enc.end();
+            let t0 = std::time::Instant::now();
+            cmd_buf.commit();
+            cmd_buf.waitUntilCompleted();
+            t0.elapsed().as_secs_f64() / iters as f64
+        }
+
+        // (n_q, n_kv, n_rows, n_pos, label)
+        let shapes: &[(usize, usize, usize, usize, &str)] = &[
+            (16, 2, 1024, 4096, "G8/A3B chunk@pp4096"),
+            (16, 2, 1024, 16384, "G8/A3B chunk@pp16384"),
+            (24, 4, 1024, 4096, "G6/27B chunk@pp4096"),
+            (24, 4, 1024, 16384, "G6/27B chunk@pp16384"),
+            (32, 2, 1024, 1024, "G16/A10B chunk@pp1024"),
+            (32, 2, 1024, 4096, "G16/A10B chunk@pp4096"),
+        ];
+
+        for &(n_q, n_kv, n_rows, n_pos, label) in shapes {
+            let group = n_q / n_kv;
+            let kv_dim = n_kv * hd;
+            let base_pos = n_pos - n_rows;
+
+            let q: Vec<f32> = (0..n_rows * n_q * hd)
+                .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+                .collect();
+            let kv_f32: Vec<f32> = (0..n_pos * kv_dim)
+                .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+                .collect();
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q),
+                vec![(n_rows * n_q * hd) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            let v_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64]).unwrap();
+            for dst in [&k_cache, &v_cache] {
+                let src_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(kv_f32.as_slice()),
+                    vec![kv_f32.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_scatter_offset_f32_to_f16(&ctx, enc, &src_t, dst, 0, kv_f32.len())
+                })
+                .unwrap();
+            }
+            let vt_stride = n_pos;
+            let v_t = MetalTensor::zeros_f16(&ctx, vec![(n_kv * hd * vt_stride) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_attn_matrix_transpose_v_f16(
+                    &ctx, enc, &v_cache, &v_t, 0, n_pos, n_pos, kv_dim, vt_stride, n_kv, hd,
+                )
+            })
+            .unwrap();
+            let scores =
+                MetalTensor::zeros_f32(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64]).unwrap();
+            let scores_h =
+                MetalTensor::zeros_f16(&ctx, vec![(n_kv * n_rows * group * n_pos) as u64]).unwrap();
+            let ml =
+                MetalTensor::zeros_f32(&ctx, vec![attn_matrix_ml_elems(n_rows, n_q, n_pos) as u64])
+                    .unwrap();
+            let out_3k = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+            let out_fused = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+
+            let encode_3k = |enc: &KernelEncoder| -> Result<(), MetalError> {
+                encode_attn_matrix_kq_f32(
+                    &ctx, enc, &q_t, &k_cache, &scores, n_rows, base_pos, n_pos, kv_dim, n_q, n_kv,
+                    group, hd, true,
+                )?;
+                encode_attn_matrix_softmax_f32(
+                    &ctx, enc, &scores, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                )?;
+                encode_attn_matrix_kqv_f32(
+                    &ctx, enc, &scores, &v_t, &out_3k, n_rows, base_pos, n_pos, vt_stride, n_q,
+                    n_kv, group, hd, true,
+                )
+            };
+            let encode_fused = |enc: &KernelEncoder| -> Result<(), MetalError> {
+                encode_attn_matrix_kq_online_f32(
+                    &ctx, enc, &q_t, &k_cache, &scores_h, &ml, n_rows, base_pos, n_pos, kv_dim,
+                    n_q, n_kv, group, hd, true,
+                )?;
+                encode_attn_matrix_kqv_norm_f32(
+                    &ctx, enc, &scores_h, &ml, &v_t, &out_fused, n_rows, base_pos, n_pos,
+                    vt_stride, n_q, n_kv, group, hd, true,
+                )
+            };
+
+            // Warmup + correctness spot at production size.
+            one_shot(&ctx, |enc| encode_3k(enc)).unwrap();
+            one_shot(&ctx, |enc| encode_fused(enc)).unwrap();
+            let y3k = read_back_f32(&out_3k.buffer, n_rows * n_q * hd);
+            let yfused = read_back_f32(&out_fused.buffer, n_rows * n_q * hd);
+            let max_abs = y3k
+                .iter()
+                .zip(yfused.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs < 5e-3,
+                "fused vs sidecar diverged at {label}: max|Δ|={max_abs}"
+            );
+
+            let iters = 8usize;
+            let mut t3k = f64::INFINITY;
+            let mut tfused = f64::INFINITY;
+            let mut tkq = f64::INFINITY;
+            let mut tsm = f64::INFINITY;
+            let mut tkqv = f64::INFINITY;
+            for _ in 0..3 {
+                t3k = t3k.min(timed_gpu(&ctx, iters, encode_3k));
+                tfused = tfused.min(timed_gpu(&ctx, iters, encode_fused));
+                tkq = tkq.min(timed_gpu(&ctx, iters, |enc| {
+                    encode_attn_matrix_kq_f32(
+                        &ctx, enc, &q_t, &k_cache, &scores, n_rows, base_pos, n_pos, kv_dim, n_q,
+                        n_kv, group, hd, true,
+                    )
+                }));
+                tsm = tsm.min(timed_gpu(&ctx, iters, |enc| {
+                    encode_attn_matrix_softmax_f32(
+                        &ctx, enc, &scores, n_rows, base_pos, n_pos, n_q, n_kv, group, hd,
+                    )
+                }));
+                tkqv = tkqv.min(timed_gpu(&ctx, iters, |enc| {
+                    encode_attn_matrix_kqv_f32(
+                        &ctx, enc, &scores, &v_t, &out_3k, n_rows, base_pos, n_pos, vt_stride, n_q,
+                        n_kv, group, hd, true,
+                    )
+                }));
+            }
+            eprintln!(
+                "[{label:>22}] 3k={:8.3} ms (kq={:.3} sm={:.3} kqv={:.3})  online2p={:8.3} ms  ratio={:.2}x  vs|Δ|={max_abs:.2e}",
+                t3k * 1e3,
+                tkq * 1e3,
+                tsm * 1e3,
+                tkqv * 1e3,
+                tfused * 1e3,
+                t3k / tfused
+            );
         }
     }
 

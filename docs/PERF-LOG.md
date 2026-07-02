@@ -6,6 +6,98 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.439 Two-Pass Online-Softmax Matrix Prefill Attention
+
+Status: default checkpoint on the queue-top do-less bet (the matrix-attention
+score round-trip). The separate softmax dispatch is deleted from the packed
+prefill matrix path: `kernel_attn_matrix_kq_online_f32[_full_tiles]` keeps the
+sidecar's K^T.Q GEMM but applies scale + causal mask + a per-64-pos-tile online
+softmax in its epilogue, storing `P~ = exp2(s*scale - m_tile)` as F16 (half the
+score bytes) plus a tiny per-(query, tile) `(m, l)` sidecar;
+`kernel_attn_matrix_kqv_norm_f32[_full_tiles]` keeps the probs.V^T GEMM,
+pre-reduces `(m_glob, 1/l)` per query column, folds `exp2(m_t - m_glob)` into
+its existing F16 staging, and divides by `l` in the epilogue. Score-tensor
+traffic drops from 16 B/elem to 4 B/elem; the F32 score scratch is replaced by
+an F16 one (half resident bytes at equal `matrix_max_pos`; A3B pp16384
+`~1.07 GB -> ~0.55 GB`). Both GEMM bodies and grids are unchanged from the
+sidecar, so tiny-chunk/long-prefix parallelism is preserved. Rollback:
+`QWEN_PREFILL_ATTN_MATRIX_ONLINE=0` restores the three-kernel F32 sidecar
+(allocation branches at scratch creation; whichever variant is off is stubbed
+at 1 element). Vᵀ maintenance and `causal_skip` are shared by both variants.
+
+New coverage this checkpoint (the matrix path previously had no isolated unit
+test): `attn_matrix_path_matches_cpu_reference` pins the sidecar AND the online
+pair against a CPU f64 reference across G4/G6/G8/G16, full/edge tile geometry,
+`base_pos > 0`, and the tiny-chunk/long-prefix shape (f16-prerounded inputs;
+sidecar max|Δ| <= 3.9e-5, online <= 2.3e-5, online-vs-sidecar <= 5.2e-5;
+causal_skip proven bitwise-pure on the sidecar). The
+`attn_matrix_online_vs_sidecar_microbench` ignored test is the kill-gate
+harness at production chunk shapes.
+
+Falsified on the way (recorded so it is not re-derived): a true single-kernel
+flash-attention body at head_dim=256 loses to the three-kernel GEMM sidecar on
+M4 Max. Ported llama.cpp `kernel_flash_attn_ext` work shape (Q=8 rows/tg, C=64,
+NSG=4, O in threadgroup memory, direct-device K/V simdgroup loads, 3
+barriers/tile): correct but `0.80x` the sidecar summed body at production
+shapes; Q=16 hits the threadgroup-memory occupancy cliff (`0.39x`); a
+register-resident-O variant spills (`0.24x`). The 1-pass design re-streams K/V
+per 8..16-row query tile (4..8x the sidecar's 32-column GEMM amplification)
+and is L2-bound; do not reopen without a >=32-row-tile design that fits
+registers/threadgroup memory. The bank-conflict lesson that made the 2-pass
+epilogue pay: 64-float spill rows put every query column on the same
+threadgroup-memory bank (32-wide serialization); padding the spill stride to
+68 floats plus float4/half4 vectorization took the pair from `1.16-1.29x` to
+the shipped `1.22-1.37x`.
+
+Validation:
+
+- `cargo fmt` / `cargo check` / `cargo clippy` (no new lints; MSRV notes are
+  pre-existing)
+- `attn_matrix_path_matches_cpu_reference` (new micro-oracle, 24 combos green)
+- `attn_matrix_online_vs_sidecar_microbench`: G8/A3B chunk@pp4096 `1.22x`,
+  @pp16384 `1.28x`; G6/27B `1.22x`/`1.28x`; G16/A10B chunk@pp1024 `1.37x`,
+  @pp4096 `1.22x` (Vᵀ transpose excluded from both sides)
+- full lib suite serial: 156 passed
+- `dflash_correctness`: default set 7 passed; explicit ignored gates green:
+  27B G6 prefix gate (`cos(logits)=1.000000`, GDN/KV cos_min `1.000000`),
+  A10B chunk128 boundary (`cos=0.999969`), A10B packed-attn active shapes
+  (all rows `cos=1.000000`)
+- phase A/B (`QWEN_PREFILL_TRACE_ATTN_PHASES=1`): A3B pp4096 matrix body
+  `282.3 -> 222.0 ms` (`1.27x`; kq `107.8 -> 109.3`, softmax `61.3 -> 0`,
+  kqv `113.2 -> 112.7`); 27B pp4096 `700.6 -> 540.7 ms` (`1.30x`; softmax
+  `157.3 -> 0`); `rope_scatter` unchanged (Vᵀ upkeep identical)
+- e2e paired ABA (`--runs 5`, sequential): A3B pp16384
+  `1199.77 -> 1263.46/1261.68 t/s` (`+5.2%`); 27B pp16384 (`--runs 3`)
+  `202.14 -> 205.60/205.73 t/s` (`+1.7%`); A3B pp512 guardrail
+  `1524.97 -> 1528.80/1533.55` (neutral-positive); A3B pp4096 e2e
+  unresolvable in two ABA attempts (first contaminated by a concurrent
+  qwen-bench, quiet-box retry monotone-thermal `1654 -> 1577 -> 1546` with
+  disagreeing anchors; the `~1%` expected effect is below box drift — the
+  `1.27x` phase row is the pp4096 evidence); A10B pp1024
+  `532.87 -> 538.31/519.98` (neutral within noise, body share `<1%`)
+- rollback lever verified live (softmax phase reappears, F32 scratch
+  allocated, F16/ml stubbed)
+- `cx ask` review, session `019f2497-cee2-7aa2-9e6a-39cf12611c9b` (plan
+  review pre-implementation: `019f2419-cfdf-7c32-a00e-6e8c39c6b9a2`)
+
+Decision: default ON. The remaining matrix-body do-less headroom is now the
+4 B/elem P~ write+read and the F16 Vᵀ sidecar; both are bounded and only worth
+revisiting behind a fresh phase budget. Next queue item per the standing
+force-rank: the GPU corruptor hunt (v0.433 follow-up).
+
+Corruptor-hunt datum captured during this checkpoint's gate runs: with a
+concurrent `qwen-bench` process (~45 GB resident, other worktree) on the box,
+the serialized single-test micro-oracle flaked nondeterministically — the
+UNTOUCHED v0.434 sidecar kernels produced real wrong answers with rotating
+failure points (`causal_skip` bitwise mismatch one run, sidecar-vs-CPU-ref cos
+the next, `MTL_SHADER_VALIDATION=1` logged NO OOB), then went green `3/3` plus
+a full `156`-test serial suite immediately after the bench exited, on
+identical binaries. v0.433's corruption class therefore reproduces in a fully
+SERIAL process under cross-process GPU contention: intra-process test
+parallelism was a trigger, not the mechanism. Suspect set shifts to (a) a
+driver/OS multi-client issue or (b) a latent timing-sensitive race that
+contention exposes; and correctness gates are only trustworthy on a QUIET box
+(bench-vs-gate mutual exclusion is now part of the methodology).
 ## 2026-07-02 - v0.438 Replay Real-Window Economics Gate
 
 Status: extended `decode-block-slice-real-margin` with optional timing columns so

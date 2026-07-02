@@ -1348,6 +1348,38 @@ timing to `decode-block-slice-real-margin`. S8 blocks=2 survives the conservativ
 validated path, S6 is marginal, and S4 is dead. The next replay branch must be an
 S8/ragged-occupancy scheduler sketch or nothing; do not spend implementation time
 on low-occupancy replay.
+v0.439 lands the score-round-trip bet as a TWO-pass design that resolves the
+v0.435-parked softmax+KQV bridge objection (no per-y-tile probability
+recompute: KQ owns the softmax where its pos-tile is resident, KQV applies
+only a scalar `c_t` per (query, 64-pos tile) during staging, y-parallelism
+untouched): KQ folds scale+mask+per-tile online softmax into its epilogue
+(F16 `P~` + (m,l) sidecar, spill stride padded to 68 floats to kill a 32-wide
+threadgroup-memory bank conflict), KQV folds `exp2(m_t - m_glob)` into its F16
+staging and `1/l` into its epilogue. Score traffic 16 -> 4 B/elem, softmax
+dispatch deleted, F32 score scratch halved to F16 (`~1.07 -> ~0.55 GB` A3B
+pp16384). Microbench `1.22-1.37x` on the summed matrix body; phase A3B pp4096
+`282 -> 222 ms`, 27B pp4096 `701 -> 541 ms`; e2e A3B pp16384 `+5.2%`, 27B
+pp16384 `+1.7%`, pp512 guardrail neutral. Rollback
+`QWEN_PREFILL_ATTN_MATRIX_ONLINE=0`. The matrix path also gained its first
+isolated micro-oracle (CPU f64 reference, all groups/edges) and a kill-gate
+microbench harness. FALSIFIED en route: a true 1-pass flash-attention body at
+head_dim=256 (llama.cpp `kernel_flash_attn_ext` shape: Q=8/C=64/NSG=4, O in
+threadgroup memory, direct-device K/V loads) is `0.80x` the sidecar at
+production shapes; Q=16 occupancy-cliffs to `0.39x`, register-resident O
+spills to `0.24x`. Cause: 8..16-row query tiles re-stream K/V 4..8x more than
+32-column GEMM tiles and go L2-bound. Do not reopen 1-pass matrix attention
+without a >=32-row-tile design that fits registers/threadgroup memory; the
+remaining matrix-body headroom (P~ 4 B/elem, F16 Vᵀ sidecar) is bounded and
+closed without a fresh phase budget. The v0.439 gate runs also produced the
+strongest corruptor-hunt datum yet: the v0.433 corruption class reproduces in
+a fully SERIAL process while a concurrent qwen-bench (separate process) loads
+the GPU — rotating victims on untouched kernels, no shader-validation OOB,
+3/3 green plus a full serial suite immediately after the bench exits. The
+corruptor is NOT intra-process test parallelism; suspect a driver/multi-client
+issue or a latent timing-sensitive race exposed by contention. Methodology
+update: correctness gates require a quiet box (no concurrent GPU processes);
+the hunt's next probes should include a cross-process load generator as the
+reproducer instead of parallel tests.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

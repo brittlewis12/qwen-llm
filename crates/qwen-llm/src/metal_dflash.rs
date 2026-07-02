@@ -1398,6 +1398,20 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
     )
 }
 
+/// v0.439: two-pass online-softmax matrix attention (KQ folds the softmax
+/// into its epilogue and stores F16 `P~` + an (m, l) sidecar; KQV normalizes
+/// during staging). Deletes the separate softmax dispatch and drops score
+/// traffic from 16 B/elem to 4 B/elem (microbench 1.22-1.37x on the matrix
+/// body). Rollback: `QWEN_PREFILL_ATTN_MATRIX_ONLINE=0` restores the
+/// three-kernel F32 sidecar (and its full-size F32 score scratch).
+fn prefill_attn_matrix_online_enabled() -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    !matches!(
+        *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_ONLINE")),
+        PrefillEnvMode::ForceOff
+    )
+}
+
 fn prefill_attn_matrix_g16_mode() -> PrefillEnvMode {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G16"))
@@ -2621,12 +2635,20 @@ pub struct MetalDFlashLayerMajorScratch {
     /// `[R, n_kv, NWG, group, 2]` F32 — packed-prompt attention `(m, l)`
     /// partials for the same microproof.
     pub attn_prefill_v4_ml_partial_pack: MetalTensor,
-    /// `[N * n_q_heads, matrix_max_pos]` F32 — experimental non-flash matrix
-    /// attention score/prob scratch for the A3B/group-8 sidecar.
+    /// `[N * n_q_heads, matrix_max_pos]` F32 — score/prob scratch for the
+    /// three-kernel matrix attention sidecar. Stubbed at 1 element when the
+    /// two-pass online path is enabled (the default).
     pub attn_matrix_scores_pack: MetalTensor,
+    /// `[N * n_q_heads, matrix_max_pos]` F16 — `P~ = exp2(s*scale - m_tile)`
+    /// scratch for the two-pass online matrix attention path. Stubbed at
+    /// 1 element when `QWEN_PREFILL_ATTN_MATRIX_ONLINE=0`.
+    pub attn_matrix_scores_h_pack: MetalTensor,
+    /// `[N * n_q_heads, ceil(matrix_max_pos/64), 2]` F32 — per-(query, tile)
+    /// (m, l) sidecar for the two-pass online matrix attention path. Stubbed
+    /// at 1 element when `QWEN_PREFILL_ATTN_MATRIX_ONLINE=0`.
+    pub attn_matrix_ml_pack: MetalTensor,
     /// `[n_attn_layers, n_kv_heads, head_dim, matrix_max_pos]` F16 — persistent
-    /// transposed V-cache view used by the experimental non-flash matrix
-    /// attention sidecar.
+    /// transposed V-cache view used by both matrix attention variants.
     pub attn_matrix_vt_pack: MetalTensor,
 
     // FFN scratch.
@@ -2885,12 +2907,40 @@ impl MetalDFlashLayerMajorScratch {
         } else {
             0
         };
-        let attn_matrix_scores_elems = if enable_attn_matrix {
+        // The F32 scores buffer backs the three-kernel sidecar (rollback);
+        // the F16 P~ + (m, l) pair backs the default two-pass online path.
+        // Whichever variant the process-level env selects is allocated in
+        // full and the other is stubbed at 1 element.
+        let attn_matrix_online = prefill_attn_matrix_online_enabled();
+        let attn_matrix_scores_elems = if enable_attn_matrix && !attn_matrix_online {
             checked_u64_mul3(
                 n,
                 arch.n_q_heads as u64,
                 attn_matrix_max_pos,
                 "layer-major attn matrix scores size overflow",
+            )?
+        } else {
+            1
+        };
+        let attn_matrix_scores_h_elems = if enable_attn_matrix && attn_matrix_online {
+            checked_u64_mul3(
+                n,
+                arch.n_q_heads as u64,
+                attn_matrix_max_pos,
+                "layer-major attn matrix online scores size overflow",
+            )?
+        } else {
+            1
+        };
+        let attn_matrix_ml_elems = if enable_attn_matrix && attn_matrix_online {
+            checked_u64_mul3(
+                n,
+                arch.n_q_heads as u64,
+                checked_u64_double(
+                    attn_matrix_max_pos.div_ceil(64),
+                    "layer-major attn matrix ml tiles overflow",
+                )?,
+                "layer-major attn matrix ml size overflow",
             )?
         } else {
             1
@@ -2994,6 +3044,11 @@ impl MetalDFlashLayerMajorScratch {
                 },
             )?,
             attn_matrix_scores_pack: MetalTensor::zeros_f32(ctx, vec![attn_matrix_scores_elems])?,
+            attn_matrix_scores_h_pack: MetalTensor::zeros_f16(
+                ctx,
+                vec![attn_matrix_scores_h_elems],
+            )?,
+            attn_matrix_ml_pack: MetalTensor::zeros_f32(ctx, vec![attn_matrix_ml_elems])?,
             attn_matrix_vt_pack: MetalTensor::zeros_f16(ctx, vec![attn_matrix_vt_elems])?,
             ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
@@ -6414,8 +6469,16 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 }
                                 if trace_attn_phases && use_matrix {
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
-                                    let scores_bytes =
-                                        chunk_p * n_q * n_pos * std::mem::size_of::<f32>();
+                                    // Online path stores F16 P~ plus the (m, l) sidecar;
+                                    // the legacy sidecar stores F32 scores.
+                                    let scores_bytes = if prefill_attn_matrix_online_enabled() {
+                                        chunk_p * n_q * n_pos * std::mem::size_of::<u16>()
+                                            + crate::metal::attn_matrix_ml_elems(
+                                                chunk_p, n_q, n_pos,
+                                            ) * std::mem::size_of::<f32>()
+                                    } else {
+                                        chunk_p * n_q * n_pos * std::mem::size_of::<f32>()
+                                    };
                                     let vt_bytes =
                                         n_kv * head_dim * vt_stride * std::mem::size_of::<u16>();
                                     let (vt_base, vt_rows) = if rebuild_matrix_vt_prefix {
@@ -6447,9 +6510,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
-                                    let scores = layer_scratch
-                                        .attn_matrix_scores_pack
-                                        .view_subrange(0, vec![(chunk_p * n_q * n_pos) as u64]);
+                                    let matrix_online = prefill_attn_matrix_online_enabled();
                                     let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
                                         (ai * per_attn_vt) as u64,
                                         vec![per_attn_vt as u64],
@@ -6511,26 +6572,66 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 "attn-prefill-g8-matrix-kq"
                                             },
                                         );
-                                        crate::metal::encode_attn_matrix_kq_f32(
-                                            base.ctx,
-                                            &enc,
-                                            &q_normed_pack_p,
-                                            &target_session.kv_k[ai],
-                                            &scores,
-                                            chunk_p,
-                                            chunk_start as usize,
-                                            n_pos,
-                                            n_kv * head_dim,
-                                            n_q,
-                                            n_kv,
-                                            group,
-                                            head_dim,
-                                            // v0.430: causal tile skip is group-generic in the
-                                            // kernels (row_last/group + base_pos); enable for all
-                                            // matrix groups, not only dense G6. Rollback:
-                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
-                                            prefill_attn_matrix_causal_skip_enabled(),
-                                        )?;
+                                        if matrix_online {
+                                            let scores_h = layer_scratch
+                                                .attn_matrix_scores_h_pack
+                                                .view_subrange(
+                                                    0,
+                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                                );
+                                            let ml =
+                                                layer_scratch.attn_matrix_ml_pack.view_subrange(
+                                                    0,
+                                                    vec![crate::metal::attn_matrix_ml_elems(
+                                                        chunk_p, n_q, n_pos,
+                                                    )
+                                                        as u64],
+                                                );
+                                            crate::metal::encode_attn_matrix_kq_online_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &q_normed_pack_p,
+                                                &target_session.kv_k[ai],
+                                                &scores_h,
+                                                &ml,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                n_kv * head_dim,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                        } else {
+                                            let scores = layer_scratch
+                                                .attn_matrix_scores_pack
+                                                .view_subrange(
+                                                    0,
+                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                                );
+                                            crate::metal::encode_attn_matrix_kq_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &q_normed_pack_p,
+                                                &target_session.kv_k[ai],
+                                                &scores,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                n_kv * head_dim,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                // v0.430: causal tile skip is group-generic in the
+                                                // kernels (row_last/group + base_pos); enable for all
+                                                // matrix groups, not only dense G6. Rollback:
+                                                // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                        }
                                         enc.end();
                                     }
                                     flush_prefill_phase(
@@ -6544,45 +6645,53 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         "body_matrix_kq",
                                     );
 
-                                    {
-                                        let enc = KernelEncoder::begin(&cmd_buf);
-                                        label_prefill_encoder(
-                                            &enc,
-                                            il,
-                                            if use_matrix_g4 {
-                                                "attn-prefill-g4-matrix-softmax"
-                                            } else if use_matrix_g6 {
-                                                "attn-prefill-g6-matrix-softmax"
-                                            } else if use_matrix_g16 {
-                                                "attn-prefill-g16-matrix-softmax"
-                                            } else {
-                                                "attn-prefill-g8-matrix-softmax"
-                                            },
-                                        );
-                                        crate::metal::encode_attn_matrix_softmax_f32(
+                                    if !matrix_online {
+                                        {
+                                            let enc = KernelEncoder::begin(&cmd_buf);
+                                            label_prefill_encoder(
+                                                &enc,
+                                                il,
+                                                if use_matrix_g4 {
+                                                    "attn-prefill-g4-matrix-softmax"
+                                                } else if use_matrix_g6 {
+                                                    "attn-prefill-g6-matrix-softmax"
+                                                } else if use_matrix_g16 {
+                                                    "attn-prefill-g16-matrix-softmax"
+                                                } else {
+                                                    "attn-prefill-g8-matrix-softmax"
+                                                },
+                                            );
+                                            let scores = layer_scratch
+                                                .attn_matrix_scores_pack
+                                                .view_subrange(
+                                                    0,
+                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                                );
+                                            crate::metal::encode_attn_matrix_softmax_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &scores,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                            )?;
+                                            enc.end();
+                                        }
+                                        flush_prefill_phase(
                                             base.ctx,
-                                            &enc,
-                                            &scores,
-                                            chunk_p,
-                                            chunk_start as usize,
-                                            n_pos,
-                                            n_q,
-                                            n_kv,
-                                            group,
-                                            head_dim,
-                                        )?;
-                                        enc.end();
+                                            &mut cmd_buf,
+                                            &mut prefill_gpu_total_ms,
+                                            trace_attn_phases,
+                                            chunk_idx,
+                                            chunk_start,
+                                            il,
+                                            "body_matrix_softmax",
+                                        );
                                     }
-                                    flush_prefill_phase(
-                                        base.ctx,
-                                        &mut cmd_buf,
-                                        &mut prefill_gpu_total_ms,
-                                        trace_attn_phases,
-                                        chunk_idx,
-                                        chunk_start,
-                                        il,
-                                        "body_matrix_softmax",
-                                    );
 
                                     {
                                         let enc = KernelEncoder::begin(&cmd_buf);
@@ -6599,26 +6708,66 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 "attn-prefill-g8-matrix-kqv"
                                             },
                                         );
-                                        crate::metal::encode_attn_matrix_kqv_f32(
-                                            base.ctx,
-                                            &enc,
-                                            &scores,
-                                            &v_t,
-                                            &attn_o_pack_p,
-                                            chunk_p,
-                                            chunk_start as usize,
-                                            n_pos,
-                                            vt_stride,
-                                            n_q,
-                                            n_kv,
-                                            group,
-                                            head_dim,
-                                            // v0.430: causal tile skip is group-generic in the
-                                            // kernels (row_last/group + base_pos); enable for all
-                                            // matrix groups, not only dense G6. Rollback:
-                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
-                                            prefill_attn_matrix_causal_skip_enabled(),
-                                        )?;
+                                        if matrix_online {
+                                            let scores_h = layer_scratch
+                                                .attn_matrix_scores_h_pack
+                                                .view_subrange(
+                                                    0,
+                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                                );
+                                            let ml =
+                                                layer_scratch.attn_matrix_ml_pack.view_subrange(
+                                                    0,
+                                                    vec![crate::metal::attn_matrix_ml_elems(
+                                                        chunk_p, n_q, n_pos,
+                                                    )
+                                                        as u64],
+                                                );
+                                            crate::metal::encode_attn_matrix_kqv_norm_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &scores_h,
+                                                &ml,
+                                                &v_t,
+                                                &attn_o_pack_p,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                vt_stride,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                        } else {
+                                            let scores = layer_scratch
+                                                .attn_matrix_scores_pack
+                                                .view_subrange(
+                                                    0,
+                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                                );
+                                            crate::metal::encode_attn_matrix_kqv_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &scores,
+                                                &v_t,
+                                                &attn_o_pack_p,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                vt_stride,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                // v0.430: causal tile skip is group-generic in the
+                                                // kernels (row_last/group + base_pos); enable for all
+                                                // matrix groups, not only dense G6. Rollback:
+                                                // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                        }
                                         enc.end();
                                     }
                                     flush_prefill_phase(
@@ -6657,9 +6806,6 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
                                         let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                         let per_attn_vt = n_kv * head_dim * vt_stride;
-                                        let scores = layer_scratch
-                                            .attn_matrix_scores_pack
-                                            .view_subrange(0, vec![(chunk_p * n_q * n_pos) as u64]);
                                         let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
                                             (ai * per_attn_vt) as u64,
                                             vec![per_attn_vt as u64],
@@ -6679,58 +6825,117 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 head_dim,
                                             )?;
                                         }
-                                        crate::metal::encode_attn_matrix_kq_f32(
-                                            base.ctx,
-                                            &enc,
-                                            &q_normed_pack_p,
-                                            &target_session.kv_k[ai],
-                                            &scores,
-                                            chunk_p,
-                                            chunk_start as usize,
-                                            n_pos,
-                                            n_kv * head_dim,
-                                            n_q,
-                                            n_kv,
-                                            group,
-                                            head_dim,
-                                            // v0.430: causal tile skip is group-generic in the
-                                            // kernels (row_last/group + base_pos); enable for all
-                                            // matrix groups, not only dense G6. Rollback:
-                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
-                                            prefill_attn_matrix_causal_skip_enabled(),
-                                        )?;
-                                        crate::metal::encode_attn_matrix_softmax_f32(
-                                            base.ctx,
-                                            &enc,
-                                            &scores,
-                                            chunk_p,
-                                            chunk_start as usize,
-                                            n_pos,
-                                            n_q,
-                                            n_kv,
-                                            group,
-                                            head_dim,
-                                        )?;
-                                        crate::metal::encode_attn_matrix_kqv_f32(
-                                            base.ctx,
-                                            &enc,
-                                            &scores,
-                                            &v_t,
-                                            &attn_o_pack_p,
-                                            chunk_p,
-                                            chunk_start as usize,
-                                            n_pos,
-                                            vt_stride,
-                                            n_q,
-                                            n_kv,
-                                            group,
-                                            head_dim,
-                                            // v0.430: causal tile skip is group-generic in the
-                                            // kernels (row_last/group + base_pos); enable for all
-                                            // matrix groups, not only dense G6. Rollback:
-                                            // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
-                                            prefill_attn_matrix_causal_skip_enabled(),
-                                        )?;
+                                        if prefill_attn_matrix_online_enabled() {
+                                            // v0.439: two-pass online-softmax matrix attention.
+                                            // Rollback: QWEN_PREFILL_ATTN_MATRIX_ONLINE=0.
+                                            let scores_h = layer_scratch
+                                                .attn_matrix_scores_h_pack
+                                                .view_subrange(
+                                                    0,
+                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                                );
+                                            let ml =
+                                                layer_scratch.attn_matrix_ml_pack.view_subrange(
+                                                    0,
+                                                    vec![crate::metal::attn_matrix_ml_elems(
+                                                        chunk_p, n_q, n_pos,
+                                                    )
+                                                        as u64],
+                                                );
+                                            crate::metal::encode_attn_matrix_kq_online_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &q_normed_pack_p,
+                                                &target_session.kv_k[ai],
+                                                &scores_h,
+                                                &ml,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                n_kv * head_dim,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                            crate::metal::encode_attn_matrix_kqv_norm_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &scores_h,
+                                                &ml,
+                                                &v_t,
+                                                &attn_o_pack_p,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                vt_stride,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                        } else {
+                                            let scores = layer_scratch
+                                                .attn_matrix_scores_pack
+                                                .view_subrange(
+                                                    0,
+                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                                );
+                                            crate::metal::encode_attn_matrix_kq_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &q_normed_pack_p,
+                                                &target_session.kv_k[ai],
+                                                &scores,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                n_kv * head_dim,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                // v0.430: causal tile skip is group-generic in the
+                                                // kernels (row_last/group + base_pos); enable for all
+                                                // matrix groups, not only dense G6. Rollback:
+                                                // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                            crate::metal::encode_attn_matrix_softmax_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &scores,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                            )?;
+                                            crate::metal::encode_attn_matrix_kqv_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &scores,
+                                                &v_t,
+                                                &attn_o_pack_p,
+                                                chunk_p,
+                                                chunk_start as usize,
+                                                n_pos,
+                                                vt_stride,
+                                                n_q,
+                                                n_kv,
+                                                group,
+                                                head_dim,
+                                                // v0.430: causal tile skip is group-generic in the
+                                                // kernels (row_last/group + base_pos); enable for all
+                                                // matrix groups, not only dense G6. Rollback:
+                                                // QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0.
+                                                prefill_attn_matrix_causal_skip_enabled(),
+                                            )?;
+                                        }
                                     } else {
                                         for row_base in (0..chunk_p).step_by(packed_rows) {
                                             let rows_n = (chunk_p - row_base).min(packed_rows);

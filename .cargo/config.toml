@@ -1,0 +1,23 @@
+# Workspace-wide test serialization (v0.433).
+#
+# The GPU test suite is only trustworthy when tests run one at a time:
+# under libtest's default parallel execution, concurrent GPU tests corrupt
+# each other's buffers with rotating victims (attn_v4_matches_naive_f16kv
+# at cos=0.9662, mat_mat q8_0/iq4/q2_k/q4_legacy at cos as low as 0.48 in
+# one shader-validation run). Serial runs are green (2/2 at 153-217 s) and
+# no slower in practice than loaded parallel runs (141-315 s) because GPU
+# tests contend on the single device anyway.
+#
+# Evidence trail (2026-07-02 triage, PERF-LOG v0.433 entry):
+#   - uninitialized-partials hypothesis FALSIFIED by the NaN-priming test
+#     `attn_v4_partials_fully_written_nan_prime` (kept as a guard);
+#   - Metal shader validation logged no OOB shader access while four tests
+#     failed, pointing at CPU-side `contents()` memcpys in test helpers or
+#     blits (both invisible to shader validation) as the likely corruptor;
+#   - `--test-threads=1` green twice, parallel red in the same session.
+#
+# Remove this once the corruptor is found and fixed. Hunt tools: guard
+# allocations around test buffers, MTL_DEBUG_LAYER=1 captures, pairwise
+# test bisection under load.
+[env]
+RUST_TEST_THREADS = "1"

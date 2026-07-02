@@ -1230,6 +1230,66 @@ win. Replay therefore has one remaining high-EV gate: measure the actual
 validation/fallback path and a realistic ragged occupancy trace. If that mechanism
 gate does not preserve S>=6 `blocks=2` above `>5-8%` end-to-end, stop the replay
 scheduler branch and return to broader hardware-headroom items.
+v0.430-v0.432 digest a do-less implementation audit (fixed roofline, fewer
+bytes/dispatches) across decode, prefill, and kernels. Banked defaults:
+matrix-attention causal tile skip generalized from G6 to all matrix groups
+(A3B `pp4096` KQ/KQV `-14%` phase, A10B `pp1024` `-47%`; e2e `+0.9%` A3B),
+packed-slot MoE fallback packs stubbed on production prefill scratch
+(`~84-160 MB` resident saved; lazy-grown on fallback), split_q_gate layout
+copies deleted via strided q-norm + strided fused gate epilogue (decode,
+prefill, packed verify; rollback branch keeps the split), and DFlash hidden
+capture batched to one strided-row copy per capture layer per chunk. Audit
+verdicts recorded so they are not re-derived: production decode has NO
+remaining zero-fills; mat-vec activation re-read is logical-only
+(cache-resident, staging falsified v0.323); RoPE precompute fails its own
+`>=0.5-1%` gate (~0.2-0.3 ms per 4096-chunk); remaining decode glue fusions
+(residual+norm, K-chain, conv+L2, sigmoid/decay fold) total ~350 dispatches
++ ~8-10 MB per dense token with GPU already `96-99%` busy — bundle as one
+gated experiment or skip; attn_v4 Phase A reduction shape is the largest
+in-kernel ALU waste but stays fenced behind the byte-reduction rule. The two
+promoted do-less bets are (1) a fused online-softmax matrix-attention body
+holding score tiles in registers (same simdgroup tiles, no `[kvh,N,M]` f32
+round-trip: `~16 B/elem`, A3B pp16384 `~365 GB`, 27B `~876 GB` per full
+prefill; measured phase budget `~4-6%` A3B / `2-3%` 27B e2e at true-long)
+and (2) an F16/BF16 repack of the F32 MoE router bank at load (`~84 MB/token
+A3B decode, ~1.7%`), gated on an exact-top-k route-equivalence check across
+real prompts. Also banked: v0.433 confirms the GPU test suite corrupts
+itself under parallel execution (rotating victims; attn_v4 `cos=0.9662`,
+mat_mat q8_0 `cos=0.48` under shader validation with no shader OOB logged
+— uninitialized-partials hypothesis falsified by the NaN-prime gate). The
+suite now runs serially via `.cargo/config.toml` `RUST_TEST_THREADS=1`
+(green 2/2, no slower); the corruptor hunt (CPU-side test-helper memcpys /
+blits suspected) is an open follow-up.
+v0.430-v0.432 bank the near-free tier of the do-less implementation audit (same
+roofline, fewer bytes/dispatches): (1) the KQ/KQV causal tile skip was G6-gated
+at the host despite group-generic kernels — enabling it for G8/G4/G16 cuts the
+A3B `pp4096` matrix body `~14%` (KQ `413->339-360 ms`, KQV `417->343-361 ms`)
+and A10B `pp1024` KQ/KQV `~47%` each; (2) packed-slot MoE fallback packs are
+now lazy stubs on production prefill scratch (`~84 MB` A3B / `~160 MB` A10B
+resident saved; grouped default never reads them); (3) `split_q_gate` is
+deleted from all production attention paths via strided-source q-norm and a
+strided fused gate epilogue (one layout-copy dispatch + `2*q_dim` round-trip
+per attn layer, decode and prefill), and the DFlash hidden-capture tap is one
+strided-row copy per capture layer instead of `chunk_p` scatters. The audit's
+remaining ranked items: (a) fused online-softmax matrix attention body — the
+score tensor round-trips `~16 B/elem` (`365 GB` per A3B pp16384 full prefill,
+`876 GB` dense 27B; est. `4-6%`/`2-3%` e2e at true-long) and is the top
+prefill do-less item, roadmap-nominated but never built; (b) MoE router
+`gate_inp` F32->F16 load-time repack (`~84 MB/token` A3B decode, `~1.7%`)
+gated on an exact-top-k equivalence check across real prompts because routing
+is discrete; (c) decode glue-dispatch fusions (residual+norm, K-chain,
+conv+L2, sigmoid/decay fold) are bounded at `<=1-2%` total with decode
+`96-99%` GPU-busy — one bundled A/B at most, not five branches. Measured
+non-items: RoPE precompute fails its own `>=0.5-1%` gate (`~0.2-0.3 ms` per
+4096-chunk); mat-vec activation re-read is logical-only (`3.5x` amplification,
+`~0` DRAM — cache-resident); attn_v4 Phase A reduction shape is the largest
+raw ALU waste (`~55%` of Phase A instructions) but the body is
+bandwidth-bound and same-byte rewrites stay triple-falsified.
+Test-infra triage carried with v0.432: `attn_v4_matches_naive_f16kv` is
+load-flaky with a real numerical divergence at `group=4 n_pos=1024 nwg=64
+C=16` (`cos=0.9662`; passes isolated) — suspected uninitialized-partials
+sensitivity (`zeros_f32` is uninit); needs a scratch-init proof or zero-init
+before the next attn-v4 branch trusts suite-load results.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

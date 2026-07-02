@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.433 Serialize Test Suite; GPU Cross-Test Corruption Triage
+
+Status: reliability checkpoint. The full non-ignored suite is only
+trustworthy serially; `.cargo/config.toml` now sets `RUST_TEST_THREADS=1`
+workspace-wide until the corruptor is found.
+
+Triage trail (hypotheses killed in order):
+
+- `attn_v4_matches_naive_f16kv` fails ~50% of parallel full-suite runs at
+  exactly `group=4 n_pos=1024 nwg=64 C=16` with `cos=0.966192` (a real
+  wrong answer), 100% green isolated.
+- Uninitialized-partials hypothesis FALSIFIED: the new
+  `attn_v4_partials_fully_written_nan_prime` gate NaN-primes o/ml partials
+  at the failing config and neighbors; zero NaNs propagate and
+  `max|delta| <= 1.3e-9` — the v4 main/reduce kernels fully write
+  everything they read (kept as a permanent guard).
+- A `MTL_SHADER_VALIDATION=1` parallel run failed FOUR different tests
+  (`mat_mat_q8_0` `cos=0.48`, `iq4`, `q2_k`, `q4_legacy`) while attn_v4
+  passed, with NO shader OOB diagnostics logged. Victims rotate per run.
+- `--test-threads=1`: green 2/2 (153-217 s, no slower than loaded parallel
+  runs at 141-315 s — GPU tests contend on the single device anyway);
+  parallel control run in the same session: red.
+
+Conclusion: systemic cross-test buffer corruption under parallel GPU test
+execution with rotating victims. Shader validation silence points at
+CPU-side `contents()` memcpys in test helpers or blit encoders (both
+invisible to shader validation). Follow-up hunt tools: guard allocations
+around test buffers, `MTL_DEBUG_LAYER=1` captures, pairwise test bisection
+under load. Suite-timing note: a lib failure aborts the remaining test
+binaries, which is why red runs look "<3 min" while green runs are
+~9-10 min quiet-box (lib ~178 s serial + dflash_correctness ~370 s).
+
 ## 2026-07-02 - v0.432 Delete Attention Layout-Copy Dispatches
 
 Status: default checkpoint from the do-less implementation audit. The

@@ -173,7 +173,11 @@ crate::env_flag!(default_off kv_q8_flag, "QWEN_KV_Q8");
 fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
     let enabled = kv_q8_flag();
     let group = (arch.n_q_heads / arch.n_kv_heads.max(1)) as usize;
-    if enabled && arch.kind == ArchKind::Dense && arch.attn_head_dim == 256 && group == 6 {
+    if enabled
+        && arch.attn_head_dim == 256
+        && ((arch.kind == ArchKind::Dense && group == 6)
+            || (arch.kind == ArchKind::Moe && group == 8))
+    {
         GgmlType::Q8_0
     } else {
         GgmlType::F16

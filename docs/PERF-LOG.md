@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.437 KV-Q8x4 Attention Falsifier
+
+Status: implemented a default-off `QWEN_KV_Q8=1` MoE/group8 attention reader
+micro-oracle that preserves the tuned F16 `attn_v4` grid and uses a Q8x4-style
+inner loop. The branch also fixes `attn-intra` so Q8 sessions measure Q8 scatter,
+not F16 scatter into Q8 buffers.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0437-kv-q8x4-falsifier/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test --release -p qwen-llm attn_v4_q8 -- --nocapture`
+- A3B Q4_K_M `attn-intra` at `ctx8192` and `ctx32768`
+- `cx ask` reviews, sessions `019f248a-ac09-7e13-8e30-179ed19ed7b8` and
+  `019f24a4-d467-7d52-ba9b-b30c08147ed1`
+
+Results: correctness is green across group6 main, group8 main, group8 tile2, and
+group8 tile4 with the tightened Q8-vs-F16 KV gate (`cos > 0.9999`, `max_abs <
+0.01`). Perf is negative. A3B `ctx8192` moves F16 main `0.1113 ms` to Q8x4
+`0.1221 ms` and one-layer `0.2478 -> 0.2567 ms`; A3B `ctx32768` moves F16 main
+`0.1767 ms` to Q8x4 `0.2213 ms` and one-layer `0.3490 -> 0.4185 ms`.
+
+Decision: keep Q8 KV default-off as a correctness/micro-oracle only. The tuned
+F16 reader is still faster even after matching its vector shape, so same-layout
+Q8_0 KV is not an active long-context decode or DFlash enabler. Do not reopen
+scalar Q8, forced-tile Q8, group-tile/NWG retunes, or Q8x4 variants without a new
+capture signal and clean `attn-intra` wins over F16 at both 8K and 32K.
+
 ## 2026-07-02 - v0.436 GDN RB4 TGM16 Staging Falsifier
 
 Status: dirty-tested and removed a one-layer packed GDN recurrence variant that

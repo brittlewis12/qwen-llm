@@ -10913,6 +10913,10 @@ pub fn encode_attn_decode_v4_f32(
             (GgmlType::F16, 8, 32) => "kernel_attn_decode_v4_g8_f32",
             (GgmlType::F16, 8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
             (GgmlType::F16, 8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
+            (GgmlType::Q8_0, 8, 16) => "kernel_attn_decode_v4_q8_g8_c16_f32",
+            (GgmlType::Q8_0, 8, 32) => "kernel_attn_decode_v4_q8_g8_f32",
+            (GgmlType::Q8_0, 8, 64) => "kernel_attn_decode_v4_q8_g8_c64_f32",
+            (GgmlType::Q8_0, 8, 128) => "kernel_attn_decode_v4_q8_g8_c128_f32",
             (GgmlType::F16, 16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
             (GgmlType::F16, 16, 32) => "kernel_attn_decode_v4_g16_f32",
             (GgmlType::F16, 16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
@@ -10921,7 +10925,7 @@ pub fn encode_attn_decode_v4_f32(
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4",
                     detail: format!(
-                        "Q8_0 KV currently supports only group=6 main kernels; got group={group}, tile_c={tile_c}"
+                        "Q8_0 KV main kernels currently support only group=6/group=8; got group={group}, tile_c={tile_c}"
                     ),
                 });
             }
@@ -10944,6 +10948,14 @@ pub fn encode_attn_decode_v4_f32(
             (GgmlType::F16, 8, 2, 32) => "kernel_attn_decode_v4_g8_t2_f32",
             (GgmlType::F16, 8, 2, 64) => "kernel_attn_decode_v4_g8_t2_c64_f32",
             (GgmlType::F16, 8, 2, 128) => "kernel_attn_decode_v4_g8_t2_c128_f32",
+            (GgmlType::Q8_0, 8, 4, 16) => "kernel_attn_decode_v4_q8_g8_t4_c16_f32",
+            (GgmlType::Q8_0, 8, 4, 32) => "kernel_attn_decode_v4_q8_g8_t4_f32",
+            (GgmlType::Q8_0, 8, 4, 64) => "kernel_attn_decode_v4_q8_g8_t4_c64_f32",
+            (GgmlType::Q8_0, 8, 4, 128) => "kernel_attn_decode_v4_q8_g8_t4_c128_f32",
+            (GgmlType::Q8_0, 8, 2, 16) => "kernel_attn_decode_v4_q8_g8_t2_c16_f32",
+            (GgmlType::Q8_0, 8, 2, 32) => "kernel_attn_decode_v4_q8_g8_t2_f32",
+            (GgmlType::Q8_0, 8, 2, 64) => "kernel_attn_decode_v4_q8_g8_t2_c64_f32",
+            (GgmlType::Q8_0, 8, 2, 128) => "kernel_attn_decode_v4_q8_g8_t2_c128_f32",
             (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
             (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
             (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
@@ -10956,7 +10968,7 @@ pub fn encode_attn_decode_v4_f32(
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4",
                     detail: format!(
-                        "Q8_0 KV does not yet support subgroup kernels (group={group}, group_tile={group_tile}, tile_c={tile_c})"
+                        "Q8_0 KV subgroup kernels currently support only group=8 tile2/tile4; got group={group}, group_tile={group_tile}, tile_c={tile_c}"
                     ),
                 });
             }
@@ -11190,6 +11202,10 @@ pub fn encode_attn_decode_v4_main_only_f32(
             (GgmlType::F16, 8, 32) => "kernel_attn_decode_v4_g8_f32",
             (GgmlType::F16, 8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
             (GgmlType::F16, 8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
+            (GgmlType::Q8_0, 8, 16) => "kernel_attn_decode_v4_q8_g8_c16_f32",
+            (GgmlType::Q8_0, 8, 32) => "kernel_attn_decode_v4_q8_g8_f32",
+            (GgmlType::Q8_0, 8, 64) => "kernel_attn_decode_v4_q8_g8_c64_f32",
+            (GgmlType::Q8_0, 8, 128) => "kernel_attn_decode_v4_q8_g8_c128_f32",
             (GgmlType::F16, 16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
             (GgmlType::F16, 16, 32) => "kernel_attn_decode_v4_g16_f32",
             (GgmlType::F16, 16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
@@ -11198,7 +11214,7 @@ pub fn encode_attn_decode_v4_main_only_f32(
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4_main",
                     detail: format!(
-                        "Q8_0 KV currently supports only group=6 main kernels; got group={group}, tile_c={tile_c}"
+                        "Q8_0 KV main kernels currently support only group=6/group=8; got group={group}, tile_c={tile_c}"
                     ),
                 });
             }
@@ -11221,6 +11237,14 @@ pub fn encode_attn_decode_v4_main_only_f32(
             (GgmlType::F16, 8, 2, 32) => "kernel_attn_decode_v4_g8_t2_f32",
             (GgmlType::F16, 8, 2, 64) => "kernel_attn_decode_v4_g8_t2_c64_f32",
             (GgmlType::F16, 8, 2, 128) => "kernel_attn_decode_v4_g8_t2_c128_f32",
+            (GgmlType::Q8_0, 8, 4, 16) => "kernel_attn_decode_v4_q8_g8_t4_c16_f32",
+            (GgmlType::Q8_0, 8, 4, 32) => "kernel_attn_decode_v4_q8_g8_t4_f32",
+            (GgmlType::Q8_0, 8, 4, 64) => "kernel_attn_decode_v4_q8_g8_t4_c64_f32",
+            (GgmlType::Q8_0, 8, 4, 128) => "kernel_attn_decode_v4_q8_g8_t4_c128_f32",
+            (GgmlType::Q8_0, 8, 2, 16) => "kernel_attn_decode_v4_q8_g8_t2_c16_f32",
+            (GgmlType::Q8_0, 8, 2, 32) => "kernel_attn_decode_v4_q8_g8_t2_f32",
+            (GgmlType::Q8_0, 8, 2, 64) => "kernel_attn_decode_v4_q8_g8_t2_c64_f32",
+            (GgmlType::Q8_0, 8, 2, 128) => "kernel_attn_decode_v4_q8_g8_t2_c128_f32",
             (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
             (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
             (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
@@ -11233,7 +11257,7 @@ pub fn encode_attn_decode_v4_main_only_f32(
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4_main",
                     detail: format!(
-                        "Q8_0 KV does not yet support subgroup kernels (group={group}, group_tile={group_tile}, tile_c={tile_c})"
+                        "Q8_0 KV subgroup kernels currently support only group=8 tile2/tile4; got group={group}, group_tile={group_tile}, tile_c={tile_c}"
                     ),
                 });
             }
@@ -19966,20 +19990,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn attn_v4_q8_kv_close_to_f16_kv() {
+    fn run_attn_v4_q8_kv_compare(
+        label: &str,
+        n_q: usize,
+        n_kv: usize,
+        n_pos: usize,
+        nwg: usize,
+        tile_c: usize,
+        group_tile: Option<usize>,
+    ) {
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
             Err(e) => panic!("init failed: {e}"),
         };
-        let n_q = 24usize;
-        let n_kv = 4usize;
         let hd = 256usize;
         let kv_dim = n_kv * hd;
-        let n_pos = 4096usize;
-        let nwg = 64usize;
-        let tile_c = 32usize;
+        let group = n_q / n_kv;
+        assert_eq!(n_q % n_kv, 0);
 
         let q: Vec<f32> = (0..n_q * hd)
             .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
@@ -20042,53 +20070,68 @@ mod tests {
         .unwrap();
 
         let o_partial_f16 =
-            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * hd) as u64]).unwrap();
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64]).unwrap();
         let ml_partial_f16 =
-            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * 2) as u64]).unwrap();
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64]).unwrap();
         let out_f16 = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
         let o_partial_q8 =
-            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * hd) as u64]).unwrap();
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * hd) as u64]).unwrap();
         let ml_partial_q8 =
-            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * 6 * 2) as u64]).unwrap();
+            MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * group * 2) as u64]).unwrap();
         let out_q8 = MetalTensor::zeros_f32(&ctx, vec![(n_q * hd) as u64]).unwrap();
 
-        one_shot(&ctx, |enc| {
-            encode_attn_decode_v4_f32(
-                &ctx,
-                enc,
-                &q_t,
-                &k_f16,
-                &v_f16,
-                &o_partial_f16,
-                &ml_partial_f16,
-                &out_f16,
-                n_q,
-                n_kv,
-                hd,
-                n_pos,
-                nwg,
-                tile_c,
-            )
-        })
+        let f16_result = || {
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_f16,
+                    &v_f16,
+                    &o_partial_f16,
+                    &ml_partial_f16,
+                    &out_f16,
+                    n_q,
+                    n_kv,
+                    hd,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )
+            })
+        };
+        if let Some(tile) = group_tile {
+            with_attn_v4_group_tile_override(tile, f16_result)
+        } else {
+            f16_result()
+        }
         .unwrap();
-        one_shot(&ctx, |enc| {
-            encode_attn_decode_v4_f32(
-                &ctx,
-                enc,
-                &q_t,
-                &k_q8,
-                &v_q8,
-                &o_partial_q8,
-                &ml_partial_q8,
-                &out_q8,
-                n_q,
-                n_kv,
-                hd,
-                n_pos,
-                nwg,
-                tile_c,
-            )
-        })
+
+        let q8_result = || {
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    enc,
+                    &q_t,
+                    &k_q8,
+                    &v_q8,
+                    &o_partial_q8,
+                    &ml_partial_q8,
+                    &out_q8,
+                    n_q,
+                    n_kv,
+                    hd,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )
+            })
+        };
+        if let Some(tile) = group_tile {
+            with_attn_v4_group_tile_override(tile, q8_result)
+        } else {
+            q8_result()
+        }
         .unwrap();
 
         let y_f16 = read_back_f32(&out_f16.buffer, n_q * hd);
@@ -20110,9 +20153,28 @@ mod tests {
             .sqrt();
         let nb: f64 = y_q8.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
         let cos = dot / (na * nb + 1e-30);
-        eprintln!("[attn_v4_q8_kv] cos={cos:.6} max|Δ|={max_abs:.4}");
-        assert!(cos > 0.999, "q8 kv cos too low: {cos}");
-        assert!(max_abs < 0.05, "q8 kv max|Δ| too high: {max_abs}");
+        eprintln!(
+            "[attn_v4_q8_kv {label}] group={group} n_pos={n_pos} nwg={nwg} C={tile_c} tile={:?} cos={cos:.6} max|Δ|={max_abs:.4}",
+            group_tile,
+        );
+        assert!(cos > 0.9999, "q8 kv cos too low: {cos}");
+        assert!(max_abs < 0.01, "q8 kv max|Δ| too high: {max_abs}");
+    }
+
+    #[test]
+    fn attn_v4_q8_kv_close_to_f16_kv() {
+        run_attn_v4_q8_kv_compare("g6-main", 24, 4, 4096, 64, 32, None);
+    }
+
+    #[test]
+    fn attn_v4_q8_group8_main_close_to_f16_kv() {
+        run_attn_v4_q8_kv_compare("g8-main", 16, 2, 2048, 32, 32, Some(8));
+    }
+
+    #[test]
+    fn attn_v4_q8_group8_subgroup_close_to_f16_kv() {
+        run_attn_v4_q8_kv_compare("g8-t2", 16, 2, 8192, 64, 64, Some(2));
+        run_attn_v4_q8_kv_compare("g8-t4", 16, 2, 16384, 128, 64, Some(4));
     }
 
     /// GDN α-chain fusion vs the 3-dispatch reference (add_inplace +

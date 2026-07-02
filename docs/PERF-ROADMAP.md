@@ -819,8 +819,9 @@ Recent confirmed wins:
 - No-spec GPU argmax decode path landed. Dense decode is neutral within noise;
   MoE decode improves modestly by avoiding full logits readback (~1.1-1.5% on
   A3B / 122B in current 64-token runs).
-- Dense KV-Q8 prototype is currently a negative result on M4 for the existing
-  v4 main-kernel structure; attention gets slower, not faster.
+- KV-Q8 remains a negative result on M4 for the existing v4 main-kernel
+  structure. v0.437 extends the oracle to MoE/group8 and changes the reader to
+  mirror the F16 vector shape, but attention is still slower.
 - Attention v4 now supports `group=4`, unlocking the small dense family
   (0.8B / 2B / 4B / 9B) as real long-context canaries instead of failing back to
   the old threadgroup-memory-limited attention path. The local 9B sweep now runs
@@ -857,6 +858,12 @@ Recent confirmed wins:
 
 Recent measured negatives:
 
+- v0.437 falsifies same-layout Q8_0 KV for MoE/group8 `attn_v4`. The Q8x4 reader
+  is correctness-clean across group6/group8 main and group8 tile2/tile4, but A3B
+  `attn-intra` regresses at both `ctx8192` (main `0.1113 -> 0.1221 ms`) and
+  `ctx32768` (main `0.1767 -> 0.2213 ms`). Do not reopen scalar Q8, forced-tile
+  Q8, group-tile/NWG sweeps, or same-layout Q8x4 variants without a new
+  capture/counter signal and clean 8K+32K `attn-intra` wins.
 - v0.341 kills the naive MoE FFN expert-pipeline proof. Splitting top-k routed
   experts into two groups and overlapping group-A down with group-B gate/up was
   exact on the A3B serial-vs-pipeline smoke, but regressed `tg128`: A3B
@@ -1320,6 +1327,15 @@ G6 matrix regresses `~2.6%`, and a 0.8B trace shows `gdn_step` itself worsens
 already captures the easy row-residency win; Q/K load duplication is not worth
 TGM barriers. If GDN recurrence is reopened, start with a floor/no-op ladder or
 a genuinely chunked delta-rule formulation, not local Q/K staging.
+v0.437 executes the reopened KV-Q8 attention-reader micro-oracle and kills it for
+the current `attn_v4` execution model. The branch preserves the F16 grid, adds
+MoE/group8 Q8 main and tile2/tile4 subgroup kernels, fixes `attn-intra` Q8
+scatter, and changes the reader to Q8x4 float4 accumulation. Correctness is green
+against F16 KV (`cos > 0.9999`, `max_abs < 0.01`), but clean A3B phase probes
+are negative: `ctx8192` main `0.1113 -> 0.1221 ms`, `ctx32768` main
+`0.1767 -> 0.2213 ms`. Keep `QWEN_KV_Q8=1` default-off as an oracle only. Future
+compressed-KV work needs a materially different layout/body or a capture signal;
+do not spend more blind time on Q8_0 reader variants.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,
@@ -2588,11 +2604,10 @@ Priority rule:
 - Keep this behind the current dense/MoE prompt push.
 - When returning to speculative work, do not lead with policy/schedule tuning;
   lead with kernel work that removes repeated long-context attention cost.
-- v0.416 audit digest reorders the speculative kernel queue: prove a better
-  KV-Q8 reader before packed-N verify attention. KV compression helps no-spec
-  long-context decode and moves the context threshold where DFlash must turn off;
-  packed verify attention only matters after the KV reader and profiles show
-  verify attention is still the dominant cost.
+- v0.416 audit digest reopened KV compression ahead of packed-N verify attention;
+  v0.437 closes the same-layout Q8_0 reader variant as negative. Future
+  compressed-KV work must start from a different layout/body and a fresh
+  `attn-intra` win; do not keep packed verify blocked on Q8_0 specifically.
 
 What the latest analysis says:
 
@@ -2603,12 +2618,12 @@ What the latest analysis says:
 
 Highest-EV speculative kernel targets:
 
-1. KV-Q8 / compressed-KV attention reader that beats the tuned F16 path in
-   `attn-intra` without repeating the old scalar-reader regression.
-2. Target packed-verify multi-query attention so consecutive verify queries share
+1. Target packed-verify multi-query attention so consecutive verify queries share
    KV reads.
-3. DFlash two-range attention reading ctx-cache and noise directly, without
+2. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
+3. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+   `attn-intra` at both 8K and 32K.
 4. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
    show N16 mat-mat-heavy surfaces remain material after the attention fixes.
 5. Adaptive draft compute width, not only adaptive verify width.
@@ -2645,22 +2660,25 @@ Current read:
   alive is cross-cutting: it can reduce no-spec long-context attention bytes,
   lower KV memory pressure, and raise the context length where DFlash/MTP verify
   remains viable.
+- v0.437 closes that micro-oracle for same-layout Q8_0. A vector-shaped Q8x4
+  reader is correctness-clean but regresses A3B `attn-intra` at both 8K and 32K.
 
-Expected payoff: still potentially large in theory, but only if a materially
-different reader structure wins. Do not spend more blind sweep time on the
-current implementation.
+Expected payoff: still potentially large for compressed KV in theory, but Q8_0
+in the current layout/body is not the path. Do not spend more blind sweep time on
+this implementation family.
 
 Risks and constraints:
 
 - Easy time sink.
-- Needs a fundamentally better Q8 read path or a different compression format to
-  be worth revisiting.
+- Needs a different compression format, layout, or attention body to be worth
+  revisiting; same-layout Q8_0 reader retunes are closed.
 
 Acceptance gates:
 
-- Revisit only with a concrete reader structure and a fast `attn-intra` feedback
-  plan that preserves Q-head grid parallelism and avoids large staged-KV TGM.
-- Cut again quickly if the reader does not beat tuned F16 at 32K or 64K before
+- Revisit only with a concrete non-Q8_0 or different-layout structure and a fast
+  `attn-intra` feedback plan that preserves Q-head grid parallelism and avoids
+  large staged-KV TGM.
+- Cut quickly if the reader does not beat tuned F16 at both 8K and 32K before
   end-to-end wiring.
 - Promote only after a no-spec long-context row improves and DFlash/verify phase
   attribution shows the new reader moves the adaptive context threshold.

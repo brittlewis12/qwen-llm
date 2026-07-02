@@ -42,9 +42,10 @@ use qwen_llm::{
         encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_rms_norm_batched_f32,
         encode_rms_norm_mul_f32, encode_roofline_fma_f32, encode_roofline_stream_f32,
         encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
-        encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
-        encode_sigmoid_mul_f32, encode_split_q_gate_f32, encode_touch_bytes_f32,
-        kernel_trace_begin, kernel_trace_snapshot, with_attn_v4_group_tile_override,
+        encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv,
+        encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32, encode_sigmoid_mul_f32,
+        encode_split_q_gate_f32, encode_touch_bytes_f32, kernel_trace_begin, kernel_trace_snapshot,
+        with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -11192,8 +11193,8 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         )?;
         timed(
             "kv scatter (fused)",
-            &|enc| {
-                Ok(encode_scatter_offset_f32_to_f16_kv(
+            &|enc| match s.kv_k[attn_idx_in_session].dtype {
+                GgmlType::F16 => Ok(encode_scatter_offset_f32_to_f16_kv(
                     &mctx,
                     enc,
                     &s.attn_k_normed,
@@ -11202,7 +11203,18 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
                     &s.kv_v[attn_idx_in_session],
                     (position as usize) * kv_dim,
                     kv_dim,
-                )?)
+                )?),
+                GgmlType::Q8_0 => Ok(encode_scatter_offset_f32_to_q8_0_kv(
+                    &mctx,
+                    enc,
+                    &s.attn_k_normed,
+                    &s.attn_v_now,
+                    &s.kv_k[attn_idx_in_session],
+                    &s.kv_v[attn_idx_in_session],
+                    (position as usize) * kv_dim,
+                    kv_dim,
+                )?),
+                other => Err(anyhow!("unsupported KV dtype for attn-intra: {other:?}")),
             },
             &mut phases,
         )?;

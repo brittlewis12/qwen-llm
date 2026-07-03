@@ -8703,6 +8703,15 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         decoder.session.enable_phase_timers();
     }
 
+    // H5.6 M1c: per-component wall accounting across the outer loop.
+    // Terminal-step bias note: the loop can break mid-step (accept hits
+    // `tokens`), so append/restore of the final step may be skipped; run
+    // with --tokens >= 256 when using these numbers for economics.
+    let mut acct_draft_ms = 0.0f64;
+    let mut acct_verify_ms = 0.0f64;
+    let mut acct_append_ms = 0.0f64;
+    let mut acct_restore_ms = 0.0f64;
+
     let t_decode = Instant::now();
     'outer: loop {
         if emitted.len() >= tokens {
@@ -8768,9 +8777,11 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         // overhead is ~12% of decode wall after v0.74.2, so the
         // wasted fraction (1 - n_eff/N) of 12% is bounded.
         let drafter_pos = processed_pos + 1; // noise_start_pos
+        let t_acct = Instant::now();
         let argmaxes = decoder
             .draft_block(carry_tok, drafter_pos)
             .context("drafter draft_block")?;
+        acct_draft_ms += t_acct.elapsed().as_secs_f64() * 1e3;
         drafter_calls += 1;
         let drafts: Vec<i32> = argmaxes[1..].to_vec();
         debug_assert_eq!(drafts.len(), d);
@@ -8784,6 +8795,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         verify_input.push(carry_tok);
         verify_input.extend_from_slice(&drafts[..n_drafts_used]);
 
+        let t_acct = Instant::now();
         let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
             decoder.base,
             &decoder.head.target_layer_ids,
@@ -8796,6 +8808,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             Some(n_eff as u32), // adaptive-N: truncate verify chain to n_eff
         )
         .context("packed_verify")?;
+        acct_verify_ms += t_acct.elapsed().as_secs_f64() * 1e3;
         verify_calls += 1;
         debug_assert_eq!(verify_argmax.len(), n_eff);
 
@@ -8863,10 +8876,12 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         }
         let columns_refs: Vec<(&qwen_llm::metal::MetalTensor, u32)> =
             append_columns.iter().map(|(t, p)| (t, *p)).collect();
+        let t_acct = Instant::now();
         decoder
             .session
             .append_target_ctx_columns_now(&ctx, &columns_refs, n_target_features)
             .context("append packed ctx columns")?;
+        acct_append_ms += t_acct.elapsed().as_secs_f64() * 1e3;
 
         // ---- Restore on partial accept ----
         // n_keep = 1 + n_accepted (carry + accepted drafts; bonus
@@ -8884,6 +8899,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let n_keep = (n_accepted + 1) as u32;
         let n_full = n_eff as u32; // adaptive-N: rollback boundary is n_eff, not n_block
         if n_keep < n_full {
+            let t_acct = Instant::now();
             qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
                 decoder.base,
                 &verify_scratch,
@@ -8893,6 +8909,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
                 Some(n_eff as u32), // adaptive-N: same n_eff as the verify call
             )
             .context("restore_after_partial_accept")?;
+            acct_restore_ms += t_acct.elapsed().as_secs_f64() * 1e3;
             restore_calls += 1;
         }
 
@@ -8967,6 +8984,24 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     } else {
         0.0
     };
+
+    // H5.6 M1c: per-step component accounting (means over all outer steps;
+    // see terminal-step caveat above — use --tokens >= 256 for economics).
+    if steps > 0 {
+        let s = steps as f64;
+        let acct_sum = acct_draft_ms + acct_verify_ms + acct_append_ms + acct_restore_ms;
+        eprintln!();
+        eprintln!("[dflash] === step accounting (H5.6 M1c) ===");
+        eprintln!(
+            "[dflash] per-step means over {steps} steps: draft {:.1} ms | verify {:.1} ms | append {:.1} ms | restore {:.1} ms | unaccounted {:.1} ms | TOTAL {:.1} ms",
+            acct_draft_ms / s,
+            acct_verify_ms / s,
+            acct_append_ms / s,
+            acct_restore_ms / s,
+            (decode_ms - acct_sum).max(0.0) / s,
+            decode_ms / s,
+        );
+    }
 
     eprintln!();
     eprintln!("[dflash] === acceptance ===");

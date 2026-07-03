@@ -1738,6 +1738,37 @@ work.
    priorities: no-spec 27B-MTP generation was `23.0 t/s`, while `draft-mtp`,
    `n_max=3`, `p_min=0.75` was `23.8 t/s` and lower prompt throughput. Keep MTP
    as a separate algorithmic target; do not mix it into no-spec parity boards.
+   v0.443 EXECUTES this item's precondition and the accounting closes: the
+   removable villain is the skinny-N mat-mat kernel family (every verify and
+   drafter projection shape runs `3-6x` off the `288-382 GB/s` the mat-vec
+   kernels reach on identical weights; verify `= 5.2-5.5x` a decode step
+   pipelined, `82%` of the DFlash step; the v0.314-era restore/append/logits
+   glue is already `<6%` after v0.74.3). Durable alpha (256-token runs):
+   code `3.34`, narrative-start `2.11`, narrative-tail `0.386` — pricing at
+   `~300 GB/s` projections clears the bar (`~1.4x` mid-alpha, `~2.0x` code)
+   on kernel work alone. M2 is sanctioned in two tracks: (a) retune the
+   existing N16 simdgroup mat-mat kernels against the
+   `packed_verify_skinny_gemm_micro_27b` harness (`>=250-300 GB/s` at N<=16;
+   scalar row-parallel is ALU-bound and capped, do not build it); (b) an
+   alpha-aware adaptive-policy cutoff (the current policy speculates at
+   `0.524x` on low-alpha text). Gate stays: `>=1.25x` decode-only on real
+   prompts at 570/2464 ctx with greedy equivalence. Track (a) also serves
+   replay S8 batched projections and small-batch MoE routing shapes.
+   v0.443 EXECUTES this item's precondition and finds the villain: the skinny-N
+   mat-mat kernel family runs `3-6x` off weight-stream on every verify/drafter
+   projection shape (`44-136 GB/s` vs mat-vec's `288-382` on identical
+   tensors); verify(N=16) is `5.2-5.5x` a decode step and `82%` of the DFlash
+   step, drafter `13%`, glue/restore `<6%` (the v0.314-era restore/logits
+   overhead is already engineered away). Durable alpha at 256 tokens:
+   code `3.34`, narrative-start `2.11`, narrative-tail `0.386` — and the
+   adaptive policy fails to protect low-alpha text (`0.524x`). M2 is
+   sanctioned in two tracks: (a) skinny-N mat-mat retune (`>=250-300 GB/s`
+   at N<=16 on the `packed_verify_skinny_gemm_micro_27b` harness; start from
+   the existing N16 simdgroup kernels — scalar row-parallel is ALU-bound at
+   `~38 ops/weight` and caps below target), (b) alpha-aware policy cutoff.
+   Priced: `~1.4x` mid-alpha / `~2.0x` code decode-only if (a) lands; gate is
+   the M1c packet re-run clearing `>=1.25x` on real prompts at 570/2464 ctx.
+   Track (a) also serves replay S8 projections and MoE small-batch decode.
 7. Promotion-grade paired residual search for prompt prefill: v0.279 cracks the
    tuned small-dense control except for parity/noise 2B `pp512`; current sentinel
    rows keep 27B/A3B/A10B prefill won after discarding A10B cold noise. Reopen

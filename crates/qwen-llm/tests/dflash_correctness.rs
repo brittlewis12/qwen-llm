@@ -1819,6 +1819,254 @@ fn packed_verify_phase_profile_v073a2_27b() {
     );
 }
 
+/// **H5.6 M1b: pipelined packed-verify cost** — times the PRODUCTION
+/// `encode_packed_verify_layer_major_inner` (one command buffer, one
+/// commit+wait internally) as-is, versus a same-session `single_token`
+/// decode step, across ctx {570, 1024, 4096} at N=16.
+///
+/// This is the truth-source the per-phase profile above cannot give:
+/// `packed_verify_phase_profile_v073a2_27b` commits a command buffer per
+/// phase per layer, which both inflates wall (~2.9x) and distorts the GPU
+/// pipelining. The verify:decode-step ratio here is the number the DFlash
+/// step economics stand on (break-even at mean_emitted/step, roadmap item 6
+/// bar: a removable villain must credibly clear >=1.25x decode).
+///
+/// KV positions are re-primed to the same ctx before every call (v0.440
+/// lesson: immutable seed per rep — verify/decode otherwise advance
+/// kv_n_pos and drift the shape).
+///
+/// `cargo test -p qwen-llm --release --test dflash_correctness \
+///   packed_verify_pipelined_cost_27b -- --ignored --nocapture`
+#[test]
+#[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
+fn packed_verify_pipelined_cost_27b() {
+    if !std::path::Path::new(TARGET_GGUF).exists() {
+        eprintln!("[h5.6-m1b] skipped — target GGUF missing");
+        return;
+    }
+    let ctx_metal = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[h5.6-m1b] loading 27B-Q4_K_M…");
+    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
+    let mf = MetalForward::new(&ctx_metal, &mm);
+
+    const N: u32 = 16;
+    let target_layer_ids: Vec<u32> = vec![1, 16, 31, 46, 61];
+    let k_target = target_layer_ids.len() as u32;
+    let ctx_points: &[u32] = &[570, 1024, 4096];
+    let kv_capacity = (*ctx_points.iter().max().unwrap() + N + 32) as usize;
+
+    let mut sess = MetalSession::fresh(&ctx_metal, &mm, kv_capacity).expect("sess");
+    let mut verify_scratch =
+        MetalDFlashVerifyScratch::fresh(&ctx_metal, &mm, N, k_target).expect("verify scratch");
+    let mut layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx_metal, &mm, N).expect("layer scratch");
+
+    let verify_tokens: Vec<i32> = (0..N as i32).map(|i| (i + 1) * 13).collect();
+    const REPS: usize = 8;
+
+    for &ctx_pos in ctx_points {
+        let reprime = |sess: &mut MetalSession| {
+            for kp in sess.kv_n_pos.iter_mut() {
+                *kp = ctx_pos as usize;
+            }
+        };
+
+        // Verify: warmup + REPS timed.
+        reprime(&mut sess);
+        qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
+            &mf,
+            &target_layer_ids,
+            &verify_tokens,
+            ctx_pos,
+            &mut verify_scratch,
+            &mut layer_scratch,
+            &mut sess,
+            None,
+            None,
+        )
+        .expect("verify warmup");
+        let mut verify_ms = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            reprime(&mut sess);
+            let t = std::time::Instant::now();
+            qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
+                &mf,
+                &target_layer_ids,
+                &verify_tokens,
+                ctx_pos,
+                &mut verify_scratch,
+                &mut layer_scratch,
+                &mut sess,
+                None,
+                None,
+            )
+            .expect("verify");
+            verify_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+
+        // Single-token decode step: warmup + REPS timed.
+        reprime(&mut sess);
+        mf.single_token(1234, ctx_pos, &mut sess)
+            .expect("decode warmup");
+        let mut decode_ms = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            reprime(&mut sess);
+            let t = std::time::Instant::now();
+            mf.single_token(1234, ctx_pos, &mut sess).expect("decode");
+            decode_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+
+        let stats = |v: &[f64]| {
+            let min = v.iter().cloned().fold(f64::INFINITY, f64::min);
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            (min, mean)
+        };
+        let (v_min, v_mean) = stats(&verify_ms);
+        let (d_min, d_mean) = stats(&decode_ms);
+        eprintln!(
+            "[h5.6-m1b ctx={ctx_pos:>4}] verify16 min={v_min:7.2} mean={v_mean:7.2} ms | \
+             decode1 min={d_min:6.2} mean={d_mean:6.2} ms | \
+             ratio(min)={:.2}x  step-budget@4.267={:.0} ms",
+            v_min / d_min,
+            d_min * 4.267
+        );
+    }
+}
+
+/// **H5.6 M1a: skinny-N GEMM attribution** — times every packed-verify
+/// projection shape (27B real weights) through `encode_mat_mat_dispatch`
+/// at N in {2,4,8,16,32} against the N=1 `encode_mat_vec_dispatch` stream
+/// reference. Reports per-call ms and effective weight-stream GB/s.
+///
+/// The M1b pipelined measurement shows verify16 = 5.2-5.5x a decode step
+/// where theory says ~1.2-1.5x; the per-phase profile blames FFN (47%) and
+/// GDN projections (~18%). This test pins WHICH shapes are off stream rate
+/// and by how much, so the M2 kernel retune targets the right one.
+///
+/// `cargo test -p qwen-llm --release --test dflash_correctness \
+///   packed_verify_skinny_gemm_micro_27b -- --ignored --nocapture`
+#[test]
+#[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
+fn packed_verify_skinny_gemm_micro_27b() {
+    if !std::path::Path::new(TARGET_GGUF).exists() {
+        eprintln!("[h5.6-m1a] skipped — target GGUF missing");
+        return;
+    }
+    let ctx_metal = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[h5.6-m1a] loading 27B-Q4_K_M…");
+    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
+
+    let h = mm.arch.hidden_size as usize;
+
+    // One GDN block and one attn block donate their real weights.
+    let gdn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Gdn(g) => Some(g),
+            _ => None,
+        })
+        .expect("gdn block");
+    let attn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Attn(a) => Some(a),
+            _ => None,
+        })
+        .expect("attn block");
+
+    // (label, weight, n_in); n_out derived from element count.
+    let f = mm.arch.intermediate_size as usize;
+    let shapes: Vec<(&str, &MetalTensor, usize)> = vec![
+        ("ffn_gate  Q4K", &gdn.ffn_gate, h),
+        ("ffn_down  Q6K", &gdn.ffn_down, f),
+        ("gdn_qkv   ", &gdn.in_proj_qkv, h),
+        ("gdn_z     ", &gdn.in_proj_z, h),
+        ("gdn_out   ", &gdn.out_proj, {
+            let n_out_elems = gdn.out_proj.n_elements() as usize;
+            n_out_elems / h // out_proj: [v_dim -> h]; n_in = v_dim
+        }),
+        ("attn_q    ", &attn.q, h),
+        ("attn_o    ", &attn.o, {
+            let n_out_elems = attn.o.n_elements() as usize;
+            n_out_elems / h // o: [q_dim -> h]; n_in = q_dim
+        }),
+    ];
+
+    let timed = |encode: &dyn Fn(&KernelEncoder) -> ()| -> f64 {
+        const ITERS: usize = 16;
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..ITERS {
+                encode(&enc);
+            }
+            enc.end();
+            let t = std::time::Instant::now();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            best = best.min(t.elapsed().as_secs_f64() / ITERS as f64);
+        }
+        best
+    };
+
+    for (label, w, n_in) in shapes {
+        let n_out = w.n_elements() as usize / n_in;
+        let w_bytes = w.buffer.length() as f64;
+        let x_src: Vec<f32> = (0..32 * n_in)
+            .map(|i| ((i % 13) as f32 - 6.0) * 1e-2)
+            .collect();
+        let x = MetalTensor::from_bytes(
+            &ctx_metal,
+            bytemuck::cast_slice(&x_src),
+            vec![(32 * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x");
+        let y = MetalTensor::zeros_f32(&ctx_metal, vec![(32 * n_out) as u64]).expect("y");
+
+        // N=1 mat-vec stream reference.
+        let x1 = x.view_subrange(0, vec![n_in as u64]);
+        let y1 = y.view_subrange(0, vec![n_out as u64]);
+        let t_mv = timed(&|enc| {
+            encode_mat_vec_dispatch(&ctx_metal, enc, w, &x1, &y1, n_in, n_out).expect("mat_vec");
+        });
+        let gbps_mv = w_bytes / t_mv / 1e9;
+        eprint!(
+            "[h5.6-m1a {label}] {n_in:>5}->{n_out:>5}  mv1 {:7.3} ms {gbps_mv:5.0} GB/s |",
+            t_mv * 1e3
+        );
+
+        for &n_q in &[2usize, 4, 8, 16, 32] {
+            let xn = x.view_subrange(0, vec![(n_q * n_in) as u64]);
+            let yn = y.view_subrange(0, vec![(n_q * n_out) as u64]);
+            let t_mm = timed(&|enc| {
+                encode_mat_mat_dispatch(&ctx_metal, enc, w, &xn, &yn, n_in, n_out, n_q)
+                    .expect("mat_mat");
+            });
+            let gbps = w_bytes / t_mm / 1e9;
+            eprint!(" N{n_q}:{:6.3}ms/{gbps:4.0}", t_mm * 1e3);
+        }
+        eprintln!();
+    }
+}
+
 /// **v0.75.1 27B integration correctness gate**: exercises the
 /// mat-mat half-staging FFN/Q/K/V/O paths AND the per-token attn-v4
 /// path (16 attn layers in the 27B Q4_K_M model — none in 0.8B-F32).

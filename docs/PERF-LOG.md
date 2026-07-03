@@ -6,6 +6,79 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.443 DFlash Verify-Cost Accounting (H5.6 M1)
+
+Status: measurement checkpoint executing PERF-ROADMAP item 6's precondition
+("promote spec only if packed verify/restore/logits accounting identifies one
+removable structural villain and a proof can plausibly clear >=1.25x decode on
+real prompts"). Three new harnesses, no production behavior change:
+
+- `packed_verify_pipelined_cost_27b` (M1b): times the PRODUCTION
+  `encode_packed_verify_layer_major_inner` (one command buffer internally)
+  vs a same-session `single_token` step. N=16 verify = `205.5/211.1/227.0 ms`
+  at ctx `570/1024/4096` vs decode `39.8/40.2/41.0 ms` = `5.2-5.5x` a decode
+  step, where a memory-bound packed pass should be `~1.2-1.5x`. The old
+  per-phase profile's phase SPLIT is credible (its sum is only ~1.13x the
+  pipelined truth), so: FFN ~47%, GDN ~36%, attn ~14%.
+- `packed_verify_skinny_gemm_micro_27b` (M1a): every verify projection shape
+  (real 27B weights) through `encode_mat_mat_dispatch` at N in {2..32} vs the
+  N=1 `encode_mat_vec_dispatch` stream reference. mat-vec runs `288-382 GB/s`;
+  mat-mat runs `44-136 GB/s` on the SAME weights — `3-6x off stream` on every
+  shape (ffn_gate Q4_K `364 -> 101`, ffn_down Q6_K `371 -> 75`, gdn_z
+  `302 -> 63`, attn_o `332 -> 53`; N2/N4/N8/N32 are flat = generic 32-wide
+  tile, the dedicated N16 kernels only ~30% better). Cross-check: N16 micro
+  times x layer counts reproduce the verify phase profile line-by-line
+  (FFN `1.97 ms x 62 = 122 ms` vs profiled `122.65`).
+- `qwen-bench dflash` step accounting (M1c): per-step means at 256 tokens on
+  27B + spiritbuun drafter. Narrative-start prompt (82 steps): verify
+  `155.9 ms` (82%), draft `25.0` (13%), append `0.1`, restore `0.6`,
+  unaccounted `9.2`. Reconciliation with M1b's `205-227 ms`: the M1c mean
+  averages over adaptive steps with `n_eff < 16` (the run crosses the
+  ctx-768 policy threshold); the all-spec16 code-prompt run shows verify
+  `206.7 ms/step`, matching M1b exactly. The numbers do not conflict.
+
+Alpha durability (256-token runs, greedy equivalence PASS on all):
+
+| prompt | alpha_chain | mean emitted/step | decode-only today |
+| --- | ---: | ---: | ---: |
+| code (pytest task) | 3.339 | 4.339 | 0.747x |
+| narrative start (the_current 536t) | 2.110 | 3.110 | 0.671x |
+| narrative tail | 0.386 | 1.386 | 0.524x |
+
+The 64-token quick read (`alpha_chain 3.267`) overstated durable alpha —
+short runs are biased; 256+ tokens is the methodology floor now.
+
+Verdict: the removable structural villain is the skinny-N mat-mat kernel
+family (all verify/drafter projection shapes run 3-6x off the stream rate the
+mat-vec kernels prove reachable). Pricing with projections at ~300 GB/s:
+verify `156 -> ~55-65 ms`, drafter shares the fix (`25 -> ~12`), step
+`~85-100 ms` vs break-even `127.5 ms` at alpha=2.11 and `174 ms` at
+alpha=3.34 ⇒ `~1.4x` mid-alpha, `~2.0x` code — clears the >=1.25x bar on
+kernel work alone. Co-finding: the adaptive policy does NOT protect low-alpha
+text (narrative tail still speculates at `0.524x`); an alpha-aware cutoff is
+required for a blended default-on story, independent of kernels.
+
+Validation:
+
+- `cargo fmt`; `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- three quiet-box measurement runs above (bench-vs-gate mutual exclusion per
+  v0.439 methodology)
+- `cx ask` session `019f2543-3fb7-70b0-9f45-712a7717e3fc` (plan review:
+  funded M1, held M2 pending this accounting)
+
+Decision: M2 sanctioned in two tracks: (a) skinny-N mat-mat retune (target
+`>=250-300 GB/s` at N<=16 on the M1a harness; retune the existing N16
+simdgroup kernels first per cx — a scalar row-parallel design is ALU-bound at
+`~38 ops/weight` and caps below target), (b) alpha-aware adaptive-policy
+cutoff so low-alpha prompts cost ~nothing. Track (a) also serves the replay
+branch's S=8 batched projections and MoE small-batch decode.
+
+Guardrails (cx round-2): no production DFlash default change in this or the
+M2a checkpoint; M2b (policy) must land BEFORE any end-to-end default or
+sanction — kernel-only promotion is forbidden while narrative-tail-class
+prompts lose money; M2 promotion requires alpha-stratified real prompts
+(code AND narrative-start clear `>=1.25x`, narrative-tail off-or-neutral,
+greedy equivalence on all).
 ## 2026-07-02 - v0.442 Product-Shaped Prefix Cache Probe
 
 Status: made `qwen-bench prefix-cache` use packed prefill by default, with a

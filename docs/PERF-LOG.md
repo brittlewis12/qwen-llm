@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.449 Long-Context S8 Replay Gate
+
+Status: measurement checkpoint on the non-DFlash replay lane. A3B S8 block-slice
+replay was rerun at longer real-prompt contexts using eight independent prompt
+files that all clear `16k` tokens, with `blocks=2`, windows `0..2` and `20..22`,
+`timing-iters=2`, and margin threshold `3e-4`.
+
+Artifact:
+
+- `docs/bench/2026-07-03-v0449-replay-long-s8/README.md`
+
+Validation:
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `decode-block-slice-real-margin` at contexts `8192/16384`
+- `uv run scripts/profile/replay_economics.py --occupancy '8=1.0'`
+
+Results: all four rows have zero fallback slots and validated net saves
+`11.64-14.84%`; full-S8 blended occupancy saves `12.85%`. True S8 `ctx32768`
+is blocked by corpus/harness shape, not by a measured replay failure: the local
+corpus has only three independent files above `32k` tokens.
+
+Decision: S8 replay remains alive for long-context serving-style work, but broad
+scheduler work is still gated on real occupancy/request traces and p95 economics.
+Do not reopen S4/S6 or local replay kernels from this result.
+
 ## 2026-07-03 - v0.448 Runtime-Backed `qwen` Single-Turn CLI
 
 Status: turned `qwen` from a metadata-only binary into a minimal runtime-backed

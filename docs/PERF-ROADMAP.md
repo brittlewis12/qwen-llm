@@ -1396,6 +1396,13 @@ and observed occupancy under an S8-only policy. The smoke trace is deliberately
 best-case full occupancy and only reproduces the expected `4.85%` fallback-adjusted
 win. The live replay branch is now blocked on a real request/occupancy trace, not
 more replay microbench rows.
+v0.449 rechecks that S8 policy at longer real-prompt contexts (`8192/16384`) with
+eight independent prompt files and `blocks=2`, windows `0..2` and `20..22`. All
+four rows have zero fallback slots at `3e-4` and validated net saves
+`11.64-14.84%`; full-S8 occupancy economics blend to `12.85%`. This keeps S8
+alive for long-context serving-style work, but does not remove the production
+request-trace/p95 gate. True S8 `ctx32768` is currently corpus/harness-blocked
+because only three local independent files exceed `32k` tokens.
 v0.442 gives the cross-turn prefix/session cache its product-shaped probe. The
 old H2 harness used a per-token prefill loop and overstated the benefit; the bench
 now defaults to packed cold/prefix prefill and auto-selects per-token suffix

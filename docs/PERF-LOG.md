@@ -33,6 +33,88 @@ is `5.16x` TTFT (`609.3 -> 118.2 ms`) and prefix 4096 is `18.51x`
 Decision: prefix caching is now a usable runtime feature boundary rather than a
 bench-only artifact. The remaining cache work is product wiring (request handling,
 cross-process/persistent identity policy, observability), not kernel optimization.
+## 2026-07-03 - v0.444 N16 Skinny-GEMM Retune Falsifier (H5.6 M2a)
+
+Status: falsification checkpoint. The v0.443-sanctioned M2a bet (retune the
+N16 mat-mat kernels to `>=250-300 GB/s` and clear `>=1.25x` DFlash decode)
+does NOT survive contact with the kernel: the skinny-GEMM deficit is not an
+A-path/bytes problem but a per-dispatch machinery floor, and the ceiling
+analysis closes the whole design space below the bar at current alpha.
+
+What was built and measured (27B-Q4_K_M, M1a/M1b harnesses):
+
+- `kernel_mat_mat_q4_K_f32_n16_v2`: cooperative raw-super-block staging to
+  threadgroup memory (coalesced 16 B units, 1.0x device traffic), dequant
+  from threadgroup, otherwise identical MMA structure. Hot-L2 micro:
+  ffn_gate `101 -> 126 GB/s` (+24%). PRODUCTION verify (M1b): `205.5 ->
+  201.1 ms` (~-1.5%, within noise at ctx 570/1024/4096). The staging costs
+  14.3 KiB threadgroup memory vs v1's 5.1 KiB (2 vs 6 TGs/core): the
+  hot-micro L2-request win trades against occupancy, and production is
+  latency/machinery-bound, not L2-request-bound. Kernel kept as an opt-in
+  measurement artifact (`QWEN_MATMAT_N16_V2=1`, default off; correctness
+  green on `mat_mat_q4_k_matches_cpu_and_mat_vec`, cos `1.000000`).
+- Probe ladder on the v2 shape (throwaway kernels, not shipped): removing
+  ALL threadgroup barriers buys `+8%` (barrier hypothesis dead); removing
+  the entire A-path (no weight reads, no dequant) leaves `0.273 ms` for the
+  ffn_gate GEMM (`~190 GB/s`-equivalent ceiling with FREE weights); removing
+  the MMA phase instead leaves `0.289 ms`. The sa-swizzle stores + fragment
+  loads + loop machinery ARE the floor.
+- The decisive production number: running the A-path-free probe INSIDE the
+  M1b verify drops it only `201 -> 168.6 ms`. An N=16 packed verify with
+  ZERO weight-fetch/dequant cost still costs `4.2x` a decode step. Floor
+  decomposition: GEMM machinery `~92 ms` (~330 dispatches x `~0.27 ms`),
+  A-path `~32 ms`, GDN recurrence `~47 ms`, attn per-token `~19 ms`,
+  norms/tail `~16 ms`.
+
+Ceiling arithmetic (recorded so the branch is not re-derived): stacking
+EVERY identified heroic — machinery `-25%`, A-path halved, the v0.73b
+N-step GDN tail kernel (`-28 ms`), packed-N attention (`-10 ms`) — lands
+verify at `~130-140 ms`, step at `~165 ms` vs break-even `174 ms` at the
+BEST measured alpha (code, `alpha_chain=3.34`): `~1.0-1.1x`. The
+`>=1.25x` roadmap bar is unreachable via verify-cost work at current
+alpha. Closed-form checks close the alternatives: an F32 dot-product
+N16 kernel is FMA-roofline-capped at `~250 GB/s`-equivalent (`16
+FMA/weight` vs `7.16 T-FMA/s`); half-accumulation designs die on the
+activation-reuse/register tension (x-slices for 16 columns cannot stay
+register- or threadgroup-resident across the row loop without L2 traffic
+amplification worse than the weights themselves).
+
+Harness caveat banked: the M1a micro loops 16 iterations on one tensor,
+so small weights go L2-hot — its absolute `GB/s` (including v0.443's
+`288-382 GB/s` mat-vec references for sub-30 MB shapes) are L2-flattered;
+deltas and the production M1b/M1c numbers stand. Production FFN verify
+time matches the HOT micro exactly (`1.97 ms/layer`), i.e. the kernel is
+machinery-bound enough that cold weight fetch fully hides under it.
+
+Validation:
+
+- `cargo fmt`; `cargo build --release -p qwen-llm`
+- `mat_mat_q4_k_matches_cpu_and_mat_vec` green with and without
+  `QWEN_MATMAT_N16_V2=1` (n_query 1/16/32/64, min_cos `1.000000`)
+- M1a/M1b A/B runs (quiet-box mins; one ctx4096 mean row discarded for
+  mid-run contention, methodology per v0.439)
+- probe kernels stripped from the tree after measurement
+- `cx ask` falsifier review, session `019f2543-3fb7-70b0-9f45-712a7717e3fc`
+  (round 3: chain endorsed as a lower-bound argument; FMA cap math checked;
+  fused gate+up re-probe rejected — machinery is per-element sa/fragment
+  work, not launch overhead, so fusion still pays it twice)
+
+Scope note (cx round 3): the shipped v2 retune artifact is Q4_K-only. The
+FAMILY closure (Q6_K/Q8_0 included) rests on the A-path-free production
+floor (168.6 ms with zero weight-fetch cost, shared machinery) plus the
+v0.443 all-shape M1a data, not on retuning each dtype directly.
+
+Decision: M2a FALSIFIED as priced; the DFlash H5.6 branch is demoted
+again. M2b (alpha-aware policy) is demoted with it — it only matters if
+DFlash ships. Reopen conditions, any one of: (a) a drafter/alpha
+breakthrough with durable `alpha_chain >= 4.5` on real prompts (budget
+`>=225 ms/step` clears the bar even at today's verify cost); (b) a
+verify execution structure that amortizes the per-dispatch machinery
+across layers/GEMMs (persistent-kernel / fused-layer class — a moonshot
+branch, not a retune); (c) an MTP-based path with materially different
+verify economics. The N16 kernel family itself is CLOSED at `~2x`
+hot-micro / `~1x` production without such a structure change; do not
+propose N-tile/staging/barrier variants against it.
 
 ## 2026-07-02 - v0.443 DFlash Verify-Cost Accounting (H5.6 M1)
 

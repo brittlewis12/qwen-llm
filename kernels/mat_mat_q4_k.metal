@@ -709,3 +709,215 @@ kernel void kernel_mat_mat_q4_K_f32_n64(
                         args.M, 0, false);
     }
 }
+
+// =============================================================================
+// kernel_mat_mat_q4_K_f32_n16_v2 — H5.6 M2a skinny-N retune.
+//
+// v0.443 accounting: the n16 kernel above (and the generic tile) runs
+// 44-136 GB/s effective weight stream at N<=32 while the mat-vec kernels
+// reach 288-382 GB/s on identical tensors. Root cause is the A-path device
+// access pattern: every thread dequantizes STRAIGHT FROM DEVICE per K-step,
+// re-reading the 16-byte block header every one of the 8 K-steps that share
+// a super-block, in ~8-24 B scattered transactions strided by nb01 across
+// threads (~2.7x byte amplification plus transaction waste — matching the
+// measured 3.6x deficit on ffn_gate).
+//
+// Fix: stage the RAW Q4_K super-blocks for the 64-row tile into threadgroup
+// memory ONCE per super-block (64 x 144 B = 9216 B, coalesced 16-byte units,
+// exactly 1.0x device traffic), then run the existing dequant + swizzle +
+// MMA inner loop against threadgroup memory. B-path, MMA structure, and the
+// store phase are unchanged from kernel_mat_mat_q4_K_f32_n16.
+//
+// Threadgroup memory (host must size accordingly):
+//   [0, 9216)        raw Q4_K blocks, 64 rows x 144 B
+//   [9216, 13312)    sa: dequantized A tile, 64 M x 32 K half
+//   [13312, 14336)   sb: activation tile, 16 N x 32 K half
+// Total 14336 B (2 TGs/core by threadgroup memory).
+
+// dequantize_q4_K_half against a threadgroup-resident raw block.
+inline void dequantize_q4_K_half_tg(threadgroup const uchar * blk_bytes,
+                                    short il,
+                                    thread half4x4 & reg) {
+    const half d_h    = ((threadgroup const half *)blk_bytes)[0];
+    const half dmin_h = ((threadgroup const half *)blk_bytes)[1];
+    threadgroup const uchar * scales = blk_bytes + 4;
+    threadgroup const uchar * qs     = blk_bytes + 4 + 12;
+
+    const short is  = (il / 4) * 2;
+    const short k01 = (il / 2) & 1;
+    uchar sc_u, m_u;
+    if (is < 4) {
+        sc_u = scales[is + k01] & 63;
+        m_u  = scales[is + k01 + 4] & 63;
+    } else {
+        sc_u = (scales[is + k01 + 4] & 0x0F) | ((scales[is + k01 - 4] >> 6) << 4);
+        m_u  = (scales[is + k01 + 4] >>   4) | ((scales[is + k01    ] >> 6) << 4);
+    }
+
+    qs = qs + (il / 4) * 32 + 16 * (il & 1);
+    short il_inner = il & 3;
+    const float d   = il_inner < 2 ? (float)d_h : (float)d_h / 16.0f;
+    const float dmin = (float)dmin_h;
+    const float dl  = d   * (float)sc_u;
+    const float ml  = dmin * (float)m_u;
+    const ushort mask = il_inner < 2 ? 0x0F : 0xF0;
+
+    FOR_UNROLL (int i = 0; i < 16; ++i) {
+        reg[i / 4][i % 4] = (half)(dl * (float)(qs[i] & mask) - ml);
+    }
+}
+
+constant constexpr int Q4K_RAW_BYTES_N16V2 = NR0_MM * Q4K_BYTES;       // 9216
+constant constexpr int Q4K_RAW_U16_N16V2  = Q4K_RAW_BYTES_N16V2 / 16;  // 576 uint4 units
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_mat_mat_q4_K_f32_n16_v2(
+        constant mat_mat_q4k_args & args   [[buffer(0)]],
+        device const uchar        * srcA   [[buffer(1)]],
+        device const float        * srcB   [[buffer(2)]],
+        device       float        * dst    [[buffer(3)]],
+        threadgroup  uchar        * shmem  [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup uchar * raw = shmem;
+    threadgroup half  * sa  = (threadgroup half *)(shmem + 9216);
+    threadgroup half  * sb  = (threadgroup half *)(shmem + 13312);
+
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_SPECIAL_N16;
+
+    const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
+
+    // A dequant thread mapping (identical to n16): each thread owns row
+    // lr0 and K-chunk il0 within the K-step.
+    const short lr0 = ((short)tiitg / NL0_MM) < nr0
+                        ? ((short)tiitg / NL0_MM)
+                        : nr0 - 1;
+    const short il0 = (tiitg % NL0_MM);
+
+    // B-loading mapping (identical to n16).
+    const short lr1 = (short)tiitg / NL1_SPECIAL_N16;
+    const short iy = 8 * (tiitg % NL1_SPECIAL_N16);
+    device const float * y_ptr = srcB + (ulong)args.stride_b * lr1
+                                       + (ulong)iy;
+
+    threadgroup const uchar * my_blk = raw + (int)lr0 * Q4K_BYTES;
+
+    simdgroup_half8x8   ma[4];
+    simdgroup_half8x8   mb;
+    simdgroup_float8x8  mc[4];
+
+    FOR_UNROLL (short i = 0; i < 4; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    // Outer loop: one Q4_K super-block (256 K elements = 8 K-steps of 32).
+    const uint n_sblk = args.K / 256;
+    for (uint sblk = 0; sblk < n_sblk; ++sblk) {
+        // --- Stage raw blocks for all 64 rows, coalesced 16-byte units. ---
+        // 576 units; unit u covers row u/9, byte offset (u%9)*16 (144 = 9*16).
+        // Rows beyond nr0 clamp to the last valid row (duplicate reads, no
+        // OOB). Both nb01 and the intra-row offset are 16-byte aligned.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        {
+            device const uchar * blk_base = srcA + (ulong)sblk * Q4K_BYTES;
+            FOR_UNROLL (short pass = 0; pass < 5; ++pass) {
+                const int u = (int)tiitg + pass * 128;
+                if (u < Q4K_RAW_U16_N16V2) {
+                    const int row = u / 9;
+                    const int off = (u % 9) * 16;
+                    const int src_row = row < nr0 ? row : nr0 - 1;
+                    device const uint4 * s = (device const uint4 *)(
+                        blk_base + (ulong)args.nb01 * (r0 + src_row) + off);
+                    *((threadgroup uint4 *)(raw + row * Q4K_BYTES + off)) = *s;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // --- 8 K-steps against the staged raw blocks. ---
+        FOR_UNROLL (short kstep = 0; kstep < 8; ++kstep) {
+            const short il = il0 + 2 * kstep;
+
+            // PHASE 1: dequant from threadgroup raw + swizzle into sa.
+            {
+                half4x4 temp_a;
+                dequantize_q4_K_half_tg(my_blk, il, temp_a);
+
+                // First K-step is already ordered by the raw barrier above;
+                // later steps must wait for the previous MMA reads of sa/sb.
+                if (kstep != 0) {
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                }
+
+                FOR_UNROLL (short i = 0; i < 16; ++i) {
+                    const short sx = 2 * il0 + i / 8;
+                    const short sy = (tiitg / NL0_MM) / 8;
+                    const short lx = (tiitg / NL0_MM) % 8;
+                    const short ly = i % 8;
+                    const short ib = 8 * sx + sy;
+                    *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
+                }
+            }
+
+            // PHASE 2: B tile (identical to n16).
+            if (tiitg < B_LOAD_THREADS_N16) {
+                const short sx = (tiitg % NL1_SPECIAL_N16);
+                const short sy = (tiitg / NL1_SPECIAL_N16) / 8;
+                const short ly = (tiitg / NL1_SPECIAL_N16) % 8;
+                const short ib = 2 * sx + sy;
+                *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                    (half2x4)(*((device const float2x4 *)y_ptr));
+            }
+            y_ptr += NK_MM;
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // PHASE 3: simdgroup matmul (identical to n16).
+            threadgroup const half * lsma = (sa + 4 * 64 * (sgitg % 2));
+            threadgroup const half * lsmb = (sb + 1 * 64 * (sgitg / 2));
+
+            FOR_UNROLL (short ik = 0; ik < NK_MM / 8; ++ik) {
+                FOR_UNROLL (short i = 0; i < 4; ++i) {
+                    simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+                }
+                simdgroup_load(mb, lsmb, 8, 0, false);
+                FOR_UNROLL (short i = 0; i < 4; ++i) {
+                    simdgroup_multiply_accumulate(mc[i], mb, ma[i], mc[i]);
+                }
+
+                lsma += 8 * 64;
+                lsmb += 2 * 64;
+            }
+        }
+    }
+
+    // PHASE 4: store (identical to n16).
+    if (r0 + NR0_MM <= (int)args.M) {
+        device float * C = dst + (r0 + 32 * (sgitg & 1))
+                               + (r1 + 8 * (sgitg >> 1)) * args.M;
+        FOR_UNROLL (short i = 0; i < 4; ++i) {
+            simdgroup_store(mc[i], C + 8 * i, args.M, 0, false);
+        }
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float * temp_str = ((threadgroup float *)shmem)
+                                       + 32 * (sgitg & 1)
+                                       + (8 * (sgitg >> 1)) * NR0_MM;
+        FOR_UNROLL (short i = 0; i < 4; ++i) {
+            simdgroup_store(mc[i], temp_str + 8 * i, NR0_MM, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0) {
+            for (int j = tiitg; j < NR1_SPECIAL_N16; j += NR1_SPECIAL_N16) {
+                device float * D = dst + r0 + (r1 + j) * args.M;
+                threadgroup float * C = temp_str + (j * NR0_MM);
+                for (int i = 0; i < nr0; ++i) {
+                    D[i] = C[i];
+                }
+            }
+        }
+    }
+}
+

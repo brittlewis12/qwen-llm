@@ -3257,6 +3257,16 @@ fn mat_mat_q4_k_use_n64(n_in: usize, n_out: usize, n_query: usize) -> bool {
     }
 }
 
+/// H5.6 M2a falsifier artifact: raw-block-staged N16 mat-mat kernel
+/// (`kernel_mat_mat_q4_K_f32_n16_v2`). +24% on the HOT-L2 micro, ~0% in
+/// production verify (occupancy trade: 14.3 KiB threadgroup memory vs
+/// v1's 5.1 KiB; production is machinery/latency-bound, not L2-request
+/// bound). Kept as an opt-in measurement artifact: QWEN_MATMAT_N16_V2=1.
+fn mat_mat_n16_v2_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| matches!(std::env::var("QWEN_MATMAT_N16_V2").as_deref(), Ok("1")))
+}
+
 fn mat_mat_q5_k_n64_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -3362,8 +3372,15 @@ pub fn encode_mat_mat_q4_k_f32(
 
     let use_n64 =
         mat_mat_q4_k_use_n64(n_in, n_out, n_query) && n_query % 64 == 0 && n_out % 64 == 0;
+    // H5.6 M2a: raw-block-staged N16 kernel (v2). The v1 A-path dequants
+    // straight from device with ~2.7x byte amplification; v2 stages raw
+    // super-blocks to threadgroup memory coalesced. K must cover whole
+    // super-blocks. Rollback: QWEN_MATMAT_N16_V2=0.
+    let use_n16_v2 = n_query == 16 && !use_n64 && n_in % 256 == 0 && mat_mat_n16_v2_enabled();
     let kernel_name = if use_n64 {
         "kernel_mat_mat_q4_K_f32_n64"
+    } else if use_n16_v2 {
+        "kernel_mat_mat_q4_K_f32_n16_v2"
     } else if n_query == 16 {
         "kernel_mat_mat_q4_K_f32_n16"
     } else {
@@ -3393,6 +3410,9 @@ pub fn encode_mat_mat_q4_k_f32(
     };
     let smem = if use_n64 {
         8192
+    } else if use_n16_v2 {
+        // raw 9216 + sa 4096 + sb 1024 (kernel doc block).
+        14336
     } else {
         mat_mat_qk_threadgroup_memory(n_out, n_query, nr1)
     };

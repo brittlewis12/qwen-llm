@@ -59,32 +59,9 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-fn env_flag_enabled(name: &str) -> bool {
-    matches!(
-        std::env::var(name).as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    )
-}
+crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_PACKED");
 
-fn dense_packed_gdn_step_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_DENSE_GDN_STEP_PACKED").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
-
-fn prefill_gdn_batched_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_GDN_BATCHED").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_gdn_batched_enabled, "QWEN_PREFILL_GDN_BATCHED");
 
 fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
     static LAYERS: OnceLock<Option<Vec<usize>>> = OnceLock::new();
@@ -104,10 +81,7 @@ fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
         .is_some_and(|layers| layers.contains(&usize::MAX) || layers.contains(&layer_idx))
 }
 
-fn prefill_noop_ffn_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_FFN"))
-}
+crate::env_flag!(default_off prefill_noop_ffn_enabled, "QWEN_PREFILL_NOOP_FFN");
 
 thread_local! {
     static PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE: Cell<Option<bool>> = Cell::new(None);
@@ -166,25 +140,9 @@ fn prefill_mat_mat_dispatch_eligible(dtype: GgmlType) -> bool {
     )
 }
 
-fn prefill_gdn_skinny_f32_e8p32_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_GDN_SKINNY_E8P32").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_gdn_skinny_f32_e8p32_enabled, "QWEN_PREFILL_GDN_SKINNY_E8P32");
 
-fn prefill_gdn_pair_l2_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_GDN_PAIR_L2").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_gdn_pair_l2_enabled, "QWEN_PREFILL_GDN_PAIR_L2");
 
 fn prefill_gdn_matvec_proj_enabled(proj: &str) -> bool {
     static PROJS: OnceLock<Option<Vec<String>>> = OnceLock::new();
@@ -227,80 +185,25 @@ fn prefill_gdn_matvec_projection_enabled(proj: &str, layer_idx: usize) -> bool {
     prefill_gdn_matvec_proj_enabled(proj) && prefill_gdn_matvec_layer_enabled(layer_idx)
 }
 
-fn prefill_moe_packed_routed_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_MOE_PACKED_ROUTED").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_moe_packed_routed_enabled, "QWEN_PREFILL_MOE_PACKED_ROUTED");
 
-fn prefill_moe_packed_route_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_MOE_PACKED_ROUTE").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_moe_packed_route_enabled, "QWEN_PREFILL_MOE_PACKED_ROUTE");
 
-fn prefill_moe_packed_down_sum_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_MOE_PACKED_DOWN_SUM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_moe_packed_down_sum_enabled, "QWEN_PREFILL_MOE_PACKED_DOWN_SUM");
 
-fn prefill_moe_packed_shared_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_MOE_PACKED_SHARED").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_moe_packed_shared_enabled, "QWEN_PREFILL_MOE_PACKED_SHARED");
 
-fn prefill_noop_moe_shared_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_MOE_SHARED"))
-}
+crate::env_flag!(default_off prefill_noop_moe_shared_enabled, "QWEN_PREFILL_NOOP_MOE_SHARED");
 
-fn prefill_noop_moe_routed_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_MOE_ROUTED"))
-}
+crate::env_flag!(default_off prefill_noop_moe_routed_enabled, "QWEN_PREFILL_NOOP_MOE_ROUTED");
 
-fn prefill_noop_moe_grouped_swiglu_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU"))
-}
+crate::env_flag!(default_off prefill_noop_moe_grouped_swiglu_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU");
 
-fn prefill_noop_moe_grouped_down_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN"))
-}
+crate::env_flag!(default_off prefill_noop_moe_grouped_down_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN");
 
-fn prefill_noop_moe_grouped_reduce_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE"))
-}
+crate::env_flag!(default_off prefill_noop_moe_grouped_reduce_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE");
 
-fn prefill_moe_grouped_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_PREFILL_MOE_GROUPED").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on prefill_moe_grouped_enabled, "QWEN_PREFILL_MOE_GROUPED");
 
 fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
@@ -408,15 +311,9 @@ fn prefill_moe_grouped_q4_n32_all_enabled(_arch: &crate::model::Arch, _chunk_p: 
     }
 }
 
-fn prefill_moe_fused_finalizer_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_MOE_FUSED_FINALIZER"))
-}
+crate::env_flag!(default_off prefill_moe_fused_finalizer_enabled, "QWEN_PREFILL_MOE_FUSED_FINALIZER");
 
-fn prefill_moe_grouped_zero_fill_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_MOE_GROUPED_ZERO_FILL"))
-}
+crate::env_flag!(default_off prefill_moe_grouped_zero_fill_enabled, "QWEN_PREFILL_MOE_GROUPED_ZERO_FILL");
 
 fn prefill_moe_tiny_down_r16_enabled(chunk_p: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
@@ -975,50 +872,23 @@ fn prefill_moe_route_logits_e8p32_mode() -> PrefillEnvMode {
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_ROUTE_LOGITS_E8P32"))
 }
 
-fn prefill_trace_labels_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_LABELS"))
-}
+crate::env_flag!(default_off prefill_trace_labels_enabled, "QWEN_PREFILL_TRACE_LABELS");
 
-fn prefill_trace_chunks_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_CHUNKS"))
-}
+crate::env_flag!(default_off prefill_trace_chunks_enabled, "QWEN_PREFILL_TRACE_CHUNKS");
 
-fn prefill_trace_wall_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_WALL"))
-}
+crate::env_flag!(default_off prefill_trace_wall_enabled, "QWEN_PREFILL_TRACE_WALL");
 
-fn prefill_trace_counts_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_COUNTS"))
-}
+crate::env_flag!(default_off prefill_trace_counts_enabled, "QWEN_PREFILL_TRACE_COUNTS");
 
-fn prefill_trace_attn_phases_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_ATTN_PHASES"))
-}
+crate::env_flag!(default_off prefill_trace_attn_phases_enabled, "QWEN_PREFILL_TRACE_ATTN_PHASES");
 
-fn prefill_trace_layer_phases_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_LAYER_PHASES"))
-}
+crate::env_flag!(default_off prefill_trace_layer_phases_enabled, "QWEN_PREFILL_TRACE_LAYER_PHASES");
 
-fn prefill_trace_ffn_subphases_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_FFN_SUBPHASES"))
-}
+crate::env_flag!(default_off prefill_trace_ffn_subphases_enabled, "QWEN_PREFILL_TRACE_FFN_SUBPHASES");
 
-fn prefill_trace_moe_buckets_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_MOE_BUCKETS"))
-}
+crate::env_flag!(default_off prefill_trace_moe_buckets_enabled, "QWEN_PREFILL_TRACE_MOE_BUCKETS");
 
-fn prefill_trace_moe_bucket_bins_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_TRACE_MOE_BUCKET_BINS"))
-}
+crate::env_flag!(default_off prefill_trace_moe_bucket_bins_enabled, "QWEN_PREFILL_TRACE_MOE_BUCKET_BINS");
 
 fn trace_prefill_moe_bucket_stats(
     enabled: bool,
@@ -1497,15 +1367,9 @@ fn prefill_attn_packed_g16_nwg() -> usize {
     })
 }
 
-fn prefill_attn_packed_g8_oracle_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_PACKED_G8_ORACLE"))
-}
+crate::env_flag!(default_off prefill_attn_packed_g8_oracle_enabled, "QWEN_PREFILL_ATTN_PACKED_G8_ORACLE");
 
-fn prefill_attn_packed_g16_oracle_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_ATTN_PACKED_G16_ORACLE"))
-}
+crate::env_flag!(default_off prefill_attn_packed_g16_oracle_enabled, "QWEN_PREFILL_ATTN_PACKED_G16_ORACLE");
 
 fn label_prefill_encoder(enc: &KernelEncoder, layer: usize, label: &str) {
     if prefill_trace_labels_enabled() {
@@ -1645,15 +1509,9 @@ fn build_expert_slot_groups_cpu(
     (ranges, slot_ids, token_ids, weights)
 }
 
-fn prefill_noop_gdn_body_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_GDN_BODY"))
-}
+crate::env_flag!(default_off prefill_noop_gdn_body_enabled, "QWEN_PREFILL_NOOP_GDN_BODY");
 
-fn prefill_noop_attn_body_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("QWEN_PREFILL_NOOP_ATTN_BODY"))
-}
+crate::env_flag!(default_off prefill_noop_attn_body_enabled, "QWEN_PREFILL_NOOP_ATTN_BODY");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrefillGdnSplitMode {

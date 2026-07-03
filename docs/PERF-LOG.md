@@ -6,6 +6,55 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.453 env_flag Adoption for metal.rs / metal_dflash.rs
+
+Status: hygiene completion of the v0.423 arc. One deliberate behavior
+change is folded in and called out below (the `QWEN_MATMAT_N16_V2`
+truthy-set widening); everything else is byte-equivalent parsing moved
+behind one macro. 54 hand-rolled `OnceLock<bool>` env-flag blocks convert to
+`crate::env_flag!` declarations (metal_dflash: 21 opt-in one-liners through
+the now-deleted local `env_flag_enabled` helper + 9 full-set default_on
+blocks; metal.rs: 3 standalone default_on, 19 embedded blocks hoisted to
+module-level declarations with call sites, the LLAMA_SMEM inline form, and
+the v0.444 `QWEN_MATMAT_N16_V2` narrow `Ok("1")` matcher widened to the
+uniform opt-in truthy set — still default-off). Net `-251` lines; polarity
+is now part of every declaration site.
+
+Trust chain for a change class where the suite cannot catch a silent
+polarity flip (tests run at defaults): (1) the transform was parser-driven
+against exact-idiom matches only (complex bodies skipped: PrefillEnvMode
+tri-states, usize/Vec parsers, thread-local override preambles kept
+hand-rolled around hoisted env defaults); (2) an ast-grep structural
+audit (not regex): 54 declarations extracted, 0 polarity mismatches vs
+HEAD, 0 invented flags, 0 remaining `OnceLock<bool>` in either file, 0
+zero-caller generated fns, and the 4 old-only rows all accounted (3
+PrefillEnvMode tri-state arms correctly not converted + the deleted
+generic helper's own signature); (3) cx coherence review (session
+`019f25b1-af89-7ee2-b41c-2d4d024b68c6`): caching semantics unchanged
+(per-fn OnceLock latch as before), override precedence preserved at both
+thread-local sites, doc-comment moves verified, `_env_default` naming
+endorsed; (4) full serial release suite on a quiet box.
+
+Behavior change (the one): `QWEN_MATMAT_N16_V2` previously enabled only
+on the literal value `1`; it now accepts the uniform truthy set
+(`1/true/TRUE/yes/YES`). Still default-off, still an opt-in measurement
+artifact.
+
+Validation:
+
+- `cargo fmt`; `cargo check` (zero new warnings after re-attaching four
+  doc comments the hoists had displaced)
+- ast-grep structural audit: 54/54 polarity match vs HEAD (details above)
+- cx coherence review, session `019f25b1-af89-7ee2-b41c-2d4d024b68c6`
+- full non-ignored release suite serial on a quiet box: 159 lib + 7
+  dflash_correctness + 8 eos_gap, all green. One earlier suite run red at
+  `attn_matrix_path_matches_cpu_reference` (causal_skip bitwise assert)
+  while the box was transitioning off another agent's bench — the
+  documented v0.439 contention-corruption class; 5/5 quiet-box reruns
+  green and ast-grep confirms zero env reads in that test's call graph
+  (hermetic to this change)
+
+## 2026-07-03 - v0.448 Close Decode-Glue Bundle (Skip Option)
 ## 2026-07-03 - v0.452 Close Decode-Glue Bundle (Skip Option)
 
 Status: queue curation, no code change. The do-less audit (v0.430-432 batch,

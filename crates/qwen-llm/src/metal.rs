@@ -1081,20 +1081,13 @@ pub fn encode_rms_norm_mul_f32(
     Ok(())
 }
 
+crate::env_flag!(default_on mat_vec_f32_lcpp_r2_enabled, "QWEN_MATVEC_F32_LCPP_R2");
+
 /// F32 mat-vec: `y[o] = Σ_i W[o, i] * x[i]`, GGUF stride convention.
 /// `W` has shape `[n_in, n_out]` (ne[0]=n_in fastest); `x` is `[n_in]`,
 /// `y` is `[n_out]`.
 ///
 /// CPU oracle: [`crate::forward::mat_vec_pub`].
-fn mat_vec_f32_lcpp_r2_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_F32_LCPP_R2").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
 
 pub fn encode_mat_vec_f32(
     ctx: &MetalContext,
@@ -1371,6 +1364,8 @@ pub fn encode_mat_vec_q4_1_f32(
     )
 }
 
+crate::env_flag!(default_on matvec_iq4_nl_fast_enabled, "QWEN_MATVEC_IQ4_NL_FAST");
+
 pub fn encode_mat_vec_iq4_nl_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1380,13 +1375,7 @@ pub fn encode_mat_vec_iq4_nl_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    static IQ4_NL_MV: OnceLock<bool> = OnceLock::new();
-    if *IQ4_NL_MV.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_IQ4_NL_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matvec_iq4_nl_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,
             enc,
@@ -1437,6 +1426,8 @@ fn encode_mat_vec_block256_f32(
     encode_mat_vec_16bit_weight_f32(ctx, enc, weight, x, y, n_in, n_out, expected, kernel_name)
 }
 
+crate::env_flag!(default_on matvec_q3_k_fast_enabled, "QWEN_MATVEC_Q3_K_FAST");
+
 pub fn encode_mat_vec_q3_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1446,13 +1437,7 @@ pub fn encode_mat_vec_q3_k_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    static Q3_K_MV: OnceLock<bool> = OnceLock::new();
-    if *Q3_K_MV.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_Q3_K_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matvec_q3_k_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,
             enc,
@@ -1483,6 +1468,8 @@ pub fn encode_mat_vec_q3_k_f32(
     )
 }
 
+crate::env_flag!(default_on matvec_q2_k_fast_enabled, "QWEN_MATVEC_Q2_K_FAST");
+
 pub fn encode_mat_vec_q2_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1492,13 +1479,7 @@ pub fn encode_mat_vec_q2_k_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    static Q2_K_MV: OnceLock<bool> = OnceLock::new();
-    if *Q2_K_MV.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_Q2_K_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matvec_q2_k_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,
             enc,
@@ -1529,6 +1510,8 @@ pub fn encode_mat_vec_q2_k_f32(
     )
 }
 
+crate::env_flag!(default_on matvec_iq2_s_fast_enabled, "QWEN_MATVEC_IQ2_S_FAST");
+
 pub fn encode_mat_vec_iq2_s_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1538,13 +1521,7 @@ pub fn encode_mat_vec_iq2_s_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    static IQ2_S_MV: OnceLock<bool> = OnceLock::new();
-    if *IQ2_S_MV.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_IQ2_S_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matvec_iq2_s_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,
             enc,
@@ -1575,6 +1552,8 @@ pub fn encode_mat_vec_iq2_s_f32(
     )
 }
 
+crate::env_flag!(default_on matvec_iq3_xxs_fast_enabled, "QWEN_MATVEC_IQ3_XXS_FAST");
+
 pub fn encode_mat_vec_iq3_xxs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1584,13 +1563,7 @@ pub fn encode_mat_vec_iq3_xxs_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    static IQ3_XXS_MV: OnceLock<bool> = OnceLock::new();
-    if *IQ3_XXS_MV.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_IQ3_XXS_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matvec_iq3_xxs_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,
             enc,
@@ -1621,6 +1594,8 @@ pub fn encode_mat_vec_iq3_xxs_f32(
     )
 }
 
+crate::env_flag!(default_on matvec_iq3_s_fast_enabled, "QWEN_MATVEC_IQ3_S_FAST");
+
 pub fn encode_mat_vec_iq3_s_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1630,13 +1605,7 @@ pub fn encode_mat_vec_iq3_s_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    static IQ3_S_MV: OnceLock<bool> = OnceLock::new();
-    if *IQ3_S_MV.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_IQ3_S_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matvec_iq3_s_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,
             enc,
@@ -1667,6 +1636,8 @@ pub fn encode_mat_vec_iq3_s_f32(
     )
 }
 
+crate::env_flag!(default_on matvec_iq4_xs_fast_enabled, "QWEN_MATVEC_IQ4_XS_FAST");
+
 pub fn encode_mat_vec_iq4_xs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1676,13 +1647,7 @@ pub fn encode_mat_vec_iq4_xs_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    static IQ4_XS_MV: OnceLock<bool> = OnceLock::new();
-    if *IQ4_XS_MV.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATVEC_IQ4_XS_FAST").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matvec_iq4_xs_fast_enabled() {
         return encode_mat_vec_lowbit_fast_f32(
             ctx,
             enc,
@@ -1982,17 +1947,13 @@ pub fn encode_mat_mat_f16_f32(
     )
 }
 
+crate::env_flag!(default_on matmat_f16_half_act_env_default, "QWEN_MATMAT_F16_HALF_ACT");
+
 fn mat_mat_f16_half_act_enabled() -> bool {
     if let Some(enabled) = MATMAT_F16_HALF_ACT_OVERRIDE.with(|slot| slot.get()) {
         return enabled;
     }
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_F16_HALF_ACT").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
+    matmat_f16_half_act_env_default()
 }
 
 pub fn encode_mat_mat_f16_half_act_f32(
@@ -2283,17 +2244,13 @@ pub fn encode_mat_mat_q4_1_f32(
     )
 }
 
+crate::env_flag!(default_on matmat_q4_legacy_mm_env_default, "QWEN_MATMAT_Q4_LEGACY_MM");
+
 fn mat_mat_q4_legacy_mm_enabled() -> bool {
     if let Some(enabled) = MATMAT_Q4_LEGACY_MM_OVERRIDE.with(|slot| slot.get()) {
         return enabled;
     }
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_Q4_LEGACY_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
+    matmat_q4_legacy_mm_env_default()
 }
 
 fn encode_mat_mat_q4_legacy_mm_f32(
@@ -2388,6 +2345,8 @@ fn encode_mat_mat_q4_legacy_mm_f32(
     Ok(())
 }
 
+crate::env_flag!(default_on matmat_iq4_nl_mm_enabled, "QWEN_MATMAT_IQ4_NL_MM");
+
 pub fn encode_mat_mat_iq4_nl_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2398,13 +2357,7 @@ pub fn encode_mat_mat_iq4_nl_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    static IQ4_NL_MM: OnceLock<bool> = OnceLock::new();
-    if *IQ4_NL_MM.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_IQ4_NL_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matmat_iq4_nl_mm_enabled() {
         return encode_mat_mat_iq4_nl_f32_mm(ctx, enc, weight, x, y, n_in, n_out, n_query);
     }
     encode_mat_mat_block32_f32(
@@ -2543,6 +2496,8 @@ fn encode_mat_mat_block256_f32(
     )
 }
 
+crate::env_flag!(default_on matmat_q3_k_mm_enabled, "QWEN_MATMAT_Q3_K_MM");
+
 pub fn encode_mat_mat_q3_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2553,13 +2508,7 @@ pub fn encode_mat_mat_q3_k_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    static Q3_K_MM: OnceLock<bool> = OnceLock::new();
-    if *Q3_K_MM.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_Q3_K_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matmat_q3_k_mm_enabled() {
         return encode_mat_mat_q3_k_f32_mm(ctx, enc, weight, x, y, n_in, n_out, n_query);
     }
     encode_mat_mat_block256_f32(
@@ -2602,6 +2551,8 @@ fn encode_mat_mat_q3_k_f32_mm(
     )
 }
 
+crate::env_flag!(default_on matmat_q2_k_mm_enabled, "QWEN_MATMAT_Q2_K_MM");
+
 pub fn encode_mat_mat_q2_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2612,13 +2563,7 @@ pub fn encode_mat_mat_q2_k_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    static Q2_K_MM: OnceLock<bool> = OnceLock::new();
-    if *Q2_K_MM.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_Q2_K_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matmat_q2_k_mm_enabled() {
         return encode_mat_mat_q2_k_f32_mm(ctx, enc, weight, x, y, n_in, n_out, n_query);
     }
     encode_mat_mat_block256_f32(
@@ -2661,6 +2606,8 @@ fn encode_mat_mat_q2_k_f32_mm(
     )
 }
 
+crate::env_flag!(default_on matmat_iq2_s_mm_enabled, "QWEN_MATMAT_IQ2_S_MM");
+
 pub fn encode_mat_mat_iq2_s_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2671,13 +2618,7 @@ pub fn encode_mat_mat_iq2_s_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    static IQ2_S_MM: OnceLock<bool> = OnceLock::new();
-    if *IQ2_S_MM.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_IQ2_S_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matmat_iq2_s_mm_enabled() {
         return encode_mat_mat_qk_lowbit_mm(
             ctx,
             enc,
@@ -2707,6 +2648,8 @@ pub fn encode_mat_mat_iq2_s_f32(
     )
 }
 
+crate::env_flag!(default_on matmat_iq3_xxs_mm_enabled, "QWEN_MATMAT_IQ3_XXS_MM");
+
 pub fn encode_mat_mat_iq3_xxs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2717,13 +2660,7 @@ pub fn encode_mat_mat_iq3_xxs_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    static IQ3_XXS_MM: OnceLock<bool> = OnceLock::new();
-    if *IQ3_XXS_MM.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_IQ3_XXS_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matmat_iq3_xxs_mm_enabled() {
         return encode_mat_mat_qk_lowbit_mm(
             ctx,
             enc,
@@ -2753,6 +2690,8 @@ pub fn encode_mat_mat_iq3_xxs_f32(
     )
 }
 
+crate::env_flag!(default_on matmat_iq3_s_mm_enabled, "QWEN_MATMAT_IQ3_S_MM");
+
 pub fn encode_mat_mat_iq3_s_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2763,13 +2702,7 @@ pub fn encode_mat_mat_iq3_s_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    static IQ3_S_MM: OnceLock<bool> = OnceLock::new();
-    if *IQ3_S_MM.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_IQ3_S_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matmat_iq3_s_mm_enabled() {
         return encode_mat_mat_qk_lowbit_mm(
             ctx,
             enc,
@@ -2893,6 +2826,8 @@ fn encode_mat_mat_qk_lowbit_mm(
     Ok(())
 }
 
+crate::env_flag!(default_on matmat_iq4_xs_mm_enabled, "QWEN_MATMAT_IQ4_XS_MM");
+
 pub fn encode_mat_mat_iq4_xs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2903,13 +2838,7 @@ pub fn encode_mat_mat_iq4_xs_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    static IQ4_XS_MM: OnceLock<bool> = OnceLock::new();
-    if *IQ4_XS_MM.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_IQ4_XS_MM").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    }) {
+    if matmat_iq4_xs_mm_enabled() {
         return encode_mat_mat_iq4_xs_f32_mm(ctx, enc, weight, x, y, n_in, n_out, n_query);
     }
     encode_mat_mat_block256_f32(
@@ -3161,6 +3090,8 @@ pub fn encode_mat_vec_q4_k_f32(
     Ok(())
 }
 
+crate::env_flag!(default_off matmat_qk_llama_smem_enabled, "QWEN_MATMAT_QK_LLAMA_SMEM");
+
 /// Q4_K mat-mat: `Y = W · X^T` where
 ///   * `W` is Q4_K `[n_out, n_in]` (row-major in Q4_K block bytes)
 ///   * `X` is F32 `[n_query, n_in]` row-major
@@ -3197,19 +3128,9 @@ pub fn encode_mat_vec_q4_k_f32(
 /// through half before float accumulation; cosine ≥ 0.999 vs
 /// scalar-float mat-vec is the gate (vs cos ≥ 0.9999 against a
 /// CPU mat-mat oracle that uses the same staging).
+
 fn mat_mat_qk_threadgroup_memory(n_out: usize, n_query: usize, nr1: usize) -> usize {
-    static LLAMA_SMEM: OnceLock<bool> = OnceLock::new();
-    mat_mat_qk_threadgroup_memory_with_policy(
-        n_out,
-        n_query,
-        nr1,
-        *LLAMA_SMEM.get_or_init(|| {
-            matches!(
-                std::env::var("QWEN_MATMAT_QK_LLAMA_SMEM").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            )
-        }),
-    )
+    mat_mat_qk_threadgroup_memory_with_policy(n_out, n_query, nr1, matmat_qk_llama_smem_enabled())
 }
 
 fn mat_mat_qk_threadgroup_memory_with_policy(
@@ -3257,25 +3178,14 @@ fn mat_mat_q4_k_use_n64(n_in: usize, n_out: usize, n_query: usize) -> bool {
     }
 }
 
-/// H5.6 M2a falsifier artifact: raw-block-staged N16 mat-mat kernel
-/// (`kernel_mat_mat_q4_K_f32_n16_v2`). +24% on the HOT-L2 micro, ~0% in
-/// production verify (occupancy trade: 14.3 KiB threadgroup memory vs
-/// v1's 5.1 KiB; production is machinery/latency-bound, not L2-request
-/// bound). Kept as an opt-in measurement artifact: QWEN_MATMAT_N16_V2=1.
-fn mat_mat_n16_v2_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| matches!(std::env::var("QWEN_MATMAT_N16_V2").as_deref(), Ok("1")))
-}
+// H5.6 M2a falsifier artifact: raw-block-staged N16 mat-mat kernel
+// (`kernel_mat_mat_q4_K_f32_n16_v2`). +24% on the HOT-L2 micro, ~0% in
+// production verify (occupancy trade: 14.3 KiB threadgroup memory vs
+// v1's 5.1 KiB; production is machinery/latency-bound, not L2-request
+// bound). Kept as an opt-in measurement artifact: QWEN_MATMAT_N16_V2=1.
+crate::env_flag!(default_off mat_mat_n16_v2_enabled, "QWEN_MATMAT_N16_V2");
 
-fn mat_mat_q5_k_n64_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_Q5_K_N64").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on mat_mat_q5_k_n64_enabled, "QWEN_MATMAT_Q5_K_N64");
 
 fn mat_mat_q5_k_n64_min_query() -> usize {
     static MIN_N: OnceLock<usize> = OnceLock::new();
@@ -3288,15 +3198,7 @@ fn mat_mat_q5_k_n64_min_query() -> usize {
     })
 }
 
-fn mat_mat_q6_k_n64_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_MATMAT_Q6_K_N64").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    })
-}
+crate::env_flag!(default_on mat_mat_q6_k_n64_enabled, "QWEN_MATMAT_Q6_K_N64");
 
 fn mat_mat_q6_k_n64_min_query() -> usize {
     static MIN_N: OnceLock<usize> = OnceLock::new();
@@ -13687,6 +13589,8 @@ pub fn encode_l2_norm_batched_f32(
     Ok(())
 }
 
+crate::env_flag!(default_on l2_pair_hd128_r4_enabled, "QWEN_L2_PAIR_HD128_R4");
+
 pub fn encode_l2_norm_pair_batched_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -13716,13 +13620,7 @@ pub fn encode_l2_norm_pair_batched_f32(
         head_dim: u32,
         eps: f32,
     }
-    static HD128_R4: OnceLock<bool> = OnceLock::new();
-    let use_hd128_r4 = *HD128_R4.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_L2_PAIR_HD128_R4").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    });
+    let use_hd128_r4 = l2_pair_hd128_r4_enabled();
     if use_hd128_r4 && head_dim == 128 {
         let pso = ctx.pipeline("kernel_l2_norm_pair_hd128_r4_f32")?;
         enc.set_pipeline(&pso);
@@ -14093,6 +13991,8 @@ pub fn encode_ssm_conv_silu_f32(
     Ok(())
 }
 
+crate::env_flag!(default_off prefill_gdn_prep_parallel_enabled, "QWEN_PREFILL_GDN_PREP_PARALLEL");
+
 pub fn encode_gdn_prep_packed_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -14152,13 +14052,7 @@ pub fn encode_gdn_prep_packed_f32(
         head_dim: u32,
         conv_dim: u32,
     }
-    static PARALLEL: OnceLock<bool> = OnceLock::new();
-    let use_parallel = *PARALLEL.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_PREFILL_GDN_PREP_PARALLEL").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    });
+    let use_parallel = prefill_gdn_prep_parallel_enabled();
     if use_parallel && n_tokens >= 3 {
         let args = Args {
             n_tokens: n_tokens as u32,
@@ -14250,11 +14144,14 @@ pub fn encode_gdn_prep_packed_f32(
     Ok(())
 }
 
+crate::env_flag!(default_on rmsnorm_gated_hd128_r4_enabled, "QWEN_RMSNORM_GATED_HD128_R4");
+
 /// RMSNormGated: per-head RMSNorm of `o` with weight, multiplied by
 /// silu(z). Used immediately after the GDN recurrence, before out_proj.
 ///
 /// CPU oracle: per-head loop in `forward::Forward::gdn_step` (the
 /// "RMSNormGated" block).
+
 pub fn encode_rmsnorm_gated_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -14289,13 +14186,7 @@ pub fn encode_rmsnorm_gated_f32(
         head_dim: u32,
         eps: f32,
     }
-    static HD128_R4: OnceLock<bool> = OnceLock::new();
-    let use_hd128_r4 = *HD128_R4.get_or_init(|| {
-        !matches!(
-            std::env::var("QWEN_RMSNORM_GATED_HD128_R4").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
-        )
-    });
+    let use_hd128_r4 = rmsnorm_gated_hd128_r4_enabled();
     if use_hd128_r4 && head_dim == 128 {
         let pso = ctx.pipeline("kernel_rmsnorm_gated_hd128_r4_f32")?;
         enc.set_pipeline(&pso);

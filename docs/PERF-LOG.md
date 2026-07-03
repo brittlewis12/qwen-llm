@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.448 Runtime-Backed `qwen` Single-Turn CLI
+
+Status: turned `qwen` from a metadata-only binary into a minimal runtime-backed
+single-turn greedy frontend. `qwen -m MODEL -p PROMPT -n TOKENS` now uses
+`Runtime -> LoadedModel -> Sequence`, packed prompt prefill, state-coherent decode
+advancement, streaming detokenization to stdout, and terse stderr timing/cache
+stats. The old metadata inventory remains the no-prompt fallback.
+
+Validation:
+
+- `cargo check -p qwen-cli --bin qwen`
+- `cargo build --release -p qwen-cli --bin qwen`
+- 0.8B smoke: `target/release/qwen -m ...Qwen3.5-0.8B-Q4_K_M.gguf -p "Hello" -n 2`
+
+Result: smoke generated 2 tokens through the runtime path with `prompt_tokens=1`,
+`prefill_ms=40.4`, `ttft_ms=44.0`, and `decode_tps=288.74`. This is not a new
+optimization claim; it is the smallest product seam needed before prefix-cache or
+runtime policy work can be exercised outside `qwen-bench`.
+
 ## 2026-07-03 - v0.447 Stub Split-Q/Gate Packs
 
 Status: scratch-debt cleanup logged at v0.432. `attn_q_pack` and

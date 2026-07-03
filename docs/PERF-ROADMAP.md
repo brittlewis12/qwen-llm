@@ -1413,6 +1413,10 @@ now exercises this path. A3B runtime probes reproduce the v0.442 economics:
 prefix 1024 `5.16x`, prefix 4096 `18.51x`, restore `4.1/7.4 ms`, exact greedy
 agreement. Remaining cache work is request/CLI product wiring, observability, and
 cross-process/persistent identity policy; the kernel gate is closed.
+v0.448 adds the smallest CLI product seam: `qwen -m MODEL -p PROMPT -n TOKENS`
+now runs a runtime-backed greedy single-turn path with packed prefill and
+state-coherent decode. Do not expand this into serving abstractions yet; next
+cache work should be driven by real interactive/request usage.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

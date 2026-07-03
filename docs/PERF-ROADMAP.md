@@ -1387,9 +1387,15 @@ validated net `~10.8-12.8%` before broader fallback and `~4.1-6.1%` after the
 v0.438 `3e-4` fallback packet (`1/15 = 6.67%`). S6 averages only `~4.0%` before
 fallback and becomes negative after it; S4 stays negative. `replay_economics.py`
 now parses real-margin timing rows and can apply simple active-slot occupancy
-mixes. Update the live gate again: replay is shadow-model only, S8-only, and must
-clear `>=5-8%` blended net on a real occupancy/p95 trace before any production
-scheduler work.
+mixes or FIFO request traces for p95 modeling. Update the live gate again: replay
+is shadow-model only, S8-only, and must clear `>=5-8%` blended net on a real
+occupancy/p95 trace before any production scheduler work.
+v0.441 makes that gate executable: `replay_economics.py` now accepts active-slot
+occupancy traces and FIFO request traces, reporting blended wall, throughput, p95,
+and observed occupancy under an S8-only policy. The smoke trace is deliberately
+best-case full occupancy and only reproduces the expected `4.85%` fallback-adjusted
+win. The live replay branch is now blocked on a real request/occupancy trace, not
+more replay microbench rows.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

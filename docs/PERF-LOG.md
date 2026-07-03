@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.441 Replay Request-Trace Shadow Model
+
+Status: extended `scripts/profile/replay_economics.py` from static occupancy mixes
+to trace-driven shadow modeling. It can now read an active-slot occupancy trace or
+a FIFO request trace (`arrival_ms`, `tokens`, optional `id`) and report blended
+wall, throughput, p95 latency, and the occupancy histogram for an S8-only replay
+policy.
+
+Validation:
+
+- `uv run python scripts/profile/replay_economics.py --help`
+- request-simulation smoke on corrected v0.440 S4/S6/S8 rows
+
+Results: the smoke uses 16 simultaneous 8-token requests at capacity 8, so it is
+only a harness check. The model reproduces the full-S8 fallback-adjusted result:
+at thresholds `1e-4/3e-4`, wall and p95 improve `4.85%`; at `1e-3` and above the
+fallback charge makes the policy sharply negative.
+
+Decision: replay's next required evidence is now explicit: feed a real request or
+active-slot trace to the shadow model. Do not infer production value from the
+full-S8 smoke.
+
 ## 2026-07-02 - v0.440 Replay Timing Reset and Policy Model
 
 Status: fixed the real-window replay economics timing harness so each timed and
@@ -13,7 +35,8 @@ warmup repetition starts from an identical prepared block-slice state. The v0.43
 timing rows reused sessions after a prior repetition had already mutated `x`, KV,
 and GDN state; that was fine as shape smoke, but too confounded for scheduler
 economics. `scripts/profile/replay_economics.py` now parses timed real-margin rows
-and can apply fallback packets plus simple active-slot occupancy mixes.
+and can apply fallback packets, active-slot occupancy traces, and FIFO request
+traces for p95 shadow-policy modeling.
 
 Artifact:
 
@@ -24,7 +47,7 @@ Validation:
 - `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
 - `cargo build --release -p qwen-cli --bin qwen-bench`
 - A3B corrected real-prompt S4/S6/S8 economics probes at contexts `512/2048`
-- `replay_economics.py` policy-model smoke on the corrected rows
+- `replay_economics.py` occupancy and request-simulation smoke on corrected rows
 
 Results: corrected S8 blocks=2 still has gross `~20.9-21.7%` and validated net
 `~10.8-12.8%` before broader fallback. Applying the broader `3e-4` fallback packet

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,13 @@ class ReplayRow:
 class FallbackRow:
     threshold: str
     fallback_pct: float
+
+
+@dataclass(frozen=True)
+class RequestRow:
+    request_id: str
+    arrival_ms: float
+    tokens: int
 
 
 def format_float(value: float) -> str:
@@ -167,6 +175,66 @@ def parse_occupancy(raw: str) -> dict[int, float]:
     return {slot: weight / total for slot, weight in out.items()}
 
 
+def parse_occupancy_trace(path: Path) -> dict[int, float]:
+    counts: dict[int, float] = {}
+    lines = path.read_text().splitlines()
+    header: list[str] | None = None
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = re.split(r"[\t, ]+", line)
+        if header is None and not parts[0].lstrip("+-").isdigit():
+            header = parts
+            continue
+        if header is None:
+            active_slots = int(parts[0])
+            weight = float(parts[1]) if len(parts) > 1 else 1.0
+        else:
+            row = dict(zip(header, parts, strict=False))
+            active_slots = int(row["active_slots"])
+            weight = float(row.get("steps", row.get("weight", "1")))
+        if active_slots > 0:
+            counts[active_slots] = counts.get(active_slots, 0.0) + weight
+    total = sum(counts.values())
+    if total <= 0.0:
+        raise SystemExit(f"no active occupancy rows found in {path}")
+    return {slot: weight / total for slot, weight in sorted(counts.items())}
+
+
+def read_text_or_stdin(path: str) -> str:
+    if path == "-":
+        return sys.stdin.read()
+    return Path(path).read_text()
+
+
+def parse_request_trace(path: str) -> list[RequestRow]:
+    rows: list[RequestRow] = []
+    header: list[str] | None = None
+    for line_i, line in enumerate(read_text_or_stdin(path).splitlines()):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = re.split(r"[\t, ]+", line)
+        if header is None and not re.match(r"^[0-9.+-]+$", parts[0]):
+            header = parts
+            continue
+        if header is None:
+            arrival_ms = float(parts[0])
+            tokens = int(parts[1])
+            request_id = parts[2] if len(parts) > 2 else f"req{line_i}"
+        else:
+            row = dict(zip(header, parts, strict=False))
+            arrival_ms = float(row["arrival_ms"])
+            tokens = int(row["tokens"])
+            request_id = row.get("id", f"req{line_i}")
+        if tokens > 0:
+            rows.append(RequestRow(request_id, arrival_ms, tokens))
+    if not rows:
+        raise SystemExit(f"no request rows found in {path}")
+    return sorted(rows, key=lambda row: (row.arrival_ms, row.request_id))
+
+
 def observed_save(row: ReplayRow) -> float:
     return row.net_save_pct if row.net_save_pct is not None else row.gross_save_pct
 
@@ -207,6 +275,12 @@ def print_policy(
     rows: list[ReplayRow], fallback_rows: list[FallbackRow], occupancy: str
 ) -> None:
     weights = parse_occupancy(occupancy)
+    print_policy_for_weights(rows, fallback_rows, weights)
+
+
+def print_policy_for_weights(
+    rows: list[ReplayRow], fallback_rows: list[FallbackRow], weights: dict[int, float]
+) -> None:
     by_tokens: dict[int, list[ReplayRow]] = {}
     for row in rows:
         by_tokens.setdefault(row.tokens, []).append(row)
@@ -247,6 +321,160 @@ def print_policy(
             )
 
 
+def percentile(xs: list[float], q: float) -> float:
+    if not xs:
+        return 0.0
+    ys = sorted(xs)
+    idx = min(len(ys) - 1, max(0, int(round((len(ys) - 1) * q))))
+    return ys[idx]
+
+
+def slot_cost(
+    values: dict[int, float], slots: int, allow_interpolate: bool, label: str
+) -> float:
+    if slots in values:
+        return values[slots]
+    if not allow_interpolate:
+        available = ",".join(str(k) for k in sorted(values))
+        raise SystemExit(
+            f"missing {label} cost for active_slots={slots}; available={available}; "
+            "rerun rows for that slot count or pass --interpolate-slots"
+        )
+    keys = sorted(values)
+    lower = max((k for k in keys if k < slots), default=keys[0])
+    upper = min((k for k in keys if k > slots), default=keys[-1])
+    if lower == upper:
+        return values[lower]
+    t = (slots - lower) / (upper - lower)
+    return values[lower] * (1.0 - t) + values[upper] * t
+
+
+def mean_costs(
+    rows: list[ReplayRow], fallback_pct: float
+) -> tuple[dict[int, float], dict[int, float]]:
+    by_tokens: dict[int, list[ReplayRow]] = {}
+    for row in rows:
+        by_tokens.setdefault(row.tokens, []).append(row)
+    baseline: dict[int, float] = {}
+    charged: dict[int, float] = {}
+    for tokens, token_rows in by_tokens.items():
+        base = mean([row.baseline_ms_per_tok for row in token_rows])
+        save = mean([adjusted_save(row, fallback_pct) for row in token_rows])
+        baseline[tokens] = base
+        charged[tokens] = base * (1.0 - save / 100.0)
+    return baseline, charged
+
+
+def simulate_requests(
+    requests: list[RequestRow],
+    baseline_costs: dict[int, float],
+    charged_costs: dict[int, float],
+    capacity: int,
+    policy_min_slots: int,
+    allow_interpolate: bool,
+) -> tuple[float, float, float, float, float, dict[int, int]]:
+    pending = list(requests)
+    waiting: list[dict[str, float | int | str]] = []
+    active: list[dict[str, float | int | str]] = []
+    done_latencies: list[float] = []
+    occupancy_counts: dict[int, int] = {}
+    time_ms = 0.0
+
+    while pending or waiting or active:
+        while pending and pending[0].arrival_ms <= time_ms:
+            req = pending.pop(0)
+            waiting.append(
+                {
+                    "id": req.request_id,
+                    "arrival_ms": req.arrival_ms,
+                    "remaining": req.tokens,
+                }
+            )
+        while waiting and len(active) < capacity:
+            active.append(waiting.pop(0))
+        if not active:
+            time_ms = max(time_ms, pending[0].arrival_ms)
+            continue
+
+        slots = len(active)
+        occupancy_counts[slots] = occupancy_counts.get(slots, 0) + 1
+        baseline_per_tok = slot_cost(
+            baseline_costs, slots, allow_interpolate, "baseline"
+        )
+        charged_per_tok = (
+            slot_cost(charged_costs, slots, allow_interpolate, "charged")
+            if slots >= policy_min_slots
+            else baseline_per_tok
+        )
+        time_ms += charged_per_tok * slots
+        next_active: list[dict[str, float | int | str]] = []
+        for req in active:
+            remaining = int(req["remaining"]) - 1
+            if remaining <= 0:
+                done_latencies.append(time_ms - float(req["arrival_ms"]))
+            else:
+                req["remaining"] = remaining
+                next_active.append(req)
+        active = next_active
+
+    token_count = sum(req.tokens for req in requests)
+    throughput = token_count / (time_ms / 1000.0) if time_ms > 0.0 else 0.0
+    return (
+        time_ms,
+        throughput,
+        percentile(done_latencies, 0.50),
+        percentile(done_latencies, 0.95),
+        max(done_latencies, default=0.0),
+        occupancy_counts,
+    )
+
+
+def print_request_sim(
+    rows: list[ReplayRow],
+    fallback_rows: list[FallbackRow],
+    request_trace: str,
+    capacity: int,
+    policy_min_slots: int,
+    allow_interpolate: bool,
+) -> None:
+    requests = parse_request_trace(request_trace)
+    scenarios = fallback_rows or [FallbackRow(threshold="observed", fallback_pct=0.0)]
+    print(
+        "request_trace\tthreshold\trequests\ttokens\tcapacity\tpolicy_min_slots"
+        "\tbaseline_wall_ms\tpolicy_wall_ms\tblended_save_pct"
+        "\tbaseline_tps\tpolicy_tps\tbaseline_p95_ms\tpolicy_p95_ms"
+        "\tp95_delta_pct\tpolicy_occupancy"
+    )
+    for fallback in scenarios:
+        baseline_costs, charged_costs = mean_costs(rows, fallback.fallback_pct)
+        base_wall, base_tps, _, base_p95, _, _ = simulate_requests(
+            requests,
+            baseline_costs,
+            baseline_costs,
+            capacity,
+            capacity + 1,
+            allow_interpolate,
+        )
+        policy_wall, policy_tps, _, policy_p95, _, occupancy = simulate_requests(
+            requests,
+            baseline_costs,
+            charged_costs,
+            capacity,
+            policy_min_slots,
+            allow_interpolate,
+        )
+        save = (base_wall - policy_wall) / base_wall * 100.0 if base_wall > 0 else 0.0
+        p95_delta = (policy_p95 - base_p95) / base_p95 * 100.0 if base_p95 > 0 else 0.0
+        occupancy_str = ",".join(f"{k}:{v}" for k, v in sorted(occupancy.items()))
+        print(
+            f"{request_trace}\t{fallback.threshold}\t{len(requests)}"
+            f"\t{sum(req.tokens for req in requests)}\t{capacity}\t{policy_min_slots}"
+            f"\t{base_wall:.4f}\t{policy_wall:.4f}\t{save:.2f}"
+            f"\t{base_tps:.2f}\t{policy_tps:.2f}\t{base_p95:.4f}"
+            f"\t{policy_p95:.4f}\t{p95_delta:.2f}\t{occupancy_str}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Model block-slice replay net savings after validation and fallback."
@@ -257,6 +485,22 @@ def main() -> None:
     parser.add_argument(
         "--occupancy",
         help="optional token-step occupancy mix, for example '4=0.2,6=0.3,8=0.5'",
+    )
+    parser.add_argument(
+        "--occupancy-trace",
+        type=Path,
+        help="optional trace with active_slots and optional weight/steps columns",
+    )
+    parser.add_argument(
+        "--request-trace",
+        help="optional request trace: arrival_ms,tokens[,id], or '-' for stdin",
+    )
+    parser.add_argument("--capacity", type=int, default=8)
+    parser.add_argument("--policy-min-slots", type=int, default=8)
+    parser.add_argument(
+        "--interpolate-slots",
+        action="store_true",
+        help="linearly interpolate missing active-slot costs in request simulation",
     )
     args = parser.parse_args()
 
@@ -274,6 +518,19 @@ def main() -> None:
     print_rows(replay_rows, fallback_rows)
     if args.occupancy:
         print_policy(replay_rows, fallback_rows, args.occupancy)
+    if args.occupancy_trace:
+        print_policy_for_weights(
+            replay_rows, fallback_rows, parse_occupancy_trace(args.occupancy_trace)
+        )
+    if args.request_trace:
+        print_request_sim(
+            replay_rows,
+            fallback_rows,
+            args.request_trace,
+            args.capacity,
+            args.policy_min_slots,
+            args.interpolate_slots,
+        )
 
 
 if __name__ == "__main__":

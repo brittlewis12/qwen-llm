@@ -12,7 +12,8 @@ on a single full-occupancy packet.
   starts from the same block-slice input state.
 - `scripts/profile/replay_economics.py` now parses timed
   `decode-block-slice-real-margin` rows, applies fallback packets, and can model
-  simple active-slot occupancy mixes.
+  active-slot occupancy traces or FIFO request traces for p95 shadow-policy
+  checks.
 
 This corrects v0.438: those timing rows reused sessions after prior repetitions
 had mutated the state, so they should be treated as shape smoke only.
@@ -66,6 +67,32 @@ uv run python scripts/profile/replay_economics.py \
   --real-margin target/profiles/v0439-a3b-real-economics-s8-c512-2048-b0-b20.out \
   --occupancy '4=0.2,6=0.3,8=0.5' \
   > target/profiles/v0439-replay-economics-policy-example.tsv
+
+uv run python scripts/profile/replay_economics.py \
+  --margin-summary target/profiles/v0438-a3b-real-margin-blocks2-s8-summary.tsv \
+  --real-margin target/profiles/v0439-a3b-real-economics-s4-c512-2048-b0-b20.out \
+  --real-margin target/profiles/v0439-a3b-real-economics-s6-c512-2048-b0-b20.out \
+  --real-margin target/profiles/v0439-a3b-real-economics-s8-c512-2048-b0-b20.out \
+  --request-trace - --interpolate-slots \
+  > target/profiles/v0441-replay-request-sim-smoke.tsv <<'EOF'
+arrival_ms tokens id
+0 8 a
+0 8 b
+0 8 c
+0 8 d
+0 8 e
+0 8 f
+0 8 g
+0 8 h
+0 8 i
+0 8 j
+0 8 k
+0 8 l
+0 8 m
+0 8 n
+0 8 o
+0 8 p
+EOF
 ```
 
 Validation:
@@ -74,7 +101,7 @@ Validation:
 - `cargo build --release -p qwen-cli --bin qwen-bench`
 - smoke row: S1 context 16 with corrected reset path
 - corrected S4/S6/S8 real-prompt rows at contexts 512 and 2048
-- replay policy script smoke on corrected rows
+- replay policy script occupancy and request-simulation smoke on corrected rows
 
 ## Results
 
@@ -110,6 +137,11 @@ The policy-model smoke is intentionally illustrative, not a measured workload
 trace: with token-step occupancy weights `4=0.2,6=0.3,8=0.5`, the S8-only policy
 blends to `2.38%` after applying the `3e-4` fallback packet. This shows why the
 next gate must be a real occupancy trace rather than another full-S8 micro row.
+
+A FIFO request-simulation smoke with 16 simultaneous 8-token requests and capacity
+8 reproduces the full-S8 fallback-adjusted save (`4.85%`) and improves p95 by the
+same amount because occupancy is always 8. That is a harness check, not product
+evidence.
 
 ## Decision
 

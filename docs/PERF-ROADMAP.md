@@ -1316,7 +1316,14 @@ because F16 loses the F32 E8xP32 route-logits specialization. Keep
 `QWEN_MOE_ROUTER_F16=1` plus `decode-moe-router-repack-check` as an opt-in
 diagnostic harness, but demote router repack and do not widen to BF16. The
 highest-EV do-less item is now the fused online-softmax matrix attention body;
-decode glue remains a single bundled A/B only.
+decode glue remains a single bundled A/B only. v0.452 exercises the audit's
+pre-authorized SKIP on that glue bundle instead: the ~350 glue dispatches move
+~8-10 MB/token = ~20 us at stream against a ~9.3 ms A3B token budget (~0.2%),
+and the dispatch-count savings land CPU-side where decode-window measures
+med_cpu_enc ~0.64 ms of a GPU-bound ~9.9 ms token (med_wait ~= med_gpu).
+Neither side reaches the audit's own 1% floor. Decode glue is CLOSED without
+the A/B; do not re-derive residual+norm/K-chain/conv+L2/sigmoid-decay fusion
+proposals unless decode stops being GPU-bound.
 v0.435 executes the cheap `max_total_threads_per_threadgroup` audit on fixed hot
 kernels (attn_v4 decode/packed/matrix entries plus GDN recurrence). It is
 correctness-clean and keeps warmed A3B `tg128`/`pp512` and 27B G6-matrix `pp512`

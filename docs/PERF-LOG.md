@@ -6,6 +6,18 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.452 Close Decode-Glue Bundle (Skip Option)
+
+Status: queue curation, no code change. The do-less audit (v0.430-432 batch,
+cx session 019f233d-d) bounded the residual decode glue fusions
+(residual+norm, K-chain, conv+L2, sigmoid/decay fold) at <=1-2% total and
+pre-authorized "bundle as one gated experiment or skip". Exercising SKIP with
+the settling arithmetic: glue bytes are ~8-10 MB/token = ~20 us at stream
+against a ~9.3 ms A3B token (~0.2%), and dispatch-count savings land CPU-side
+where decode-window measures med_cpu_enc ~0.64 ms of a GPU-bound ~9.9 ms
+token (med_wait ~= med_gpu, gpu/total 91-98% across ctx). Neither side
+reaches 1%. Closed in the roadmap digest; reopen only if decode stops being
+GPU-bound.
 ## 2026-07-03 - v0.451 Request-Trace Seam for Replay Economics
 
 Status: trace-only plumbing for the non-DFlash replay lane. `qwen -p ...` can now

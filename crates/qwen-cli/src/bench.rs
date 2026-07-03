@@ -1148,6 +1148,42 @@ struct PrefixCacheArgs {
     /// Decode tokens to generate after each request's prefill.
     #[arg(long, default_value = "8")]
     tokens: usize,
+    /// Prefill implementation used by the cache probe.
+    #[arg(long, value_enum, default_value_t = PrefixCachePrefillMode::Packed)]
+    prefill_mode: PrefixCachePrefillMode,
+    /// Prefill implementation for the post-hit suffix.
+    #[arg(long, value_enum, default_value_t = PrefixCacheSuffixMode::Auto)]
+    suffix_prefill_mode: PrefixCacheSuffixMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PrefixCachePrefillMode {
+    /// Product-shaped packed prefill path.
+    Packed,
+    /// Legacy per-token loop, retained as a diagnostic control.
+    Single,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PrefixCacheSuffixMode {
+    /// Use the per-token path for short suffixes and packed path otherwise.
+    Auto,
+    /// Force product-shaped packed prefill for the suffix.
+    Packed,
+    /// Force the per-token loop for the suffix.
+    Single,
+}
+
+fn choose_prefix_cache_suffix_mode(
+    mode: PrefixCacheSuffixMode,
+    suffix_len: usize,
+) -> PrefixCachePrefillMode {
+    match mode {
+        PrefixCacheSuffixMode::Auto if suffix_len <= 64 => PrefixCachePrefillMode::Single,
+        PrefixCacheSuffixMode::Auto => PrefixCachePrefillMode::Packed,
+        PrefixCacheSuffixMode::Packed => PrefixCachePrefillMode::Packed,
+        PrefixCacheSuffixMode::Single => PrefixCachePrefillMode::Single,
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -12386,6 +12422,41 @@ fn compare_logits(ours: &[f32], oracle: &[f32]) -> (f64, f32, usize, usize) {
 ///   * Restore p95 < 25 ms at prefix=4096
 ///   * (We also assert: cold-decoded-token == warm-decoded-token,
 ///      since both should produce identical greedy output.)
+fn prefix_cache_prefill_logits(
+    mf: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    session: &mut MetalSession,
+    mode: PrefixCachePrefillMode,
+    scratch: Option<&mut MetalDFlashLayerMajorScratch>,
+) -> Result<Vec<f32>> {
+    if token_ids.is_empty() {
+        return Err(anyhow!("prefix-cache prefill token slice is empty"));
+    }
+    match mode {
+        PrefixCachePrefillMode::Single => {
+            let mut last_logits = Vec::new();
+            for (i, &tid) in token_ids.iter().enumerate() {
+                last_logits = mf.single_token(tid, start_position + i as u32, session)?;
+            }
+            Ok(last_logits)
+        }
+        PrefixCachePrefillMode::Packed => {
+            let scratch =
+                scratch.ok_or_else(|| anyhow!("packed prefix-cache prefill needs scratch"))?;
+            Ok(prefill_tokens_with_multi_hidden(
+                mf,
+                token_ids,
+                start_position,
+                session,
+                scratch,
+                &[],
+                None,
+            )?)
+        }
+    }
+}
+
 fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     let PrefixCacheArgs {
         model,
@@ -12393,6 +12464,8 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         target_prefix_len,
         suffix,
         tokens,
+        prefill_mode,
+        suffix_prefill_mode,
     } = args;
 
     let ctx = MetalContext::new()?;
@@ -12420,29 +12493,88 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     }
     let suffix_ids = tok.encode(&suffix, false)?;
     let total_len = prefix_ids.len() + suffix_ids.len();
+    let effective_suffix_mode =
+        choose_prefix_cache_suffix_mode(suffix_prefill_mode, suffix_ids.len());
     eprintln!(
-        "[prefix-cache] prefix={} tokens, suffix={} tokens, total={} tokens",
+        "[prefix-cache] prefix={} tokens, suffix={} tokens, total={} tokens prefill_mode={:?} suffix_prefill_mode={:?}->{:?}",
         prefix_ids.len(),
         suffix_ids.len(),
-        total_len
+        total_len,
+        prefill_mode,
+        suffix_prefill_mode,
+        effective_suffix_mode
     );
 
     let mf = MetalForward::new(&ctx, &mm);
     let cap = total_len + tokens + 16;
 
+    let prefill_chunk = default_prefill_chunk(mm.arch.kind, total_len);
+    let mut cold_scratch = if prefill_mode == PrefixCachePrefillMode::Packed {
+        Some(fresh_prefill_scratch_for_prompt(
+            &ctx,
+            &mm,
+            total_len,
+            prefill_chunk,
+        )?)
+    } else {
+        None
+    };
+    let mut prefix_scratch = if prefill_mode == PrefixCachePrefillMode::Packed {
+        Some(fresh_prefill_scratch_for_prompt(
+            &ctx,
+            &mm,
+            total_len,
+            prefill_chunk,
+        )?)
+    } else {
+        None
+    };
+    let mut suffix_scratch = if effective_suffix_mode == PrefixCachePrefillMode::Packed {
+        Some(fresh_prefill_scratch_for_prompt(
+            &ctx,
+            &mm,
+            total_len,
+            prefill_chunk,
+        )?)
+    } else {
+        None
+    };
+
     // Warmup pass to compile pipeline state objects.
     {
         let mut s = MetalSession::fresh(&ctx, &mm, 32)?;
-        let _ = mf.single_token(prefix_ids[0], 0, &mut s)?;
+        if prefill_mode == PrefixCachePrefillMode::Packed {
+            let mut warm_scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, 1, 1)?;
+            let _ = prefill_tokens_with_multi_hidden(
+                &mf,
+                &[prefix_ids[0]],
+                0,
+                &mut s,
+                &mut warm_scratch,
+                &[],
+                None,
+            )?;
+        } else {
+            let _ = mf.single_token(prefix_ids[0], 0, &mut s)?;
+        }
     }
 
     // ---- COLD path: prefill (prefix + suffix), decode N tokens ----
     let cold_t0 = Instant::now();
     let mut sess_cold = MetalSession::fresh(&ctx, &mm, cap)?;
-    let mut last_logits = vec![];
-    for (i, &tid) in prefix_ids.iter().chain(suffix_ids.iter()).enumerate() {
-        last_logits = mf.single_token(tid, i as u32, &mut sess_cold)?;
-    }
+    let full_ids: Vec<i32> = prefix_ids
+        .iter()
+        .chain(suffix_ids.iter())
+        .copied()
+        .collect();
+    let last_logits = prefix_cache_prefill_logits(
+        &mf,
+        &full_ids,
+        0,
+        &mut sess_cold,
+        prefill_mode,
+        cold_scratch.as_mut(),
+    )?;
     let cold_prefill_ms = cold_t0.elapsed().as_secs_f64() * 1e3;
 
     // First decoded token = TTFT-equivalent measurement.
@@ -12460,10 +12592,14 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     // ---- WARM path: prefill prefix, snapshot. Then fresh session, restore, ----
     // ---- prefill suffix, decode 1 token. Time the second-request portion. ----
     let mut sess_pre = MetalSession::fresh(&ctx, &mm, cap)?;
-    let mut last_pre_logits = vec![];
-    for (i, &tid) in prefix_ids.iter().enumerate() {
-        last_pre_logits = mf.single_token(tid, i as u32, &mut sess_pre)?;
-    }
+    let last_pre_logits = prefix_cache_prefill_logits(
+        &mf,
+        &prefix_ids,
+        0,
+        &mut sess_pre,
+        prefill_mode,
+        prefix_scratch.as_mut(),
+    )?;
     let identity = sess_pre.snapshot_identity(0xAA, 0xBB);
     let snap_t = Instant::now();
     let snap = sess_pre.snapshot(identity.clone(), prefix_ids.clone(), Some(last_pre_logits));
@@ -12491,11 +12627,14 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     sess_warm.restore_from(hit.snapshot)?;
     let restore_ms = restore_t.elapsed().as_secs_f64() * 1e3;
 
-    let mut last_warm_logits = vec![];
-    for (k, &tid) in suffix_ids.iter().enumerate() {
-        let pos = (prefix_ids.len() + k) as u32;
-        last_warm_logits = mf.single_token(tid, pos, &mut sess_warm)?;
-    }
+    let last_warm_logits = prefix_cache_prefill_logits(
+        &mf,
+        &suffix_ids,
+        prefix_ids.len() as u32,
+        &mut sess_warm,
+        effective_suffix_mode,
+        suffix_scratch.as_mut(),
+    )?;
     let warm_prefill_ms = warm_t0.elapsed().as_secs_f64() * 1e3;
     let warm_suffix_ms = warm_prefill_ms - restore_ms;
 

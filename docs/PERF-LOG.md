@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.442 Product-Shaped Prefix Cache Probe
+
+Status: made `qwen-bench prefix-cache` use packed prefill by default, with a
+legacy `--prefill-mode single` control. The warm-cache suffix now has an
+independent `--suffix-prefill-mode auto|packed|single`; `auto` uses the per-token
+path for suffixes up to 64 tokens because tiny packed suffixes were slower in the
+cache-hit regime.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0442-prefix-cache-packed/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B prefix-cache probes at prefix lengths `64/256/1024/4096`
+
+Results: with product-shaped packed cold/prefix prefill and auto short-suffix
+handling, A3B prefix cache passes the long-prefix gates and fails the small-prefix
+ones: prefix 64 `1.27x` (needs `2x`), 256 `1.92x` (needs `2x`), 1024 `5.28x`
+(passes `5x`), 4096 `18.47x` (passes `5x`). Restore is cheap throughout
+(`3.0-7.3 ms`, under the 25 ms gate), and greedy outputs match.
+
+Decision: prefix/session caching is a real product TTFT win for 1K+ repeated
+prefixes, but not a small-prefix optimization. The next cache work should be
+runtime/CLI integration and memory-policy shape, not kernel work.
+
 ## 2026-07-02 - v0.441 Replay Request-Trace Shadow Model
 
 Status: extended `scripts/profile/replay_economics.py` from static occupancy mixes

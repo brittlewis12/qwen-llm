@@ -1396,6 +1396,15 @@ and observed occupancy under an S8-only policy. The smoke trace is deliberately
 best-case full occupancy and only reproduces the expected `4.85%` fallback-adjusted
 win. The live replay branch is now blocked on a real request/occupancy trace, not
 more replay microbench rows.
+v0.442 gives the cross-turn prefix/session cache its product-shaped probe. The
+old H2 harness used a per-token prefill loop and overstated the benefit; the bench
+now defaults to packed cold/prefix prefill and auto-selects per-token suffix
+prefill for short cache-hit suffixes. A3B results: prefix 64 `1.27x` (fails 2x),
+256 `1.92x` (fails 2x), 1024 `5.28x` (passes 5x), 4096 `18.47x` (passes 5x),
+restore `3.0-7.3 ms`, exact greedy agreement. Product conclusion: cache repeated
+1K+ prefixes aggressively, but do not sell prefix cache as a small-prefix win.
+Next cache work is runtime/CLI integration plus bounded memory policy, not kernel
+work.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

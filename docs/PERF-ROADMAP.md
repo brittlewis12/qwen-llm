@@ -1408,6 +1408,11 @@ churn: A3B Q4 long decode remains `101.7/99.3/93.5 t/s` at
 ctx `8192/16384/32768`, A10B Q4_XL `tg128` is `45.62 t/s`, and dense 27B Q4 is
 `244.31` pp512, `224.93` pp4096, `23.51` tg128. No fresh guardrail regression;
 do not burn a full paired family sweep until a branch changes a primary row.
+v0.451 adds trace-only request plumbing: `qwen -p ... --trace-request PATH`
+appends FIFO-compatible request rows, and `replay_economics.py --request-trace`
+normalizes first-arrival time so real epoch timestamps simulate correctly. The
+single-request smoke necessarily shows occupancy `1:2` and no replay save; this
+does not promote replay, it only makes the real occupancy/request gate collectable.
 v0.442 gives the cross-turn prefix/session cache its product-shaped probe. The
 old H2 harness used a per-token prefill loop and overstated the benefit; the bench
 now defaults to packed cold/prefix prefill and auto-selects per-token suffix

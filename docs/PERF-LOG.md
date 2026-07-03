@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.451 Request-Trace Seam for Replay Economics
+
+Status: trace-only plumbing for the non-DFlash replay lane. `qwen -p ...` can now
+append a FIFO request trace row via `--trace-request PATH`, and
+`replay_economics.py --request-trace` normalizes first-arrival time so real CLI
+epoch timestamps and hand-written relative traces both simulate correctly.
+
+Artifact:
+
+- `docs/bench/2026-07-03-v0451-request-trace/README.md`
+
+Validation:
+
+- `cargo check -p qwen-cli --bin qwen`
+- `cargo build --release -p qwen-cli --bin qwen`
+- 0.8B `qwen --trace-request` smoke
+- `uv run scripts/profile/replay_economics.py --request-trace ... --interpolate-slots`
+
+Result: the smoke trace writes `arrival_ms tokens id prompt_tokens`; the parser
+reports the expected single-request occupancy `1:2` and `0.00%` replay save. This
+is not a replay win; it is the minimal real-request trace seam needed to gather
+deployability evidence.
+
 ## 2026-07-03 - v0.450 Narrow Current-HEAD Guardrail
 
 Status: qwen-only guardrail packet after the v0.444-v0.449 churn. This is a

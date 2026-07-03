@@ -232,7 +232,12 @@ def parse_request_trace(path: str) -> list[RequestRow]:
             rows.append(RequestRow(request_id, arrival_ms, tokens))
     if not rows:
         raise SystemExit(f"no request rows found in {path}")
-    return sorted(rows, key=lambda row: (row.arrival_ms, row.request_id))
+    rows = sorted(rows, key=lambda row: (row.arrival_ms, row.request_id))
+    first_arrival = rows[0].arrival_ms
+    return [
+        RequestRow(row.request_id, row.arrival_ms - first_arrival, row.tokens)
+        for row in rows
+    ]
 
 
 def observed_save(row: ReplayRow) -> float:

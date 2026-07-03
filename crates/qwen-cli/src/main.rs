@@ -4,9 +4,10 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use qwen_llm::metal_dflash::{MetalDFlashLayerMajorScratch, prefill_tokens_with_multi_hidden};
 use qwen_llm::runtime::{Runtime, SequenceConfig};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(name = "qwen", version, about = "qwen-llm inference CLI")]
@@ -42,6 +43,13 @@ struct Args {
     /// Do not ask the tokenizer to add model-defined special tokens.
     #[arg(long)]
     no_special_tokens: bool,
+
+    /// Append a FIFO request-trace row after single-turn generation completes.
+    ///
+    /// Format is compatible with `scripts/profile/replay_economics.py
+    /// --request-trace`: `arrival_ms tokens id ...`.
+    #[arg(long)]
+    trace_request: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -87,6 +95,7 @@ fn prompt_text(args: &Args) -> Result<Option<String>> {
 fn run_single_turn(model_path: &Path, prompt: &str, args: &Args) -> Result<()> {
     ensure!(args.prefill_chunk > 0, "--prefill-chunk must be >= 1");
 
+    let arrival_ms = unix_epoch_ms()?;
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
     let loaded = runtime
@@ -195,6 +204,46 @@ fn run_single_turn(model_path: &Path, prompt: &str, args: &Args) -> Result<()> {
         loaded.prefix_cache_stats().max_bytes as f64 / 1024.0 / 1024.0,
     );
 
+    if let Some(path) = args.trace_request.as_ref() {
+        append_request_trace(path, arrival_ms, prompt_ids.len(), generated.len())?;
+    }
+
+    Ok(())
+}
+
+fn unix_epoch_ms() -> Result<u128> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before Unix epoch")?
+        .as_millis())
+}
+
+fn append_request_trace(
+    path: &Path,
+    arrival_ms: u128,
+    prompt_tokens: usize,
+    generated_tokens: usize,
+) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create trace directory {}", parent.display()))?;
+    }
+    let write_header = std::fs::metadata(path).map_or(true, |m| m.len() == 0);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open request trace {}", path.display()))?;
+    if write_header {
+        writeln!(file, "arrival_ms\ttokens\tid\tprompt_tokens")?;
+    }
+    let id = format!("{}-{arrival_ms}", std::process::id());
+    writeln!(
+        file,
+        "{arrival_ms}\t{generated_tokens}\t{id}\t{prompt_tokens}"
+    )?;
     Ok(())
 }
 

@@ -81,7 +81,37 @@ denser phases?).
   at the wall => the 51% figure was proxy error, close the "biggest raw
   gap" framing.
 
-## Results
+## Results — autonomous xctrace pass (2026-07-03, A3B ctx16384 w400)
 
-(fill after the session; move highlights into PERF-LOG as the next
-checkpoint entry)
+What the CLI path could and could not get:
+
+- `xcrun xctrace record --template 'Metal System Trace' --attach PID`
+  works end-to-end with the launcher (note: touch the go-file AFTER the
+  ready-file appears; a pre-created go-file is ignored by the waiter).
+- Per-kernel shader profiling and `Metal GPU Counters` tables export
+  EMPTY under both --attach and --launch (the instrument records no
+  samples without an Instruments-UI counter-set configuration). The
+  per-kernel limiter cell (q1/q2) still needs the interactive session.
+
+Timeline-level findings (from metal-gpu-execution-points +
+application-command-buffer-submissions, id-interned XML export):
+
+- Each decode token = ONE command buffer executing as EXACTLY 3 serial
+  GPU kicks (400/400 tokens): med 2.89 / 3.63 / 3.40 ms = 9.9 ms GPU.
+- Intra-token kick gaps are ZERO (3 us/token total): no scheduling
+  stalls inside a token at kick granularity. The GPU held Maximum
+  performance state through the window (no downclock story).
+- ALL idle is inter-token. Clean (untraced) run: 0.68 ms/token gap =
+  ~6% of the 10.94 ms period (gpu/total 93.8-95.7%, 91.4 t/s). Under
+  active tracing the gap inflates to ~1.95 ms (84-87% busy) — tracing
+  overhead lives in exactly this window; do not read traced busy
+  fractions as production numbers.
+- `--pipelined` prototype A/B at ctx16384: REGRESSES (10.94 -> 12.11
+  ms/token; GPU time itself 10.26 -> 11.29 ms). The 6%-ceiling
+  inter-token gap is not recoverable with this overlap shape.
+
+Interpretation per the pre-registered guide: decode at long context is
+GPU-kernel-bound with a clean pipeline at kick granularity; the
+282-296 GB/s attention question is intra-kernel (occupancy/latency
+inside attn_v4), so only the counter cell can crack it. The bench-loop
+idle (~6%) is real but small and the cheap overlap idea is falsified.

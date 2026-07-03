@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.454 Decode Timeline Capture via xctrace (Partial)
+
+Status: the v0.446 capture packet run autonomously through `xcrun xctrace`
+(Metal System Trace, attach mode) on A3B ctx16384 window 400. The
+per-kernel LIMITER cell remains open — shader-profiler and Metal GPU
+Counters tables export empty under both --attach and --launch (the
+counter set needs Instruments-UI configuration), so q1/q2 limiters still
+need the 15-minute interactive session. Everything timeline-level is now
+measured:
+
+- One command buffer per decode token executing as EXACTLY 3 serial GPU
+  kicks (400/400): med `2.89/3.63/3.40 ms` = `9.9 ms` GPU/token.
+- Intra-token kick gaps: ZERO (`~3 us`/token). GPU perf state: Maximum
+  throughout. At kick granularity the token pipeline is clean — the
+  attention-efficiency question (`282-296 GB/s` vs stream) is
+  INTRA-kernel, reinforcing that only counters can attribute it.
+- All idle is inter-token: `0.68 ms`/token untraced = `~6%` (gpu/total
+  `93.8-95.7%`, `91.4 t/s`). Under tracing the same gap reads `1.95 ms`
+  (`84-87%`) — instrument overhead lands exactly in this window; traced
+  busy fractions are not production numbers.
+- `--pipelined` bench prototype at ctx16384 REGRESSES: `10.94 -> 12.11
+  ms`/token with GPU time itself `10.26 -> 11.29 ms`. The 6%-ceiling
+  overlap idea is falsified in this shape; do not re-derive without a
+  design that leaves GPU-side work untouched.
+
+Validation:
+
+- clean-box plain vs pipelined A/B (untraced), 400-token windows
+- trace analysis from exported `metal-gpu-execution-points` +
+  `metal-application-command-buffer-submissions` (id-interned XML),
+  kicks/token histogram exact over all 400 tokens
+- artifacts + method notes in
+  `docs/bench/2026-07-03-xcode-decode-capture/README.md` (including the
+  go-file-after-ready launcher fix note)
+
+Decision: decode long-context work remains gated on the interactive
+counter cell (packet ready; ~15 min). The timeline pass retires the
+"scheduling stalls / downclock / loop overhead" hypothesis family for
+ctx16k decode: the wall is inside the kernels.
+
 ## 2026-07-03 - v0.453 env_flag Adoption for metal.rs / metal_dflash.rs
 
 Status: hygiene completion of the v0.423 arc. One deliberate behavior

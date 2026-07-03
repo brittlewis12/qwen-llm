@@ -990,6 +990,17 @@ oracles, not family-counter truth, because topology changes. The rank is now:
 (1) PSO/resource audit for hot decode kernels, (2) batch-2/two-stream concurrency
 discriminator, (3) one surgical occupancy-shape retune only after the resource
 table predicts the cap and the counter capture moves occupancy/SIMD inflight.
+v0.458 adds the cheap PSO resource audit. `qwen-bench metal-pipelines` confirms
+`thread_width=32`, no static threadgroup memory, and no ICB support across the
+hot decode set. Attention main/reduce and GDN-step are one-simdgroup contracts
+(`max_threads_per_tg=32`, packed NSG4 `128`), while mat-vec/MoE/elementwise rows
+report `1024`; metal-objdump does not expose register/private-memory counts. This
+kills static-TGM and ICB as visible caps but is too coarse to pick a concrete
+retune. Current rank: (1) batch-2/two-stream counter capture, gated on occupancy
+rising from `~28%` toward `>=38-45%` and aggregate throughput `>=1.15x`; (2)
+per-dispatch labels that cover `>=95%` of GPU interval time; (3) one focused
+attention/GDN occupancy retune only after labels/counters identify the live
+dispatch.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

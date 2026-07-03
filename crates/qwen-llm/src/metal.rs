@@ -299,6 +299,15 @@ pub struct MetalCounterCapabilities {
     pub sets: Vec<MetalCounterSetInfo>,
 }
 
+#[derive(Clone, Debug)]
+pub struct MetalPipelineInfo {
+    pub name: String,
+    pub thread_execution_width: usize,
+    pub max_total_threads_per_threadgroup: usize,
+    pub static_threadgroup_memory_length: usize,
+    pub supports_indirect_command_buffers: bool,
+}
+
 // ===========================================================================
 // MetalContext
 // ===========================================================================
@@ -355,6 +364,17 @@ impl MetalContext {
             })?;
         self.pso_cache.lock().insert(name.to_string(), pso.clone());
         Ok(pso)
+    }
+
+    pub fn pipeline_info(&self, name: &str) -> Result<MetalPipelineInfo, MetalError> {
+        let pso = self.pipeline(name)?;
+        Ok(MetalPipelineInfo {
+            name: name.to_string(),
+            thread_execution_width: pso.threadExecutionWidth(),
+            max_total_threads_per_threadgroup: pso.maxTotalThreadsPerThreadgroup(),
+            static_threadgroup_memory_length: pso.staticThreadgroupMemoryLength(),
+            supports_indirect_command_buffers: pso.supportIndirectCommandBuffers(),
+        })
     }
 
     /// Allocate a buffer populated from a `bytemuck::Pod` slice.

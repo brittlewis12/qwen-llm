@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.458 Hot Decode PSO Resource Audit
+
+Status: tooling + attribution checkpoint, no engine hot-path change. Adds a
+`qwen-bench metal-pipelines` subcommand for cheap Metal compute-pipeline resource
+facts before guessing at occupancy-shape rewrites.
+
+- Tooling: `MetalContext::pipeline_info()` reports `threadExecutionWidth`,
+  `maxTotalThreadsPerThreadgroup`, static threadgroup-memory length, and ICB
+  support for any named kernel. `qwen-bench metal-pipelines --kernel A,B` prints
+  a TSV; with no `--kernel`, it prints the hot decode audit set.
+- Release audit (`target/release/qwen-bench metal-pipelines`) says all inspected
+  kernels have `thread_width=32`, `static_tg_mem=0`, and `icb=false`.
+- Active/near-active attention main+reduce kernels report
+  `max_threads_per_tg=32`; `kernel_gdn_step_decay_*` reports `32`, while the
+  active packed-NSG4 step reports `128`. GDN prep/decay/L2/rmsnorm, Q4/Q5/Q6/Q8
+  mat-vecs, grouped MoE SwiGLU/down, weighted-sum, gate sigmoid, and argmax all
+  report `1024`.
+- `metal-objdump --metallib --reflection`, `--build-table=all`, and `--syms` on
+  the release `kernels.metallib` did not expose register/private-memory counts.
+
+Interpretation: this kills static threadgroup memory and ICB support as the
+visible PSO cap, confirms that attention/reduce and GDN-step are one-simdgroup
+contracts, but does not reveal the register/private-memory limiter. Per cx review
+(`019f2a0a-d...`), the next highest-EV discriminator remains batch-2/two-stream
+counter capture; if independent work raises occupancy/inflight materially,
+scheduling/batching/replay rises above kernel retune. If it stays flat, add
+per-dispatch labels before one surgical attention/GDN retune.
+
+Validation:
+
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `target/release/qwen-bench metal-pipelines`
+
 ## 2026-07-03 - v0.457 A3B Limiter-Family Noop Packet
 
 Status: attribution + tooling checkpoint, no engine hot-path change. Uses the

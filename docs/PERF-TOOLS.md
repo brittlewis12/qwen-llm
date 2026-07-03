@@ -554,6 +554,18 @@ kicks. Use this as the interpretation baseline: kernel-shape retunes
 should MOVE occupancy/SIMD inflight in the counter table BEFORE any e2e
 claim.
 
+For the cheap PSO-side facts that do not require Instruments, use:
+
+```sh
+target/release/qwen-bench metal-pipelines
+target/release/qwen-bench metal-pipelines --kernel kernel_name,other_kernel
+```
+
+It reports `threadExecutionWidth`, `maxTotalThreadsPerThreadgroup`, static
+threadgroup memory, and ICB support. This is not a register/private-memory audit;
+use it to kill visible caps and pick follow-up counter experiments, not to promote
+a kernel rewrite by itself.
+
 ## Command-level benchmarking
 
 Use `hyperfine` when comparing builds, feature flags, or external baselines:

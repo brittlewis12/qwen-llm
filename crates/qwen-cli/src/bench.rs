@@ -458,6 +458,8 @@ enum Cmd {
     Roofline(RooflineArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),
+    /// Report Metal compute-pipeline resource hints for hot kernels.
+    MetalPipelines(MetalPipelinesArgs),
     /// Warm to a target context, then wait for an external go signal before
     /// running a fixed decode window. Intended for attach-mode tracing so the
     /// recorder can skip the long ramp.
@@ -567,6 +569,13 @@ struct DecodeArgs {
 
 #[derive(Parser, Debug)]
 struct MetalCountersArgs {}
+
+#[derive(Parser, Debug)]
+struct MetalPipelinesArgs {
+    /// Kernel names to inspect. If omitted, prints the hot decode audit set.
+    #[arg(long = "kernel", value_delimiter = ',')]
+    kernels: Vec<String>,
+}
 
 #[derive(Parser, Debug)]
 struct PpArgs {
@@ -2028,6 +2037,7 @@ fn main() -> Result<()> {
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
         Cmd::Roofline(a) => run_roofline(a),
         Cmd::MetalCounters(a) => run_metal_counters(a),
+        Cmd::MetalPipelines(a) => run_metal_pipelines(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
@@ -2059,6 +2069,63 @@ fn run_metal_counters(_args: MetalCountersArgs) -> Result<()> {
         );
         for counter in &set.counters {
             println!("counter\t{}\t{}", set.name, counter);
+        }
+    }
+    Ok(())
+}
+
+const HOT_DECODE_PIPELINE_AUDIT: &[&str] = &[
+    "kernel_attn_decode_v4_g8_t4_c64_f32",
+    "kernel_attn_decode_v4_g8_t4_c128_f32",
+    "kernel_attn_decode_v4_g8_t2_c64_f32",
+    "kernel_attn_decode_v4_g8_t2_c128_f32",
+    "kernel_attn_decode_v4_g16_t4_c64_f32",
+    "kernel_attn_decode_v4_g16_t4_c128_f32",
+    "kernel_attn_decode_v4_reduce_h2_g8_f32",
+    "kernel_attn_decode_v4_reduce_h2_g16_f32",
+    "kernel_gdn_prep_parallel_state_f32",
+    "kernel_gdn_decay_chain_f32",
+    "kernel_l2_norm_pair_hd128_r4_f32",
+    "kernel_gdn_step_decay_f32",
+    "kernel_gdn_step_decay_packed_f32",
+    "kernel_gdn_step_decay_packed_nsg4_f32",
+    "kernel_rmsnorm_gated_hd128_r4_f32",
+    "kernel_mat_vec_q4_K_f32",
+    "kernel_mat_vec_q5_K_f32",
+    "kernel_mat_vec_q6_K_f32",
+    "kernel_mat_vec_q8_0_f32",
+    "kernel_moe_swiglu_q4_K_f32_grouped_slots_n16",
+    "kernel_moe_swiglu_q5_K_f32_grouped_slots_n16",
+    "kernel_moe_down_q5_K_f32_grouped_slots",
+    "kernel_moe_down_q5_K_f32_grouped_slots_tiny8_r16",
+    "kernel_moe_down_q6_K_f32_grouped_slots",
+    "kernel_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2",
+    "kernel_sigmoid_mul_gate_strided_f32",
+    "kernel_argmax_f32",
+];
+
+fn run_metal_pipelines(args: MetalPipelinesArgs) -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let names: Vec<String> = if args.kernels.is_empty() {
+        HOT_DECODE_PIPELINE_AUDIT
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        args.kernels
+    };
+    println!("kernel\tthread_width\tmax_threads_per_tg\tstatic_tg_mem\ticb");
+    for name in names {
+        match ctx.pipeline_info(&name) {
+            Ok(info) => println!(
+                "{}\t{}\t{}\t{}\t{}",
+                info.name,
+                info.thread_execution_width,
+                info.max_total_threads_per_threadgroup,
+                info.static_threadgroup_memory_length,
+                info.supports_indirect_command_buffers
+            ),
+            Err(e) => eprintln!("missing\t{name}\t{e}"),
         }
     }
     Ok(())

@@ -228,6 +228,32 @@ Read:
   concurrency discriminator, then one surgical occupancy retune with a counter
   gate.
 
+## Results — PSO resource audit (v0.458)
+
+Command:
+
+```sh
+target/release/qwen-bench metal-pipelines \
+  > target/profiles/v0458-metal-pipelines-release.tsv
+```
+
+Summary:
+
+| family | thread width | max threads/TG | static TG mem | ICB |
+| --- | ---: | ---: | ---: | --- |
+| active/near-active attention main+reduce | 32 | 32 | 0 | false |
+| GDN step | 32 | 32 (`128` for packed NSG4) | 0 | false |
+| GDN prep/decay/L2/rmsnorm | 32 | 1024 | 0 | false |
+| Q4/Q5/Q6/Q8 mat-vec | 32 | 1024 | 0 | false |
+| grouped MoE SwiGLU/down/weighted sum | 32 | 1024 | 0 | false |
+
+`metal-objdump --metallib --reflection`, `--build-table=all`, and `--syms` on
+the release `kernels.metallib` did not expose register/private-memory counts.
+Read: the audit kills static threadgroup memory and ICB support as visible caps,
+and confirms attention/reduce plus GDN-step are one-simdgroup contracts. It does
+not prove the register cap or justify a concrete rewrite by itself. Next
+discriminator remains batch-2/two-stream capture, then per-dispatch labels.
+
 
 ## Provenance (per cx review)
 

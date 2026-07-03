@@ -1403,6 +1403,11 @@ four rows have zero fallback slots at `3e-4` and validated net saves
 alive for long-context serving-style work, but does not remove the production
 request-trace/p95 gate. True S8 `ctx32768` is currently corpus/harness-blocked
 because only three local independent files exceed `32k` tokens.
+v0.450 adds a narrow current-HEAD qwen-only guardrail after the v0.444-v0.449
+churn: A3B Q4 long decode remains `101.7/99.3/93.5 t/s` at
+ctx `8192/16384/32768`, A10B Q4_XL `tg128` is `45.62 t/s`, and dense 27B Q4 is
+`244.31` pp512, `224.93` pp4096, `23.51` tg128. No fresh guardrail regression;
+do not burn a full paired family sweep until a branch changes a primary row.
 v0.442 gives the cross-turn prefix/session cache its product-shaped probe. The
 old H2 harness used a per-token prefill loop and overstated the benefit; the bench
 now defaults to packed cold/prefix prefill and auto-selects per-token suffix

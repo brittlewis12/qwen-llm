@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.450 Narrow Current-HEAD Guardrail
+
+Status: qwen-only guardrail packet after the v0.444-v0.449 churn. This is a
+cheap current-HEAD sanity read, not a replacement for a paired llama.cpp family
+sweep.
+
+Artifact:
+
+- `docs/bench/2026-07-03-v0450-narrow-guardrail/README.md`
+
+Results: A3B Q4 long decode remains gradual (`101.7/99.3/93.5 t/s` at
+ctx `8192/16384/32768`), A10B Q4_XL `tg128` is `45.62 t/s`, and dense 27B Q4
+is `244.31 t/s` pp512, `224.93 t/s` pp4096, `23.51 t/s` tg128. Recorded power
+state is AC power with no thermal/performance warnings.
+
+Decision: no fresh guardrail regression appears. Continue picking branches from
+hardware-headroom evidence rather than spending on a broad sweep immediately.
+
 ## 2026-07-03 - v0.449 Long-Context S8 Replay Gate
 
 Status: measurement checkpoint on the non-DFlash replay lane. A3B S8 block-slice

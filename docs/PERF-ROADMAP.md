@@ -1001,6 +1001,18 @@ rising from `~28%` toward `>=38-45%` and aggregate throughput `>=1.15x`; (2)
 per-dispatch labels that cover `>=95%` of GPU interval time; (3) one focused
 attention/GDN occupancy retune only after labels/counters identify the live
 dispatch.
+v0.459 runs that batch-2/two-stream discriminator in-process with shared model
+weights, separate sessions, and separate command queues. It overlaps well
+(`gpu_sum/gpu_span=1.90x`) but fails the pivot gate: A3B ctx16384 aggregate t/s
+is only `88.1 -> 109.6` (`1.24x`), per-stream falls to `54.8 t/s`, and device
+occupancy rises only `23.7 -> 30.6` under the limiter capture. Do not promote
+scheduler/multi-slot/replay as the primary branch from this evidence. Current
+rank: (1) single-stream per-dispatch labels/counter attribution, gated on
+covering `>=95%` of GPU interval time and matching phase/noop totals; (2) one
+focused attention/GDN occupancy retune if the top 3-5 dispatch families dominate
+GPU time and retain the low-residency signature; (3) revisit multi-slot only if a
+future shared-submit experiment reaches aggregate `>=1.5x`, per-stream
+`>=70-75%` of baseline, and occupancy `>=40%` without read BW saturation.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

@@ -318,6 +318,15 @@ def analyze(trace, label, outdir):
             "Wrong workload shape or truncated bundle? Check /tmp/dw-*.log"
         )
     n_kicks = len(tokens[0])
+    group_count = sum(kick_hist.values())
+    dominant_count = kick_hist.get(n_kicks, 0)
+    dominant_fraction = dominant_count / group_count if group_count else 0.0
+    if dominant_fraction < 0.5:
+        print(
+            "WARNING: unstable kick histogram; per-kick rows are topology-biased. "
+            "Use device means and external throughput logs for this run.",
+            file=sys.stderr,
+        )
     names, info_used = load_counter_names(trace, info)
     # Persist the (acc, dev) tuple so subsequent analyze calls on the
     # same label skip the ~1-3 min join. defaultdict-with-lambda is
@@ -374,6 +383,8 @@ def analyze(trace, label, outdir):
         kick_ms=kd,
         kick_count=n_kicks,
         kick_histogram=kick_hist,
+        kick_groups=group_count,
+        kick_dominant_fraction=dominant_fraction,
         intervals=n_iv,
         big_intervals=n_big,
         counter_info=info_used,
@@ -392,7 +403,7 @@ def analyze(trace, label, outdir):
     # pressure matters (`rm outdir/LABEL-counter-values.xml`).
 
 
-def ramp(model_key, ctx, window, env=None):
+def ramp(model_key, ctx, window, streams=1, env=None):
     if not os.path.exists(TEMPLATE_PATH):
         raise SystemExit(
             f"missing template {TEMPLATE_PATH} - see "
@@ -425,6 +436,8 @@ def ramp(model_key, ctx, window, env=None):
             str(ctx),
             "--window",
             str(window),
+            "--streams",
+            str(streams),
             "--ready-file",
             READY,
             "--go-file",
@@ -434,7 +447,7 @@ def ramp(model_key, ctx, window, env=None):
         stderr=subprocess.STDOUT,
         env=ev,
     )
-    print(f"ramping {model_key} to ctx={ctx} (log {log}) ...")
+    print(f"ramping {model_key} to ctx={ctx} streams={streams} (log {log}) ...")
     while not os.path.exists(READY):
         if proc.poll() is not None:
             raise SystemExit(f"decode-window exited during ramp; tail {log}")
@@ -492,7 +505,7 @@ def cmd_capture(args):
     if args.reuse_pid:
         record_and_analyze(args.reuse_pid, args.label, args.seconds, args.outdir)
         return
-    proc = ramp(args.model, args.ctx, args.window, args.env)
+    proc = ramp(args.model, args.ctx, args.window, args.streams, args.env)
     try:
         record_and_analyze(proc.pid, args.label, args.seconds, args.outdir)
     finally:
@@ -500,7 +513,7 @@ def cmd_capture(args):
 
 
 def cmd_hold(args):
-    proc = ramp(args.model, args.ctx, args.window, args.env)
+    proc = ramp(args.model, args.ctx, args.window, args.streams, args.env)
     print(
         f"READY. PID={proc.pid}. Release the window when done:\n"
         f"  touch {GO}\n"
@@ -529,6 +542,12 @@ def main():
             type=int,
             default=1200,
             help="decode tokens; MUST outlive --seconds",
+        )
+        p.add_argument(
+            "--streams",
+            type=int,
+            default=1,
+            help="decode-window streams for concurrency discrimination",
         )
         p.add_argument("--env", action="append", metavar="K=V")
 

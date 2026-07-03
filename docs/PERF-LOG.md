@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.459 Two-Stream Decode Discriminator
+
+Status: tooling + attribution checkpoint, no default engine change. Adds a
+bench-only `decode-window --streams N` path that shares model weights, gives each
+stream its own session/KV/GDN state, and issues each stream from a separate Metal
+command queue. This tests whether low decode occupancy is mostly fillable with
+independent work.
+
+- Tooling: `decode-window --streams 2` runs the default decode graph through the
+  GPU-argmax encode path for two independent streams and reports aggregate t/s,
+  per-stream t/s, GPU span, GPU sum, and overlap efficiency. The limiter capture
+  wrapper now forwards `--streams` and warns when overlapping command buffers make
+  the kick histogram unstable; those captures should use device means, not
+  per-kick attribution.
+- A3B ctx16384 untraced single-stream baseline (`window=400`): `88.1 t/s`,
+  avg_total `11.35 ms`, avg_gpu `10.58 ms`, median gpu/total `95.8%`.
+- A3B ctx16384 untraced two-stream (`window=400` per stream): aggregate
+  `109.6 t/s` (`1.24x` baseline), per-stream `54.8 t/s`, avg_step `18.26 ms`,
+  med_gpu_span `17.47 ms`, med_gpu_sum `33.81 ms`, overlap_eff `1.90x`.
+- A3B ctx16384 two-stream limiter capture: device mean Kernel Occupancy `30.6`
+  vs prior single-stream device `23.7`, SIMD inflight `29.4` vs `22.7`, Read BW
+  `297.8 GB/s` vs `239.0 GB/s`. Kick histogram is intentionally unstable under
+  overlapping streams (`17` dominant two-kick groups out of `63` groups), so only
+  device means are decision-grade.
+
+Interpretation: command buffers overlap, but the pivot gate fails. Aggregate
+throughput rises only `1.24x`, per-stream throughput collapses to `62%` of
+baseline, and occupancy rises modestly rather than toward the `>=38-45%` gate.
+Per cx review (`019f2a30-7...`), this is evidence of some overlap slack, not a
+reason to make scheduler/multi-slot/replay the top branch. Next highest-EV move:
+single-stream per-dispatch labels/counter attribution, then one focused
+attention/GDN occupancy retune if the top dispatch families account for a large
+share of GPU time and show the same low-residency signature.
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `decode-window --streams 2` 0.8B smoke at ctx4/window2
+- A3B ctx16384 single-stream and two-stream untraced decode-window runs
+- A3B ctx16384 two-stream headless limiter capture + cached re-analysis
+
 ## 2026-07-03 - v0.458 Hot Decode PSO Resource Audit
 
 Status: tooling + attribution checkpoint, no engine hot-path change. Adds a

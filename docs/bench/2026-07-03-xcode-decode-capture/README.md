@@ -254,6 +254,33 @@ and confirms attention/reduce plus GDN-step are one-simdgroup contracts. It does
 not prove the register cap or justify a concrete rewrite by itself. Next
 discriminator remains batch-2/two-stream capture, then per-dispatch labels.
 
+## Results — two-stream discriminator (v0.459)
+
+Implementation: `decode-window --streams 2` keeps one loaded model, creates two
+independent sessions with separate KV/GDN state, and issues each decode step from
+two separate Metal command queues. This is an intentional concurrency probe, not
+a default runtime policy.
+
+Untraced throughput:
+
+| run | avg step | t/s | gpu span | gpu sum | note |
+| --- | ---: | ---: | ---: | ---: | --- |
+| single stream | `11.35 ms` | `88.1` | `10.58 ms avg_gpu` | n/a | `gpu/total` median `95.8%` |
+| two streams | `18.26 ms` | `109.6 agg` | `17.47 ms med` | `33.81 ms med` | `54.8` per stream, overlap `1.90x` |
+
+Limiter capture (two-stream, traced): device mean Kernel Occupancy `30.6`, SIMD
+inflight `29.4`, Read BW `297.8 GB/s`. Prior single-stream device means from the
+same counter loop were `23.7`, `22.7`, and `239.0 GB/s`. The two-stream kick
+histogram is unstable because command buffers overlap (`17` dominant two-kick
+groups out of `63` groups), so per-kick rows are not decision-grade.
+
+Read: command buffers overlap, but the roadmap pivot gate fails. Aggregate t/s
+improves only `1.24x`, per-stream throughput falls to `62%` of baseline, and
+occupancy rises modestly rather than toward `>=38-45%`. Keep multi-slot/replay as
+a product/serving branch, not the primary hardware-saturation branch. Next move:
+single-stream per-dispatch labels, then one focused attention/GDN occupancy
+retune if the labels show a dominant low-residency dispatch set.
+
 
 ## Provenance (per cx review)
 

@@ -1114,6 +1114,11 @@ struct DecodeWindowArgs {
     /// Number of decode tokens to execute after the go signal.
     #[arg(long, default_value = "128")]
     window: usize,
+    /// Independent decode streams to issue from separate command queues.
+    /// Intended only for occupancy/counter discrimination; each stream owns
+    /// separate KV/GDN state while sharing resident model weights.
+    #[arg(long, default_value = "1")]
+    streams: usize,
     /// File created when the process has reached `target_ctx` and is waiting.
     #[arg(long)]
     ready_file: PathBuf,
@@ -12077,12 +12082,21 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         model,
         target_ctx,
         window,
+        streams,
         ready_file,
         go_file,
         pipelined,
         concurrent_gdn_proj,
         concurrent_attn_proj,
     } = args;
+    if streams == 0 {
+        return Err(anyhow!("--streams must be >= 1"));
+    }
+    if streams > 1 && (pipelined || concurrent_gdn_proj || concurrent_attn_proj) {
+        return Err(anyhow!(
+            "--streams is a concurrency discriminator; combine it only with the default decode path"
+        ));
+    }
     let ctx = MetalContext::new()?;
     eprintln!("[decode-window] device: {}", ctx.describe());
     let g = GgufFile::open(&model)?;
@@ -12098,6 +12112,28 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     let _ = mf.single_token(0, 0, &mut s)?;
     for p in 1..(target_ctx as u32) {
         let _ = mf.single_token(0, p, &mut s)?;
+    }
+
+    let mut s_opt = Some(s);
+    let mut multi_stream_sessions = None;
+    if streams > 1 {
+        let mut sessions = Vec::with_capacity(streams);
+        sessions.push(s_opt.take().expect("primary session present"));
+        for stream_idx in 1..streams {
+            eprintln!(
+                "[decode-window] ramping stream {}/{} to ctx={}",
+                stream_idx + 1,
+                streams,
+                target_ctx
+            );
+            let mut sx = MetalSession::fresh(&ctx, &mm, target_ctx + window + 16)?;
+            let _ = mf.single_token(0, 0, &mut sx)?;
+            for p in 1..(target_ctx as u32) {
+                let _ = mf.single_token(0, p, &mut sx)?;
+            }
+            sessions.push(sx);
+        }
+        multi_stream_sessions = Some(sessions);
     }
 
     if let Some(parent) = ready_file.parent() {
@@ -12130,6 +12166,12 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
             "--pipelined is separate from the concurrent projection experiments; use one mode at a time"
         ));
     }
+
+    if let Some(mut sessions) = multi_stream_sessions {
+        return run_decode_window_multi_stream(&ctx, &mf, &mut sessions, target_ctx, window);
+    }
+
+    let mut s = s_opt.expect("single-stream session present");
 
     fn median(values: &[f64]) -> f64 {
         let mut v = values.to_vec();
@@ -12341,6 +12383,136 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         "[decode-window] avg_wait={:.2} ms gpu/total(avg)={:.1}%",
         avg_wait,
         100.0 * avg_gpu / avg_total
+    );
+    Ok(())
+}
+
+fn run_decode_window_multi_stream(
+    ctx: &MetalContext,
+    mf: &MetalForward,
+    sessions: &mut [MetalSession],
+    target_ctx: usize,
+    window: usize,
+) -> Result<()> {
+    fn median(values: &[f64]) -> f64 {
+        let mut v = values.to_vec();
+        v.sort_by(|a, b| a.total_cmp(b));
+        let n = v.len();
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) * 0.5
+        }
+    }
+
+    let streams = sessions.len();
+    let mut queues = Vec::with_capacity(streams);
+    let mut ids = Vec::with_capacity(streams);
+    let mut argmax = Vec::with_capacity(streams);
+    for _ in 0..streams {
+        queues.push(
+            ctx.device
+                .newCommandQueue()
+                .context("stream command queue")?,
+        );
+        ids.push(MetalTensor::zeros_f32(ctx, vec![1])?);
+        argmax.push(MetalTensor::zeros_f32(ctx, vec![1])?);
+    }
+
+    let mut prev_tokens = vec![0i32; streams];
+    let mut encode_ms = Vec::with_capacity(window);
+    let mut wait_ms = Vec::with_capacity(window);
+    let mut gpu_span_ms = Vec::with_capacity(window);
+    let mut gpu_sum_ms = Vec::with_capacity(window);
+    let total_t = Instant::now();
+
+    for step in 0..window {
+        let pos = target_ctx as u32 + step as u32;
+        let encode_t = Instant::now();
+        let mut cmds = Vec::with_capacity(streams);
+        for stream_idx in 0..streams {
+            unsafe {
+                let ptr = ids[stream_idx].buffer.contents().as_ptr() as *mut i32;
+                *ptr = prev_tokens[stream_idx];
+            }
+            let cmd = queues[stream_idx]
+                .commandBuffer()
+                .context("stream command buffer")?;
+            let enc = KernelEncoder::begin(&cmd);
+            mf.encode_single_token_argmax(
+                &enc,
+                pos,
+                &mut sessions[stream_idx],
+                &ids[stream_idx],
+                &argmax[stream_idx],
+            )?;
+            enc.end();
+            cmd.commit();
+            cmds.push(cmd);
+        }
+        encode_ms.push(encode_t.elapsed().as_secs_f64() * 1e3);
+
+        let wait_t = Instant::now();
+        for cmd in &cmds {
+            cmd.waitUntilCompleted();
+        }
+        wait_ms.push(wait_t.elapsed().as_secs_f64() * 1e3);
+
+        let mut min_start = f64::INFINITY;
+        let mut max_end = 0.0f64;
+        let mut sum = 0.0f64;
+        for cmd in &cmds {
+            let start = cmd.GPUStartTime();
+            let end = cmd.GPUEndTime();
+            min_start = min_start.min(start);
+            max_end = max_end.max(end);
+            sum += (end - start) * 1e3;
+        }
+        gpu_span_ms.push((max_end - min_start) * 1e3);
+        gpu_sum_ms.push(sum);
+
+        for stream_idx in 0..streams {
+            prev_tokens[stream_idx] = unsafe {
+                let src = argmax[stream_idx].buffer.contents().as_ptr() as *const i32;
+                *src
+            };
+        }
+    }
+
+    let total_ms = total_t.elapsed().as_secs_f64() * 1e3;
+    let aggregate_tokens = streams * window;
+    let avg_total = total_ms / window as f64;
+    let avg_span = gpu_span_ms.iter().sum::<f64>() / window as f64;
+    let avg_sum = gpu_sum_ms.iter().sum::<f64>() / window as f64;
+    let avg_enc = encode_ms.iter().sum::<f64>() / window as f64;
+    let avg_wait = wait_ms.iter().sum::<f64>() / window as f64;
+    eprintln!(
+        "[decode-window] ctx={} window={} streams={} avg_step={:.2} ms agg_t/s={:.1} per_stream_t/s={:.1}",
+        target_ctx,
+        window,
+        streams,
+        avg_total,
+        aggregate_tokens as f64 / (total_ms * 1e-3),
+        window as f64 / (total_ms * 1e-3)
+    );
+    eprintln!(
+        "[decode-window] streams med_gpu_span={:.2} ms med_gpu_sum={:.2} ms med_cpu_enc={:.2} ms med_wait={:.2} ms",
+        median(&gpu_span_ms),
+        median(&gpu_sum_ms),
+        median(&encode_ms),
+        median(&wait_ms),
+    );
+    eprintln!(
+        "[decode-window] streams avg_gpu_span={:.2} ms avg_gpu_sum={:.2} ms avg_cpu_enc={:.2} ms avg_wait={:.2} ms overlap_eff={:.2}x",
+        avg_span,
+        avg_sum,
+        avg_enc,
+        avg_wait,
+        if avg_span > 0.0 {
+            avg_sum / avg_span
+        } else {
+            0.0
+        }
     );
     Ok(())
 }

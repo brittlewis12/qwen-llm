@@ -566,6 +566,12 @@ threadgroup memory, and ICB support. This is not a register/private-memory audit
 use it to kill visible caps and pick follow-up counter experiments, not to promote
 a kernel rewrite by itself.
 
+For the two-stream occupancy discriminator, use `decode-window --streams 2` or
+pass `--streams 2` through `gpu_limiter_capture.py capture`. The run intentionally
+overlaps command buffers, so the kick histogram can become unstable; when the
+tool warns, treat per-kick rows as topology-biased and use device means plus the
+untraced `decode-window` log for decisions.
+
 ## Command-level benchmarking
 
 Use `hyperfine` when comparing builds, feature flags, or external baselines:

@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.446 Xcode Decode-Capture Packet
+
+Status: prep checkpoint, no measurement claims. The twice-endorsed,
+never-scheduled interactive GPU-capture session now has a 5-minute launch
+path: `scripts/profile/xcode_capture_decode_window.sh {a3b|27b|a10b} [ctx]`
+ramps `qwen-bench decode-window`, prints the PID for Instruments/Xcode
+attachment, and releases a decode window on `touch /tmp/qwen-capture.go`.
+`docs/bench/2026-07-03-xcode-decode-capture/README.md` carries the three
+pre-registered questions (decode-attention KV-read limiter at ctx>=16k;
+MoE routed-projection limiter behind the `~51%%`-of-stream gap; per-kernel
+proxy calibration), the per-kernel counter table to fill, and a
+pre-registered interpretation guide so the results pick the next branch
+instead of rationalizing one. Smoke-validated end-to-end on 0.8B and A3B
+(ready/go handshake, window stats, 86-92%% GPU-busy).
+
 ## 2026-07-02 - v0.445 Runtime Prefix-Cache API Integration
 
 Status: moved the prefix-cache branch from a bench-local proof into the runtime

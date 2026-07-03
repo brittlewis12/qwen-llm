@@ -967,7 +967,20 @@ gated hardware-headroom probes.
 
 v0.389 counter-pivot read: autonomous Metal hardware counters are unavailable on
 this M4 Max beyond timestamps, so do not wait for counter tables that cannot be
-captured. Use existing software gates instead. v0.390 then demotes exact route
+captured. Use existing software gates instead. v0.455 SUPERSEDES this pivot:
+a user-saved Instruments template (`metal-counters`: Performance Limiters
+counter set, Performance State Maximum) unlocks the full 64-counter Apple
+limiter stream headlessly via `xctrace record --template 'metal-counters'
+--attach PID`. The measurement loop lives in
+`scripts/profile/gpu_limiter_capture.py` (uv script; `hold`/`capture --reuse-pid`
+amortizes the ramp; per-experiment CSV under `target/profiles/gpu-limiters/`,
+~30 s warm, ~2-3 min cold, ~1 min re-analyze). A3B ctx16384 verdict is
+recorded: low effective residency (Kernel Occupancy ~28% vs manager ~72%),
+bandwidth 57-68% of stream, ALU pipes <=31%; NWG192 discriminator moves
+nothing so the cap is per-kernel residency shape. Newly promoted top item:
+per-kernel residency audit + one occupancy-shape retune gated on the
+counter loop (inflight must move before any e2e claim). Byte reduction stays
+demoted. Interpretation guide: `docs/bench/2026-07-03-xcode-decode-capture/`. v0.390 then demotes exact route
 from the main branch: A3B/A10B route replay still repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
 exact boundary is router logits into global exact top-k. The immediate

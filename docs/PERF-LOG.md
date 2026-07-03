@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.456 Metal Counter Loop Tooling
+
+Status: tooling + docs checkpoint, no engine change. Converts the v0.455
+capture ad-hoc pipeline into a durable `uv` script.
+
+- `scripts/profile/gpu_limiter_capture.py` is now a PEP-723 uv script
+  (`lxml` dep declared inline; no venv). Three subcommands: `capture`
+  (ramp + record + analyze), `hold` (ramp once, run many captures
+  against the held PID via `--reuse-pid`), `analyze` (re-parse an
+  existing .trace). Outputs per label under
+  `target/profiles/gpu-limiters/`: `LABEL-per-kick.csv` (64 counters x
+  3 kicks + device mean + sample counts), `LABEL-meta.json` (xctrace
+  version, git commit, kick medians, export/join timings), and cached
+  XML exports so re-analysis is instant.
+- Two bugs from the v0.455 ad-hoc code fixed before promotion:
+  (1) `metal-command-buffer-id` positional lookup was actually reading
+  the `channel-id` column and collapsing 42,494 cmdbufs into 3 phantom
+  buckets (kick medians came out as 8000 ms/1 token); rewritten as
+  schema-column-keyed decode (needed because the counter-info row has
+  four `uint32` element tags mapping to four different columns).
+  (2) `counter_names` was reading the wrong element tag; the CSV was
+  emitting "GPU Write Bandwidth" for counter_id 0. Both caught by
+  re-running against `/tmp/qwen-nwg192.trace` and cross-checking
+  against the earlier hand-run: `682` tokens, per-kick numbers stable
+  to `0.1 GB/s`.
+- Perf: cold analyze `~1 min 28 s` (lxml iterparse over 3.9 GB
+  counter-value XML), warm re-analyze `~0.9 s` via a `pickle` cache of
+  the joined (acc, dev) tuple. Cold end-to-end per experiment `~2-3
+  min` (or `~30 s` when reusing a held PID); down from the earlier
+  `~6 min` per experiment.
+- `docs/PERF-TOOLS.md` gains a "Headless Metal performance-limiter
+  counters" subsection under the GPU section with the one-time UI
+  setup and the wrapper usage. The v0.389/v0.455 counter-availability
+  sentence in PERF-TOOLS was updated (previous "counters unavailable,
+  use proxies" note now points at the new headless path).
+
+Validation:
+
+- `scripts/profile/gpu_limiter_capture.py analyze --trace
+  /tmp/qwen-nwg192.trace --label revalidate` cold: 682 tokens,
+  Kernel Occupancy `28.3/28.0/29.0`, Read BW `269.8/274.4/311.6 GB/s`
+  (matches the manual v0.455 numbers to `0.1 GB/s`).
+- warm re-run of same command: `0.9 s`, identical CSV.
+
 ## 2026-07-03 - v0.455 Headless GPU Limiter Counters; Decode Residency Verdict
 
 Status: the limiter cell is CLOSED, headlessly and permanently. A one-time

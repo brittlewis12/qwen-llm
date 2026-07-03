@@ -403,9 +403,64 @@ Counter guidance:
   device` and produce empty counter tables. Treat that as a tooling miss, not a
   kernel conclusion.
 - v0.389 adds the in-process probe and shows `MTLCounterSampleBuffer` exposes no
-  useful performance counters on this target either. For autonomous GPU
-  efficiency and memory bandwidth, use phase/microbench/roofline proxies unless a
-  manual Xcode GPU capture or another external profiler is available.
+  useful performance counters on this target either.
+- v0.455 unlocks headless counters via a user-saved Instruments template. See
+  "Headless Metal performance-limiter counters" below — this is the current
+  best path for autonomous GPU efficiency and bandwidth attribution.
+
+### Headless Metal performance-limiter counters (v0.455+)
+
+`xctrace` cannot configure a counter profile from CLI flags, but it can
+attach a UI-saved `.tracetemplate`. One-time setup:
+
+1. Open Instruments, pick **Metal System Trace**.
+2. Add the **Metal GPU Counters** instrument. In its inspector: **Counter Set =
+   Performance Limiters**, **Performance State = Maximum**, shader profiler on.
+3. **File > Save As Template** as `metal-counters` in the user templates
+   directory (`~/Library/Application Support/Instruments/Templates/`).
+
+The wrapper `scripts/profile/gpu_limiter_capture.py` (uv script) drives the
+full loop: workload ramp, `xctrace record --template 'metal-counters'`,
+XML export, kick-window join, CSV emit. Two usage modes:
+
+```sh
+# One-shot per experiment (~2-3 min cold, includes fresh ramp):
+scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
+    --label baseline
+
+# Amortize the ramp across many experiments (~30 s per capture after warm):
+scripts/profile/gpu_limiter_capture.py hold --model a3b --ctx 16384 &
+HOLD_PID=$(pgrep -f decode-window | head -1)
+scripts/profile/gpu_limiter_capture.py capture --reuse-pid $HOLD_PID --label a
+scripts/profile/gpu_limiter_capture.py capture --reuse-pid $HOLD_PID --label b
+# ...
+
+# Re-analyze without re-recording (~1 min cold, ~1 s warm pickle-cached):
+scripts/profile/gpu_limiter_capture.py analyze --trace /tmp/qwen-a.trace \
+    --label a-take2
+```
+
+Output lands in `target/profiles/gpu-limiters/`: `LABEL-per-kick.csv`
+(all 64 counters × 3 kicks × device mean, plus sample counts),
+`LABEL-meta.json` (xctrace version, git commit, kick medians, timings),
+and cached XML exports so re-analysis is instant. Pitfalls, all
+enforced by the script but worth knowing when reading traces manually:
+
+- **Recording must end BEFORE the target exits**, or the .trace bundle
+  saves truncated (all schemas present, no rows). The script sizes
+  `--window` so decode outlives `--seconds`.
+- **Quiet box**: any concurrent qwen-bench or heavy GPU consumer skews
+  counters. The script warns.
+- **Shader-profiler per-kernel tables are kick-sampling biased** (e.g.,
+  routed-down mat-vec reads 52% of samples vs ~13% known wall). Use
+  kernel names as metadata; take quantitative shares from the per-kick
+  counter join.
+- **Truncated bundles report as "1 token, 8000 ms kick medians"** — the
+  script refuses to emit stats on <10 tokens.
+- **Interpretation guide** for the pre-registered A3B ctx16384 questions
+  is in `docs/bench/2026-07-03-xcode-decode-capture/README.md`; the
+  measured v0.455 verdict (low-residency latency-bound, byte reduction
+  demoted) is in `docs/PERF-LOG.md`.
 
 `.trace` versus `.gputrace`:
 
@@ -414,6 +469,84 @@ Counter guidance:
   `MTLCaptureManager` code.
 - If an agent needs `.gputrace`, the host project must include capture code; a
   CLI trace cannot synthesize it after the fact.
+
+## Metal performance limiters (headless GPU counters)
+
+For "why is this kernel slow" questions — the counter cell that Metal System
+Trace alone cannot answer — use the saved `metal-counters` Instruments
+template plus the repo tool:
+
+```sh
+# One-shot ramp + record + analyze (~4 min ramp + 1-3 min analyze cold):
+scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
+  --label baseline
+
+# Iterating on a kernel change (ramp once, then ~30s per experiment):
+scripts/profile/gpu_limiter_capture.py hold --model a3b --ctx 16384 &
+scripts/profile/gpu_limiter_capture.py capture --reuse-pid PID --label baseline
+scripts/profile/gpu_limiter_capture.py capture --reuse-pid PID --label kernel-v2
+
+# Re-analyze without re-exporting (cache-hit ~1s):
+scripts/profile/gpu_limiter_capture.py analyze --trace /tmp/qwen-baseline.trace \
+  --label baseline
+```
+
+Output per experiment (in `target/profiles/gpu-limiters/`):
+
+- `<label>-per-kick.csv`: all 64 Apple GPU performance-limiter counters,
+  per decode-token kick (kick0/kick1/kick2) and device-average, plus
+  sample counts.
+- `<label>-meta.json`: xctrace version, git commit, token count, kick
+  medians, export/join wall time.
+- `<label>-exec-points.xml`, `<label>-counter-info.xml`,
+  `<label>-counter-values.xml`: raw exports (cached for re-analysis).
+- `<label>-join.pkl`: cached joined counters (subsequent `analyze` runs
+  finish in <1s).
+
+Pitfalls the tool encodes but agents should read once:
+
+- **One-time template save**: requires
+  `~/Library/Application Support/Instruments/Templates/metal-counters.tracetemplate`
+  saved from Instruments GUI (Metal GPU Counters instrument, Counter
+  Set = Performance Limiters, Performance State = Maximum, shader
+  profiler on). xctrace has no CLI flag for counter-profile selection.
+- **Truncated-bundle bug**: the recording MUST end before the target
+  process exits, otherwise the `.trace` bundle saves incomplete and
+  export fails with "Document Missing Template Error". The tool sizes
+  the decode window so decode outlives `--seconds` by default (`--window
+  1200`).
+- **Traced busy fractions are inflated** by instrument overhead (~10x
+  gap growth measured); use this tool for counter attribution only, and
+  `qwen-bench` for throughput claims.
+- **Shader-profiler per-kernel share** in the trace is
+  kick-sampling-biased (measured 4x mis-attribution on one hot kernel);
+  use it for kernel NAMES only, quantitative shares come from
+  `qwen-bench phase` or the per-kick counter joins.
+- **Quiet box rule**: any concurrent GPU-heavy process invalidates the
+  run. The tool warns on detection but does not block.
+
+Interpretation cheat sheet (M4 Max, Performance Limiters counter set):
+
+- `Kernel Occupancy` (id 3) vs `Occupancy Manager Target` (id 5): the
+  first is how much shader-core resource is used; the second is what
+  the driver's throttler thinks is achievable. Big gap = residency cap.
+- `Compute SIMD Groups Inflight` (id 54): SIMD groups per core.
+  ~28 on the current decode workload; ceiling depends on kernel
+  registers/threadgroup-memory/threads-per-TG.
+- `Instruction Throughput Limiter` (id 7): ALU pipeline pressure. High
+  when kernels are ALU-bound; low = latency-bound (this is our decode
+  case).
+- `GPU Bandwidth`/`Read`/`Write` (61/62/63) in GB/s: device DRAM traffic.
+  Compare against `~474 GB/s` M4 Max stream ceiling.
+- `L1 Cache Limiter` (23) + `Buffer L1 Miss Rate` (47): shader-core L1
+  pressure. Low miss rate + low limiter = not L1-bound.
+
+The v0.455 workflow (README:
+`docs/bench/2026-07-03-xcode-decode-capture/`) established that
+long-context decode is latency-bound at low residency, uniformly across
+kicks. Use this as the interpretation baseline: kernel-shape retunes
+should MOVE occupancy/SIMD inflight in the counter table BEFORE any e2e
+claim.
 
 ## Command-level benchmarking
 

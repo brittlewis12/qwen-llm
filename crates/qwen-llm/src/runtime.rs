@@ -9,9 +9,14 @@
 use crate::gguf::{GgufError, GgufFile};
 use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
-use crate::metal_forward::{MetalForward, MetalModel, MetalSession, MfError};
+use crate::metal_forward::{
+    MetalForward, MetalModel, MetalSession, MfError, SessionSnapshot, SnapshotIdentity,
+};
 use crate::model::Arch;
+use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
 use crate::tokenizer::{TokError, Tokenizer};
+use parking_lot::Mutex;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -44,6 +49,13 @@ pub enum RuntimeError {
         n_tokens: usize,
         max_context_tokens: usize,
     },
+    #[error("prefix snapshot identity mismatch: expected {expected:?}, snapshot {snapshot:?}")]
+    SnapshotIdentityMismatch {
+        expected: SnapshotIdentity,
+        snapshot: SnapshotIdentity,
+    },
+    #[error("prefix snapshot logits length {got} != vocab size {expected}")]
+    PrefixLogitsLengthMismatch { got: usize, expected: usize },
 }
 
 struct RuntimeInner {
@@ -87,17 +99,56 @@ impl Runtime {
 
     /// Open a GGUF, bind its model metadata, and load resident Metal weights.
     pub fn load_model(&self, path: impl AsRef<Path>) -> Result<LoadedModel, RuntimeError> {
+        self.load_model_with_config(path, LoadedModelConfig::default())
+    }
+
+    pub fn load_model_with_config(
+        &self,
+        path: impl AsRef<Path>,
+        config: LoadedModelConfig,
+    ) -> Result<LoadedModel, RuntimeError> {
         let path = path.as_ref();
         let gguf = GgufFile::open(path)?;
         let bound = Model::from_gguf(&gguf)?;
+        let (model_id, tokenizer_id) = snapshot_identity_parts(&gguf, bound.arch);
         let metal_model = MetalModel::load(self.context(), &gguf, &bound)?;
         Ok(LoadedModel {
             runtime: self.clone(),
             path: path.to_path_buf(),
             gguf,
             metal_model,
+            model_id,
+            tokenizer_id,
+            prefix_cache: Mutex::new(PrefixCache::with_max_bytes(config.prefix_cache_max_bytes)),
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoadedModelConfig {
+    pub prefix_cache_max_bytes: u64,
+}
+
+impl Default for LoadedModelConfig {
+    fn default() -> Self {
+        Self {
+            prefix_cache_max_bytes: DEFAULT_MAX_BYTES,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PrefixCacheInsert {
+    pub snapshot_bytes: u64,
+    pub stats: PrefixCacheStats,
+}
+
+#[derive(Clone, Debug)]
+pub struct PrefixCacheRestore {
+    pub matched_prefix_len: usize,
+    pub exact: bool,
+    pub exact_final_logits: Option<Vec<f32>>,
+    pub stats: PrefixCacheStats,
 }
 
 /// One model loaded into a [`Runtime`].
@@ -110,6 +161,9 @@ pub struct LoadedModel {
     path: PathBuf,
     gguf: GgufFile,
     metal_model: MetalModel,
+    model_id: u64,
+    tokenizer_id: u64,
+    prefix_cache: Mutex<PrefixCache>,
 }
 
 impl LoadedModel {
@@ -168,6 +222,84 @@ impl LoadedModel {
     /// Borrowed execution driver over this loaded model.
     pub fn forward(&self) -> MetalForward<'_> {
         MetalForward::new(self.context(), &self.metal_model)
+    }
+
+    pub fn snapshot_identity(&self, sequence: &Sequence) -> SnapshotIdentity {
+        sequence
+            .metal_session()
+            .snapshot_identity(self.model_id, self.tokenizer_id)
+    }
+
+    pub fn prefix_cache_stats(&self) -> PrefixCacheStats {
+        self.prefix_cache.lock().stats()
+    }
+
+    pub fn set_prefix_cache_max_bytes(&self, max_bytes: u64) -> PrefixCacheStats {
+        let mut cache = self.prefix_cache.lock();
+        cache.set_max_bytes(max_bytes);
+        cache.stats()
+    }
+
+    pub fn clear_prefix_cache(&self) -> PrefixCacheStats {
+        let mut cache = self.prefix_cache.lock();
+        cache.clear();
+        cache.stats()
+    }
+
+    pub fn cache_sequence_prefix(
+        &self,
+        sequence: &Sequence,
+        prefix_tokens: Vec<i32>,
+        final_logits: Option<Vec<f32>>,
+    ) -> Result<PrefixCacheInsert, RuntimeError> {
+        sequence.check_position(prefix_tokens.len())?;
+        if let Some(logits) = final_logits.as_ref() {
+            let expected = self.metal_model.arch.vocab_size as usize;
+            if logits.len() != expected {
+                return Err(RuntimeError::PrefixLogitsLengthMismatch {
+                    got: logits.len(),
+                    expected,
+                });
+            }
+        }
+        let snap = sequence.snapshot(
+            self.snapshot_identity(sequence),
+            prefix_tokens,
+            final_logits,
+        );
+        let snapshot_bytes = snap.n_bytes();
+        let mut cache = self.prefix_cache.lock();
+        cache.insert(snap);
+        Ok(PrefixCacheInsert {
+            snapshot_bytes,
+            stats: cache.stats(),
+        })
+    }
+
+    pub fn restore_cached_prefix(
+        &self,
+        sequence: &mut Sequence,
+        request_tokens: &[i32],
+    ) -> Result<Option<PrefixCacheRestore>, RuntimeError> {
+        sequence.check_position(0)?;
+        sequence.ensure_can_append(request_tokens.len())?;
+        let identity = self.snapshot_identity(sequence);
+        let mut cache = self.prefix_cache.lock();
+        let Some(hit) = cache.lookup_longest(&identity, request_tokens) else {
+            return Ok(None);
+        };
+        sequence.restore_from_snapshot(hit.snapshot, &identity)?;
+        let exact_final_logits = if hit.exact {
+            hit.snapshot.final_logits.clone()
+        } else {
+            None
+        };
+        Ok(Some(PrefixCacheRestore {
+            matched_prefix_len: hit.matched_prefix_len,
+            exact: hit.exact,
+            exact_final_logits,
+            stats: cache.stats(),
+        }))
     }
 }
 
@@ -249,6 +381,33 @@ impl Sequence {
         Ok(())
     }
 
+    pub fn snapshot(
+        &self,
+        identity: SnapshotIdentity,
+        prefix_tokens: Vec<i32>,
+        final_logits: Option<Vec<f32>>,
+    ) -> SessionSnapshot {
+        self.state.snapshot(identity, prefix_tokens, final_logits)
+    }
+
+    pub fn restore_from_snapshot(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        expected_identity: &SnapshotIdentity,
+    ) -> Result<(), RuntimeError> {
+        if &snapshot.identity != expected_identity {
+            return Err(RuntimeError::SnapshotIdentityMismatch {
+                expected: expected_identity.clone(),
+                snapshot: snapshot.identity.clone(),
+            });
+        }
+        self.check_position(0)?;
+        self.ensure_can_append(snapshot.prefix_len())?;
+        self.state.restore_from(snapshot)?;
+        self.position = snapshot.prefix_len();
+        Ok(())
+    }
+
     /// Low-level bridge for the existing Metal execution functions.
     pub fn metal_session(&self) -> &MetalSession {
         &self.state
@@ -258,4 +417,102 @@ impl Sequence {
     pub fn metal_session_mut(&mut self) -> &mut MetalSession {
         &mut self.state
     }
+}
+
+const HASH_OFFSET: u64 = 0xcbf29ce484222325;
+const HASH_PRIME: u64 = 0x100000001b3;
+
+fn hash_u64(h: &mut u64, value: u64) {
+    for byte in value.to_le_bytes() {
+        *h ^= byte as u64;
+        *h = h.wrapping_mul(HASH_PRIME);
+    }
+}
+
+fn hash_str(h: &mut u64, value: &str) {
+    hash_u64(h, value.len() as u64);
+    for byte in value.as_bytes() {
+        *h ^= *byte as u64;
+        *h = h.wrapping_mul(HASH_PRIME);
+    }
+}
+
+fn hash_value(h: &mut u64, value: &Value) {
+    match value {
+        Value::Null => hash_str(h, "null"),
+        Value::Bool(v) => {
+            hash_str(h, "bool");
+            hash_u64(h, u64::from(*v));
+        }
+        Value::Number(v) => {
+            hash_str(h, "number");
+            hash_str(h, &v.to_string());
+        }
+        Value::String(v) => {
+            hash_str(h, "string");
+            hash_str(h, v);
+        }
+        Value::Array(xs) => {
+            hash_str(h, "array");
+            hash_u64(h, xs.len() as u64);
+            for x in xs {
+                hash_value(h, x);
+            }
+        }
+        Value::Object(map) => {
+            hash_str(h, "object");
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            for key in keys {
+                hash_str(h, key);
+                hash_value(h, &map[key]);
+            }
+        }
+    }
+}
+
+fn snapshot_identity_parts(gguf: &GgufFile, arch: Arch) -> (u64, u64) {
+    let mut model_hash = HASH_OFFSET;
+    let mut tokenizer_hash = HASH_OFFSET;
+
+    hash_str(&mut model_hash, "qwen-llm-model-v1");
+    hash_str(&mut model_hash, &format!("{arch:?}"));
+    hash_u64(&mut model_hash, gguf.shard_count() as u64);
+    hash_u64(&mut model_hash, gguf.total_mapped_len() as u64);
+    for shard in &gguf.shards {
+        hash_str(&mut model_hash, &shard.path.display().to_string());
+        hash_u64(&mut model_hash, shard.mmap.len() as u64);
+        if let Ok(meta) = std::fs::metadata(&shard.path) {
+            hash_u64(&mut model_hash, meta.len());
+            if let Ok(modified) = meta.modified()
+                && let Ok(elapsed) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                hash_u64(&mut model_hash, elapsed.as_nanos() as u64);
+            }
+        }
+    }
+    for tensor in &gguf.tensors {
+        hash_str(&mut model_hash, &tensor.name);
+        hash_u64(&mut model_hash, tensor.dtype as i32 as u32 as u64);
+        hash_u64(&mut model_hash, tensor.shard_idx as u64);
+        hash_u64(&mut model_hash, tensor.data_offset);
+        hash_u64(&mut model_hash, tensor.n_bytes);
+        hash_u64(&mut model_hash, tensor.shape.len() as u64);
+        for &dim in &tensor.shape {
+            hash_u64(&mut model_hash, dim);
+        }
+    }
+
+    hash_str(&mut tokenizer_hash, "qwen-llm-tokenizer-v1");
+    for (key, value) in gguf.model.metadata() {
+        if key.starts_with("tokenizer.") {
+            hash_str(&mut tokenizer_hash, key);
+            hash_value(&mut tokenizer_hash, value);
+        } else {
+            hash_str(&mut model_hash, key);
+            hash_value(&mut model_hash, value);
+        }
+    }
+
+    (model_hash, tokenizer_hash)
 }

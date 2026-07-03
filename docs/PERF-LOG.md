@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-02 - v0.445 Runtime Prefix-Cache API Integration
+
+Status: moved the prefix-cache branch from a bench-local proof into the runtime
+surface. `LoadedModel` now owns a bounded `PrefixCache` with in-process
+model/tokenizer compatibility fingerprints, stats, resize/clear controls, and
+exact restore helpers. `Sequence` can snapshot and restore through the runtime
+wrapper, with explicit identity/capacity checks before Metal state writes, and
+`qwen-bench prefix-cache` now exercises that runtime path instead of a local cache.
+
+Artifact:
+
+- `docs/bench/2026-07-02-v0445-runtime-prefix-cache/README.md`
+
+Validation:
+
+- `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `cargo test -p qwen-llm prefix_cache -- --nocapture`
+- A3B runtime-integrated prefix-cache probes at prefix lengths `1024/4096`
+
+Results: runtime-cache probes reproduce the v0.442 product shape: A3B prefix 1024
+is `5.16x` TTFT (`609.3 -> 118.2 ms`) and prefix 4096 is `18.51x`
+(`2347.4 -> 126.8 ms`), with restore `4.1/7.4 ms` and exact greedy agreement.
+
+Decision: prefix caching is now a usable runtime feature boundary rather than a
+bench-only artifact. The remaining cache work is product wiring (request handling,
+cross-process/persistent identity policy, observability), not kernel optimization.
+
 ## 2026-07-02 - v0.443 DFlash Verify-Cost Accounting (H5.6 M1)
 
 Status: measurement checkpoint executing PERF-ROADMAP item 6's precondition
@@ -79,6 +107,7 @@ sanction — kernel-only promotion is forbidden while narrative-tail-class
 prompts lose money; M2 promotion requires alpha-stratified real prompts
 (code AND narrative-start clear `>=1.25x`, narrative-tail off-or-neutral,
 greedy equivalence on all).
+
 ## 2026-07-02 - v0.442 Product-Shaped Prefix Cache Probe
 
 Status: made `qwen-bench prefix-cache` use packed prefill by default, with a

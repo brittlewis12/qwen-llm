@@ -15,6 +15,13 @@ pub struct PrefixCacheHit<'a> {
     pub exact: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrefixCacheStats {
+    pub entries: usize,
+    pub total_bytes: u64,
+    pub max_bytes: u64,
+}
+
 /// Session snapshots are large (KV arenas + GDN state — tens to hundreds of
 /// MiB each on 27B-class models), so an unbounded cache is a reliability
 /// hazard in any long-running process. `PrefixCache` therefore carries a
@@ -77,6 +84,25 @@ impl PrefixCache {
 
     pub fn is_empty(&self) -> bool {
         self.buckets.is_empty()
+    }
+
+    pub fn stats(&self) -> PrefixCacheStats {
+        PrefixCacheStats {
+            entries: self.len(),
+            total_bytes: self.total_bytes,
+            max_bytes: self.max_bytes,
+        }
+    }
+
+    pub fn set_max_bytes(&mut self, max_bytes: u64) {
+        self.max_bytes = max_bytes;
+        self.evict_to_budget();
+    }
+
+    pub fn clear(&mut self) {
+        self.buckets.clear();
+        self.last_used.clear();
+        self.total_bytes = 0;
     }
 
     pub fn insert(&mut self, snap: SessionSnapshot) {
@@ -321,5 +347,27 @@ mod tests {
         // Guard against accidentally shipping a tiny default that would
         // silently change bench behavior.
         assert!(super::DEFAULT_MAX_BYTES >= (8u64 << 30));
+    }
+
+    #[test]
+    fn stats_resize_and_clear_reflect_memory_policy() {
+        let id = ident(1);
+        let mut cache = PrefixCache::with_max_bytes(1 << 20);
+        cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        let before = cache.stats();
+        assert_eq!(before.entries, 2);
+        assert!(before.total_bytes > 0);
+
+        cache.set_max_bytes(1);
+        let after = cache.stats();
+        assert_eq!(after.entries, 1);
+        assert_eq!(after.max_bytes, 1);
+
+        cache.clear();
+        let cleared = cache.stats();
+        assert_eq!(cleared.entries, 0);
+        assert_eq!(cleared.total_bytes, 0);
+        assert_eq!(cleared.max_bytes, 1);
     }
 }

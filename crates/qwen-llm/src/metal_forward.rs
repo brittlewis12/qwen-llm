@@ -6864,10 +6864,11 @@ impl<'a> MetalForward<'a> {
 /// Identity tag for a snapshot. Checked at restore to refuse silent
 /// corruption from model drift / dtype change / layout-version bump.
 ///
-/// `model_id` is content-addressable (typically a hash of the GGUF
-/// metadata + tensor descriptor table). `layout_version` is a manual
-/// counter bumped whenever the `MetalSession` field layout changes
-/// in a way that would invalidate prior snapshots.
+/// `model_id` is a caller-supplied compatibility fingerprint (typically a hash
+/// of GGUF metadata + tensor descriptors for in-process caches). Persistent or
+/// cross-process caches need a stronger content identity. `layout_version` is a
+/// manual counter bumped whenever the `MetalSession` field layout changes in a
+/// way that would invalidate prior snapshots.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SnapshotIdentity {
     pub model_id: u64,

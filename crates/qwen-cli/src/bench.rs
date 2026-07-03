@@ -58,7 +58,6 @@ use qwen_llm::{
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
-    prefix_cache::PrefixCache,
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
@@ -12503,12 +12502,12 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         suffix_prefill_mode,
     } = args;
 
-    let ctx = MetalContext::new()?;
-    eprintln!("[prefix-cache] device: {}", ctx.describe());
-    let g = GgufFile::open(&model)?;
-    let m = Model::from_gguf(&g)?;
-    let mm = MetalModel::load(&ctx, &g, &m)?;
-    let tok = Tokenizer::from_gguf(&g)?;
+    let runtime = Runtime::metal()?;
+    eprintln!("[prefix-cache] device: {}", runtime.describe());
+    let loaded = runtime.load_model(&model)?;
+    let ctx = loaded.context();
+    let mm = loaded.metal_model();
+    let tok = loaded.tokenizer()?;
 
     let mut prefix_ids = tok.encode(&prefix, false)?;
     if let Some(target) = target_prefix_len {
@@ -12577,26 +12576,26 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
 
     // Warmup pass to compile pipeline state objects.
     {
-        let mut s = MetalSession::fresh(&ctx, &mm, 32)?;
+        let mut s = loaded.create_sequence(SequenceConfig::new(32))?;
         if prefill_mode == PrefixCachePrefillMode::Packed {
             let mut warm_scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, 1, 1)?;
             let _ = prefill_tokens_with_multi_hidden(
                 &mf,
                 &[prefix_ids[0]],
                 0,
-                &mut s,
+                s.metal_session_mut(),
                 &mut warm_scratch,
                 &[],
                 None,
             )?;
         } else {
-            let _ = mf.single_token(prefix_ids[0], 0, &mut s)?;
+            let _ = mf.single_token(prefix_ids[0], 0, s.metal_session_mut())?;
         }
     }
 
     // ---- COLD path: prefill (prefix + suffix), decode N tokens ----
     let cold_t0 = Instant::now();
-    let mut sess_cold = MetalSession::fresh(&ctx, &mm, cap)?;
+    let mut seq_cold = loaded.create_sequence(SequenceConfig::new(cap))?;
     let full_ids: Vec<i32> = prefix_ids
         .iter()
         .chain(suffix_ids.iter())
@@ -12606,16 +12605,22 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         &mf,
         &full_ids,
         0,
-        &mut sess_cold,
+        seq_cold.metal_session_mut(),
         prefill_mode,
         cold_scratch.as_mut(),
     )?;
+    seq_cold.advance_by(full_ids.len())?;
     let cold_prefill_ms = cold_t0.elapsed().as_secs_f64() * 1e3;
 
     // First decoded token = TTFT-equivalent measurement.
     let cold_first_decode_t = Instant::now();
     let cold_first_id = argmax_i32(&last_logits);
-    let _ = mf.single_token(cold_first_id, total_len as u32, &mut sess_cold)?;
+    let _ = mf.single_token(
+        cold_first_id,
+        total_len as u32,
+        seq_cold.metal_session_mut(),
+    )?;
+    seq_cold.advance_by(1)?;
     let cold_first_decode_ms = cold_first_decode_t.elapsed().as_secs_f64() * 1e3;
 
     let cold_ttft_ms = cold_prefill_ms + cold_first_decode_ms;
@@ -12626,56 +12631,81 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
 
     // ---- WARM path: prefill prefix, snapshot. Then fresh session, restore, ----
     // ---- prefill suffix, decode 1 token. Time the second-request portion. ----
-    let mut sess_pre = MetalSession::fresh(&ctx, &mm, cap)?;
+    let mut seq_pre = loaded.create_sequence(SequenceConfig::new(cap))?;
     let last_pre_logits = prefix_cache_prefill_logits(
         &mf,
         &prefix_ids,
         0,
-        &mut sess_pre,
+        seq_pre.metal_session_mut(),
         prefill_mode,
         prefix_scratch.as_mut(),
     )?;
-    let identity = sess_pre.snapshot_identity(0xAA, 0xBB);
+    seq_pre.advance_by(prefix_ids.len())?;
     let snap_t = Instant::now();
-    let snap = sess_pre.snapshot(identity.clone(), prefix_ids.clone(), Some(last_pre_logits));
+    let inserted =
+        loaded.cache_sequence_prefix(&seq_pre, prefix_ids.clone(), Some(last_pre_logits))?;
     let snap_create_ms = snap_t.elapsed().as_secs_f64() * 1e3;
-    let snap_bytes = snap.n_bytes();
-    let mut cache = PrefixCache::new();
-    cache.insert(snap);
     let full_request: Vec<i32> = prefix_ids
         .iter()
         .chain(suffix_ids.iter())
         .copied()
         .collect();
-    let hit = cache
-        .lookup_longest(&identity, &full_request)
-        .ok_or_else(|| anyhow!("prefix cache lookup missed a freshly inserted prefix"))?;
     eprintln!(
         "[prefix-cache] (snapshot built: {:.1} MB in {snap_create_ms:.1} ms)",
-        snap_bytes as f64 / 1e6
+        inserted.snapshot_bytes as f64 / 1e6
+    );
+    eprintln!(
+        "[prefix-cache] cache after insert: entries={} bytes={:.1}/{:.1} MB",
+        inserted.stats.entries,
+        inserted.stats.total_bytes as f64 / 1e6,
+        inserted.stats.max_bytes as f64 / 1e6
     );
 
     // Now simulate request 2 starting fresh and finding the cached prefix.
     let warm_t0 = Instant::now();
-    let mut sess_warm = MetalSession::fresh(&ctx, &mm, cap)?;
+    let mut seq_warm = loaded.create_sequence(SequenceConfig::new(cap))?;
     let restore_t = Instant::now();
-    sess_warm.restore_from(hit.snapshot)?;
+    let hit = loaded
+        .restore_cached_prefix(&mut seq_warm, &full_request)?
+        .ok_or_else(|| anyhow!("prefix cache lookup missed a freshly inserted prefix"))?;
     let restore_ms = restore_t.elapsed().as_secs_f64() * 1e3;
+    if hit.matched_prefix_len != prefix_ids.len() {
+        return Err(anyhow!(
+            "prefix cache restored {} tokens, expected {}",
+            hit.matched_prefix_len,
+            prefix_ids.len()
+        ));
+    }
+    eprintln!(
+        "[prefix-cache] hit: matched_prefix={} exact={} exact_logits={} entries={} bytes={:.1}/{:.1} MB",
+        hit.matched_prefix_len,
+        hit.exact,
+        hit.exact_final_logits.is_some(),
+        hit.stats.entries,
+        hit.stats.total_bytes as f64 / 1e6,
+        hit.stats.max_bytes as f64 / 1e6
+    );
 
     let last_warm_logits = prefix_cache_prefill_logits(
         &mf,
         &suffix_ids,
         prefix_ids.len() as u32,
-        &mut sess_warm,
+        seq_warm.metal_session_mut(),
         effective_suffix_mode,
         suffix_scratch.as_mut(),
     )?;
+    seq_warm.advance_by(suffix_ids.len())?;
     let warm_prefill_ms = warm_t0.elapsed().as_secs_f64() * 1e3;
     let warm_suffix_ms = warm_prefill_ms - restore_ms;
 
     let warm_first_decode_t = Instant::now();
     let warm_first_id = argmax_i32(&last_warm_logits);
-    let _ = mf.single_token(warm_first_id, total_len as u32, &mut sess_warm)?;
+    let _ = mf.single_token(
+        warm_first_id,
+        total_len as u32,
+        seq_warm.metal_session_mut(),
+    )?;
+    seq_warm.advance_by(1)?;
     let warm_first_decode_ms = warm_first_decode_t.elapsed().as_secs_f64() * 1e3;
 
     let warm_ttft_ms = warm_prefill_ms + warm_first_decode_ms;
@@ -12724,8 +12754,18 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         let mut warm_extra = vec![warm_first_id];
         for k in 1..tokens {
             let pos = (total_len + k) as u32;
-            let cold_logits = mf.single_token(*cold_extra.last().unwrap(), pos, &mut sess_cold)?;
-            let warm_logits = mf.single_token(*warm_extra.last().unwrap(), pos, &mut sess_warm)?;
+            let cold_logits = mf.single_token(
+                *cold_extra.last().unwrap(),
+                pos,
+                seq_cold.metal_session_mut(),
+            )?;
+            let warm_logits = mf.single_token(
+                *warm_extra.last().unwrap(),
+                pos,
+                seq_warm.metal_session_mut(),
+            )?;
+            seq_cold.advance_by(1)?;
+            seq_warm.advance_by(1)?;
             cold_extra.push(argmax_i32(&cold_logits));
             warm_extra.push(argmax_i32(&warm_logits));
         }

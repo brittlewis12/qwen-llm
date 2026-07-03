@@ -1405,6 +1405,14 @@ restore `3.0-7.3 ms`, exact greedy agreement. Product conclusion: cache repeated
 1K+ prefixes aggressively, but do not sell prefix cache as a small-prefix win.
 Next cache work is runtime/CLI integration plus bounded memory policy, not kernel
 work.
+v0.445 lands that runtime boundary: `LoadedModel` owns a bounded cache with
+in-process model/tokenizer compatibility fingerprints, stats, resize/clear
+controls, and exact restore helpers; `Sequence` can snapshot/restore through the
+runtime wrapper with explicit identity/capacity checks; `qwen-bench prefix-cache`
+now exercises this path. A3B runtime probes reproduce the v0.442 economics:
+prefix 1024 `5.16x`, prefix 4096 `18.51x`, restore `4.1/7.4 ms`, exact greedy
+agreement. Remaining cache work is request/CLI product wiring, observability, and
+cross-process/persistent identity policy; the kernel gate is closed.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

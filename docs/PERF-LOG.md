@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.457 A3B Limiter-Family Noop Packet
+
+Status: attribution + tooling checkpoint, no engine hot-path change. Uses the
+v0.456 headless limiter loop on A3B ctx16384 to isolate whether the low-residency
+counter signature is tied to one model phase.
+
+- Tooling: `scripts/profile/gpu_limiter_capture.py` now handles dynamic
+  kick-count traces. Normal decode still appears as `3` large kicks/token, but
+  noops can collapse the topology to `1` kick/token; the analyzer now uses the
+  dominant kick-count histogram instead of hard-coding `3`. It also falls back
+  when xctrace's `shader-profiler=0` `gpu-counter-info` table is empty, either by
+  exporting the unfiltered table or by reusing sibling counter metadata for
+  offline re-analysis after `/tmp/*.trace` cleanup.
+- Full A3B ctx16384 decode re-analysis: `675` tokens, `3` kicks/token,
+  medians `2.94/3.70/3.49 ms`; Kernel Occupancy `28.1/27.9/29.0`, SIMD inflight
+  `27.0/26.8/27.8`, Read BW `265/270/310 GB/s`, ALU `14/14/19`.
+- No-GDN (`QWEN_DECODE_GDN_NOOP_FRONT=1`, `QWEN_DECODE_GDN_NOOP_OUT=1`):
+  `845` tokens, still `3` kicks/token, medians `2.14/2.80/2.69 ms`; occupancy
+  drops to `17.6/18.0/23.3`, Read BW `208/217/288 GB/s`.
+- No-MoE routed gate/up+down noop: topology collapses to `1` kick/token,
+  `776` tokens, median `8.86 ms`; occupancy remains `28.1`, Read BW `261 GB/s`.
+- No-GDN + no-MoE attention/residual floor: `1` kick/token, `1051` tokens,
+  median `6.36 ms`; occupancy `17.5`, Read BW `203 GB/s`.
+
+Interpretation: noops are useful budget oracles but not stable family counters;
+kick identity changes when the graph changes. They do not overturn v0.455. If
+launch starvation were first-order, collapsing to one kick should have improved
+occupancy; if bandwidth were first-order, the remaining work should approach the
+`474 GB/s` stream anchor. Neither happens. The live limiter remains per-kernel
+residency/occupancy shape, with attention/residual as a large floor.
+
+Next gated moves, per cx review (`019f29f3-b...`): (1) PSO/resource audit for the
+hot decode kernels, (2) batch-2/two-stream concurrency discriminator, (3) one
+surgical occupancy-shape retune only when the resource table predicts the cap and
+the counter capture moves occupancy/SIMD inflight before any throughput claim.
+
 ## 2026-07-03 - v0.456 Metal Counter Loop Tooling
 
 Status: tooling + docs checkpoint, no engine change. Converts the v0.455

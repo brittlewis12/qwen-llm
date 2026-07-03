@@ -424,7 +424,7 @@ full loop: workload ramp, `xctrace record --template 'metal-counters'`,
 XML export, kick-window join, CSV emit. Two usage modes:
 
 ```sh
-# One-shot per experiment (~2-3 min cold, includes fresh ramp):
+# One-shot per experiment (several minutes cold, includes fresh ramp/export):
 scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
     --label baseline
 
@@ -435,15 +435,15 @@ scripts/profile/gpu_limiter_capture.py capture --reuse-pid $HOLD_PID --label a
 scripts/profile/gpu_limiter_capture.py capture --reuse-pid $HOLD_PID --label b
 # ...
 
-# Re-analyze without re-recording (~1 min cold, ~1 s warm pickle-cached):
+# Re-analyze without re-recording (minutes cold, ~1 s warm pickle-cached):
 scripts/profile/gpu_limiter_capture.py analyze --trace /tmp/qwen-a.trace \
     --label a-take2
 ```
 
 Output lands in `target/profiles/gpu-limiters/`: `LABEL-per-kick.csv`
-(all 64 counters × 3 kicks × device mean, plus sample counts),
-`LABEL-meta.json` (xctrace version, git commit, kick medians, timings),
-and cached XML exports so re-analysis is instant. Pitfalls, all
+(all 64 counters × dominant kick count × device mean, plus sample counts),
+`LABEL-meta.json` (xctrace version, git commit, kick medians, kick histogram,
+timings), and cached XML exports so re-analysis is instant. Pitfalls, all
 enforced by the script but worth knowing when reading traces manually:
 
 - **Recording must end BEFORE the target exits**, or the .trace bundle
@@ -457,6 +457,13 @@ enforced by the script but worth knowing when reading traces manually:
   counter join.
 - **Truncated bundles report as "1 token, 8000 ms kick medians"** — the
   script refuses to emit stats on <10 tokens.
+- **Kick count is workload topology**, not a constant. Normal A3B decode is
+  three large kicks/token, but phase-noop isolation can collapse to one kick.
+  Compare total token medians across graph variants, not kick index to kick
+  index.
+- **Counter-info table selection can vary**. If the filtered
+  `shader-profiler=0` metadata table is empty, the analyzer falls back to an
+  unfiltered export or sibling counter metadata for offline re-analysis.
 - **Interpretation guide** for the pre-registered A3B ctx16384 questions
   is in `docs/bench/2026-07-03-xcode-decode-capture/README.md`; the
   measured v0.455 verdict (low-residency latency-bound, byte reduction
@@ -477,7 +484,7 @@ Trace alone cannot answer — use the saved `metal-counters` Instruments
 template plus the repo tool:
 
 ```sh
-# One-shot ramp + record + analyze (~4 min ramp + 1-3 min analyze cold):
+# One-shot ramp + record + analyze (several minutes cold):
 scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
   --label baseline
 
@@ -494,10 +501,9 @@ scripts/profile/gpu_limiter_capture.py analyze --trace /tmp/qwen-baseline.trace 
 Output per experiment (in `target/profiles/gpu-limiters/`):
 
 - `<label>-per-kick.csv`: all 64 Apple GPU performance-limiter counters,
-  per decode-token kick (kick0/kick1/kick2) and device-average, plus
-  sample counts.
+  per dominant decode-token kick and device-average, plus sample counts.
 - `<label>-meta.json`: xctrace version, git commit, token count, kick
-  medians, export/join wall time.
+  medians, kick histogram, export/join wall time.
 - `<label>-exec-points.xml`, `<label>-counter-info.xml`,
   `<label>-counter-values.xml`: raw exports (cached for re-analysis).
 - `<label>-join.pkl`: cached joined counters (subsequent `analyze` runs

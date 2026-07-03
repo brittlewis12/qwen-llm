@@ -52,7 +52,7 @@ import pickle
 import subprocess
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from lxml import etree as ET  # ~4x faster than stdlib on iterparse
 
@@ -150,8 +150,11 @@ def stream_rows(path):
 
 def kick_windows(exec_points_xml):
     """Bucket GPU-execution-point timestamps by cmdbuf-id, keep intervals
-    > 2 ms, and group into 3-kick tokens using > 0.8 ms inter-kick gaps.
-    The schema calls the metal-command-buffer-id column `slot-id`."""
+    > 2 ms, and group into per-token kick windows using > 0.8 ms
+    inter-kick gaps. Normal decode currently has three large kicks/token;
+    noop isolation runs can legitimately remove a kick, so use the dominant
+    group size instead of hard-coding 3. The schema calls the
+    metal-command-buffer-id column `slot-id`."""
     by_id = defaultdict(list)
     for row in stream_rows(exec_points_xml):
         cb = row.get("slot-id")
@@ -160,16 +163,20 @@ def kick_windows(exec_points_xml):
             by_id[cb].append(parse_ts(st))
     iv = sorted((min(t), max(t)) for t in by_id.values() if len(t) >= 2)
     big = [x for x in iv if x[1] - x[0] > 0.002]
-    tokens, cur = [], []
+    groups, cur = [], []
     for a, b in big:
         if cur and a - cur[-1][1] > 0.0008:
-            if len(cur) == 3:
-                tokens.append(cur)
+            groups.append(cur)
             cur = []
         cur.append((a, b))
-    if len(cur) == 3:
-        tokens.append(cur)
-    return tokens, len(iv), len(big)
+    if cur:
+        groups.append(cur)
+    hist = Counter(len(g) for g in groups)
+    if not hist:
+        return [], len(iv), len(big), {}, 0
+    target = max(hist, key=lambda n: (hist[n], n))
+    tokens = [g for g in groups if len(g) == target]
+    return tokens, len(iv), len(big), dict(sorted(hist.items())), target
 
 
 def counter_names(info_xml):
@@ -185,7 +192,57 @@ def counter_names(info_xml):
     return out
 
 
-def join_counters(values_xml, tokens):
+def sibling_counter_names(info_xml):
+    """Reuse counter names from another capture in the same outdir when a
+    trace bundle is gone and this capture's filtered info table is empty.
+    Counter IDs are template/device metadata, so sibling captures from the
+    same limiter suite are valid for offline re-analysis."""
+    outdir = os.path.dirname(info_xml) or "."
+    for name in sorted(os.listdir(outdir)):
+        if not name.endswith(".xml") or "-counter-info" not in name:
+            continue
+        path = os.path.join(outdir, name)
+        if path == info_xml:
+            continue
+        names = counter_names(path)
+        if names:
+            return names, path
+    return {}, None
+
+
+def load_counter_names(trace, info_xml):
+    """Load counter-id names, falling back to the unfiltered table when
+    xctrace's shader-profiler=0 selector produces an empty metadata table.
+    Some captures use a different profiler table index even though the
+    counter-value export is valid."""
+    if not os.path.exists(info_xml):
+        export(
+            trace, "gpu-counter-info", info_xml, extra_pred=' and @shader-profiler="0"'
+        )
+    names = counter_names(info_xml)
+    if names:
+        return names, info_xml
+    if not os.path.exists(trace):
+        names, sibling = sibling_counter_names(info_xml)
+        if names:
+            return names, sibling
+        raise SystemExit(
+            f"missing trace bundle {trace}; cannot re-export empty "
+            f"counter-info table {info_xml}"
+        )
+    base, ext = os.path.splitext(info_xml)
+    fallback = f"{base}-all{ext}"
+    export(trace, "gpu-counter-info", fallback)
+    names = counter_names(fallback)
+    if not names:
+        raise SystemExit(
+            "gpu-counter-info export contained no counter names, even without "
+            f"the shader-profiler filter: {info_xml}"
+        )
+    return names, fallback
+
+
+def join_counters(values_xml, tokens, n_kicks):
     """Manual streamer for gpu-counter-value (100M+ elements). Skips the
     ElementTree row-dict construction to run faster than stream_rows()
     on this table specifically."""
@@ -195,7 +252,7 @@ def join_counters(values_xml, tokens):
             segs.append((a, b, j))
     segs.sort()
     starts = [s[0] for s in segs]
-    acc = [defaultdict(lambda: [0.0, 0]) for _ in range(3)]
+    acc = [defaultdict(lambda: [0.0, 0]) for _ in range(n_kicks)]
     dev = defaultdict(lambda: [0.0, 0])
     ts_i, u_i, d_i = {}, {}, {}
     t_cur = cid_cur = v_cur = None
@@ -252,17 +309,16 @@ def analyze(trace, label, outdir):
         export(trace, "metal-gpu-execution-points", pts)
     if not os.path.exists(vals):
         export(trace, "gpu-counter-value", vals)
-    if not os.path.exists(info):
-        export(trace, "gpu-counter-info", info, extra_pred=' and @shader-profiler="0"')
     t1 = time.time()
-    tokens, n_iv, n_big = kick_windows(pts)
+    tokens, n_iv, n_big, kick_hist, n_kicks = kick_windows(pts)
     if len(tokens) < 10:
         raise SystemExit(
-            f"only {len(tokens)} 3-kick tokens found from "
-            f"{n_iv} intervals ({n_big} > 2 ms). Wrong workload "
-            "shape or truncated bundle? Check /tmp/dw-*.log"
+            f"only {len(tokens)} {n_kicks}-kick tokens found from "
+            f"{n_iv} intervals ({n_big} > 2 ms, hist={kick_hist}). "
+            "Wrong workload shape or truncated bundle? Check /tmp/dw-*.log"
         )
-    names = counter_names(info)
+    n_kicks = len(tokens[0])
+    names, info_used = load_counter_names(trace, info)
     # Persist the (acc, dev) tuple so subsequent analyze calls on the
     # same label skip the ~1-3 min join. defaultdict-with-lambda is
     # unpicklable; convert to plain dicts.
@@ -270,8 +326,12 @@ def analyze(trace, label, outdir):
     if os.path.exists(join_cache) and os.path.getsize(join_cache) > 0:
         with open(join_cache, "rb") as f:
             acc, dev = pickle.load(f)
+        if len(acc) != n_kicks:
+            acc, dev = None, None
     else:
-        acc_dd, dev_dd = join_counters(vals, tokens)
+        acc, dev = None, None
+    if acc is None:
+        acc_dd, dev_dd = join_counters(vals, tokens, n_kicks)
         acc = [dict(a) for a in acc_dd]
         dev = dict(dev_dd)
         with open(join_cache, "wb") as f:
@@ -280,45 +340,43 @@ def analyze(trace, label, outdir):
 
     import statistics as st
 
-    kd = [st.median([t[j][1] - t[j][0] for t in tokens]) * 1e3 for j in range(3)]
+    kd = [st.median([t[j][1] - t[j][0] for t in tokens]) * 1e3 for j in range(n_kicks)]
     print(
         f"\n== {label}: {len(tokens)} tokens, kick medians "
-        f"{kd[0]:.2f}/{kd[1]:.2f}/{kd[2]:.2f} ms  "
+        f"{'/'.join(f'{x:.2f}' for x in kd)} ms  "
         f"(export {t1 - t0:.1f}s, join {t2 - t1:.1f}s)"
     )
-    print(
-        f"{'id':>3} {'counter':<40} {'kick0':>8} {'kick1':>8} "
-        f"{'kick2':>8} {'device':>8}"
-    )
+    kick_header = "".join(f" {'kick' + str(j):>8}" for j in range(n_kicks))
+    print(f"{'id':>3} {'counter':<40}{kick_header} {'device':>8}")
     csv_path = f"{outdir}/{label}-per-kick.csv"
     with open(csv_path, "w") as f:
-        f.write(
-            "counter_id,counter,kick0,kick1,kick2,device,samples0,samples1,samples2\n"
-        )
+        kick_cols = ",".join(f"kick{j}" for j in range(n_kicks))
+        sample_cols = ",".join(f"samples{j}" for j in range(n_kicks))
+        f.write(f"counter_id,counter,{kick_cols},device,{sample_cols}\n")
         for cid in sorted(names):
             row, ns = [], []
-            for j in range(3):
+            for j in range(n_kicks):
                 s, n = acc[j].get(cid, [0, 0])
                 row.append(s / n if n else 0.0)
                 ns.append(n)
             ds, dn = dev.get(cid, [0, 0])
             dmean = ds / dn if dn else 0.0
-            f.write(
-                f'{cid},"{names[cid]}",{row[0]:.3f},{row[1]:.3f},'
-                f"{row[2]:.3f},{dmean:.3f},{ns[0]},{ns[1]},{ns[2]}\n"
-            )
+            row_csv = ",".join(f"{x:.3f}" for x in row)
+            ns_csv = ",".join(str(n) for n in ns)
+            f.write(f'{cid},"{names[cid]}",{row_csv},{dmean:.3f},{ns_csv}\n')
             if cid in KEY_COUNTERS:
-                print(
-                    f"{cid:>3} {names[cid]:<40} {row[0]:8.1f} {row[1]:8.1f} "
-                    f"{row[2]:8.1f} {dmean:8.1f}"
-                )
+                row_txt = "".join(f" {x:8.1f}" for x in row)
+                print(f"{cid:>3} {names[cid]:<40}{row_txt} {dmean:8.1f}")
     meta = dict(
         label=label,
         trace=trace,
         tokens=len(tokens),
         kick_ms=kd,
+        kick_count=n_kicks,
+        kick_histogram=kick_hist,
         intervals=n_iv,
         big_intervals=n_big,
+        counter_info=info_used,
         xctrace=sh(["xcrun", "xctrace", "version"]).stdout.strip(),
         commit=sh(["git", "rev-parse", "--short", "HEAD"]).stdout.strip(),
         time=time.strftime("%F %T"),
@@ -392,6 +450,7 @@ def record_and_analyze(pid, label, seconds, outdir):
             "xcrun",
             "xctrace",
             "record",
+            "--no-prompt",
             "--template",
             TEMPLATE,
             "--attach",
@@ -408,7 +467,23 @@ def record_and_analyze(pid, label, seconds, outdir):
     time.sleep(2)
     if not os.path.exists(GO):
         open(GO, "w").close()
-    rec.wait(timeout=seconds + 90)
+    try:
+        rec.wait(timeout=seconds + 90)
+    except subprocess.TimeoutExpired:
+        rec.terminate()
+        try:
+            out, _ = rec.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            rec.kill()
+            out, _ = rec.communicate()
+        if os.path.exists(trace):
+            print(
+                "WARNING: xctrace record timed out after saving the trace; "
+                "continuing to analysis",
+                file=sys.stderr,
+            )
+        else:
+            raise SystemExit(f"xctrace record timed out; output:\n{out[-4000:]}")
     time.sleep(3)  # xctrace write is async
     analyze(trace, label, outdir)
 

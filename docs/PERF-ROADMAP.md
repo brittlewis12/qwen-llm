@@ -48,11 +48,10 @@ Primary guardrails:
   model should be loaded once across many pp/tg shapes. It still allocates fresh
   sequence state per measured row; keep env-variant A/B as process-per-variant
   until hot-path knobs move out of process-global env caches.
-- v0.389 shows autonomous hardware counters are not available on this M4 Max via
-  `xctrace` or in-process `MTLCounterSampleBuffer`: only timestamp sampling is
-  exposed, and dispatch-boundary sampling is unsupported. Counter-driven claims
-  need manual Xcode GPU capture or another external profiler; routine branch
-  selection should keep using phase/no-op/microbench/trace-count/roofline gates.
+- v0.455 supersedes the old v0.389 counter caveat: a user-saved Instruments
+  template (`metal-counters`) now makes Apple performance-limiter counters
+  headlessly available via `scripts/profile/gpu_limiter_capture.py`. Use them for
+  kernel-shape claims; keep throughput claims on untraced `qwen-bench` runs.
 
 ## Latest Baseline Snapshot
 
@@ -974,17 +973,28 @@ limiter stream headlessly via `xctrace record --template 'metal-counters'
 --attach PID`. The measurement loop lives in
 `scripts/profile/gpu_limiter_capture.py` (uv script; `hold`/`capture --reuse-pid`
 amortizes the ramp; per-experiment CSV under `target/profiles/gpu-limiters/`,
-~30 s warm, ~2-3 min cold, ~1 min re-analyze). A3B ctx16384 verdict is
+~30 s warm capture, several minutes cold export, ~1 s cached re-analyze). A3B
+ctx16384 verdict is
 recorded: low effective residency (Kernel Occupancy ~28% vs manager ~72%),
 bandwidth 57-68% of stream, ALU pipes <=31%; NWG192 discriminator moves
 nothing so the cap is per-kernel residency shape. Newly promoted top item:
 per-kernel residency audit + one occupancy-shape retune gated on the
 counter loop (inflight must move before any e2e claim). Byte reduction stays
-demoted. Interpretation guide: `docs/bench/2026-07-03-xcode-decode-capture/`. v0.390 then demotes exact route
-from the main branch: A3B/A10B route replay still repeats (`1.01/1.34 ms`), but
+demoted. Interpretation guide: `docs/bench/2026-07-03-xcode-decode-capture/`.
+v0.457 adds the phase-noop limiter packet. Full A3B ctx16384 is still `3` kicks
+at `2.94/3.70/3.49 ms` with occupancy `~28%` and Read BW `265/270/310 GB/s`.
+No-GDN remains `3` kicks but lower occupancy (`17.6/18.0/23.3`); no-MoE and
+no-GDN+no-MoE collapse to `1` kick/token (`8.86 ms` and `6.36 ms`) without
+approaching stream bandwidth or improving occupancy. Treat noops as budget
+oracles, not family-counter truth, because topology changes. The rank is now:
+(1) PSO/resource audit for hot decode kernels, (2) batch-2/two-stream concurrency
+discriminator, (3) one surgical occupancy-shape retune only after the resource
+table predicts the cap and the counter capture moves occupancy/SIMD inflight.
+v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
+repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
-exact boundary is router logits into global exact top-k. The immediate
-implementation rank is now: (1) captured MoE gate/up/down projection throughput
+exact boundary is router logits into global exact top-k. The v0.390 local route
+rank was: (1) captured MoE gate/up/down projection throughput
 and active-token/expert batching; (2) a bounded attention read-once prototype only
 if it changes the main-body memory shape; (3) exact route only if a prototype can
 save `>=0.4 ms` A3B or `>=0.5 ms` A10B route total without consumer movement.

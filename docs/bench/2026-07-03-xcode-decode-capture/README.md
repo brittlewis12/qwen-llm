@@ -172,6 +172,62 @@ counter joins are exact; per-KERNEL counter attribution needs
 finer-grained encoder labels (planned) or per-dispatch timestamp
 sampling via the app-accessible GPUTimestamp counter set.
 
+## Results — phase-noop limiter packet (v0.457)
+
+Purpose: test whether the v0.455 low-residency signature is caused by one
+family of work, and harden the analyzer for graph variants whose command-buffer
+topology changes. These are attribution runs only; they are not throughput
+claims because xctrace overhead is large.
+
+Commands:
+
+```sh
+scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
+  --window 4000 --seconds 8 --label v0457-a3b-full
+
+scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
+  --window 4000 --seconds 8 --label v0457-a3b-no-gdn \
+  --env QWEN_DECODE_GDN_NOOP_FRONT=1 \
+  --env QWEN_DECODE_GDN_NOOP_OUT=1
+
+scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
+  --window 4000 --seconds 8 --label v0457-a3b-no-moe \
+  --env QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP=1 \
+  --env QWEN_DECODE_MOE_NOOP_ROUTED_DOWN=1
+
+scripts/profile/gpu_limiter_capture.py capture --model a3b --ctx 16384 \
+  --window 4000 --seconds 8 --label v0457-a3b-attn-residual \
+  --env QWEN_DECODE_GDN_NOOP_FRONT=1 \
+  --env QWEN_DECODE_GDN_NOOP_OUT=1 \
+  --env QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP=1 \
+  --env QWEN_DECODE_MOE_NOOP_ROUTED_DOWN=1
+```
+
+Counter summary:
+
+| variant | tokens | kicks/token | kick medians (ms) | occupancy | read BW (GB/s) |
+| --- | ---: | ---: | --- | --- | --- |
+| full | 675 | 3 | `2.94/3.70/3.49` | `28.1/27.9/29.0` | `265/270/310` |
+| no-GDN | 845 | 3 | `2.14/2.80/2.69` | `17.6/18.0/23.3` | `208/217/288` |
+| no-MoE routed | 776 | 1 | `8.86` | `28.1` | `261` |
+| no-GDN + no-MoE | 1051 | 1 | `6.36` | `17.5` | `203` |
+
+Read:
+
+- The noops give an approximate traced-token budget: full `10.13 ms`, no-GDN
+  `7.63 ms`, no-MoE `8.86 ms`, no-GDN+no-MoE `6.36 ms`. The combined delta
+  is roughly additive, but kick identity is not stable across variants.
+- Removing MoE collapses to one large kick without improving occupancy; removing
+  both GDN and MoE also leaves low occupancy and lower bandwidth. This argues
+  against launch starvation and bandwidth saturation as the first-order limiter.
+- Noop counter levels are not production family counters. They perturb topology
+  and execution mix; compare total medians and broad limiter signatures, not
+  kick0-to-kick0 values.
+- The v0.455 conclusion stands: the live limiter is per-kernel residency /
+  occupancy shape. Next steps are PSO/resource audit, batch-2/two-stream
+  concurrency discriminator, then one surgical occupancy retune with a counter
+  gate.
+
 
 ## Provenance (per cx review)
 

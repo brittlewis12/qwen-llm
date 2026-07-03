@@ -2587,8 +2587,8 @@ impl MetalDFlashDebugScratch {
 //   h_pack            [N, H]            16·5120·4   =   320 KiB
 //   mixer_out_pack    [N, H]            16·5120·4   =   320 KiB
 //   attn_q_full_pack  [N, 2·q_dim]      16·12288·4  =   768 KiB  (gated Q)
-//   attn_q_pack       [N, q_dim]        16·6144·4   =   384 KiB
-//   attn_gate_pack    [N, q_dim]        16·6144·4   =   384 KiB
+//   attn_q_pack       stub (v0.447)     4 B  (split path removed v0.432)
+//   attn_gate_pack    stub (v0.447)     4 B  (split path removed v0.432)
 //   attn_q_normed_pack[N, q_dim]        16·6144·4   =   384 KiB
 //   attn_k_now_pack   [N, kv_dim]       16·1024·4   =    64 KiB
 //   attn_v_now_pack   [N, kv_dim]       16·1024·4   =    64 KiB
@@ -2615,9 +2615,13 @@ pub struct MetalDFlashLayerMajorScratch {
     pub attn_qkv_fused_pack: MetalTensor,
     /// `[N, 2·q_dim]` F32 — gated Q projection (Q + gate interleaved).
     pub attn_q_full_pack: MetalTensor,
-    /// `[N, q_dim]` F32 — Q after split.
+    /// v0.447: stubbed at 1 element. The strided q-norm + fused gate
+    /// epilogue (v0.432) read `attn_q_full_pack` in place; no production
+    /// path splits Q/gate into these packs anymore (the only remaining
+    /// split-path user is a test-module profile helper with local
+    /// buffers).
     pub attn_q_pack: MetalTensor,
-    /// `[N, q_dim]` F32 — gate after split.
+    /// v0.447: stubbed at 1 element (see `attn_q_pack`).
     pub attn_gate_pack: MetalTensor,
     /// `[N, q_dim]` F32 — Q after per-head RMSNorm.
     pub attn_q_normed_pack: MetalTensor,
@@ -3020,8 +3024,8 @@ impl MetalDFlashLayerMajorScratch {
                 },
             )?,
             attn_q_full_pack: MetalTensor::zeros_f32(ctx, vec![n, attn_q_full_dim])?,
-            attn_q_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
-            attn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
+            attn_q_pack: MetalTensor::zeros_f32(ctx, vec![1])?,
+            attn_gate_pack: MetalTensor::zeros_f32(ctx, vec![1])?,
             attn_q_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
             attn_k_now_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
             attn_v_now_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
@@ -3171,19 +3175,9 @@ impl MetalDFlashLayerMajorScratch {
             .view_subrange((n as u64) * two_q, vec![two_q])
     }
 
-    /// Zero-copy view of row n of `attn_q_pack`, `attn_gate_pack`, etc.
-    pub fn attn_q_row(&self, n: u32) -> MetalTensor {
-        assert!(n < self.n);
-        self.attn_q_pack
-            .view_subrange((n as u64) * self.q_dim, vec![self.q_dim])
-    }
-
-    pub fn attn_gate_row(&self, n: u32) -> MetalTensor {
-        assert!(n < self.n);
-        self.attn_gate_pack
-            .view_subrange((n as u64) * self.q_dim, vec![self.q_dim])
-    }
-
+    /// Zero-copy view of row n of `attn_q_normed_pack`, etc.
+    /// (v0.447: `attn_q_row`/`attn_gate_row` deleted with their stubbed
+    /// packs — the strided kernels read `attn_q_full_pack` directly.)
     pub fn attn_q_normed_row(&self, n: u32) -> MetalTensor {
         assert!(n < self.n);
         self.attn_q_normed_pack
@@ -18456,12 +18450,13 @@ mod tests {
                     let q_full_pack_p = scratch
                         .attn_q_full_pack
                         .view_subrange(0, vec![(total_n * 2 * q_dim) as u64]);
-                    let q_pack_p = scratch
-                        .attn_q_pack
-                        .view_subrange(0, vec![(total_n * q_dim) as u64]);
-                    let gate_pack_p = scratch
-                        .attn_gate_pack
-                        .view_subrange(0, vec![(total_n * q_dim) as u64]);
+                    // v0.447: the production packs are stubbed; this profile
+                    // helper times the OLD split path, so it allocates its
+                    // own buffers.
+                    let q_pack_p =
+                        MetalTensor::zeros_f32(&ctx, vec![(total_n * q_dim) as u64]).unwrap();
+                    let gate_pack_p =
+                        MetalTensor::zeros_f32(&ctx, vec![(total_n * q_dim) as u64]).unwrap();
                     let q_normed_pack_p = scratch
                         .attn_q_normed_pack
                         .view_subrange(0, vec![(total_n * q_dim) as u64]);

@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.447 Stub Split-Q/Gate Packs
+
+Status: scratch-debt cleanup logged at v0.432. `attn_q_pack` and
+`attn_gate_pack` ([N, q_dim] F32 each) had no production readers left --
+the strided q-norm + fused gate epilogue consume `attn_q_full_pack` in
+place -- so both are stubbed at 1 element in the layer-major scratch
+(v0.431 pattern). Resident savings at prefill block sizes: `~33 MB` A3B,
+`~50 MB` 27B, `~67 MB` A10B (2 x block x q_dim x 4 B). The only remaining
+split-path user was the test-module phase-profile helper, which now
+allocates its own local buffers; the dead `attn_q_row`/`attn_gate_row`
+view helpers are deleted.
+
+Validation:
+
+- `cargo fmt`; `cargo check -p qwen-llm -p qwen-cli --bin qwen-bench`
+- full lib suite serial: 159 passed (includes the 0.8B bit-exact prefill
+  gate and A3B prefill-vs-single)
+- `metal_27b_packed_prefill_phase_profile` (the split-path profile helper)
+  green with local buffers
+
 ## 2026-07-03 - v0.446 Xcode Decode-Capture Packet
 
 Status: prep checkpoint, no measurement claims. The twice-endorsed,

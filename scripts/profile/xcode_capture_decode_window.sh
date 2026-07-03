@@ -28,6 +28,12 @@ READY=/tmp/qwen-capture.ready
 GO=/tmp/qwen-capture.go
 rm -f "$READY" "$GO"
 
+# Headless counter capture (requires the one-time UI-saved template
+# ~/Library/Application Support/Instruments/Templates/metal-counters.tracetemplate):
+#   xcrun xctrace record --template 'metal-counters' --attach $PID \
+#     --time-limit 8s --output /tmp/qwen-limiters.trace
+# IMPORTANT: end the recording BEFORE the window/process exits (size the
+# window so decode outlives the time limit), or the bundle saves truncated.
 echo "[capture] launching decode-window: $MODEL_KEY ctx=$CTX window=$WINDOW"
 echo "[capture] (MTL_CAPTURE_ENABLED=1 for the Xcode GPU-capture path)"
 MTL_CAPTURE_ENABLED=1 "$BENCH" decode-window \

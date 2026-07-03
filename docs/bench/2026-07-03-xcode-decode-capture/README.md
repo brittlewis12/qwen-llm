@@ -115,3 +115,80 @@ GPU-kernel-bound with a clean pipeline at kick granularity; the
 282-296 GB/s attention question is intra-kernel (occupancy/latency
 inside attn_v4), so only the counter cell can crack it. The bench-loop
 idle (~6%) is real but small and the cheap overlap idea is falsified.
+
+
+## Results — headless limiter capture (2026-07-03, metal-counters template)
+
+The one-time UI-saved template (`metal-counters.tracetemplate`: Metal GPU
+Counters, Counter Set = Performance Limiters, Performance State = Maximum,
+shader profiler on) unlocks fully headless counter capture:
+`xcrun xctrace record --template 'metal-counters' --attach PID`. The
+`gpu-counter-value` table exports 24M timestamped samples; join to the
+exact kick timeline from `metal-gpu-execution-points`.
+
+A3B ctx16384 decode, per-kick means (5.9-7.4M samples per kick):
+
+| counter | kick0 | kick1 | kick2 |
+| --- | ---: | ---: | ---: |
+| Kernel Occupancy (%) | 28.8 | 28.3 | 29.4 |
+| Compute SIMD Groups Inflight | 27.7 | 27.2 | 28.2 |
+| GPU Read Bandwidth (GB/s) | 265.6 | 271.0 | 309.6 |
+| Instruction Throughput Limiter (%) | 44.9 | 45.0 | 56.2 |
+| ALU Utilization (%) | 13.9 | 14.3 | 19.0 |
+| F32 / Int+Complex Limiter (%) | 13.6 / 21.0 | 14.1 / 21.2 | 14.0 / 30.9 |
+| L1 Cache Limiter (%) | 7.8 | 7.9 | 8.4 |
+| Buffer L1 Miss Rate (%) | 25.6 | 26.2 | 24.0 |
+
+Device-level over the window: 268 GB/s (253 R + 15.5 W), Kernel Occupancy
+25.4% vs Occupancy Manager Target 72.5%.
+
+ANSWER to q1/q2 (pre-registered, wording per cx review): long-context
+decode is primarily limited by POOR LATENCY HIDING / LOW EFFECTIVE
+RESIDENCY, not by DRAM bandwidth or ALU saturation. All three kicks show
+the same first-order symptom (occupancy ~28% vs manager target ~72%,
+bandwidth 57-68% of stream, ALU pipes <= 31%, L1 <= 8.4%) — though the
+root residency cap may still differ by kernel family. Instruction
+Throughput Limiter (45-56%) and Int+Complex (up to 31%) are nonzero but
+not dominant. Byte reduction is NOT FIRST-ORDER under this measurement
+(it can still help via latency exposure / cache pressure, but bandwidth
+is not the binding limiter).
+
+DISCRIMINATOR RUN (cx-prescribed): default vs QWEN_ATTN_V4_NWG=192, two
+independent captures, exact per-kick joins over 664/682 tokens. NWG192
+changes NOTHING: Kernel Occupancy 28.3/27.9/29.0 -> 28.3/28.0/29.0,
+SIMD Inflight 27.2/26.8/27.8 -> 27.2/26.9/27.8, kick durations
+2.98/3.76/3.58 -> 2.92/3.66/3.54 ms (within run noise), t/s 85.1 -> 86.0.
+More logical partitions do not raise resident work => the residency cap
+is PER-KERNEL (registers / threadgroup-memory / occupancy shape), not
+launch starvation. This also retro-explains the v0.404 NWG shelf.
+Remaining secondary discriminator (not yet run): a two-stream /
+batch-2 concurrency probe to bound how much independent work the device
+would absorb.
+
+Caveat: the shader-profiler per-kernel table is kick-sampling-biased
+(routed-down mat-vec reads 52% of samples vs ~13% of known wall; GDN
+kernels nearly absent) — use it for kernel NAMES, not shares. Per-kick
+counter joins are exact; per-KERNEL counter attribution needs
+finer-grained encoder labels (planned) or per-dispatch timestamp
+sampling via the app-accessible GPUTimestamp counter set.
+
+
+## Provenance (per cx review)
+
+- machine: zekrom, M4 Max MacBook Pro, macOS 15.6.1 (24G90); xctrace
+  26.0 (17C52); template `metal-counters.tracetemplate` (user templates
+  dir; Metal GPU Counters, Counter Set = Performance Limiters,
+  Performance State = Maximum, shader profiler enabled)
+- workload: `qwen-bench decode-window -m Qwen3.5-35B-A3B-Q4_K_M.gguf
+  --target-ctx 16384 --window 1200`, engine at main v0.454-era; window
+  released post-ready; recording 8 s attach-mode ending BEFORE process
+  exit (truncated-bundle pitfall otherwise)
+- join: per-kick means over `gpu-counter-value` samples bucketed into
+  exact kick windows from `metal-gpu-execution-points` (cmdbuf-id begin/
+  end pairs, >2 ms intervals, 3-kick tokens only); SAMPLE-weighted
+  (cadence approximately uniform; time-weighting is the upgrade path)
+- shader-profiler names are METADATA ONLY (kick-sampling bias measured:
+  routed-down mat-vec reads 52% of samples vs ~13% known wall share)
+- raw traces on zekrom: /tmp/qwen-a3b-limiters.trace,
+  /tmp/qwen-nwg-default.trace, /tmp/qwen-nwg192.trace (regenerate:
+  launcher + the join scripts in this session's PERF-LOG entry)

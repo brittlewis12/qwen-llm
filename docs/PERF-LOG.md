@@ -6,6 +6,69 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.455 Headless GPU Limiter Counters; Decode Residency Verdict
+
+Status: the limiter cell is CLOSED, headlessly and permanently. A one-time
+Instruments-saved template (`metal-counters.tracetemplate`: Metal GPU
+Counters, Performance Limiters set, Performance State = Maximum, shader
+profiler on) makes `xcrun xctrace record --template 'metal-counters'
+--attach PID` yield the full 64-counter Apple performance-limiter stream
+(24M timestamped samples per 8 s capture). Every counter path that did not
+require the UI was probed and closed first: MTLCounterSampleBuffer exposes
+only `timestamp` on M4 Max (Swift probe), xctrace `--instrument`
+composition records nothing unconfigured, Game Performance template is
+attach-incompatible. Caveat banked: end recordings BEFORE the target
+exits or the custom-template bundle saves truncated.
+
+Measured verdict (A3B ctx16384 decode, per-kick exact joins, 5.9-7.4M
+samples/kick): long-context decode is primarily limited by POOR LATENCY
+HIDING / LOW EFFECTIVE RESIDENCY, not DRAM bandwidth or ALU saturation.
+Kernel Occupancy `28.3-29.4%` vs Occupancy Manager Target `72.5%`; GPU
+read bandwidth `266/271/310 GB/s` per kick (`57-68%` of stream); ALU
+pipes `<= 31%`; L1 limiter `<= 8.4%`; Instruction Throughput Limiter
+`45-56%` (nonzero, not dominant). All three kicks (attention + GDN + MoE
+mix) show the same first-order symptom, though root residency caps may
+differ per kernel family. Byte reduction is NOT FIRST-ORDER under this
+measurement — consistent with the read-once/coop4/KV-Q8 falsification
+trail.
+
+Discriminator (cx-prescribed, run same-day): default vs
+`QWEN_ATTN_V4_NWG=192`, independent captures, 664/682-token joins.
+NWG192 moves NOTHING (occupancy 28.3->28.3, SIMD inflight 27.2->27.2,
+kick durations flat, t/s 85.1->86.0): more logical partitions do not
+raise resident work, so the cap is PER-KERNEL residency shape
+(registers/threadgroup-memory/occupancy geometry), not launch
+starvation — cx's (a) at their 65/35 prior, now measured. This
+retro-explains the v0.404 NWG shelf. Secondary discriminator still
+open: a batch-2/two-stream concurrency probe.
+
+Also banked: per-kernel shader-profiler tables are kick-sampling-BIASED
+(routed-down mat-vec reads 52% of samples vs ~13% known wall) — names
+are metadata; quantitative attribution comes from exact kick joins.
+Full provenance + regeneration notes in
+`docs/bench/2026-07-03-xcode-decode-capture/README.md`.
+
+Validation:
+
+- Swift MTLCounterSampleBuffer probe; three CLI counter paths falsified
+  with evidence before requesting the one-time UI template save
+- headless capture validated end-to-end twice (initial + NWG A/B)
+- per-kick joins: 3-kick token structure exact (703/703, 664/664,
+  682/682); device-level vs in-kick numbers cross-check
+- cx ask review of conclusions (session `019f2916-b...`, full transcript
+  read): wording softened per review, provenance list adopted,
+  discriminator executed with the prescribed metrics
+
+Decision: the decode long-context branch is now OPEN with a measured
+mechanism and a minutes-cheap verification loop. Next moves, in order:
+(1) per-kernel residency audit — pull registers/threadgroup-memory/
+threads-per-TG for the hot kernels (attn_v4 main/reduce, mat_vec_q6_K,
+moe swiglu) from PSO reflection and identify which resource caps
+simdgroups-inflight at ~28; (2) one occupancy-shape retune on the top
+kernel, gated by a counter capture showing inflight moving BEFORE any
+e2e claim; (3) the batch-2 concurrency probe as the secondary
+discriminator. KV-Q8-class byte reduction stays demoted.
+
 ## 2026-07-03 - v0.454 Decode Timeline Capture via xctrace (Partial)
 
 Status: the v0.446 capture packet run autonomously through `xcrun xctrace`

@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.478 Clean G16 Bcast Falsifier
+
+Status: clean sidecar killed and not kept. This revisited v0.477 with a
+tighter implementation of the same score-broadcast attention body for A10B-style
+`group=16`, `tile4/tile8`, `C=64` F16-KV decode attention behind a temporary
+`QWEN_ATTN_V4_G16_BCAST=1` flag.
+
+- Correctness did clear this time: broad `attn_v4_matches_naive_f16kv` passed
+  with the G16 flag enabled, including the non-target group4/group6/group8 rows
+  that failed in the earlier dirty attempt.
+- A10B `attn-intra ctx8192 --runs 3` improved the one-layer packet
+  (`0.4801 -> 0.4407 ms`), with the main body moving `0.1256 -> 0.1152 ms`.
+- A10B `attn-intra ctx16384 --runs 3` was noisier but still showed a lower
+  one-layer packet (`0.6271 -> 0.4858 ms`) and a smaller main body
+  (`0.2317 -> 0.2209 ms`). Phase attribution around RoPE/O-proj was visibly
+  unstable, so treat the packet totals as directional only.
+- The required full-decode gate did not clear: A10B `ctx8192 --window 4
+  --fresh-per-checkpoint` regressed `42.5 -> 41.4 t/s` (`gpu_ms 23.02 -> 23.67`).
+
+Interpretation: the G16 score-broadcast body is exact, but it does not translate
+into a trustworthy A10B decode win. Do not keep another default-off env knob for
+this lane; reopen only with a different `group=16` dataflow or counters showing
+why the attention-intra body win is lost end-to-end.
+
+Validation:
+
+- Env `QWEN_ATTN_V4_G16_BCAST=1`; command `cargo test -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- Artifacts: `target/profiles/v0478-a10b-attn-*-ctx8192.out`,
+  `target/profiles/v0478-a10b-attn-*-ctx16384.out`,
+  `target/profiles/v0478-a10b-ctx8192-*.out`
+
 ## 2026-07-04 - v0.477 G16 Bcast Extension Falsifier
 
 Status: dirty extension killed and not kept. After v0.476, the same

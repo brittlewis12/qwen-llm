@@ -31,7 +31,7 @@ struct Args {
     #[arg(long, conflicts_with = "prompt")]
     prompt_file: Option<PathBuf>,
 
-    /// Read multiple request objects from a JSONL file while keeping one model loaded.
+    /// Read JSONL request objects from a file or '-' while keeping one model loaded.
     #[arg(long, conflicts_with_all = ["prompt", "prompt_file"])]
     requests_jsonl: Option<PathBuf>,
 
@@ -93,14 +93,25 @@ struct RequestOutput {
 
 #[derive(Debug, Serialize)]
 struct RequestStatsRow {
+    schema_version: u32,
     id: String,
     line: usize,
+    model: String,
+    arrival_ms: u64,
+    finish_ms: u64,
     prompt_tokens: usize,
+    prompt_hash: String,
+    requested_tokens: usize,
     generated_tokens: usize,
     cache_prefix_tokens: Option<usize>,
+    cache_prefix_hash: Option<String>,
     cache_hit: bool,
     matched_prefix_tokens: usize,
+    matched_prefix_hash: Option<String>,
     exact_cache_hit: bool,
+    prefill_chunk: usize,
+    max_context_tokens: usize,
+    no_special_tokens: bool,
     restore_ms: f64,
     prefix_inserted_bytes: u64,
     prefix_insert_ms: f64,
@@ -299,9 +310,15 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
 
-    let requests = std::fs::File::open(requests_path)
-        .with_context(|| format!("open requests JSONL {}", requests_path.display()))?;
-    let reader = std::io::BufReader::new(requests);
+    let stdin;
+    let reader: Box<dyn BufRead> = if requests_path == Path::new("-") {
+        stdin = std::io::stdin();
+        Box::new(stdin.lock())
+    } else {
+        let requests = std::fs::File::open(requests_path)
+            .with_context(|| format!("open requests JSONL {}", requests_path.display()))?;
+        Box::new(std::io::BufReader::new(requests))
+    };
     let mut stats_file = args
         .request_stats
         .as_ref()
@@ -378,6 +395,7 @@ fn run_jsonl_request(
     line: usize,
     args: &Args,
 ) -> Result<(RequestOutput, RequestStatsRow)> {
+    let arrival_ms = unix_epoch_ms_u64()?;
     let total_t0 = Instant::now();
     let prompt = request_prompt(request, line)?;
     let prompt_ids = tokenizer
@@ -421,6 +439,8 @@ fn run_jsonl_request(
         .or(args.cache_prefix_tokens)
         .map(|n| n.min(prompt_ids.len()))
         .filter(|&n| n > 0);
+    let prompt_hash = token_hash_hex(&prompt_ids);
+    let cache_prefix_hash = cache_prefix_tokens.map(|n| token_hash_hex(&prompt_ids[..n]));
 
     let mut cache_hit = false;
     let mut matched_prefix_tokens = 0usize;
@@ -499,15 +519,31 @@ fn run_jsonl_request(
         0.0
     };
     let stats_now = loaded.prefix_cache_stats();
+    let finish_ms = unix_epoch_ms_u64()?;
     let stats = RequestStatsRow {
+        schema_version: 1,
         id: id.to_string(),
         line,
+        model: loaded.path().display().to_string(),
+        arrival_ms,
+        finish_ms,
         prompt_tokens: prompt_ids.len(),
+        prompt_hash,
+        requested_tokens: n_generate,
         generated_tokens: generated.len(),
         cache_prefix_tokens,
+        cache_prefix_hash,
         cache_hit,
         matched_prefix_tokens,
+        matched_prefix_hash: if matched_prefix_tokens > 0 {
+            Some(token_hash_hex(&prompt_ids[..matched_prefix_tokens]))
+        } else {
+            None
+        },
         exact_cache_hit,
+        prefill_chunk: args.prefill_chunk,
+        max_context_tokens: capacity,
+        no_special_tokens: args.no_special_tokens,
         restore_ms,
         prefix_inserted_bytes,
         prefix_insert_ms,
@@ -610,6 +646,23 @@ fn prefix_cache_max_bytes(args: &Args) -> Result<u64> {
     args.prefix_cache_max_mib
         .checked_mul(1024 * 1024)
         .context("prefix cache byte budget overflow")
+}
+
+fn unix_epoch_ms_u64() -> Result<u64> {
+    let ms = unix_epoch_ms()?;
+    u64::try_from(ms).context("Unix epoch milliseconds do not fit u64")
+}
+
+const TOKEN_HASH_SEED: u64 = 0xcbf29ce484222325;
+const TOKEN_HASH_PRIME: u64 = 0x100000001b3;
+
+fn token_hash_hex(tokens: &[i32]) -> String {
+    let mut hash = TOKEN_HASH_SEED;
+    for &token in tokens {
+        hash ^= (token as u32 as u64).wrapping_add(0x9e3779b97f4a7c15);
+        hash = hash.wrapping_mul(TOKEN_HASH_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 fn open_append_file(path: &Path, label: &str) -> Result<std::fs::File> {

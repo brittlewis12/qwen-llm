@@ -519,6 +519,9 @@ Interpretation rules:
 
 - Hits require exact token-prefix identity; prompt-template or whitespace drift can
   miss.
+- Use `--requests-jsonl -` for a resident stdin loop. Stats rows include
+  `schema_version`, model path, arrival/finish timestamps, prompt hash, configured
+  cache-prefix hash, and matched-prefix hash for trace replay/accounting.
 - `model_ttft_ms` is model-internal accounting. This JSONL mode writes after full
   decode, so it is not a streamed first-byte measurement.
 - `--prefix-cache-max-mib` bounds normal eviction pressure, but an oversized newest

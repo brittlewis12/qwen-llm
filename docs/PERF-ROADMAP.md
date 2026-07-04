@@ -1568,7 +1568,11 @@ first-byte claim yet. Next cache work should collect real request traces with
 hit-rate, prefix-length distribution, p50/p95, memory, and eviction stats before
 building admission/discovery policy. v0.470 adds
 `scripts/profile/prefix_cache_stats.py` as the reducer for those stats; use it on
-real request captures before widening cache policy.
+real request captures before widening cache policy. v0.472 enriches the stats
+schema with arrival/finish timestamps plus prompt/cache/matched-prefix hashes and
+adds stdin JSONL (`--requests-jsonl -`), so the next cache artifact should be an
+actual resident-process trace packet rather than another synthetic two-request
+smoke.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

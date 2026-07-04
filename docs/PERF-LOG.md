@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.472 Enriched Prefix-Cache Request Stats
+
+Status: trace-capture/product-measurement checkpoint, no kernel change. This
+addresses the cx v0.471 next-step recommendation: keep prefix-cache work evidence
+driven by request-level traces before adding automatic admission or broader
+serving abstractions.
+
+- `qwen --requests-jsonl -` now reads requests from stdin, so an external driver
+  can keep one model resident while feeding a live JSONL stream.
+- Per-request stats now include `schema_version`, model path, arrival/finish
+  timestamps, requested generation tokens, prefill chunk, context capacity,
+  special-token mode, prompt hash, configured cache-prefix hash, and matched-prefix
+  hash.
+- Smoke: 0.8B Q4 stdin JSONL over the v0.469 two-request 16-token packet restores
+  the second request; stats show shared `cache_prefix_hash` and matching
+  `matched_prefix_hash` on the hit.
+
+Interpretation: this still does not prove product throughput. It makes the next
+gate collectable: real traces can now report hit rate, exact reusable-prefix mass,
+model timing, total request timing, memory, and hash-stable cache identity from one
+resident process.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p qwen-cli --bin qwen`
+- `cargo build --release -p qwen-cli --bin qwen`
+- 0.8B Q4 stdin JSONL prefix-cache smoke
+- `uv run scripts/profile/prefix_cache_stats.py target/profiles/v0472-prefix-cache-stdin-stats.jsonl`
+
 ## 2026-07-04 - v0.471 Use qwen-tok for Game Trace Counts
 
 Status: tooling cleanup, no engine change. Switches exact token counting in the

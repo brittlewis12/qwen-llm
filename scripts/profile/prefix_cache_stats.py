@@ -154,12 +154,95 @@ def summarize(rows: list[CacheRow]) -> None:
         emit_group("miss", misses)
 
 
+def save_pct(baseline: float, candidate: float) -> float:
+    if baseline <= 0.0:
+        return 0.0
+    return 100.0 * (baseline - candidate) / baseline
+
+
+def compare_rows(baseline: list[CacheRow], candidate: list[CacheRow]) -> None:
+    baseline_by_id = {row.request_id: row for row in baseline}
+    pairs = [
+        (baseline_by_id[row.request_id], row)
+        for row in candidate
+        if row.request_id in baseline_by_id
+    ]
+    if not pairs:
+        raise SystemExit("no request ids overlap between baseline and candidate")
+
+    prompt_hash_mismatches = sum(
+        1 for base, cand in pairs if base.prompt_tokens != cand.prompt_tokens
+    )
+    base_ttft = [base.model_ttft_ms for base, _ in pairs]
+    cand_ttft = [cand.model_ttft_ms for _, cand in pairs]
+    base_total = [base.total_ms for base, _ in pairs]
+    cand_total = [cand.total_ms for _, cand in pairs]
+    hit_rows = [cand for _, cand in pairs if cand.cache_hit]
+
+    emit_metric("paired_requests", len(pairs))
+    emit_metric("baseline_requests", len(baseline))
+    emit_metric("candidate_requests", len(candidate))
+    emit_metric("prompt_token_mismatches", prompt_hash_mismatches)
+    emit_metric("candidate_hits", len(hit_rows))
+    emit_metric("candidate_hit_rate_pct", 100.0 * len(hit_rows) / len(pairs))
+    emit_metric("model_ttft_sum_baseline_ms", sum(base_ttft))
+    emit_metric("model_ttft_sum_candidate_ms", sum(cand_ttft))
+    emit_metric("model_ttft_sum_save_pct", save_pct(sum(base_ttft), sum(cand_ttft)))
+    emit_metric(
+        "model_ttft_pair_save_p50_pct",
+        percentile(
+            [save_pct(base.model_ttft_ms, cand.model_ttft_ms) for base, cand in pairs],
+            0.50,
+        ),
+    )
+    emit_metric(
+        "model_ttft_pair_save_p95_pct",
+        percentile(
+            [save_pct(base.model_ttft_ms, cand.model_ttft_ms) for base, cand in pairs],
+            0.95,
+        ),
+    )
+    emit_metric("model_ttft_p50_baseline_ms", percentile(base_ttft, 0.50))
+    emit_metric("model_ttft_p50_candidate_ms", percentile(cand_ttft, 0.50))
+    emit_metric("model_ttft_p95_baseline_ms", percentile(base_ttft, 0.95))
+    emit_metric("model_ttft_p95_candidate_ms", percentile(cand_ttft, 0.95))
+    emit_metric("total_sum_baseline_ms", sum(base_total))
+    emit_metric("total_sum_candidate_ms", sum(cand_total))
+    emit_metric("total_sum_save_pct", save_pct(sum(base_total), sum(cand_total)))
+    emit_metric("total_p50_baseline_ms", percentile(base_total, 0.50))
+    emit_metric("total_p50_candidate_ms", percentile(cand_total, 0.50))
+    emit_metric(
+        "restore_p95_candidate_ms",
+        percentile([row.restore_ms for row in hit_rows], 0.95),
+    )
+    emit_metric(
+        "matched_prefix_p50_candidate",
+        percentile([float(row.matched_prefix_tokens) for row in hit_rows], 0.50),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="summarize qwen --requests-jsonl prefix-cache stats JSONL"
     )
-    parser.add_argument("stats", nargs="+", type=Path, help="stats JSONL files")
+    parser.add_argument("stats", nargs="*", type=Path, help="stats JSONL files")
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        type=Path,
+        metavar=("BASELINE", "CANDIDATE"),
+        help="compare paired request ids across no-cache and cache stats files",
+    )
     args = parser.parse_args()
+
+    if args.compare is not None:
+        baseline = parse_stats(args.compare[0])
+        candidate = parse_stats(args.compare[1])
+        compare_rows(baseline, candidate)
+        return
+
+    if not args.stats:
+        raise SystemExit("provide stats files, or --compare BASELINE CANDIDATE")
 
     rows: list[CacheRow] = []
     for path in args.stats:

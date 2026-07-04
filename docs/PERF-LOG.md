@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.473 Prefix-Cache Paired Stats Compare
+
+Status: evidence tooling, no engine change. Extends the prefix-cache stats reducer
+with a paired no-cache-vs-cache comparison mode keyed by request id.
+
+- `scripts/profile/prefix_cache_stats.py --compare BASELINE CANDIDATE` now emits
+  paired request counts, prompt-token mismatch count, candidate hit rate,
+  model-TTFT and total-latency sum saves, p50/p95 model-TTFT for each side,
+  candidate restore p95, and candidate matched-prefix p50.
+- Smoke: 0.8B Q4 no-cache vs explicit-cache JSONL packets parse and compare for
+  both the 16-token and 1024-token two-request fixtures.
+- The 1024-token two-request aggregate is near break-even/negative when the cold
+  insert request is charged, while the hit row itself is faster. This reinforces
+  the product gate: cache claims need repeated-prefix mass and request-level p95,
+  not a single hit row.
+
+Interpretation: the next cache packet should compare no-cache and explicit-cache
+runs over the same resident workload trace. Do not widen admission/discovery until
+that scoreboard shows real p50/p95 or throughput benefit after insert and memory
+costs.
+
+Validation:
+
+- `uv run python -m py_compile scripts/profile/prefix_cache_stats.py`
+- `prefix_cache_stats.py --compare` on 16-token and 1024-token smoke packets
+
 ## 2026-07-04 - v0.472 Enriched Prefix-Cache Request Stats
 
 Status: trace-capture/product-measurement checkpoint, no kernel change. This

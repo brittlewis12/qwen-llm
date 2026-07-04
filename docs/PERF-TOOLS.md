@@ -513,6 +513,10 @@ target/release/qwen -m "$MODEL" \
 
 uv run scripts/profile/prefix_cache_stats.py \
   target/profiles/prefix-cache-stats.jsonl
+
+uv run scripts/profile/prefix_cache_stats.py \
+  --compare target/profiles/no-cache-stats.jsonl \
+            target/profiles/prefix-cache-stats.jsonl
 ```
 
 Interpretation rules:

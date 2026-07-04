@@ -1028,6 +1028,16 @@ one isolated subfamily is `>=25%` alone or the top three families stay `>=60%`,
 and the counter signature still shows low occupancy/inflight rather than byte
 saturation. Do not read the `window=4` percentages as fine-grained speedup
 ceilings.
+v0.461 splits the top attention bucket. Route prep is only `~2.1%`, front
+projections are flat at `~0.49 ms`, and the ctx-scaling term is `attn_body_out`
+(`1.2516 ms` at ctx4096 -> `1.9174 ms` at ctx16384). Existing `attn-intra`
+proportions point at v4 main+reduce for that slope, but the absolute ctx16384
+share is still `16.75%`, below the combined GDN front/after-route pool (`~38.7%`).
+Current rank: (1) split `gdn_after_route` and `gdn_front` with the same stage
+timestamp discipline; (2) run an attention-body limiter/counter probe tied to
+main+reduce, not another blind NWG/tile sweep; (3) promote attention work only if
+it shows `>=0.35-0.50 ms` recoverable ctx16384 upside without ctx4096 regression,
+otherwise prefer the largest isolated GDN subfamily.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

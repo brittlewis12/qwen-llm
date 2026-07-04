@@ -3263,6 +3263,8 @@ impl<'a> MetalForward<'a> {
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
+        split_attn_route: bool,
+        split_attn_detail: bool,
     ) -> Result<(i32, DecodeStageProfile), MfError> {
         let arch = &self.model.arch;
         if arch.kind != ArchKind::Moe {
@@ -3415,7 +3417,155 @@ impl<'a> MetalForward<'a> {
                     attn_idx += 1;
                     let slot = MixerSlot::Attn(local_idx);
                     let moe = a.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
-                    {
+                    if split_attn_detail {
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "attn_pre_norm",
+                                    block_kind: "attn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            encode_rms_norm_mul_f32(
+                                self.ctx,
+                                &enc,
+                                &session.x,
+                                &a.attn_norm,
+                                &session.h,
+                                RMS_EPS,
+                            )?;
+                            enc.end();
+                        }
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "attn_front_proj",
+                                    block_kind: "attn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            self.encode_attn_front_projections(&enc, a, session)?;
+                            enc.end();
+                        }
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "attn_body_out",
+                                    block_kind: "attn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            self.encode_attn_after_projections(
+                                &enc, a, local_idx, position, session,
+                            )?;
+                            enc.end();
+                        }
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "attn_resid_post_norm",
+                                    block_kind: "attn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                            encode_rms_norm_mul_f32(
+                                self.ctx,
+                                &enc,
+                                &session.x,
+                                &a.post_attn_norm,
+                                &session.h,
+                                RMS_EPS,
+                            )?;
+                            enc.end();
+                        }
+                        let enc = begin_decode_stage(
+                            &cmd_buf,
+                            Some(&mut recorder),
+                            Some(DecodeStageMeta {
+                                family: if concurrent_shared_moe_decode_enabled() {
+                                    "attn_route"
+                                } else {
+                                    "attn_route_ffn_serial"
+                                },
+                                block_kind: "attn",
+                                block_index: Some(block_idx),
+                                local_index: Some(local_idx),
+                            }),
+                            false,
+                        )?;
+                        self.encode_moe_route_prepare(&enc, session, moe)?;
+                        if !concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                session,
+                                &a.ffn_gate,
+                                &a.ffn_up,
+                                &a.ffn_down,
+                                moe,
+                            )?;
+                        }
+                        enc.end();
+                    } else if split_attn_route {
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "attn_mixer",
+                                    block_kind: "attn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                            enc.end();
+                        }
+                        let enc = begin_decode_stage(
+                            &cmd_buf,
+                            Some(&mut recorder),
+                            Some(DecodeStageMeta {
+                                family: if concurrent_shared_moe_decode_enabled() {
+                                    "attn_route"
+                                } else {
+                                    "attn_route_ffn_serial"
+                                },
+                                block_kind: "attn",
+                                block_index: Some(block_idx),
+                                local_index: Some(local_idx),
+                            }),
+                            false,
+                        )?;
+                        self.encode_moe_route_prepare(&enc, session, moe)?;
+                        if !concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                session,
+                                &a.ffn_gate,
+                                &a.ffn_up,
+                                &a.ffn_down,
+                                moe,
+                            )?;
+                        }
+                        enc.end();
+                    } else {
                         let enc = begin_decode_stage(
                             &cmd_buf,
                             Some(&mut recorder),

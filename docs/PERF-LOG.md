@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.461 Split Attention Decode Stage Attribution
+
+Status: tooling + attribution checkpoint, no default engine change. Adds
+second-level `decode-window --stage-timestamps` probes for the top mixed MoE
+decode bucket from v0.460.
+
+- Tooling: `--stage-split-attn-route` separates attention mixer work from MoE
+  route prep. `--stage-split-attn-detail` further splits attention blocks into
+  pre-norm, front projections, attention body/output, residual+post-norm, and
+  route prep. These are attribution-only shapes; they intentionally add encoder
+  boundaries.
+- A3B ctx16384/window16 unsplit stage run: avg_gpu `11.44 ms`, coverage `1.000`.
+  Family shares: `attn_mixer_route 24.26%`, `gdn_after_route 20.48%`,
+  `gdn_front 17.27%`, `tail_lm_head_argmax 8.41%`.
+- A3B ctx16384/window16 route split: avg_gpu `11.66 ms`, coverage `1.000`.
+  `attn_mixer 22.52%`, `attn_route 2.08%`; route/glue is not the attention
+  bucket.
+- A3B attention detail split: at ctx4096, `attn_body_out 1.2516 ms / 11.50%`,
+  `attn_front_proj 0.4949 ms / 4.55%`, `attn_route 0.2393 ms / 2.20%`. At
+  ctx16384, `attn_body_out 1.9174 ms / 16.75%`, `attn_front_proj 0.4930 ms /
+  4.31%`, `attn_route 0.2407 ms / 2.10%`.
+- Existing `attn-intra` block3 proportions corroborate the slope: v4
+  main+reduce grows from `0.0949 ms/layer` at ctx4096 to `0.1717 ms/layer` at
+  ctx16384, roughly explaining the `attn_body_out` delta.
+
+Interpretation: attention route and front projections are not the long-context
+culprit. `attn_body_out` is real ctx-scaling work, but at ctx16384 it is still
+smaller than the combined GDN families (`gdn_after_route + gdn_front ~= 38.7%`).
+Per cx review, do not jump into another broad NWG/tile retune. Next rank: split
+GDN after/front before kernel work; run attention limiter or a targeted
+main/reduce counter probe; promote `attn_v4` only with a concrete recoverable
+`>=0.35-0.50 ms` ctx16384 upside and no ctx4096 regression.
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B ctx16384/window16 unsplit stage run
+- A3B ctx4096 and ctx16384/window16 attention route/detail split runs
+- A3B ctx4096 and ctx16384 `attn-intra --block 3 --runs 16` probes
+- cx review `019f2b4d-9` on attention split interpretation and next rank
+
 ## 2026-07-03 - v0.460 Decode Stage Timestamp Attribution
 
 Status: tooling + attribution checkpoint, no default engine change. Adds a

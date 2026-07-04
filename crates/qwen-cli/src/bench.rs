@@ -1123,6 +1123,14 @@ struct DecodeWindowArgs {
     /// encoder boundaries. Bench-only attribution probe for single-stream MoE.
     #[arg(long)]
     stage_timestamps: bool,
+    /// Under --stage-timestamps, split attention mixer work from MoE route prep.
+    /// This is an attribution-only second-level probe and changes encoder shape.
+    #[arg(long)]
+    stage_split_attn_route: bool,
+    /// Under --stage-timestamps, split attention blocks into pre-norm, front
+    /// projections, attention body/output, residual+post-norm, and route prep.
+    #[arg(long)]
+    stage_split_attn_detail: bool,
     /// File created when the process has reached `target_ctx` and is waiting.
     #[arg(long)]
     ready_file: PathBuf,
@@ -12088,6 +12096,8 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         window,
         streams,
         stage_timestamps,
+        stage_split_attn_route,
+        stage_split_attn_detail,
         ready_file,
         go_file,
         pipelined,
@@ -12110,6 +12120,16 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     if stage_timestamps && (pipelined || concurrent_gdn_proj || concurrent_attn_proj) {
         return Err(anyhow!(
             "--stage-timestamps profiles the default MoE decode shape; do not combine it with other decode-window experiments"
+        ));
+    }
+    if stage_split_attn_route && !stage_timestamps {
+        return Err(anyhow!(
+            "--stage-split-attn-route requires --stage-timestamps"
+        ));
+    }
+    if stage_split_attn_detail && !stage_timestamps {
+        return Err(anyhow!(
+            "--stage-split-attn-detail requires --stage-timestamps"
         ));
     }
     let ctx = MetalContext::new()?;
@@ -12194,7 +12214,14 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
                 "--stage-timestamps currently supports MoE models only"
             ));
         }
-        return run_decode_window_stage_timestamps(&mf, &mut s, target_ctx, window);
+        return run_decode_window_stage_timestamps(
+            &mf,
+            &mut s,
+            target_ctx,
+            window,
+            stage_split_attn_route,
+            stage_split_attn_detail,
+        );
     }
 
     fn median(values: &[f64]) -> f64 {
@@ -12422,6 +12449,8 @@ fn run_decode_window_stage_timestamps(
     session: &mut MetalSession,
     target_ctx: usize,
     window: usize,
+    split_attn_route: bool,
+    split_attn_detail: bool,
 ) -> Result<()> {
     let mut prev_tok = 0i32;
     let mut total_ms = 0.0f64;
@@ -12437,8 +12466,13 @@ fn run_decode_window_stage_timestamps(
 
     for i in 0..window {
         let pos = target_ctx as u32 + i as u32;
-        let (tok, profile) =
-            mf.single_token_argmax_stage_profiled_concurrent_gdn_moe(prev_tok, pos, session)?;
+        let (tok, profile) = mf.single_token_argmax_stage_profiled_concurrent_gdn_moe(
+            prev_tok,
+            pos,
+            session,
+            split_attn_route,
+            split_attn_detail,
+        )?;
         prev_tok = tok;
         total_ms += profile.token.total_ms;
         gpu_ms += profile.token.gpu_kernel_ms;
@@ -12476,9 +12510,19 @@ fn run_decode_window_stage_timestamps(
     let avg_enc = enc_ms / window as f64;
     let avg_wait = wait_ms / window as f64;
     eprintln!(
-        "[decode-stage] ctx={} window={} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
+        "[decode-stage] ctx={} window={}{}{} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
         target_ctx,
         window,
+        if split_attn_route {
+            " split_attn_route"
+        } else {
+            ""
+        },
+        if split_attn_detail {
+            " split_attn_detail"
+        } else {
+            ""
+        },
         avg_total,
         avg_gpu,
         avg_enc,

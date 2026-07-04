@@ -441,6 +441,14 @@ encode overhead. Require:
 - One targeted second-level split if the winning family is mixed, e.g.
   `attn_mixer_route` or `gdn_after_route`.
 
+Second-level attention probes:
+
+- `--stage-split-attn-route` splits attention mixer work from MoE route prep.
+- `--stage-split-attn-detail` splits attention blocks into `attn_pre_norm`,
+  `attn_front_proj`, `attn_body_out`, `attn_resid_post_norm`, and `attn_route`.
+- Use these one at a time; they intentionally add encoder boundaries and are not
+  throughput comparison modes.
+
 ### Headless Metal performance-limiter counters (v0.455+)
 
 `xctrace` cannot configure a counter profile from CLI flags, but it can

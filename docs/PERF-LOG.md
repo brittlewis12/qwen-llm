@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.464 A3B Tail LM/Argmax Split
+
+Status: measurement checkpoint, no engine change. Uses the existing
+`QWEN_PHASE_LM_ARGMAX=1` phase split after the v0.462/v0.463 attribution work to
+size the tail before considering fused lm-head/argmax ideas.
+
+- A3B ctx16384 phase run: `phase_sum 12.06 ms` (phase-command artifact wall
+  `44.89 ms`; use phase sum only).
+- Major rows: `attn mixer 2.81 ms / 23.3%`, `moe ffn apply 2.78 ms / 23.1%`,
+  `gdn front proj 2.16 ms / 18.0%`, `gdn out_proj 1.04 ms / 8.6%`,
+  `moe route 1.03 ms / 8.6%`, `lm head 0.87 ms / 7.2%`.
+- Tail split: `lm argmax 0.05 ms / 0.4%`; final norm rounds to `0.00 ms` in this
+  phase view.
+
+Interpretation: standalone argmax fusion is not a high-EV branch. The useful tail
+work, if any, is amortizing or changing the lm-head mat-vec dataflow; include it
+in batched/multi-token decode replay economics rather than spending a local
+single-token argmax lane.
+
+Validation:
+
+- A3B ctx16384 `qwen-bench phase` with `QWEN_PHASE_LM_ARGMAX=1`
+- cx review `019f2b9b-d` on post-v0.463 next-lane selection
+
 ## 2026-07-04 - v0.463 Kill A3B V-Staged Decode Attention
 
 Status: killed env-only attention-main sidecar, no default engine change. Adds a

@@ -60,3 +60,49 @@ kernel void kernel_rms_norm_mul_f32(
         y[i] = (x[i] * scale) * weight[i];
     }
 }
+
+// Fused residual add + RMSNorm:
+//
+//   x[i] += residual[i]
+//   y[i]  = (x[i] / sqrt(mean(x²) + eps)) * weight[i]
+//
+// This replaces the decode post-mixer pair `add_inplace(x, mixer_out)` followed
+// by `rms_norm_mul(x, post_attn_norm, h)`, eliminating one dispatch and one
+// extra residual-stream read. The reduction order intentionally mirrors
+// kernel_rms_norm_mul_f32: each lane visits the same strided indices and uses
+// the same simdgroup + threadgroup reduction tree, but it accumulates the
+// post-add value before writing it back to x.
+kernel void kernel_residual_rms_norm_mul_f32(
+        constant rms_norm_args & args     [[buffer(0)]],
+        device       float     * x        [[buffer(1)]],
+        device const float     * residual [[buffer(2)]],
+        device const float     * weight   [[buffer(3)]],
+        device       float     * y        [[buffer(4)]],
+        threadgroup float      * shmem    [[threadgroup(0)]],
+        uint  tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint  ntg   [[threads_per_threadgroup]]) {
+    float sumsq = 0.0f;
+    for (uint i = tpitg; i < args.n_dim; i += ntg) {
+        const float v = x[i] + residual[i];
+        x[i] = v;
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+
+    if (tiisg == 0) {
+        shmem[sgitg] = sumsq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    sumsq = (tiisg < (ntg + 31) / 32) ? shmem[tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+
+    const float mean  = sumsq / float(args.n_dim);
+    const float scale = rsqrt(mean + args.eps);
+
+    for (uint i = tpitg; i < args.n_dim; i += ntg) {
+        y[i] = (x[i] * scale) * weight[i];
+    }
+}

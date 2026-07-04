@@ -1408,7 +1408,11 @@ and the dispatch-count savings land CPU-side where decode-window measures
 med_cpu_enc ~0.64 ms of a GPU-bound ~9.9 ms token (med_wait ~= med_gpu).
 Neither side reaches the audit's own 1% floor. Decode glue is CLOSED without
 the A/B; do not re-derive residual+norm/K-chain/conv+L2/sigmoid-decay fusion
-proposals unless decode stops being GPU-bound.
+proposals unless decode stops being GPU-bound. v0.474 nevertheless executes the
+residual+post-RMSNorm member of that glue bundle as a concrete exact sidecar; it
+is correctness-safe but flat/noise (`~1.001x` A3B, `~1.011x` 0.8B, `~0.999x`
+27B `tg128`) and remains default-off. Treat that as confirmation, not a branch to
+repeat.
 v0.435 executes the cheap `max_total_threads_per_threadgroup` audit on fixed hot
 kernels (attn_v4 decode/packed/matrix entries plus GDN recurrence). It is
 correctness-clean and keeps warmed A3B `tg128`/`pp512` and 27B G6-matrix `pp512`

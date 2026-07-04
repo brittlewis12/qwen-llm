@@ -1234,6 +1234,82 @@ pub fn encode_rms_norm_mul_f32(
     Ok(())
 }
 
+/// In-place residual add followed by RMSNorm-with-weight:
+/// `x[i] += residual[i]`; `y[i] = (x[i] / sqrt(mean(x²) + eps)) * weight[i]`.
+pub fn encode_residual_rms_norm_mul_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    residual: &MetalTensor,
+    weight: &MetalTensor,
+    y: &MetalTensor,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let n_dim = x.n_elements() as usize;
+    if residual.n_elements() as usize != n_dim {
+        return Err(MetalError::BadShape {
+            kernel: "residual_rms_norm",
+            detail: format!(
+                "residual.n_elements={} != x.n_elements={n_dim}",
+                residual.n_elements()
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_dim {
+        return Err(MetalError::BadShape {
+            kernel: "residual_rms_norm",
+            detail: format!("y.n_elements={} != x.n_elements={n_dim}", y.n_elements()),
+        });
+    }
+    if weight.n_elements() as usize != n_dim {
+        return Err(MetalError::BadShape {
+            kernel: "residual_rms_norm",
+            detail: format!(
+                "weight.n_elements={} != x.n_elements={n_dim}",
+                weight.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_residual_rms_norm_mul_f32")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_dim: u32,
+        eps: f32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_dim: n_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, residual);
+    enc.set_tensor(3, weight);
+    enc.set_tensor(4, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 crate::env_flag!(default_on mat_vec_f32_lcpp_r2_enabled, "QWEN_MATVEC_F32_LCPP_R2");
 
 /// F32 mat-vec: `y[o] = Σ_i W[o, i] * x[i]`, GGUF stride convention.
@@ -15582,6 +15658,46 @@ pub fn rms_norm_mul_f32_readback_for_test(
     Ok(read_back_f32(&y_t.buffer, n))
 }
 
+/// One-shot fused residual-add + RMSNorm for tests. Returns `(x_after, y)`.
+pub fn residual_rms_norm_mul_f32_readback_for_test(
+    ctx: &MetalContext,
+    x: &[f32],
+    residual: &[f32],
+    weight: &[f32],
+    eps: f32,
+) -> Result<(Vec<f32>, Vec<f32>), MetalError> {
+    let n = x.len();
+    if residual.len() != n || weight.len() != n {
+        return Err(MetalError::BadShape {
+            kernel: "residual_rms_norm_test",
+            detail: format!(
+                "x={} residual={} weight={} length mismatch",
+                x.len(),
+                residual.len(),
+                weight.len()
+            ),
+        });
+    }
+    let x_t = MetalTensor::from_bytes(ctx, bytemuck::cast_slice(x), vec![n as u64], GgmlType::F32)?;
+    let r_t = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(residual),
+        vec![n as u64],
+        GgmlType::F32,
+    )?;
+    let w_t = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(weight),
+        vec![n as u64],
+        GgmlType::F32,
+    )?;
+    let y_t = MetalTensor::zeros_f32(ctx, vec![n as u64])?;
+    one_shot(ctx, |enc| {
+        encode_residual_rms_norm_mul_f32(ctx, enc, &x_t, &r_t, &w_t, &y_t, eps)
+    })?;
+    Ok((read_back_f32(&x_t.buffer, n), read_back_f32(&y_t.buffer, n)))
+}
+
 /// One-shot F32 mat-vec for tests.
 pub fn mat_vec_f32_readback_for_test(
     ctx: &MetalContext,
@@ -15988,6 +16104,40 @@ mod tests {
                 .fold(0f32, f32::max);
             eprintln!("[rms_norm n={n}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-4, "rms_norm n={n}: max|Δ|={max_abs}");
+        }
+    }
+
+    #[test]
+    fn residual_rms_norm_matches_separate_cpu_path() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        for &n in &[1024usize, 5120, 17408] {
+            let x: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 - 11.0) * 0.07).collect();
+            let r: Vec<f32> = (0..n).map(|i| ((i % 19) as f32 - 9.0) * 0.03).collect();
+            let w: Vec<f32> = (0..n).map(|i| 0.4 + (i % 11) as f32 * 0.05).collect();
+            let eps = 1e-6;
+
+            let x_cpu: Vec<f32> = x.iter().zip(r.iter()).map(|(a, b)| a + b).collect();
+            let y_cpu = crate::forward::rms_norm_pub(&x_cpu, &w, eps);
+            let (x_gpu, y_gpu) = residual_rms_norm_mul_f32_readback_for_test(&ctx, &x, &r, &w, eps)
+                .expect("metal residual_rms_norm");
+
+            let max_x = x_gpu
+                .iter()
+                .zip(x_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let max_y = y_gpu
+                .iter()
+                .zip(y_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("[residual_rms_norm n={n}] max_x={max_x:.2e} max_y={max_y:.2e}");
+            assert!(max_x == 0.0, "residual add n={n}: max|Δ|={max_x}");
+            assert!(max_y < 1e-4, "residual_rms_norm n={n}: max|Δ|={max_y}");
         }
     }
 

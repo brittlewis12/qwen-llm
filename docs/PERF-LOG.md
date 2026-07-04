@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.474 Fused Residual RMSNorm Falsifier
+
+Status: correctness-safe exact decode sidecar, default off. This was a concrete
+dispatch/byte-reduction attempt, not a measurement-only checkpoint: fuse the
+post-mixer residual add with the immediately following RMSNorm to remove one
+dispatch and one residual-stream pass per block.
+
+- Added `kernel_residual_rms_norm_mul_f32` and
+  `encode_residual_rms_norm_mul_f32`.
+- Wired the decode post-mixer norm path behind
+  `QWEN_DECODE_FUSED_RESIDUAL_RMSNORM=1`.
+- Correctness: fused kernel matches the separate CPU residual-add + RMSNorm path
+  on `n=1024/5120/17408` with max RMSNorm delta below `1.3e-5`.
+- A3B Q4 `tg128` A/B: fused `106.43 t/s`, rollback `106.32 t/s` (`~1.001x`).
+- 0.8B Q4 `tg128` A/B: fused `366.45 t/s`, rollback `362.37 t/s`
+  (`~1.011x`, noise-scale).
+- 27B Q4 `tg128` A/B: fused `24.466 t/s`, rollback `24.489 t/s`
+  (`~0.999x`).
+
+Interpretation: this exact micro-fusion does not move the roofline board enough
+to default or keep repeating. Leave it as a default-off sidecar and move effort to
+larger dataflow changes: GDN recurrence structure, attention KV/body layout, or
+MoE decode execution shape, not more residual/norm pass shaving.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p qwen-llm`
+- `cargo test -p qwen-llm residual_rms_norm_matches_separate_cpu_path -- --nocapture`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- Sequential A/B on A3B Q4, 0.8B Q4, and 27B Q4 `tg128`
+
 ## 2026-07-04 - v0.473 Prefix-Cache Paired Stats Compare
 
 Status: evidence tooling, no engine change. Extends the prefix-cache stats reducer

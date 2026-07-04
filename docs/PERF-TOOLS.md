@@ -446,6 +446,9 @@ Second-level attention probes:
 - `--stage-split-attn-route` splits attention mixer work from MoE route prep.
 - `--stage-split-attn-detail` splits attention blocks into `attn_pre_norm`,
   `attn_front_proj`, `attn_body_out`, `attn_resid_post_norm`, and `attn_route`.
+- `--stage-split-gdn-after` splits GDN after-projection work into
+  `gdn_beta_alpha`, `gdn_tail`, `gdn_out_proj`, `gdn_resid_post_norm`, and
+  `gdn_route`.
 - Use these one at a time; they intentionally add encoder boundaries and are not
   throughput comparison modes.
 

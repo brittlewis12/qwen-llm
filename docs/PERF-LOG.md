@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.462 Split GDN Decode After-Route Attribution
+
+Status: tooling + attribution checkpoint, no default engine change. Adds
+`decode-window --stage-split-gdn-after` to decompose the mixed GDN
+`gdn_after_route` bucket from v0.460/v0.461.
+
+- Tooling: under `--stage-timestamps`, `--stage-split-gdn-after` splits each GDN
+  block after the front projections into `gdn_beta_alpha`, `gdn_tail`,
+  `gdn_out_proj`, `gdn_resid_post_norm`, and `gdn_route`. This is an
+  attribution-only shape; it intentionally adds encoder boundaries.
+- A3B ctx4096/window16 split: avg_gpu `11.90 ms`, coverage `1.000`.
+  `gdn_front 1.977 ms / 16.61%`, `gdn_out_proj 0.854 ms / 7.17%`,
+  `gdn_route 0.788 ms / 6.62%`, `gdn_tail 0.644 ms / 5.41%`,
+  `gdn_resid_post_norm 0.216 ms / 1.81%`, `gdn_beta_alpha 0.147 ms /
+  1.24%`.
+- A3B ctx16384/window16 split: avg_gpu `12.55 ms`, coverage `1.000`.
+  `attn_mixer_route 2.910 ms / 23.19%`, `gdn_front 1.993 ms / 15.89%`,
+  `gdn_out_proj 0.840 ms / 6.69%`, `gdn_route 0.767 ms / 6.11%`,
+  `gdn_tail 0.651 ms / 5.19%`, `gdn_resid_post_norm 0.203 ms / 1.62%`,
+  `gdn_beta_alpha 0.142 ms / 1.13%`, `tail_lm_head_argmax 0.952 ms /
+  7.59%`.
+- Shape read: the split GDN-after subtotal is flat across ctx4096 and ctx16384
+  (`~2.65 -> ~2.60 ms`) while `attn_mixer_route` grows by `+0.76 ms`. This
+  strengthens the v0.461 read: GDN-after is fixed decode overhead, not the
+  long-context slope term.
+
+Interpretation: exact GDN decode work remains large (`gdn_front + gdn_after`
+families are still a major fixed-cost pool), but the next long-context A3B decode
+branch should target the attention v4 main/reduce body, not `gdn_beta_alpha`,
+post-norm, or another broad GDN-after retile. Per cx review, promote only on
+uninstrumented normal-path A/B: require `>=3-5%` end-to-end at ctx16384 with no
+ctx4096 regression and unchanged correctness.
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B ctx4/window1 `--stage-split-gdn-after` smoke
+- A3B ctx4096 and ctx16384/window16 `--stage-split-gdn-after` runs
+- cx review `019f2b70-0` on GDN split interpretation and next rank
+
 ## 2026-07-03 - v0.461 Split Attention Decode Stage Attribution
 
 Status: tooling + attribution checkpoint, no default engine change. Adds

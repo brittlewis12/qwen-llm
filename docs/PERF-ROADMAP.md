@@ -179,6 +179,12 @@ Current caveats:
   NWG/reduce selector is small. NWG192 saves only `0.13-0.15 ms` phase time at
   `ctx16384/32768`; the next attention branch must be a main-body KV/partial
   traffic oracle that clears `>=0.30-0.40 ms` full-decode-equivalent savings.
+  v0.461/v0.462 timestamp splits sharpen the diagnosis: at A3B ctx16384/window16,
+  `attn_body_out` is `1.917 ms` and attn-intra main+reduce growth explains the
+  context slope, while split GDN-after totals are flat from ctx4096 to ctx16384
+  (`~2.65 -> ~2.60 ms`). Promote attention work only through normal-path A/B
+  (`>=3-5%` at ctx16384, no ctx4096 regression), but rank attention main/reduce
+  ahead of fixed GDN-after cleanup for long-context decode.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

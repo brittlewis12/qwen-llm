@@ -3265,6 +3265,7 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
         split_attn_route: bool,
         split_attn_detail: bool,
+        split_gdn_after: bool,
     ) -> Result<(i32, DecodeStageProfile), MfError> {
         let arch = &self.model.arch;
         if arch.kind != ArchKind::Moe {
@@ -3283,7 +3284,7 @@ impl<'a> MetalForward<'a> {
 
         let ids_buf = session.ids_buf.clone();
         let argmax_tok = session.argmax_tok.clone();
-        let sample_count = 2 * (2 + self.model.blocks.len() * 8);
+        let sample_count = 2 * (2 + self.model.blocks.len() * 16);
         let mut recorder = DecodeStageRecorder::new(self.ctx, sample_count)?;
 
         let t_encode = std::time::Instant::now();
@@ -3358,7 +3359,142 @@ impl<'a> MetalForward<'a> {
                         self.encode_gdn_front_projections(&enc, g, session)?;
                         enc.end();
                     }
-                    {
+                    if split_gdn_after {
+                        let v_dim = arch.gdn_n_v_heads as usize * arch.gdn_head_dim as usize;
+                        let gdn_qkv = session.gdn_qkv.clone();
+                        let gdn_z = session.gdn_z.clone();
+                        let gdn_alpha = session.gdn_alpha.clone();
+                        let gdn_beta = session.gdn_beta.clone();
+                        let gdn_normed = session.gdn_normed.clone();
+
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "gdn_beta_alpha",
+                                    block_kind: "gdn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            encode_sigmoid_f32(self.ctx, &enc, &session.gdn_b, &session.gdn_beta)?;
+                            encode_gdn_decay_chain_f32(
+                                self.ctx,
+                                &enc,
+                                &session.gdn_a,
+                                &g.dt_bias,
+                                &g.a_log,
+                                &session.gdn_alpha,
+                            )?;
+                            enc.end();
+                        }
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "gdn_tail",
+                                    block_kind: "gdn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            self.encode_gdn_tail(
+                                &enc,
+                                g,
+                                local_idx,
+                                session,
+                                &gdn_qkv,
+                                &gdn_z,
+                                &gdn_alpha,
+                                &gdn_beta,
+                                &gdn_normed,
+                            )?;
+                            enc.end();
+                        }
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "gdn_out_proj",
+                                    block_kind: "gdn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            if decode_gdn_noop_out_enabled() {
+                                encode_fill_f32(self.ctx, &enc, &session.mixer_out, 0.0)?;
+                            } else {
+                                encode_mat_vec_dispatch(
+                                    self.ctx,
+                                    &enc,
+                                    &g.out_proj,
+                                    &gdn_normed,
+                                    &session.mixer_out,
+                                    v_dim,
+                                    h,
+                                )?;
+                            }
+                            enc.end();
+                        }
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: "gdn_resid_post_norm",
+                                    block_kind: "gdn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                            encode_rms_norm_mul_f32(
+                                self.ctx,
+                                &enc,
+                                &session.x,
+                                &g.post_attn_norm,
+                                &session.h,
+                                RMS_EPS,
+                            )?;
+                            enc.end();
+                        }
+                        {
+                            let enc = begin_decode_stage(
+                                &cmd_buf,
+                                Some(&mut recorder),
+                                Some(DecodeStageMeta {
+                                    family: if concurrent_shared_moe_decode_enabled() {
+                                        "gdn_route"
+                                    } else {
+                                        "gdn_route_ffn_serial"
+                                    },
+                                    block_kind: "gdn",
+                                    block_index: Some(block_idx),
+                                    local_index: Some(local_idx),
+                                }),
+                                false,
+                            )?;
+                            self.encode_moe_route_prepare(&enc, session, moe)?;
+                            if !concurrent_shared_moe_decode_enabled() {
+                                self.encode_moe_ffn_apply_gpu(
+                                    &enc,
+                                    session,
+                                    &g.ffn_gate,
+                                    &g.ffn_up,
+                                    &g.ffn_down,
+                                    moe,
+                                )?;
+                            }
+                            enc.end();
+                        }
+                    } else {
                         let enc = begin_decode_stage(
                             &cmd_buf,
                             Some(&mut recorder),

@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.477 G16 Bcast Extension Falsifier
+
+Status: dirty extension killed and not kept. After v0.476, the same
+score-broadcast body was instantiated for the A10B-style `group=16`, `tile4`,
+`C=64` decode attention path behind a temporary `QWEN_ATTN_V4_G16_BCAST=1` flag.
+
+- Correctness did not clear the gate: with the G16 flag present, the broad
+  `attn_v4_matches_naive_f16kv` test repeatedly failed before reaching the
+  target G16 rows, on non-target group6 cases (`cos~0.87`).
+- The default no-env correctness test immediately passed on the same tree, so the
+  failure was tied to the dirty extension/flag path rather than a general v4
+  regression.
+- No A10B performance runs were trusted or kept. The extension code was removed.
+
+Interpretation: do not mechanically broaden the G8 score-broadcast sidecar to
+G16. If this is reopened, start with a narrow group16-only correctness harness or
+an isolated Metal driver/corruption repro before any A10B timing.
+
+Validation:
+
+- `QWEN_ATTN_V4_G16_BCAST=1 cargo test -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture`
+  (failed)
+- `cargo test -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture` (passed)
+- Artifacts: `target/profiles/v0477-attn-g16-bcast-correctness*.out`,
+  `target/profiles/v0477-attn-default-correctness-check.out`
+
 ## 2026-07-04 - v0.476 G8 Attention Score-Broadcast Sidecar
 
 Status: correctness-safe default-off long-context attention sidecar. Adds

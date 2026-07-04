@@ -1841,8 +1841,13 @@ single faster hit can still lose after cold insert and memory costs.
    `0.1948 -> 0.1755 ms` at ctx32768; full ctx-sweep is neutral at 4096 and
    positive at ctx32768 (`86.5 -> 88.9 t/s`) but below the `>=5%` default gate.
    Keep `QWEN_ATTN_V4_G8_BCAST=1` as an opt-in true-long sidecar and recheck on
-   real long rollouts before promotion. Keep attention below MoE/GDN unless the
-   next proposal brings hidden-traffic counters, a main-pass read-once execution
+   real long rollouts before promotion. v0.477 kills a dirty attempt to broaden
+   the same score-broadcast body to G16/tile4/C64: the temporary flag made the
+   broad v4 correctness test fail in non-target group6 rows while the default
+   no-env test passed, so no A10B timings are trusted. Reopen G16 only with a
+   narrow correctness harness or isolated driver/corruption repro. Keep attention
+   below MoE/GDN unless the next proposal brings hidden-traffic counters,
+   a main-pass read-once execution
    shape, or an end-to-end `ctx32768` prototype that moves throughput rather than
    partial storage or reduce rows.
 3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds

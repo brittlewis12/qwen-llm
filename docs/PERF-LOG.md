@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.479 Packed GDN Lazy-Decay Falsifier
+
+Status: dirty sidecar killed and not kept. This tested a non-local packed-GDN
+recurrence rewrite: keep each state row in a lazily scaled basis within
+`kernel_gdn_step_decay_packed_nsg4_f32`, avoid the per-token `S *= decay` vector
+multiply, rescale outputs by the accumulated scalar, and fold the scale back into
+state at chunk end or when it leaves a safe range.
+
+- Correctness cleared on the dense 27B prefill-vs-single gate with
+  `QWEN_GDN_PACKED_LAZY_DECAY=1`, `T=24`, `P=16`: final logits, captured hidden,
+  GDN state, GDN conv, and KV all stayed at `cos_min >= 0.999999`.
+- The performance gate failed on 27B `pp1024`: paired repeated sweep moved base
+  `237.13/223.27 t/s` to lazy `233.89/218.11 t/s`, with GPU ms/token also
+  worse (`4.206/4.470 -> 4.265/4.576`).
+
+Interpretation: the algebra is exact enough, but replacing 128 per-row state
+multiplies with scalar scaling/division is slower on this Metal path. This does
+not falsify a real chunked delta-rule formulation; it only closes the lazy-scale
+sequential recurrence variant.
+
+Validation:
+
+- Env `QWEN_GDN_PACKED_LAZY_DECAY=1`; command:
+  `cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- Artifacts: `target/profiles/v0479-gdn-lazy-27b-correctness.out`,
+  `target/profiles/v0479-27b-pp1024-gdn-lazy-sweep.json`
+
 ## 2026-07-04 - v0.478 Clean G16 Bcast Falsifier
 
 Status: clean sidecar killed and not kept. This revisited v0.477 with a

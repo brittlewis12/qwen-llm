@@ -1429,7 +1429,13 @@ G6 matrix regresses `~2.6%`, and a 0.8B trace shows `gdn_step` itself worsens
 `21.93 -> 32.59 ms`. Do not keep the flag/kernel. The active packed NSG4 kernel
 already captures the easy row-residency win; Q/K load duplication is not worth
 TGM barriers. If GDN recurrence is reopened, start with a floor/no-op ladder or
-a genuinely chunked delta-rule formulation, not local Q/K staging.
+a genuinely chunked delta-rule formulation, not local Q/K staging. v0.479 tests
+and kills a different sequential-recurrence rewrite: lazy state-decay scaling is
+correctness-safe on the 27B prefill-vs-single gate, but regresses 27B `pp1024`
+(`237.13/223.27 -> 233.89/218.11 t/s`). Do not reopen lazy-scale packed GDN; it
+does not falsify chunked delta-rule, which must parallelize or reduce the
+recurrence work rather than trade vector multiplies for scalar scale/divide
+bookkeeping.
 v0.437 executes the reopened KV-Q8 attention-reader micro-oracle and kills it for
 the current `attn_v4` execution model. The branch preserves the F16 grid, adds
 MoE/group8 Q8 main and tile2/tile4 subgroup kernels, fixes `attn-intra` Q8

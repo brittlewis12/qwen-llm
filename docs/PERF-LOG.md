@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.475 Q4 Gate/Up Slotpair Falsifier
+
+Status: dirty sidecar killed and not kept. This tested the smallest concrete MoE
+decode execution-shape branch after v0.474: pack two routed Q4 gate/up slots into
+one 4-simdgroup threadgroup while preserving the existing route ledger,
+intermediate layout, and downstream down path.
+
+- Synthetic A3B Q4 `moe-gateup-micro`: default `1.9494 ms` GPU versus slotpair
+  `2.3988 ms` GPU on the same built binary, so the shape is clearly not a broad
+  primitive win.
+- Captured A3B Q4 `ctx8192` replay: default `1.0207 ms` GPU versus slotpair
+  `1.0317 ms` GPU, with identical route stats (`avg_unique_experts=8.00`,
+  `avg_reuse=1.00`).
+- Interpretation: combining two top-k slots per threadgroup does not improve the
+  captured production work unit; it only risks lower residency/occupancy. Do not
+  reopen Q4 gate/up slot-packing or row-width variants without a deeper dataflow
+  change than grouping slots inside the same threadgroup.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p qwen-llm`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- Artifacts:
+  `target/profiles/v0475-a3b-gateup-slotpair-default.out`,
+  `target/profiles/v0475-a3b-gateup-slotpair-sidecar.out`
+
 ## 2026-07-04 - v0.474 Fused Residual RMSNorm Falsifier
 
 Status: correctness-safe exact decode sidecar, default off. This was a concrete

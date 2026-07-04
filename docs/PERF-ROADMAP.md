@@ -1776,7 +1776,12 @@ single faster hit can still lose after cold insert and memory costs.
    replay versus `3.19 ms` phase). It also rejects the known dirty NR4 false
    positive (`1.1014 ms` captured versus `1.0836 ms` default). Use captured
    replay as a gate for future Q4 gate/up variants, but do not keep mining
-   row-width tweaks without a structural byte/dataflow rationale.
+   row-width tweaks without a structural byte/dataflow rationale. v0.475 kills
+   the adjacent slot-packing work-unit proof: packing two routed Q4 gate/up slots
+   into one 4-SG threadgroup is not better on captured A3B ctx8192 replay
+   (`1.0207 -> 1.0317 ms` GPU) and was much worse on synthetic replay. Do not
+   reopen Q4 gate/up slot-pair/row-width shapes unless the proposal changes expert
+   dataflow or bytes, not just threadgroup packing.
    v0.391 extends the same captured-route discipline to routed down and makes the
    down microbench production-faithful: A3B Q5 down captured R2 is `0.814 ms`
    versus phase `0.82 ms`, and A10B captured Q5 down is `2.595 ms` versus phase

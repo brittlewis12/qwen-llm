@@ -509,6 +509,9 @@ target/release/qwen -m "$MODEL" \
   --requests-jsonl target/profiles/prefix-cache-requests.jsonl \
   --request-stats target/profiles/prefix-cache-stats.jsonl \
   --cache-prefix-tokens 1024 -n 1
+
+uv run scripts/profile/prefix_cache_stats.py \
+  target/profiles/prefix-cache-stats.jsonl
 ```
 
 Interpretation rules:

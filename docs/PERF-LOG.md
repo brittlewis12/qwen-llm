@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.470 Prefix-Cache Stats Summarizer
+
+Status: evidence tooling, no engine change. Adds a compact reducer for
+`qwen --requests-jsonl --request-stats` output so prefix-cache product claims can
+be based on hit-rate, latency distribution, and memory stats instead of ad hoc
+row inspection.
+
+- `scripts/profile/prefix_cache_stats.py` reads one or more per-request stats
+  JSONL files and emits TSV metrics for hit/miss counts, hit rate,
+  model-internal TTFT p50/p95, restore p95, matched-prefix p50/p95, cache bytes,
+  and snapshot insert cost.
+- The parser accepts both the new `model_ttft_ms` field and the pre-rename
+  `ttft_ms` field from early v0.469 smoke artifacts.
+- Smoke over the v0.469 1024-token prefix packet reports one hit, one miss,
+  `50%` hit rate, hit p50 model TTFT `150.2 ms`, miss p50 model TTFT `299.8 ms`,
+  and hit matched-prefix p50 `1024`.
+
+Interpretation: this is the minimal measurement bridge for the next prefix-cache
+gate. Real product claims still require captured workloads with hit-rate,
+prefix-length, p50/p95/p99, memory, eviction, and streaming first-token accounting
+if the product path streams output.
+
+Validation:
+
+- `uv run python -m py_compile scripts/profile/prefix_cache_stats.py`
+- `uv run scripts/profile/prefix_cache_stats.py target/profiles/v0469-prefix-cache-stats-1k-v2.jsonl`
+
 ## 2026-07-04 - v0.469 Prefix-Cache JSONL CLI
 
 Status: experimental product seam, no kernel change. Adds an in-process

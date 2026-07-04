@@ -124,6 +124,7 @@ Use this as the starting point, then switch tools based on the question below.
 | --- | --- | --- |
 | Did throughput regress? | `qwen-bench`, `hyperfine` | Stable wall-clock and model-aware numbers. |
 | Which model phase dominates? | `qwen-bench phase` | Knows GDN, attention, LM head, DFlash phases. |
+| Which live MoE decode stage dominates? | `decode-window --stage-timestamps` | Uses one command buffer and Metal timestamp samples at encoder boundaries. |
 | Is host/FFI/argmax/load CPU expensive? | `xctrace` + `ztrace` | Best headless symbolicated CPU stack summaries. |
 | Is the process blocked on GPU completion? | source-built `samply --presymbolicate` | Shows off-CPU waits and CPU deltas. |
 | Are command buffers/gaps/competing GPU work visible? | `Metal System Trace` | Exposes Metal app and GPU interval tables. |
@@ -385,9 +386,10 @@ contain rows before drawing conclusions.
 Counter guidance:
 
 - First run `target/release/qwen-bench metal-counters`. On the current M4 Max,
-  v0.389 reports only the `timestamp`/`GPUTimestamp` counter set, with
-  `stage=true`, `dispatch=false`, and `blit=false`; this is timing-only, not
-  bandwidth/stall/occupancy evidence.
+  the app-visible counter set is `timestamp`/`GPUTimestamp`, with `stage=true`,
+  `dispatch=false`, and `blit=false`; this is timing-only, not bandwidth,
+  stall, or occupancy evidence. v0.460 wires this into
+  `decode-window --stage-timestamps` for MoE decode stage attribution.
 - Keep `Metal System Trace` as the primary timeline tool for queue gaps,
   command-buffer cadence, and GPU ownership.
 - Use `qwen-bench phase` or `qwen-bench dflash --profile` for model-aware phase
@@ -403,10 +405,41 @@ Counter guidance:
   device` and produce empty counter tables. Treat that as a tooling miss, not a
   kernel conclusion.
 - v0.389 adds the in-process probe and shows `MTLCounterSampleBuffer` exposes no
-  useful performance counters on this target either.
+  useful performance counters on this target beyond timestamps.
 - v0.455 unlocks headless counters via a user-saved Instruments template. See
   "Headless Metal performance-limiter counters" below — this is the current
   best path for autonomous GPU efficiency and bandwidth attribution.
+
+### In-process decode stage timestamps (v0.460+)
+
+Use this when xctrace cannot label dispatch execution, but you need a live
+single-command-buffer MoE decode attribution map before editing kernels:
+
+```sh
+READY=target/profiles/a3b-stage.ready
+GO=target/profiles/a3b-stage.go
+rm -f "$READY" "$GO"
+(while [ ! -f "$READY" ]; do sleep 0.1; done; touch "$GO") &
+target/release/qwen-bench decode-window \
+  -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  --target-ctx 16384 --window 4 --stage-timestamps \
+  --ready-file "$READY" --go-file "$GO" \
+  > target/profiles/a3b-stage.tsv \
+  2> target/profiles/a3b-stage.log
+```
+
+Read the TSV as attribution, not throughput. The probe samples existing encoder
+boundaries with `MTLCounterSampleBuffer`; it does not split the command buffer
+into per-stage commits, but it does add descriptor-backed compute passes and CPU
+encode overhead. Require:
+
+- `raw_coverage_assuming_ns` near `1.0`, proving samples line up with
+  `GPUEndTime-GPUStartTime`.
+- A separate uninstrumented `decode-window` run for throughput.
+- A dominant family before kernel work: one family `>=25-30%` of GPU time, or top
+  three families `>=60%`.
+- One targeted second-level split if the winning family is mixed, e.g.
+  `attn_mixer_route` or `gdn_after_route`.
 
 ### Headless Metal performance-limiter counters (v0.455+)
 

@@ -31,14 +31,15 @@
 use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
-    attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
-    encode_attn_decode_v4_f32, encode_axpy_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
-    encode_ffn_swiglu_q4_K_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32, encode_mat_vec_f32,
-    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
-    encode_moe_down_bf16_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
-    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTimestampSampleBuffer,
+    attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32,
+    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
+    encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32,
+    encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q5_K_f32,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
     encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32, encode_moe_mat_vec_iq3_s_f32,
@@ -2067,8 +2068,15 @@ impl<'a> MetalForward<'a> {
         ffn_gate: &MetalTensor,
         ffn_up: &MetalTensor,
         moe: &MetalMoeFfn,
+        mut stage_recorder: Option<&mut DecodeStageRecorder>,
+        stage_meta: Option<DecodeStageMeta>,
     ) -> Result<bool, MfError> {
-        let enc = KernelEncoder::begin_concurrent(cmd_buf);
+        let enc = begin_decode_stage(
+            cmd_buf,
+            stage_recorder.as_mut().map(|recorder| &mut **recorder),
+            stage_meta,
+            true,
+        )?;
         self.encode_moe_routed_gate_up_q4_gpu(&enc, session, moe)?;
         let shared_inner_fused =
             self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
@@ -2082,6 +2090,8 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
         ffn_down: &MetalTensor,
         moe: &MetalMoeFfn,
+        mut stage_recorder: Option<&mut DecodeStageRecorder>,
+        stage_meta: Option<DecodeStageMeta>,
     ) -> Result<bool, MfError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
@@ -2098,7 +2108,12 @@ impl<'a> MetalForward<'a> {
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
         if decode_moe_noop_routed_down_enabled() {
-            let enc = KernelEncoder::begin_concurrent(cmd_buf);
+            let enc = begin_decode_stage(
+                cmd_buf,
+                stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                stage_meta,
+                true,
+            )?;
             encode_fill_f32(self.ctx, &enc, &session.mixer_out, 0.0)?;
             self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
             enc.end();
@@ -2107,7 +2122,12 @@ impl<'a> MetalForward<'a> {
 
         let pending = match moe.down_exps.dtype {
             GgmlType::Q5_K => {
-                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                let enc = begin_decode_stage(
+                    cmd_buf,
+                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                    stage_meta,
+                    true,
+                )?;
                 let pending = if decode_moe_q5_down_fused_enabled() {
                     if f_exp == 512 && decode_moe_q5_down_k512_r2_enabled() {
                         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
@@ -2161,7 +2181,12 @@ impl<'a> MetalForward<'a> {
                 pending
             }
             GgmlType::Q6_K => {
-                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                let enc = begin_decode_stage(
+                    cmd_buf,
+                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                    stage_meta,
+                    true,
+                )?;
                 encode_moe_down_weighted_sum_q6_K_f32(
                     self.ctx,
                     &enc,
@@ -2180,7 +2205,12 @@ impl<'a> MetalForward<'a> {
                 false
             }
             GgmlType::Q8_0 => {
-                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                let enc = begin_decode_stage(
+                    cmd_buf,
+                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                    stage_meta,
+                    true,
+                )?;
                 encode_moe_down_weighted_sum_q8_0_f32(
                     self.ctx,
                     &enc,
@@ -2199,7 +2229,12 @@ impl<'a> MetalForward<'a> {
                 false
             }
             GgmlType::IQ4_XS => {
-                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                let enc = begin_decode_stage(
+                    cmd_buf,
+                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                    stage_meta,
+                    true,
+                )?;
                 if decode_moe_iq4_down_fast_enabled() {
                     encode_moe_down_iq4_xs_f32_fast(
                         self.ctx,
@@ -2232,7 +2267,12 @@ impl<'a> MetalForward<'a> {
                 true
             }
             GgmlType::BF16 => {
-                let enc = KernelEncoder::begin_concurrent(cmd_buf);
+                let enc = begin_decode_stage(
+                    cmd_buf,
+                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                    stage_meta,
+                    true,
+                )?;
                 encode_moe_down_bf16_f32(
                     self.ctx,
                     &enc,
@@ -2259,6 +2299,8 @@ impl<'a> MetalForward<'a> {
         cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         session: &mut MetalSession,
         routed_weighted_sum_is_pending: bool,
+        mut stage_recorder: Option<&mut DecodeStageRecorder>,
+        stage_meta: Option<DecodeStageMeta>,
     ) -> Result<(), MfError> {
         let h = self.model.arch.hidden_size as usize;
         let topk = self
@@ -2271,7 +2313,12 @@ impl<'a> MetalForward<'a> {
             .view_subrange(0, vec![(topk * h) as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
-        let enc = KernelEncoder::begin(cmd_buf);
+        let enc = begin_decode_stage(
+            cmd_buf,
+            stage_recorder.as_mut().map(|recorder| &mut **recorder),
+            stage_meta,
+            false,
+        )?;
         if routed_weighted_sum_is_pending {
             encode_moe_weighted_sum_f32(
                 self.ctx,
@@ -2304,17 +2351,109 @@ impl<'a> MetalForward<'a> {
             return Ok(());
         }
 
-        let shared_inner_fused =
-            self.encode_moe_ffn_gate_up_wave_gpu(cmd_buf, session, ffn_gate, ffn_up, moe)?;
+        let shared_inner_fused = self
+            .encode_moe_ffn_gate_up_wave_gpu(cmd_buf, session, ffn_gate, ffn_up, moe, None, None)?;
         if !shared_inner_fused {
             let enc = KernelEncoder::begin(cmd_buf);
             self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
             enc.end();
         }
         let routed_weighted_sum_is_pending =
-            self.encode_moe_ffn_down_wave_gpu(cmd_buf, session, ffn_down, moe)?;
-        self.encode_moe_ffn_final_wave_gpu(cmd_buf, session, routed_weighted_sum_is_pending)?;
+            self.encode_moe_ffn_down_wave_gpu(cmd_buf, session, ffn_down, moe, None, None)?;
+        self.encode_moe_ffn_final_wave_gpu(
+            cmd_buf,
+            session,
+            routed_weighted_sum_is_pending,
+            None,
+            None,
+        )?;
         Ok(())
+    }
+
+    fn encode_stage_profiled_moe_ffn_waves(
+        &self,
+        cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        recorder: &mut DecodeStageRecorder,
+        block_kind: &'static str,
+        block_idx: usize,
+        local_idx: usize,
+        session: &mut MetalSession,
+        ffn_gate: &MetalTensor,
+        ffn_up: &MetalTensor,
+        ffn_down: &MetalTensor,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MfError> {
+        if moe.gate_exps.dtype != GgmlType::Q4_K || moe.up_exps.dtype != GgmlType::Q4_K {
+            let enc = begin_decode_stage(
+                cmd_buf,
+                Some(&mut *recorder),
+                Some(DecodeStageMeta {
+                    family: "moe_fallback_ffn",
+                    block_kind,
+                    block_index: Some(block_idx),
+                    local_index: Some(local_idx),
+                }),
+                false,
+            )?;
+            self.encode_moe_ffn_apply_gpu(&enc, session, ffn_gate, ffn_up, ffn_down, moe)?;
+            enc.end();
+            return Ok(());
+        }
+
+        let shared_inner_fused = self.encode_moe_ffn_gate_up_wave_gpu(
+            cmd_buf,
+            session,
+            ffn_gate,
+            ffn_up,
+            moe,
+            Some(&mut *recorder),
+            Some(DecodeStageMeta {
+                family: "moe_gate_up_wave",
+                block_kind,
+                block_index: Some(block_idx),
+                local_index: Some(local_idx),
+            }),
+        )?;
+        if !shared_inner_fused {
+            let enc = begin_decode_stage(
+                cmd_buf,
+                Some(&mut *recorder),
+                Some(DecodeStageMeta {
+                    family: "moe_shared_silu",
+                    block_kind,
+                    block_index: Some(block_idx),
+                    local_index: Some(local_idx),
+                }),
+                false,
+            )?;
+            self.encode_moe_shared_ffn_silu_gpu(&enc, session)?;
+            enc.end();
+        }
+        let routed_weighted_sum_is_pending = self.encode_moe_ffn_down_wave_gpu(
+            cmd_buf,
+            session,
+            ffn_down,
+            moe,
+            Some(&mut *recorder),
+            Some(DecodeStageMeta {
+                family: "moe_down_wave",
+                block_kind,
+                block_index: Some(block_idx),
+                local_index: Some(local_idx),
+            }),
+        )?;
+        self.encode_moe_ffn_final_wave_gpu(
+            cmd_buf,
+            session,
+            routed_weighted_sum_is_pending,
+            Some(&mut *recorder),
+            Some(DecodeStageMeta {
+                family: "moe_final_wave",
+                block_kind,
+                block_index: Some(block_idx),
+                local_index: Some(local_idx),
+            }),
+        )
     }
 
     fn encode_moe_block_gpu(
@@ -3117,6 +3256,275 @@ impl<'a> MetalForward<'a> {
                 moe_cmd_count: 1,
             },
         ))
+    }
+
+    pub fn single_token_argmax_stage_profiled_concurrent_gdn_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(i32, DecodeStageProfile), MfError> {
+        let arch = &self.model.arch;
+        if arch.kind != ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let h = arch.hidden_size as usize;
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let ids_buf = session.ids_buf.clone();
+        let argmax_tok = session.argmax_tok.clone();
+        let sample_count = 2 * (2 + self.model.blocks.len() * 8);
+        let mut recorder = DecodeStageRecorder::new(self.ctx, sample_count)?;
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+
+        {
+            let enc = begin_decode_stage(
+                &cmd_buf,
+                Some(&mut recorder),
+                Some(DecodeStageMeta {
+                    family: "embed",
+                    block_kind: "tail",
+                    block_index: None,
+                    local_index: None,
+                }),
+                false,
+            )?;
+            encode_get_rows_f32(
+                self.ctx,
+                &enc,
+                &self.model.token_embd,
+                &ids_buf,
+                &session.x,
+                1,
+                h,
+            )?;
+            enc.end();
+        }
+
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        for (block_idx, block) in self.model.blocks.iter().enumerate() {
+            match block {
+                MetalBlock::Gdn(g) => {
+                    let local_idx = gdn_idx;
+                    gdn_idx += 1;
+                    let moe = g.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                    {
+                        let enc = begin_decode_stage(
+                            &cmd_buf,
+                            Some(&mut recorder),
+                            Some(DecodeStageMeta {
+                                family: "gdn_pre_norm",
+                                block_kind: "gdn",
+                                block_index: Some(block_idx),
+                                local_index: Some(local_idx),
+                            }),
+                            false,
+                        )?;
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        enc.end();
+                    }
+                    {
+                        let enc = begin_decode_stage(
+                            &cmd_buf,
+                            Some(&mut recorder),
+                            Some(DecodeStageMeta {
+                                family: "gdn_front",
+                                block_kind: "gdn",
+                                block_index: Some(block_idx),
+                                local_index: Some(local_idx),
+                            }),
+                            true,
+                        )?;
+                        self.encode_gdn_front_projections(&enc, g, session)?;
+                        enc.end();
+                    }
+                    {
+                        let enc = begin_decode_stage(
+                            &cmd_buf,
+                            Some(&mut recorder),
+                            Some(DecodeStageMeta {
+                                family: if concurrent_shared_moe_decode_enabled() {
+                                    "gdn_after_route"
+                                } else {
+                                    "gdn_after_route_ffn_serial"
+                                },
+                                block_kind: "gdn",
+                                block_index: Some(block_idx),
+                                local_index: Some(local_idx),
+                            }),
+                            false,
+                        )?;
+                        self.encode_gdn_after_projections(&enc, g, local_idx, session)?;
+                        encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                        encode_rms_norm_mul_f32(
+                            self.ctx,
+                            &enc,
+                            &session.x,
+                            &g.post_attn_norm,
+                            &session.h,
+                            RMS_EPS,
+                        )?;
+                        self.encode_moe_route_prepare(&enc, session, moe)?;
+                        if !concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                session,
+                                &g.ffn_gate,
+                                &g.ffn_up,
+                                &g.ffn_down,
+                                moe,
+                            )?;
+                        }
+                        enc.end();
+                    }
+                    if concurrent_shared_moe_decode_enabled() {
+                        self.encode_stage_profiled_moe_ffn_waves(
+                            &cmd_buf,
+                            &mut recorder,
+                            "gdn",
+                            block_idx,
+                            local_idx,
+                            session,
+                            &g.ffn_gate,
+                            &g.ffn_up,
+                            &g.ffn_down,
+                            moe,
+                        )?;
+                    }
+                }
+                MetalBlock::Attn(a) => {
+                    let local_idx = attn_idx;
+                    attn_idx += 1;
+                    let slot = MixerSlot::Attn(local_idx);
+                    let moe = a.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                    {
+                        let enc = begin_decode_stage(
+                            &cmd_buf,
+                            Some(&mut recorder),
+                            Some(DecodeStageMeta {
+                                family: if concurrent_shared_moe_decode_enabled() {
+                                    "attn_mixer_route"
+                                } else {
+                                    "attn_mixer_route_ffn_serial"
+                                },
+                                block_kind: "attn",
+                                block_index: Some(block_idx),
+                                local_index: Some(local_idx),
+                            }),
+                            false,
+                        )?;
+                        self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                        self.encode_moe_route_prepare(&enc, session, moe)?;
+                        if !concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                session,
+                                &a.ffn_gate,
+                                &a.ffn_up,
+                                &a.ffn_down,
+                                moe,
+                            )?;
+                        }
+                        enc.end();
+                    }
+                    if concurrent_shared_moe_decode_enabled() {
+                        self.encode_stage_profiled_moe_ffn_waves(
+                            &cmd_buf,
+                            &mut recorder,
+                            "attn",
+                            block_idx,
+                            local_idx,
+                            session,
+                            &a.ffn_gate,
+                            &a.ffn_up,
+                            &a.ffn_down,
+                            moe,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        {
+            let enc = begin_decode_stage(
+                &cmd_buf,
+                Some(&mut recorder),
+                Some(DecodeStageMeta {
+                    family: "tail_lm_head_argmax",
+                    block_kind: "tail",
+                    block_index: None,
+                    local_index: None,
+                }),
+                false,
+            )?;
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                arch.vocab_size as usize,
+            )?;
+            encode_argmax_f32(
+                self.ctx,
+                &enc,
+                &session.logits,
+                &argmax_tok,
+                1,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+        }
+
+        let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
+        let t_gpu = std::time::Instant::now();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+        let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+
+        let argmax = unsafe {
+            let src = argmax_tok.buffer.contents().as_ptr() as *const i32;
+            *src
+        };
+        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        let token = TokenProfile {
+            cpu_encode_ms,
+            cpu_to_gpu_complete_ms,
+            gpu_kernel_ms,
+            total_ms,
+            moe_cpu_route_ms: 0.0,
+            moe_cmd_count: 1,
+        };
+        let profile = recorder.resolve(self.ctx, token)?;
+        Ok((argmax, profile))
     }
 
     pub fn single_token_profiled_concurrent_attn_dense(
@@ -5126,6 +5534,8 @@ impl<'a> MetalForward<'a> {
                         &cmd,
                         session,
                         routed_weighted_sum_is_pending,
+                        None,
+                        None,
                     )?;
                     cmd.commit();
                     cmd.waitUntilCompleted();
@@ -5135,8 +5545,9 @@ impl<'a> MetalForward<'a> {
                     && moe.up_exps.dtype == GgmlType::Q4_K
                 {
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
-                    let shared_inner_fused =
-                        self.encode_moe_ffn_gate_up_wave_gpu(&cmd, session, ffn_gate, ffn_up, moe)?;
+                    let shared_inner_fused = self.encode_moe_ffn_gate_up_wave_gpu(
+                        &cmd, session, ffn_gate, ffn_up, moe, None, None,
+                    )?;
                     cmd.commit();
                     cmd.waitUntilCompleted();
                     ffn_gate_up_wave_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
@@ -5152,8 +5563,8 @@ impl<'a> MetalForward<'a> {
                     }
 
                     let cmd = self.ctx.queue.commandBuffer().expect("cmd");
-                    let routed_weighted_sum_is_pending =
-                        self.encode_moe_ffn_down_wave_gpu(&cmd, session, ffn_down, moe)?;
+                    let routed_weighted_sum_is_pending = self
+                        .encode_moe_ffn_down_wave_gpu(&cmd, session, ffn_down, moe, None, None)?;
                     cmd.commit();
                     cmd.waitUntilCompleted();
                     ffn_down_wave_total_ms += (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
@@ -5163,6 +5574,8 @@ impl<'a> MetalForward<'a> {
                         &cmd,
                         session,
                         routed_weighted_sum_is_pending,
+                        None,
+                        None,
                     )?;
                     cmd.commit();
                     cmd.waitUntilCompleted();
@@ -6541,6 +6954,167 @@ pub struct TokenProfile {
     pub total_ms: f64,
     pub moe_cpu_route_ms: f64,
     pub moe_cmd_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodeStageTiming {
+    pub family: String,
+    pub block_kind: String,
+    pub block_index: Option<usize>,
+    pub local_index: Option<usize>,
+    pub concurrent: bool,
+    pub start_sample: usize,
+    pub end_sample: usize,
+    pub start_timestamp: u64,
+    pub end_timestamp: u64,
+    pub duration_ticks: u64,
+    pub duration_ms_scaled: f64,
+    pub fraction_of_gpu: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodeStageProfile {
+    pub token: TokenProfile,
+    pub stages: Vec<DecodeStageTiming>,
+    pub sampled_span_ticks: u64,
+    pub raw_span_ms_assuming_ns: f64,
+    pub raw_coverage_assuming_ns: f64,
+}
+
+#[derive(Clone, Copy)]
+struct DecodeStageMeta {
+    family: &'static str,
+    block_kind: &'static str,
+    block_index: Option<usize>,
+    local_index: Option<usize>,
+}
+
+struct DecodeStageRecord {
+    meta: DecodeStageMeta,
+    concurrent: bool,
+    start_sample: usize,
+    end_sample: usize,
+}
+
+struct DecodeStageRecorder {
+    samples: MetalTimestampSampleBuffer,
+    next_sample: usize,
+    records: Vec<DecodeStageRecord>,
+}
+
+impl DecodeStageRecorder {
+    fn new(ctx: &MetalContext, sample_count: usize) -> Result<Self, MfError> {
+        Ok(Self {
+            samples: ctx.timestamp_sample_buffer(sample_count)?,
+            next_sample: 0,
+            records: Vec::new(),
+        })
+    }
+
+    fn begin(
+        &mut self,
+        cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        meta: DecodeStageMeta,
+        concurrent: bool,
+    ) -> Result<KernelEncoder, MfError> {
+        let start_sample = self.next_sample;
+        let end_sample = start_sample + 1;
+        if end_sample >= self.samples.sample_count() {
+            return Err(MfError::Metal(MetalError::Counter(format!(
+                "decode stage timestamp buffer exhausted at sample {end_sample}"
+            ))));
+        }
+        self.next_sample += 2;
+        self.records.push(DecodeStageRecord {
+            meta,
+            concurrent,
+            start_sample,
+            end_sample,
+        });
+        Ok(KernelEncoder::begin_sampled(
+            cmd,
+            &self.samples,
+            start_sample,
+            end_sample,
+            concurrent,
+        ))
+    }
+
+    fn resolve(
+        self,
+        ctx: &MetalContext,
+        token: TokenProfile,
+    ) -> Result<DecodeStageProfile, MfError> {
+        let timestamps = ctx.resolve_timestamp_samples(&self.samples, self.next_sample)?;
+        let sampled_span_ticks = match (self.records.first(), self.records.last()) {
+            (Some(first), Some(last)) => {
+                timestamps[last.end_sample].saturating_sub(timestamps[first.start_sample])
+            }
+            _ => 0,
+        };
+        let scale_ms_per_tick = if sampled_span_ticks > 0 {
+            token.gpu_kernel_ms / sampled_span_ticks as f64
+        } else {
+            0.0
+        };
+        let stages = self
+            .records
+            .into_iter()
+            .map(|record| {
+                let start_timestamp = timestamps[record.start_sample];
+                let end_timestamp = timestamps[record.end_sample];
+                let duration_ticks = end_timestamp.saturating_sub(start_timestamp);
+                let duration_ms_scaled = duration_ticks as f64 * scale_ms_per_tick;
+                let fraction_of_gpu = if token.gpu_kernel_ms > 0.0 {
+                    duration_ms_scaled / token.gpu_kernel_ms
+                } else {
+                    0.0
+                };
+                DecodeStageTiming {
+                    family: record.meta.family.to_string(),
+                    block_kind: record.meta.block_kind.to_string(),
+                    block_index: record.meta.block_index,
+                    local_index: record.meta.local_index,
+                    concurrent: record.concurrent,
+                    start_sample: record.start_sample,
+                    end_sample: record.end_sample,
+                    start_timestamp,
+                    end_timestamp,
+                    duration_ticks,
+                    duration_ms_scaled,
+                    fraction_of_gpu,
+                }
+            })
+            .collect();
+        let raw_span_ms_assuming_ns = sampled_span_ticks as f64 * 1e-6;
+        let raw_coverage_assuming_ns = if token.gpu_kernel_ms > 0.0 {
+            raw_span_ms_assuming_ns / token.gpu_kernel_ms
+        } else {
+            0.0
+        };
+        Ok(DecodeStageProfile {
+            token,
+            stages,
+            sampled_span_ticks,
+            raw_span_ms_assuming_ns,
+            raw_coverage_assuming_ns,
+        })
+    }
+}
+
+fn begin_decode_stage(
+    cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    recorder: Option<&mut DecodeStageRecorder>,
+    meta: Option<DecodeStageMeta>,
+    concurrent: bool,
+) -> Result<KernelEncoder, MfError> {
+    if let (Some(recorder), Some(meta)) = (recorder, meta) {
+        recorder.begin(cmd, meta, concurrent)
+    } else if concurrent {
+        Ok(KernelEncoder::begin_concurrent(cmd))
+    } else {
+        Ok(KernelEncoder::begin(cmd))
+    }
 }
 
 pub const RMS_EPS: f32 = 1e-6;

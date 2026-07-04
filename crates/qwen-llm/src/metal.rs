@@ -30,13 +30,13 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSError, NSString, NSURL};
+use objc2_foundation::{NSError, NSRange, NSString, NSURL};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCounter,
-    MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLDispatchType, MTLFence, MTLLibrary,
-    MTLResourceOptions, MTLSize,
+    MTLComputeCommandEncoder, MTLComputePassDescriptor, MTLComputePipelineState, MTLCounter,
+    MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor,
+    MTLCounterSamplingPoint, MTLCounterSet, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLDispatchType, MTLFence, MTLLibrary, MTLResourceOptions, MTLSize, MTLStorageMode,
 };
 use parking_lot::Mutex;
 use std::cell::Cell;
@@ -112,6 +112,8 @@ pub enum MetalError {
     Pipeline(String, String),
     #[error("could not create buffer of {0} bytes")]
     NoBuffer(usize),
+    #[error("metal counter probe failed: {0}")]
+    Counter(String),
     #[error("bad shape for kernel {kernel}: {detail}")]
     BadShape {
         kernel: &'static str,
@@ -151,6 +153,17 @@ impl KernelTraceCounters {
 #[must_use]
 pub struct KernelTraceGuard {
     previous: bool,
+}
+
+pub struct MetalTimestampSampleBuffer {
+    raw: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    sample_count: usize,
+}
+
+impl MetalTimestampSampleBuffer {
+    pub fn sample_count(&self) -> usize {
+        self.sample_count
+    }
 }
 
 impl Drop for KernelTraceGuard {
@@ -459,6 +472,99 @@ impl MetalContext {
                 .supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
             sets,
         }
+    }
+
+    fn timestamp_counter_set(
+        &self,
+    ) -> Result<Retained<ProtocolObject<dyn MTLCounterSet>>, MetalError> {
+        let counter_sets = self
+            .device
+            .counterSets()
+            .ok_or_else(|| MetalError::Counter("device exposes no counter sets".to_string()))?;
+        for i in 0..counter_sets.len() {
+            let set = counter_sets.objectAtIndex(i);
+            let set_name = set.name().to_string();
+            if set_name.eq_ignore_ascii_case("timestamp") {
+                return Ok(set);
+            }
+            let counters = set.counters();
+            for j in 0..counters.len() {
+                let counter_name = counters.objectAtIndex(j).name().to_string();
+                if counter_name.eq_ignore_ascii_case("timestamp") {
+                    return Ok(set);
+                }
+            }
+        }
+        Err(MetalError::Counter(
+            "device exposes no timestamp counter set".to_string(),
+        ))
+    }
+
+    pub fn timestamp_sample_buffer(
+        &self,
+        sample_count: usize,
+    ) -> Result<MetalTimestampSampleBuffer, MetalError> {
+        if sample_count == 0 {
+            return Err(MetalError::Counter(
+                "timestamp sample count must be non-zero".to_string(),
+            ));
+        }
+        if !self
+            .device
+            .supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary)
+        {
+            return Err(MetalError::Counter(
+                "device does not support stage-boundary counter sampling".to_string(),
+            ));
+        }
+        let set = self.timestamp_counter_set()?;
+        let desc = MTLCounterSampleBufferDescriptor::new();
+        desc.setCounterSet(Some(&set));
+        desc.setLabel(&NSString::from_str("qwen decode stage timestamps"));
+        desc.setStorageMode(MTLStorageMode::Shared);
+        unsafe { desc.setSampleCount(sample_count) };
+        let raw = self
+            .device
+            .newCounterSampleBufferWithDescriptor_error(&desc)
+            .map_err(|e| MetalError::Counter(e.localizedDescription().to_string()))?;
+        Ok(MetalTimestampSampleBuffer { raw, sample_count })
+    }
+
+    pub fn resolve_timestamp_samples(
+        &self,
+        samples: &MetalTimestampSampleBuffer,
+        sample_count: usize,
+    ) -> Result<Vec<u64>, MetalError> {
+        if sample_count > samples.sample_count {
+            return Err(MetalError::Counter(format!(
+                "resolve requested {sample_count} samples from {}-sample buffer",
+                samples.sample_count
+            )));
+        }
+        let data = unsafe {
+            samples
+                .raw
+                .resolveCounterRange(NSRange::new(0, sample_count))
+        }
+        .ok_or_else(|| MetalError::Counter("resolveCounterRange returned nil".to_string()))?;
+        let bytes = unsafe { data.as_bytes_unchecked() };
+        let stride = std::mem::size_of::<MTLCounterResultTimestamp>();
+        let needed = sample_count
+            .checked_mul(stride)
+            .ok_or_else(|| MetalError::Counter("timestamp resolve size overflow".to_string()))?;
+        if bytes.len() < needed {
+            return Err(MetalError::Counter(format!(
+                "timestamp resolve returned {} bytes, need {needed}",
+                bytes.len()
+            )));
+        }
+        let mut out = Vec::with_capacity(sample_count);
+        for chunk in bytes[..needed].chunks_exact(stride) {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&chunk[..8]);
+            out.push(u64::from_ne_bytes(raw));
+        }
+        Ok(out)
     }
 }
 
@@ -772,6 +878,33 @@ impl KernelEncoder {
             .expect("concurrent compute encoder");
         kernel_trace_record_encoder(true);
         Self::new(raw, true)
+    }
+
+    pub fn begin_sampled(
+        cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        samples: &MetalTimestampSampleBuffer,
+        start_sample: usize,
+        end_sample: usize,
+        concurrent: bool,
+    ) -> Self {
+        let pass = MTLComputePassDescriptor::computePassDescriptor();
+        pass.setDispatchType(if concurrent {
+            MTLDispatchType::Concurrent
+        } else {
+            MTLDispatchType::Serial
+        });
+        let attachments = pass.sampleBufferAttachments();
+        let attachment = unsafe { attachments.objectAtIndexedSubscript(0) };
+        attachment.setSampleBuffer(Some(&samples.raw));
+        unsafe {
+            attachment.setStartOfEncoderSampleIndex(start_sample);
+            attachment.setEndOfEncoderSampleIndex(end_sample);
+        }
+        let raw = cmd
+            .computeCommandEncoderWithDescriptor(&pass)
+            .expect("sampled compute encoder");
+        kernel_trace_record_encoder(concurrent);
+        Self::new(raw, concurrent)
     }
 
     /// Debug-only hazard note: declare that a dispatch in this encoder

@@ -18,6 +18,7 @@ objc2-metal = { version = "0.3", features = [
     "MTLDevice",
     "MTLCommandQueue",
     "MTLCommandBuffer",
+    "MTLComputePass",
     "MTLComputeCommandEncoder",
     "MTLFence",
     "MTLBlitCommandEncoder",

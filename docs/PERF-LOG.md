@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-03 - v0.460 Decode Stage Timestamp Attribution
+
+Status: tooling + attribution checkpoint, no default engine change. Adds a
+bench-only `decode-window --stage-timestamps` path for single-stream MoE decode.
+It uses Metal timestamp counter samples at existing compute-encoder boundaries,
+without per-stage commit/wait splitting, so it can attribute the live command
+buffer shape when xctrace cannot label individual dispatch executions.
+
+- Tooling: `MetalContext::timestamp_sample_buffer()` creates a shared timestamp
+  counter sample buffer, and `KernelEncoder::begin_sampled()` starts a
+  descriptor-backed compute pass with start/end sample indices. The MoE decode
+  argmax path can now report TSV aggregates by family and by block.
+- Validation smoke: A3B ctx4/window1 sampled span matched command-buffer GPU
+  time (`raw_coverage_assuming_ns=1.000`), proving the timestamp counter units
+  line up with `GPUEndTime-GPUStartTime` on this host.
+- A3B ctx4096/window4 baseline: `99.6 t/s`, avg_gpu `9.55 ms`.
+  Stage-timestamp run: `76.6 t/s`, avg_gpu `10.81 ms`, avg_cpu_enc `1.85 ms`,
+  raw coverage `1.000`. Treat this as attribution only; GPU perturbation is
+  about `+13%`, and CPU encode overhead is intentionally higher.
+- A3B ctx16384/window4 stage-timestamp run: `76.8 t/s`, avg_gpu `11.54 ms`,
+  raw coverage `1.000`. Family shares: `attn_mixer_route 24.46%`,
+  `gdn_after_route 20.13%`, `gdn_front 17.55%`, GDN-block MoE gate/up+down
+  `14.15%`, `tail_lm_head_argmax 8.00%`, attention-block MoE gate/up+down
+  `4.78%`.
+
+Interpretation: the probe passes the coverage gate and gives the first
+single-command-buffer GPU-stage map for default MoE decode. The `+13%` GPU
+perturbation means the percentages are attribution, not speedup ceilings, but the
+top-three concentration is still useful (`62.14%`). The high-EV branch is not
+scheduler work: v0.459 already failed that pivot. Next gate: repeat until family
+shares are stable, then split one dominant mixed family at a time
+(`attn_mixer_route` into attention vs route/post-norm, `gdn_after_route` into GDN
+step/output vs post-route glue) before any kernel edit.
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B ctx4/window1 `decode-window --stage-timestamps` smoke
+- A3B ctx4096/window4 baseline and stage-timestamp attribution runs
+- A3B ctx16384/window4 stage-timestamp attribution run
+- cx review `019f2b0c-b` on timestamp probe design and gates
+- cx review `019f2b30-c` on result interpretation and split-before-edit gates
+
 ## 2026-07-03 - v0.459 Two-Stream Decode Discriminator
 
 Status: tooling + attribution checkpoint, no default engine change. Adds a

@@ -62,7 +62,7 @@ use qwen_llm::{
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -1119,6 +1119,10 @@ struct DecodeWindowArgs {
     /// separate KV/GDN state while sharing resident model weights.
     #[arg(long, default_value = "1")]
     streams: usize,
+    /// Use Metal timestamp counter samples around existing decode-stage
+    /// encoder boundaries. Bench-only attribution probe for single-stream MoE.
+    #[arg(long)]
+    stage_timestamps: bool,
     /// File created when the process has reached `target_ctx` and is waiting.
     #[arg(long)]
     ready_file: PathBuf,
@@ -12083,6 +12087,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         target_ctx,
         window,
         streams,
+        stage_timestamps,
         ready_file,
         go_file,
         pipelined,
@@ -12095,6 +12100,16 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     if streams > 1 && (pipelined || concurrent_gdn_proj || concurrent_attn_proj) {
         return Err(anyhow!(
             "--streams is a concurrency discriminator; combine it only with the default decode path"
+        ));
+    }
+    if stage_timestamps && streams > 1 {
+        return Err(anyhow!(
+            "--stage-timestamps is a single-stream attribution probe; do not combine it with --streams"
+        ));
+    }
+    if stage_timestamps && (pipelined || concurrent_gdn_proj || concurrent_attn_proj) {
+        return Err(anyhow!(
+            "--stage-timestamps profiles the default MoE decode shape; do not combine it with other decode-window experiments"
         ));
     }
     let ctx = MetalContext::new()?;
@@ -12172,6 +12187,15 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     }
 
     let mut s = s_opt.expect("single-stream session present");
+
+    if stage_timestamps {
+        if mm.arch.kind != qwen_llm::model::ArchKind::Moe {
+            return Err(anyhow!(
+                "--stage-timestamps currently supports MoE models only"
+            ));
+        }
+        return run_decode_window_stage_timestamps(&mf, &mut s, target_ctx, window);
+    }
 
     fn median(values: &[f64]) -> f64 {
         let mut v = values.to_vec();
@@ -12384,6 +12408,119 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         avg_wait,
         100.0 * avg_gpu / avg_total
     );
+    Ok(())
+}
+
+#[derive(Default)]
+struct StageAgg {
+    count: usize,
+    ms: f64,
+}
+
+fn run_decode_window_stage_timestamps(
+    mf: &MetalForward,
+    session: &mut MetalSession,
+    target_ctx: usize,
+    window: usize,
+) -> Result<()> {
+    let mut prev_tok = 0i32;
+    let mut total_ms = 0.0f64;
+    let mut gpu_ms = 0.0f64;
+    let mut enc_ms = 0.0f64;
+    let mut wait_ms = 0.0f64;
+    let mut raw_cov = 0.0f64;
+    let mut raw_span_ms = 0.0f64;
+    let mut sampled_ticks = 0u64;
+    let mut family = BTreeMap::<(String, String, bool), StageAgg>::new();
+    let mut block =
+        BTreeMap::<(String, String, Option<usize>, Option<usize>, bool), StageAgg>::new();
+
+    for i in 0..window {
+        let pos = target_ctx as u32 + i as u32;
+        let (tok, profile) =
+            mf.single_token_argmax_stage_profiled_concurrent_gdn_moe(prev_tok, pos, session)?;
+        prev_tok = tok;
+        total_ms += profile.token.total_ms;
+        gpu_ms += profile.token.gpu_kernel_ms;
+        enc_ms += profile.token.cpu_encode_ms;
+        wait_ms += profile.token.cpu_to_gpu_complete_ms;
+        raw_cov += profile.raw_coverage_assuming_ns;
+        raw_span_ms += profile.raw_span_ms_assuming_ns;
+        sampled_ticks = sampled_ticks.saturating_add(profile.sampled_span_ticks);
+
+        for stage in profile.stages {
+            let fam_key = (
+                stage.block_kind.clone(),
+                stage.family.clone(),
+                stage.concurrent,
+            );
+            let fam = family.entry(fam_key).or_default();
+            fam.count += 1;
+            fam.ms += stage.duration_ms_scaled;
+
+            let block_key = (
+                stage.block_kind,
+                stage.family,
+                stage.block_index,
+                stage.local_index,
+                stage.concurrent,
+            );
+            let blk = block.entry(block_key).or_default();
+            blk.count += 1;
+            blk.ms += stage.duration_ms_scaled;
+        }
+    }
+
+    let avg_total = total_ms / window as f64;
+    let avg_gpu = gpu_ms / window as f64;
+    let avg_enc = enc_ms / window as f64;
+    let avg_wait = wait_ms / window as f64;
+    eprintln!(
+        "[decode-stage] ctx={} window={} avg_total={:.2} ms avg_gpu={:.2} ms avg_cpu_enc={:.2} ms t/s={:.1}",
+        target_ctx,
+        window,
+        avg_total,
+        avg_gpu,
+        avg_enc,
+        1000.0 / avg_total,
+    );
+    eprintln!(
+        "[decode-stage] avg_wait={:.2} ms raw_coverage_assuming_ns={:.3} raw_span_ms={:.3} sampled_ticks={}",
+        avg_wait,
+        raw_cov / window as f64,
+        raw_span_ms / window as f64,
+        sampled_ticks,
+    );
+
+    println!(
+        "row\tblock_kind\tfamily\tblock_index\tlocal_index\tconcurrent\tcount\tavg_ms\tpct_gpu"
+    );
+    for ((block_kind, family_name, concurrent), agg) in family {
+        println!(
+            "family\t{}\t{}\t\t\t{}\t{}\t{:.4}\t{:.2}",
+            block_kind,
+            family_name,
+            concurrent,
+            agg.count,
+            agg.ms / window as f64,
+            100.0 * agg.ms / gpu_ms,
+        );
+    }
+    for ((block_kind, family_name, block_index, local_index, concurrent), agg) in block {
+        let block_index = block_index.map(|v| v.to_string()).unwrap_or_default();
+        let local_index = local_index.map(|v| v.to_string()).unwrap_or_default();
+        println!(
+            "block\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}",
+            block_kind,
+            family_name,
+            block_index,
+            local_index,
+            concurrent,
+            agg.count,
+            agg.ms / window as f64,
+            100.0 * agg.ms / gpu_ms,
+        );
+    }
     Ok(())
 }
 

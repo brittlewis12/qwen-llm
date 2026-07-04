@@ -1013,6 +1013,21 @@ focused attention/GDN occupancy retune if the top 3-5 dispatch families dominate
 GPU time and retain the low-residency signature; (3) revisit multi-slot only if a
 future shared-submit experiment reaches aggregate `>=1.5x`, per-stream
 `>=70-75%` of baseline, and occupancy `>=40%` without read BW saturation.
+v0.460 replaces the unavailable per-dispatch xctrace labels with app-side Metal
+timestamp sampling at existing compute-encoder stage boundaries. The probe passes
+the coverage gate (`raw_coverage_assuming_ns=1.000`) and perturbs A3B ctx4096 GPU
+time by about `+13%`, so use it for attribution, not throughput. A3B ctx16384
+family map: `attn_mixer_route 24.46%`, `gdn_after_route 20.13%`, `gdn_front
+17.55%`, GDN-block MoE gate/up+down `14.15%`, and `tail_lm_head_argmax 8.00%`.
+Current rank: (1) split the dominant mixed families only enough to decide the
+retune target, after a longer/repeated stage window confirms the top-three
+concentration (`attn_mixer_route` into attention vs route/post-norm;
+`gdn_after_route` into GDN step/output vs residual/post-route glue); (2) run a
+focused limiter capture on the winning split family; (3) edit the kernel only if
+one isolated subfamily is `>=25%` alone or the top three families stay `>=60%`,
+and the counter signature still shows low occupancy/inflight rather than byte
+saturation. Do not read the `window=4` percentages as fine-grained speedup
+ceilings.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

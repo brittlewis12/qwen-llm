@@ -9,10 +9,8 @@ import argparse
 import datetime as dt
 import glob
 import json
-import re
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,11 +72,11 @@ class TokenCounter:
     def __init__(
         self,
         model: Path | None,
-        qwen_bench: Path,
+        qwen_tok: Path,
         estimate_chars_per_token: float,
     ) -> None:
         self.model = model
-        self.qwen_bench = qwen_bench
+        self.qwen_tok = qwen_tok
         self.estimate_chars_per_token = estimate_chars_per_token
         self.cache: dict[str, int] = {}
 
@@ -89,37 +87,23 @@ class TokenCounter:
         if self.model is None:
             count = max(1, round(len(text) / self.estimate_chars_per_token))
         else:
-            count = self._count_with_qwen_bench(text)
+            count = self._count_with_qwen_tok(text)
         self.cache[text] = count
         return count
 
-    def _count_with_qwen_bench(self, text: str) -> int:
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-            f.write(text)
-            temp = Path(f.name)
-        try:
-            run = subprocess.run(
-                [
-                    str(self.qwen_bench),
-                    "tok",
-                    "-m",
-                    str(self.model),
-                    "--file",
-                    str(temp),
-                    "--iters",
-                    "1",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        finally:
-            temp.unlink(missing_ok=True)
+    def _count_with_qwen_tok(self, text: str) -> int:
+        run = subprocess.run(
+            [str(self.qwen_tok), "-m", str(self.model), "--file", "-"],
+            input=text,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         for line in run.stdout.splitlines():
-            match = re.search(r"\btokens=(\d+)", line)
-            if match:
-                return int(match.group(1))
-        raise SystemExit("qwen-bench tok output did not include a token count")
+            fields = line.split()
+            if len(fields) >= 2 and fields[1] == "tokens":
+                return int(fields[0])
+        raise SystemExit("qwen-tok output did not include a token count")
 
 
 def session_base_ms(
@@ -223,7 +207,7 @@ def main() -> None:
         "--model", type=Path, help="optional GGUF for exact token counts"
     )
     parser.add_argument(
-        "--qwen-bench", type=Path, default=Path("target/release/qwen-bench")
+        "--qwen-tok", type=Path, default=Path("target/release/qwen-tok")
     )
     parser.add_argument(
         "--arrival-model",
@@ -249,7 +233,7 @@ def main() -> None:
     inputs = expand_inputs(args.input)
     if not inputs:
         raise SystemExit("no input files matched")
-    counter = TokenCounter(args.model, args.qwen_bench, args.estimate_chars_per_token)
+    counter = TokenCounter(args.model, args.qwen_tok, args.estimate_chars_per_token)
     rows = build_requests(
         inputs,
         counter,
@@ -266,7 +250,7 @@ def main() -> None:
         "arrival_source": args.arrival_model,
         "content_source": "game_transcripts",
         "completion_source": "assistant_transcript_messages",
-        "token_count_source": "qwen-bench tok" if args.model else "char_estimate",
+        "token_count_source": "qwen-tok" if args.model else "char_estimate",
         "is_empirical_arrival": "false",
         "inputs": str(len(inputs)),
         "requests": str(len(rows)),

@@ -469,7 +469,8 @@ Trace provenance matters:
 - `scripts/profile/request_trace_from_game.py` builds scenario traces from
   `~/code/llm/game` transcripts. It emits provenance comments such as
   `arrival_source`, `completion_source`, `token_count_source`, and
-  `is_empirical_arrival=false`.
+  `is_empirical_arrival=false`. When `--model` is supplied, exact counts use the
+  lightweight `qwen-tok` binary rather than `qwen-bench`.
 - Treat transcript scenario traces as stress coverage only. They use real
   completion-length distributions, but modeled arrivals do not satisfy the
   real/captured request-trace replay gate.

@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.471 Use qwen-tok for Game Trace Counts
+
+Status: tooling cleanup, no engine change. Switches exact token counting in the
+game-transcript request trace builder from the heavier `qwen-bench tok` subcommand
+to the dedicated `qwen-tok` CLI.
+
+- `scripts/profile/request_trace_from_game.py --model ...` now shells out to
+  `target/release/qwen-tok --file -`, avoiding temporary files and benchmark CLI
+  overhead for exact count smokes.
+- Trace provenance now records `token_count_source=qwen-tok` when exact counts are
+  enabled.
+
+Interpretation: this keeps request-trace generation cheap enough to use as a
+normal evidence step. It does not change the replay/cache gates; modeled arrivals
+remain scenario evidence only.
+
+Validation:
+
+- `uv run python -m py_compile scripts/profile/request_trace_from_game.py`
+- Exact-count smoke on `/Users/tito/code/llm/game/chaos.json` with
+  `/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf`
+
 ## 2026-07-04 - v0.470 Prefix-Cache Stats Summarizer
 
 Status: evidence tooling, no engine change. Adds a compact reducer for

@@ -1831,11 +1831,20 @@ single faster hit can still lose after cold insert and memory costs.
     `attn-intra` knobs and keeps the default tile4/NWG256 path best: default is
     `0.3469 ms/layer` (`3.47 ms` extrapolated), while tile2/NWG64 is
     `0.5265 ms`, tile8/NWG256 is `0.3971 ms`, and tile4/NWG128 is `0.3810 ms`.
-    `NWG=128` halves reduce but slows the main body; tile8 reads fewer logical
-    bytes but loses occupancy. Existing group-tile/NWG retunes remain closed.
-    Keep attention below MoE/GDN unless the next proposal brings hidden-traffic
-    counters, a main-pass read-once execution shape, or an end-to-end `ctx32768`
-    prototype that moves throughput rather than partial storage or reduce rows.
+   `NWG=128` halves reduce but slows the main body; tile8 reads fewer logical
+   bytes but loses occupancy. Existing group-tile/NWG retunes remain closed.
+   v0.476 reopens the lane with a real body/dataflow change instead of another
+   selector retune: the G8 C64 score-broadcast sidecar keeps score/weight state
+   lane-local and uses `simd_shuffle` during PV, deleting the main-pass
+   score/weight TGM round-trip while preserving F16 KV and the reduce contract.
+   It is exact and moves A3B main `0.1076 -> 0.1019 ms` at ctx8192 and
+   `0.1948 -> 0.1755 ms` at ctx32768; full ctx-sweep is neutral at 4096 and
+   positive at ctx32768 (`86.5 -> 88.9 t/s`) but below the `>=5%` default gate.
+   Keep `QWEN_ATTN_V4_G8_BCAST=1` as an opt-in true-long sidecar and recheck on
+   real long rollouts before promotion. Keep attention below MoE/GDN unless the
+   next proposal brings hidden-traffic counters, a main-pass read-once execution
+   shape, or an end-to-end `ctx32768` prototype that moves throughput rather than
+   partial storage or reduce rows.
 3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds
    correctness-breaking no-op attribution for the GDN projection lane. The
    recoverable lower-bound budget is

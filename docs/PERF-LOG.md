@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.476 G8 Attention Score-Broadcast Sidecar
+
+Status: correctness-safe default-off long-context attention sidecar. Adds
+`QWEN_ATTN_V4_G8_BCAST=1` for the A3B-style `group=8`, F16-KV, `C=64`,
+subgroup decode path. The new body keeps scores and weights lane-local and uses
+`simd_shuffle` to broadcast weights during PV, removing the score/weight
+threadgroup-memory round trip from the main pass while preserving the existing
+KV layout, split-K partial layout, and reduce kernel.
+
+- Correctness: `attn_v4_matches_naive_f16kv` passes with the bcast path enabled.
+- A3B `attn-intra ctx8192 --runs 5`: main `0.1076 -> 0.1019 ms/layer`
+  (`~5.3%` faster); reduce is flat (`0.0341 -> 0.0341`).
+- A3B `attn-intra ctx32768 --runs 3`: main `0.1948 -> 0.1755 ms/layer`
+  (`~9.9%` faster); reduce is flat/slightly slower (`0.0681 -> 0.0689`).
+- A3B `ctx-sweep` window 4: ctx4096 neutral (`100.6 -> 100.5 t/s`), ctx16384
+  slight positive (`93.9 -> 94.3`), ctx32768 positive (`86.5 -> 88.9`, `~1.028x`).
+- C128 bcast was also tried dirty and rejected: main was worse than C64 at both
+  ctx8192 and ctx32768, so only the C64 path is kept.
+
+Interpretation: this is a real body/dataflow win in the attention main pass, not
+another selector retune. It does not yet clear the full-decode default gate
+(`>=5%` at true long), so keep it opt-in and recheck on larger/real long-context
+rollouts before promotion.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p qwen-llm`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- `QWEN_ATTN_V4_G8_BCAST=1 cargo test -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture`
+- Artifacts: `target/profiles/v0476-a3b-attn-*.out`,
+  `target/profiles/v0476-a3b-ctxsweep-*.out`
+
 ## 2026-07-04 - v0.475 Q4 Gate/Up Slotpair Falsifier
 
 Status: dirty sidecar killed and not kept. This tested the smallest concrete MoE

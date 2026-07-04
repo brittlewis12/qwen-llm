@@ -10857,6 +10857,16 @@ fn attn_v4_g8_vstage_c() -> Option<usize> {
     })
 }
 
+fn attn_v4_g8_bcast_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("QWEN_ATTN_V4_G8_BCAST").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    })
+}
+
 /// Group-tile subgroup size for v4's decode main pass.
 ///
 /// The 122B A10B shape (`GROUP=16`) is faster when split across multiple
@@ -11061,11 +11071,23 @@ pub fn encode_attn_decode_v4_f32(
         rows_per_partition: u32,
         scale: f32,
     }
-    let use_g8_vstage = k_cache.dtype == GgmlType::F16
+    let use_g8_bcast = k_cache.dtype == GgmlType::F16
+        && group == 8
+        && matches!(group_tile, 2 | 4)
+        && tile_c == 64
+        && attn_v4_g8_bcast_enabled();
+    let use_g8_vstage = !use_g8_bcast
+        && k_cache.dtype == GgmlType::F16
         && group == 8
         && group_tile == 4
         && attn_v4_g8_vstage_c() == Some(tile_c);
-    let pipeline_name = if use_g8_vstage {
+    let pipeline_name = if use_g8_bcast {
+        match group_tile {
+            2 => "kernel_attn_decode_v4_g8_t2_c64_bcast_f32",
+            4 => "kernel_attn_decode_v4_g8_t4_c64_bcast_f32",
+            _ => unreachable!(),
+        }
+    } else if use_g8_vstage {
         match tile_c {
             16 => "kernel_attn_decode_v4_g8_t4_c16_vstage_f32",
             32 => "kernel_attn_decode_v4_g8_t4_c32_vstage_f32",
@@ -11189,7 +11211,22 @@ pub fn encode_attn_decode_v4_f32(
     //   threadgroup(1) ss[group_tile * C floats]
     // The vstage proof fuses both group8/tile4 simdgroups into one TG, so it
     // allocates both simdgroups' Q/score scratch plus a shared V tile.
-    if use_g8_vstage {
+    if use_g8_bcast {
+        let sq_bytes = group_tile * DK * 2;
+        enc.set_threadgroup_memory(0, sq_bytes);
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: group / group_tile,
+                depth: nwg,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else if use_g8_vstage {
         enc.set_threadgroup_memory(0, 2 * group_tile * DK * 2);
         enc.set_threadgroup_memory(1, 2 * group_tile * tile_c * std::mem::size_of::<f32>());
         enc.set_threadgroup_memory(2, tile_c * head_dim * 2);
@@ -11385,11 +11422,23 @@ pub fn encode_attn_decode_v4_main_only_f32(
         rows_per_partition: u32,
         scale: f32,
     }
-    let use_g8_vstage = k_cache.dtype == GgmlType::F16
+    let use_g8_bcast = k_cache.dtype == GgmlType::F16
+        && group == 8
+        && matches!(group_tile, 2 | 4)
+        && tile_c == 64
+        && attn_v4_g8_bcast_enabled();
+    let use_g8_vstage = !use_g8_bcast
+        && k_cache.dtype == GgmlType::F16
         && group == 8
         && group_tile == 4
         && attn_v4_g8_vstage_c() == Some(tile_c);
-    let pipeline_name = if use_g8_vstage {
+    let pipeline_name = if use_g8_bcast {
+        match group_tile {
+            2 => "kernel_attn_decode_v4_g8_t2_c64_bcast_f32",
+            4 => "kernel_attn_decode_v4_g8_t4_c64_bcast_f32",
+            _ => unreachable!(),
+        }
+    } else if use_g8_vstage {
         match tile_c {
             16 => "kernel_attn_decode_v4_g8_t4_c16_vstage_f32",
             32 => "kernel_attn_decode_v4_g8_t4_c32_vstage_f32",
@@ -11507,7 +11556,22 @@ pub fn encode_attn_decode_v4_main_only_f32(
     enc.set_tensor(3, v_cache);
     enc.set_tensor(4, o_partial);
     enc.set_tensor(5, ml_partial);
-    if use_g8_vstage {
+    if use_g8_bcast {
+        let sq_bytes = group_tile * DK * 2;
+        enc.set_threadgroup_memory(0, sq_bytes);
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: group / group_tile,
+                depth: nwg,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else if use_g8_vstage {
         enc.set_threadgroup_memory(0, 2 * group_tile * DK * 2);
         enc.set_threadgroup_memory(1, 2 * group_tile * tile_c * std::mem::size_of::<f32>());
         enc.set_threadgroup_memory(2, tile_c * head_dim * 2);

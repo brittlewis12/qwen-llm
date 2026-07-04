@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.466 S8 Shadow Request Gate
+
+Status: tooling + request-economics checkpoint, no default engine change. This
+follows cx session `019f2d70-d`: the next replay question is not another full-S8
+micro win, but whether an S8-only policy keeps value under request-shaped
+occupancy and p95 accounting.
+
+- Tooling: `decode-block-slice-real-margin --slot-counts 1,2,4,8` prepares the
+  maximum slot prefix set once and emits multiple slot-count rows for the same
+  context/windows. This avoids reramping the long prompt for each S value.
+- Tooling: `replay_economics.py --request-trace` now reports replayed step and
+  token shares alongside wall, throughput, p95, and occupancy.
+- A3B `chaos.json` ctx8192, windows `0..2` and `20..22`, timing iters 3: S1/S2
+  are strongly negative, S4 is flat/negative after validation, and S8 nets
+  `7.51%` / `10.51%` with zero fallback.
+- Synthetic request sims over the ctx8192 rows: saturated S8 workload saves
+  `9.01%` with replayed tokens `100%`; a ragged burst saves `6.07%`, p95 improves
+  `-7.68%`, and replayed tokens are `68.75%`.
+- A3B `chaos.json` ctx16384, same windows/iters: S8 nets `-3.13%` / `14.27%` in
+  the multi-slot packet. A repeat of S8 `block0..2` with timing iters 5 nets
+  `7.25%`, so the negative row is not enough to kill the branch but does mark the
+  gate as noisy/marginal.
+- Synthetic request sims over the ctx16384 packet save `5.57%` saturated and
+  `3.73%` on the ragged burst, below the desired `>=5-8%` ragged gate.
+
+Interpretation: v0.466 keeps S8 GDN-only replay live but narrows the claim. The
+branch now has a real shadow-policy harness, not a production gate. Continue only
+with real/captured request traces and robust repeats; avoid S4/S6, attention
+slices, late windows, and scheduler work until ragged occupancy clears the
+predeclared net-save and p95 bars.
+
+Validation:
+
+- `cargo fmt`
+- `uv run python -m py_compile scripts/profile/replay_economics.py`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B ctx16 `--slot-counts 1,2,4` smoke, with and without timing
+- A3B ctx8192 and ctx16384 S1/S2/S4/S8 real-economics packets
+- A3B ctx16384 S8 `block0..2` timing repeat
+- Synthetic saturated and ragged request simulations
+- cx review `019f2d70-d` on next-gate ranking
+
 ## 2026-07-04 - v0.465 Single-File S8 Replay Gate
 
 Status: tooling + measurement checkpoint, no default engine change. Extends

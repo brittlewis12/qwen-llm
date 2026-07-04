@@ -933,6 +933,9 @@ struct DecodeBlockSliceRealMarginArgs {
     /// Number of consecutive prompt positions to use as slots.
     #[arg(long, default_value = "4")]
     tokens: usize,
+    /// Slot counts to measure after preparing the maximum slot prefix set.
+    #[arg(long = "slot-counts", value_delimiter = ',')]
+    slot_counts: Vec<usize>,
     /// Prompt context positions to sweep.
     #[arg(long = "context", value_delimiter = ',', default_value = "512")]
     contexts: Vec<usize>,
@@ -5175,6 +5178,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
         model,
         file,
         tokens,
+        mut slot_counts,
         mut contexts,
         stride,
         mut start_blocks,
@@ -5186,16 +5190,30 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
     if tokens == 0 {
         return Err(anyhow!("--tokens must be >= 1"));
     }
+    if slot_counts.is_empty() {
+        slot_counts.push(tokens);
+    }
+    slot_counts.sort_unstable();
+    slot_counts.dedup();
+    if slot_counts.iter().any(|&count| count == 0) {
+        return Err(anyhow!("--slot-counts must all be >= 1"));
+    }
+    let max_slots = *slot_counts.iter().max().expect("non-empty slot_counts");
+    if max_slots > tokens {
+        return Err(anyhow!(
+            "largest --slot-counts value ({max_slots}) exceeds --tokens {tokens}; set --tokens to the maximum slots to prepare"
+        ));
+    }
     if stride == 0 {
         return Err(anyhow!("--stride must be >= 1"));
     }
     if file.is_empty() {
         return Err(anyhow!("--file must include at least one prompt"));
     }
-    if file.len() > 1 && file.len() < tokens {
+    if file.len() > 1 && file.len() < max_slots {
         return Err(anyhow!(
-            "got {} --file entries, need at least --tokens {tokens}",
-            file.len()
+            "got {} --file entries, need at least {max_slots} for the requested slot counts",
+            file.len(),
         ));
     }
     if n_blocks == 0 {
@@ -5261,7 +5279,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
     let max_context = *contexts.last().expect("non-empty contexts");
     let last_needed = if file.len() == 1 {
         max_context
-            .checked_add((tokens - 1).saturating_mul(stride))
+            .checked_add((max_slots - 1).saturating_mul(stride))
             .ok_or_else(|| anyhow!("context + (tokens - 1) * stride overflow"))?
     } else {
         max_context
@@ -5276,7 +5294,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
             ));
         }
     } else {
-        for (path, ids) in file.iter().zip(prompt_ids.iter()).take(tokens) {
+        for (path, ids) in file.iter().zip(prompt_ids.iter()).take(max_slots) {
             if ids.len() <= last_needed {
                 return Err(anyhow!(
                     "prompt {} has {} tokens, need at least {} for context sweep",
@@ -5301,7 +5319,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
     let gdn_layers = collect_gdn_layers(&mm);
 
     println!(
-        "[decode-block-slice-real-margin] model={} files={} first_prompt_tokens={} contexts={} windows={} tokens={} stride={} blocks={} topk={} experts={} h={} conv_dim={} v_dim={} timing_iters={} timing_warmup={} margin_threshold={:.6}",
+        "[decode-block-slice-real-margin] model={} files={} first_prompt_tokens={} contexts={} windows={} tokens={} slot_counts={} stride={} blocks={} topk={} experts={} h={} conv_dim={} v_dim={} timing_iters={} timing_warmup={} margin_threshold={:.6}",
         model.display(),
         file.len(),
         prompt_ids[0].len(),
@@ -5312,6 +5330,11 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
             .join(","),
         start_blocks.len(),
         tokens,
+        slot_counts
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
         stride,
         n_blocks,
         topk,
@@ -5329,7 +5352,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
 
     for &context in &contexts {
         let kv_capacity = last_needed + 32;
-        let slot_positions: Vec<usize> = (0..tokens)
+        let slot_positions: Vec<usize> = (0..max_slots)
             .map(|slot| {
                 if prompt_ids.len() == 1 {
                     context + slot * stride
@@ -5338,7 +5361,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 }
             })
             .collect();
-        let mut prefix_sessions = Vec::with_capacity(tokens);
+        let mut prefix_sessions = Vec::with_capacity(max_slots);
         if prompt_ids.len() == 1 {
             let ids = &prompt_ids[0];
             let mut prev_pos = slot_positions[0];
@@ -5348,7 +5371,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 let _ = mf.single_token_argmax_profiled(token_id, p as u32, &mut first)?;
             }
             prefix_sessions.push(first);
-            for slot in 1..tokens {
+            for slot in 1..max_slots {
                 let pos = slot_positions[slot];
                 let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
                     .with_context(|| format!("real prefix session slot {slot}"))?;
@@ -5360,7 +5383,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 prev_pos = pos;
             }
         } else {
-            for slot in 0..tokens {
+            for slot in 0..max_slots {
                 let ids = &prompt_ids[slot];
                 let pos = slot_positions[slot];
                 let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
@@ -5373,256 +5396,262 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
         }
 
         for &start_block in &start_blocks {
-            if prompt_ids.len() == 1
-                && tokens > 1
-                && block_slice_has_attention(&mm, start_block, n_blocks)?
-            {
-                return Err(anyhow!(
-                    "single-file strided real-margin slots currently require GDN-only block slices; slice {}..{} contains attention",
+            let slice_has_attention = block_slice_has_attention(&mm, start_block, n_blocks)?;
+            for &slot_count in &slot_counts {
+                if prompt_ids.len() == 1 && slot_count > 1 && slice_has_attention {
+                    return Err(anyhow!(
+                        "single-file strided real-margin slots currently require GDN-only block slices; slice {}..{} contains attention",
+                        start_block,
+                        start_block + n_blocks
+                    ));
+                }
+                let mut base = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    &slot_positions,
+                    slot_count,
                     start_block,
-                    start_block + n_blocks
-                ));
-            }
-            let mut base = prepare_real_block_slice_sessions(
-                &ctx,
-                &mf,
-                &mm,
-                &prefix_sessions,
-                &prompt_ids,
-                &slot_positions,
-                tokens,
-                start_block,
-                kv_capacity,
-                h,
-            )?;
-            let mut replay = prepare_real_block_slice_sessions(
-                &ctx,
-                &mf,
-                &mm,
-                &prefix_sessions,
-                &prompt_ids,
-                &slot_positions,
-                tokens,
-                start_block,
-                kv_capacity,
-                h,
-            )?;
+                    kv_capacity,
+                    h,
+                )?;
+                let mut replay = prepare_real_block_slice_sessions(
+                    &ctx,
+                    &mf,
+                    &mm,
+                    &prefix_sessions,
+                    &prompt_ids,
+                    &slot_positions,
+                    slot_count,
+                    start_block,
+                    kv_capacity,
+                    h,
+                )?;
 
-            let scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
-            let summary = trace_prepared_block_slice_summary(
-                &ctx,
-                &mf,
-                &mm,
-                start_block,
-                n_blocks,
-                context as u32,
-                &mut base,
-                &mut replay,
-                &scratch,
-                h,
-                conv_dim,
-                v_dim,
-                topk,
-                n_expert,
-                &gdn_layers,
-            )?;
-            let timing = if timing_iters > 0 {
-                let timing_base_seed = prepare_real_block_slice_sessions(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    &prefix_sessions,
-                    &prompt_ids,
-                    &slot_positions,
-                    tokens,
-                    start_block,
-                    kv_capacity,
-                    h,
-                )?;
-                let mut timing_base = prepare_real_block_slice_sessions(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    &prefix_sessions,
-                    &prompt_ids,
-                    &slot_positions,
-                    tokens,
-                    start_block,
-                    kv_capacity,
-                    h,
-                )?;
-                let timing_replay_seed = prepare_real_block_slice_sessions(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    &prefix_sessions,
-                    &prompt_ids,
-                    &slot_positions,
-                    tokens,
-                    start_block,
-                    kv_capacity,
-                    h,
-                )?;
-                let mut timing_replay = prepare_real_block_slice_sessions(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    &prefix_sessions,
-                    &prompt_ids,
-                    &slot_positions,
-                    tokens,
-                    start_block,
-                    kv_capacity,
-                    h,
-                )?;
-                let timing_validated_seed = prepare_real_block_slice_sessions(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    &prefix_sessions,
-                    &prompt_ids,
-                    &slot_positions,
-                    tokens,
-                    start_block,
-                    kv_capacity,
-                    h,
-                )?;
-                let mut timing_validated = prepare_real_block_slice_sessions(
-                    &ctx,
-                    &mf,
-                    &mm,
-                    &prefix_sessions,
-                    &prompt_ids,
-                    &slot_positions,
-                    tokens,
-                    start_block,
-                    kv_capacity,
-                    h,
-                )?;
-                let timing_scratch = GdnLayerReplayScratch::new(&ctx, tokens, h, conv_dim, v_dim)?;
-                let baseline = time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
-                    reset_block_slice_sessions(&ctx, &timing_base_seed, &mut timing_base)?;
-                    let enc = KernelEncoder::begin(cmd);
-                    encode_block_slice_baseline(
-                        &mf,
-                        &enc,
-                        start_block,
-                        n_blocks,
-                        context as u32,
-                        &mut timing_base,
-                    )?;
-                    enc.end();
-                    Ok(())
-                })?;
-                let replay_stats = time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
-                    reset_block_slice_sessions(&ctx, &timing_replay_seed, &mut timing_replay)?;
-                    encode_block_slice_replay(
-                        &ctx,
-                        &mf,
-                        &mm,
-                        cmd,
-                        start_block,
-                        n_blocks,
-                        context as u32,
-                        &mut timing_replay,
-                        &timing_scratch,
-                        &gdn_layers,
-                        h,
-                        conv_dim,
-                        v_dim,
-                    )
-                })?;
-                let validated = time_validated_block_slice_replay(
+                let scratch = GdnLayerReplayScratch::new(&ctx, slot_count, h, conv_dim, v_dim)?;
+                let summary = trace_prepared_block_slice_summary(
                     &ctx,
                     &mf,
                     &mm,
                     start_block,
                     n_blocks,
                     context as u32,
-                    &timing_validated_seed,
-                    &mut timing_validated,
-                    &timing_scratch,
-                    &gdn_layers,
+                    &mut base,
+                    &mut replay,
+                    &scratch,
                     h,
                     conv_dim,
                     v_dim,
                     topk,
                     n_expert,
-                    margin_threshold,
-                    timing_warmup,
-                    timing_iters,
+                    &gdn_layers,
                 )?;
-                let baseline_per_tok = baseline.avg_wall_ms / tokens as f64;
-                let replay_per_tok = replay_stats.avg_wall_ms / tokens as f64;
-                let validated_wall_per_tok = validated.avg_wall_ms / tokens as f64;
-                let validated_gpu_per_tok = validated.avg_gpu_ms / tokens as f64;
-                let fallback_pct = validated.avg_fallback_slots / tokens as f64;
-                let fallback_exact_per_tok = fallback_pct * baseline_per_tok;
-                let gross_save_pct = if baseline_per_tok > 0.0 {
-                    (baseline_per_tok - replay_per_tok) / baseline_per_tok * 100.0
+                let timing = if timing_iters > 0 {
+                    let timing_base_seed = prepare_real_block_slice_sessions(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        &prefix_sessions,
+                        &prompt_ids,
+                        &slot_positions,
+                        slot_count,
+                        start_block,
+                        kv_capacity,
+                        h,
+                    )?;
+                    let mut timing_base = prepare_real_block_slice_sessions(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        &prefix_sessions,
+                        &prompt_ids,
+                        &slot_positions,
+                        slot_count,
+                        start_block,
+                        kv_capacity,
+                        h,
+                    )?;
+                    let timing_replay_seed = prepare_real_block_slice_sessions(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        &prefix_sessions,
+                        &prompt_ids,
+                        &slot_positions,
+                        slot_count,
+                        start_block,
+                        kv_capacity,
+                        h,
+                    )?;
+                    let mut timing_replay = prepare_real_block_slice_sessions(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        &prefix_sessions,
+                        &prompt_ids,
+                        &slot_positions,
+                        slot_count,
+                        start_block,
+                        kv_capacity,
+                        h,
+                    )?;
+                    let timing_validated_seed = prepare_real_block_slice_sessions(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        &prefix_sessions,
+                        &prompt_ids,
+                        &slot_positions,
+                        slot_count,
+                        start_block,
+                        kv_capacity,
+                        h,
+                    )?;
+                    let mut timing_validated = prepare_real_block_slice_sessions(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        &prefix_sessions,
+                        &prompt_ids,
+                        &slot_positions,
+                        slot_count,
+                        start_block,
+                        kv_capacity,
+                        h,
+                    )?;
+                    let timing_scratch =
+                        GdnLayerReplayScratch::new(&ctx, slot_count, h, conv_dim, v_dim)?;
+                    let baseline = time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
+                        reset_block_slice_sessions(&ctx, &timing_base_seed, &mut timing_base)?;
+                        let enc = KernelEncoder::begin(cmd);
+                        encode_block_slice_baseline(
+                            &mf,
+                            &enc,
+                            start_block,
+                            n_blocks,
+                            context as u32,
+                            &mut timing_base,
+                        )?;
+                        enc.end();
+                        Ok(())
+                    })?;
+                    let replay_stats =
+                        time_cmd_reps_stats(&ctx, timing_warmup, timing_iters, |cmd| {
+                            reset_block_slice_sessions(
+                                &ctx,
+                                &timing_replay_seed,
+                                &mut timing_replay,
+                            )?;
+                            encode_block_slice_replay(
+                                &ctx,
+                                &mf,
+                                &mm,
+                                cmd,
+                                start_block,
+                                n_blocks,
+                                context as u32,
+                                &mut timing_replay,
+                                &timing_scratch,
+                                &gdn_layers,
+                                h,
+                                conv_dim,
+                                v_dim,
+                            )
+                        })?;
+                    let validated = time_validated_block_slice_replay(
+                        &ctx,
+                        &mf,
+                        &mm,
+                        start_block,
+                        n_blocks,
+                        context as u32,
+                        &timing_validated_seed,
+                        &mut timing_validated,
+                        &timing_scratch,
+                        &gdn_layers,
+                        h,
+                        conv_dim,
+                        v_dim,
+                        topk,
+                        n_expert,
+                        margin_threshold,
+                        timing_warmup,
+                        timing_iters,
+                    )?;
+                    let baseline_per_tok = baseline.avg_wall_ms / slot_count as f64;
+                    let replay_per_tok = replay_stats.avg_wall_ms / slot_count as f64;
+                    let validated_wall_per_tok = validated.avg_wall_ms / slot_count as f64;
+                    let validated_gpu_per_tok = validated.avg_gpu_ms / slot_count as f64;
+                    let fallback_pct = validated.avg_fallback_slots / slot_count as f64;
+                    let fallback_exact_per_tok = fallback_pct * baseline_per_tok;
+                    let gross_save_pct = if baseline_per_tok > 0.0 {
+                        (baseline_per_tok - replay_per_tok) / baseline_per_tok * 100.0
+                    } else {
+                        0.0
+                    };
+                    let net_save_pct = if baseline_per_tok > 0.0 {
+                        (baseline_per_tok - validated_wall_per_tok - fallback_exact_per_tok)
+                            / baseline_per_tok
+                            * 100.0
+                    } else {
+                        0.0
+                    };
+                    Some((
+                        baseline_per_tok,
+                        replay_per_tok,
+                        gross_save_pct,
+                        validated_wall_per_tok,
+                        validated_gpu_per_tok,
+                        validated.avg_fallback_slots,
+                        fallback_pct * 100.0,
+                        net_save_pct,
+                    ))
                 } else {
-                    0.0
+                    None
                 };
-                let net_save_pct = if baseline_per_tok > 0.0 {
-                    (baseline_per_tok - validated_wall_per_tok - fallback_exact_per_tok)
-                        / baseline_per_tok
-                        * 100.0
-                } else {
-                    0.0
-                };
-                Some((
-                    baseline_per_tok,
-                    replay_per_tok,
-                    gross_save_pct,
-                    validated_wall_per_tok,
-                    validated_gpu_per_tok,
-                    validated.avg_fallback_slots,
-                    fallback_pct * 100.0,
-                    net_save_pct,
-                ))
-            } else {
-                None
-            };
-            let first_set = summary
-                .first_set_mismatch
-                .map(|(block, slot)| format!("block={block},slot={slot}"))
-                .unwrap_or_else(|| "none".to_string());
-            let timing_cols = timing.map_or_else(
-                || "\t\t\t\t\t\t\t\t".to_string(),
-                |(
-                    baseline_per_tok,
-                    replay_per_tok,
-                    gross_save_pct,
-                    validated_wall_per_tok,
-                    validated_gpu_per_tok,
-                    fallback_slots_avg,
-                    fallback_pct,
-                    net_save_pct,
-                )| {
-                    format!(
-                        "\t{baseline_per_tok:.4}\t{replay_per_tok:.4}\t{gross_save_pct:.2}\t{validated_wall_per_tok:.4}\t{validated_gpu_per_tok:.4}\t{fallback_slots_avg:.2}\t{fallback_pct:.2}\t{net_save_pct:.2}"
-                    )
-                },
-            );
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{:.9}\t{:.6}{}",
-                start_block,
-                start_block + n_blocks,
-                context,
-                tokens,
-                summary.route_order_mismatches,
-                summary.route_set_mismatches,
-                first_set,
-                summary.max_logit_abs,
-                summary.max_logit_rms,
-                summary.min_base_margin,
-                summary.min_replay_margin,
-                summary.replay_margin_lt_1e3,
-                summary.replay_margin_lt_5e3,
-                summary.min_x_cos,
-                summary.max_x_abs,
-                timing_cols,
-            );
+                let first_set = summary
+                    .first_set_mismatch
+                    .map(|(block, slot)| format!("block={block},slot={slot}"))
+                    .unwrap_or_else(|| "none".to_string());
+                let timing_cols = timing.map_or_else(
+                    || "\t\t\t\t\t\t\t\t".to_string(),
+                    |(
+                        baseline_per_tok,
+                        replay_per_tok,
+                        gross_save_pct,
+                        validated_wall_per_tok,
+                        validated_gpu_per_tok,
+                        fallback_slots_avg,
+                        fallback_pct,
+                        net_save_pct,
+                    )| {
+                        format!(
+                            "\t{baseline_per_tok:.4}\t{replay_per_tok:.4}\t{gross_save_pct:.2}\t{validated_wall_per_tok:.4}\t{validated_gpu_per_tok:.4}\t{fallback_slots_avg:.2}\t{fallback_pct:.2}\t{net_save_pct:.2}"
+                        )
+                    },
+                );
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{:.9}\t{:.6}{}",
+                    start_block,
+                    start_block + n_blocks,
+                    context,
+                    slot_count,
+                    summary.route_order_mismatches,
+                    summary.route_set_mismatches,
+                    first_set,
+                    summary.max_logit_abs,
+                    summary.max_logit_rms,
+                    summary.min_base_margin,
+                    summary.min_replay_margin,
+                    summary.replay_margin_lt_1e3,
+                    summary.replay_margin_lt_5e3,
+                    summary.min_x_cos,
+                    summary.max_x_abs,
+                    timing_cols,
+                );
+            }
         }
     }
 

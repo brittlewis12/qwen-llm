@@ -1503,7 +1503,18 @@ to `16.09%`. This promotes replay to a minimal S8-only shadow-policy branch, not
 a scheduler/default branch: still require real or captured ragged occupancy,
 fallback rate, replayed-token share, blended `>=5-8%` net wall save, and p95
 non-regression before production scheduler work. Do not generalize this row to
-independent-prompt diversity or attention-containing slices.
+independent-prompt diversity or attention-containing slices. v0.466 makes that
+shadow gate executable by adding `--slot-counts` to the real-margin harness and
+replayed step/token shares to request simulation. A3B `chaos.json` ctx8192 with
+S1/S2/S4/S8 shows the expected policy shape: S1/S2 are strongly negative, S4 is
+flat/negative, and S8 nets `7.51%`/`10.51%` on windows `0..2`/`20..22`; synthetic
+request sims save `9.01%` saturated and `6.07%` on a ragged burst. The ctx16384
+packet is weaker (`-3.13%`/`14.27%` S8, with the negative window repeating at
+`7.25%` in an S8-only rerun), and the ragged synthetic sim saves only `3.73%`.
+So replay remains live but not promoted: the next artifact must use real or
+captured request traces plus robust repeats, not more full-occupancy-only rows.
+Keep S8-only/GDN-only; do not build attention-slice support or runtime scheduler
+plumbing until the ragged `>=5-8%` net and p95 gate clears.
 v0.450 adds a narrow current-HEAD qwen-only guardrail after the v0.444-v0.449
 churn: A3B Q4 long decode remains `101.7/99.3/93.5 t/s` at
 ctx `8192/16384/32768`, A10B Q4_XL `tg128` is `45.62 t/s`, and dense 27B Q4 is

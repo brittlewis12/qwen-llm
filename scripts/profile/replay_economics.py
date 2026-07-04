@@ -434,6 +434,24 @@ def simulate_requests(
     )
 
 
+def occupancy_replay_shares(
+    occupancy: dict[int, int], policy_min_slots: int
+) -> tuple[float, float]:
+    total_steps = sum(occupancy.values())
+    total_token_steps = sum(slots * steps for slots, steps in occupancy.items())
+    replay_steps = sum(
+        steps for slots, steps in occupancy.items() if slots >= policy_min_slots
+    )
+    replay_token_steps = sum(
+        slots * steps for slots, steps in occupancy.items() if slots >= policy_min_slots
+    )
+    step_share = replay_steps / total_steps * 100.0 if total_steps else 0.0
+    token_share = (
+        replay_token_steps / total_token_steps * 100.0 if total_token_steps else 0.0
+    )
+    return step_share, token_share
+
+
 def print_request_sim(
     rows: list[ReplayRow],
     fallback_rows: list[FallbackRow],
@@ -448,7 +466,7 @@ def print_request_sim(
         "request_trace\tthreshold\trequests\ttokens\tcapacity\tpolicy_min_slots"
         "\tbaseline_wall_ms\tpolicy_wall_ms\tblended_save_pct"
         "\tbaseline_tps\tpolicy_tps\tbaseline_p95_ms\tpolicy_p95_ms"
-        "\tp95_delta_pct\tpolicy_occupancy"
+        "\tp95_delta_pct\treplayed_step_pct\treplayed_token_pct\tpolicy_occupancy"
     )
     for fallback in scenarios:
         baseline_costs, charged_costs = mean_costs(rows, fallback.fallback_pct)
@@ -470,13 +488,17 @@ def print_request_sim(
         )
         save = (base_wall - policy_wall) / base_wall * 100.0 if base_wall > 0 else 0.0
         p95_delta = (policy_p95 - base_p95) / base_p95 * 100.0 if base_p95 > 0 else 0.0
+        replayed_step_pct, replayed_token_pct = occupancy_replay_shares(
+            occupancy, policy_min_slots
+        )
         occupancy_str = ",".join(f"{k}:{v}" for k, v in sorted(occupancy.items()))
         print(
             f"{request_trace}\t{fallback.threshold}\t{len(requests)}"
             f"\t{sum(req.tokens for req in requests)}\t{capacity}\t{policy_min_slots}"
             f"\t{base_wall:.4f}\t{policy_wall:.4f}\t{save:.2f}"
             f"\t{base_tps:.2f}\t{policy_tps:.2f}\t{base_p95:.4f}"
-            f"\t{policy_p95:.4f}\t{p95_delta:.2f}\t{occupancy_str}"
+            f"\t{policy_p95:.4f}\t{p95_delta:.2f}\t{replayed_step_pct:.2f}"
+            f"\t{replayed_token_pct:.2f}\t{occupancy_str}"
         )
 
 

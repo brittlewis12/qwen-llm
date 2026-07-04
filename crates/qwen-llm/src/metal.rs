@@ -10747,6 +10747,11 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
 ///
 /// `QWEN_ATTN_V4_TILE_C={16,32,64,128}` is an A/B knob for whole-model sweeps.
 pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
+    if group == 8 {
+        if let Some(tile_c) = attn_v4_g8_vstage_c() {
+            return tile_c;
+        }
+    }
     static TILE_C_OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
     if let Some(tile_c) = *TILE_C_OVERRIDE.get_or_init(|| {
         std::env::var("QWEN_ATTN_V4_TILE_C")
@@ -10764,6 +10769,16 @@ pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
     } else {
         32
     }
+}
+
+fn attn_v4_g8_vstage_c() -> Option<usize> {
+    static VSTAGE_C: OnceLock<Option<usize>> = OnceLock::new();
+    *VSTAGE_C.get_or_init(|| {
+        std::env::var("QWEN_ATTN_V4_G8_VSTAGE_C")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|v| matches!(*v, 16 | 32))
+    })
 }
 
 /// Group-tile subgroup size for v4's decode main pass.
@@ -10970,7 +10985,22 @@ pub fn encode_attn_decode_v4_f32(
         rows_per_partition: u32,
         scale: f32,
     }
-    let pipeline_name = if group_tile == group {
+    let use_g8_vstage = k_cache.dtype == GgmlType::F16
+        && group == 8
+        && group_tile == 4
+        && attn_v4_g8_vstage_c() == Some(tile_c);
+    let pipeline_name = if use_g8_vstage {
+        match tile_c {
+            16 => "kernel_attn_decode_v4_g8_t4_c16_vstage_f32",
+            32 => "kernel_attn_decode_v4_g8_t4_c32_vstage_f32",
+            _ => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4",
+                    detail: format!("vstage C={tile_c} unsupported; expected 16 or 32"),
+                });
+            }
+        }
+    } else if group_tile == group {
         match (k_cache.dtype, group, tile_c) {
             (GgmlType::F16, 4, 16) => "kernel_attn_decode_v4_g4_c16_f32",
             (GgmlType::F16, 4, 32) => "kernel_attn_decode_v4_g4_f32",
@@ -11079,25 +11109,45 @@ pub fn encode_attn_decode_v4_f32(
     enc.set_tensor(5, ml_partial);
 
     // Threadgroup memory:
-    //   threadgroup(0) sq[group * DK halves]
-    //   threadgroup(1) ss[group * C floats]
-    let sq_bytes = group_tile * DK * 2; // f16 = 2 bytes per element
-    let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
-    enc.set_threadgroup_memory(0, sq_bytes);
-    enc.set_threadgroup_memory(1, ss_bytes);
+    //   threadgroup(0) sq[group_tile * DK halves]
+    //   threadgroup(1) ss[group_tile * C floats]
+    // The vstage proof fuses both group8/tile4 simdgroups into one TG, so it
+    // allocates both simdgroups' Q/score scratch plus a shared V tile.
+    if use_g8_vstage {
+        enc.set_threadgroup_memory(0, 2 * group_tile * DK * 2);
+        enc.set_threadgroup_memory(1, 2 * group_tile * tile_c * std::mem::size_of::<f32>());
+        enc.set_threadgroup_memory(2, tile_c * head_dim * 2);
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: 1,
+                depth: nwg,
+            },
+            MTLSize {
+                width: 64,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        let sq_bytes = group_tile * DK * 2; // f16 = 2 bytes per element
+        let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
+        enc.set_threadgroup_memory(0, sq_bytes);
+        enc.set_threadgroup_memory(1, ss_bytes);
 
-    enc.dispatch(
-        MTLSize {
-            width: n_kv_heads,
-            height: group / group_tile,
-            depth: nwg,
-        },
-        MTLSize {
-            width: 32,
-            height: 1,
-            depth: 1,
-        },
-    );
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: group / group_tile,
+                depth: nwg,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
 
     // -------- Reduce kernel ----------------------------------------------
     #[repr(C)]
@@ -11259,7 +11309,22 @@ pub fn encode_attn_decode_v4_main_only_f32(
         rows_per_partition: u32,
         scale: f32,
     }
-    let pipeline_name = if group_tile == group {
+    let use_g8_vstage = k_cache.dtype == GgmlType::F16
+        && group == 8
+        && group_tile == 4
+        && attn_v4_g8_vstage_c() == Some(tile_c);
+    let pipeline_name = if use_g8_vstage {
+        match tile_c {
+            16 => "kernel_attn_decode_v4_g8_t4_c16_vstage_f32",
+            32 => "kernel_attn_decode_v4_g8_t4_c32_vstage_f32",
+            _ => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4_main",
+                    detail: format!("vstage C={tile_c} unsupported; expected 16 or 32"),
+                });
+            }
+        }
+    } else if group_tile == group {
         match (k_cache.dtype, group, tile_c) {
             (GgmlType::F16, 4, 16) => "kernel_attn_decode_v4_g4_c16_f32",
             (GgmlType::F16, 4, 32) => "kernel_attn_decode_v4_g4_f32",
@@ -11366,22 +11431,40 @@ pub fn encode_attn_decode_v4_main_only_f32(
     enc.set_tensor(3, v_cache);
     enc.set_tensor(4, o_partial);
     enc.set_tensor(5, ml_partial);
-    let sq_bytes = group_tile * DK * 2;
-    let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
-    enc.set_threadgroup_memory(0, sq_bytes);
-    enc.set_threadgroup_memory(1, ss_bytes);
-    enc.dispatch(
-        MTLSize {
-            width: n_kv_heads,
-            height: group / group_tile,
-            depth: nwg,
-        },
-        MTLSize {
-            width: 32,
-            height: 1,
-            depth: 1,
-        },
-    );
+    if use_g8_vstage {
+        enc.set_threadgroup_memory(0, 2 * group_tile * DK * 2);
+        enc.set_threadgroup_memory(1, 2 * group_tile * tile_c * std::mem::size_of::<f32>());
+        enc.set_threadgroup_memory(2, tile_c * head_dim * 2);
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: 1,
+                depth: nwg,
+            },
+            MTLSize {
+                width: 64,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        let sq_bytes = group_tile * DK * 2;
+        let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
+        enc.set_threadgroup_memory(0, sq_bytes);
+        enc.set_threadgroup_memory(1, ss_bytes);
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: group / group_tile,
+                depth: nwg,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
     Ok(())
 }
 

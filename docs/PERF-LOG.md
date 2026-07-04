@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.463 Kill A3B V-Staged Decode Attention
+
+Status: killed env-only attention-main sidecar, no default engine change. Adds a
+narrow `QWEN_ATTN_V4_G8_VSTAGE_C={16,32}` proof for A3B/group8 true-long decode
+attention, then falsifies it in `attn-intra` before any production promotion.
+
+- Mechanism tested: fuse both group8/tile4 gtiles into one two-simdgroup
+  threadgroup, keep each simdgroup on the existing four-head register shape, and
+  stage only V in threadgroup memory so K remains per-simdgroup streaming while V
+  is shared. This targets `K2 + V2 -> K2 + V1` without tile8's eight-head
+  `o_acc` register footprint.
+- A3B block3 ctx16384/runs16 same-build baseline: group_tile `4`, NWG `256`,
+  C `64`, main `0.1047 ms/layer`, reduce `0.0695`, one-layer avg `0.3395`.
+- V-stage C16: main `0.2056 ms/layer`, reduce `0.0680`, one-layer avg `0.4132`.
+- V-stage C32: main `0.3344 ms/layer`, reduce `0.0847`, one-layer avg `0.5388`.
+
+Interpretation: kill the branch. Explicit V reuse through threadgroup memory is
+slower than the default duplicate streaming/cache behavior for this shape. The
+likely causal lesson is synchronization, TGM footprint, address work, and reduced
+residency overwhelming the capped V-read savings. Per cx review, do not keep
+mining TGM-staged KV/V attention variants without a new counter signal proving
+the data actually moved and occupancy did not collapse.
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B ctx16384/block3 `attn-intra --runs 16` default, V-stage C16, V-stage C32
+- cx reviews `019f2b7e-a` and `019f2b93-5` on sidecar design and kill read
+
 ## 2026-07-04 - v0.462 Split GDN Decode After-Route Attribution
 
 Status: tooling + attribution checkpoint, no default engine change. Adds

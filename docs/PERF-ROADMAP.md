@@ -184,7 +184,12 @@ Current caveats:
   context slope, while split GDN-after totals are flat from ctx4096 to ctx16384
   (`~2.65 -> ~2.60 ms`). Promote attention work only through normal-path A/B
   (`>=3-5%` at ctx16384, no ctx4096 regression), but rank attention main/reduce
-  ahead of fixed GDN-after cleanup for long-context decode.
+  ahead of fixed GDN-after cleanup for long-context decode. v0.463 then kills the
+  most concrete read-once follow-up: a two-simdgroup group8/tile4 V-staged
+  sidecar preserves the four-head register shape and shares only V, but A3B
+  ctx16384 `attn-intra` regresses main from `0.1047 ms/layer` to `0.2056` at C16
+  and `0.3344` at C32. Do not reopen TGM-staged K/V or V-only sharing without a
+  counter signal proving lower traffic and preserved occupancy.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

@@ -1556,8 +1556,17 @@ agreement. Remaining cache work is request/CLI product wiring, observability, an
 cross-process/persistent identity policy; the kernel gate is closed.
 v0.448 adds the smallest CLI product seam: `qwen -m MODEL -p PROMPT -n TOKENS`
 now runs a runtime-backed greedy single-turn path with packed prefill and
-state-coherent decode. Do not expand this into serving abstractions yet; next
-cache work should be driven by real interactive/request usage.
+state-coherent decode. v0.469 adds the next narrow product seam:
+`qwen --requests-jsonl FILE` keeps one `LoadedModel` resident, accepts explicit
+per-request cache-prefix lengths, emits JSONL completions plus optional cache
+stats, and demonstrates a 0.8B Q4 `1024`-token exact-prefix hit (`1629`-token
+prompts) moving model-internal TTFT `299.8 -> 150.2 ms` with `1.75 ms` restore
+and a `32.2 MiB` snapshot. Scope this narrowly: exact in-process token-prefix
+reuse for repeated 1K+ prefixes. It is not streaming, concurrent serving,
+cross-process persistence, automatic prompt-prefix discovery, or a user-visible
+first-byte claim yet. Next cache work should collect real request traces with
+hit-rate, prefix-length distribution, p50/p95, memory, and eviction stats before
+building admission/discovery policy.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

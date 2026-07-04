@@ -488,6 +488,40 @@ uv run scripts/profile/replay_economics.py \
   --interpolate-slots
 ```
 
+### Prefix-cache request smoke
+
+Use the runtime-backed `qwen --requests-jsonl` path when testing repeated explicit
+prompt prefixes in one live process. This is product-seam evidence, not a replay
+policy gate and not cross-process persistence.
+
+JSONL input accepts `prompt` or `prompt_file`, optional `tokens`, and optional
+`cache_prefix_tokens`:
+
+```json
+{"id":"a","prompt":"...shared prefix...suffix A","tokens":1,"cache_prefix_tokens":1024}
+{"id":"b","prompt":"...shared prefix...suffix B","tokens":1,"cache_prefix_tokens":1024}
+```
+
+Run with cache stats:
+
+```sh
+target/release/qwen -m "$MODEL" \
+  --requests-jsonl target/profiles/prefix-cache-requests.jsonl \
+  --request-stats target/profiles/prefix-cache-stats.jsonl \
+  --cache-prefix-tokens 1024 -n 1
+```
+
+Interpretation rules:
+
+- Hits require exact token-prefix identity; prompt-template or whitespace drift can
+  miss.
+- `model_ttft_ms` is model-internal accounting. This JSONL mode writes after full
+  decode, so it is not a streamed first-byte measurement.
+- `--prefix-cache-max-mib` bounds normal eviction pressure, but an oversized newest
+  snapshot is retained alone by runtime cache policy.
+- Treat 1K+ repeated prefixes as the first product-worthy regime unless fresh data
+  overturns the v0.442/v0.445 small-prefix results.
+
 ### Headless Metal performance-limiter counters (v0.455+)
 
 `xctrace` cannot configure a counter profile from CLI flags, but it can

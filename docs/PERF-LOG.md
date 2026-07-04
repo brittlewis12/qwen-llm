@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.469 Prefix-Cache JSONL CLI
+
+Status: experimental product seam, no kernel change. Adds an in-process
+multi-request CLI path so repeated explicit prompt prefixes can reuse one
+resident model and one bounded runtime prefix cache instead of paying repeated
+load/prefill costs.
+
+- `qwen --requests-jsonl FILE` now reads JSONL requests with `prompt` or
+  `prompt_file`, optional per-request `tokens`, and optional
+  `cache_prefix_tokens`, while keeping a single `LoadedModel` alive.
+- `--prefix-cache-max-mib` controls the runtime cache budget, and
+  `--cache-prefix-tokens` opts requests into exact token-prefix insertion on
+  misses. The newest oversized snapshot is still retained alone by cache policy.
+- Multi-request stdout is JSONL completions. `--request-stats PATH` appends
+  machine-readable cache/timing rows with hit/miss, matched prefix tokens,
+  restore/insert/prefill/decode/model-TTFT timings, and cache bytes.
+- Smoke: 0.8B Q4, two `1629`-token requests sharing an explicit `1024`-token
+  prefix. Request 2 restored `1024` tokens, restore was `1.75 ms`, snapshot size
+  was `32.2 MiB`, and model-internal TTFT moved `299.8 -> 150.2 ms`.
+
+Interpretation: this productizes the known v0.445 runtime-prefix-cache economics
+enough to gather real usage evidence. It is not streaming, concurrent serving,
+cross-process persistence, automatic common-prefix discovery, or a small-prefix
+claim. Exact token-prefix identity matters: chat-template, whitespace, special
+token, or prompt-construction drift can turn expected hits into misses.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p qwen-cli --bin qwen`
+- `cargo build --release -p qwen-cli --bin qwen`
+- 0.8B Q4 two-request smoke with a 16-token cache prefix
+- 0.8B Q4 two-request smoke with a 1024-token cache prefix
+- cx review `019f2ddc-c` on product-seam scope and footguns
+
 ## 2026-07-04 - v0.468 Request-Trace Scenario Builder
 
 Status: tooling + scenario checkpoint, no default engine change. Adds a

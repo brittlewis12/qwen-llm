@@ -936,7 +936,7 @@ struct DecodeBlockSliceRealMarginArgs {
     /// Prompt context positions to sweep.
     #[arg(long = "context", value_delimiter = ',', default_value = "512")]
     contexts: Vec<usize>,
-    /// Position stride between slots when single-file multi-slot support lands.
+    /// Position stride between slots when one prompt file supplies multiple slots.
     #[arg(long, default_value = "1")]
     stride: usize,
     /// Start blocks to sweep. If omitted, uses a non-overlapping stride.
@@ -4856,12 +4856,18 @@ fn prepare_real_block_slice_sessions(
     mm: &MetalModel,
     prefix_sessions: &[MetalSession],
     prompt_ids: &[Vec<i32>],
-    context: usize,
+    slot_positions: &[usize],
     tokens: usize,
     start_block: usize,
     kv_capacity: usize,
     h: usize,
 ) -> Result<Vec<MetalSession>> {
+    if slot_positions.len() < tokens {
+        return Err(anyhow!(
+            "slot_positions has {} entries, need {tokens}",
+            slot_positions.len()
+        ));
+    }
     let mut sessions = fresh_gdn_replay_sessions_with_capacity(ctx, mm, tokens, kv_capacity)?;
     for slot in 0..tokens {
         copy_recurrent_session_state(ctx, &prefix_sessions[slot], &mut sessions[slot])?;
@@ -4870,13 +4876,14 @@ fn prepare_real_block_slice_sessions(
         } else {
             &prompt_ids[slot]
         };
-        let token_id = ids[context];
+        let pos = slot_positions[slot];
+        let token_id = ids[pos];
         prepare_moe_session_to_block(
             ctx,
             mf,
             mm,
             token_id,
-            context as u32,
+            pos as u32,
             start_block,
             &mut sessions[slot],
             h,
@@ -5185,11 +5192,6 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
     if file.is_empty() {
         return Err(anyhow!("--file must include at least one prompt"));
     }
-    if file.len() == 1 && tokens != 1 {
-        return Err(anyhow!(
-            "single-file real margin currently requires --tokens 1; pass multiple --file entries for multi-slot same-context rows"
-        ));
-    }
     if file.len() > 1 && file.len() < tokens {
         return Err(anyhow!(
             "got {} --file entries, need at least --tokens {tokens}",
@@ -5257,15 +5259,32 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
         prompt_ids.push(ids);
     }
     let max_context = *contexts.last().expect("non-empty contexts");
-    let last_needed = max_context;
-    for (path, ids) in file.iter().zip(prompt_ids.iter()).take(tokens) {
-        if ids.len() <= last_needed {
+    let last_needed = if file.len() == 1 {
+        max_context
+            .checked_add((tokens - 1).saturating_mul(stride))
+            .ok_or_else(|| anyhow!("context + (tokens - 1) * stride overflow"))?
+    } else {
+        max_context
+    };
+    if file.len() == 1 {
+        if prompt_ids[0].len() <= last_needed {
             return Err(anyhow!(
-                "prompt {} has {} tokens, need at least {} for context sweep",
-                path.display(),
-                ids.len(),
+                "prompt {} has {} tokens, need at least {} for context+stride sweep",
+                file[0].display(),
+                prompt_ids[0].len(),
                 last_needed + 1
             ));
+        }
+    } else {
+        for (path, ids) in file.iter().zip(prompt_ids.iter()).take(tokens) {
+            if ids.len() <= last_needed {
+                return Err(anyhow!(
+                    "prompt {} has {} tokens, need at least {} for context sweep",
+                    path.display(),
+                    ids.len(),
+                    last_needed + 1
+                ));
+            }
         }
     }
 
@@ -5310,30 +5329,67 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
 
     for &context in &contexts {
         let kv_capacity = last_needed + 32;
+        let slot_positions: Vec<usize> = (0..tokens)
+            .map(|slot| {
+                if prompt_ids.len() == 1 {
+                    context + slot * stride
+                } else {
+                    context
+                }
+            })
+            .collect();
         let mut prefix_sessions = Vec::with_capacity(tokens);
-        for slot in 0..tokens {
-            let ids = if prompt_ids.len() == 1 {
-                &prompt_ids[0]
-            } else {
-                &prompt_ids[slot]
-            };
-            let pos = context;
-            let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
-                .with_context(|| format!("real prefix session slot {slot}"))?;
-            for (p, &token_id) in ids.iter().take(pos).enumerate() {
-                let _ = mf.single_token_argmax_profiled(token_id, p as u32, &mut s)?;
+        if prompt_ids.len() == 1 {
+            let ids = &prompt_ids[0];
+            let mut prev_pos = slot_positions[0];
+            let mut first = MetalSession::fresh(&ctx, &mm, kv_capacity)
+                .context("real prefix session slot 0")?;
+            for (p, &token_id) in ids.iter().take(prev_pos).enumerate() {
+                let _ = mf.single_token_argmax_profiled(token_id, p as u32, &mut first)?;
             }
-            prefix_sessions.push(s);
+            prefix_sessions.push(first);
+            for slot in 1..tokens {
+                let pos = slot_positions[slot];
+                let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
+                    .with_context(|| format!("real prefix session slot {slot}"))?;
+                copy_recurrent_session_state(&ctx, &prefix_sessions[slot - 1], &mut s)?;
+                for p in prev_pos..pos {
+                    let _ = mf.single_token_argmax_profiled(ids[p], p as u32, &mut s)?;
+                }
+                prefix_sessions.push(s);
+                prev_pos = pos;
+            }
+        } else {
+            for slot in 0..tokens {
+                let ids = &prompt_ids[slot];
+                let pos = slot_positions[slot];
+                let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
+                    .with_context(|| format!("real prefix session slot {slot}"))?;
+                for (p, &token_id) in ids.iter().take(pos).enumerate() {
+                    let _ = mf.single_token_argmax_profiled(token_id, p as u32, &mut s)?;
+                }
+                prefix_sessions.push(s);
+            }
         }
 
         for &start_block in &start_blocks {
+            if prompt_ids.len() == 1
+                && tokens > 1
+                && block_slice_has_attention(&mm, start_block, n_blocks)?
+            {
+                return Err(anyhow!(
+                    "single-file strided real-margin slots currently require GDN-only block slices; slice {}..{} contains attention",
+                    start_block,
+                    start_block + n_blocks
+                ));
+            }
             let mut base = prepare_real_block_slice_sessions(
                 &ctx,
                 &mf,
                 &mm,
                 &prefix_sessions,
                 &prompt_ids,
-                context,
+                &slot_positions,
                 tokens,
                 start_block,
                 kv_capacity,
@@ -5345,7 +5401,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 &mm,
                 &prefix_sessions,
                 &prompt_ids,
-                context,
+                &slot_positions,
                 tokens,
                 start_block,
                 kv_capacity,
@@ -5377,7 +5433,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     &mm,
                     &prefix_sessions,
                     &prompt_ids,
-                    context,
+                    &slot_positions,
                     tokens,
                     start_block,
                     kv_capacity,
@@ -5389,7 +5445,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     &mm,
                     &prefix_sessions,
                     &prompt_ids,
-                    context,
+                    &slot_positions,
                     tokens,
                     start_block,
                     kv_capacity,
@@ -5401,7 +5457,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     &mm,
                     &prefix_sessions,
                     &prompt_ids,
-                    context,
+                    &slot_positions,
                     tokens,
                     start_block,
                     kv_capacity,
@@ -5413,7 +5469,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     &mm,
                     &prefix_sessions,
                     &prompt_ids,
-                    context,
+                    &slot_positions,
                     tokens,
                     start_block,
                     kv_capacity,
@@ -5425,7 +5481,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     &mm,
                     &prefix_sessions,
                     &prompt_ids,
-                    context,
+                    &slot_positions,
                     tokens,
                     start_block,
                     kv_capacity,
@@ -5437,7 +5493,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     &mm,
                     &prefix_sessions,
                     &prompt_ids,
-                    context,
+                    &slot_positions,
                     tokens,
                     start_block,
                     kv_capacity,
@@ -5582,6 +5638,23 @@ fn moe_for_block(mm: &MetalModel, block_idx: usize) -> Result<Option<&MetalMoeFf
         MetalBlock::Gdn(b) => b.ffn_moe.as_ref(),
         MetalBlock::Attn(b) => b.ffn_moe.as_ref(),
     })
+}
+
+fn block_slice_has_attention(mm: &MetalModel, start_block: usize, n_blocks: usize) -> Result<bool> {
+    let end_block = start_block
+        .checked_add(n_blocks)
+        .ok_or_else(|| anyhow!("start_block + blocks overflow"))?;
+    if end_block > mm.blocks.len() {
+        return Err(anyhow!(
+            "block slice {}..{} outside available 0..{}",
+            start_block,
+            end_block,
+            mm.blocks.len()
+        ));
+    }
+    Ok(mm.blocks[start_block..end_block]
+        .iter()
+        .any(|block| matches!(block, MetalBlock::Attn(_))))
 }
 
 fn cpu_route_fingerprint(

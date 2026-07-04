@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.465 Single-File S8 Replay Gate
+
+Status: tooling + measurement checkpoint, no default engine change. Extends
+`decode-block-slice-real-margin` so one long prompt file can supply multiple
+nearby replay slots at `context + slot * stride`, removing the local true-long
+S8 corpus blocker for GDN-only windows.
+
+- Tooling: single-file slots now prepare prefixes incrementally by copying
+  recurrent state from the previous slot and advancing only the stride delta,
+  rather than ramping each slot from scratch. Multi-file behavior stays
+  unchanged.
+- Guardrail: single-file multi-slot mode is currently limited to GDN-only block
+  slices; attention-containing slices still need per-slot attention-position
+  support before they are valid.
+- Smoke: A3B `chaos.json` ctx16/S2/stride1 `block0..2` has zero route set/order
+  mismatches, `min_x_cos 0.999999983`, and `max_x_abs 0.000108`.
+- True-long A3B `chaos.json` ctx32768/S8/stride1, `block0..2`: zero fallback,
+  gross save `25.92%`, validated wall `0.4386 ms/token`, validated GPU
+  `0.3656 ms/token`, net wall save `14.41%`.
+- Same run, `block20..22`: zero fallback, gross save `16.72%`, validated wall
+  `0.4002 ms/token`, validated GPU `0.3310 ms/token`, net wall save `17.78%`.
+- Full-S8 occupancy economics over those two rows blend to `16.09%` net save.
+
+Interpretation: replay remains the live high-EV decode branch for serving-style
+full S8 occupancy. This is mechanism-positive, not a product scheduler gate: it
+does not prove independent prompt diversity, ragged occupancy, p95 behavior, or
+attention-containing slices. Per cx review, the next gate is a minimal S8-only
+shadow policy around `blocks=2` GDN-only windows with margin fallback, replayed
+token share, fallback rate, blended net wall save, and p95 latency accounting on
+real/captured request occupancy.
+
+Validation:
+
+- `cargo fmt`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B ctx16/S2 single-file `decode-block-slice-real-margin` smoke
+- A3B ctx32768/S8 single-file true-long replay gate
+- `replay_economics.py --occupancy '8=1.0'`
+- cx review `019f2baf-6` on interpretation and next gate
+
 ## 2026-07-04 - v0.464 A3B Tail LM/Argmax Split
 
 Status: measurement checkpoint, no engine change. Uses the existing

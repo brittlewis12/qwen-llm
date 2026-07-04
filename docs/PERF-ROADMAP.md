@@ -1494,7 +1494,16 @@ four rows have zero fallback slots at `3e-4` and validated net saves
 `11.64-14.84%`; full-S8 occupancy economics blend to `12.85%`. This keeps S8
 alive for long-context serving-style work, but does not remove the production
 request-trace/p95 gate. True S8 `ctx32768` is currently corpus/harness-blocked
-because only three local independent files exceed `32k` tokens.
+because only three local independent files exceed `32k` tokens. v0.465 removes
+that harness blocker for GDN-only windows by letting one long prompt file supply
+nearby slots at `context + slot * stride` with incremental prefix prep. A3B
+`chaos.json` ctx32768/S8/stride1, `blocks=2`, windows `0..2` and `20..22`, has
+zero fallback and validated net saves `14.41%`/`17.78%`; full-S8 occupancy blends
+to `16.09%`. This promotes replay to a minimal S8-only shadow-policy branch, not
+a scheduler/default branch: still require real or captured ragged occupancy,
+fallback rate, replayed-token share, blended `>=5-8%` net wall save, and p95
+non-regression before production scheduler work. Do not generalize this row to
+independent-prompt diversity or attention-containing slices.
 v0.450 adds a narrow current-HEAD qwen-only guardrail after the v0.444-v0.449
 churn: A3B Q4 long decode remains `101.7/99.3/93.5 t/s` at
 ctx `8192/16384/32768`, A10B Q4_XL `tg128` is `45.62 t/s`, and dense 27B Q4 is

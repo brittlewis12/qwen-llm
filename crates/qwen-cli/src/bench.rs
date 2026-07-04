@@ -2193,6 +2193,7 @@ where
 struct TimedGpuStats {
     avg_wall_ms: f64,
     avg_gpu_ms: f64,
+    p50_wall_ms: f64,
     p50_gpu_ms: f64,
     p90_gpu_ms: f64,
     max_gpu_ms: f64,
@@ -2240,10 +2241,12 @@ where
 
     let avg_wall_ms = wall_samples.iter().sum::<f64>() / iters as f64;
     let avg_gpu_ms = gpu_samples.iter().sum::<f64>() / iters as f64;
+    wall_samples.sort_by(|a, b| a.total_cmp(b));
     gpu_samples.sort_by(|a, b| a.total_cmp(b));
     Ok(TimedGpuStats {
         avg_wall_ms,
         avg_gpu_ms,
+        p50_wall_ms: percentile(&wall_samples, 0.50),
         p50_gpu_ms: percentile(&gpu_samples, 0.50),
         p90_gpu_ms: percentile(&gpu_samples, 0.90),
         max_gpu_ms: *gpu_samples.last().unwrap_or(&0.0),
@@ -2280,10 +2283,12 @@ where
 
     let avg_wall_ms = wall_samples.iter().sum::<f64>() / iters as f64;
     let avg_gpu_ms = gpu_samples.iter().sum::<f64>() / iters as f64;
+    wall_samples.sort_by(|a, b| a.total_cmp(b));
     gpu_samples.sort_by(|a, b| a.total_cmp(b));
     Ok(TimedGpuStats {
         avg_wall_ms,
         avg_gpu_ms,
+        p50_wall_ms: percentile(&wall_samples, 0.50),
         p50_gpu_ms: percentile(&gpu_samples, 0.50),
         p90_gpu_ms: percentile(&gpu_samples, 0.90),
         max_gpu_ms: *gpu_samples.last().unwrap_or(&0.0),
@@ -4898,6 +4903,8 @@ fn prepare_real_block_slice_sessions(
 struct ValidatedReplayStats {
     avg_wall_ms: f64,
     avg_gpu_ms: f64,
+    p50_wall_ms: f64,
+    p50_gpu_ms: f64,
     avg_fallback_slots: f64,
 }
 
@@ -4960,9 +4967,15 @@ fn time_validated_block_slice_replay(
         }
     }
 
+    let avg_wall_ms = wall_samples.iter().sum::<f64>() / iters as f64;
+    let avg_gpu_ms = gpu_samples.iter().sum::<f64>() / iters as f64;
+    wall_samples.sort_by(|a, b| a.total_cmp(b));
+    gpu_samples.sort_by(|a, b| a.total_cmp(b));
     Ok(ValidatedReplayStats {
-        avg_wall_ms: wall_samples.iter().sum::<f64>() / iters as f64,
-        avg_gpu_ms: gpu_samples.iter().sum::<f64>() / iters as f64,
+        avg_wall_ms,
+        avg_gpu_ms,
+        p50_wall_ms: percentile(&wall_samples, 0.50),
+        p50_gpu_ms: percentile(&gpu_samples, 0.50),
         avg_fallback_slots: fallback_samples.iter().sum::<f64>() / iters as f64,
     })
 }
@@ -5347,7 +5360,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
         margin_threshold,
     );
     println!(
-        "start_block\tend_block\tcontext\tslots\troute_order_mismatches\troute_set_mismatches\tfirst_set_mismatch\tmax_logit_abs\tmax_logit_rms\tmin_base_margin\tmin_replay_margin\treplay_margin_lt_1e3\treplay_margin_lt_5e3\tmin_x_cos\tmax_x_abs\tbaseline_wall_ms_per_tok\treplay_wall_ms_per_tok\tgross_wall_save_pct\tvalidated_wall_ms_per_tok\tvalidated_gpu_ms_per_tok\tfallback_slots_avg\tfallback_pct\tnet_wall_save_pct"
+        "start_block\tend_block\tcontext\tslots\troute_order_mismatches\troute_set_mismatches\tfirst_set_mismatch\tmax_logit_abs\tmax_logit_rms\tmin_base_margin\tmin_replay_margin\treplay_margin_lt_1e3\treplay_margin_lt_5e3\tmin_x_cos\tmax_x_abs\tbaseline_wall_ms_per_tok\treplay_wall_ms_per_tok\tgross_wall_save_pct\tvalidated_wall_ms_per_tok\tvalidated_gpu_ms_per_tok\tfallback_slots_avg\tfallback_pct\tnet_wall_save_pct\tbaseline_p50_wall_ms_per_tok\treplay_p50_wall_ms_per_tok\tvalidated_p50_wall_ms_per_tok\tvalidated_p50_gpu_ms_per_tok\tp50_net_wall_save_pct"
     );
 
     for &context in &contexts {
@@ -5584,6 +5597,10 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     let replay_per_tok = replay_stats.avg_wall_ms / slot_count as f64;
                     let validated_wall_per_tok = validated.avg_wall_ms / slot_count as f64;
                     let validated_gpu_per_tok = validated.avg_gpu_ms / slot_count as f64;
+                    let baseline_p50_wall_per_tok = baseline.p50_wall_ms / slot_count as f64;
+                    let replay_p50_wall_per_tok = replay_stats.p50_wall_ms / slot_count as f64;
+                    let validated_p50_wall_per_tok = validated.p50_wall_ms / slot_count as f64;
+                    let validated_p50_gpu_per_tok = validated.p50_gpu_ms / slot_count as f64;
                     let fallback_pct = validated.avg_fallback_slots / slot_count as f64;
                     let fallback_exact_per_tok = fallback_pct * baseline_per_tok;
                     let gross_save_pct = if baseline_per_tok > 0.0 {
@@ -5598,6 +5615,15 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     } else {
                         0.0
                     };
+                    let p50_net_save_pct = if baseline_p50_wall_per_tok > 0.0 {
+                        (baseline_p50_wall_per_tok
+                            - validated_p50_wall_per_tok
+                            - fallback_exact_per_tok)
+                            / baseline_p50_wall_per_tok
+                            * 100.0
+                    } else {
+                        0.0
+                    };
                     Some((
                         baseline_per_tok,
                         replay_per_tok,
@@ -5607,6 +5633,11 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                         validated.avg_fallback_slots,
                         fallback_pct * 100.0,
                         net_save_pct,
+                        baseline_p50_wall_per_tok,
+                        replay_p50_wall_per_tok,
+                        validated_p50_wall_per_tok,
+                        validated_p50_gpu_per_tok,
+                        p50_net_save_pct,
                     ))
                 } else {
                     None
@@ -5616,7 +5647,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                     .map(|(block, slot)| format!("block={block},slot={slot}"))
                     .unwrap_or_else(|| "none".to_string());
                 let timing_cols = timing.map_or_else(
-                    || "\t\t\t\t\t\t\t\t".to_string(),
+                    || "\t".repeat(13),
                     |(
                         baseline_per_tok,
                         replay_per_tok,
@@ -5626,9 +5657,14 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                         fallback_slots_avg,
                         fallback_pct,
                         net_save_pct,
+                        baseline_p50_wall_per_tok,
+                        replay_p50_wall_per_tok,
+                        validated_p50_wall_per_tok,
+                        validated_p50_gpu_per_tok,
+                        p50_net_save_pct,
                     )| {
                         format!(
-                            "\t{baseline_per_tok:.4}\t{replay_per_tok:.4}\t{gross_save_pct:.2}\t{validated_wall_per_tok:.4}\t{validated_gpu_per_tok:.4}\t{fallback_slots_avg:.2}\t{fallback_pct:.2}\t{net_save_pct:.2}"
+                            "\t{baseline_per_tok:.4}\t{replay_per_tok:.4}\t{gross_save_pct:.2}\t{validated_wall_per_tok:.4}\t{validated_gpu_per_tok:.4}\t{fallback_slots_avg:.2}\t{fallback_pct:.2}\t{net_save_pct:.2}\t{baseline_p50_wall_per_tok:.4}\t{replay_p50_wall_per_tok:.4}\t{validated_p50_wall_per_tok:.4}\t{validated_p50_gpu_per_tok:.4}\t{p50_net_save_pct:.2}"
                         )
                     },
                 );

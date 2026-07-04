@@ -1514,7 +1514,10 @@ packet is weaker (`-3.13%`/`14.27%` S8, with the negative window repeating at
 So replay remains live but not promoted: the next artifact must use real or
 captured request traces plus robust repeats, not more full-occupancy-only rows.
 Keep S8-only/GDN-only; do not build attention-slice support or runtime scheduler
-plumbing until the ragged `>=5-8%` net and p95 gate clears.
+plumbing until the ragged `>=5-8%` net and p95 gate clears. v0.467 adds p50 wall
+columns to the real-margin timing rows so near-threshold packets can distinguish
+average-wall noise from a real validation overhead loss. Keep the gate on average
+wall/request p95 unless a later artifact explicitly justifies a p50 policy metric.
 v0.450 adds a narrow current-HEAD qwen-only guardrail after the v0.444-v0.449
 churn: A3B Q4 long decode remains `101.7/99.3/93.5 t/s` at
 ctx `8192/16384/32768`, A10B Q4_XL `tg128` is `45.62 t/s`, and dense 27B Q4 is

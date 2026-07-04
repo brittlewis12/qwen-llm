@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.467 Replay Timing P50 Columns
+
+Status: tooling checkpoint, no default engine change. Adds a minimal timing
+methodology guard after v0.466 showed one ctx16384 S8 replay row could flip from
+negative to positive under repeat.
+
+- `time_cmd_reps_stats` now records p50 wall time in addition to average wall/GPU
+  and p50/p90/max GPU.
+- `time_validated_block_slice_replay` now records p50 wall and p50 GPU.
+- `decode-block-slice-real-margin` appends p50 timing columns and a p50 net save
+  estimate after the existing average columns. Existing parsers keep using the
+  average columns and ignore the extras unless a later gate opts in.
+- Smoke: A3B ctx16, `--slot-counts 1,2`, timing iters 2 emits the new columns;
+  `replay_economics.py --real-margin` still parses the file.
+
+Interpretation: this does not change the promotion metric. It makes future
+near-threshold replay packets easier to audit for wall-time jitter before we park
+or promote the branch.
+
+Validation:
+
+- `cargo fmt`
+- `uv run python -m py_compile scripts/profile/replay_economics.py`
+- `cargo check -p qwen-cli --bin qwen-bench`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- A3B ctx16 timed real-margin smoke with p50 columns
+- `replay_economics.py --real-margin` parser smoke on the p50-column TSV
+
 ## 2026-07-04 - v0.466 S8 Shadow Request Gate
 
 Status: tooling + request-economics checkpoint, no default engine change. This

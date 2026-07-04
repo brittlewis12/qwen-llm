@@ -1518,6 +1518,15 @@ plumbing until the ragged `>=5-8%` net and p95 gate clears. v0.467 adds p50 wall
 columns to the real-margin timing rows so near-threshold packets can distinguish
 average-wall noise from a real validation overhead loss. Keep the gate on average
 wall/request p95 unless a later artifact explicitly justifies a p50 policy metric.
+v0.468 adds `request_trace_from_game.py`, a provenance-labeled scenario builder
+from game transcripts. It improves stress coverage with real transcript
+completion lengths, but modeled `burst`/`fixed-gap` arrivals remain synthetic:
+fixed-gap 500 ms scenarios save `8.13%` at ctx8192 and `5.02%` at ctx16384, while
+burst scenarios save `8.76%`/`5.42%`. This does not satisfy the empirical
+arrival/request gate. Replay is now explicitly parked as blocked on real/captured
+arrival traces; do not add scheduler, attention-slice, or more replay kernel work
+until that evidence exists. Scenario traces may be used only to keep the economics
+tooling honest.
 v0.450 adds a narrow current-HEAD qwen-only guardrail after the v0.444-v0.449
 churn: A3B Q4 long decode remains `101.7/99.3/93.5 t/s` at
 ctx `8192/16384/32768`, A10B Q4_XL `tg128` is `45.62 t/s`, and dense 27B Q4 is

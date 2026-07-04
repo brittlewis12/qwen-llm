@@ -452,6 +452,42 @@ Second-level attention probes:
 - Use these one at a time; they intentionally add encoder boundaries and are not
   throughput comparison modes.
 
+### Replay request traces
+
+Use `replay_economics.py --request-trace` when evaluating S8 replay policy
+economics. A trace row is:
+
+```tsv
+arrival_ms	tokens	id	prompt_tokens
+```
+
+Trace provenance matters:
+
+- `qwen --trace-request PATH` records real single-process arrivals and generated
+  token counts. Sequential local runs are real traces, but usually occupancy-1
+  smoke, not S8 evidence.
+- `scripts/profile/request_trace_from_game.py` builds scenario traces from
+  `~/code/llm/game` transcripts. It emits provenance comments such as
+  `arrival_source`, `completion_source`, `token_count_source`, and
+  `is_empirical_arrival=false`.
+- Treat transcript scenario traces as stress coverage only. They use real
+  completion-length distributions, but modeled arrivals do not satisfy the
+  real/captured request-trace replay gate.
+
+Example scenario packet:
+
+```sh
+uv run scripts/profile/request_trace_from_game.py \
+  --input '/Users/tito/code/llm/game/*.json' \
+  --arrival-model fixed-gap --fixed-gap-ms 500 \
+  --output target/profiles/game-scenario-fixed500.tsv
+
+uv run scripts/profile/replay_economics.py \
+  --real-margin target/profiles/v0466-a3b-real-economics-slotcounts-c8192.tsv \
+  --request-trace target/profiles/game-scenario-fixed500.tsv \
+  --interpolate-slots
+```
+
 ### Headless Metal performance-limiter counters (v0.455+)
 
 `xctrace` cannot configure a counter profile from CLI flags, but it can

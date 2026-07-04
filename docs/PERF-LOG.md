@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.468 Request-Trace Scenario Builder
+
+Status: tooling + scenario checkpoint, no default engine change. Adds a
+provenance-labeled way to feed richer completion-length distributions into the
+S8 replay economics model without calling modeled arrivals real workload data.
+
+- Tooling: `scripts/profile/request_trace_from_game.py` converts game transcripts
+  into `replay_economics.py --request-trace` TSV rows with metadata comments for
+  `provenance`, `arrival_source`, `content_source`, `completion_source`,
+  `token_count_source`, and `is_empirical_arrival=false`.
+- The builder supports `burst`, `fixed-gap`, and `session-created-fixed-gap`
+  arrival models, char-estimated token counts, and optional exact counts via
+  `qwen-bench tok`.
+- Smoke: exact-token `chaos.json` first-four assistant trace works with
+  `/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf`.
+- Scenario packet: 34 game JSONs, 163 assistant completions, about `218k`
+  char-estimated completion tokens.
+- Fixed-gap 500 ms scenario through v0.466 A3B rows: ctx8192 saves `8.13%`, p95
+  improves `-31.06%`, replayed tokens `90.82%`; ctx16384 saves `5.02%`, p95
+  improves `-20.85%`, replayed tokens `90.75%`.
+- Burst scenario through the same rows: ctx8192 saves `8.76%`, ctx16384 saves
+  `5.42%`, replayed tokens `97.43%`.
+
+Interpretation: this is useful stress/scenario coverage only. The content and
+completion lengths come from real transcripts, but arrivals are modeled and the
+full packet uses char-estimated tokens. Per cx review, this does not satisfy the
+real/captured request-trace gate; replay remains blocked on empirical arrivals
+and should not receive scheduler or attention-slice work from this packet.
+
+Validation:
+
+- `uv run python -m py_compile scripts/profile/request_trace_from_game.py`
+- Approximate and exact-token trace-builder smokes
+- Full game-corpus `burst` and `fixed-gap 500 ms` scenario traces
+- `replay_economics.py --request-trace --interpolate-slots` over v0.466 ctx8192
+  and ctx16384 rows
+- cx review `019f2dae-4` on scenario/provenance interpretation
+
 ## 2026-07-04 - v0.467 Replay Timing P50 Columns
 
 Status: tooling checkpoint, no default engine change. Adds a minimal timing

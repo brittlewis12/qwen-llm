@@ -1853,10 +1853,15 @@ single faster hit can still lose after cold insert and memory costs.
    G16 body exact, but the full A10B decode gate still fails: attention-intra
    improves directionally while `ctx8192 --window 4 --fresh-per-checkpoint`
    regresses `42.5 -> 41.4 t/s`. Do not keep a G16 bcast env knob or reopen this
-   exact shape. Keep attention below MoE/GDN unless the next proposal brings
-   hidden-traffic counters, a main-pass read-once execution shape, or an
-   end-to-end `ctx32768` prototype that moves throughput rather than partial
-   storage or reduce rows.
+   exact shape. v0.480 then tests a more literal read-once-ish G16 shape: one
+   4-simdgroup TG stages half of V at a time to cut tile traffic from roughly
+   `K4 + V4` to `K4 + V1`. It is exact, but A10B `attn-intra ctx8192` regresses
+   badly (`0.4340 -> 0.5614 ms`, main `0.1274 -> 0.2231`). Together with the
+   v0.463 A3B V-stage kill, close TGM-staged V/KV variants unless counters prove
+   read savings beat synchronization/TGM/occupancy loss. Keep attention below
+   MoE/GDN unless the next proposal brings hidden-traffic counters, a non-TGM
+   read-once execution shape, or an end-to-end `ctx32768` prototype that moves
+   throughput rather than partial storage or reduce rows.
 3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds
    correctness-breaking no-op attribution for the GDN projection lane. The
    recoverable lower-bound budget is

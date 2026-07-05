@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.480 G16 V-Half Attention Staging Falsifier
+
+Status: dirty sidecar killed and not kept. This was a narrower read-once decode
+attention probe for the A10B `group=16`, `tile4`, `C=64` path: merge the four
+gtile threadgroups into one 4-simdgroup threadgroup, keep score/weight state
+lane-local, and stage only half of the V vector at a time in threadgroup memory.
+The design targets default `K4 + V4` traffic per tile and changes it to roughly
+`K4 + V1` while staying under the 32 KiB threadgroup-memory cap.
+
+- Correctness cleared: `QWEN_ATTN_V4_G16_VHALF_BCAST=1` passed the broad
+  `attn_v4_matches_naive_f16kv` suite.
+- The micro gate failed hard on A10B `attn-intra ctx8192 --runs 5`: default
+  one-layer packet `0.4340 ms`, vhalf `0.5614 ms`; main body regressed
+  `0.1274 -> 0.2231 ms`.
+
+Interpretation: explicitly staging V for the G16 decode shape is worse than
+duplicate streaming/cache behavior, even with lane-local scores and no score
+threadgroup-memory round trip. This reinforces the v0.463 A3B V-stage kill:
+do not reopen TGM-staged V/KV attention variants without counter evidence that
+the saved device reads beat synchronization, TGM footprint, and occupancy loss.
+
+Validation:
+
+- Env `QWEN_ATTN_V4_G16_VHALF_BCAST=1`; command
+  `cargo test -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture`
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- Artifacts: `target/profiles/v0480-g16-vhalf-correctness.out`,
+  `target/profiles/v0480-a10b-attn-*-ctx8192.out`
+
 ## 2026-07-04 - v0.479 Packed GDN Lazy-Decay Falsifier
 
 Status: dirty sidecar killed and not kept. This tested a non-local packed-GDN

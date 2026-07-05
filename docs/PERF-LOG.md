@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.490 G8 Bcast Promotion Falsifier
+
+Status: promotion sidecar killed and not kept. The existing exact G8
+score-broadcast decode-attention body remains opt-in behind
+`QWEN_ATTN_V4_G8_BCAST=1`; this checkpoint tested whether to auto-enable it only
+for true-long A3B `group=8`, F16-KV, `C=64` contexts at `ctx >= 32768`.
+
+- Fresh opt-in A/B repeated the old direction but stayed bounded: A3B `ctx16384`
+  moved `92.4 -> 93.2 t/s`; `ctx32768` moved `85.9 -> 87.7 t/s`.
+- The auto-policy implementation was correctness-clean under the forced-bcast
+  attention oracle, but full decode did not robustly keep the win.
+- With the auto policy in place, rollback-first `ctx32768 --window 8` measured
+  rollback `90.4 t/s` versus auto `90.1 t/s`; the branch was reverted.
+
+Interpretation: the G8 score-broadcast body still has a real main-body signal,
+but it does not clear a full-decode default gate. Keep it opt-in for long-context
+experiments; do not promote it without a repeated full-decode win, not just an
+`attn-intra` body win.
+
+Validation:
+
+- `QWEN_ATTN_V4_G8_BCAST=1 cargo test -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture`
+- A3B `ctx-sweep` base/bcast/auto/rollback artifacts:
+  `target/profiles/v0490-a3b-g8-bcast-*.out`
+- cx review session `019f3438-9e21-7763-baa5-8d208486c365`
+
 ## 2026-07-05 - v0.489 BF16 Vector A-Load Recheck
 
 Status: source sidecar killed and not kept. This rechecked the out-of-band BF16

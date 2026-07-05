@@ -196,10 +196,14 @@ Current caveats:
   `0.3490 -> 0.4574 ms` because estimated main bytes jump
   `0.0714 -> 0.2727 GB`. Future attention work needs byte reduction with
   preserved reuse/occupancy, or a real online-attention rewrite, not smaller
-  subgroup splits. v0.464 splits the tail and kills standalone argmax work: A3B
-  ctx16384 has `lm head 0.87 ms / 7.2%` but `lm argmax 0.05 ms / 0.4%`; treat
-  lm-head as a batched/dataflow economics component, not a local argmax-fusion
-  branch.
+  subgroup splits. v0.490 rejects promoting the existing G8 score-broadcast
+  attention sidecar to an automatic true-long default: opt-in still has a main-body
+  signal, but rollback-first A3B `ctx32768 --window 8` measured rollback
+  `90.4 t/s` versus auto `90.1 t/s`. Keep `QWEN_ATTN_V4_G8_BCAST=1` opt-in until
+  it clears a repeated full-decode gate. v0.464 splits the tail and kills
+  standalone argmax work: A3B ctx16384 has `lm head 0.87 ms / 7.2%` but
+  `lm argmax 0.05 ms / 0.4%`; treat lm-head as a batched/dataflow economics
+  component, not a local argmax-fusion branch.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

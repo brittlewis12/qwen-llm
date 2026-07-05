@@ -6,6 +6,52 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.492 Valley Alignment: Compositor Excluded, Trace Path Exhausted
+
+Status: attribution checkpoint from EXISTING capture data, no engine change.
+Answers cx's A0 caveat ("valleys aligning to dispatch boundaries is
+suggestive, not proof") as far as traces allow, with a pre-registered
+falsifier (`scripts/profile/gpu_valley_alignment.py`, new, uv).
+
+- The exec-points table's only sub-kick structure is NOT our dispatches:
+  decode kicks are single opaque begin/end intervals on the Compute channel
+  (`0x123459`); interior rows are paired micro-submissions on Vertex/Fragment
+  channels (`0x123457/8`), identified via `metal-gpu-intervals` as
+  WindowServer display compositing (median 7.4 us, p99 338 us, bursts about
+  once per 8.3 ms refresh) plus a Browser Helper trickle.
+- Pre-registered alignment test (A0 valley definitions; circular-shift
+  control preserving valley run structure): P2/NEGATIVE. Valley bins within
+  +-100 us of a compositor burst = 0.307 vs shifted control 0.266
+  (enrichment 1.15x, gate was >= 2x); valley bins inside burst envelopes
+  15.4% vs 12.1% baseline cover. Burst-onset PSTH shows a real time-locked
+  dip (~29% flat pre-onset -> ~22-24% for ~400 us) worth only ~3% of the
+  occupancy shortfall. Compositor interference is real, ambient, and MINOR;
+  it does not explain the valley mass. H3 (inter-dispatch drain) stands.
+- Trace-based dispatch alignment is now triply falsified on this hardware:
+  (1) exec-points compute channel carries no intra-kick markers; (2)
+  `metal-gpu-intervals` has ONE row per kick because each kick is a single
+  compute encoder; (3) v0.460: per-dispatch xctrace labels unavailable and
+  app-side stage timestamps perturb +13%. Within-encoder dispatch timing is
+  not observable from outside on M4 Max. Do not re-attempt.
+- Consequence for the program: the drain question moves from correlational
+  to CAUSAL, inside B0 - add a synthetic dispatch-chain arm (K tiny
+  dependent dispatches shaped like the ~110/kick decode ladder vs the same
+  work as one persistent dispatch with device-scope acquire/release
+  boundaries; the delta IS the boundary drain cost). B0's signaling arm
+  must also tolerate ~120 Hz compositor preemption by construction, since
+  headless does not mean exclusive.
+
+Validation:
+
+- `uv run --script scripts/profile/gpu_valley_alignment.py --values
+  /tmp/nwg-default-gpu-counter-value.xml --exec-points
+  /tmp/nwg-default-metal-gpu-execution-points.xml` (664 tokens, 1979 kicks,
+  40785 micro-submissions; valley fraction 56.3% pooled reproduces A0)
+- WindowServer identification: `metal-gpu-intervals` export from
+  `/tmp/qwen-nwg-default.trace` (Vertex/Fragment rows, process
+  `WindowServer (388)`; qwen-bench rows = 2336 ~= (664 tokens + ramp) x 3
+  kicks, one compute encoder each)
+
 ## 2026-07-05 - v0.491 A0 Occupancy Time-Series: Drain Sawtooth Verdict
 
 Status: attribution checkpoint from EXISTING capture data, no engine change.

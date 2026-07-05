@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.484 GDN Update-Dot Loop Falsifier
+
+Status: exact micro-cleanup killed and not kept. This tested whether the packed
+GDN recurrence still had a cheap local loop-level win after the larger chunked
+delta-rule sidecar failed.
+
+- The sidecar coalesced the state update and post-update output dot loops in all
+  four GDN recurrence kernels (`step`, `step_decay`, packed, and packed NSG4),
+  preserving the same per-lane sum order for `o_partial`.
+- Correctness stayed green: `gdn_step_matches_cpu` matched both `n_v=16,n_k=16`
+  and `n_v=48,n_k=16`, and the 27B `prefill-vs-single` gate at `T=24,P=16`
+  reported final logits, hidden capture, GDN state/conv, and KV all green.
+- A source A/B on 27B suite rows did not clear a keep gate. `pp1024` was flat
+  (`234.568 -> 234.579 t/s`, GPU `4.2535 -> 4.2525 ms/token`) and `tg128`
+  regressed slightly (`23.777 -> 23.629 t/s`, GPU `41.6324 -> 41.8923 ms/token`).
+
+Interpretation: the compiler/hardware is not leaving a meaningful win in this
+local GDN row loop. Keep GDN recurrence work focused on a materially different
+one-dispatch or matmul-shaped algorithm; do not spend more time on local
+update/dot loop reshuffles.
+
+Validation:
+
+- `cargo test -p qwen-llm gdn_step_matches_cpu -- --nocapture`
+- `QWEN_TEST_27B_PREFILL_T=24 QWEN_TEST_27B_PREFILL_P=16 cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
+- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024 --tg 128 --runs 3 -o json > target/profiles/v0484-27b-suite-gdn-dot-base.json`
+- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024 --tg 128 --runs 3 -o json > target/profiles/v0484-27b-suite-gdn-dot-combined.json`
+
 ## 2026-07-05 - v0.483 GDN Chunk16 Delta-Rule Falsifier
 
 Status: dirty exact sidecar killed and not kept. This was the first concrete

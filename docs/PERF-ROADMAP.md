@@ -1442,7 +1442,12 @@ model correctness all clear, but the all-in 27B `pp1024` gate collapses
 `238.75 -> 124.34 t/s` (`4.1500 -> 8.0000 gpu ms/token`). This kills host-loop
 `chunk16` GDN. Future chunked GDN must be one-dispatch-per-layer or genuinely
 matmul-shaped enough to beat the current packed kernel all-in before model
-integration.
+integration. v0.484 also kills the remaining cheap local row-loop cleanup: merging
+the recurrence update loop with the post-update output-dot loop is exact and
+correctness-clean, but 27B suite rows are flat/slightly negative (`pp1024`
+`234.568 -> 234.579 t/s`, `tg128` `23.777 -> 23.629 t/s`). Do not reopen local
+`gdn_step` loop reshuffles; only a materially different recurrence algorithm
+belongs on the live queue.
 v0.437 executes the reopened KV-Q8 attention-reader micro-oracle and kills it for
 the current `attn_v4` execution model. The branch preserves the F16 grid, adds
 MoE/group8 Q8 main and tile2/tile4 subgroup kernels, fixes `attn-intra` Q8

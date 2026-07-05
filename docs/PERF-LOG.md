@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.488 G8 Tile1 Attention Falsifier
+
+Status: exact attention occupancy sidecar killed and not kept. This retested the
+old group8 tile1 idea against the current tile4/NWG256 true-long A3B path: split
+the group8 decode attention subgroup to one Q head at a time to reduce private
+state and register pressure, while accepting the extra K/V rereads.
+
+- The sidecar added group8 tile1 decode kernels and selector support for the
+  v4 subgroup path. It did not change default dispatch.
+- `QWEN_ATTN_V4_G8_TILE=1` stayed correctness-clean on the ignored group8
+  F16-KV oracle (`max|d| <= 8.26e-10`, `cos=1.000000`).
+- The A3B `ctx16384` `attn-intra` gate failed immediately. Tile4 measured
+  `0.3490 ms/layer` with main/reduce `0.1035/0.0679 ms`; tile1 measured
+  `0.4574 ms/layer` with main/reduce `0.1993/0.0676 ms`.
+
+Interpretation: lower group-tile occupancy without a new reuse mechanism is not
+the long-attention exit. Tile1 quadruples estimated main-pass bytes
+(`0.0714 -> 0.2727 GB`) and nearly doubles main-pass time; do not reopen
+lower-than-tile2 group8 subgroup splits without a materially different K/V reuse
+or online-attention design.
+
+Validation:
+
+- `QWEN_ATTN_V4_G8_TILE=1 cargo test --release -p qwen-llm attn_v4_group8_subgroup_matches_naive_f16kv -- --ignored --nocapture`
+- `QWEN_ATTN_V4_G8_TILE=4 target/release/qwen-bench attn-intra -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --ctx 16384 --runs 5 > target/profiles/v0488-a3b-attn-intra-ctx16384-t4.out`
+- `QWEN_ATTN_V4_G8_TILE=1 target/release/qwen-bench attn-intra -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --ctx 16384 --runs 5 > target/profiles/v0488-a3b-attn-intra-ctx16384-t1.out`
+
 ## 2026-07-05 - v0.487 MoE Down All-SG Scatter Falsifier
 
 Status: exact source sidecar killed and not kept. This tested the remaining

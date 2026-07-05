@@ -189,10 +189,17 @@ Current caveats:
   sidecar preserves the four-head register shape and shares only V, but A3B
   ctx16384 `attn-intra` regresses main from `0.1047 ms/layer` to `0.2056` at C16
   and `0.3344` at C32. Do not reopen TGM-staged K/V or V-only sharing without a
-  counter signal proving lower traffic and preserved occupancy. v0.464 splits the
-  tail and kills standalone argmax work: A3B ctx16384 has `lm head 0.87 ms / 7.2%`
-  but `lm argmax 0.05 ms / 0.4%`; treat lm-head as a batched/dataflow economics
-  component, not a local argmax-fusion branch.
+  counter signal proving lower traffic and preserved occupancy. v0.488 then kills
+  the opposite occupancy-only split against the current tile4/NWG256 true-long
+  path: group8 tile1 is exact, but A3B ctx16384 `attn-intra` main regresses
+  `0.1035 -> 0.1993 ms/layer` and one-layer total regresses
+  `0.3490 -> 0.4574 ms` because estimated main bytes jump
+  `0.0714 -> 0.2727 GB`. Future attention work needs byte reduction with
+  preserved reuse/occupancy, or a real online-attention rewrite, not smaller
+  subgroup splits. v0.464 splits the tail and kills standalone argmax work: A3B
+  ctx16384 has `lm head 0.87 ms / 7.2%` but `lm argmax 0.05 ms / 0.4%`; treat
+  lm-head as a batched/dataflow economics component, not a local argmax-fusion
+  branch.
 - Shared Q8_0 SwiGLU fusion is a small default MoE decode cleanup. v0.294 fuses
   shared gate/up Q8_0 mat-vec plus `silu_mul`; rollback is
   `QWEN_DECODE_SHARED_SWIGLU_Q8=0`. A3B `tg128` moves about `+0.7%`, A10B

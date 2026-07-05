@@ -2060,6 +2060,13 @@ policy and move back to S8 replay or chunked GDN.
       correctness is green, but 27B `pp1024` regresses (`235.384 -> 231.967 t/s`)
       while `pp4096` is flat/noise. Do not repeat this without shader-counter
       evidence for a specific kernel.
+    - Hot-weight K-quant repack: v0.486 executes the smallest exact compressed
+      prepack proof, reordering one 27B Q4_K FFN gate tensor into N16 mat-mat
+      consumption order without predequantizing. Correctness is bit-exact, but
+      the primitive only moves `0.4078 -> 0.4030 ms/dispatch` (`1.012x`), far
+      below the `>=1.12-1.15x` gate for model wiring. Demote broad K-quant repack
+      until counters identify a larger layout stall or a different tensor/layout
+      has a named primitive win.
     - Decode fusions: prefer byte-reuse/dataflow fusions such as GDN `qkv+z` over
       residual/elementwise shelves, but require a primitive proof that beats the
       current near-roofline projection harness or a phase bucket of at least `5%`

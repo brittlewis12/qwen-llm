@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.486 Q4_K Compressed Prepack Falsifier
+
+Status: exact primitive sidecar killed and not kept. This was the smallest
+bounded test of the hot-weight repack idea: keep Q4_K bytes compressed, but
+reorder one dense 27B FFN gate tensor offline into the exact `[sblk, mtile64,
+row64]` raw-block order consumed by the N16 mat-mat body.
+
+- The sidecar added a benchmark-only `kernel_mat_mat_q4_K_f32_n16_prepack`, plus a
+  CPU repacker for `blk.0.ffn_gate.weight`. It did not predequantize to half and
+  did not change model ABI or production dispatch.
+- Correctness was bit-exact against the default Q4_K mat-mat path on the 27B
+  `blk.0.ffn_gate.weight` shape at `N=16` (`max_abs=0`).
+- The release primitive gate failed hard: default `0.4078 ms/dispatch`, prepack
+  `0.4030 ms/dispatch`, only `1.012x`. The pre-authorized continuation gate was
+  `>=1.12-1.15x` at this primitive before any full-model wiring.
+
+Interpretation: compressed block reordering does not buy enough on the current
+Q4_K N16 prefill kernel to justify model-level repack, memory accounting, or ABI
+work. Do not reopen Q4_K compressed prepack unless a counter trace identifies a
+larger layout-specific stall than this primitive exposes.
+
+Validation:
+
+- cx review session `019f3399-6da3-7923-acb5-ddaccfb2e2e0`
+- `cargo test -p qwen-llm mat_mat_q4_k_n16_prepack_matches_default -- --nocapture`
+- `cargo test --release -p qwen-llm mat_mat_q4_k_n16_prepack_microbench -- --ignored --nocapture`
+
 ## 2026-07-05 - v0.485 Q4/Q6 Mat-Mat SG-Barrier Falsifier
 
 Status: exact source sidecar killed and not kept. This tested the audit claim that

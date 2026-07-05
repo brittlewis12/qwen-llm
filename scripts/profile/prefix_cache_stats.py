@@ -19,6 +19,9 @@ class CacheRow:
     prompt_tokens: int
     generated_tokens: int
     cache_prefix_tokens: int | None
+    cache_prefix_source: str
+    auto_cache_prefix_tokens: int | None
+    auto_cache_future_hits: int
     cache_hit: bool
     matched_prefix_tokens: int
     exact_cache_hit: bool
@@ -60,6 +63,7 @@ def parse_stats(path: Path) -> list[CacheRow]:
         if ttft is None:
             raise SystemExit(f"{path}:{line_no}: missing model_ttft_ms")
         prefix = raw.get("cache_prefix_tokens")
+        auto_prefix = raw.get("auto_cache_prefix_tokens")
         rows.append(
             CacheRow(
                 path=path,
@@ -67,6 +71,11 @@ def parse_stats(path: Path) -> list[CacheRow]:
                 prompt_tokens=as_int(raw, "prompt_tokens"),
                 generated_tokens=as_int(raw, "generated_tokens"),
                 cache_prefix_tokens=None if prefix is None else int(prefix),
+                cache_prefix_source=str(raw.get("cache_prefix_source", "unknown")),
+                auto_cache_prefix_tokens=None
+                if auto_prefix is None
+                else int(auto_prefix),
+                auto_cache_future_hits=as_int(raw, "auto_cache_future_hits"),
                 cache_hit=bool(raw.get("cache_hit", False)),
                 matched_prefix_tokens=as_int(raw, "matched_prefix_tokens"),
                 exact_cache_hit=bool(raw.get("exact_cache_hit", False)),
@@ -130,12 +139,18 @@ def summarize(rows: list[CacheRow]) -> None:
     misses = [r for r in rows if not r.cache_hit]
     exact_hits = [r for r in rows if r.exact_cache_hit]
     inserts = [r for r in rows if r.prefix_inserted_bytes > 0]
+    auto_rows = [r for r in rows if r.cache_prefix_source == "auto"]
+    auto_hits = [
+        r for r in rows if r.cache_hit and r.cache_prefix_source in {"auto", "none"}
+    ]
 
     emit_metric("requests", len(rows))
     emit_metric("hits", len(hits))
     emit_metric("misses", len(misses))
     emit_metric("hit_rate_pct", 100.0 * len(hits) / len(rows))
     emit_metric("exact_hits", len(exact_hits))
+    emit_metric("auto_rows", len(auto_rows))
+    emit_metric("auto_hits", len(auto_hits))
     emit_metric("generated_tokens", sum(r.generated_tokens for r in rows))
     emit_metric("cache_bytes_max", max(r.cache_bytes for r in rows))
     emit_metric("cache_max_bytes", max(r.cache_max_bytes for r in rows))
@@ -178,6 +193,12 @@ def compare_rows(baseline: list[CacheRow], candidate: list[CacheRow]) -> None:
     base_total = [base.total_ms for base, _ in pairs]
     cand_total = [cand.total_ms for _, cand in pairs]
     hit_rows = [cand for _, cand in pairs if cand.cache_hit]
+    auto_rows = [cand for _, cand in pairs if cand.cache_prefix_source == "auto"]
+    auto_hits = [
+        cand
+        for _, cand in pairs
+        if cand.cache_hit and cand.cache_prefix_source in {"auto", "none"}
+    ]
 
     emit_metric("paired_requests", len(pairs))
     emit_metric("baseline_requests", len(baseline))
@@ -185,6 +206,8 @@ def compare_rows(baseline: list[CacheRow], candidate: list[CacheRow]) -> None:
     emit_metric("prompt_token_mismatches", prompt_hash_mismatches)
     emit_metric("candidate_hits", len(hit_rows))
     emit_metric("candidate_hit_rate_pct", 100.0 * len(hit_rows) / len(pairs))
+    emit_metric("candidate_auto_rows", len(auto_rows))
+    emit_metric("candidate_auto_hits", len(auto_hits))
     emit_metric("model_ttft_sum_baseline_ms", sum(base_ttft))
     emit_metric("model_ttft_sum_candidate_ms", sum(cand_ttft))
     emit_metric("model_ttft_sum_save_pct", save_pct(sum(base_ttft), sum(cand_ttft)))

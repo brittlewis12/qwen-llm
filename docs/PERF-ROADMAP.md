@@ -1584,7 +1584,21 @@ adds stdin JSONL (`--requests-jsonl -`), so the next cache artifact should be an
 actual resident-process trace packet rather than another synthetic two-request
 smoke. v0.473 adds paired `--compare BASELINE CANDIDATE` stats; use no-cache and
 explicit-cache runs over the same request ids as the promotion unit, because a
-single faster hit can still lose after cold insert and memory costs.
+single faster hit can still lose after cold insert and memory costs. v0.482
+removes the manual-prefix tax for JSONL request packets by defaulting an automatic
+repeated-prefix admission policy at `>=1024` tokens
+(`--cache-prefix-auto-min-tokens 0` disables). The policy scans exact token
+prefixes across the packet, picks one prefix per request by
+`prefix_len * future_hit_count`, preserves explicit per-request/CLI overrides, and
+records `cache_prefix_source`, `auto_cache_prefix_tokens`, and
+`auto_cache_future_hits` in stats; stdin JSONL remains streaming and does not use
+lookahead auto admission. A 0.8B release file-JSONL smoke with three requests and
+`1260` shared tokens improves model-TTFT sum `511.4 -> 390.9 ms`, while the tiny
+first-insert packet still worsens p95; this is the expected product shape, not a
+full promotion. Next cache work is real request traces with no-cache versus
+auto-cache paired stats, p50/p95, memory, and eviction behavior. If real traces
+lack repeated `1K+` prefixes or p95 worsens after insert/eviction, park cache
+policy and move back to S8 replay or chunked GDN.
 
 0. Dense all-quant prompt guardrail: v0.347 found a blind spot in the old
    scoreboard. Static fast-path coverage was clean across 52 local Qwen GGUFs,

@@ -55,6 +55,10 @@ struct Args {
     #[arg(long)]
     cache_prefix_tokens: Option<usize>,
 
+    /// Auto-cache repeated JSONL prompt prefixes at or above this token length.
+    #[arg(long, default_value_t = 1024)]
+    cache_prefix_auto_min_tokens: usize,
+
     /// Append per-request JSON stats for multi-request runs.
     ///
     /// Timing fields are model-internal; this JSONL mode writes each completion
@@ -83,6 +87,39 @@ struct JsonlRequest {
     cache_prefix_tokens: Option<usize>,
 }
 
+#[derive(Debug)]
+struct PreparedJsonlRequest {
+    request: JsonlRequest,
+    id: String,
+    line: usize,
+    prompt_ids: Vec<i32>,
+    auto_cache_prefix_tokens: Option<usize>,
+    auto_cache_future_hits: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CachePrefixSource {
+    None,
+    Request,
+    RequestDisabled,
+    Cli,
+    CliDisabled,
+    Auto,
+}
+
+impl CachePrefixSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Request => "request",
+            Self::RequestDisabled => "request_disabled",
+            Self::Cli => "cli",
+            Self::CliDisabled => "cli_disabled",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RequestOutput {
     id: String,
@@ -104,7 +141,10 @@ struct RequestStatsRow {
     requested_tokens: usize,
     generated_tokens: usize,
     cache_prefix_tokens: Option<usize>,
+    cache_prefix_source: String,
     cache_prefix_hash: Option<String>,
+    auto_cache_prefix_tokens: Option<usize>,
+    auto_cache_future_hits: usize,
     cache_hit: bool,
     matched_prefix_tokens: usize,
     matched_prefix_hash: Option<String>,
@@ -310,15 +350,6 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
 
-    let stdin;
-    let reader: Box<dyn BufRead> = if requests_path == Path::new("-") {
-        stdin = std::io::stdin();
-        Box::new(stdin.lock())
-    } else {
-        let requests = std::fs::File::open(requests_path)
-            .with_context(|| format!("open requests JSONL {}", requests_path.display()))?;
-        Box::new(std::io::BufReader::new(requests))
-    };
     let mut stats_file = args
         .request_stats
         .as_ref()
@@ -334,40 +365,72 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
         args.prefix_cache_max_mib,
     );
 
-    for (line_idx, line) in reader.lines().enumerate() {
-        let line_no = line_idx + 1;
-        let line = line.with_context(|| format!("read requests line {line_no}"))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
+    if requests_path == Path::new("-") {
+        let stdin = std::io::stdin();
+        let reader = stdin.lock();
+        if args.cache_prefix_auto_min_tokens > 0 {
+            eprintln!(
+                "prefix-cache auto admission needs request lookahead; disabled for stdin JSONL"
+            );
         }
-        let request: JsonlRequest = serde_json::from_str(trimmed)
-            .with_context(|| format!("parse requests line {line_no}"))?;
-        let id = request
-            .id
-            .clone()
-            .unwrap_or_else(|| format!("line-{line_no}"));
-        let (output, stats) = run_jsonl_request(&loaded, &tokenizer, &request, &id, line_no, args)
-            .with_context(|| format!("run request {id}"))?;
+        for (line_idx, line) in reader.lines().enumerate() {
+            let line_no = line_idx + 1;
+            let line = line.with_context(|| format!("read requests line {line_no}"))?;
+            let Some(prepared_request) =
+                prepare_jsonl_request_line(line_no, &line, &tokenizer, args)?
+            else {
+                continue;
+            };
+            let (output, stats) =
+                run_jsonl_request(&loaded, &tokenizer, &prepared_request, args)
+                    .with_context(|| format!("run request {}", prepared_request.id))?;
 
-        serde_json::to_writer(&mut stdout, &output).context("write request output")?;
-        writeln!(stdout)?;
-        stdout.flush()?;
+            serde_json::to_writer(&mut stdout, &output).context("write request output")?;
+            writeln!(stdout)?;
+            stdout.flush()?;
 
-        if let Some(file) = stats_file.as_mut() {
-            serde_json::to_writer(&mut *file, &stats).context("write request stats")?;
-            writeln!(file)?;
-            file.flush()?;
+            if let Some(file) = stats_file.as_mut() {
+                serde_json::to_writer(&mut *file, &stats).context("write request stats")?;
+                writeln!(file)?;
+                file.flush()?;
+            }
+            if let Some(path) = args.trace_request.as_ref() {
+                append_request_trace(
+                    path,
+                    unix_epoch_ms()?,
+                    stats.prompt_tokens,
+                    stats.generated_tokens,
+                )?;
+            }
+            n_requests += 1;
         }
-        if let Some(path) = args.trace_request.as_ref() {
-            append_request_trace(
-                path,
-                unix_epoch_ms()?,
-                stats.prompt_tokens,
-                stats.generated_tokens,
-            )?;
+    } else {
+        let mut prepared = prepare_jsonl_requests(requests_path, &tokenizer, args)?;
+        discover_auto_cache_prefixes(&mut prepared, args.cache_prefix_auto_min_tokens);
+
+        for prepared_request in &prepared {
+            let (output, stats) = run_jsonl_request(&loaded, &tokenizer, prepared_request, args)
+                .with_context(|| format!("run request {}", prepared_request.id))?;
+
+            serde_json::to_writer(&mut stdout, &output).context("write request output")?;
+            writeln!(stdout)?;
+            stdout.flush()?;
+
+            if let Some(file) = stats_file.as_mut() {
+                serde_json::to_writer(&mut *file, &stats).context("write request stats")?;
+                writeln!(file)?;
+                file.flush()?;
+            }
+            if let Some(path) = args.trace_request.as_ref() {
+                append_request_trace(
+                    path,
+                    unix_epoch_ms()?,
+                    stats.prompt_tokens,
+                    stats.generated_tokens,
+                )?;
+            }
+            n_requests += 1;
         }
-        n_requests += 1;
     }
 
     ensure!(
@@ -387,23 +450,155 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
     Ok(())
 }
 
-fn run_jsonl_request(
-    loaded: &LoadedModel,
+fn prepare_jsonl_requests(
+    requests_path: &Path,
     tokenizer: &Tokenizer,
-    request: &JsonlRequest,
-    id: &str,
-    line: usize,
     args: &Args,
-) -> Result<(RequestOutput, RequestStatsRow)> {
-    let arrival_ms = unix_epoch_ms_u64()?;
-    let total_t0 = Instant::now();
-    let prompt = request_prompt(request, line)?;
+) -> Result<Vec<PreparedJsonlRequest>> {
+    let stdin;
+    let reader: Box<dyn BufRead> = if requests_path == Path::new("-") {
+        stdin = std::io::stdin();
+        Box::new(stdin.lock())
+    } else {
+        let requests = std::fs::File::open(requests_path)
+            .with_context(|| format!("open requests JSONL {}", requests_path.display()))?;
+        Box::new(std::io::BufReader::new(requests))
+    };
+
+    let mut prepared = Vec::new();
+    for (line_idx, line) in reader.lines().enumerate() {
+        let line_no = line_idx + 1;
+        let line = line.with_context(|| format!("read requests line {line_no}"))?;
+        if let Some(request) = prepare_jsonl_request_line(line_no, &line, tokenizer, args)? {
+            prepared.push(request);
+        }
+    }
+    ensure!(
+        !prepared.is_empty(),
+        "requests JSONL {} contained no requests",
+        requests_path.display()
+    );
+    Ok(prepared)
+}
+
+fn prepare_jsonl_request_line(
+    line_no: usize,
+    line: &str,
+    tokenizer: &Tokenizer,
+    args: &Args,
+) -> Result<Option<PreparedJsonlRequest>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(None);
+    }
+    let request: JsonlRequest =
+        serde_json::from_str(trimmed).with_context(|| format!("parse requests line {line_no}"))?;
+    let id = request
+        .id
+        .clone()
+        .unwrap_or_else(|| format!("line-{line_no}"));
+    let prompt = request_prompt(&request, line_no)?;
     let prompt_ids = tokenizer
         .encode(&prompt, !args.no_special_tokens)
         .context("tokenize prompt")?;
     if prompt_ids.is_empty() {
         bail!("request {id} tokenized to zero tokens");
     }
+    Ok(Some(PreparedJsonlRequest {
+        request,
+        id,
+        line: line_no,
+        prompt_ids,
+        auto_cache_prefix_tokens: None,
+        auto_cache_future_hits: 0,
+    }))
+}
+
+fn discover_auto_cache_prefixes(requests: &mut [PreparedJsonlRequest], min_tokens: usize) {
+    if min_tokens == 0 || requests.len() < 2 {
+        return;
+    }
+
+    for idx in 0..requests.len() {
+        let mut future_lcps = Vec::new();
+        for future in &requests[idx + 1..] {
+            let lcp = longest_common_prefix_len(&requests[idx].prompt_ids, &future.prompt_ids);
+            if lcp >= min_tokens {
+                future_lcps.push(lcp);
+            }
+        }
+        if future_lcps.is_empty() {
+            continue;
+        }
+
+        future_lcps.sort_unstable();
+        let mut best_len = 0usize;
+        let mut best_hits = 0usize;
+        let mut best_score = 0usize;
+        for (pos, &len) in future_lcps.iter().enumerate() {
+            let hits = future_lcps.len() - pos;
+            let score = len.saturating_mul(hits);
+            if score > best_score || (score == best_score && len > best_len) {
+                best_len = len;
+                best_hits = hits;
+                best_score = score;
+            }
+        }
+
+        requests[idx].auto_cache_prefix_tokens = Some(best_len.min(requests[idx].prompt_ids.len()));
+        requests[idx].auto_cache_future_hits = best_hits;
+    }
+}
+
+fn longest_common_prefix_len(a: &[i32], b: &[i32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+fn selected_cache_prefix(
+    request: &JsonlRequest,
+    args: &Args,
+    auto_cache_prefix_tokens: Option<usize>,
+    prompt_len: usize,
+) -> (Option<usize>, CachePrefixSource) {
+    if let Some(n) = request.cache_prefix_tokens {
+        return selected_cache_prefix_from_value(n, prompt_len, CachePrefixSource::Request);
+    }
+    if let Some(n) = args.cache_prefix_tokens {
+        return selected_cache_prefix_from_value(n, prompt_len, CachePrefixSource::Cli);
+    }
+    if let Some(n) = auto_cache_prefix_tokens {
+        return selected_cache_prefix_from_value(n, prompt_len, CachePrefixSource::Auto);
+    }
+    (None, CachePrefixSource::None)
+}
+
+fn selected_cache_prefix_from_value(
+    n: usize,
+    prompt_len: usize,
+    source: CachePrefixSource,
+) -> (Option<usize>, CachePrefixSource) {
+    if n == 0 {
+        let disabled = match source {
+            CachePrefixSource::Request => CachePrefixSource::RequestDisabled,
+            CachePrefixSource::Cli => CachePrefixSource::CliDisabled,
+            _ => CachePrefixSource::None,
+        };
+        return (None, disabled);
+    }
+    (Some(n.min(prompt_len)).filter(|&n| n > 0), source)
+}
+
+fn run_jsonl_request(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    prepared: &PreparedJsonlRequest,
+    args: &Args,
+) -> Result<(RequestOutput, RequestStatsRow)> {
+    let request = &prepared.request;
+    let id = &prepared.id;
+    let arrival_ms = unix_epoch_ms_u64()?;
+    let total_t0 = Instant::now();
+    let prompt_ids = &prepared.prompt_ids;
 
     let n_generate = request.tokens.unwrap_or(args.tokens);
     let min_capacity = prompt_ids
@@ -434,11 +629,12 @@ fn run_jsonl_request(
     let mut sequence = loaded.create_sequence(SequenceConfig::new(capacity))?;
     let forward = loaded.forward();
 
-    let cache_prefix_tokens = request
-        .cache_prefix_tokens
-        .or(args.cache_prefix_tokens)
-        .map(|n| n.min(prompt_ids.len()))
-        .filter(|&n| n > 0);
+    let (cache_prefix_tokens, cache_prefix_source) = selected_cache_prefix(
+        request,
+        args,
+        prepared.auto_cache_prefix_tokens,
+        prompt_ids.len(),
+    );
     let prompt_hash = token_hash_hex(&prompt_ids);
     let cache_prefix_hash = cache_prefix_tokens.map(|n| token_hash_hex(&prompt_ids[..n]));
 
@@ -464,6 +660,39 @@ fn run_jsonl_request(
                 hit.exact_final_logits.with_context(|| {
                     format!("exact prefix-cache hit for request {id} did not store logits")
                 })?
+            } else if let Some(prefix_len) = cache_prefix_tokens
+                && prefix_len > matched_prefix_tokens
+            {
+                let prefix_suffix = &prompt_ids[matched_prefix_tokens..prefix_len];
+                let (prefix_logits, ms) = prefill_span(
+                    &forward,
+                    &mut sequence,
+                    &mut scratch,
+                    prefix_suffix,
+                    matched_prefix_tokens,
+                )?;
+                prefill_ms += ms;
+
+                let insert_t0 = Instant::now();
+                let insert = loaded
+                    .cache_sequence_prefix(
+                        &sequence,
+                        prompt_ids[..prefix_len].to_vec(),
+                        Some(prefix_logits.clone()),
+                    )
+                    .context("insert prefix cache snapshot")?;
+                prefix_insert_ms = insert_t0.elapsed().as_secs_f64() * 1e3;
+                prefix_inserted_bytes = insert.snapshot_bytes;
+
+                if prefix_len == prompt_ids.len() {
+                    prefix_logits
+                } else {
+                    let suffix = &prompt_ids[prefix_len..];
+                    let (logits, ms) =
+                        prefill_span(&forward, &mut sequence, &mut scratch, suffix, prefix_len)?;
+                    prefill_ms += ms;
+                    logits
+                }
             } else {
                 let suffix = &prompt_ids[matched_prefix_tokens..];
                 let (logits, ms) = prefill_span(
@@ -521,9 +750,9 @@ fn run_jsonl_request(
     let stats_now = loaded.prefix_cache_stats();
     let finish_ms = unix_epoch_ms_u64()?;
     let stats = RequestStatsRow {
-        schema_version: 1,
+        schema_version: 2,
         id: id.to_string(),
-        line,
+        line: prepared.line,
         model: loaded.path().display().to_string(),
         arrival_ms,
         finish_ms,
@@ -532,7 +761,10 @@ fn run_jsonl_request(
         requested_tokens: n_generate,
         generated_tokens: generated.len(),
         cache_prefix_tokens,
+        cache_prefix_source: cache_prefix_source.as_str().to_string(),
         cache_prefix_hash,
+        auto_cache_prefix_tokens: prepared.auto_cache_prefix_tokens,
+        auto_cache_future_hits: prepared.auto_cache_future_hits,
         cache_hit,
         matched_prefix_tokens,
         matched_prefix_hash: if matched_prefix_tokens > 0 {
@@ -799,4 +1031,45 @@ fn print_model_info(model_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prepared(id: &str, tokens: &[i32]) -> PreparedJsonlRequest {
+        PreparedJsonlRequest {
+            request: JsonlRequest {
+                id: Some(id.to_string()),
+                prompt: None,
+                prompt_file: None,
+                tokens: None,
+                cache_prefix_tokens: None,
+            },
+            id: id.to_string(),
+            line: 1,
+            prompt_ids: tokens.to_vec(),
+            auto_cache_prefix_tokens: None,
+            auto_cache_future_hits: 0,
+        }
+    }
+
+    #[test]
+    fn auto_cache_prefix_discovery_scores_reuse() {
+        let mut requests = vec![
+            prepared("a", &[1, 2, 3, 4, 10]),
+            prepared("b", &[1, 2, 3, 4, 20]),
+            prepared("c", &[1, 2, 3, 30]),
+            prepared("d", &[9, 9, 9]),
+        ];
+
+        discover_auto_cache_prefixes(&mut requests, 3);
+
+        assert_eq!(requests[0].auto_cache_prefix_tokens, Some(3));
+        assert_eq!(requests[0].auto_cache_future_hits, 2);
+        assert_eq!(requests[1].auto_cache_prefix_tokens, Some(3));
+        assert_eq!(requests[1].auto_cache_future_hits, 1);
+        assert_eq!(requests[2].auto_cache_prefix_tokens, None);
+        assert_eq!(requests[3].auto_cache_prefix_tokens, None);
+    }
 }

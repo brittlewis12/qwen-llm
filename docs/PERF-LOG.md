@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.482 JSONL Auto Prefix-Cache Admission
+
+Status: product-shaped prefix-cache wiring, not a kernel change. Adds default
+JSONL lookahead admission for repeated exact prompt prefixes of at least `1024`
+tokens, with `--cache-prefix-auto-min-tokens 0` as rollback/disable. Explicit
+per-request or CLI `cache_prefix_tokens` still takes precedence, including `0` as
+an explicit disable. `--requests-jsonl -` stays streaming; lookahead auto
+admission is disabled there unless explicit prefixes are provided.
+
+- The admission policy scores each request's future common-prefix candidates by
+  `prefix_len * future_hit_count`, then caches one selected prefix before the
+  suffix. If a request restores a shorter cached prefix and is also selected for a
+  longer future prefix, it advances to that prefix, snapshots it, and then runs
+  the remaining suffix.
+- Request stats now report `schema_version=2`, `cache_prefix_source`,
+  `auto_cache_prefix_tokens`, and `auto_cache_future_hits`; the stats reducer now
+  exposes auto rows/hits in summaries and paired compares.
+- A release 0.8B Q4 file-JSONL repeated-prefix smoke at `1260` shared tokens
+  shows the intended shape: first request inserts a `35.0 MiB` snapshot, the next
+  two restore `1260` tokens in about `2.0 ms`, and paired model-TTFT sum improves
+  `511.4 -> 390.9 ms` (`+23.6%`). P95 is worse on this tiny packet because the
+  first cold insert is not amortized; real trace promotion still requires p95 and
+  memory gates.
+- A short `270`-token two-request smoke loses after insert cost, matching the
+  existing conclusion that small-prefix cache should not be sold as a win.
+
+Interpretation: this removes the main UX/process tax from the proven repeated
+`1K+` prefix cache lane without adding another env knob or kernel sidecar. The
+next cache decision should use real request traces with repeated-prefix hit rate,
+p50/p95, memory, and eviction stats; if those traces lack `1K+` reuse or p95
+worsens after cold insert/eviction, park cache policy and return to S8 replay or
+chunked GDN.
+
+Validation:
+
+- cx review session `019f32d4-6aa4-7c93-b51f-e2a94a3bf475`
+- `cargo check -p qwen-cli --bin qwen`
+- `uv run python -m py_compile scripts/profile/prefix_cache_stats.py`
+- `cargo test -p qwen-cli auto_cache_prefix_discovery_scores_reuse`
+- `cargo build --release -p qwen-cli --bin qwen`
+- Artifacts: `target/profiles/v0482-prefix-auto-*.jsonl`
+
 ## 2026-07-04 - v0.481 G6 Bcast Correctness Falsifier
 
 Status: dirty sidecar killed and not kept. This tried to reuse the lane-local

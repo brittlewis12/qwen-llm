@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.491 A0 Occupancy Time-Series: Drain Sawtooth Verdict
+
+Status: attribution checkpoint from EXISTING capture data, no engine change.
+Executes A0 of the cx-gated topology program (session `019f347b-c...`):
+intra-kick occupancy time-series from the v0.455-era nwg-default capture
+(664 tokens, 25 us bins, 50 us kick-edge guard bands, per cx conditions).
+
+- Interior valley fraction (<50% of the kick's own p90): med `0.64/0.64/0.43`
+  across kicks 0/1/2 — RECURRING interior valleys, not edge artifacts.
+- Every kick STARTS at `56-58%` occupancy and the pooled histogram shows
+  `~8%` of time at `60-70%`: the machine repeatedly reaches good occupancy
+  and collapses. The v0.455 "28% occupancy" is a duty-cycle average of
+  ~60% bursts and near-idle valleys.
+- Tail/mid ratio `1.00-1.18`: no monotone tail decay, so H4 (intra-dispatch
+  imbalance) is not dominant. Verdict: H3 — inter-dispatch drain/
+  serialization between ~110 short dependent dispatches per kick.
+- Per the pre-registered branch: Program A (TG-packaging) demotes to
+  confirmatory; Program B (persistent/fused execution across dispatch
+  boundaries) is now EVIDENCED; next gate is B0 (residency + bounded
+  cross-TG signaling probe), then B1a (GDN glue/route descriptor
+  persistence) per the signed sequence.
+- Root cause fixed en route: xctrace exec-points rows carry TWO
+  `metal-command-buffer-id` elements (queue-scoped first, real cmdbuf id
+  LAST); first-tag-wins parsing collapses the kick timeline into one
+  giant token. `scripts/profile/gpu_occupancy_timeseries.py` (new, uv)
+  takes the last id; the same latent hazard is annotated in
+  `gpu_limiter_capture.py`. The exec-points table also carries ~127
+  sub-kick points/token — B0 review should use them to align valleys to
+  dispatch boundaries (cx's "suggestive, not proof" caveat).
+
+Validation:
+
+- `uv run --script scripts/profile/gpu_occupancy_timeseries.py` on the
+  matched nwg-default pair (664 tokens; kick medians 2.98/3.76/3.58 ms
+  reproduce v0.455)
+- cx program gate session `019f347b-c...` (A0 GO with conditions:
+  time-weighted bins, guard bands, interior-only claims — all applied)
+
 ## 2026-07-05 - v0.490 G8 Bcast Promotion Falsifier
 
 Status: promotion sidecar killed and not kept. The existing exact G8

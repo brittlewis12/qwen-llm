@@ -276,6 +276,10 @@ Current caveats:
   `2.15 ms` A10B and `tg128` moves only `+2.2%/+2.4%`. Q5 down remains real, but
   the removable cost is smeared across several mechanisms; stop drilling local Q5
   down sidecars unless a new mechanism or counter trace isolates a larger term.
+  v0.487 also kills the prompt-side all-SG scatter epilogue rewrite for Q5/Q6
+  grouped down: correctness is green, but A3B `pp512/pp1024` moves
+  `1487.45/1678.78 -> 1484.06/1675.05 t/s`. Do not reopen scalar scatter
+  epilogue rewrites without a trace showing the epilogue itself is material.
 - v0.312 adds `QWEN_DECODE_TRACE_COUNTS=1` tg JSON accounting and reruns the
   current-default versus `QWEN_DECODE_MOE_CONCURRENT_GDN=0` packet. The default
   remains a real win (`+8.8%` A3B, `+6.0%` A10B in the clean no-trace repeat), but

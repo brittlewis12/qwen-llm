@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.487 MoE Down All-SG Scatter Falsifier
+
+Status: exact source sidecar killed and not kept. This tested the remaining
+audit-shaped MoE routed-down epilogue idea: use all four simdgroups to scatter
+their own `32x16` output quadrant instead of staging the full tile and letting
+`sgitg==0` copy every column.
+
+- The sidecar changed the Q5_K and Q6_K grouped routed-down prompt kernels only;
+  the decode fused weighted-sum R2 path was not touched.
+- A3B MoE `prefill-vs-single` at `T=16,P=16` stayed green with final logits,
+  GDN state/conv, and KV inside the existing gates.
+- The A3B prompt gate failed: `pp512` moved `1487.45 -> 1484.06 t/s` and `pp1024`
+  moved `1678.78 -> 1675.05 t/s`, with GPU ms/token slightly worse on both rows.
+
+Interpretation: the single-simdgroup scatter epilogue is not a hidden prompt
+MoE down lever on the current grouped kernels. Do not reopen all-SG/scalar
+scatter rewrites unless a trace shows the epilogue itself, not the projection
+body, is the limiting term.
+
+Validation:
+
+- `QWEN_A3B_MOE_TEST_TOTAL=16 QWEN_A3B_MOE_TEST_CHUNK=16 QWEN_A3B_MOE_TEST_CONT_TOKENS=0 cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_35b_a3b_moe -- --nocapture`
+- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --pp 512,1024 --runs 2 -o json > target/profiles/v0487-a3b-pp512-1024-allsg-base.json`
+- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --pp 512,1024 --runs 2 -o json > target/profiles/v0487-a3b-pp512-1024-allsg-modified.json`
+
 ## 2026-07-05 - v0.486 Q4_K Compressed Prepack Falsifier
 
 Status: exact primitive sidecar killed and not kept. This was the smallest

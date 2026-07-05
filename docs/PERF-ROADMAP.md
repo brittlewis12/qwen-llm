@@ -2031,7 +2031,10 @@ policy and move back to S8 replay or chunked GDN.
    llama.cpp (`73.63` versus `1239.10 t/s`). Do not default bfloat-act or reopen
    BF16 kernel work until named production accounting explains `>=90%` of BF16
    `pp512` wall, or one identified category is `>=40%` of wall and has a plausible
-   `>=1.5x` no-trace production fix. Do not reapply grouped-MoE vector A-loads.
+   `>=1.5x` no-trace production fix. v0.489 independently rechecks grouped BF16
+   `bfloat4x4` A loads and again loses on warmed A3B BF16 `pp512` samples
+   (`657.3/1373.2` scalar versus `645.0/1371.3 t/s` vector). Do not reapply
+   grouped-MoE vector A-loads.
 9. Short MoE decode execution-shape, only with fresh evidence: v0.292-v0.311 make
    decode materially greener, but v0.312 says the current default is already
    GPU-active at `~95.8-97.8%` wall on warmed A3B/A10B `tg128`. The GDN-concurrent

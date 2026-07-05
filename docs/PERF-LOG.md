@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.489 BF16 Vector A-Load Recheck
+
+Status: source sidecar killed and not kept. This rechecked the out-of-band BF16
+MoE scalar-load hypothesis by replacing grouped BF16 SwiGLU/down scalar A-tile
+loads with direct `bfloat4x4` loads, then restoring the scalar source after the
+gate failed.
+
+- This was already covered by the older v0.319 BF16 audit; the refreshed source
+  A/B confirms that vector A-loads are not the BF16 prompt exit.
+- A3B BF16 `pp512` has a huge first-touch effect in `qwen-bench pp`: scalar
+  samples were `77.8/657.3/1373.2 t/s`, so the warmed samples are the useful
+  comparison, not the cold average.
+- The warmed vector samples were `645.0/1371.3 t/s`, slightly below scalar. GPU
+  time also moved the wrong way (`2.252 -> 2.290 s` average over the three-run
+  packet), so there is no keep gate.
+
+Interpretation: do not reopen grouped BF16 A-load vectorization without a new
+counter signal. The BF16 cliff remains an accounting/dataflow problem, not this
+specific scalar-load microshape.
+
+Validation:
+
+- `cargo build --release -p qwen-cli --bin qwen-bench`
+- scalar/vector source A/B on A3B BF16 `pp512`, artifacts
+  `target/profiles/v0489-a3b-bf16-pp512-{scalar,vector}-r3.out`
+
 ## 2026-07-05 - v0.488 G8 Tile1 Attention Falsifier
 
 Status: exact attention occupancy sidecar killed and not kept. This retested the

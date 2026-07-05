@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.483 GDN Chunk16 Delta-Rule Falsifier
+
+Status: dirty exact sidecar killed and not kept. This was the first concrete
+test of the real chunked GDN delta-rule algebra rather than another local Q/K
+staging or lazy-decay variant.
+
+- The CPU oracle rewrote the packed recurrence as decayed low-rank
+  contributions, avoiding the unstable normalized-basis `v / cumulative_decay`
+  form. It matched the serial packed recurrence on synthetic `head_dim=128`
+  shapes.
+- The Metal sidecar used a small `K*K^T` / `K*Q^T` Gram precompute plus a
+  `chunk16` NSG4 recurrence kernel. Synthetic GPU correctness matched the packed
+  kernel for both `T=5, n_v=12, n_k=4` and production-shaped
+  `T=16, n_v=48, n_k=16` rows.
+- The first model-level 27B gate found the normalized-basis form could produce
+  NaNs; the stable carry-product form fixed that and passed
+  `prefill-vs-single-27b` at `T=24, P=16` with final logits, hidden capture, GDN
+  state/conv, and KV all green.
+- The all-in performance gate failed decisively: 27B `pp1024` moved from
+  `238.75 t/s` (`4.1500 gpu ms/token`) to `124.34 t/s`
+  (`8.0000 gpu ms/token`) with `QWEN_GDN_PACKED_CHUNK16=1`.
+
+Interpretation: the algebra is correct, but the host-loop `chunk16` execution
+shape is dead. The small per-row work reduction is overwhelmed by the added Gram
+work, T^2 scalar work, and especially the extra subchunk dispatches. Do not
+reopen chunked GDN as a 16-token host-loop sidecar. A future GDN attempt must be
+one-dispatch-per-layer or materially matmul-shaped, and must clear an all-in
+micro gate before model integration.
+
+Validation:
+
+- cx review session `019f3323-279e-7c31-84d6-4ab9ae185807`
+- `cargo test -p qwen-llm gdn_chunked_delta_matches_serial_cpu -- --nocapture`
+- `cargo test -p qwen-llm gdn_chunk16_matches_packed_gpu_production_shape -- --nocapture`
+- `QWEN_GDN_PACKED_CHUNK16=1 QWEN_TEST_27B_PREFILL_T=24 QWEN_TEST_27B_PREFILL_P=16 cargo test --release -p qwen-llm --test dflash_correctness prefill_tokens_matches_single_token_loop_27b -- --nocapture`
+- `uv run scripts/profile/prefill_sweep.py --model /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --n-prompt 1024 --runs 2 --no-warmup --cooldown-seconds 10 --repeat-blocks 1 --shuffle-seed 482 --variant base --variant chunk16:QWEN_GDN_PACKED_CHUNK16=1 --output target/profiles/v0483-27b-pp1024-gdn-chunk16-sweep.json`
+- `cargo fmt --check`
+- `cargo check -p qwen-llm`
+
 ## 2026-07-05 - v0.482 JSONL Auto Prefix-Cache Admission
 
 Status: product-shaped prefix-cache wiring, not a kernel change. Adds default

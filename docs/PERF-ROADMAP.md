@@ -1435,7 +1435,14 @@ correctness-safe on the 27B prefill-vs-single gate, but regresses 27B `pp1024`
 (`237.13/223.27 -> 233.89/218.11 t/s`). Do not reopen lazy-scale packed GDN; it
 does not falsify chunked delta-rule, which must parallelize or reduce the
 recurrence work rather than trade vector multiplies for scalar scale/divide
-bookkeeping.
+bookkeeping. v0.483 then tests the smallest exact chunked delta-rule work
+reduction: a stable carry-product algebra, a tiny `K*K^T` / `K*Q^T` Gram
+precompute, and an NSG4 `chunk16` recurrence kernel. Synthetic CPU/GPU and 27B
+model correctness all clear, but the all-in 27B `pp1024` gate collapses
+`238.75 -> 124.34 t/s` (`4.1500 -> 8.0000 gpu ms/token`). This kills host-loop
+`chunk16` GDN. Future chunked GDN must be one-dispatch-per-layer or genuinely
+matmul-shaped enough to beat the current packed kernel all-in before model
+integration.
 v0.437 executes the reopened KV-Q8 attention-reader micro-oracle and kills it for
 the current `attn_v4` execution model. The branch preserves the F16 grid, adds
 MoE/group8 Q8 main and tile2/tile4 subgroup kernels, fixes `attn-intra` Q8

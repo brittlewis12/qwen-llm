@@ -1861,7 +1861,11 @@ single faster hit can still lose after cold insert and memory costs.
    read savings beat synchronization/TGM/occupancy loss. Keep attention below
    MoE/GDN unless the next proposal brings hidden-traffic counters, a non-TGM
    read-once execution shape, or an end-to-end `ctx32768` prototype that moves
-   throughput rather than partial storage or reduce rows.
+   throughput rather than partial storage or reduce rows. v0.481 also kills a
+   dirty dense group6 bcast broadening attempt at correctness: the added
+   specialization disturbed non-target group4 rows (`cos=0.931786`). Do not keep
+   broadening the G8 bcast template across groups without a narrow harness and a
+   clean broad-suite pass.
 3. GDN decode projection mechanics, with local Q8 retunes closed: v0.336 adds
    correctness-breaking no-op attribution for the GDN projection lane. The
    recoverable lower-bound budget is

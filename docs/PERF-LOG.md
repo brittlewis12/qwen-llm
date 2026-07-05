@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-04 - v0.481 G6 Bcast Correctness Falsifier
+
+Status: dirty sidecar killed and not kept. This tried to reuse the lane-local
+score-broadcast attention body for the dense 27B `group=6`, full-group, `C=32`
+decode path behind a temporary `QWEN_ATTN_V4_G6_BCAST=1` flag.
+
+- The broad correctness suite failed before reaching the target group6 row:
+  non-target group4 `C=16`, `n_pos=1024`, `nwg=64` produced `cos=0.931786`.
+- Because the extension disturbed a non-target shape, no 27B timings were run and
+  no code was kept.
+
+Interpretation: do not broaden the G8 score-broadcast body by adding more v4
+specializations unless the first gate is a narrow correctness harness plus a clean
+broad-suite pass. Group6 bcast remains unproven and lower priority than branches
+that change measured bytes or recurrence structure.
+
+Validation:
+
+- Env `QWEN_ATTN_V4_G6_BCAST=1`; command
+  `cargo test -p qwen-llm attn_v4_matches_naive_f16kv -- --nocapture` (failed)
+- Artifact: `target/profiles/v0481-g6-bcast-correctness.out`
+
 ## 2026-07-04 - v0.480 G16 V-Half Attention Staging Falsifier
 
 Status: dirty sidecar killed and not kept. This was a narrower read-once decode

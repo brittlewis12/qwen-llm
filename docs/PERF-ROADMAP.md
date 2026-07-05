@@ -2056,6 +2056,10 @@ policy and move back to S8 replay or chunked GDN.
     - `max_total_threads_per_threadgroup` and simdgroup-barrier pruning: test only
       on exact hot kernels with primitive microbench wins, then run clean family
       guards. Do not blanket-annotate kernels; a wrong cap can reduce occupancy.
+      v0.485 tests the concrete Q4/Q6 mat-mat SG-barrier deletion and kills it:
+      correctness is green, but 27B `pp1024` regresses (`235.384 -> 231.967 t/s`)
+      while `pp4096` is flat/noise. Do not repeat this without shader-counter
+      evidence for a specific kernel.
     - Decode fusions: prefer byte-reuse/dataflow fusions such as GDN `qkv+z` over
       residual/elementwise shelves, but require a primitive proof that beats the
       current near-roofline projection harness or a phase bucket of at least `5%`

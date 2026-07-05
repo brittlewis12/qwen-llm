@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.485 Q4/Q6 Mat-Mat SG-Barrier Falsifier
+
+Status: exact source sidecar killed and not kept. This tested the audit claim that
+the hot Q4_K/Q6_K prefill mat-mat kernels might gain by deleting inherited
+`simdgroup_barrier(mem_none)` calls between same-simdgroup loads and FMAs.
+
+- The sidecar removed all nine such barriers from each of `mat_mat_q4_k.metal`
+  and `mat_mat_q6_k.metal`, covering the generic, N16, and N64 variants.
+- Q4_K and Q6_K mat-mat correctness stayed green against the existing CPU/mat-vec
+  oracles across `n_query` rows including the N16/N64 paths.
+- The 27B prefill source A/B did not clear a keep gate. `pp1024` regressed versus
+  the clean repeat (`235.384 -> 231.967 t/s`, GPU `4.2382 -> 4.3012 ms/token`),
+  while `pp4096` was noise/flat-positive (`216.079 -> 216.721 t/s`, GPU
+  `4.6236 -> 4.6102 ms/token`).
+
+Interpretation: these barriers are not a broad hidden prefill lever on the current
+compiler/runtime. Do not delete the Q4/Q6 mat-mat SG barriers without shader
+counter evidence for a specific kernel; if revisited, gate on a named primitive
+win before any model-level A/B.
+
+Validation:
+
+- `cargo test -p qwen-llm mat_mat_q4_k_matches_cpu_and_mat_vec -- --nocapture`
+- `cargo test -p qwen-llm mat_mat_q6_k_matches_cpu_and_mat_vec -- --nocapture`
+- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024,4096 --runs 3 -o json > target/profiles/v0485-27b-suite-q4q6-sgbarrier-pruned.json`
+- `target/release/qwen-bench suite -m /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf --pp 1024,4096 --runs 3 -o json > target/profiles/v0485-27b-suite-q4q6-sgbarrier-base-repeat.json`
+
 ## 2026-07-05 - v0.484 GDN Update-Dot Loop Falsifier
 
 Status: exact micro-cleanup killed and not kept. This tested whether the packed

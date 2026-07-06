@@ -12928,8 +12928,20 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         }
     }
     let mut s = MetalSession::fresh(&mctx, &mm, target + runs + 16)?;
-    for p in 0..(target as u32) {
-        let _ = mf.single_token(0, p, &mut s)?;
+    if target > 1 {
+        // prefill-warm (v0.494 pattern): production packed prefill instead of
+        // the token-by-token decode ramp; validated gpu_ms parity at ctx16384.
+        let ids = vec![0i32; target];
+        let chunk = default_prefill_chunk(mm.arch.kind, target);
+        let mut scratch = fresh_prefill_scratch_for_prompt(&mctx, &mm, chunk, ids.len())
+            .context("attn-intra prefill scratch")?;
+        let t0 = Instant::now();
+        prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
+            .context("attn-intra prefill warm")?;
+        eprintln!(
+            "[attn-intra] prefill-warm to {target} in {:.1}s",
+            t0.elapsed().as_secs_f64()
+        );
     }
 
     let timed = |label: &str,

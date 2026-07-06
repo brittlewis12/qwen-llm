@@ -10945,6 +10945,20 @@ fn attn_v4_g8_bcast_enabled() -> bool {
     })
 }
 
+/// W1b partition-packing opt-in: `QWEN_ATTN_V4_PACK=4` packs 4 partitions
+/// (one simdgroup each) into 128-thread TGs for the g8/t4/C64 F16 decode
+/// main. Default off; see docs/bench/2026-07-06-w1b-attn-partition-pack/.
+fn attn_v4_pack() -> usize {
+    static PACK: OnceLock<usize> = OnceLock::new();
+    *PACK.get_or_init(|| {
+        std::env::var("QWEN_ATTN_V4_PACK")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|v| *v == 4)
+            .unwrap_or(1)
+    })
+}
+
 /// Group-tile subgroup size for v4's decode main pass.
 ///
 /// The 122B A10B shape (`GROUP=16`) is faster when split across multiple
@@ -11159,7 +11173,17 @@ pub fn encode_attn_decode_v4_f32(
         && group == 8
         && group_tile == 4
         && attn_v4_g8_vstage_c() == Some(tile_c);
-    let pipeline_name = if use_g8_bcast {
+    // W1b: partition-packed main (opt-in; exact same per-simdgroup dataflow)
+    let use_pack4 = !use_g8_bcast
+        && !use_g8_vstage
+        && k_cache.dtype == GgmlType::F16
+        && group == 8
+        && group_tile == 4
+        && tile_c == 64
+        && attn_v4_pack() == 4;
+    let pipeline_name = if use_pack4 {
+        "kernel_attn_decode_v4_g8_t4_c64_pack4_f32"
+    } else if use_g8_bcast {
         match group_tile {
             2 => "kernel_attn_decode_v4_g8_t2_c64_bcast_f32",
             4 => "kernel_attn_decode_v4_g8_t4_c64_bcast_f32",
@@ -11300,6 +11324,23 @@ pub fn encode_attn_decode_v4_f32(
             },
             MTLSize {
                 width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else if use_pack4 {
+        const PACK: usize = 4;
+        // sq is SHARED across the packed partitions; ss is per-simdgroup.
+        enc.set_threadgroup_memory(0, group_tile * DK * 2);
+        enc.set_threadgroup_memory(1, PACK * group_tile * tile_c * std::mem::size_of::<f32>());
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: group / group_tile,
+                depth: nwg.div_ceil(PACK),
+            },
+            MTLSize {
+                width: 32 * PACK,
                 height: 1,
                 depth: 1,
             },
@@ -11510,7 +11551,17 @@ pub fn encode_attn_decode_v4_main_only_f32(
         && group == 8
         && group_tile == 4
         && attn_v4_g8_vstage_c() == Some(tile_c);
-    let pipeline_name = if use_g8_bcast {
+    // W1b: partition-packed main (opt-in; exact same per-simdgroup dataflow)
+    let use_pack4 = !use_g8_bcast
+        && !use_g8_vstage
+        && k_cache.dtype == GgmlType::F16
+        && group == 8
+        && group_tile == 4
+        && tile_c == 64
+        && attn_v4_pack() == 4;
+    let pipeline_name = if use_pack4 {
+        "kernel_attn_decode_v4_g8_t4_c64_pack4_f32"
+    } else if use_g8_bcast {
         match group_tile {
             2 => "kernel_attn_decode_v4_g8_t2_c64_bcast_f32",
             4 => "kernel_attn_decode_v4_g8_t4_c64_bcast_f32",
@@ -11645,6 +11696,23 @@ pub fn encode_attn_decode_v4_main_only_f32(
             },
             MTLSize {
                 width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else if use_pack4 {
+        const PACK: usize = 4;
+        // sq is SHARED across the packed partitions; ss is per-simdgroup.
+        enc.set_threadgroup_memory(0, group_tile * DK * 2);
+        enc.set_threadgroup_memory(1, PACK * group_tile * tile_c * std::mem::size_of::<f32>());
+        enc.dispatch(
+            MTLSize {
+                width: n_kv_heads,
+                height: group / group_tile,
+                depth: nwg.div_ceil(PACK),
+            },
+            MTLSize {
+                width: 32 * PACK,
                 height: 1,
                 depth: 1,
             },

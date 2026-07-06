@@ -6,6 +6,60 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-06 - v0.496 W1b Partition-Packed Attention Falsifier; Q8-KV Reopen Blocked
+
+Status: engine falsifier, opt-in code kept (`QWEN_ATTN_V4_PACK=4`, default
+off, production path untouched). Design and results:
+`docs/bench/2026-07-06-w1b-attn-partition-pack/README.md` (cx-signed,
+conditional-go with five gate edits, session `019f347b-c...`).
+
+- SCOPE REVIEW FIRST (the discipline paying for itself): the intended
+  "top lever" - Q8 KV for A3B g8 at true-long - was ALREADY implemented
+  and killed by v0.437 (full kernel family, correctness-clean, main body
+  9.7% slower @8k / 25% @32k vs the tuned F16 reader, explicit
+  do-not-reopen without a materially different layout or body). The trend
+  worsens with ctx; 131k reopens nothing. Q8-KV stays closed.
+- W1b mechanism (new axis, B0-counter-backed): pack 4 NWG partitions (one
+  simdgroup each) into 128-thread TGs - same dataflow, same bytes, same
+  per-simdgroup work; only TG packaging changes, to escape the W32
+  TG-slot regime (B0: ~30 TGs/core compute plateau vs ~92 stall-fill) and
+  to decouple the v0.495 NWG falsifier's wave-serialization confound.
+- New kernel `kernel_attn_decode_v4_g8_t4_c64_pack4_f32` honoring the
+  cx barrier/tail invariant (single TG-wide barrier at the shared-Q load,
+  executed unconditionally; per-simdgroup ss slices + simdgroup_barrier
+  after). G0 legal-launch PASS (max threads 128); G1 correctness PASS
+  NON-VACUOUSLY (tile4 forced via `QWEN_ATTN_V4_G8_TILE=4`; the default
+  test sweep never reaches the tile4 threshold - recorded to prevent
+  future vacuous gates). A rotating matches_naive failure during gating
+  was the DOCUMENTED v0.433 ambient load-flake (same shape, cos 0.9665
+  vs recorded 0.9662, tile2 path unreachable by pack) - not W1b.
+- FALSIFIED at the pre-registered control: attn-intra ctx131072 main
+  `0.6842 -> 1.1050 ms/layer` (+61.5%) for pack4@256 (packaging-only,
+  identical streams); pack4@512 +13.5%; pack4@1024 +21.8% with reduce
+  growing 0.07 -> 0.35 ms. P-W1b-1 kill fires; verdict = "pack4
+  register/TGM packaging failed" (register budget at 4 resident
+  simdgroups/TG is the leading suspect). Per the split kill semantics
+  this does NOT claim attention is stream-issue-bound.
+- CONSEQUENCE: attention main is now falsifier-bracketed on SIX axes
+  (split count, byte shape, bcast, Q8 bytes, thread-cap hints, packing).
+  The 32-thread one-simdgroup body is locally optimal across its entire
+  tested neighborhood; the only remaining attention-main lane is a
+  materially different body (parked FA2-style matrix branch). gdn_step
+  packing parked (wave-collapse arithmetic survives but the packaging
+  cost haircuts it below its ~0.3 ms ceiling). W-program falls back to
+  the census narrow-glue list (~1.2-1.5 ms/token, ~10 small ops).
+- Infra kept: `attn-intra` now prefill-warms (131k micro in ~4 min).
+
+Validation:
+
+- G0: `qwen-bench metal-pipelines --kernel kernel_attn_decode_v4_g8_t4_c64_pack4_f32`
+- G1: `QWEN_ATTN_V4_PACK=4 QWEN_ATTN_V4_G8_TILE=4 cargo test --release
+  -p qwen-llm --lib attn_v4_matches_naive_f16kv` (3/3) +
+  `attn_v4_partials_fully_written_nan_prime` with PACK on
+- rows: `attn-intra -m <A3B 3.6> --ctx 131072 --runs 3` x {flat, pack4@
+  256/512/1024}; quiet box; base main reproduces the census-implied
+  ~6.8 ms/token family time
+
 ## 2026-07-06 - v0.495 W0 Dispatch Census + Two True-Long Falsifiers
 
 Status: W-program attribution executed (per the cx-signed attribution-first

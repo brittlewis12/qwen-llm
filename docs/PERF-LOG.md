@@ -44,13 +44,18 @@ recorded (pmset reports none on this box; noted as vacuous).
   ~43%, F32 limiter ~22%, ALU util ~17%. The true-long regime is the SAME
   latency/occupancy-bound signature as ctx16384 - long context does not
   become bandwidth-walled, so the v0.493 width/concurrency attribution
-  applies at 131k too. Accidental control: the same capture against
-  Qwen3.5-A3B (`progc-131k`) shows near-identical counters.
-- RE-RANK INPUT (Britt's call, per the parked v0.490 condition): true-long
-  attention is now measured at 46% of token where the llama.cpp margin is
-  widest; if true-long becomes primary, the G8 bcast opt-in
-  (`QWEN_ATTN_V4_G8_BCAST=1`) revisit condition is MET, and attention-side
-  byte/occupancy work re-ranks against the W-program.
+  applies at 131k too. BINDING ROW: the explicit-GGUF Qwen3.6 capture
+  (`progc-131k-q36`). The alias-drift Qwen3.5 capture (`progc-131k`) is
+  CONTROL-ONLY (near-identical counters; useful cross-version evidence,
+  never a decision input).
+- RE-RANK (cx-signed ordering, conditional on Britt's true-long priority
+  call): attention re-ranks INTO the W-program, not as standalone knob
+  work. If true-long is PRIMARY: W's first ranked target family is
+  attention main/reduce (not GDN glue), and the parked v0.490 G8 bcast
+  opt-in gets an immediate cheap 131k FULL-DECODE A/B (full-token gate,
+  not attn-intra-only). If true-long is NOT primary: W proceeds
+  attribution-first across all families with attention ranked inside;
+  medium-context evidence alone must not displace W.
 
 Validation:
 

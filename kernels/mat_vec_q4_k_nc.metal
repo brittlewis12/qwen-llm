@@ -53,7 +53,11 @@ struct mat_vec_q4k_nc_args {
 // the production compile flags.
 #define NR0_Q4K_NC 2
 
-template <short NC>
+// RP = row-pairs per threadgroup (v0.500 sweep axis B1: TG shape).
+// RP=2 reproduces the v0.499 kernels exactly ((sgitg % 2) == (sgitg & 1),
+// (sgitg / 2) == (sgitg >> 1)); RP=4 packs 8 simdgroups (256 threads,
+// 8 rows + both column halves per TG, grid n_out/8).
+template <short NC, short RP>
 inline void mat_vec_q4_K_nc_impl(
         constant mat_vec_q4k_nc_args & args,
         device const uchar           * weight,
@@ -73,9 +77,9 @@ inline void mat_vec_q4_K_nc_impl(
     const ushort ir = it % 4;
 
     const uint nb = args.n_in / QK_K_NC;
-    // sgitg & 1 -> row-pair within the TG; sgitg >> 1 -> column half.
-    const uint first_row = (tgpig * 2 + (sgitg & 1)) * NR0_Q4K_NC;
-    const short col_base = (short)(sgitg >> 1) * NC_SG;
+    // sgitg % RP -> row-pair within the TG; sgitg / RP -> column half.
+    const uint first_row = (tgpig * RP + (sgitg % RP)) * NR0_Q4K_NC;
+    const short col_base = (short)(sgitg / RP) * NC_SG;
     if (first_row >= args.n_out) return;
 
     const ulong row_stride_bytes = (ulong)nb * Q4K_BYTES_NC;
@@ -161,7 +165,7 @@ inline void mat_vec_q4_K_nc_impl(
     }
 }
 
-#define MAT_VEC_Q4K_NC_KERNEL(NCOLS, NAME)                                    \
+#define MAT_VEC_Q4K_NC_KERNEL(NCOLS, RP, NAME)                                \
 kernel void NAME(                                                             \
         constant mat_vec_q4k_nc_args & args   [[buffer(0)]],                  \
         device const uchar           * weight [[buffer(1)]],                  \
@@ -170,9 +174,11 @@ kernel void NAME(                                                             \
         uint   tgpig [[threadgroup_position_in_grid]],                        \
         ushort sgitg [[simdgroup_index_in_threadgroup]],                      \
         ushort tiisg [[thread_index_in_simdgroup]]) {                         \
-    mat_vec_q4_K_nc_impl<NCOLS>(args, weight, x, y, tgpig, sgitg, tiisg);     \
+    mat_vec_q4_K_nc_impl<NCOLS, RP>(args, weight, x, y, tgpig, sgitg, tiisg); \
 }
 
-MAT_VEC_Q4K_NC_KERNEL(2, kernel_mat_vec_q4_K_nc2_f32)
-MAT_VEC_Q4K_NC_KERNEL(4, kernel_mat_vec_q4_K_nc4_f32)
-MAT_VEC_Q4K_NC_KERNEL(8, kernel_mat_vec_q4_K_nc8_f32)
+MAT_VEC_Q4K_NC_KERNEL(2, 2, kernel_mat_vec_q4_K_nc2_f32)
+MAT_VEC_Q4K_NC_KERNEL(4, 2, kernel_mat_vec_q4_K_nc4_f32)
+MAT_VEC_Q4K_NC_KERNEL(8, 2, kernel_mat_vec_q4_K_nc8_f32)
+// v0.500 sweep B1: TG-shape point (8 SGs / 256 threads / 8 rows per TG).
+MAT_VEC_Q4K_NC_KERNEL(2, 4, kernel_mat_vec_q4_K_nc2_rp4_f32)

@@ -6,6 +6,82 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-06 - v0.500 Small-N Selection Sweep: Dispatcher Staleness Quantified, Best-Kernel Table Recorded
+
+Status: systematic config sweep + staleness audit (bench/harness only; NO
+production dispatch change yet — that is the recorded follow-up with its
+own gate). Britt's ask: verify the small-N story carries no stale kernel
+assumptions. cx-vetted axes/ranges/granularity (design vet `019f393b-7...`);
+staleness audit of the verify/drafter/MTP paths preceded the sweep.
+
+STALENESS AUDIT (recon, file:line evidence in the session record):
+- Packed verify dispatches the GENERIC 32-wide mat-mat tile at N in
+  {2,3,4,8} (n16 requires n_query == 16 exactly, metal.rs:3950); the MTP
+  `--spec-tokens 2/3` prototype verifies at N=3/4 on that tier.
+- Verify runs per-token GDN tails (16x conv/L2/step/gated + 32 blits per
+  GDN layer) where prefill has default-on packed GDN (+NSG4); per-token
+  RoPE (32 dispatches/layer) and per-token KV scatter where prefill has
+  packed variants; per-token decode attention (full KV re-read per
+  Q-position) where prefill has matrix-online/packed-row bodies; one
+  fully SERIAL encoder chain (decode's v0.340 concurrent fronts absent).
+- Drafter phase-2 Q/K/V still per-row mat-vec (phase 3 got mat-mat in
+  v0.74.2); ~13 commit/wait boundaries per draft_block. MTP drafting =
+  full-graph encode + full-V lm_head + commit/wait per call (the
+  measured 28-44 ms/call).
+
+SWEEP (test `smalln_selection_sweep_27b`; N in {2,3,4,8,16}; 7 shapes
+incl. gdn_out Q5_K and lm_head Q6_K; best-of-5x32, block anchors, all
+correctness cos >= 0.999 asserted, padded outputs finite-checked; raw
+rows reproducible via the test, `QWEN_MATMAT_N16_V2=1` second pass):
+
+- R2 FIRES, HARD: the current production selection is dominated at EVERY
+  N < 16 cell (c = 5.0-8.3 vs best 1.4-2.5 on the Q4_K/Q6_K/lm_head
+  cells — e.g. attn_o N<=8 current 8.0x vs 1.7-2.5x; Q5_K gdn_out has
+  only current/pad16 coverage and floors at pad16 3.90) and at N=16 on
+  5/7 shapes (r2c2k64 beats n16 by 8-35%: ffn_down 0.485 vs 0.747 ms).
+  Even zero-code `pad16` (pad activations to 16, take the n16 kernel)
+  beats `current` at every N < 16 cell measured (e.g. ffn_gate 3.50 vs
+  5.09).
+- Best-kernel table (c vs mv1; record run, drift-clean blocks except
+  lm_head ~8% flagged):
+  N=2: Q4_K nc2rp4 `1.53-1.72`; Q6_K nc2/r1c1k128 `1.55-1.66`;
+       lm_head r2c1k64 `1.44`; Q5_K pad16 `3.90` (no nc/mma port yet).
+  N=3-8: Q4_K r2c1k64/sg2 `2.23` (mma8 2.4); Q6_K r1c1k128 `1.58-1.66`
+       FLAT across N (ffn_down verify(8) at 1.59!); lm_head r2c1k64
+       `1.44-1.72`; attn_o r1c1k128 `2.39-2.50`.
+  N=16: ffn/gdn r2c2k64 `2.58-3.26`; lm_head current-n16 `2.35`;
+       attn_o r1c2k64 `4.57`.
+- New falsifiers banked: interaction variants REGRESS (r2c1k128 4.0 on
+  ffn_gate, r4c1k64 3.8-5.6, r2c2k128 mixed — register/residency
+  pressure; K128 pays only at R1 on long-K Q6_K, R2 only at K64);
+  `QWEN_MATMAT_N16_V2` measured ~0-0.5% at all swept shapes (default-off
+  justified; assumption checked, not carried).
+- Cap scoping confirmed: mma8v-r1c1k128 runs `279-346 GB/s-equiv` on
+  Q6_K shapes — ABOVE the v0.498 ~270 scalar cap, which was correctly
+  scoped to scalar mask-convert-FMA designs; dense-encoded MMA exceeds
+  it where bytes/weight are higher.
+- R1 (reopen): best c(2) = `1.53-1.56` (nc2rp4) / `1.55-1.57`
+  (nc2 | r1c1k128) on the kill shapes — still > 1.25. STANDS CLOSED.
+- R3 (scoped): verify(16) PROJECTION cost with best kernels drops
+  ~8-35% per leg vs current n16; verify(4) projections drop from
+  generic-tier ~5x to ~1.6-2.3x per shape. Composed MTP-3 at measured
+  alpha (code 0.984) shifts to `~1.5-1.7x` code-only (composition
+  estimate, v0.444 estimator caveat; still gated on the drafting
+  restructure + a whole-step measurement) — a material revision of
+  v0.499's MTP-1-based `~1.15-1.2x` line.
+- R4: for the swept matmul neighborhood the closure hardens; the
+  reopen ladder is unchanged (c(2) <= 1.25 never approached).
+
+Recorded follow-ups, force-ranked: (1) verify-path integration project —
+wire the best-kernel table into the small-N dispatch used by packed
+verify (incl. pad16 as the trivial floor), plus the audit's structural
+items (packed GDN in verify ~36% of verify cost, packed rope/scatter,
+matrix attention, concurrent encoders), gated on greedy-equivalence +
+whole-step verify cost re-measurement; (2) whole-step packed MTP-3
+re-pricing after (1) + single-CB drafting; (3) Q5_K nc/mma port
+(gdn_out floor is pad16 3.9); (4) drafter phase-2 mat-mat + sync-boundary
+reduction.
+
 ## 2026-07-06 - v0.499 Small-N MMA Falsifier Fails Its Kill Line; Shallow Small-N Lane Closes
 
 Status: pre-registered falsifier + experimental kernels (no production-path

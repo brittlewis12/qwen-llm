@@ -208,3 +208,157 @@ kernel void kernel_mat_mat_q6_K_mma8_f32(
         ushort tiisg [[thread_index_in_simdgroup]]) {
     MAT_MAT_MMA8_BODY(mma8_dequantize_q6_K_half, 210)
 }
+
+// ---------------------------------------------------------------------------
+// v0.500 sweep: generalized mma8 variants (Family A of the small-N config
+// sweep; cx-vetted axes 019f393b). Parameterized over:
+//   RT  = row tiles per simdgroup (8*RT output rows; B loads amortized
+//         across RT — each mb is loaded once per (kt, ct) and consumed by
+//         all RT accumulators),
+//   CT  = column tiles (8*CT activation columns; A dequant amortized
+//         across CT),
+//   KS  = K-step (barrier frequency; dequant calls per lane per step =
+//         RT*KS/64),
+//   SGS = simdgroups per TG (independent 8*RT-row slices; tests
+//         residency shape vs RT at equal rows/TG).
+// The v0.499 kernels above are kept untouched as the A1 anchor.
+// Constraints: n_in % 256 == 0 (host), KS in {64,128}, rows/TG divides
+// n_out (host: n_out % (8*RT*SGS) == 0).
+#define MAT_MAT_MMA8V_BODY(DEQ, BLK_BYTES, RT, CT, KS, SGS)                   \
+    const uint rows_per_sg = 8u * (RT);                                       \
+    const uint r0 = tgpig * rows_per_sg * (SGS) + (uint)sgitg * rows_per_sg;  \
+    if (r0 >= args.n_out) return;                                             \
+    const uint nb = args.n_in / QK_K_MMA8;                                    \
+    const ulong row_stride_bytes = (ulong)nb * (BLK_BYTES);                   \
+                                                                              \
+    threadgroup float sa_all[(SGS) * 8 * (RT) * (KS)];                        \
+    threadgroup float * sa = sa_all + (uint)sgitg * (8 * (RT) * (KS));        \
+                                                                              \
+    simdgroup_float8x8 acc[RT][CT];                                           \
+    FOR_UNROLL (short rt = 0; rt < (RT); ++rt) {                              \
+        FOR_UNROLL (short ct = 0; ct < (CT); ++ct) {                          \
+            acc[rt][ct] = make_filled_simdgroup_matrix<float, 8>(0.0f);       \
+        }                                                                     \
+    }                                                                         \
+                                                                              \
+    for (uint k0 = 0; k0 < args.n_in; k0 += (KS)) {                           \
+        /* Dequant A: RT*KS/64 chunks of 16 per lane, K-linear layout. */     \
+        FOR_UNROLL (short ch = 0; ch < (RT) * (KS) / 64; ++ch) {              \
+            const uint cid  = (uint)tiisg + 32u * (uint)ch;                   \
+            const uint lrow = cid / ((KS) / 16);                              \
+            const uint kch  = cid % ((KS) / 16);                              \
+            const uint kbase = k0 + kch * 16;                                 \
+            device const uchar * blk = weight                                 \
+                + (r0 + lrow) * row_stride_bytes                              \
+                + (ulong)(kbase / QK_K_MMA8) * (BLK_BYTES);                   \
+            const short il = (short)((kbase % QK_K_MMA8) / 16);               \
+            half4x4 tmp;                                                      \
+            DEQ(blk, il, tmp);                                                \
+            FOR_UNROLL (int i = 0; i < 16; ++i) {                             \
+                sa[lrow * (KS) + kch * 16 + i] = (float)tmp[i / 4][i % 4];    \
+            }                                                                 \
+        }                                                                     \
+        if ((SGS) > 1) {                                                      \
+            threadgroup_barrier(mem_flags::mem_threadgroup);                  \
+        } else {                                                              \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                    \
+        }                                                                     \
+                                                                              \
+        FOR_UNROLL (short kt = 0; kt < (KS) / 8; ++kt) {                      \
+            simdgroup_float8x8 mb[CT];                                        \
+            FOR_UNROLL (short ct = 0; ct < (CT); ++ct) {                      \
+                simdgroup_load(mb[ct],                                        \
+                               x + (ulong)ct * 8 * args.n_in                  \
+                                 + k0 + (uint)kt * 8,                         \
+                               args.n_in, ulong2(0, 0), true);                \
+            }                                                                 \
+            FOR_UNROLL (short rt = 0; rt < (RT); ++rt) {                      \
+                simdgroup_float8x8 ma;                                        \
+                simdgroup_load(ma, sa + (uint)rt * 8 * (KS) + (uint)kt * 8,   \
+                               (KS));                                         \
+                FOR_UNROLL (short ct = 0; ct < (CT); ++ct) {                  \
+                    simdgroup_multiply_accumulate(acc[rt][ct], ma, mb[ct],    \
+                                                  acc[rt][ct]);               \
+                }                                                             \
+            }                                                                 \
+        }                                                                     \
+        if ((SGS) > 1) {                                                      \
+            threadgroup_barrier(mem_flags::mem_threadgroup);                  \
+        } else {                                                              \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                    \
+        }                                                                     \
+    }                                                                         \
+                                                                              \
+    threadgroup float sc_all[(SGS) * 64];                                     \
+    threadgroup float * sc_out = sc_all + (uint)sgitg * 64;                   \
+    FOR_UNROLL (short rt = 0; rt < (RT); ++rt) {                              \
+        FOR_UNROLL (short ct = 0; ct < (CT); ++ct) {                          \
+            simdgroup_store(acc[rt][ct], sc_out, 8);                          \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                    \
+            FOR_UNROLL (short e = 0; e < 2; ++e) {                            \
+                const short cell = (short)tiisg * 2 + e;                      \
+                const short row  = cell / 8;                                  \
+                const short col  = cell % 8;                                  \
+                if (r0 + (uint)rt * 8 + (uint)row < args.n_out) {             \
+                    y[(ulong)((uint)ct * 8 + (uint)col) * args.n_out          \
+                      + r0 + (uint)rt * 8 + (uint)row] =                      \
+                        sc_out[row * 8 + col];                                \
+                }                                                             \
+            }                                                                 \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                    \
+        }                                                                     \
+    }
+
+#define MAT_MAT_MMA8V_KERNEL(NAME, DEQ, BLK_BYTES, RT, CT, KS, SGS)           \
+kernel void NAME(                                                             \
+        constant mat_mat_mma8_args & args   [[buffer(0)]],                    \
+        device const uchar         * weight [[buffer(1)]],                    \
+        device const float         * x      [[buffer(2)]],                    \
+        device       float         * y      [[buffer(3)]],                    \
+        uint   tgpig [[threadgroup_position_in_grid]],                        \
+        ushort sgitg [[simdgroup_index_in_threadgroup]],                      \
+        ushort tiisg [[thread_index_in_simdgroup]]) {                         \
+    MAT_MAT_MMA8V_BODY(DEQ, BLK_BYTES, RT, CT, KS, SGS)                       \
+}
+
+// A2: B-amortization across 2 row tiles.
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r2c1k64_f32,
+                     mma8_dequantize_q4_K_half, 144, 2, 1, 64, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r2c1k64_f32,
+                     mma8_dequantize_q6_K_half, 210, 2, 1, 64, 1)
+// A4: halved barrier frequency (device-B K128 — v2 only falsified STAGED-B).
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c1k128_f32,
+                     mma8_dequantize_q4_K_half, 144, 1, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r1c1k128_f32,
+                     mma8_dequantize_q6_K_half, 210, 1, 1, 128, 1)
+// A6: A-dequant amortization across 2 column tiles (16 cols; DFlash-16).
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c2k64_f32,
+                     mma8_dequantize_q4_K_half, 144, 1, 2, 64, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r1c2k64_f32,
+                     mma8_dequantize_q6_K_half, 210, 1, 2, 64, 1)
+// A8: 2 independent SGs per TG (residency-shape control for A2).
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r1c1k64_sg2_f32,
+                     mma8_dequantize_q4_K_half, 144, 1, 1, 64, 2)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r1c1k64_sg2_f32,
+                     mma8_dequantize_q6_K_half, 210, 1, 1, 64, 2)
+// A7 (conditional tier, pre-instantiated): both amortizations combined.
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r2c2k64_f32,
+                     mma8_dequantize_q4_K_half, 144, 2, 2, 64, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r2c2k64_f32,
+                     mma8_dequantize_q6_K_half, 210, 2, 2, 64, 1)
+// Conditional tier unlocked by the first sweep pass (v0.500): K128 moved
+// on Q6_K (flat c~1.58 N=2..8 on ffn_down) and R2 won lm_head -> test
+// the interaction and deeper row tiling.
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r2c1k128_f32,
+                     mma8_dequantize_q4_K_half, 144, 2, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r2c1k128_f32,
+                     mma8_dequantize_q6_K_half, 210, 2, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r4c1k64_f32,
+                     mma8_dequantize_q4_K_half, 144, 4, 1, 64, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r4c1k64_f32,
+                     mma8_dequantize_q6_K_half, 210, 4, 1, 64, 1)
+// K128 x C2 for the N=16 tier (K128 was the Q6_K winner at C1).
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r2c2k128_f32,
+                     mma8_dequantize_q4_K_half, 144, 2, 2, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r2c2k128_f32,
+                     mma8_dequantize_q6_K_half, 210, 2, 2, 128, 1)

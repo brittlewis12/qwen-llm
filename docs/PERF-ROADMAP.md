@@ -1162,6 +1162,27 @@ tensor silicon; a step-change-alpha drafter/MTP asset (price in
 `--tree-sim`, no engine work); or a real multi-token source arriving via
 batching, which inherits mma8 as the best-known N in {4,8} primitive
 (`~2.0-2.8x` the incumbent MM tile at N=8).
+v0.500 then answers Britt's stale-assumption challenge with a staleness
+audit + cx-vetted systematic sweep (see the PERF-LOG entry for the
+table). The audit finds the verify path frozen at v0.44x selections:
+GENERIC 32-wide tiles at N<16 (n16 needs n_query==16 exactly), per-token
+GDN/rope/scatter/attention where prefill has packed bodies, one serial
+encoder, and MTP drafting paying full-graph + full-V lm_head + sync per
+call. The sweep (N {2,3,4,8,16} x 7 shapes x dtype/N-dependent configs,
+up to 10 per cell, correctness asserted) fires R2 hard — the current
+selection is dominated at EVERY N<16 cell (5.0-8.3x vs best 1.4-2.5x on
+Q4_K/Q6_K/lm_head cells; Q5_K floors at zero-code pad16 3.9) and at
+N=16 on 5/7 shapes — while
+R1 stands closed (best c(2) 1.53, bar 1.25) and the interaction variants
++ n16_v2 are freshly falsified rather than assumed. Material revision:
+best-kernel verify(4) projections land at ~1.6-2.3x per shape (was
+generic ~5x), shifting composed MTP-3 to `~1.5-1.7x` code-only
+(composition estimate; gates unchanged: drafting restructure +
+whole-step measurement). Top-ranked follow-up is now the VERIFY-PATH
+INTEGRATION PROJECT: wire the best-kernel table (pad16 as the zero-code
+floor) + packed GDN/rope/scatter into packed verify behind
+greedy-equivalence and whole-step re-measurement gates; then whole-step
+MTP-3 re-pricing; then the Q5_K port and drafter phase-2/sync cleanup.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

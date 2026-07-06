@@ -3754,6 +3754,193 @@ pub fn encode_mat_mat_mma8_dispatch(
     Ok(())
 }
 
+/// v0.500 sweep (bench-only, no production call sites): dispatch a named
+/// mma8v variant. `variant` ∈ {"r2c1k64", "r1c1k128", "r1c2k64",
+/// "r1c1k64_sg2", "r2c2k64", "r2c1k128", "r4c1k64", "r2c2k128"};
+/// column count = 8*CT (x/y must carry exactly that many columns),
+/// rows per TG = 8*RT*SGS.
+pub fn encode_mat_mat_mma8_variant(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    variant: &str,
+) -> Result<(), MetalError> {
+    let (rt, ct, sgs) = match variant {
+        "r2c1k64" => (2usize, 1usize, 1usize),
+        "r1c1k128" => (1, 1, 1),
+        "r1c2k64" => (1, 2, 1),
+        "r1c1k64_sg2" => (1, 1, 2),
+        "r2c2k64" => (2, 2, 1),
+        "r2c1k128" => (2, 1, 1),
+        "r4c1k64" => (4, 1, 1),
+        "r2c2k128" => (2, 2, 1),
+        _ => {
+            return Err(MetalError::BadShape {
+                kernel: "mat_mat_mma8v",
+                detail: format!("unknown variant {variant}"),
+            });
+        }
+    };
+    let cols = 8 * ct;
+    let rows_per_tg = 8 * rt * sgs;
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8v",
+            detail: format!("x/y dtype = {:?}/{:?}, expected F32/F32", x.dtype, y.dtype),
+        });
+    }
+    if weight.n_elements() as usize != n_in * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8v",
+            detail: format!(
+                "weight.n_elements={} != n_in*n_out={}",
+                weight.n_elements(),
+                n_in * n_out
+            ),
+        });
+    }
+    if n_in % 256 != 0 || n_out % rows_per_tg != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8v",
+            detail: format!("n_in={n_in} % 256 or n_out={n_out} % rows_per_tg={rows_per_tg} != 0"),
+        });
+    }
+    if x.n_elements() as usize != cols * n_in || y.n_elements() as usize != cols * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8v",
+            detail: format!(
+                "x/y elements {}/{} != cols({cols}) * n_in/n_out",
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    let dt = match weight.dtype {
+        GgmlType::Q4_K => "q4_K",
+        GgmlType::Q6_K => "q6_K",
+        other => {
+            return Err(MetalError::BadShape {
+                kernel: "mat_mat_mma8v",
+                detail: format!("unsupported dtype {other:?}"),
+            });
+        }
+    };
+    let name = format!("kernel_mat_mat_{dt}_mma8v_{variant}_f32");
+    let pso = ctx.pipeline(&name)?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out / rows_per_tg,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32 * sgs,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// v0.500 sweep B1 (bench-only): nc2 with 4 row-pairs per TG (8 SGs, 256
+/// threads, 8 rows/TG). Same layouts and E0 body as
+/// [`encode_mat_vec_q4_k_nc_f32`] at `n_cols = 2`.
+pub fn encode_mat_vec_q4_k_nc2_rp4_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 || weight.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc2_rp4",
+            detail: format!("n_in={n_in} % 256 != 0 or dtype {:?}", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc2_rp4",
+            detail: format!("x/y dtype = {:?}/{:?}, expected F32/F32", x.dtype, y.dtype),
+        });
+    }
+    if weight.n_elements() as usize != n_in * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc2_rp4",
+            detail: format!(
+                "weight.n_elements={} != n_in*n_out={}",
+                weight.n_elements(),
+                n_in * n_out
+            ),
+        });
+    }
+    if x.n_elements() as usize != 2 * n_in || y.n_elements() as usize != 2 * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc2_rp4",
+            detail: format!(
+                "x/y elements {}/{} != 2 * n_in/n_out",
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_vec_q4_K_nc2_rp4_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(8),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 crate::env_flag!(default_off matmat_qk_llama_smem_enabled, "QWEN_MATMAT_QK_LLAMA_SMEM");
 
 /// Q4_K mat-mat: `Y = W · X^T` where

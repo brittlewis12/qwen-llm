@@ -32,9 +32,10 @@ use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_get_rows_f32,
-    encode_mat_mat_mma8_dispatch, encode_mat_vec_nc_dispatch, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
+    encode_mat_mat_mma8_dispatch, encode_mat_mat_mma8_variant, encode_mat_vec_nc_dispatch,
+    encode_mat_vec_q4_k_nc2_rp4_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32,
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
@@ -2519,6 +2520,394 @@ fn smalln_mma_micro_27b() {
         } else {
             "FAIL — shallow small-N lane closes per pre-registration"
         }
+    );
+}
+
+/// **v0.500 small-N matmul selection sweep** (`smalln_selection_sweep_27b`).
+/// Britt's ask: systematic config-permutation sweep so the small-N story
+/// carries no stale kernel assumptions. cx-vetted axes/ranges/granularity
+/// (session `019f393b-7...`): Family C first (selection permutations of
+/// EXISTING kernels — the staleness audit found N in {2,3,4,8} verify
+/// falls to the generic 32-wide tile because n16 requires n_query==16);
+/// Family A staged mma8v variants (RT/CT/KS/SGS); Family B one TG-shape
+/// point (nc2 rp4). Scope: MATMUL SELECTION ONLY (per-token GDN/attn/rope
+/// staleness is a separate recorded scope).
+///
+/// Pre-registered reads: R1 reopen iff any config c(2) <= 1.25 on BOTH
+/// ffn_gate and ffn_down; R2 recommend dispatcher change iff a config
+/// beats the CURRENT selection >= 10% at some (N, shape) (production
+/// flip needs repeat + e2e confirmation, separate gate); R3 updates the
+/// verify(16) PROJECTION cost only; R4 else closure hardens to "swept
+/// matmul neighborhood".
+///
+/// Rows are machine-parseable: `[sweep] shape= dtype= N= cfg= ms= gbps=
+/// c= cos=`. Correctness asserted per (config, shape, N): live-column
+/// cos >= 0.999 vs per-column mv1 (E0 families are separately
+/// bit-asserted by their own gates); padded outputs finite-checked.
+///
+/// `cargo test -p qwen-llm --release --test dflash_correctness \
+///   smalln_selection_sweep_27b -- --ignored --nocapture`
+/// (run a second time with `QWEN_MATMAT_N16_V2=1` for the v2 rows —
+/// the flag latches on first read.)
+#[test]
+#[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
+fn smalln_selection_sweep_27b() {
+    if !std::path::Path::new(TARGET_GGUF).exists() {
+        eprintln!("[sweep] skipped — target GGUF missing");
+        return;
+    }
+    let ctx_metal = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[sweep] loading 27B-Q4_K_M…");
+    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
+
+    let h = mm.arch.hidden_size as usize;
+    let f = mm.arch.intermediate_size as usize;
+    let gdn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Gdn(g) => Some(g),
+            _ => None,
+        })
+        .expect("gdn block");
+    let attn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Attn(a) => Some(a),
+            _ => None,
+        })
+        .expect("attn block");
+
+    let shapes: Vec<(&str, &MetalTensor, usize)> = vec![
+        ("ffn_gate", &gdn.ffn_gate, h),
+        ("ffn_down", &gdn.ffn_down, f),
+        ("gdn_qkv", &gdn.in_proj_qkv, h),
+        ("gdn_out", &gdn.out_proj, {
+            gdn.out_proj.n_elements() as usize / h
+        }),
+        ("attn_q", &attn.q, h),
+        ("attn_o", &attn.o, { attn.o.n_elements() as usize / h }),
+        ("lm_head", &mm.lm_head, h),
+    ];
+
+    #[allow(clippy::type_complexity)]
+    let timed = |encode: &dyn Fn(&KernelEncoder) -> (), iters: usize, reps: usize| -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..iters {
+                encode(&enc);
+            }
+            enc.end();
+            let t = std::time::Instant::now();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            best = best.min(t.elapsed().as_secs_f64() / iters as f64);
+        }
+        best
+    };
+
+    let ns: [usize; 5] = [2, 3, 4, 8, 16];
+    let mut best_c2_kill: Vec<(String, f64, String)> = Vec::new(); // (shape, best c, cfg)
+
+    for (label, w, n_in) in shapes {
+        let n_out = w.n_elements() as usize / n_in;
+        let w_bytes = w.buffer.length() as f64;
+        let dtype = w.dtype;
+        // lm_head is ~15x the next-largest tensor; lighter sampling.
+        let (iters, reps) = if n_out > 100_000 { (8, 3) } else { (32, 5) };
+
+        // 16 distinct nonzero sentinel columns.
+        let x_src: Vec<f32> = (0..16 * n_in)
+            .map(|i| {
+                let c = i / n_in;
+                let k = i % n_in;
+                (((k * 7 + c * 13) % 23) as f32 - 11.0) * 1e-2 + (c as f32 + 1.0) * 1e-3
+            })
+            .collect();
+        let x = MetalTensor::from_bytes(
+            &ctx_metal,
+            bytemuck::cast_slice(&x_src),
+            vec![(16 * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x");
+        let y_test = MetalTensor::zeros_f32(&ctx_metal, vec![(16 * n_out) as u64]).expect("y_test");
+        let y_ref = MetalTensor::zeros_f32(&ctx_metal, vec![(16 * n_out) as u64]).expect("y_ref");
+
+        // Reference: mv1 per column, all 16 columns.
+        {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for c in 0..16 {
+                let xc = x.view_subrange((c * n_in) as u64, vec![n_in as u64]);
+                let yc = y_ref.view_subrange((c * n_out) as u64, vec![n_out as u64]);
+                encode_mat_vec_dispatch(&ctx_metal, &enc, w, &xc, &yc, n_in, n_out)
+                    .expect("mv1 ref");
+            }
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+        }
+        let want_all = unsafe {
+            std::slice::from_raw_parts(y_ref.buffer.contents().as_ptr() as *const f32, 16 * n_out)
+        };
+
+        // Anchor: mv1 at block start.
+        let x1 = x.view_subrange(0, vec![n_in as u64]);
+        let y1 = y_test.view_subrange(0, vec![n_out as u64]);
+        let t_mv_a = timed(
+            &|enc| {
+                encode_mat_vec_dispatch(&ctx_metal, enc, w, &x1, &y1, n_in, n_out).expect("mv");
+            },
+            iters,
+            reps,
+        );
+
+        // (cfg name, valid at N?, encode closure builder) — run per N.
+        for &n in &ns {
+            // Enumerate configs valid at this (N, dtype).
+            #[allow(clippy::type_complexity)]
+            let mut cfgs: Vec<(String, Box<dyn Fn(&KernelEncoder) + '_>, usize)> = Vec::new(); // (name, encode, cols_computed)
+
+            // C1: current production selection at n_query=N.
+            {
+                let xn = x.view_subrange(0, vec![(n * n_in) as u64]);
+                let yn = y_test.view_subrange(0, vec![(n * n_out) as u64]);
+                let (ctx2, w2) = (&ctx_metal, w);
+                cfgs.push((
+                    "current".into(),
+                    Box::new(move |enc| {
+                        encode_mat_mat_dispatch(ctx2, enc, w2, &xn, &yn, n_in, n_out, n)
+                            .expect("mm current");
+                    }),
+                    n,
+                ));
+            }
+            // C2: padded-to-16 n16 (only meaningful when N < 16).
+            if n < 16 {
+                let xn = x.view_subrange(0, vec![(16 * n_in) as u64]);
+                let yn = y_test.view_subrange(0, vec![(16 * n_out) as u64]);
+                let (ctx2, w2) = (&ctx_metal, w);
+                cfgs.push((
+                    "pad16".into(),
+                    Box::new(move |enc| {
+                        encode_mat_mat_dispatch(ctx2, enc, w2, &xn, &yn, n_in, n_out, 16)
+                            .expect("mm pad16");
+                    }),
+                    16,
+                ));
+            }
+            // nc scalar family (Q4_K/Q6_K, N in {2,4,8}).
+            if matches!(n, 2 | 4 | 8) && matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K) {
+                let xn = x.view_subrange(0, vec![(n * n_in) as u64]);
+                let yn = y_test.view_subrange(0, vec![(n * n_out) as u64]);
+                let (ctx2, w2) = (&ctx_metal, w);
+                cfgs.push((
+                    "nc".into(),
+                    Box::new(move |enc| {
+                        encode_mat_vec_nc_dispatch(ctx2, enc, w2, &xn, &yn, n_in, n_out, n)
+                            .expect("nc");
+                    }),
+                    n,
+                ));
+            }
+            // B1: nc2 rp4 (Q4_K, N=2).
+            if n == 2 && dtype == GgmlType::Q4_K {
+                let xn = x.view_subrange(0, vec![(2 * n_in) as u64]);
+                let yn = y_test.view_subrange(0, vec![(2 * n_out) as u64]);
+                let (ctx2, w2) = (&ctx_metal, w);
+                cfgs.push((
+                    "nc2rp4".into(),
+                    Box::new(move |enc| {
+                        encode_mat_vec_q4_k_nc2_rp4_f32(ctx2, enc, w2, &xn, &yn, n_in, n_out)
+                            .expect("nc2rp4");
+                    }),
+                    2,
+                ));
+            }
+            // mma8 (8-col) at N <= 8; composed 2x at N=16.
+            if matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K) && n_out % 8 == 0 {
+                if n <= 8 {
+                    let xn = x.view_subrange(0, vec![(8 * n_in) as u64]);
+                    let yn = y_test.view_subrange(0, vec![(8 * n_out) as u64]);
+                    let (ctx2, w2) = (&ctx_metal, w);
+                    cfgs.push((
+                        "mma8".into(),
+                        Box::new(move |enc| {
+                            encode_mat_mat_mma8_dispatch(ctx2, enc, w2, &xn, &yn, n_in, n_out)
+                                .expect("mma8");
+                        }),
+                        8,
+                    ));
+                    // Family A variants (8-col). Row-per-TG constraints
+                    // (16 for r2c1k64/sg2) are re-checked below and in the
+                    // encode fn; all swept shapes satisfy n_out % 16 == 0.
+                    for v in ["r2c1k64", "r1c1k128", "r1c1k64_sg2", "r2c1k128", "r4c1k64"] {
+                        if v == "r4c1k64" && n_out % 32 != 0 {
+                            continue;
+                        }
+                        let xn = x.view_subrange(0, vec![(8 * n_in) as u64]);
+                        let yn = y_test.view_subrange(0, vec![(8 * n_out) as u64]);
+                        let (ctx2, w2) = (&ctx_metal, w);
+                        cfgs.push((
+                            format!("mma8v-{v}"),
+                            Box::new(move |enc| {
+                                encode_mat_mat_mma8_variant(
+                                    ctx2, enc, w2, &xn, &yn, n_in, n_out, v,
+                                )
+                                .expect("mma8v");
+                            }),
+                            8,
+                        ));
+                    }
+                } else {
+                    // N=16: composed 2x mma8 and the 16-col variants.
+                    let xa = x.view_subrange(0, vec![(8 * n_in) as u64]);
+                    let ya = y_test.view_subrange(0, vec![(8 * n_out) as u64]);
+                    let xb = x.view_subrange((8 * n_in) as u64, vec![(8 * n_in) as u64]);
+                    let yb = y_test.view_subrange((8 * n_out) as u64, vec![(8 * n_out) as u64]);
+                    let (ctx2, w2) = (&ctx_metal, w);
+                    cfgs.push((
+                        "mma8x2".into(),
+                        Box::new(move |enc| {
+                            encode_mat_mat_mma8_dispatch(ctx2, enc, w2, &xa, &ya, n_in, n_out)
+                                .expect("mma8x2a");
+                            encode_mat_mat_mma8_dispatch(ctx2, enc, w2, &xb, &yb, n_in, n_out)
+                                .expect("mma8x2b");
+                        }),
+                        16,
+                    ));
+                    for v in ["r1c2k64", "r2c2k64", "r2c2k128"] {
+                        let xn = x.view_subrange(0, vec![(16 * n_in) as u64]);
+                        let yn = y_test.view_subrange(0, vec![(16 * n_out) as u64]);
+                        let (ctx2, w2) = (&ctx_metal, w);
+                        cfgs.push((
+                            format!("mma8v-{v}"),
+                            Box::new(move |enc| {
+                                encode_mat_mat_mma8_variant(
+                                    ctx2, enc, w2, &xn, &yn, n_in, n_out, v,
+                                )
+                                .expect("mma8v16");
+                            }),
+                            16,
+                        ));
+                    }
+                }
+            }
+
+            for (cfg, encode, cols_computed) in cfgs {
+                // Skip variants whose row constraint fails (encode returns Err
+                // inside closure would panic; pre-check the common one).
+                if (cfg == "mma8v-r2c1k64" || cfg == "mma8v-r1c1k64_sg2" || cfg == "mma8v-r2c2k64")
+                    && n_out % 16 != 0
+                {
+                    continue;
+                }
+                // Correctness once: zero y_test, run encode, compare live N
+                // columns; finiteness of computed-but-padded columns.
+                unsafe {
+                    std::ptr::write_bytes(
+                        y_test.buffer.contents().as_ptr() as *mut u8,
+                        0,
+                        16 * n_out * 4,
+                    );
+                }
+                {
+                    let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode(&enc);
+                    enc.end();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                }
+                let got = unsafe {
+                    std::slice::from_raw_parts(
+                        y_test.buffer.contents().as_ptr() as *const f32,
+                        16 * n_out,
+                    )
+                };
+                let mut min_cos = f64::INFINITY;
+                for c in 0..n {
+                    let (mut dot, mut n2g, mut n2w) = (0f64, 0f64, 0f64);
+                    for i in c * n_out..(c + 1) * n_out {
+                        let (gv, wv) = (got[i] as f64, want_all[i] as f64);
+                        dot += gv * wv;
+                        n2g += gv * gv;
+                        n2w += wv * wv;
+                    }
+                    min_cos = min_cos.min(dot / (n2g.sqrt() * n2w.sqrt()).max(1e-30));
+                }
+                for i in n * n_out..cols_computed * n_out {
+                    assert!(
+                        got[i].is_finite(),
+                        "[sweep {label}] {cfg} N{n}: padded output not finite at {i}"
+                    );
+                }
+                assert!(
+                    min_cos >= 0.999,
+                    "[sweep {label}] {cfg} N{n}: min live-column cos {min_cos:.6} < 0.999"
+                );
+
+                let t = timed(&encode, iters, reps);
+                let gbps = w_bytes / t / 1e9;
+                let c_ratio = t / t_mv_a;
+                eprintln!(
+                    "[sweep] shape={label} dtype={dtype:?} N={n} cfg={cfg} ms={:.3} gbps={gbps:.0} c={c_ratio:.2} cos={min_cos:.6}",
+                    t * 1e3
+                );
+                if n == 2 && (label == "ffn_gate" || label == "ffn_down") {
+                    match best_c2_kill.iter_mut().find(|(l, _, _)| l == label) {
+                        Some(entry) if c_ratio < entry.1 => {
+                            entry.1 = c_ratio;
+                            entry.2 = cfg.clone();
+                        }
+                        Some(_) => {}
+                        None => best_c2_kill.push((label.to_string(), c_ratio, cfg.clone())),
+                    }
+                }
+            }
+        }
+
+        // Anchor: mv1 at block end; drift check.
+        let t_mv_b = timed(
+            &|enc| {
+                encode_mat_vec_dispatch(&ctx_metal, enc, w, &x1, &y1, n_in, n_out).expect("mv");
+            },
+            iters,
+            reps,
+        );
+        let drift = (t_mv_b - t_mv_a).abs() / t_mv_a;
+        eprintln!(
+            "[sweep] shape={label} anchor mv1 start={:.3}ms end={:.3}ms drift={:.1}%{}",
+            t_mv_a * 1e3,
+            t_mv_b * 1e3,
+            drift * 100.0,
+            if drift > 0.03 {
+                "  ** NOISY BLOCK **"
+            } else {
+                ""
+            }
+        );
+    }
+
+    // R1 read across everything measured.
+    for (l, c, cfg) in &best_c2_kill {
+        eprintln!("[sweep] best c(2) {l}: {c:.2} ({cfg})");
+    }
+    let reopen = best_c2_kill.len() == 2 && best_c2_kill.iter().all(|(_, c, _)| *c <= 1.25);
+    eprintln!(
+        "[sweep] R1 reopen read (c(2) <= 1.25 on both kill shapes): {}",
+        if reopen { "REOPEN" } else { "stands closed" }
     );
 }
 

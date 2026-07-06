@@ -49,7 +49,7 @@ use std::sync::{
 static KERNEL_TRACE_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
 const ATTN_V4_SUBGROUP_MIN_POS_DEFAULT: usize = 256;
-const ATTN_V4_NWG_MAX: usize = 256;
+const ATTN_V4_NWG_MAX: usize = 1024;
 
 thread_local! {
     static ATTN_V4_GROUP_TILE_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
@@ -230,6 +230,82 @@ fn kernel_trace_record_dispatch() {
     });
 }
 
+// ===========================================================================
+// Dispatch census (bench-only; v0.495 W-program attribution). Records
+// (stage_family, kernel_name, grid_tgs, tg_threads) per dispatch while
+// active. Zero production cost when never enabled (one atomic load per
+// dispatch, same pattern as kernel_trace).
+// ===========================================================================
+
+#[derive(Clone, Debug)]
+pub struct DispatchCensusRow {
+    pub family: &'static str,
+    pub kernel: String,
+    pub grid_tgs: u64,
+    pub tg_threads: u64,
+}
+
+static DISPATCH_CENSUS_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static DISPATCH_CENSUS: std::cell::RefCell<Option<Vec<DispatchCensusRow>>> =
+        const { std::cell::RefCell::new(None) };
+    static CENSUS_LAST_PSO: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+    static CENSUS_FAMILY: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// Begin recording dispatch shapes on this thread. Bench-only.
+pub fn dispatch_census_begin() {
+    DISPATCH_CENSUS_EVER_ENABLED.store(true, Ordering::Relaxed);
+    DISPATCH_CENSUS.with(|c| *c.borrow_mut() = Some(Vec::with_capacity(512)));
+}
+
+/// Stop recording and take the census rows.
+pub fn dispatch_census_take() -> Vec<DispatchCensusRow> {
+    DISPATCH_CENSUS.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Set the current stage family label (called by decode stage boundaries).
+pub fn dispatch_census_set_family(family: &'static str) {
+    if !DISPATCH_CENSUS_EVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    CENSUS_FAMILY.with(|f| f.set(family));
+}
+
+#[inline]
+fn census_record_pso(name: &str) {
+    if !DISPATCH_CENSUS_EVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    DISPATCH_CENSUS.with(|c| {
+        if c.borrow().is_some() {
+            CENSUS_LAST_PSO.with(|p| {
+                let mut p = p.borrow_mut();
+                p.clear();
+                p.push_str(name);
+            });
+        }
+    });
+}
+
+#[inline]
+fn census_record_dispatch(grid: MTLSize, threads: MTLSize) {
+    if !DISPATCH_CENSUS_EVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    DISPATCH_CENSUS.with(|c| {
+        if let Some(rows) = c.borrow_mut().as_mut() {
+            rows.push(DispatchCensusRow {
+                family: CENSUS_FAMILY.with(|f| f.get()),
+                kernel: CENSUS_LAST_PSO.with(|p| p.borrow().clone()),
+                grid_tgs: (grid.width * grid.height.max(1) * grid.depth.max(1)) as u64,
+                tg_threads: (threads.width * threads.height.max(1) * threads.depth.max(1)) as u64,
+            });
+        }
+    });
+}
+
 /// Checked element-count and byte-size computation for a tensor shape.
 /// Returns `(n_elements, n_bytes)`, both as `usize` validated to fit.
 /// Use this before any allocation or kernel arg derived from
@@ -361,6 +437,7 @@ impl MetalContext {
     /// Look up a kernel function by name, compiling its pipeline state
     /// object on first request and caching it thereafter.
     pub fn pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
+        census_record_pso(name);
         if let Some(p) = self.pso_cache.lock().get(name) {
             return Ok(p.clone());
         }
@@ -1027,6 +1104,7 @@ impl KernelEncoder {
 
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
         kernel_trace_record_dispatch();
+        census_record_dispatch(grid, threads);
         self.raw
             .dispatchThreadgroups_threadsPerThreadgroup(grid, threads);
     }

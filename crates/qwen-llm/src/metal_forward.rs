@@ -63,7 +63,7 @@ use std::{cell::Cell, sync::OnceLock};
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
 /// `attn_v4_choose_nwg` for the selection heuristic.
-pub const ATTN_V4_MAX_NWG: usize = 256;
+pub const ATTN_V4_MAX_NWG: usize = 1024;
 use crate::tensor::{GgmlType, TensorDesc};
 
 /// Single source of truth for which weight dtypes the loader keeps in
@@ -7418,6 +7418,10 @@ fn begin_decode_stage(
     meta: Option<DecodeStageMeta>,
     concurrent: bool,
 ) -> Result<KernelEncoder, MfError> {
+    if let Some(meta) = &meta {
+        // bench-only dispatch census label; no-op unless a census is active
+        qwen_llm_dispatch_census_set_family(meta.family);
+    }
     if let (Some(recorder), Some(meta)) = (recorder, meta) {
         recorder.begin(cmd, meta, concurrent)
     } else if concurrent {
@@ -7426,6 +7430,8 @@ fn begin_decode_stage(
         Ok(KernelEncoder::begin(cmd))
     }
 }
+
+use crate::metal::dispatch_census_set_family as qwen_llm_dispatch_census_set_family;
 
 pub const RMS_EPS: f32 = 1e-6;
 

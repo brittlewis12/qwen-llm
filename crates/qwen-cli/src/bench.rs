@@ -466,6 +466,11 @@ enum Cmd {
     /// the causal boundary-drain ladder-vs-persistent comparison (arm D).
     /// Bench-only kernels; quiet-box rules apply.
     TopologyProbe(TopologyProbeArgs),
+    /// **W-program attribution**: per-family x per-kernel dispatch WIDTH
+    /// census for one decode token (grid TGs, threads/TG, simdgroups),
+    /// joined with stage times. Answers "how much token time sits in
+    /// dispatches too narrow to fill 40 cores" with exact shapes.
+    DispatchCensus(DispatchCensusArgs),
     /// Warm to a target context, then wait for an external go signal before
     /// running a fixed decode window. Intended for attach-mode tracing so the
     /// recorder can skip the long ramp.
@@ -581,6 +586,22 @@ struct MetalPipelinesArgs {
     /// Kernel names to inspect. If omitted, prints the hot decode audit set.
     #[arg(long = "kernel", value_delimiter = ',')]
     kernels: Vec<String>,
+}
+
+#[derive(Parser, Debug)]
+struct DispatchCensusArgs {
+    /// Path to a GGUF file (MoE arch; uses the stage-profiled decode entry).
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Context position to census at (KV warmed to this depth first).
+    #[arg(long, default_value = "16384")]
+    ctx: usize,
+    /// Warm via the token-by-token decode ramp instead of packed prefill.
+    #[arg(long)]
+    decode_ramp_warm: bool,
+    /// Output JSON path.
+    #[arg(long, default_value = "target/profiles/dispatch-census/census.json")]
+    out: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -2104,6 +2125,7 @@ fn main() -> Result<()> {
         Cmd::MetalCounters(a) => run_metal_counters(a),
         Cmd::MetalPipelines(a) => run_metal_pipelines(a),
         Cmd::TopologyProbe(a) => run_topology_probe(a),
+        Cmd::DispatchCensus(a) => run_dispatch_census(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
@@ -3050,6 +3072,130 @@ fn tp_arm_d(
         }
     }
     Ok(rows)
+}
+
+fn run_dispatch_census(args: DispatchCensusArgs) -> Result<()> {
+    use qwen_llm::metal::{dispatch_census_begin, dispatch_census_take};
+    let ctx = MetalContext::new()?;
+    eprintln!("[census] device: {}", ctx.describe());
+    let g = GgufFile::open(&args.model)?;
+    let m = Model::from_gguf(&g)?;
+    let mm = MetalModel::load(&ctx, &g, &m)?;
+    let mf = MetalForward::new(&ctx, &mm);
+
+    let mut s = MetalSession::fresh(&ctx, &mm, args.ctx + 32)?;
+    // PSO warm on the exact profiled path (all splits on for finest labels)
+    for i in 0..3 {
+        let _ = mf.single_token_argmax_stage_profiled_concurrent_gdn_moe(
+            0, i as u32, &mut s, true, true, true,
+        )?;
+    }
+    let mut s = MetalSession::fresh(&ctx, &mm, args.ctx + 32)?;
+    if args.ctx > 1 {
+        if args.decode_ramp_warm {
+            let _ = mf.single_token(0, 0, &mut s)?;
+            for p in 1..(args.ctx as u32) {
+                let _ = mf.single_token(0, p, &mut s)?;
+            }
+        } else {
+            let ids = vec![0i32; args.ctx];
+            let chunk = default_prefill_chunk(mm.arch.kind, args.ctx);
+            let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, chunk, ids.len())
+                .context("census prefill scratch")?;
+            let t0 = Instant::now();
+            prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
+                .context("census prefill warm")?;
+            eprintln!(
+                "[census] prefill-warm to {} in {:.1}s",
+                args.ctx,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    dispatch_census_begin();
+    let (_tok, profile) = mf.single_token_argmax_stage_profiled_concurrent_gdn_moe(
+        0,
+        args.ctx as u32,
+        &mut s,
+        true,
+        true,
+        true,
+    )?;
+    let rows = dispatch_census_take();
+
+    // family time totals from the same token
+    let mut fam_ms: BTreeMap<String, (f64, f64)> = BTreeMap::new(); // ms, pct
+    for st in &profile.stages {
+        let e = fam_ms.entry(st.family.clone()).or_default();
+        e.0 += st.duration_ms_scaled;
+        e.1 += st.fraction_of_gpu * 100.0;
+    }
+    // dispatch shape aggregation per (family, kernel, grid, tg)
+    let mut agg: BTreeMap<(String, String, u64, u64), u64> = BTreeMap::new();
+    for r in &rows {
+        *agg.entry((
+            r.family.to_string(),
+            r.kernel.clone(),
+            r.grid_tgs,
+            r.tg_threads,
+        ))
+        .or_default() += 1;
+    }
+
+    println!(
+        "[census] ctx={} dispatches={} families={} (stage-profiled token; shapes exact, times +~19% perturbed - use shares)",
+        args.ctx,
+        rows.len(),
+        fam_ms.len()
+    );
+    println!("family\tms\tpct_gpu\tkernel\tcount\tgrid_tgs\ttg_threads\tsimdgroups\tcore_fill_pct");
+    let mut fam_sorted: Vec<_> = fam_ms.iter().collect();
+    fam_sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
+    let mut json_rows = Vec::new();
+    for (fam, (ms, pct)) in &fam_sorted {
+        let mut first = true;
+        for ((f, kernel, grid, tg), count) in agg.iter() {
+            if f != *fam {
+                continue;
+            }
+            let sg = grid * (tg / 32).max(1);
+            // one-simdgroup-per-TG fill estimate vs 40 cores
+            let fill = (*grid as f64 / TP_GPU_CORES * 100.0).min(100.0);
+            println!(
+                "{}\t{:.3}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{:.0}",
+                if first { fam.as_str() } else { "" },
+                if first { *ms } else { 0.0 },
+                if first { *pct } else { 0.0 },
+                kernel,
+                count,
+                grid,
+                tg,
+                sg,
+                fill
+            );
+            json_rows.push(serde_json::json!({
+                "family": fam, "family_ms": ms, "family_pct": pct,
+                "kernel": kernel, "count": count, "grid_tgs": grid,
+                "tg_threads": tg, "simdgroups_per_dispatch": sg,
+            }));
+            first = false;
+        }
+    }
+    if let Some(dir) = args.out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(
+        &args.out,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "model": args.model.display().to_string(),
+            "ctx": args.ctx,
+            "gpu_ms_perturbed": profile.token.gpu_kernel_ms,
+            "rows": json_rows,
+        }))?,
+    )?;
+    println!("wrote {}", args.out.display());
+    Ok(())
 }
 
 fn run_topology_probe(args: TopologyProbeArgs) -> Result<()> {

@@ -6,6 +6,64 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-06 - v0.495 W0 Dispatch Census + Two True-Long Falsifiers
+
+Status: W-program attribution executed (per the cx-signed attribution-first
+mandate, session `019f347b-c...`) plus two cheap pre-registered true-long
+experiments, both falsified. New durable machinery: `qwen-bench
+dispatch-census` - per-family x per-kernel dispatch WIDTH census (grid TGs,
+threads/TG, simdgroups) for one stage-profiled decode token, joined with
+family times; recording hooks in `MetalContext::pipeline` /
+`KernelEncoder::dispatch` / `begin_decode_stage` are zero-cost unless a
+census is active. Artifacts:
+`target/profiles/dispatch-census/census-{16384,131072}.json`.
+
+- CENSUS FINDING (884 dispatches/token, 17 families): the "narrow glue"
+  bucket is SMALL - all sub-50%-fill families sum to ~1.2-1.5 ms/token
+  (norms/adds/topk/rope/scatter at 1-16 TGs, moe_final at 2 TGs, gdn_tail
+  sub-ops at 8-16 TGs). The v0.493 idea that widening glue is a ~5 ms
+  lever is REVISED DOWN to ~1.2-1.5 ms spread across ~10 tiny ops.
+- The real width story: the TOP TIME kernels are one-simdgroup 32-thread
+  TGs - `attn_decode_v4_g8_t4_c64` runs a FIXED 1024x32 grid at BOTH 16k
+  and 131k (25.6 TGs/core ~ B0's W32 compute plateau, 3.6x under the
+  ~92/core stall-fill ceiling), `gdn_step_decay` runs 4096x32. Wide by
+  TG count, capped by per-TG width; per-TG work grows 8x from 16k->131k
+  at constant parallelism.
+- FALSIFIER 1 - G8 bcast @131k full-decode (pre-registered ~+2% e2e from
+  the 46% attention share): base gpu `16.10 ms` vs bcast `16.12 ms`
+  (+0.1%, noise). The v0.490 pattern holds even at maximum attention
+  share; the opt-in stays parked permanently absent a new mechanism.
+- FALSIFIER 2 - attention ctx-split widening @131k (W1a; mechanism: more
+  resident W32 TGs toward the B0 stall-fill ceiling; prediction >= 3%
+  gpu_ms win, kill on reduce overhead): INVERTED. NWG sweep at 131k:
+  128 -> `18.64 ms` (+14.6%), 256 (default) -> `16.26 ms`, 512 ->
+  `19.11 ms` (+17.5%), 1024 -> `20.62 ms` (+26.8%). NWG=256 is a genuine
+  local optimum; splitting shortens each TG's KV stream and the loss
+  dwarfs any residency gain. The `ATTN_V4_NWG_MAX`/`ATTN_V4_MAX_NWG`
+  caps were raised 256 -> 1024 to run the sweep (env-knob range only;
+  default heuristic and partial-scratch sizing unchanged in behavior,
+  correctness green at 512/1024) and are KEPT for future sweeps.
+- Attention main is now falsifier-BRACKETED on three axes at true-long:
+  split count (this entry), per-TG byte shape (v0.463/v0.488),
+  score-broadcast (v0.490 + this entry). Its ~1.29x gap to the KV-byte
+  roofline (measured ~7.5 ms vs 5.8 ms floor at 131k) lives inside the
+  fixed-width stream loop. The remaining roofline-backed lever is KV
+  BYTES: `q8_g8` decode PSOs already exist but `QWEN_KV_Q8` is wired
+  only for dense g6; wiring Q8 KV for A3B g8 halves the attention floor
+  (5.8 -> 2.9 ms @131k, e2e estimate ~+15-25% at true-long). That is
+  the top-ranked next arc, pending v0.437 falsifier-scope review and a
+  cx design gate.
+
+Validation:
+
+- census: `qwen-bench dispatch-census --ctx {16384,131072}` (shapes exact;
+  times from the stage-profiled token, +~19% perturbed, shares only)
+- G8 A/B: 2 reps/arm interleaved, ctx-sweep window 16 prefill-warm
+  (`/tmp/g8-131k-ab.log`)
+- NWG sweep: `QWEN_ATTN_V4_NWG={128,512,1024}` vs default, same harness;
+  correctness `attn_v4_matches_naive_f16kv` green at 512/1024
+- quiet box throughout; G8 A/B ran exclusively before census/NWG runs
+
 ## 2026-07-05 - v0.494 Program C: True-Long Scoreboard, Attention 46% @131k
 
 Status: Program C executed per the signed conditions (cx gate session

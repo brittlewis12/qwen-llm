@@ -1183,6 +1183,20 @@ INTEGRATION PROJECT: wire the best-kernel table (pad16 as the zero-code
 floor) + packed GDN/rope/scatter into packed verify behind
 greedy-equivalence and whole-step re-measurement gates; then whole-step
 MTP-3 re-pricing; then the Q5_K port and drafter phase-2/sync cleanup.
+v0.501 lands stage one: the small-N table is production default
+(`QWEN_MATMAT_SMALLN_TABLE`, rollback documented as re-exposing the
+witness below) and moves whole-step DFlash static-16 verify
+`0.862/0.871x -> 0.952/0.951x` (+10.4%, two samples each side,
+equivalence PASS) and the MTP-N prototype to `0.836x` (3.32
+emitted/step; drafting machinery still binding). The rollback A/B also
+SURFACED A LATENT CORRECTNESS FINDING, confirmed on the pristine v0.500
+binary: the pre-table path deterministically violates greedy
+token-identity on a short-prompt static-16 witness (first divergence at
+index 84, single near-tie flip; best-fit mechanism: E1 half-staged
+verify tiles vs the mat-vec decode chain). The witness is now a
+required gate row; the residual E1-accept-path risk class is recorded
+with tie-guarded verify (E0 recompute under a logit-margin guard, MoE
+3e-4 fallback as the house pattern) as the top correctness follow-up.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

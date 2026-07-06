@@ -7524,6 +7524,8 @@ pub fn encode_mat_vec_dispatch(
 ///   * Q6_K (ffn_down, lm_head)
 ///   * Q8_0 (DFlash drafter projections, lm_head — added by v0.73b.0)
 ///   * IQ4_NL/IQ4_XS (IQ quant compatibility)
+crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
+
 pub fn encode_mat_mat_dispatch(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -7534,6 +7536,64 @@ pub fn encode_mat_mat_dispatch(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
+    // v0.501: small-N best-kernel table from the v0.500 selection sweep
+    // (PERF-LOG v0.500; the pre-v0.501 selection fell through to the
+    // GENERIC 32-wide tile at every N < 16 and lost 2-5x). Only fires
+    // where the sweep measured a clear win AND the buffer contract is
+    // drop-in (x = [n_query, n_in], y = [n_query, n_out], exact).
+    // Exactness: nc is E0 per column vs mat-vec (tighter than the E1
+    // half-staged tile it replaces); mma8v is E1 with F32 activations
+    // (cos 1.000000 at rel_rms ~2e-4 on all swept shapes). End-to-end
+    // greedy equivalence re-gated at v0.501. Rollback:
+    // QWEN_MATMAT_SMALLN_TABLE=0.
+    if matmat_smalln_table_enabled()
+        && matches!(weight.dtype, GgmlType::Q4_K | GgmlType::Q6_K)
+        && n_in % 256 == 0
+    {
+        match n_query {
+            2 if weight.dtype == GgmlType::Q4_K => {
+                // nc2rp4: c(2) 1.53-1.72 vs generic 5.1-8.0.
+                return Ok(crate::metal::encode_mat_vec_q4_k_nc2_rp4_f32(
+                    ctx, enc, weight, x, y, n_in, n_out,
+                )?);
+            }
+            2 | 4 => {
+                // nc2 (Q6_K) / nc4: c 1.6-3.3 vs generic 5.1-8.3.
+                return Ok(crate::metal::encode_mat_vec_nc_dispatch(
+                    ctx, enc, weight, x, y, n_in, n_out, n_query,
+                )?);
+            }
+            8 if weight.dtype == GgmlType::Q6_K && n_out % 8 == 0 => {
+                // r1c1k128: flat c ~1.6-1.8 across N on Q6_K shapes.
+                return Ok(crate::metal::encode_mat_mat_mma8_variant(
+                    ctx, enc, weight, x, y, n_in, n_out, "r1c1k128",
+                )?);
+            }
+            8 if weight.dtype == GgmlType::Q4_K && n_out % 16 == 0 => {
+                // r1c1k64_sg2: the Q4_K N=8 all-rounder (2.25-2.78,
+                // never worst) vs generic 5.1-8.3.
+                return Ok(crate::metal::encode_mat_mat_mma8_variant(
+                    ctx,
+                    enc,
+                    weight,
+                    x,
+                    y,
+                    n_in,
+                    n_out,
+                    "r1c1k64_sg2",
+                )?);
+            }
+            16 if n_out % 16 == 0 && n_out < 100_000 => {
+                // r2c2k64 beats n16 by 8-35% on ffn/gdn/attn shapes;
+                // n16 retained for lm_head-class (n_out >= 100k) where
+                // it still wins (2.35 vs 2.81).
+                return Ok(crate::metal::encode_mat_mat_mma8_variant(
+                    ctx, enc, weight, x, y, n_in, n_out, "r2c2k64",
+                )?);
+            }
+            _ => {}
+        }
+    }
     match weight.dtype {
         GgmlType::Q4_K => Ok(crate::metal::encode_mat_mat_q4_k_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,

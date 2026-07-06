@@ -6,6 +6,67 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-06 - v0.501 Small-N Dispatch Table Wired; Latent Verify Near-Tie Flip Found and Recorded
+
+Status: PRODUCTION dispatch change (first of the verify-path integration
+project) + a correctness finding. cx pre-commit `019f397b-5...` (GO after
+docs; "pre-existing" upgraded to confirmed-on-pristine-binary).
+
+THE CHANGE: `encode_mat_mat_dispatch` now routes small-N Q4_K/Q6_K
+mat-mats per the v0.500 best-kernel table, behind default_on
+`QWEN_MATMAT_SMALLN_TABLE`: N=2 Q4_K -> nc2rp4; N=2 (Q6_K) / N=4 -> nc
+family (E0 per column); N=8 Q4_K -> mma8v-r1c1k64_sg2 (n_out%16), Q6_K ->
+r1c1k128 (n_out%8); N=16 -> r2c2k64 when n_out%16==0 && n_out<100k
+(lm_head-class stays n16, where it still wins). Everything else falls
+through unchanged. Buffer contracts are drop-in; no caller changes.
+
+GATES (all greedy equivalence PASS):
+- DFlash static-16, full code prompt, 256 tok: decode-only `0.862/0.871x`
+  (old path, two samples) -> `0.952/0.951x` (table, two samples) —
+  **+10.4% whole-step verify** from the mat-mat legs alone (per-token
+  GDN/attention/rope remain the recorded structural staleness items).
+- MTP `--spec-tokens 3` (N=4 verify -> nc4): `0.836x` total (from the
+  prototype class's 0.479x at spec-2/v0.498), `3.32 emitted/step` at
+  chained alpha `0.771`, equivalence PASS. Drafting machinery (28-44
+  ms/call) remains the binding loss, as recorded.
+- Guardrails: tg64 `25.38 +/- 0.17` (baseline 25.61, within noise);
+  pp sanity ok; fast suite + nc E0 regression test pass.
+
+THE FINDING (correctness, pre-existing): the PRE-TABLE path
+deterministically violates the spec-decode hard gate (H5 greedy
+token-identity) on a witness config —
+`qwen-bench dflash --n-policy static-16 --tokens 128 -p "Write a Python
+function that parses a GGUF file header."` (27B Q4_K_M + spiritbuun
+drafter) -> greedy equivalence FAIL, 3/3 deterministic runs, first
+divergence at index 84 (single token flip 81726 vs 74451, prefix
+identical), and CONFIRMED on the pristine v0.500 binary (stash/rebuild).
+The same config PASSES with the table on. Mechanism (best-fit, not
+proven): near-tie argmax flip — verify logits come from E1 half-staged
+mat-mat tiles while the no-spec baseline uses the mat-vec chain; at a
+near-tie the n16 tile's rounding flips the argmax; r2c2k64's tighter
+F32-activation rounding agrees with mat-vec on this witness.
+- RESIDUAL RISK CLASS (stated plainly): empirical greedy equivalence is
+  not a proof while ANY E1 leg feeds the accept path. v0.501 narrows the
+  class (E0 at N in {2,4}; tighter E1 elsewhere); it does not close it.
+- GATE ROW (added to discipline): the witness config above must PASS in
+  any future verify-path equivalence gating, alongside the full-prompt
+  256-token config.
+- ROLLBACK CAVEAT: `QWEN_MATMAT_SMALLN_TABLE=0` is a rollback/debug
+  configuration that re-exposes the witness failure — it is not
+  exactness-green for that witness.
+- Bench diagnostic improved: equivalence FAIL now prints the first
+  divergence index + local token context (the first-16 prefix print was
+  blind to mid-generation flips).
+
+Recorded follow-ups: (1) tie-guarded verify — recompute near-tie
+positions (verify top1-top2 margin < epsilon) through the E0 mat-vec
+chain before the accept decision; house precedent: the MoE route-margin
+exact fallback (3e-4, v0.415-v0.429) as the guarded-exact-fallback
+PATTERN (the right logit epsilon here is unmeasured); (2) the remaining
+verify-path structural items (packed GDN ~36%, packed rope/scatter,
+matrix attention, concurrent encoders); (3) whole-step MTP-3 re-pricing
+after single-CB drafting; (4) Q5_K port.
+
 ## 2026-07-06 - v0.500 Small-N Selection Sweep: Dispatcher Staleness Quantified, Best-Kernel Table Recorded
 
 Status: systematic config sweep + staleness audit (bench/harness only; NO

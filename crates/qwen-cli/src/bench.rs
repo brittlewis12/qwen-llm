@@ -10683,6 +10683,33 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             eprintln!("[dflash] greedy equivalence: FAIL");
             eprintln!("[dflash]   dflash:  {:?}", &emitted[..n_show]);
             eprintln!("[dflash]   no-spec: {:?}", &ref_emitted[..n_show]);
+            // v0.501: print the first divergence with context — the
+            // first-16 prefix is often identical (near-tie argmax flips
+            // happen mid-generation) and the index is the evidence that
+            // matters for correctness triage.
+            let div = emitted
+                .iter()
+                .zip(ref_emitted.iter())
+                .position(|(a, b)| a != b);
+            match div {
+                Some(i) => {
+                    let lo = i.saturating_sub(4);
+                    let hi_a = (i + 4).min(emitted.len());
+                    let hi_b = (i + 4).min(ref_emitted.len());
+                    eprintln!(
+                        "[dflash]   first divergence at index {i}: dflash[{lo}..{hi_a}]={:?} no-spec[{lo}..{hi_b}]={:?}",
+                        &emitted[lo..hi_a],
+                        &ref_emitted[lo..hi_b]
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "[dflash]   no positional divergence — length mismatch: dflash={} no-spec={}",
+                        emitted.len(),
+                        ref_emitted.len()
+                    );
+                }
+            }
             return Err(anyhow!(
                 "DFlash decode produced different tokens than DFlash=off greedy"
             ));

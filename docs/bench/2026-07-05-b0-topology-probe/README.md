@@ -1,8 +1,85 @@
-# B0: Residency + Forward-Progress + Boundary-Drain Probe (design)
+# B0: Residency + Forward-Progress + Boundary-Drain Probe
 
-Status: SIGNED (cx session `019f347b-c...`, two rounds; four required changes
-applied verbatim). Program B gate 0 per the cx-signed topology program.
-Budget: ~2 days including runs and review.
+Status: RUN COMPLETE. Design cx-signed (session `019f347b-c...`, two rounds;
+four required changes applied verbatim). Program B gate 0 per the cx-signed
+topology program. Results and verdicts below; full artifacts in
+`target/profiles/topology-probe/topology-probe-dwellext.json` (run 2, with
+dwell extension) and `/tmp/b0-full-run{,2}.log`.
+
+## RESULTS (two full runs, quiet box, runs=5 medians)
+
+Calibration (stable across runs): dependent-FMA 13.3 ns/iter; relaxed
+device-atomic poll 96.7 ns/poll.
+
+### Arm R - PASS (kill gate cleared in every reading)
+
+- W32/lo/no-traffic: max_alive 1191-2311 across dwells/runs = 29.8-57.8
+  TGs/core, ALWAYS >= 16/core kill line (worst reading has 86% margin).
+  max_alive is churn-noisy run-to-run; `steady_p10` (alive count observed at
+  entry by post-ramp TGs) is the dwell-stable censor: 717-722 TGs (~18/core)
+  across 200 us - 25 ms dwells and both runs. Use p10 ~ 720 as the
+  conservative co-residency planning figure for 32-wide kernels.
+- Fill ceilings: W32 compute-bound ~1764 threads/core; W32 MEMORY-STALLED
+  reaches ~2950 threads/core (~92 TGs/core) - the scheduler deep-fills only
+  when TGs stall. W256 compute-bound reaches ~2630 threads/core. Hard caps
+  at high width + register pressure: 960 TGs at W128, 480-482 at W256 =
+  ~96 simdgroups/core both ways (architectural).
+- Register pressure did NOT reduce W32 residency (TG-slot/scheduling limits
+  bind first at one-simdgroup width); pressure effects only appear as the
+  ~96 sg/core cap at W128/W256.
+
+### Arm S - PASS (decisive), plus a binding memory-model finding
+
+- Delivery 100% at 40/160/720 consumers x {tight, 25 us, 100 us} x
+  {traffic off, on}; zero timeouts, zero corrupt reads, zero detected
+  global-stall slots; filtered excess-over-cadence p99 <= 0.1 us (one poll
+  unit) - ~250x inside the 25 us gate. Raw p99 tracks cadence exactly as
+  predicted by the amended metric definition.
+- Cross-object reorder probe: 0 stale reads in 6.4M no-traffic
+  observations, but 2.2e-3 / 6.0e-3 stale rates under device traffic
+  (runs 2/1; always nonzero under load). Relaxed data-then-flag publication
+  is EMPIRICALLY UNSAFE on M4 Max under load; any future cross-TG protocol
+  must be self-validating (payload-in-flag / checksummed slots).
+
+### Arm D - P-D1 fires; P-D2 fails BOTH variants => B1a KILLED pre-build
+
+- Uniform ladders (m in {4, 64, low-water} x W {32, 64} x K {8, 32, 110} x
+  work {0, 5, 15, 30 us}): per-boundary cost spans 1.0-5.1 us with median
+  ~2.5 us; the BINDING decode-realistic uniform rows sit at ~2-3 us, far
+  below the pre-registered 8-25 us prediction band and the A0-derived
+  ~18 us anchor (a few edge rows graze 5 us; the gate reads the binding
+  rows, per the cx results review). P-D1 fires.
+- Mixed narrow<->wide ladders (4 alternating with low-water cap): ~11
+  us/boundary at K110/15 us - heterogeneity multiplies boundary cost ~3-5x
+  but still stays under the anchor.
+- Persistence recovery at decode-realistic stages (K110, 15-30 us):
+  local_mem 3.8-18.3%, local_reg lower (in-register fusion does not help at
+  these stage sizes), global -4.6..14.3%, ALL far below the 30% kill line
+  for both dependency classes. `global_wide` - the actual B1a persistent-
+  host shape (full low-water grid hosting narrow stages, idle TGs paying
+  every barrier) - has NEGATIVE recovery everywhere (-2..-9%): the
+  persistent host is slower than the serial ladder it would replace.
+- Zero barrier aborts anywhere; all checksums bit-exact. The persistence
+  MECHANICS work (co-residency, bounded barriers ~0.6-5.8 us, forward
+  progress under compositor preemption); the ECONOMICS do not.
+
+### Verdict and re-attribution (for the PERF-LOG and cx review)
+
+Pre-registered kill semantics applied: P-D1 kill signal (uniform boundary
+< 5 us) + P-D2 both-variant fail => Program B's persistence thesis is
+falsified at the glue-ladder scale and B1a is killed BEFORE touching
+production kernels. Dispatch boundaries cost ~2-4 us x ~330/token =
+~0.7-1.3 ms/token (7-13% of the token), not the ~5.9 ms interior valley
+mass. The valley majority is INTRA-dispatch under-parallelism: narrow
+one-simdgroup dispatches structurally cannot fill 40 cores (a 4-TG glue
+dispatch idles ~36 cores while it runs), and D-local proves fusion cannot
+recover that (perfect in-register fusion of a 110-stage ladder recovers
+<= 18%). The recoverable lane is WIDTH/PARALLELISM restructuring (wider
+glue dispatches; concurrent encoding of independent narrow stages - the
+hazard-tracked concurrent-encoder machinery already exists), not
+persistence. This also closes the DFlash reopen condition recorded at
+v0.443 (persistent-kernel verify structure), which was contingent on
+Program B economics.
 
 BUILD-TIME FINDING (memory-model smoke, cx-required first step): the Metal
 toolchain (v17.3.7003, macosx SDK) accepts ONLY `memory_order_relaxed` on

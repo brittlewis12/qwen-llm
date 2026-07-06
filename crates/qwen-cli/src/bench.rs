@@ -602,6 +602,10 @@ struct TopologyProbeArgs {
     /// Smoke mode: smaller grids/epochs/dwells for a fast end-to-end pass.
     #[arg(long)]
     quick: bool,
+    /// Extra arm-R dwell points (us) for plateau confirmation, e.g.
+    /// `--dwell-extend 15000`. Runs lo/no-traffic variants only.
+    #[arg(long, value_delimiter = ',')]
+    dwell_extend: Vec<f64>,
 }
 
 #[derive(Parser, Debug)]
@@ -3064,6 +3068,58 @@ fn run_topology_probe(args: TopologyProbeArgs) -> Result<()> {
     let mut all_rows: Vec<serde_json::Value> = Vec::new();
     let mut r_caps: Option<TpArmROut> = None;
 
+    if !args.dwell_extend.is_empty() {
+        // focused plateau confirmation: lo variant, no traffic, W in {32,64}
+        let g_tgs: usize = 10240;
+        let census = ctx.buffer_uninit(8)?;
+        let entry = ctx.buffer_uninit(g_tgs * 4)?;
+        let out = ctx.buffer_uninit(g_tgs * 4)?;
+        let dummy = ctx.buffer_uninit(4)?;
+        tp_zero(&dummy, 4);
+        println!("\n== arm R dwell extension (lo, no-traffic) ==");
+        println!("W\tdwell_us\tmax_alive\tper_core\tsteady_p10\tgpu_ms");
+        for &w in &[32usize, 64] {
+            for &dw in &args.dwell_extend {
+                let spin = ((dw * 1e3 / cal.fma_ns).max(1.0)) as u32;
+                tp_zero(&census, 8);
+                tp_zero(&entry, g_tgs * 4);
+                let p = TpParams {
+                    spin_iters: spin,
+                    grid_tgs: g_tgs as u32,
+                    ..Default::default()
+                };
+                let ms = tp_run_timed(&ctx, |enc| {
+                    tp_dispatch(
+                        &ctx,
+                        enc,
+                        "tp_residency_lo",
+                        &p,
+                        &[&seed, &census, &entry, &out, &dummy],
+                        g_tgs,
+                        w,
+                    )
+                })?;
+                let max_alive = tp_read_u32(&census, 2)[1];
+                let ea = tp_read_u32(&entry, g_tgs);
+                let skip = (max_alive as usize).min(g_tgs.saturating_sub(1));
+                let mut steady: Vec<u32> = ea[skip..].to_vec();
+                steady.sort_unstable();
+                let p10 = tp_percentile_u32(&steady, 0.10);
+                println!(
+                    "{w}\t{dw:.0}\t{max_alive}\t{:.1}\t{p10}\t{ms:.1}",
+                    max_alive as f64 / TP_GPU_CORES
+                );
+                all_rows.push(serde_json::json!({
+                    "arm": "r", "variant": "tp_residency_lo", "traffic": false,
+                    "w": w, "dwell_us_nominal": dw, "spin_iters": spin,
+                    "gpu_ms": ms, "max_alive": max_alive,
+                    "per_core": max_alive as f64 / TP_GPU_CORES,
+                    "steady_p10": p10, "dwell_extension": true,
+                }));
+            }
+        }
+    }
+
     if arms.contains("r") {
         let r = tp_arm_r(&ctx, &cal, &seed, &traffic, traffic_mask, args.quick)?;
         all_rows.extend(r.rows.iter().cloned());
@@ -3132,11 +3188,19 @@ fn run_topology_probe(args: TopologyProbeArgs) -> Result<()> {
         "device": ctx.device.name().to_string(),
         "rows": all_rows,
     });
-    let path = args.out_dir.join(if args.quick {
-        "topology-probe-quick.json"
-    } else {
-        "topology-probe.json"
-    });
+    let mut fname = String::from("topology-probe");
+    if args.arm != "all" {
+        fname.push('-');
+        fname.push_str(&args.arm.replace(',', "_"));
+    }
+    if !args.dwell_extend.is_empty() {
+        fname.push_str("-dwellext");
+    }
+    if args.quick {
+        fname.push_str("-quick");
+    }
+    fname.push_str(".json");
+    let path = args.out_dir.join(fname);
     std::fs::write(&path, serde_json::to_string_pretty(&summary)?)?;
     println!("\nwrote {}", path.display());
     Ok(())

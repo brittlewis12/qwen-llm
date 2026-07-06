@@ -6,6 +6,65 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.493 B0 Topology Probe: Persistence Killed, Valleys Re-Attributed
+
+Status: Program B gate 0 executed end-to-end (cx-signed design, two review
+rounds, session `019f347b-c...`). New bench-only machinery: `qwen-bench
+topology-probe` + `kernels/topology_probe.metal` (residency census, bounded
+self-validating signaling, exact cross-object reorder probe, serial-ladder
+vs persistent chain variants). Two full quiet-box runs reproduce; artifacts
+`target/profiles/topology-probe/topology-probe-dwellext.json`. Design +
+full results: `docs/bench/2026-07-05-b0-topology-probe/README.md`.
+
+- MEMORY MODEL (build-time): this Metal toolchain accepts ONLY
+  `memory_order_relaxed`; no fence exists in any signature. Measured
+  consequence: cross-object data-then-flag publication shows `0` stale
+  reads in 6.4M no-traffic observations but `2.2e-3..6e-3` stale rates
+  under device traffic. Any cross-TG protocol on this GPU must be
+  self-validating (payload-in-flag). Banked as a hard design constraint.
+- Arm R PASS: 32-wide co-residency clears the kill line in every reading
+  (max_alive 30-58 TGs/core vs >= 16 gate; dwell-stable steady_p10 ~720
+  TGs ~ 18/core is the conservative planning figure). Fill ceilings:
+  compute-bound W32 ~1764 threads/core vs ~2950/core when memory-stalled
+  (~92 TGs/core); ~96 simdgroups/core hard cap at W128/W256 with pressure.
+- Arm S PASS decisively: 100% delivery to 720 consumers, zero
+  timeouts/corruption, filtered excess-over-cadence p99 <= 0.1 us
+  (~250x inside the 25 us gate), robust to traffic and ~120 Hz compositor
+  preemption. Bounded cross-TG signaling is RELIABLE on this GPU.
+- Arm D: P-D1 FIRES and P-D2 fails BOTH variants => B1a KILLED pre-build
+  per the pre-registered semantics. Serial-encoder dispatch boundaries
+  cost `~2-3 us` at the binding decode-realistic uniform rows (full span
+  `1.0-5.1 us`, median ~2.5), `~11 us` for extreme narrow<->wide mixed
+  ladders - never the `8-25 us` predicted band or the ~18 us the A0
+  valley arithmetic implied. Persistence recovery at decode-realistic stages (K110,
+  15-30 us): best 18.3%, both dependency classes << 30% kill line;
+  `global_wide` (the actual B1a host shape) is NEGATIVE everywhere. Zero
+  barrier aborts; checksums exact - mechanics work, economics do not.
+- RE-ATTRIBUTION: boundaries account for ~0.7-1.3 ms/token (7-13%), not
+  the ~5.9 ms interior valley mass. The majority is INTRA-dispatch
+  under-parallelism: narrow one-simdgroup dispatches cannot fill 40 cores
+  regardless of boundaries, and D-local proves fusion cannot recover it.
+  The H3 verdict stands as "duty-cycle valleys are real" but its
+  boundary-drain MECHANISM is falsified; the recoverable lane is
+  width/parallelism restructuring (wider glue dispatches; concurrent
+  encoding of independent narrow stages - hazard-tracked concurrent
+  encoders already exist in metal.rs).
+- Consequences: Program B (persistence/fusion) is DEAD at glue scale;
+  B1a cancelled before touching production kernels; the v0.443 DFlash
+  reopen condition (persistent-kernel verify machinery) is CLOSED by the
+  same economics. Program A stays demoted. Next force-rank belongs to a
+  width/concurrency program gated through cx.
+
+Validation:
+
+- `qwen-bench topology-probe --runs 5 --dwell-extend 15000` (full matrix,
+  quiet box, two independent runs; logs `/tmp/b0-full-run{,2}.log`)
+- Kill gates read exactly as pre-registered in the signed design doc;
+  design amendments (empirical dwell calibration, excess-over-cadence
+  metric, narrow/mixed arm-D shapes) recorded pre-run with gates unchanged
+- cx design gate session `019f347b-c...` (signed after two rounds);
+  results review pending below
+
 ## 2026-07-05 - v0.492 Valley Alignment: Compositor Excluded, Trace Path Exhausted
 
 Status: attribution checkpoint from EXISTING capture data, no engine change.

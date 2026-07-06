@@ -1067,6 +1067,33 @@ timestamp discipline; (2) run an attention-body limiter/counter probe tied to
 main+reduce, not another blind NWG/tile sweep; (3) promote attention work only if
 it shows `>=0.35-0.50 ms` recoverable ctx16384 upside without ctx4096 regression,
 otherwise prefer the largest isolated GDN subfamily.
+v0.491-v0.493 close the occupancy-attribution thread and KILL the persistence
+branch (cx-gated topology program, session `019f347b-c...`). v0.491 (A0): the
+v0.455 "28% occupancy" is a duty-cycle artifact - kicks start at 56-58%, burst
+to 60-70%, and spend most interior 25 us bins in recurring valleys (H3-shaped,
+no tail decay). v0.492: the only sub-kick trace structure is WindowServer
+compositing (~3% of the shortfall; excluded), and within-encoder dispatch
+timing is triply unobservable on M4 Max - do not re-attempt trace-based
+alignment. v0.493 (B0 probe, `qwen-bench topology-probe`): 32-wide
+co-residency PASSES (~18/core conservative, 30-58/core max_alive; fill
+ceilings ~1764 threads/core compute-bound vs ~2950 memory-stalled; ~96
+simdgroups/core hard cap at W128/256); bounded self-validating cross-TG
+signaling is RELIABLE (100% delivery to 720 consumers, excess p99 <= 0.1 us)
+but relaxed cross-object data-then-flag is UNSAFE under traffic (2e-3..6e-3
+stale rate; payload-in-flag is mandatory); dispatch boundaries cost only
+~2-3 us at decode-realistic shapes (~11 us extreme mixed), so persistence
+recovers <= 18% of a 110-stage glue ladder vs a >= 30% kill line - Program B
+is DEAD, B1a cancelled pre-build, and the v0.443 DFlash persistent-verify
+reopen condition is CLOSED. Working attribution (cx: "roadmap working
+hypothesis requiring an attribution-first discriminator"): the valley mass is
+INTRA-dispatch under-parallelism - narrow one-simdgroup dispatches cannot
+fill 40 cores regardless of boundaries. Next program (cx-signed direction):
+WIDTH/CONCURRENCY restructuring, attribution-first - (1) per-family
+dispatch-width census over the v0.462 stage splits; (2) a concurrent-encoder
+discriminator on 2-3 provably independent narrow stage pairs (machinery
+exists: `begin_concurrent` + hazard notes); (3) only then any production
+widening. Program C (ctx-65536/131072 scoreboard vs pinned llama.cpp +
+limiter capture) remains GO and may re-rank attention-side work first.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

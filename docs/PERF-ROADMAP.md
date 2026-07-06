@@ -1145,6 +1145,23 @@ shallow lane closes too; (2) whole-step packed MTP-1 measurement only if
 (1) or the drafting restructure moves first. See the v0.498 PERF-LOG entry
 for the full gate-session numbers (fixed-layer anchors, DFlash drafter
 health at HEAD).
+v0.499 executes follow-up (1) and the kill line fires: an 8-row x
+8-padded-column simdgroup_matrix kernel at `n_out/8` TGs (design jam
+corrected the mechanism first — M4 has no separate MMA pool, so the
+candidate win was dequant amortization + dense FMA encoding + occupancy)
+measures `c = 1.92-2.41` on the kill shapes at `4.5-5.2 TF` (correct at
+cos 1.000000; a staged-B/wider-K v2 regressed; two variants measured,
+wider micro-variants explicitly not covered). Per pre-registration THE
+SHALLOW SMALL-N LANE CLOSES: across both measured kernel classes the
+best-known costs are `c(2) 1.57` (scalar), `c(4)/c(8) ~1.9-2.4` (mma8),
+leaving composed MTP-1 at `~1.15-1.2x` code-only — below practical
+value. The kernel-level speculative-verify arc on M4 is CLOSED at the
+pre-registered scope. Reopens: an untried micro-variant beating
+`c(2) <= 1.25` (the harness prices candidates in minutes); M5-class
+tensor silicon; a step-change-alpha drafter/MTP asset (price in
+`--tree-sim`, no engine work); or a real multi-token source arriving via
+batching, which inherits mma8 as the best-known N in {4,8} primitive
+(`~2.0-2.8x` the incumbent MM tile at N=8).
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

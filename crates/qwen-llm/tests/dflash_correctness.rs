@@ -32,9 +32,9 @@ use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_get_rows_f32,
-    encode_mat_vec_nc_dispatch, encode_mul_f32, encode_rms_norm_batched_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32,
+    encode_mat_mat_mma8_dispatch, encode_mat_vec_nc_dispatch, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
@@ -2299,6 +2299,227 @@ fn multicol_gemv_micro_27b() {
         .map(|(l, r)| format!("{l}={r:.2}"))
         .collect();
     eprintln!("[h5.6-m2nc] c(2) by shape: {}", c2s.join(" "));
+}
+
+/// **v0.498 follow-up: small-N MMA falsifier** (`smalln_mma_micro_27b`).
+/// The recorded open lane after the M2-nc scalar cap replication:
+/// simdgroup_matrix at mat-vec-grade occupancy (8-row x 8-padded-column
+/// tiles, `n_out/8` single-SG threadgroups — 2176 at ffn_gate vs the
+/// incumbent 64x32 tile's 272). On M4 there is no separate MMA pool; the
+/// candidate win is dequant-once-per-weight + dense FMA encoding +
+/// occupancy.
+///
+/// Pre-registered reads (cx design jam `019f38c6-f...`):
+///   * PASS: c(2) = t_mma8/t_mv1 <= 1.25 on BOTH ffn_gate (Q4_K) and
+///     ffn_down (Q6_K) with cos >= 0.999 per column → lane stays open,
+///     next step whole-step integration.
+///   * mechanism-real-but-under-kill: beats scalar nc2 (c < ~1.6) but
+///     misses 1.25 → record and close unless whole-step composition
+///     changes the math.
+///   * diagnosis-falsified: fails to beat scalar nc2 → tiny-tile
+///     overhead / shared-FP32-pipe pressure was the binding term, not
+///     incumbent under-occupancy.
+///
+/// The kernel always computes 8 columns (padding is the caller's job);
+/// correctness checks ALL 8 columns (distinct nonzero patterns — catches
+/// transpose/stride bugs) at cos >= 0.999 vs per-column mv1 (E1: half
+/// weight staging + MMA accumulation order; activations stay F32).
+///
+/// This is a FALSIFIER HARNESS, not a regression gate: the kill-line
+/// verdict is REPORTED for the registry (a closed lane would otherwise
+/// fail forever). Asserted invariants: per-column correctness, and that
+/// both kill-line shapes were actually measured.
+///
+/// `cargo test -p qwen-llm --release --test dflash_correctness \
+///   smalln_mma_micro_27b -- --ignored --nocapture`
+#[test]
+#[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
+fn smalln_mma_micro_27b() {
+    if !std::path::Path::new(TARGET_GGUF).exists() {
+        eprintln!("[h5.6-mma8] skipped — target GGUF missing");
+        return;
+    }
+    let ctx_metal = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[h5.6-mma8] loading 27B-Q4_K_M…");
+    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
+
+    let h = mm.arch.hidden_size as usize;
+    let f = mm.arch.intermediate_size as usize;
+    let gdn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Gdn(g) => Some(g),
+            _ => None,
+        })
+        .expect("gdn block");
+    let attn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Attn(a) => Some(a),
+            _ => None,
+        })
+        .expect("attn block");
+
+    // (label, weight, n_in, kill-line shape?)
+    let shapes: Vec<(&str, &MetalTensor, usize, bool)> = vec![
+        ("ffn_gate ", &gdn.ffn_gate, h, true),
+        ("ffn_down ", &gdn.ffn_down, f, true),
+        ("gdn_qkv  ", &gdn.in_proj_qkv, h, false),
+        ("attn_q   ", &attn.q, h, false),
+    ];
+
+    let timed = |encode: &dyn Fn(&KernelEncoder) -> ()| -> f64 {
+        const ITERS: usize = 32;
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..ITERS {
+                encode(&enc);
+            }
+            enc.end();
+            let t = std::time::Instant::now();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            best = best.min(t.elapsed().as_secs_f64() / ITERS as f64);
+        }
+        best
+    };
+
+    let mut kill_line: Vec<(String, f64)> = Vec::new();
+
+    for (label, w, n_in, is_kill_shape) in shapes {
+        if !matches!(w.dtype, GgmlType::Q4_K | GgmlType::Q6_K) {
+            eprintln!(
+                "[h5.6-mma8 {label}] skipped — dtype {:?} not in {{Q4_K, Q6_K}}",
+                w.dtype
+            );
+            continue;
+        }
+        let n_out = w.n_elements() as usize / n_in;
+        let w_bytes = w.buffer.length() as f64;
+
+        // 8 DISTINCT nonzero column patterns (catches transpose/stride
+        // bugs; padded columns compute for real per the cx jam).
+        let x_src: Vec<f32> = (0..8 * n_in)
+            .map(|i| {
+                let c = i / n_in;
+                let k = i % n_in;
+                (((k * 7 + c * 13) % 23) as f32 - 11.0) * 1e-2 + (c as f32 + 1.0) * 1e-3
+            })
+            .collect();
+        let x = MetalTensor::from_bytes(
+            &ctx_metal,
+            bytemuck::cast_slice(&x_src),
+            vec![(8 * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x");
+        let y_mma = MetalTensor::zeros_f32(&ctx_metal, vec![(8 * n_out) as u64]).expect("y_mma");
+        let y_ref = MetalTensor::zeros_f32(&ctx_metal, vec![(8 * n_out) as u64]).expect("y_ref");
+
+        // --- Correctness: all 8 columns vs per-column mv1, cos >= 0.999. ---
+        {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_mat_mat_mma8_dispatch(&ctx_metal, &enc, w, &x, &y_mma, n_in, n_out)
+                .expect("mma8");
+            for c in 0..8 {
+                let xc = x.view_subrange((c * n_in) as u64, vec![n_in as u64]);
+                let yc = y_ref.view_subrange((c * n_out) as u64, vec![n_out as u64]);
+                encode_mat_vec_dispatch(&ctx_metal, &enc, w, &xc, &yc, n_in, n_out)
+                    .expect("mv1 ref");
+            }
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+
+            let got = unsafe {
+                std::slice::from_raw_parts(
+                    y_mma.buffer.contents().as_ptr() as *const f32,
+                    8 * n_out,
+                )
+            };
+            let want = unsafe {
+                std::slice::from_raw_parts(
+                    y_ref.buffer.contents().as_ptr() as *const f32,
+                    8 * n_out,
+                )
+            };
+            let mut min_cos = f64::INFINITY;
+            let mut max_rel_rms = 0f64;
+            for c in 0..8 {
+                let (mut dot, mut n2g, mut n2w, mut err2) = (0f64, 0f64, 0f64, 0f64);
+                for i in c * n_out..(c + 1) * n_out {
+                    let (gv, wv) = (got[i] as f64, want[i] as f64);
+                    dot += gv * wv;
+                    n2g += gv * gv;
+                    n2w += wv * wv;
+                    err2 += (gv - wv) * (gv - wv);
+                }
+                let cos = dot / (n2g.sqrt() * n2w.sqrt()).max(1e-30);
+                let rel_rms = (err2 / n2w.max(1e-30)).sqrt();
+                min_cos = min_cos.min(cos);
+                max_rel_rms = max_rel_rms.max(rel_rms);
+            }
+            eprintln!(
+                "[h5.6-mma8 {label}] correctness: min_cos {min_cos:.6} max_rel_rms {max_rel_rms:.2e} (8/8 cols)"
+            );
+            assert!(
+                min_cos >= 0.999,
+                "[h5.6-mma8 {label}] min per-column cos {min_cos:.6} < 0.999 vs mv1 (E1 gate)"
+            );
+        }
+
+        // --- Bench: mv1 reference vs mma8 (always 8 padded columns). ---
+        let x1 = x.view_subrange(0, vec![n_in as u64]);
+        let y1 = y_ref.view_subrange(0, vec![n_out as u64]);
+        let t_mv = timed(&|enc| {
+            encode_mat_vec_dispatch(&ctx_metal, enc, w, &x1, &y1, n_in, n_out).expect("mat_vec");
+        });
+        let t_mma = timed(&|enc| {
+            encode_mat_mat_mma8_dispatch(&ctx_metal, enc, w, &x, &y_mma, n_in, n_out)
+                .expect("mma8");
+        });
+        let gbps_mv = w_bytes / t_mv / 1e9;
+        let gbps_mma = w_bytes / t_mma / 1e9;
+        let tflops = (8.0 * 2.0 * n_in as f64 * n_out as f64) / t_mma / 1e12;
+        let c_ratio = t_mma / t_mv;
+        eprintln!(
+            "[h5.6-mma8 {label}] {n_in:>5}->{n_out:>5}  mv1 {:7.3} ms {gbps_mv:5.0} GB/s | mma8 {:7.3} ms {gbps_mma:5.0} GB/s-eq {tflops:5.2} TF c={c_ratio:4.2} ({} TGs)",
+            t_mv * 1e3,
+            t_mma * 1e3,
+            n_out / 8
+        );
+        if is_kill_shape {
+            kill_line.push((label.trim().to_string(), c_ratio));
+        }
+    }
+
+    assert_eq!(kill_line.len(), 2, "both kill-line shapes must be measured");
+    let pass = kill_line.iter().all(|(_, c)| *c <= 1.25);
+    let detail: Vec<String> = kill_line
+        .iter()
+        .map(|(l, c)| format!("{l}={c:.2}"))
+        .collect();
+    eprintln!(
+        "[h5.6-mma8] kill line c(2) <= 1.25 on {{ffn_gate, ffn_down}}: {} → {}",
+        detail.join(" "),
+        if pass {
+            "PASS — small-N MMA lane stays open"
+        } else {
+            "FAIL — shallow small-N lane closes per pre-registration"
+        }
+    );
 }
 
 /// **v0.75.1 27B integration correctness gate**: exercises the

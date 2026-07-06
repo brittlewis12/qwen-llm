@@ -3652,6 +3652,108 @@ pub fn encode_mat_vec_nc_dispatch(
     }
 }
 
+/// Small-N MMA experiment (v0.498 follow-up): 8-row x 8-padded-column
+/// simdgroup_matrix tile at mat-vec-grade occupancy (`n_out/8`
+/// single-simdgroup threadgroups). Caller ALWAYS provides 8 activation
+/// columns (`x`: F32 `[8, n_in]`) and receives 8 output columns
+/// (`y`: F32 `[8, n_out]`, `y[c*n_out + r]`); pad unused columns.
+/// Q4_K | Q6_K. Exactness: E1 (half-staged weight dequant + MMA
+/// accumulation order; activations NOT half-staged — loaded F32 direct).
+/// Gate: cos >= 0.999 per column vs mv1, asserted by
+/// `smalln_mma_micro_27b`.
+pub fn encode_mat_mat_mma8_dispatch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8",
+            detail: format!("n_in={n_in} not divisible by 256 (K-quant super-block)"),
+        });
+    }
+    if n_out % 8 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8",
+            detail: format!("n_out={n_out} not divisible by 8 (tile rows)"),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8",
+            detail: format!("x/y dtype = {:?}/{:?}, expected F32/F32", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != 8 * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8",
+            detail: format!("x.n_elements={} != 8*n_in={}", x.n_elements(), 8 * n_in),
+        });
+    }
+    if y.n_elements() as usize != 8 * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8",
+            detail: format!("y.n_elements={} != 8*n_out={}", y.n_elements(), 8 * n_out),
+        });
+    }
+    if weight.n_elements() as usize != n_in * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_mma8",
+            detail: format!(
+                "weight.n_elements={} != n_in*n_out={}",
+                weight.n_elements(),
+                n_in * n_out
+            ),
+        });
+    }
+    let name = match weight.dtype {
+        GgmlType::Q4_K => "kernel_mat_mat_q4_K_mma8_f32",
+        GgmlType::Q6_K => "kernel_mat_mat_q6_K_mma8_f32",
+        other => {
+            return Err(MetalError::BadShape {
+                kernel: "mat_mat_mma8",
+                detail: format!("unsupported dtype {other:?} (Q4_K | Q6_K)"),
+            });
+        }
+    };
+    let pso = ctx.pipeline(name)?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out / 8,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 crate::env_flag!(default_off matmat_qk_llama_smem_enabled, "QWEN_MATMAT_QK_LLAMA_SMEM");
 
 /// Q4_K mat-mat: `Y = W · X^T` where

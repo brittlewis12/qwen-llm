@@ -6,6 +6,62 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-06 - v0.499 Small-N MMA Falsifier Fails Its Kill Line; Shallow Small-N Lane Closes
+
+Status: pre-registered falsifier + experimental kernels (no production-path
+change). Executes the v0.498 recorded follow-up: simdgroup_matrix small-N
+kernels at mat-vec-grade occupancy, kill line `c(2) <= 1.25` on ffn_gate
+AND ffn_down else the shallow lane closes too. Design jam + pre-registered
+reads: cx session `019f38c6-f...` (which also corrected the recorded
+mechanism: M4 has NO separate MMA pool — same FP32 pipes; the candidate
+win was dequant-once-per-weight + dense FMA encoding + occupancy).
+
+- Design (`kernels/mat_mat_mma8.metal`, `encode_mat_mat_mma8_dispatch`,
+  gate test `smalln_mma_micro_27b`): 8 rows x 8-padded-columns per
+  single-simdgroup TG (`n_out/8` TGs — 2176 at ffn_gate vs the incumbent
+  64x32 tile's 272), K-step 64, A dequanted (same half helpers as the
+  incumbent mat-mat) to a 2 KiB TG tile, B loaded transposed DIRECTLY
+  from device F32 (no half staging of activations), one
+  simdgroup_float8x8 accumulator, Q4_K + Q6_K.
+- Correctness: min per-column cos `1.000000`, rel_rms `~2.1e-4` on all 8
+  columns (distinct nonzero patterns), all four shapes — E1 as
+  pre-registered, asserted at `cos >= 0.999`.
+- Perf (best-of-5x32): c = `2.41` ffn_gate / `1.92` ffn_down / `1.91`
+  gdn_qkv / `2.67` attn_q at `4.5-5.2 TF` achieved (vs ~7.6 TF needed for
+  free 8-column verify at stream rate; the 12.80 TF anchor does NOT
+  transfer to 8-row tiles — consistent with tiny-tile overhead, though
+  dequant/MMA/barrier/B-load shares were not phase-isolated). A v2
+  iteration (K-step 128 + B staged through TG with coalesced float4
+  reads) REGRESSED to c `2.53-4.44` — staging roundtrip + halved TG
+  residency lost to v1's L1-served scattered B loads. Two variants
+  measured; the wider neighborhood (2-SG/16-row tiles, half-staged B,
+  swizzled sa, in-SG K-split) is explicitly NOT covered by this closure
+  and any reopen must beat the kill line (the harness prices a candidate
+  in minutes).
+- KILL LINE: `c(2) <= 1.25` on {ffn_gate, ffn_down} -> measured
+  `2.41 / 1.92` -> FAIL. Per pre-registration (read ii: mechanism real —
+  it beats the incumbent MM tile `~2.0-2.8x` at N=8 and scalar nc4/nc8
+  outright — but under kill), THE SHALLOW SMALL-N LANE CLOSES.
+- Arc-level statement: with scalar (v0.498) and MMA (v0.499) classes both
+  measured, the best-known small-N verify costs on M4 are
+  `c(2) = 1.57` (scalar nc2), `c(4) ~= 1.9` (mma8, 8-padded),
+  `c(8) ~= 1.9-2.4` (mma8). Composed shallow-chain MTP-1 stays
+  `~1.15-1.2x` code-only (composition estimate, v0.444's estimator
+  caveat applies) — below practical value after drafting costs. The
+  kernel-level speculative-verify arc on M4 is CLOSED AT THE
+  PRE-REGISTERED SCOPE (two kernel classes, kill line fired). Recorded
+  reopens: an untried micro-variant beating `c(2) <= 1.25`; M5-class
+  silicon (NAX/tensor path); a drafter/MTP asset with step-change alpha
+  (price via `--tree-sim`, no engine work); or a real multi-token source
+  arriving for other reasons (e.g. S8 replay batching), which would
+  inherit mma8 as the best-known N in {4,8} primitive.
+- Byproduct kept (experimental, no production call sites): mma8 is the
+  best-known N in {4,8} skinny path — `~2.0-2.8x` faster than the
+  incumbent MM tile at N=8 on these shapes; a verify(16) built as 2x
+  mma8(8) would run `~3.8-4.8x` a decode step vs the measured `5.2-5.5x`
+  — an improvement, but still far outside the v0.444 all-heroics
+  economics at measured alpha.
+
 ## 2026-07-06 - v0.498 Gate Re-measurement + Multi-Column GEMV (M2-nc) Replicates the Small-N ALU Cap
 
 Status: measurement + experimental kernels (no production-path change).

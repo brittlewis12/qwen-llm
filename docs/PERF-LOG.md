@@ -6,6 +6,66 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-06 - v0.497 Program T (Tree Speculation) Killed at T0 by Direct Simulation
+
+Status: measurement falsifier, harness-only (no engine change). Program T
+proposed satisfying the RECORDED DFlash reopen condition (v0.444: durable
+alpha >= 4.5, i.e. emitted/step >= 5.5) by spending the same N=16 verify
+block as a TREE instead of a chain. cx conditional-go with four amendments
+(session `019f347b-c...`): conservative comb class only from chain data,
+economics gated on the v0.444 cost table, Wilson/lower-bound discipline,
+and correct kill semantics. Killed at T0 by direct measurement.
+
+- NEW MACHINERY (kept): `dflash-lazy --rank-topk` records, at every
+  prefix-conditioned draft position (accepted path + terminal mismatch),
+  the rank of target's argmax in the drafter's logits row
+  (`draft_block_with_logits` existed unused); `--tree-sim` upgrades the
+  harness into an EXACT one-block tree-decode simulator (static topology
+  D+R*(B-1) <= 15; emitted stream stays target-greedy by construction).
+  KEY STRUCTURAL FACT that made this cheap: DFlash is a BLOCK drafter -
+  deeper rows never condition on intermediate drafted tokens, so rescued
+  paths keep verifying against the SAME block (tree continuations need
+  ZERO extra drafter calls; only target-side post-rescue acceptance was
+  unmeasured, and the sim measures it).
+- Rank structure (27B Qwen3.6 + spiritbuun drafter, 256 tokens/prompt):
+  the drafter is chronically NEARLY right - p2-p1 = +12-16 points,
+  p4-p1 = +15-22 points at shallow depths on all three prompts (code /
+  narrative-start / narrative-tail; chain alpha anchors 3.27/1.91/2.49,
+  in-family with v0.443's 3.34/2.11; our "tail" slice is NOT v0.443's
+  degenerate tail - their 0.386 regime is unrepresented here).
+- Tree-sim verdict (D6/R3/B4, 15/15 nodes, measured emitted/step):
+  code `4.267 -> 5.120` (+20%), narrative-start `2.909 -> 3.507` (+21%),
+  narrative-tail `3.493 -> 4.414` (+26%). Post-rescue chain acceptance
+  `0.39-0.49` - roughly HALF of on-path p1 (the cx amendment to measure
+  rather than assume was load-bearing; assuming full p1 would have
+  overpriced trees by ~2x on the continuation term).
+- ECONOMICS KILL (v0.444 cost table, 27B decode step 40.2 ms):
+  today's kernels (~242 ms/step): 0.85x/0.58x/0.73x; T2-planned heroics
+  (~204 ms): 1.01x/0.69x/0.87x; ALL-heroics ceiling (~165 ms):
+  1.25x/0.85x/1.08x. Even the ceiling row only TOUCHES the 1.25x gate on
+  code and fails narrative-start by 32%. Point estimates fail before
+  lower bounds enter. Reopen condition NOT met.
+- KILL SEMANTICS (as amended): "this drafter + N=16 tree budget does not
+  satisfy the v0.444 reopen condition." NOT "tree speculation is dead" -
+  a drafter with a larger block and/or higher shallow-depth top-1 (the
+  tree needs emitted ~6.5+ at narrative to clear the ceiling row) reopens
+  cleanly, and the tree-sim harness prices any candidate drafter in
+  minutes without engine work.
+- CASCADE: with Program T dead at current assets, the v0.439 >= 32-row
+  reopen condition for matrix/FA2 attention DECODE also stays unmet
+  (rows only existed via multi-token verify). Matrix-body attention
+  remains a prefill/verify-side technology until a viable multi-token
+  decode source appears.
+
+Validation:
+
+- three chain runs + three tree-sim runs, 256 tokens each, quiet box;
+  greedy-target equivalence holds by construction (every emitted token is
+  a target argmax); artifacts `target/profiles/t0-rank/*.jsonl` (chain
+  and tree-sim rank rows, post_rescue-flagged)
+- cx program gate `019f347b-c...`: T0 conditional-go amendments applied;
+  kill verdict per the amended semantics
+
 ## 2026-07-06 - v0.496 W1b Partition-Packed Attention Falsifier; Q8-KV Reopen Blocked
 
 Status: engine falsifier, opt-in code kept (`QWEN_ATTN_V4_PACK=4`, default

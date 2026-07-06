@@ -1866,6 +1866,30 @@ struct DflashLazyArgs {
     /// Skip the warmup pass.
     #[arg(long)]
     no_warmup: bool,
+    /// **T0 (Program T)**: record, for every prefix-conditioned draft
+    /// position (accepted path + first mismatch), the RANK of target's
+    /// argmax in the drafter's logits at that position. Emits a JSONL
+    /// artifact for the comb-tree acceptance optimizer plus a p_k(depth)
+    /// table (k in 1/2/4/8/16). Uses draft_block_with_logits (slower;
+    /// measurement-only).
+    #[arg(long)]
+    rank_topk: Option<PathBuf>,
+    /// **T0b tree-sim**: simulate ONE-block tree decode exactly (static
+    /// topology: chain depth D plus rank<=B sibling sets at the first R
+    /// depths; DFlash's block drafter makes deeper rows path-independent,
+    /// so rescued paths keep verifying against the SAME block). Emitted
+    /// stream remains target-greedy by construction. Requires --rank-topk.
+    #[arg(long)]
+    tree_sim: bool,
+    /// Tree-sim chain depth D (node budget = D + R*(B-1) must be <= 15).
+    #[arg(long, default_value = "6")]
+    tree_chain_d: usize,
+    /// Tree-sim sibling-set count R (rescues allowed at depths 0..R).
+    #[arg(long, default_value = "3")]
+    tree_sibling_depths: usize,
+    /// Tree-sim sibling branching B (rescue taken when rank <= B).
+    #[arg(long, default_value = "4")]
+    tree_b: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -9615,7 +9639,27 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
         stop_tokens,
         effective_n,
         no_warmup,
+        rank_topk,
+        tree_sim,
+        tree_chain_d,
+        tree_sibling_depths,
+        tree_b,
     } = args;
+    if tree_sim && rank_topk.is_none() {
+        return Err(anyhow!("--tree-sim requires --rank-topk"));
+    }
+    if tree_sim {
+        let nodes = tree_chain_d + tree_sibling_depths * (tree_b - 1);
+        if nodes > 15 {
+            return Err(anyhow!(
+                "tree topology exceeds the N=16 block budget: D={tree_chain_d} + R={tree_sibling_depths}*(B-1={}) = {nodes} > 15",
+                tree_b - 1
+            ));
+        }
+        eprintln!(
+            "[dflash-lazy] tree-sim: chain D={tree_chain_d}, sibling sets at first {tree_sibling_depths} depths, B={tree_b} ({nodes}/15 nodes)"
+        );
+    }
 
     let ctx = MetalContext::new().context("init MetalContext")?;
     eprintln!("[dflash-lazy] device: {}", ctx.describe());
@@ -9644,8 +9688,16 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     };
     let h_target = target_m.arch.hidden_size as usize;
     let v = target_m.arch.vocab_size as usize;
+    let vocab = v;
     let k_layers = head.target_layer_ids.len();
     let n_target_features = k_layers * h_target;
+    // T0 rank rows: (draft depth j, rank of target argmax in drafter row,
+    // accepted, post_rescue). Prefix-conditioned by construction: recorded
+    // only along the walked path plus its terminal mismatch.
+    let mut rank_rows: Vec<(usize, usize, bool, bool)> = Vec::new();
+    let mut rescues_taken: u32 = 0;
+    let mut post_rescue_accepts: u32 = 0;
+    let mut post_rescue_attempts: u32 = 0;
 
     eprintln!(
         "[dflash-lazy] target={} drafter={}",
@@ -9752,12 +9804,28 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
 
         // ---- Drafter ----
         let drafter_pos = processed_pos + 1; // noise_start_pos
-        let argmaxes = decoder
-            .draft_block(carry_tok, drafter_pos)
-            .context("drafter draft_block")?;
+        let mut draft_logits: Option<Vec<f32>> = None;
+        let drafts: Vec<i32> = if rank_topk.is_some() {
+            // T0: full drafter logits for rank measurement; drafts recomputed
+            // host-side from the same logits (identical argmax by
+            // construction).
+            let logits = decoder
+                .draft_block_with_logits(carry_tok, drafter_pos)
+                .context("drafter draft_block_with_logits")?;
+            let v = vocab;
+            let d: Vec<i32> = (1..=m)
+                .map(|row| argmax_i32(&logits[row * v..(row + 1) * v]))
+                .collect();
+            draft_logits = Some(logits);
+            d
+        } else {
+            let argmaxes = decoder
+                .draft_block(carry_tok, drafter_pos)
+                .context("drafter draft_block")?;
+            // Draft tokens come from positions 1..N.
+            argmaxes[1..].iter().take(m).copied().collect()
+        };
         drafter_calls += 1;
-        // Draft tokens come from positions 1..N.
-        let drafts: Vec<i32> = argmaxes[1..].iter().take(m).copied().collect();
 
         // ---- Lazy verify ----
         // First, process carry_tok via target. Capture hidden + logits.
@@ -9779,37 +9847,63 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
         processed_pos += 1;
         let mut target_next = argmax_i32(&target_logits);
 
-        // Now check each draft sequentially.
+        // Walk the block. Chain mode: first mismatch ends the step.
+        // Tree-sim mode: a mismatch at depth < R whose target argmax sits in
+        // the drafter's top-B at that position is a RESCUE - the rescued
+        // token (a target argmax) is emitted, processed via target, and the
+        // walk CONTINUES against the same block's deeper rows (valid because
+        // the block drafter never conditioned on its own intermediate
+        // tokens). Budget/topology is static and pre-committed per step.
         let mut n_accepted_this_step = 0usize;
         steps += 1;
-        for j in 0..m {
+        let walk_max = if tree_sim { tree_chain_d.min(m) } else { m };
+        let mut post_rescue = false;
+        for j in 0..walk_max {
             attempts_at_pos[j] += 1;
-            if drafts[j] != target_next {
+            let mut rank = usize::MAX;
+            if let Some(logits) = &draft_logits {
+                let row = &logits[(j + 1) * vocab..(j + 2) * vocab];
+                let t = target_next as usize;
+                let tv = row[t];
+                rank = 1 + row.iter().filter(|&&x| x > tv).count();
+                rank_rows.push((j, rank, drafts[j] == target_next, post_rescue));
+            }
+            if post_rescue {
+                post_rescue_attempts += 1;
+            }
+            let chain_hit = drafts[j] == target_next;
+            let rescue_hit = tree_sim && !chain_hit && j < tree_sibling_depths && rank <= tree_b;
+            if !chain_hit && !rescue_hit {
                 break;
             }
-            // Accepted!
-            accepts_at_pos[j] += 1;
-            accepted_total += 1;
+            // Accepted: either the chain token or the rescued sibling (which
+            // IS target's argmax, so the emitted stream stays target-greedy).
+            let tok = if chain_hit { drafts[j] } else { target_next };
+            if chain_hit {
+                accepts_at_pos[j] += 1;
+                accepted_total += 1;
+                if post_rescue {
+                    post_rescue_accepts += 1;
+                }
+            } else {
+                rescues_taken += 1;
+                post_rescue = true;
+            }
             n_accepted_this_step += 1;
-            emitted.push(drafts[j]);
-            if emitted.len() >= tokens || stops.contains(&drafts[j]) {
-                // Note: we don't `return` here because we still want to
-                // emit() through the outer loop. The outer-loop
-                // `if emitted.len() >= tokens` check at the top of the
-                // next iter handles the exit, so carry_tok doesn't
-                // need to be touched here.
+            emitted.push(tok);
+            if emitted.len() >= tokens || stops.contains(&tok) {
                 break;
             }
-            // Process drafts[j] via target to set up next verify step.
+            // Process the accepted token via target for the next position.
             let logits = mf
                 .single_token_with_multi_hidden(
-                    drafts[j],
+                    tok,
                     processed_pos + 1,
                     &mut target_session,
                     &head.target_layer_ids,
                     &multi_hidden_dst,
                 )
-                .context("verify base step (draft)")?;
+                .context("verify base step (walk)")?;
             base_calls += 1;
             decoder
                 .session
@@ -9819,7 +9913,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
                     processed_pos + 1,
                     n_target_features,
                 )
-                .context("append draft ctx column")?;
+                .context("append walk ctx column")?;
             processed_pos += 1;
             target_next = argmax_i32(&logits);
         }
@@ -9832,6 +9926,57 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
 
     let decode_ms = t_decode.elapsed().as_secs_f64() * 1e3;
     let total_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
+
+    // ---------- T0 rank artifact + p_k(depth) table ----------
+    if let Some(rank_path) = &rank_topk {
+        if let Some(dir) = rank_path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut out = String::new();
+        for &(j, rank, accepted, post_rescue) in &rank_rows {
+            out.push_str(&format!(
+                "{{\"depth\":{},\"rank\":{},\"accepted\":{},\"post_rescue\":{}}}\n",
+                j, rank, accepted, post_rescue
+            ));
+        }
+        std::fs::write(rank_path, out)?;
+        println!(
+            "[dflash-lazy] T0 rank rows: {} -> {}",
+            rank_rows.len(),
+            rank_path.display()
+        );
+        // p_k(depth): P[rank <= k at depth j | prefix accepted to j-1].
+        println!("[dflash-lazy] depth\tn\tp1\tp2\tp4\tp8\tp16");
+        for j in 0..m {
+            let at: Vec<usize> = rank_rows.iter().filter(|r| r.0 == j).map(|r| r.1).collect();
+            if at.is_empty() {
+                continue;
+            }
+            let nn = at.len() as f64;
+            let pk = |k: usize| at.iter().filter(|&&r| r <= k).count() as f64 / nn;
+            println!(
+                "[dflash-lazy] {j}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}",
+                at.len(),
+                pk(1),
+                pk(2),
+                pk(4),
+                pk(8),
+                pk(16)
+            );
+        }
+        if tree_sim {
+            println!(
+                "[dflash-lazy] tree-sim: emitted/step = {} / {} = {:.3}; rescues={} post-rescue chain accepts {}/{} = {:.3}",
+                emitted.len(),
+                steps,
+                emitted.len() as f64 / steps.max(1) as f64,
+                rescues_taken,
+                post_rescue_accepts,
+                post_rescue_attempts,
+                post_rescue_accepts as f64 / post_rescue_attempts.max(1) as f64
+            );
+        }
+    }
 
     // ---------- Apples-to-apples no-spec baseline ----------
     eprintln!("[dflash-lazy] running MTP=off greedy baseline for comparison ...");

@@ -40,11 +40,13 @@ conditional-go with five gate edits, session `019f347b-c...`).
   register/TGM packaging failed" (register budget at 4 resident
   simdgroups/TG is the leading suspect). Per the split kill semantics
   this does NOT claim attention is stream-issue-bound.
-- CONSEQUENCE: attention main is now falsifier-bracketed on SIX axes
-  (split count, byte shape, bcast, Q8 bytes, thread-cap hints, packing).
-  The 32-thread one-simdgroup body is locally optimal across its entire
-  tested neighborhood; the only remaining attention-main lane is a
-  materially different body (parked FA2-style matrix branch). gdn_step
+- CONSEQUENCE (cx wording guard applied: this is a six-axis bracket on
+  CURRENT attention-main LOCAL VARIANTS, not "attention main exhausted"):
+  split count, byte shape, bcast, Q8 same-layout bytes, thread-cap hints,
+  and pack4 packaging are all closed. The 32-thread one-simdgroup body is
+  locally optimal across its tested neighborhood; the remaining credible
+  attention-main lane is a materially different body/dataflow (parked
+  FA2-style matrix branch), not another local retile. gdn_step
   packing parked (wave-collapse arithmetic survives but the packaging
   cost haircuts it below its ~0.3 ms ceiling). W-program falls back to
   the census narrow-glue list (~1.2-1.5 ms/token, ~10 small ops).

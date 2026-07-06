@@ -1094,6 +1094,17 @@ discriminator on 2-3 provably independent narrow stage pairs (machinery
 exists: `begin_concurrent` + hazard notes); (3) only then any production
 widening. Program C (ctx-65536/131072 scoreboard vs pinned llama.cpp +
 limiter capture) remains GO and may re-rank attention-side work first.
+v0.494 executes Program C: ours vs pinned b9833 at ctx16384/32768/65536/
+131072 = `1.34x/1.30x/1.1-1.2x/1.80x` (llama.cpp halves per doubling past
+65k; the moat WIDENS at true-long). Attention @131k = `46.2%` of the token
+(pre-registered 45-55% band CONFIRMED); the 131k limiter capture shows the
+SAME latency/occupancy-bound signature as 16k (occupancy ~26%, read BW ~66%
+of stream) - true-long is NOT bandwidth-walled, so the width/concurrency
+attribution applies there too. `--prefill-warm` (validated: gpu_ms within
+~0.5-2% of decode-ramp) makes deep-context measurement routine (131k warm
+~4 min). Parked v0.490 condition is now MET if true-long becomes primary:
+revisit `QWEN_ATTN_V4_G8_BCAST=1` promotion and re-rank attention byte/
+occupancy work against the W-program (Britt's call).
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

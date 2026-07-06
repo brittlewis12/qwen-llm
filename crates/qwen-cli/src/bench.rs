@@ -774,6 +774,10 @@ struct CtxSweepArgs {
     /// models.
     #[arg(long)]
     fresh_per_checkpoint: bool,
+    /// Warm each checkpoint with the production packed-prefill path instead of
+    /// the token-by-token decode ramp (requires --fresh-per-checkpoint).
+    #[arg(long)]
+    prefill_warm: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1145,6 +1149,12 @@ struct DecodeWindowArgs {
     /// Context length to ramp to before waiting.
     #[arg(long)]
     target_ctx: usize,
+    /// Warm the KV/GDN state with the production packed-prefill path instead
+    /// of the token-by-token decode ramp. Orders of magnitude faster to deep
+    /// contexts; validate against a decode-ramp point before trusting new
+    /// context regimes (v0.494 validation: ctx16384 matches within noise).
+    #[arg(long)]
+    prefill_warm: bool,
     /// Number of decode tokens to execute after the go signal.
     #[arg(long, default_value = "128")]
     window: usize,
@@ -12551,7 +12561,11 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
         concurrent_gdn_proj,
         concurrent_attn_proj,
         fresh_per_checkpoint,
+        prefill_warm,
     } = args;
+    if prefill_warm && !fresh_per_checkpoint {
+        return Err(anyhow!("--prefill-warm requires --fresh-per-checkpoint"));
+    }
     let ctx = MetalContext::new()?;
     eprintln!("[bench] device: {}", ctx.describe());
     let g = GgufFile::open(&model)?;
@@ -12583,7 +12597,19 @@ fn run_ctx_sweep(args: CtxSweepArgs) -> Result<()> {
     if fresh_per_checkpoint {
         for &target in &checkpoints {
             let mut s = MetalSession::fresh(&ctx, &mm, target + window + 16)?;
-            if target > 0 {
+            if target > 0 && prefill_warm {
+                let ids = vec![0i32; target];
+                let chunk = default_prefill_chunk(mm.arch.kind, target);
+                let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, chunk, ids.len())
+                    .context("prefill-warm scratch")?;
+                let t0 = Instant::now();
+                prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
+                    .context("prefill-warm")?;
+                eprintln!(
+                    "[ctx-sweep] prefill-warm to {target} in {:.1}s",
+                    t0.elapsed().as_secs_f64()
+                );
+            } else if target > 0 {
                 let _ = mf.single_token(0, 0, &mut s)?;
                 for p in 1..(target as u32) {
                     let _ = mf.single_token(0, p, &mut s)?;
@@ -13286,6 +13312,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
     let DecodeWindowArgs {
         model,
         target_ctx,
+        prefill_warm,
         window,
         streams,
         stage_timestamps,
@@ -13343,9 +13370,23 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         let _ = mf.single_token(0, i as u32, &mut s)?;
     }
     let mut s = MetalSession::fresh(&ctx, &mm, target_ctx + window + 16)?;
-    let _ = mf.single_token(0, 0, &mut s)?;
-    for p in 1..(target_ctx as u32) {
-        let _ = mf.single_token(0, p, &mut s)?;
+    if prefill_warm && target_ctx > 1 {
+        let ids = vec![0i32; target_ctx];
+        let chunk = default_prefill_chunk(mm.arch.kind, target_ctx);
+        let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, chunk, ids.len())
+            .context("prefill-warm scratch")?;
+        let t0 = Instant::now();
+        prefill_tokens_prompt_only_profiled(&mf, &ids, 0, &mut s, &mut scratch)
+            .context("prefill-warm")?;
+        eprintln!(
+            "[decode-window] prefill-warm to {target_ctx} in {:.1}s",
+            t0.elapsed().as_secs_f64()
+        );
+    } else {
+        let _ = mf.single_token(0, 0, &mut s)?;
+        for p in 1..(target_ctx as u32) {
+            let _ = mf.single_token(0, p, &mut s)?;
+        }
     }
 
     let mut s_opt = Some(s);

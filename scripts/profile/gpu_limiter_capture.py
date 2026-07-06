@@ -415,7 +415,12 @@ def ramp(model_key, ctx, window, streams=1, env=None):
             f"WARNING: concurrent qwen-bench (quiet-box rule):\n{other}",
             file=sys.stderr,
         )
-    model = os.path.expanduser(MODELS[model_key])
+    # aliases resolve via MODELS; anything else is treated as a GGUF path so
+    # captures can pin the EXACT scoreboard model (alias drift burned one
+    # 131k capture against the old 3.5 A3B in Program C)
+    model = os.path.expanduser(MODELS.get(model_key, model_key))
+    if model_key not in MODELS and not os.path.exists(model):
+        raise SystemExit(f"--model {model_key!r}: not an alias and not a file")
     for p in (READY, GO):
         if os.path.exists(p):
             os.unlink(p)
@@ -424,8 +429,12 @@ def ramp(model_key, ctx, window, streams=1, env=None):
     for kv in env or []:
         k, v = kv.split("=", 1)
         ev[k] = v
-    log = f"/tmp/dw-{model_key}-hold.log"
+    log_key = os.path.splitext(os.path.basename(model_key))[0]
+    log = f"/tmp/dw-{log_key}-hold.log"
     dwlog = open(log, "w")
+    # prefill-warm (v0.494): production packed-prefill ramp instead of the
+    # token-by-token decode ramp; validated at ctx16384 (gpu_ms within 0.5%).
+    # Makes deep-context captures practical (131072 warm ~4 min vs ~30 min).
     proc = subprocess.Popen(
         [
             bench,
@@ -434,6 +443,7 @@ def ramp(model_key, ctx, window, streams=1, env=None):
             model,
             "--target-ctx",
             str(ctx),
+            "--prefill-warm",
             "--window",
             str(window),
             "--streams",
@@ -535,7 +545,11 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add_ramp_args(p):
-        p.add_argument("--model", choices=MODELS, default="a3b")
+        p.add_argument(
+            "--model",
+            default="a3b",
+            help="alias (a3b/27b/a10b) or an explicit GGUF path",
+        )
         p.add_argument("--ctx", type=int, default=16384)
         p.add_argument(
             "--window",

@@ -6,6 +6,64 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-05 - v0.494 Program C: True-Long Scoreboard, Attention 46% @131k
+
+Status: Program C executed per the signed conditions (cx gate session
+`019f347b-c...`): A3B ctx-{16384,32768,65536,131072} scoreboard vs pinned
+llama.cpp (`scripts/bench/llama-cpp.lock.json`, b9833 `c818263f2a`), stage
+attribution + one limiter capture @131072. Model provenance:
+`Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` both sides; fa=on, f16/f16 KV both sides;
+ctx metadata verified (`context_length=262144`, `full_attention_interval=4`
+x 40 blocks => 10 KV layers, ~2.75 GB F16 KV @131k); no thermal warnings
+recorded (pmset reports none on this box; noted as vacuous).
+
+- NEW MACHINERY: `--prefill-warm` on `decode-window`/`ctx-sweep` warms KV
+  via the production packed-prefill path instead of the token-by-token
+  decode ramp (131072 warm: ~233 s vs ~30 min). VALIDATED at ctx16384:
+  decode gpu_ms 10.35-10.57 prefill-warm vs 10.33 decode-ramp (within
+  ~0.5-2%); t/s totals carry ~1-3% host-side jitter, so gpu_ms is the
+  scoreboard column. `gpu_limiter_capture.py` now accepts explicit GGUF
+  paths (alias drift burned one capture against the old 3.5 A3B - kept as
+  a cross-version control) and uses prefill-warm ramps.
+- SCOREBOARD (window 8/16, gpu_ms | t/s vs llama-bench tg32@depth):
+  ctx16384 `10.41 ms | 91.4 t/s` vs `68.3` (1.34x); ctx32768
+  `11.62 | 80.5` vs `62.1` (1.30x); ctx65536 `13.2 | 57-64` vs `52.6`
+  (1.1-1.2x); ctx131072 `16.27 | 59.1` vs `32.8` (**1.80x**). llama.cpp
+  halves per doubling past 65k; our slope is ~+1.2-3 ms per doubling on
+  10 KV layers. The moat WIDENS at true-long. (65k t/s carries a
+  reproducible ~2.5-4 ms host-side total-vs-gpu gap - gpu_ms is stable
+  13.19/13.28 across runs; flagged, not chased.)
+- ATTRIBUTION @131k (stage timestamps, +19% perturbation, shares only):
+  `attn_mixer_route 46.2%` - the pre-registered prediction (attention
+  45-55% of token) is CONFIRMED. GDN families ~23.2%, MoE waves ~12.9%,
+  lm-head tail ~5.2%. Attention ~7.5 ms/token unperturbed at 131k vs
+  ~2.6 ms at 16k; everything else ~flat.
+- LIMITER CAPTURE @131k (`progc-131k-q36`, 430 tokens): kick medians
+  `4.52/5.04/5.71 ms`; Kernel Occupancy `26.0-26.4%`; SIMD inflight ~25;
+  read BW `308-314 GB/s` (~66% of stream); instruction-throughput limiter
+  ~43%, F32 limiter ~22%, ALU util ~17%. The true-long regime is the SAME
+  latency/occupancy-bound signature as ctx16384 - long context does not
+  become bandwidth-walled, so the v0.493 width/concurrency attribution
+  applies at 131k too. Accidental control: the same capture against
+  Qwen3.5-A3B (`progc-131k`) shows near-identical counters.
+- RE-RANK INPUT (Britt's call, per the parked v0.490 condition): true-long
+  attention is now measured at 46% of token where the llama.cpp margin is
+  widest; if true-long becomes primary, the G8 bcast opt-in
+  (`QWEN_ATTN_V4_G8_BCAST=1`) revisit condition is MET, and attention-side
+  byte/occupancy work re-ranks against the W-program.
+
+Validation:
+
+- ours: `ctx-sweep --checkpoints 16384,32768,65536,131072 --window 8
+  --fresh-per-checkpoint --prefill-warm` (+ ctx65536 window-16 repeat;
+  logs `/tmp/progc-ours.log`)
+- prefill-warm A/B at ctx16384: 89.4/91.5/90.3 t/s (gpu 10.35-10.57 ms)
+  vs decode-ramp 92.8 t/s (gpu 10.33 ms)
+- llama.cpp: pinned b9833 `llama-bench -fa on -p 0 -n 32 -d
+  16384,32768,65536,131072 -r 2` (`/tmp/progc-lcpp.json`)
+- stage shares: `/tmp/progc-stages.log`; limiter CSVs
+  `target/profiles/gpu-limiters/progc-131k{,-q36}-per-kick.csv`
+
 ## 2026-07-05 - v0.493 B0 Topology Probe: Persistence Killed, Valleys Re-Attributed
 
 Status: Program B gate 0 executed end-to-end (cx-signed design, two review

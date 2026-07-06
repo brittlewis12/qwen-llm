@@ -1105,6 +1105,26 @@ attribution applies there too. `--prefill-warm` (validated: gpu_ms within
 ~4 min). Parked v0.490 condition is now MET if true-long becomes primary:
 revisit `QWEN_ATTN_V4_G8_BCAST=1` promotion and re-rank attention byte/
 occupancy work against the W-program (Britt's call).
+v0.495-v0.497 then close the board (cx-signed program-level statement,
+session `019f347b-c...`): the dispatch census revises narrow-glue to a
+~1.2-1.5 ms ceiling; W1b partition packing is falsified at its control row
+(+61.5%); the Q8-KV reopen is blocked at scope review (v0.437 covers it);
+and Program T (tree speculation) is killed at T0 by DIRECT tree-decode
+simulation - tree-sim lifts emitted/step +20-26% (code 4.27->5.12,
+narrative-start 2.91->3.51) but even the v0.444 all-heroics cost ceiling
+only touches 1.25x on code and fails narrative-start at 0.85x, so the
+recorded DFlash reopen condition stays unmet, which in turn keeps the
+v0.439 >=32-row matrix-decode precondition unmet. "Under current model
+assets, current drafter, current N=16 verify budget, and current M4 Max
+measurements, all recorded reopen conditions in this arc are closed by
+measurement. Further large decode gains require new assets or a materially
+new execution primitive, not another local kernel retune." Reopen recipes
+are recorded per branch: DFlash/tree needs a larger-block or
+stronger-shallow drafter (the `--tree-sim` harness prices any candidate in
+minutes, no engine work); matrix decode needs a real multi-token source;
+attention main needs a materially different body; persistence needs
+nothing (its mechanism was measured and does not exist at useful
+magnitude on this GPU).
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

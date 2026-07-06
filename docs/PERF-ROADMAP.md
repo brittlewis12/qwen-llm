@@ -1125,6 +1125,26 @@ minutes, no engine work); matrix decode needs a real multi-token source;
 attention main needs a materially different body; persistence needs
 nothing (its mechanism was measured and does not exist at useful
 magnitude on this GPU).
+v0.498 then runs the closure itself through a falsification audit (was the
+v0.443/v0.444 skinny-verify cap a single-design artifact?) and REINFORCES
+it: a clean-room multi-column GEMV family (mat-vec geometry, occupancy-
+corrected, E0 bit-exact per column, Q4_K + Q6_K) lands at `~270
+GB/s-equiv` under hot-repeat microbench conditions — the same wall as the
+v0.444 F32-dot family, now two design families deep (the GEMV family was
+measured in both ALU-heavy and occupancy-split bodies). `c(2) =
+1.57-1.71`, `c(4) = 2.9-3.3`: deep-N scalar multi-column decode stays
+closed, and the reopen arm (c) "MTP-side economics" resolves as MARGINAL:
+composed MTP-1 ceiling `~1.15-1.2x` code-only at measured on-box alpha
+(code `0.984`, prose `0.693`, equivalence PASS), gated on
+single-command-buffer GPU-fed drafting (the measured `28-44 ms/call`
+prototype drafting is the binding loss today). Two recorded follow-ups, both with kill lines: (1) MMA-unit
+small-N kernels at mat-vec-grade occupancy (the scalar-ALU cap does not
+bind the MMA pool; the MM tile's 56-128 GB/s was 64-row-tile
+under-occupancy) — kill line `c(2) <= 1.25` on ffn shapes, else the
+shallow lane closes too; (2) whole-step packed MTP-1 measurement only if
+(1) or the drafting restructure moves first. See the v0.498 PERF-LOG entry
+for the full gate-session numbers (fixed-layer anchors, DFlash drafter
+health at HEAD).
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining

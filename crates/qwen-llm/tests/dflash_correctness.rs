@@ -32,7 +32,7 @@ use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_copy_offset_f32, encode_gdn_alpha_chain_f32, encode_get_rows_f32,
-    encode_mul_f32, encode_rms_norm_batched_f32, encode_rope_neox_f32,
+    encode_mat_vec_nc_dispatch, encode_mul_f32, encode_rms_norm_batched_f32, encode_rope_neox_f32,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
     encode_split_q_gate_f32,
 };
@@ -2065,6 +2065,240 @@ fn packed_verify_skinny_gemm_micro_27b() {
         }
         eprintln!();
     }
+}
+
+/// **H5.6 M2-nc: multi-column GEMV experiment.** The M1a micro pins the
+/// mat-mat tile family at 56-128 GB/s on skinny verify shapes with
+/// N2..N32 costing identical wall time (per-tile floor + under-occupancy:
+/// `n_out/64` threadgroups). This experiment keeps the mat-vec dispatch
+/// geometry (`n_out/4` threadgroups, 283-436 GB/s at N=1 on these same
+/// shapes) and amortizes the weight stream across NC in {2,4,8} activation
+/// columns with register-staged quants (kernels/mat_vec_q4_k_nc.metal).
+///
+/// Gates:
+///   * correctness (asserted): bit-exact per column vs `mv1` on every
+///     Q4_K verify shape, real 27B weights.
+///   * perf (pre-registered, reported): c(4) = t_nc4 / t_mv1 <= 1.4 on the
+///     FFN gate shape reopens MTP-N / packed-verify economics
+///     (v0.443/v0.444 reopen arm (c)); c(4) >= ~3 confirms the v0.444
+///     ALU-cap for GEMV-shaped designs and closes the arm.
+///
+/// `cargo test -p qwen-llm --release --test dflash_correctness \
+///   multicol_gemv_micro_27b -- --ignored --nocapture`
+#[test]
+#[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
+fn multicol_gemv_micro_27b() {
+    if !std::path::Path::new(TARGET_GGUF).exists() {
+        eprintln!("[h5.6-m2nc] skipped — target GGUF missing");
+        return;
+    }
+    let ctx_metal = match MetalContext::new() {
+        Ok(c) => c,
+        Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+        Err(e) => panic!("metal init: {e}"),
+    };
+
+    eprintln!("[h5.6-m2nc] loading 27B-Q4_K_M…");
+    let g = GgufFile::open(TARGET_GGUF).expect("open target");
+    let m = Model::from_gguf(&g).expect("load target");
+    let mm = MetalModel::load(&ctx_metal, &g, &m).expect("metal load");
+
+    let h = mm.arch.hidden_size as usize;
+    let gdn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Gdn(g) => Some(g),
+            _ => None,
+        })
+        .expect("gdn block");
+    let attn = mm
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            MetalBlock::Attn(a) => Some(a),
+            _ => None,
+        })
+        .expect("attn block");
+
+    let f = mm.arch.intermediate_size as usize;
+    let shapes: Vec<(&str, &MetalTensor, usize)> = vec![
+        ("ffn_gate ", &gdn.ffn_gate, h),
+        ("ffn_down ", &gdn.ffn_down, f),
+        ("gdn_qkv  ", &gdn.in_proj_qkv, h),
+        ("gdn_z    ", &gdn.in_proj_z, h),
+        ("gdn_out  ", &gdn.out_proj, {
+            gdn.out_proj.n_elements() as usize / h
+        }),
+        ("attn_q   ", &attn.q, h),
+        ("attn_o   ", &attn.o, { attn.o.n_elements() as usize / h }),
+    ];
+
+    // best-of-5 x 32 iters: the mv1 reference is ~0.04-0.18 ms/dispatch and
+    // showed +/-20% run-to-run at 3x16; the nc kernels were stable. Deeper
+    // sampling keeps the c(N) ratios honest for the record.
+    let timed = |encode: &dyn Fn(&KernelEncoder) -> ()| -> f64 {
+        const ITERS: usize = 32;
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..ITERS {
+                encode(&enc);
+            }
+            enc.end();
+            let t = std::time::Instant::now();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            best = best.min(t.elapsed().as_secs_f64() / ITERS as f64);
+        }
+        best
+    };
+
+    const NC_MAX: usize = 8;
+    let mut bar_c4_ffn_gate: Option<f64> = None;
+
+    let mut c2_summary: Vec<(String, f64)> = Vec::new();
+
+    for (label, w, n_in) in shapes {
+        if !matches!(w.dtype, GgmlType::Q4_K | GgmlType::Q6_K) {
+            eprintln!(
+                "[h5.6-m2nc {label}] skipped — dtype {:?} not in {{Q4_K, Q6_K}}",
+                w.dtype
+            );
+            continue;
+        }
+        let n_out = w.n_elements() as usize / n_in;
+        let w_bytes = w.buffer.length() as f64;
+
+        let x_src: Vec<f32> = (0..NC_MAX * n_in)
+            .map(|i| ((i % 13) as f32 - 6.0) * 1e-2)
+            .collect();
+        let x = MetalTensor::from_bytes(
+            &ctx_metal,
+            bytemuck::cast_slice(&x_src),
+            vec![(NC_MAX * n_in) as u64],
+            GgmlType::F32,
+        )
+        .expect("x");
+        let y_nc = MetalTensor::zeros_f32(&ctx_metal, vec![(NC_MAX * n_out) as u64]).expect("y_nc");
+        let y_ref =
+            MetalTensor::zeros_f32(&ctx_metal, vec![(NC_MAX * n_out) as u64]).expect("y_ref");
+
+        // --- Correctness: bit-exact per column vs mv1, per NC. ---
+        for &nc in &[2usize, 4, 8] {
+            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            let xn = x.view_subrange(0, vec![(nc * n_in) as u64]);
+            let yn = y_nc.view_subrange(0, vec![(nc * n_out) as u64]);
+            encode_mat_vec_nc_dispatch(&ctx_metal, &enc, w, &xn, &yn, n_in, n_out, nc)
+                .expect("nc kernel");
+            for c in 0..nc {
+                let xc = x.view_subrange((c * n_in) as u64, vec![n_in as u64]);
+                let yc = y_ref.view_subrange((c * n_out) as u64, vec![n_out as u64]);
+                encode_mat_vec_dispatch(&ctx_metal, &enc, w, &xc, &yc, n_in, n_out)
+                    .expect("mv1 ref");
+            }
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+
+            let got = unsafe {
+                std::slice::from_raw_parts(
+                    y_nc.buffer.contents().as_ptr() as *const f32,
+                    nc * n_out,
+                )
+            };
+            let want = unsafe {
+                std::slice::from_raw_parts(
+                    y_ref.buffer.contents().as_ptr() as *const f32,
+                    nc * n_out,
+                )
+            };
+            // Exactness gate: E0 — the shipped nc body is
+            // expression-identical to mv1 per column and MUST stay
+            // bit-exact (the v0.498 convert-hoisted variant broke this
+            // via fast-math reassociation and was reverted; this assert
+            // is the tripwire). Cosine/rel_rms/max_abs are reported as
+            // diagnostics for future variant work.
+            let mut bit_mismatches = 0usize;
+            let mut dot = 0f64;
+            let mut n2_got = 0f64;
+            let mut n2_want = 0f64;
+            let mut err2 = 0f64;
+            let mut max_abs = 0f64;
+            for i in 0..nc * n_out {
+                if got[i].to_bits() != want[i].to_bits() {
+                    bit_mismatches += 1;
+                }
+                let (g, w) = (got[i] as f64, want[i] as f64);
+                dot += g * w;
+                n2_got += g * g;
+                n2_want += w * w;
+                let e = (g - w).abs();
+                err2 += e * e;
+                if e > max_abs {
+                    max_abs = e;
+                }
+            }
+            let cos = dot / (n2_got.sqrt() * n2_want.sqrt()).max(1e-30);
+            let rel_rms = (err2 / n2_want.max(1e-30)).sqrt();
+            eprintln!(
+                "[h5.6-m2nc {label}] NC{nc}: bit-mismatches {bit_mismatches}/{} cos {cos:.9} rel_rms {rel_rms:.2e} max_abs {max_abs:.2e}",
+                nc * n_out
+            );
+            assert_eq!(
+                bit_mismatches, 0,
+                "[h5.6-m2nc {label}] NC{nc}: {bit_mismatches} bit-mismatches vs per-column mv1 (E0 gate; cos {cos:.9} rel_rms {rel_rms:.2e})"
+            );
+        }
+
+        // --- Bench: mv1 stream reference, then nc{2,4,8}. ---
+        let x1 = x.view_subrange(0, vec![n_in as u64]);
+        let y1 = y_ref.view_subrange(0, vec![n_out as u64]);
+        let t_mv = timed(&|enc| {
+            encode_mat_vec_dispatch(&ctx_metal, enc, w, &x1, &y1, n_in, n_out).expect("mat_vec");
+        });
+        let gbps_mv = w_bytes / t_mv / 1e9;
+        eprint!(
+            "[h5.6-m2nc {label}] {n_in:>5}->{n_out:>5}  mv1 {:7.3} ms {gbps_mv:5.0} GB/s |",
+            t_mv * 1e3
+        );
+        for &nc in &[2usize, 4, 8] {
+            let xn = x.view_subrange(0, vec![(nc * n_in) as u64]);
+            let yn = y_nc.view_subrange(0, vec![(nc * n_out) as u64]);
+            let t_nc = timed(&|enc| {
+                encode_mat_vec_nc_dispatch(&ctx_metal, enc, w, &xn, &yn, n_in, n_out, nc)
+                    .expect("nc kernel");
+            });
+            let gbps = w_bytes / t_nc / 1e9;
+            let ratio = t_nc / t_mv;
+            eprint!(" nc{nc}:{:6.3}ms/{gbps:4.0} c={ratio:4.2}", t_nc * 1e3);
+            if nc == 4 && label.trim() == "ffn_gate" {
+                bar_c4_ffn_gate = Some(ratio);
+            }
+            if nc == 2 {
+                c2_summary.push((label.trim().to_string(), ratio));
+            }
+        }
+        eprintln!();
+    }
+
+    let c4 = bar_c4_ffn_gate
+        .expect("pre-registered bar shape (ffn_gate, Q4_K) was not measured — model/dtype drift?");
+    let verdict = if c4 <= 1.4 {
+        "PASS — reopen bar met"
+    } else {
+        "FAIL — under bar"
+    };
+    eprintln!("[h5.6-m2nc] pre-registered bar: c(4) on ffn_gate = {c4:.2} (<= 1.40) → {verdict}");
+    // Shallow-chain (verify-2) economics read: c(2) per shape. Not a
+    // pre-registered gate — reported for the MTP-1/2 pricing model.
+    let c2s: Vec<String> = c2_summary
+        .iter()
+        .map(|(l, r)| format!("{l}={r:.2}"))
+        .collect();
+    eprintln!("[h5.6-m2nc] c(2) by shape: {}", c2s.join(" "));
 }
 
 /// **v0.75.1 27B integration correctness gate**: exercises the

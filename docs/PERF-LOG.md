@@ -6,6 +6,81 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-06 - v0.498 Gate Re-measurement + Multi-Column GEMV (M2-nc) Replicates the Small-N ALU Cap
+
+Status: measurement + experimental kernels (no production-path change).
+One-session checkpoint: pre-registered gate re-measurements (cx go/no-go
+session `019f385c-f...`), then a clean-room falsification audit of the
+v0.443/v0.444 skinny-verify cap via a new multi-column GEMV kernel family.
+Strategy-review provenance: cx sessions `019f383a-2...` (dossier
+adjudication) and `019f3853-f...` (fixed-cost frame).
+
+Part 1 - gate session (indicative-grade: active desktop, but A/A spread
+0.1%; AC power, no thermal warnings, HEAD `2474181`):
+
+- Anchors: 27B tg64 `25.61 +/- 0.03 t/s` (98.9% GPU-busy; wall-gpu fixed
+  layer `0.43 ms/tok` = 1.1%); 0.8B tg128 `374.3 t/s` (87.9% GPU-busy;
+  fixed layer `0.325 ms/tok` = 12.1%) - the drafter-tax anchor for
+  micro-step economics.
+- MTP head, 27B-MTP GGUF, `--qwen-chat --disable-thinking`, real prompts:
+  alpha code `0.984` (N=1) and `0.891` chained (N=2, 2.78 emitted/step);
+  alpha prose `0.693` (at-gate). Greedy equivalence PASS on all four runs.
+  Current implementations lose anyway: lazy N=1 `0.76-0.82x`; the bench
+  MTP-N=2 prototype `0.479x` with `mtp_calls ~= 4.3/step` at `~28-44
+  ms/call` - drafting machinery, not acceptance, is where MTP dies today.
+- DFlash drafter health at HEAD: alpha_pos1 `0.769` code / `0.839` prose
+  (both clear the H5.2.5 gates), alpha_chain `3.92 / 3.13`
+  (start-of-generation, NOT tail-durable; do not compare to v0.443's
+  degenerate-tail 0.386). Production `static-16` on code: `0.862x`
+  decode-only with equivalence PASS - verify-bound, v0.443 story intact.
+
+Part 2 - M2-nc multi-column GEMV experiment
+(`kernels/mat_vec_q4_k_nc.metal`, `kernels/mat_vec_q6_k_nc.metal`,
+`encode_mat_vec_nc_dispatch`, gate test `multicol_gemv_micro_27b`):
+
+- Design: keep the mat-vec dispatch geometry (`n_out/4` TGs; the MM tile's
+  56-128 GB/s at these shapes is 64-row-tile under-occupancy, 272 TGs on
+  40 cores), 4 simdgroups = 2 row-pairs x 2 column-halves, per-column body
+  expression-identical to mv1. NC in {2,4,8}; Q4_K + Q6_K (ffn_gate/attn +
+  ffn_down/gdn_qkv coverage; Q5_K gdn_out not ported - recorded follow-up).
+- Correctness: bit-exact (E0) per column vs mv1 on all six verify shapes,
+  real 27B weights, zero mismatches. (A convert-hoisted NR0=1 variant
+  measured E1-only AND 3.5-6x slower - register spills; falsified and
+  reverted in-session.)
+- Perf (best-of-5x32; shallow 3x16 sampling had shown c(2) as low as 1.12
+  from mv1-reference noise - deep sampling is the record): nc2 `263-282
+  GB/s-equiv` (c(2) `1.57-1.71`), nc4 `131-150` (c(4) `2.9-3.3`), nc8
+  `55-75` (c(8) `5.9-8.0`); mv1 reference `437-478 GB/s` (partial-L2
+  flattered; ratios are the signal). Pre-registered bar c(4) <= 1.40:
+  FAIL.
+- THE FINDING: the v0.444 "~250 GB/s-equiv FMA cap" REPLICATES at ~270
+  across two dtypes, six shapes, and a second design family (the
+  v0.443/v0.444 F32-dot family + this GEMV-shaped family, measured in
+  ALU-heavy and occupancy-split bodies). Consistent with chip-level
+  scalar-ALU throughput (~2.5-3 ops per weight-column against the ~3
+  TOP/s scalar anchor), not implementation quality. Scope: hot-repeat
+  same-tensor microbench (shared with the v0.443 harness class; a
+  whole-step measurement would retire that residual). The
+  falsification-audit question raised in strategy review is answered:
+  no support for the confound hypothesis at the design level.
+- Composed shallow-chain read (composition, NOT a whole-step measurement -
+  v0.444's estimator warning applies): verify(2) ~= 1.6x a decode step ->
+  MTP-1 ceiling ~= `1.15-1.2x` code / `~1.0x` prose at Part-1 alpha.
+  Marginal-open, code-only, and gated on single-command-buffer GPU-fed
+  drafting (the measured 28-44 ms/call prototype drafting is the first
+  blocker regardless).
+- Verdict + reopen hygiene: deep-N (N >= 4) scalar multi-column decode is
+  CLOSED with replication-grade evidence. The one untried design class is
+  MMA-unit small-N kernels (simdgroup_matrix at mat-vec-grade occupancy,
+  e.g. 8-row tiles -> n_out/8 TGs): the scalar cap does not bind the MMA
+  pool and the MM tile's failure was occupancy-shaped. Kill line for that
+  follow-up: c(2) <= 1.25 on ffn_gate/ffn_down or the shallow lane closes
+  too.
+- Kernels land as experimental (dispatcher + gate test only; zero
+  production call sites). They are the best-known N in {2,4} skinny path
+  regardless: `1.75-3.3x` faster than the incumbent MM tile at those
+  shapes.
+
 ## 2026-07-06 - v0.497 Program T (Tree Speculation) Killed at T0 by Direct Simulation
 
 Status: measurement falsifier, harness-only (no engine change). Program T

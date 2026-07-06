@@ -3397,6 +3397,261 @@ pub fn encode_mat_vec_q4_k_f32(
     Ok(())
 }
 
+/// Multi-column Q4_K mat-vec (H5.6 M2-nc skinny-GEMM experiment):
+/// `Y = W · X^T` with mat-vec-grade occupancy (`n_out/4` threadgroups of
+/// 128 threads: 2 row-pairs x 2 column-halves) running the mv1 body per
+/// activation column — quant block reads are column-invariant and L1-hot
+/// on re-reads (explicit register staging measured slower; see the kernel
+/// header).
+///
+///   * `x`: F32 `[n_cols, n_in]` row-major (column c = `x + c*n_in`)
+///   * `y`: F32 `[n_cols, n_out]` row-major (`y[c*n_out + r]`)
+///   * `n_cols` ∈ {2, 4, 8} (compile-time instantiations)
+///
+/// Exactness: bit-identical per column to `encode_mat_vec_q4_k_f32`
+/// (same accumulation order; E0 tier). Asserted by
+/// `multicol_gemv_micro_27b` in tests/dflash_correctness.rs.
+pub fn encode_mat_vec_q4_k_nc_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc",
+            detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
+        });
+    }
+    if weight.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc",
+            detail: format!("weight.dtype = {:?}, expected Q4_K", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc",
+            detail: format!("x/y dtype = {:?}/{:?}, expected F32/F32", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_cols * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc",
+            detail: format!(
+                "x.n_elements={} != n_cols*n_in={}",
+                x.n_elements(),
+                n_cols * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_cols * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc",
+            detail: format!(
+                "y.n_elements={} != n_cols*n_out={}",
+                y.n_elements(),
+                n_cols * n_out
+            ),
+        });
+    }
+    if weight.n_elements() as usize != n_in * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q4_k_nc",
+            detail: format!(
+                "weight.n_elements={} != n_in*n_out={}",
+                weight.n_elements(),
+                n_in * n_out
+            ),
+        });
+    }
+    let name = match n_cols {
+        2 => "kernel_mat_vec_q4_K_nc2_f32",
+        4 => "kernel_mat_vec_q4_K_nc4_f32",
+        8 => "kernel_mat_vec_q4_K_nc8_f32",
+        _ => {
+            return Err(MetalError::BadShape {
+                kernel: "mat_vec_q4_k_nc",
+                detail: format!("n_cols={n_cols} not in {{2, 4, 8}}"),
+            });
+        }
+    };
+    let pso = ctx.pipeline(name)?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+
+    // TG = 4 simdgroups (128 threads): 2 row-pairs x 2 column-halves.
+    // Same 4-rows-per-TG weight coverage as mv1 (grid = n_out/4), twice
+    // the ALU per weight byte (columns split across the extra SGs).
+    const ROWS_PER_TG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(ROWS_PER_TG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Q6_K companion to [`encode_mat_vec_q4_k_nc_f32`] — same layouts,
+/// same 4-simdgroup (2 row-pairs x 2 column-halves) geometry, Q6_K
+/// block decode. Covers the two largest verify-path tensors on
+/// 27B-Q4_K_M (ffn_down, gdn_qkv).
+pub fn encode_mat_vec_q6_k_nc_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q6_k_nc",
+            detail: format!("n_in={n_in} not divisible by 256 (Q6_K super-block)"),
+        });
+    }
+    if weight.dtype != GgmlType::Q6_K {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q6_k_nc",
+            detail: format!("weight.dtype = {:?}, expected Q6_K", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q6_k_nc",
+            detail: format!("x/y dtype = {:?}/{:?}, expected F32/F32", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_cols * n_in {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q6_k_nc",
+            detail: format!(
+                "x.n_elements={} != n_cols*n_in={}",
+                x.n_elements(),
+                n_cols * n_in
+            ),
+        });
+    }
+    if y.n_elements() as usize != n_cols * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q6_k_nc",
+            detail: format!(
+                "y.n_elements={} != n_cols*n_out={}",
+                y.n_elements(),
+                n_cols * n_out
+            ),
+        });
+    }
+    if weight.n_elements() as usize != n_in * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q6_k_nc",
+            detail: format!(
+                "weight.n_elements={} != n_in*n_out={}",
+                weight.n_elements(),
+                n_in * n_out
+            ),
+        });
+    }
+    let name = match n_cols {
+        2 => "kernel_mat_vec_q6_K_nc2_f32",
+        4 => "kernel_mat_vec_q6_K_nc4_f32",
+        8 => "kernel_mat_vec_q6_K_nc8_f32",
+        _ => {
+            return Err(MetalError::BadShape {
+                kernel: "mat_vec_q6_k_nc",
+                detail: format!("n_cols={n_cols} not in {{2, 4, 8}}"),
+            });
+        }
+    };
+    let pso = ctx.pipeline(name)?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+
+    const ROWS_PER_TG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(ROWS_PER_TG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Dtype-routing wrapper for the multi-column mat-vec family (Q4_K and
+/// Q6_K today). Mirrors `encode_mat_vec_dispatch` semantics for the
+/// N-column case; returns `BadShape` for unsupported dtypes so callers
+/// can fall back explicitly.
+pub fn encode_mat_vec_nc_dispatch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    match weight.dtype {
+        GgmlType::Q4_K => encode_mat_vec_q4_k_nc_f32(ctx, enc, weight, x, y, n_in, n_out, n_cols),
+        GgmlType::Q6_K => encode_mat_vec_q6_k_nc_f32(ctx, enc, weight, x, y, n_in, n_out, n_cols),
+        other => Err(MetalError::BadShape {
+            kernel: "mat_vec_nc_dispatch",
+            detail: format!("unsupported dtype {other:?} (Q4_K | Q6_K)"),
+        }),
+    }
+}
+
 crate::env_flag!(default_off matmat_qk_llama_smem_enabled, "QWEN_MATMAT_QK_LLAMA_SMEM");
 
 /// Q4_K mat-mat: `Y = W · X^T` where

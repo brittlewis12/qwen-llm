@@ -1,7 +1,27 @@
 # B0: Residency + Forward-Progress + Boundary-Drain Probe (design)
 
-Status: DESIGN, pending cx gate. Program B gate 0 per the cx-signed topology
-program (session `019f347b-c...`). Budget: ~2 days including runs and review.
+Status: SIGNED (cx session `019f347b-c...`, two rounds; four required changes
+applied verbatim). Program B gate 0 per the cx-signed topology program.
+Budget: ~2 days including runs and review.
+
+BUILD-TIME FINDING (memory-model smoke, cx-required first step): the Metal
+toolchain (v17.3.7003, macosx SDK) accepts ONLY `memory_order_relaxed` on
+device atomics. `memory_order_release/acquire/seq_cst/acq_rel` do not exist
+as identifiers and `atomic_thread_fence` does not exist in any signature.
+Consequences, per the signed contingency ("treat S/D-global as memory-model
+probes before interpreting latency"):
+  - Arm S epochs use a per-epoch slot ring where the PAYLOAD IS THE EPOCH
+    VALUE (self-validating; no cross-object ordering assumed), plus a
+    dedicated reordering sub-probe: producer writes atomic object A then
+    atomic object B (both relaxed); consumers poll B then read A; the
+    stale-A-after-fresh-B count is a measured cross-object reordering rate.
+  - Arm D-global stage barriers are sense-reversing on relaxed atomics with
+    `threadgroup_barrier(mem_flags::mem_device)` for intra-TG ordering of
+    each TG's device writes; the pre-existing checksum-equality gate is the
+    correctness detector for any visibility violation.
+  - Arm D-local has no cross-TG waits and is immune - the cx-required
+    variant split is what keeps a relaxed-only memory model from blocking
+    the whole arm.
 
 ## Why this exists (evidence base, do not re-derive)
 
@@ -208,6 +228,36 @@ PRE-REGISTERED PREDICTIONS AND KILL SEMANTICS (per cx review):
 - PERF-LOG checkpoint with the three arms' verdicts against the gates above.
 - GO/NO-GO recommendation for B1a with measured numbers filled into its
   pre-registered gate (>= 25% reduction on the ~2.6 ms glue/route family).
+
+## Amendments during build (pre-run; gates unchanged - flag at results review)
+
+Smoke passes (`--quick`) exposed three methodology bugs and one early
+finding; fixes extend the signed matrix without weakening any gate:
+
+1. Arm R dwell sizing now uses EMPIRICAL per-variant iteration calibration
+   (1 TG, min of 3): the NACC accumulator chains pipeline (ILP), so scaling
+   the nacc=1 chain cost by NACC over-sized hi-pressure dwells by up to ~8x
+   (visible as hi64 "beating" lo residency in the first smoke). Traffic-
+   variant rows cap the dwell sweep at {200 us, 1 ms} (qualitative rows;
+   memory-dominated cost).
+2. Arm S gate metric is EXCESS-over-cadence (`filtered_excess_p99_us`):
+   the sampled wait spans a full inter-epoch interval, so raw waits cluster
+   near the producer cadence and a 100 us row would false-kill a 25 us raw
+   gate. Raw and filtered percentiles are still recorded.
+3. Arm D adds: a TG-count axis m in {4, 64, low-water} (production glue
+   dispatches are NARROW on a mostly-idle machine - the uniform low-water
+   ladder was too friendly and backfilled instantly); PSO alternation
+   between consecutive ladder stages (tp_chain_stage/_b) to match
+   production per-dispatch state changes; a `global_wide` variant (full
+   low-water persistent grid hosting narrow stages, idle TGs paying every
+   barrier - the actual B1a host shape); and mixed-shape timing-only
+   ladders (m alternating 4/64 and 4/cap) to model narrow->wide drain
+   asymmetry. P-D1/P-D2 read at the decode-realistic (narrow/mixed) shapes.
+4. Early finding banked from smoke: the cross-object reorder probe measures
+   ZERO stale reads with no traffic but a REAL nonzero rate under device
+   traffic (6e-4 to 2e-3 across smokes) on relaxed atomics. Self-validating
+   protocols (payload-in-flag) are mandatory for any B1a signaling design;
+   a bare data-then-flag publication is empirically unsafe on this GPU.
 
 ## Out of scope (binding, from the cx gate)
 

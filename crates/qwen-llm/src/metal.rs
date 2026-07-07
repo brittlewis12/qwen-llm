@@ -6275,6 +6275,89 @@ pub fn encode_moe_fused_routed_q4q5_token_f32(
 }
 
 #[allow(non_snake_case)]
+pub fn encode_moe_down_q4_K_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    expert_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if n_in % 256 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q4_K",
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != GgmlType::Q4_K {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q4_K",
+            detail: format!("expected Q4_K expert down, got {:?}", weight.dtype),
+        });
+    }
+    if inner.n_elements() as usize != topk * n_in
+        || topk_idx.n_elements() as usize != topk
+        || expert_out.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_q4_K",
+            detail: format!(
+                "shape mismatch: inner={} idx={} out={} expected inner={} idx={topk} out={}",
+                inner.n_elements(),
+                topk_idx.n_elements(),
+                expert_out.n_elements(),
+                topk * n_in,
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_q4_K_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, expert_out);
+
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(non_snake_case)]
 pub fn encode_moe_down_q5_K_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -8065,6 +8148,81 @@ pub fn encode_moe_mat_vec_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, topk_idx);
     enc.set_tensor(4, out);
+
+    const NSG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NSG),
+            height: topk,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_moe_down_f32_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    topk_idx: &MetalTensor,
+    expert_out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_f32",
+            detail: format!("expected F32 expert down, got {:?}", weight.dtype),
+        });
+    }
+    if inner.n_elements() as usize != topk * n_in
+        || topk_idx.n_elements() as usize != topk
+        || expert_out.n_elements() as usize != topk * n_out
+    {
+        return Err(MetalError::BadShape {
+            kernel: "moe_down_f32",
+            detail: format!(
+                "shape mismatch: inner={} idx={} out={} expected inner={} idx={topk} out={}",
+                inner.n_elements(),
+                topk_idx.n_elements(),
+                expert_out.n_elements(),
+                topk * n_in,
+                topk * n_out
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_moe_down_f32_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        topk: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_expert: n_expert as u32,
+            topk: topk as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, topk_idx);
+    enc.set_tensor(4, expert_out);
 
     const NSG: usize = 4;
     enc.dispatch(

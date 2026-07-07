@@ -3234,49 +3234,60 @@ What the latest analysis says:
   `n_depth=7`. This is now an explicit unsupported-model gap; the thin lcpp
   synthetic uplift argues for correctness/acceptance probing before Q2/Q3 MoE
   MTP kernel work.
+- v0.513 replaces the MoE-MTP unsupported bail with a correctness-first executable
+  path. The single MTP MoE expert bank is dequantized to F32, A3B UD-Q4_K_S lazy
+  MTP-1 passes equivalence, and base MoE decode gains native `Q4_K` routed-down
+  coverage. This is not a performance conclusion: D3/N4 still fails because the
+  packed-N verifier does not implement qwen35moe base forward, and IQ2/Q2/Q3 base
+  MoE still needs native expert-bank kernels rather than F32 residency expansion.
 
 Highest-EV speculative kernel targets:
 
-1. Add a correctness-first MoE MTP draft path for A3B only if we want native-MTP
-   coverage across the family now. Bind the already-recognized MoE head through a
-   generic/dequantized MTP MoE FFN first, then reuse the existing actual/replay/
-   oracle probes. Gate optimization on real prompt emitted/step and replay/oracle
-   ceilings, not on the lcpp synthetic `tg128` row alone.
-2. Continue dense-27B MTP semantic parity before tree work, but with cycle history closed.
+1. Implement qwen35moe packed-N verify support so `--spec-tokens > 1` can run on
+   A3B MoE. Lazy MTP-1 now proves the MoE draft/head/hidden path, but meaningful
+   speculative throughput needs N8-style target verification. Gate on equivalence
+   first, then replay/oracle ceilings and real-prompt emitted/step.
+2. Run the intended A3B UD-Q4_K_M MTP comparison when the artifact is available.
+   Treat it as a measurement gate and coverage probe, not as proof that broad MoE
+   MTP is solved; Q4_K_S already showed artifact-specific dtype holes can matter.
+3. Add native IQ2_S MoE expert-bank gate/up support, then evaluate Q2_K/Q3_K. Do
+   not dequantize base MoE expert banks to F32. The one-block MTP F32 bridge is
+   acceptable; base low-bit MoE needs native routed bank kernels for residency.
+4. Continue dense-27B MTP semantic parity before tree work, but with cycle history closed.
    Remaining concrete variants are position-offset semantics, history-window
    variants rather than full reset, and MTPLX contract/draft-asset details. Gate
    continuation on emitted/step `>=5.2` or `>=25%` over the post-norm committed
    default, equivalence PASS.
-3. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
+5. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
    D3 vs D7, and proper draft-head asset effects. The current qwen oracle already
    reaches the screenshot band decode-only; the open question is how MTPLX gets
    much closer to oracle in actual chain mode.
-4. Prototype a proper low-bit copy of `output.weight` only as a bounded cleanup or
+6. Prototype a proper low-bit copy of `output.weight` only as a bounded cleanup or
    if semantic parity lifts emitted/step enough for draft cost to matter. Do not
    use `token_embd.weight`; v0.509 killed that alias. Gate on `>=5%` whole-run
    gain, `>=40%` recovery of the body-no-lm gap, and `<=5%` relative acceptance
    loss.
-5. Build an alternate-continuation/tree simulator before any tree implementation,
+7. Build an alternate-continuation/tree simulator before any tree implementation,
    but only after post-norm rank traces still show unreachable chain acceptance.
    Gates: N8 `>=5.2` emitted/step to investigate, `>=5.8` to implement; N16 `>=9`
    interesting, `>=11` viable. Require stability across prompts.
-6. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
+8. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.
-7. Demote short-prompt target-verify work while D7/N8 actual emitted/step is
+9. Demote short-prompt target-verify work while D7/N8 actual emitted/step is
    `~4`. Reopen N8/N16 verify phase splits, packed GDN tape/capture, and
    packed multi-query verify attention once acceptance moves, or for long-context
    MTP where attention/GDN verify again becomes the measured limiter.
-8. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
+10. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
    draft-head microbench shows `>=25%` phase recovery or D7/N8 improves `>=5%`.
-9. Build bucket policy around supported packet shapes; prefer padding/rollback to
+11. Build bucket policy around supported packet shapes; prefer padding/rollback to
    arbitrary ragged N unless bucketed verification fails a correctness or waste
    gate.
-10. DFlash two-range attention reading ctx-cache and noise directly, without
+12. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-11. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+13. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
     `attn-intra` at both 8K and 32K.
-12. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+14. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
     show N16 mat-mat-heavy surfaces remain material after the attention fixes.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4

@@ -31,19 +31,21 @@ use crate::loader::MtpHead;
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
     attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
-    encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_get_rows_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_q_gate_f32,
+    encode_attn_decode_v4_f32, encode_axpy_scalar_f32, encode_ffn_swiglu_q4_K_f32,
+    encode_get_rows_f32, encode_moe_down_f32_f32, encode_moe_mat_vec_f32,
+    encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32,
 };
 use crate::metal_dflash::{
     MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, encode_packed_verify_layer_major_inner,
     encode_restore_after_partial_accept_inner,
 };
 use crate::metal_forward::{
-    ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalSession, RMS_EPS, checked_u64_div_exact,
-    checked_u64_double, checked_u64_mul, checked_u64_mul4, encode_mat_vec_dispatch,
-    encode_scatter_offset_f32, weight_dtype_kept_native,
+    ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalMoeFfn, MetalSession, RMS_EPS,
+    checked_u64_div_exact, checked_u64_double, checked_u64_mul, checked_u64_mul4,
+    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
@@ -109,6 +111,23 @@ impl MetalMtpHead {
                 load_f32(desc)
             }
         };
+        let load_moe = |moe: &crate::loader::MoeFfn<'_>| -> Result<MetalMoeFfn, MtpError> {
+            Ok(MetalMoeFfn {
+                gate_inp: load_f32(moe.gate_inp)?,
+                // Correctness-first MoE MTP path: dequant expert banks to F32 so
+                // low-bit A3B MTP heads can run before native Q2/Q3 routed kernels
+                // exist for this block.
+                gate_exps: load_f32(moe.gate_exps)?,
+                up_exps: load_f32(moe.up_exps)?,
+                down_exps: load_f32(moe.down_exps)?,
+                gate_inp_shexp: load_f32(moe.gate_inp_shexp)?,
+                gate_inp_cpu: dequant_to_f32(moe.gate_inp, gguf.slice(moe.gate_inp))?,
+                gate_inp_shexp_cpu: dequant_to_f32(
+                    moe.gate_inp_shexp,
+                    gguf.slice(moe.gate_inp_shexp),
+                )?,
+            })
+        };
 
         Ok(Self {
             block_idx: mtp.block_idx,
@@ -125,7 +144,7 @@ impl MetalMtpHead {
                 o: load_weight(mtp.attn.o)?,
                 q_norm: load_f32(mtp.attn.q_norm)?,
                 k_norm: load_f32(mtp.attn.k_norm)?,
-                ffn_moe: None,
+                ffn_moe: mtp.attn.ffn_moe.as_ref().map(load_moe).transpose()?,
             },
             eh_proj: load_weight(mtp.eh_proj)?,
             enorm: load_f32(mtp.enorm)?,
@@ -161,6 +180,11 @@ pub struct MetalMtpSession {
     pub ffn_inner: MetalTensor, // [F] — silu(gate) * up
     pub ffn_out: MetalTensor,   // [H]
     pub mixer_out: MetalTensor, // [H] — attn output
+    pub moe_router_probs: MetalTensor,
+    pub moe_topk_idx: MetalTensor,
+    pub moe_topk_weight: MetalTensor,
+    pub moe_shared_gate: MetalTensor,
+    pub moe_expert_out: MetalTensor,
 
     // Attn scratch.
     pub attn_q_full: MetalTensor,   // [2 * q_dim] — Q + gate interleaved
@@ -191,9 +215,17 @@ impl MetalMtpSession {
         arch: &crate::model::Arch,
         kv_capacity: usize,
     ) -> Result<Self, MtpError> {
-        let _ = head; // currently unused; reserved for arch consistency checks
         let h = arch.hidden_size as u64;
-        let f = arch.intermediate_size as u64;
+        let mtp_moe = head.attn.ffn_moe.is_some();
+        let topk = arch.expert_used_count.max(1).min(arch.expert_count.max(1)) as u64;
+        let f_exp = arch.expert_feed_forward_length as u64;
+        let f_shared = arch.expert_shared_feed_forward_length as u64;
+        let f = if mtp_moe {
+            checked_u64_mul(topk, f_exp.max(1), "mtp moe ffn scratch overflow")?
+                .max(f_shared.max(1))
+        } else {
+            arch.intermediate_size as u64
+        };
         let head_dim = arch.attn_head_dim as u64;
         let n_q = arch.n_q_heads as u64;
         let n_kv = arch.n_kv_heads as u64;
@@ -218,6 +250,17 @@ impl MetalMtpSession {
             2,
             "mtp attn_v4_ml_partial size overflow",
         )?;
+        let moe_router_n = if mtp_moe {
+            arch.expert_count.max(1) as u64
+        } else {
+            1
+        };
+        let moe_topk_n = if mtp_moe { topk } else { 1 };
+        let moe_expert_out_n = if mtp_moe {
+            checked_u64_mul(topk, h, "mtp moe expert out overflow")?
+        } else {
+            1
+        };
 
         Ok(Self {
             kv_k: MetalTensor::zeros_f16(ctx, vec![kv_cache_elems])?,
@@ -235,6 +278,11 @@ impl MetalMtpSession {
             ffn_inner: MetalTensor::zeros_f32(ctx, vec![f])?,
             ffn_out: MetalTensor::zeros_f32(ctx, vec![h])?,
             mixer_out: MetalTensor::zeros_f32(ctx, vec![h])?,
+            moe_router_probs: MetalTensor::zeros_f32(ctx, vec![moe_router_n])?,
+            moe_topk_idx: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
+            moe_topk_weight: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
+            moe_shared_gate: MetalTensor::zeros_f32(ctx, vec![1])?,
+            moe_expert_out: MetalTensor::zeros_f32(ctx, vec![moe_expert_out_n])?,
             attn_q_full: MetalTensor::zeros_f32(ctx, vec![attn_q_full_elems])?,
             attn_q: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             attn_gate: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
@@ -458,6 +506,237 @@ impl<'a> SpeculativeDecoder<'a> {
         Ok(())
     }
 
+    fn encode_mtp_ffn(&mut self, enc: &KernelEncoder) -> Result<(), MtpError> {
+        if let Some(moe) = self.mtp_head.attn.ffn_moe.as_ref() {
+            self.encode_mtp_moe_ffn(enc, moe)
+        } else {
+            self.encode_mtp_dense_ffn(enc)
+        }
+    }
+
+    fn encode_mtp_dense_ffn(&mut self, enc: &KernelEncoder) -> Result<(), MtpError> {
+        let arch = &self.base.model.arch;
+        let ctx = self.base.ctx;
+        let h = arch.hidden_size as usize;
+        let f = arch.intermediate_size as usize;
+        let g_w = &self.mtp_head.attn.ffn_gate;
+        let u_w = &self.mtp_head.attn.ffn_up;
+        let d_w = &self.mtp_head.attn.ffn_down;
+        let ffn_fused = g_w.dtype == GgmlType::Q4_K && u_w.dtype == GgmlType::Q4_K;
+        if ffn_fused {
+            encode_ffn_swiglu_q4_K_f32(
+                ctx,
+                enc,
+                g_w,
+                u_w,
+                &self.mtp_session.h,
+                &self.mtp_session.ffn_inner,
+                h,
+                f,
+            )?;
+        } else {
+            encode_mat_vec_dispatch(
+                ctx,
+                enc,
+                g_w,
+                &self.mtp_session.h,
+                &self.mtp_session.ffn_gate,
+                h,
+                f,
+            )?;
+            encode_mat_vec_dispatch(
+                ctx,
+                enc,
+                u_w,
+                &self.mtp_session.h,
+                &self.mtp_session.ffn_up,
+                h,
+                f,
+            )?;
+            encode_silu_mul_f32(
+                ctx,
+                enc,
+                &self.mtp_session.ffn_gate,
+                &self.mtp_session.ffn_up,
+                &self.mtp_session.ffn_inner,
+            )?;
+        }
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            d_w,
+            &self.mtp_session.ffn_inner,
+            &self.mtp_session.ffn_out,
+            f,
+            h,
+        )?;
+        encode_add_inplace_f32(ctx, enc, &self.mtp_session.x, &self.mtp_session.ffn_out)?;
+        Ok(())
+    }
+
+    fn encode_mtp_moe_ffn(
+        &mut self,
+        enc: &KernelEncoder,
+        moe: &MetalMoeFfn,
+    ) -> Result<(), MtpError> {
+        let arch = &self.base.model.arch;
+        let ctx = self.base.ctx;
+        let h = arch.hidden_size as usize;
+        let f_exp = arch.expert_feed_forward_length as usize;
+        let f_shared = arch.expert_shared_feed_forward_length as usize;
+        let n_expert = arch.expert_count as usize;
+        let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+
+        let router_probs = self
+            .mtp_session
+            .moe_router_probs
+            .view_subrange(0, vec![n_expert as u64]);
+        let topk_idx = self
+            .mtp_session
+            .moe_topk_idx
+            .view_subrange(0, vec![topk as u64]);
+        let topk_w = self
+            .mtp_session
+            .moe_topk_weight
+            .view_subrange(0, vec![topk as u64]);
+        let routed_gate = self
+            .mtp_session
+            .ffn_gate
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let routed_up = self
+            .mtp_session
+            .ffn_up
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let routed_inner = self
+            .mtp_session
+            .ffn_inner
+            .view_subrange(0, vec![(topk * f_exp) as u64]);
+        let routed_out = self
+            .mtp_session
+            .moe_expert_out
+            .view_subrange(0, vec![(topk * h) as u64]);
+
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            &moe.gate_inp,
+            &self.mtp_session.h,
+            &router_probs,
+            h,
+            n_expert,
+        )?;
+        encode_topk_logits_softmax_dot_sigmoid_f32(
+            ctx,
+            enc,
+            &router_probs,
+            &moe.gate_inp_shexp,
+            &self.mtp_session.h,
+            &topk_idx,
+            &topk_w,
+            &self.mtp_session.moe_shared_gate,
+            n_expert,
+            topk,
+            h,
+        )?;
+        encode_moe_mat_vec_f32(
+            ctx,
+            enc,
+            &moe.gate_exps,
+            &self.mtp_session.h,
+            &topk_idx,
+            &routed_gate,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+        )?;
+        encode_moe_mat_vec_f32(
+            ctx,
+            enc,
+            &moe.up_exps,
+            &self.mtp_session.h,
+            &topk_idx,
+            &routed_up,
+            h,
+            f_exp,
+            n_expert,
+            topk,
+        )?;
+        encode_silu_mul_f32(ctx, enc, &routed_gate, &routed_up, &routed_inner)?;
+        encode_moe_down_f32_f32(
+            ctx,
+            enc,
+            &moe.down_exps,
+            &routed_inner,
+            &topk_idx,
+            &routed_out,
+            f_exp,
+            h,
+            n_expert,
+            topk,
+        )?;
+        encode_moe_weighted_sum_f32(
+            ctx,
+            enc,
+            &routed_out,
+            &topk_w,
+            &self.mtp_session.mixer_out,
+            h,
+            topk,
+        )?;
+
+        let shared_gate = self
+            .mtp_session
+            .ffn_gate
+            .view_subrange(0, vec![f_shared as u64]);
+        let shared_up = self
+            .mtp_session
+            .ffn_up
+            .view_subrange(0, vec![f_shared as u64]);
+        let shared_inner = self
+            .mtp_session
+            .ffn_inner
+            .view_subrange(0, vec![f_shared as u64]);
+        let shared_out = self.mtp_session.ffn_out.view_subrange(0, vec![h as u64]);
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            &self.mtp_head.attn.ffn_gate,
+            &self.mtp_session.h,
+            &shared_gate,
+            h,
+            f_shared,
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            &self.mtp_head.attn.ffn_up,
+            &self.mtp_session.h,
+            &shared_up,
+            h,
+            f_shared,
+        )?;
+        encode_silu_mul_f32(ctx, enc, &shared_gate, &shared_up, &shared_inner)?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            &self.mtp_head.attn.ffn_down,
+            &shared_inner,
+            &shared_out,
+            f_shared,
+            h,
+        )?;
+        encode_axpy_scalar_f32(
+            ctx,
+            enc,
+            &shared_out,
+            &self.mtp_session.moe_shared_gate,
+            &self.mtp_session.mixer_out,
+        )?;
+        encode_add_inplace_f32(ctx, enc, &self.mtp_session.x, &self.mtp_session.mixer_out)?;
+        Ok(())
+    }
+
     /// Draft a single token. The MTP head at slot `position` consumes
     /// `(embed(next_tok), prev_hidden)` and predicts the token at
     /// `position + 2` (greedy v1).
@@ -638,62 +917,9 @@ impl<'a> SpeculativeDecoder<'a> {
             RMS_EPS,
         )?;
 
-        // (9) SwiGLU FFN. Same fused/unfused path as base.
-        let g_w = &self.mtp_head.attn.ffn_gate;
-        let u_w = &self.mtp_head.attn.ffn_up;
-        let d_w = &self.mtp_head.attn.ffn_down;
-        let f = arch.intermediate_size as usize;
-        let ffn_fused = g_w.dtype == GgmlType::Q4_K && u_w.dtype == GgmlType::Q4_K;
-        if ffn_fused {
-            encode_ffn_swiglu_q4_K_f32(
-                ctx,
-                &enc,
-                g_w,
-                u_w,
-                &self.mtp_session.h,
-                &self.mtp_session.ffn_inner,
-                h,
-                f,
-            )?;
-        } else {
-            encode_mat_vec_dispatch(
-                ctx,
-                &enc,
-                g_w,
-                &self.mtp_session.h,
-                &self.mtp_session.ffn_gate,
-                h,
-                f,
-            )?;
-            encode_mat_vec_dispatch(
-                ctx,
-                &enc,
-                u_w,
-                &self.mtp_session.h,
-                &self.mtp_session.ffn_up,
-                h,
-                f,
-            )?;
-            encode_silu_mul_f32(
-                ctx,
-                &enc,
-                &self.mtp_session.ffn_gate,
-                &self.mtp_session.ffn_up,
-                &self.mtp_session.ffn_inner,
-            )?;
-        }
-        encode_mat_vec_dispatch(
-            ctx,
-            &enc,
-            d_w,
-            &self.mtp_session.ffn_inner,
-            &self.mtp_session.ffn_out,
-            f,
-            h,
-        )?;
-
-        // (10) Residual #2: x += ffn_out.
-        encode_add_inplace_f32(ctx, &enc, &self.mtp_session.x, &self.mtp_session.ffn_out)?;
+        // (9-10) FFN + residual. Dense MTP uses SwiGLU; MoE MTP runs
+        // router+routed/shared experts against the same residual stream.
+        self.encode_mtp_ffn(&enc)?;
 
         // (11) shared_head_norm: x → h.
         encode_rms_norm_mul_f32(
@@ -851,59 +1077,7 @@ impl<'a> SpeculativeDecoder<'a> {
             RMS_EPS,
         )?;
 
-        let g_w = &self.mtp_head.attn.ffn_gate;
-        let u_w = &self.mtp_head.attn.ffn_up;
-        let d_w = &self.mtp_head.attn.ffn_down;
-        let f = arch.intermediate_size as usize;
-        let ffn_fused = g_w.dtype == GgmlType::Q4_K && u_w.dtype == GgmlType::Q4_K;
-        if ffn_fused {
-            encode_ffn_swiglu_q4_K_f32(
-                ctx,
-                enc,
-                g_w,
-                u_w,
-                &self.mtp_session.h,
-                &self.mtp_session.ffn_inner,
-                h,
-                f,
-            )?;
-        } else {
-            encode_mat_vec_dispatch(
-                ctx,
-                enc,
-                g_w,
-                &self.mtp_session.h,
-                &self.mtp_session.ffn_gate,
-                h,
-                f,
-            )?;
-            encode_mat_vec_dispatch(
-                ctx,
-                enc,
-                u_w,
-                &self.mtp_session.h,
-                &self.mtp_session.ffn_up,
-                h,
-                f,
-            )?;
-            encode_silu_mul_f32(
-                ctx,
-                enc,
-                &self.mtp_session.ffn_gate,
-                &self.mtp_session.ffn_up,
-                &self.mtp_session.ffn_inner,
-            )?;
-        }
-        encode_mat_vec_dispatch(
-            ctx,
-            enc,
-            d_w,
-            &self.mtp_session.ffn_inner,
-            &self.mtp_session.ffn_out,
-            f,
-            h,
-        )?;
-        encode_add_inplace_f32(ctx, enc, &self.mtp_session.x, &self.mtp_session.ffn_out)?;
+        self.encode_mtp_ffn(enc)?;
         if !emit_head {
             if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
                 encode_rms_norm_mul_f32(

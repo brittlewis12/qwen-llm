@@ -38,7 +38,8 @@ use crate::metal::{
     encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
     encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
     encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32,
-    encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q5_K_f32,
+    encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
+    encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
@@ -1251,7 +1252,13 @@ impl<'a> MetalForward<'a> {
         }
         if !matches!(
             moe.down_exps.dtype,
-            GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS | GgmlType::BF16
+            GgmlType::Q4_K
+                | GgmlType::Q5_K
+                | GgmlType::Q6_K
+                | GgmlType::Q8_0
+                | GgmlType::IQ4_XS
+                | GgmlType::BF16
+                | GgmlType::F32
         ) {
             return Err(MfError::UnsupportedDtype {
                 name: "MoE routed down expert bank".into(),
@@ -1274,6 +1281,29 @@ impl<'a> MetalForward<'a> {
             return Ok(());
         }
         match moe.down_exps.dtype {
+            GgmlType::Q4_K => {
+                encode_moe_down_q4_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_weighted_sum_f32(
+                    self.ctx,
+                    enc,
+                    &moe_expert_out,
+                    &topk_w,
+                    &session.mixer_out,
+                    h,
+                    topk,
+                )?;
+            }
             GgmlType::Q5_K => {
                 if decode_moe_q5_down_fused_enabled() {
                     encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
@@ -1368,6 +1398,29 @@ impl<'a> MetalForward<'a> {
                         topk,
                     )?;
                 }
+                encode_moe_weighted_sum_f32(
+                    self.ctx,
+                    enc,
+                    &moe_expert_out,
+                    &topk_w,
+                    &session.mixer_out,
+                    h,
+                    topk,
+                )?;
+            }
+            GgmlType::F32 => {
+                encode_moe_down_f32_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
                 encode_moe_weighted_sum_f32(
                     self.ctx,
                     enc,
@@ -1931,6 +1984,21 @@ impl<'a> MetalForward<'a> {
         }
 
         let pending = match moe.down_exps.dtype {
+            GgmlType::Q4_K => {
+                encode_moe_down_q4_K_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                true
+            }
             GgmlType::Q5_K => {
                 if decode_moe_q5_down_fused_enabled() {
                     if f_exp == 512 && decode_moe_q5_down_k512_r2_enabled() {
@@ -2043,6 +2111,21 @@ impl<'a> MetalForward<'a> {
                 }
                 true
             }
+            GgmlType::F32 => {
+                encode_moe_down_f32_f32(
+                    self.ctx,
+                    enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                true
+            }
             GgmlType::BF16 => {
                 encode_moe_down_bf16_f32(
                     self.ctx,
@@ -2123,6 +2206,29 @@ impl<'a> MetalForward<'a> {
         }
 
         let pending = match moe.down_exps.dtype {
+            GgmlType::Q4_K => {
+                let enc = begin_decode_stage(
+                    cmd_buf,
+                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                    stage_meta,
+                    true,
+                )?;
+                encode_moe_down_q4_K_f32(
+                    self.ctx,
+                    &enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                enc.end();
+                true
+            }
             GgmlType::Q5_K => {
                 let enc = begin_decode_stage(
                     cmd_buf,
@@ -2264,6 +2370,29 @@ impl<'a> MetalForward<'a> {
                         topk,
                     )?;
                 }
+                self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
+                enc.end();
+                true
+            }
+            GgmlType::F32 => {
+                let enc = begin_decode_stage(
+                    cmd_buf,
+                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
+                    stage_meta,
+                    true,
+                )?;
+                encode_moe_down_f32_f32(
+                    self.ctx,
+                    &enc,
+                    &moe.down_exps,
+                    &moe_inner,
+                    &topk_idx,
+                    &moe_expert_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
                 self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
                 enc.end();
                 true
@@ -4934,9 +5063,6 @@ impl<'a> MetalForward<'a> {
         post_norm_hidden: bool,
     ) -> Result<i32, MfError> {
         let arch = &self.model.arch;
-        if arch.kind == ArchKind::Moe {
-            return Err(MfError::UnsupportedMoe);
-        }
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
             return Err(MfError::BadToken(token_id, arch.vocab_size));
         }
@@ -4969,15 +5095,31 @@ impl<'a> MetalForward<'a> {
         let mut gdn_idx = 0usize;
         let mut attn_idx = 0usize;
         for (il, block) in self.model.blocks.iter().enumerate() {
-            self.encode_block(
-                &enc,
-                il,
-                block,
-                &mut gdn_idx,
-                &mut attn_idx,
-                position,
-                session,
-            )?;
+            if arch.kind == ArchKind::Moe {
+                let slot = match block {
+                    MetalBlock::Gdn(_) => {
+                        let s = MixerSlot::Gdn(gdn_idx);
+                        gdn_idx += 1;
+                        s
+                    }
+                    MetalBlock::Attn(_) => {
+                        let s = MixerSlot::Attn(attn_idx);
+                        attn_idx += 1;
+                        s
+                    }
+                };
+                self.encode_moe_block_gpu(&enc, block, slot, position, session)?;
+            } else {
+                self.encode_block(
+                    &enc,
+                    il,
+                    block,
+                    &mut gdn_idx,
+                    &mut attn_idx,
+                    position,
+                    session,
+                )?;
+            }
         }
 
         encode_rms_norm_mul_f32(
@@ -10214,6 +10356,43 @@ mod tests {
         }
 
         match moe.down_exps.dtype {
+            GgmlType::Q4_K => {
+                timed(
+                    "routed_down_q4_K",
+                    &|enc| {
+                        encode_moe_down_q4_K_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &moe_expert_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_weighted_sum",
+                    &|enc| {
+                        encode_moe_weighted_sum_f32(
+                            mf.ctx,
+                            enc,
+                            &moe_expert_out,
+                            &topk_w,
+                            &s.mixer_out,
+                            h,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
             GgmlType::Q5_K => {
                 if decode_moe_q5_down_fused_enabled() {
                     timed(
@@ -10302,6 +10481,43 @@ mod tests {
                     "routed_down_iq4_xs",
                     &|enc| {
                         encode_moe_down_iq4_xs_f32(
+                            mf.ctx,
+                            enc,
+                            &moe.down_exps,
+                            &moe_inner,
+                            &topk_idx,
+                            &moe_expert_out,
+                            f_exp,
+                            h,
+                            n_expert,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+                timed(
+                    "routed_weighted_sum",
+                    &|enc| {
+                        encode_moe_weighted_sum_f32(
+                            mf.ctx,
+                            enc,
+                            &moe_expert_out,
+                            &topk_w,
+                            &s.mixer_out,
+                            h,
+                            topk,
+                        )
+                        .map_err(MfError::from)
+                    },
+                    &mut phases,
+                )?;
+            }
+            GgmlType::F32 => {
+                timed(
+                    "routed_down_f32",
+                    &|enc| {
+                        encode_moe_down_f32_f32(
                             mf.ctx,
                             enc,
                             &moe.down_exps,

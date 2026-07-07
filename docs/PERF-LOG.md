@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.513 MoE MTP Spec1 Executes on A3B
+
+Status: correctness-first MoE MTP support + Q4 routed-down coverage. This replaces
+the v0.512 MoE-MTP unsupported bail with an executable draft path and fixes a base
+MoE decode quant gap exposed by the A3B UD-Q4_K_S MTP artifact.
+
+THE CHANGE:
+- `qwen-bench mtp` no longer rejects MoE MTP heads up front.
+- `MetalMtpHead::load` now binds MoE MTP FFN blocks. The single MTP expert bank is
+  dequantized to F32 for a correctness-first bridge across low-bit MTP assets.
+- `MetalMtpSession` adds MoE router/top-k/shared-gate/expert-output scratch.
+- MTP drafting now dispatches dense or MoE FFN by head shape. The MoE path runs
+  GPU router/top-k/shared gate, routed gate/up/down experts, weighted sum, shared
+  expert, and residual update.
+- Base MoE decode gains native routed-down `Q4_K` support. This closes the
+  UD-Q4_K_S blocker where gate/up were Q4_K but routed down was also Q4_K.
+- `single_token_argmax_with_hidden` now supports qwen35moe, so MoE MTP can obtain
+  the base hidden carry it needs.
+- Added an F32 MoE routed-down kernel so the dequantized MTP expert bank uses the
+  correct per-slot inner vector instead of the gate/up shared-input mat-vec shape.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B UD-Q4_K_S MoE MTP lazy smoke, 2 tokens, D1/N2, post/post hidden,
+  `--no-warmup`: equivalence PASS; MTP-on total `169.6 ms` vs no-spec
+  `199.1 ms`. Timing is a smoke only; the prompt is tiny and acceptance was `0`.
+  Artifact: `target/profiles/v0513-a3b-q4ks-moe-mtp-q4down-lazy-smoke.json`.
+- Dense 27B MTP regression smoke, 2 tokens, D1/N2, post/post hidden,
+  `--no-warmup`: equivalence PASS. Artifact:
+  `target/profiles/v0513-27b-mtp-dense-regression-smoke.json`.
+- A3B UD-Q4_K_S D3/N4 still fails before timing because packed-N verify uses the
+  dense/layer-major verifier and does not implement qwen35moe base forward yet.
+
+READ: this is a support/correctness checkpoint, not a MoE MTP performance claim.
+The Q4_K_S artifact was not the intended direct scoreboard target, but it exposed a
+real Q4 routed-down coverage hole worth keeping. Low-bit IQ2/Q2/Q3 MoE is not
+abandoned: dequantizing one MTP block is acceptable, while base MoE needs native
+expert-bank kernels to avoid exploding residency. The next performance gate is
+qwen35moe packed-N verify support; without it, MoE MTP is capped at lazy MTP-1.
+
 ## 2026-07-07 - v0.512 A3B MoE MTP Asset Exposes Unsupported Head
 
 Status: model-asset + comparator smoke. Downloaded

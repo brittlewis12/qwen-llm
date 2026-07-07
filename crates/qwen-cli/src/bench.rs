@@ -62,7 +62,6 @@ use qwen_llm::{
         MtpRankRow, MtpRecursiveHiddenVariant, PackedDraftPlan, RecordedDraftStep, RecordedMtpWork,
         SpeculativeDecoder,
     },
-    model::ArchKind,
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
@@ -9570,22 +9569,6 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
              use brittlewis12/Qwen3.6-27B-MTP-GGUF or the 0.8B-MTP variant)"
         )
     })?;
-    if m.arch.kind == ArchKind::Moe || mtp_view.attn.ffn_moe.is_some() {
-        let dtype_summary = mtp_view.attn.ffn_moe.as_ref().map(|moe| {
-            format!(
-                "gate/up/down={:?}/{:?}/{:?}",
-                moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype
-            )
-        });
-        anyhow::bail!(
-            "MoE MTP head detected at blk.{}{}; native MoE MTP drafting is not yet implemented",
-            mtp_view.block_idx,
-            dtype_summary
-                .as_deref()
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default(),
-        );
-    }
 
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
     let mtp_head = MetalMtpHead::load(&ctx, &g, mtp_view).context("metal-load MTP head")?;

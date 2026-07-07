@@ -298,6 +298,33 @@ pub struct MtpRankRow {
     pub accepted: bool,
     pub draft_tok: i32,
     pub target_tok: i32,
+    pub target_logit: f32,
+    pub top_tokens: Vec<i32>,
+    pub top_logits: Vec<f32>,
+}
+
+fn rank_and_topk(logits: &[f32], target_idx: usize, k: usize) -> (usize, Vec<i32>, Vec<f32>) {
+    let target_logit = logits[target_idx];
+    let mut rank = 1usize;
+    let mut top_tokens = vec![-1i32; k];
+    let mut top_logits = vec![f32::NEG_INFINITY; k];
+    for (idx, &v) in logits.iter().enumerate() {
+        if v > target_logit {
+            rank += 1;
+        }
+        if v <= top_logits[k - 1] {
+            continue;
+        }
+        let mut pos = k - 1;
+        while pos > 0 && v > top_logits[pos - 1] {
+            top_logits[pos] = top_logits[pos - 1];
+            top_tokens[pos] = top_tokens[pos - 1];
+            pos -= 1;
+        }
+        top_logits[pos] = v;
+        top_tokens[pos] = idx as i32;
+    }
+    (rank, top_tokens, top_logits)
 }
 
 fn copy_f32_tensor(src: &MetalTensor, dst: &MetalTensor) -> Result<(), MtpError> {
@@ -1617,7 +1644,7 @@ impl<'a> SpeculativeDecoder<'a> {
                     let target_tok = verify_argmax[j];
                     let target_idx = target_tok as usize;
                     let target_logit = logits[target_idx];
-                    let rank = 1 + logits.iter().filter(|&&x| x > target_logit).count();
+                    let (rank, top_tokens, top_logits) = rank_and_topk(logits, target_idx, 16);
                     let accepted = drafts[j] == target_tok;
                     (*rows).push(MtpRankRow {
                         step: stats.steps as usize,
@@ -1626,6 +1653,9 @@ impl<'a> SpeculativeDecoder<'a> {
                         accepted,
                         draft_tok: drafts[j],
                         target_tok,
+                        target_logit,
+                        top_tokens,
+                        top_logits,
                     });
                     if !accepted {
                         break;

@@ -9733,9 +9733,29 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         }
         let mut out = String::new();
         for row in &mtp_rank_rows {
+            let top_tokens = row
+                .top_tokens
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let top_logits = row
+                .top_logits
+                .iter()
+                .map(|v| format!("{v:.6}"))
+                .collect::<Vec<_>>()
+                .join(",");
             out.push_str(&format!(
-                "{{\"step\":{},\"depth\":{},\"rank\":{},\"accepted\":{},\"draft_tok\":{},\"target_tok\":{}}}\n",
-                row.step, row.depth, row.rank, row.accepted, row.draft_tok, row.target_tok
+                "{{\"step\":{},\"depth\":{},\"rank\":{},\"accepted\":{},\"draft_tok\":{},\"target_tok\":{},\"target_logit\":{:.6},\"top_tokens\":[{}],\"top_logits\":[{}]}}\n",
+                row.step,
+                row.depth,
+                row.rank,
+                row.accepted,
+                row.draft_tok,
+                row.target_tok,
+                row.target_logit,
+                top_tokens,
+                top_logits,
             ));
         }
         std::fs::write(rank_path, out)?;

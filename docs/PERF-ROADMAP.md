@@ -1255,6 +1255,13 @@ gate: top-k containment is hindsight unless draft-side features can choose the
 non-top1 candidate before target verification. Next branch is top-k logit/id
 capture plus offline policy simulation; do not build tree verify or low-bit
 draft head before that simulator clears.
+v0.508 adds top-16 ids/logits and runs that simulator. Simple margin-swap
+policies are effectively flat (`4.031` emitted/step best), and even an oracle
+one-token terminal rescue only reaches `4.812` emitted/step at top-16 versus the
+`>=5.2` investigation gate. Close simple rerank. The live acceptance branch is
+now either real alternate continuation/tree economics, a stronger learned or
+engineered corrector, a better MTP policy/asset, or an MTPLX measurement/reporting
+difference; inspect MTPLX before building tree machinery.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
@@ -3184,37 +3191,43 @@ What the latest analysis says:
 - v0.507 rank tracing shows D7/N8 terminal mismatches are often near misses:
   target is in draft top-2 for `50%`, top-4 for `67.9%`, top-8 for `85.7%`, and
   top-16 for `92.9%` of terminal mismatches on the 27B code prompt.
+- v0.508 closes simple rerank: best margin-swap policy is only `4.031`
+  emitted/step and oracle one-token top-16 terminal rescue is only `4.812`, short
+  of the `>=5.2` gate.
 
 Highest-EV speculative kernel targets:
 
-1. Extend MTP rank tracing to capture draft top-k ids/logits, margin, and depth,
-   then run an offline policy simulator. Only pursue online rerank/correction if
-   draft-side features can raise emitted/step from `~4.0` to `>=5.2` on held-out
-   traces without target hindsight.
-2. Run N8/N16 verify phase splits and no-op probes to choose between GDN
+1. Inspect MTPLX acceptance logic and reporting. Determine whether its `65-80`
+   t/s comes from alternate continuation/tree verification, a different MTP
+   policy, a stronger draft asset, or throughput accounting that is not directly
+   comparable.
+2. Build an alternate-continuation/tree simulator before any tree implementation.
+   Gates: N8 `>=5.2` emitted/step to investigate, `>=5.8` to implement; N16
+   `>=9` interesting, `>=11` viable. Require stability across prompts.
+3. Run N8/N16 verify phase splits and no-op probes to choose between GDN
    tape/capture, packed q_len attention, and remaining target-verify memory debt.
-3. Prototype a draft-only low-bit/top-k LM-head only if rank tracing says the
-   current target token stays near the draft distribution. Gate on `>=8-10%`
-   whole-run gain and `<=5%` relative acceptance loss.
-4. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
+4. Prototype a draft-only low-bit/top-k LM-head only after a deployable selection
+   policy exists. Gate on `>=8-10%` whole-run gain and `<=5%` relative acceptance
+   loss.
+5. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.
-5. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
+6. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
    draft-head microbench shows `>=25%` phase recovery or D7/N8 improves `>=5%`.
-6. Build bucket policy around supported packet shapes; prefer padding/rollback to
+7. Build bucket policy around supported packet shapes; prefer padding/rollback to
    arbitrary ragged N unless bucketed verification fails a correctness or waste
    gate.
-7. Pack the remaining target-verify GDN work, or build compact GDN tape/capture,
+8. Pack the remaining target-verify GDN work, or build compact GDN tape/capture,
    measured on N8/N16 fast buckets rather than ragged shapes.
-8. Target packed-verify multi-query attention so consecutive verify queries share
+9. Target packed-verify multi-query attention so consecutive verify queries share
    KV reads; prioritize this over more small-N mat-mat retunes.
-9. Pack verify rope/scatter and coalesce/concurrently issue independent verify
+10. Pack verify rope/scatter and coalesce/concurrently issue independent verify
    phases only where phase traces show the same debt.
-10. DFlash two-range attention reading ctx-cache and noise directly, without
+11. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-11. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+12. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
    `attn-intra` at both 8K and 32K.
-12. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+13. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
    show N16 mat-mat-heavy surfaces remain material after the attention fixes.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4

@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.508 Simple MTP Rerank Is Not Enough
+
+Status: bench diagnostic + simulator. Extends the v0.507 rank trace with draft
+top-16 token ids/logits and adds `scripts/profile/mtp_rank_sim.py` to test
+simple rescue/rerank economics before building a tree verifier or draft-head
+kernel.
+
+THE CHANGE: MTP rank JSONL rows now include `target_logit`, `top_tokens`, and
+`top_logits`. The simulator reports base emitted/step, oracle one-terminal-token
+rescue ceilings for top-k, and simple margin-swap policies that use only
+draft-side features.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- 27B MTP code prompt, D7/N8, 128 tokens, `--no-warmup`, AC power: top-k rank
+  JSONL emitted and greedy equivalence PASS.
+
+27B D7/N8 simulator result on
+`target/profiles/v0508-27b-mtp-d7n8-topk-rank.jsonl`:
+- base: `128 / 32 = 4.000` emitted/step.
+- oracle one-token terminal rescue: top-2 `4.438`, top-4 `4.594`, top-8
+  `4.750`, top-16 `4.812` emitted/step.
+- best deployable margin-swap policies are flat: top-2 `4.031`, top-3 `4.031`,
+  top-4 `4.000` emitted/step.
+
+READ: top-k containment is real, but simple online rerank is effectively closed,
+and even perfect one-token rescue does not reach the `>=5.2 emitted/step` gate.
+The remaining acceptance lanes are alternate-continuation/tree simulation,
+a stronger learned/engineered corrector, a different MTP policy/asset, or a
+measurement/accounting difference in MTPLX. Before building tree verify, inspect
+MTPLX acceptance/reporting logic and simulate real alternate continuations under
+N8/N16 packet budgets.
+
 ## 2026-07-07 - v0.507 MTP Rank Trace Reopens Reranking
 
 Status: bench diagnostic + roadmap update. Adds target-rank tracing for native

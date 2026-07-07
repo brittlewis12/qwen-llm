@@ -4493,10 +4493,9 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
-    /// Same as [`single_token`] but ALSO copies the pre-output_norm hidden
-    /// state (the residual stream right before the final RMSNorm + lm_head)
-    /// into `hidden_dst`. This is the input the MTP head's `prev_hidden`
-    /// argument expects per `docs/H4-MTP.md` §1.2.
+    /// Same as [`single_token`] but ALSO copies the hidden state for the MTP
+    /// carry into `hidden_dst`. By default this is the pre-output_norm residual;
+    /// `post_norm_hidden` instead captures the final RMSNorm output.
     ///
     /// `hidden_dst` must be a zero-copy F32 tensor of shape `[H]`. It's
     /// kept GPU-resident so the next MTP draft call can consume it
@@ -4932,6 +4931,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
         hidden_dst: &MetalTensor,
+        post_norm_hidden: bool,
     ) -> Result<i32, MfError> {
         let arch = &self.model.arch;
         if arch.kind == ArchKind::Moe {
@@ -4997,7 +4997,12 @@ impl<'a> MetalForward<'a> {
             h,
             arch.vocab_size as usize,
         )?;
-        encode_scatter_offset_f32(self.ctx, &enc, &session.x, hidden_dst, 0, h)?;
+        let hidden_src = if post_norm_hidden {
+            &session.h
+        } else {
+            &session.x
+        };
+        encode_scatter_offset_f32(self.ctx, &enc, hidden_src, hidden_dst, 0, h)?;
         encode_argmax_f32(
             self.ctx,
             &enc,

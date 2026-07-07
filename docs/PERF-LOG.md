@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.510 MTP Hidden Semantics Reopen Acceptance
+
+Status: bench default + MTPLX parity diagnostic. Splits MTP prompt prefill from
+decode-loop timing, writes compact JSON summaries with `qwen-bench mtp --output`,
+and exposes/defaults MTPLX-style post-norm hidden feeds for native MTP.
+
+THE CHANGE:
+- `qwen-bench mtp --output <path>` writes compact JSON with decode-only and total
+  rates, emitted/step, accepted/step, physical/logical verify N, hidden variants,
+  and equivalence status.
+- `SpecStats` now carries `prefill_ms` and `decode_ms`; stderr reports
+  decode-only and total t/s for MTP-on rows.
+- `--mtp-base-hidden {pre-norm,post-norm}` controls the base hidden passed to MTP
+  prompt/bridge slots. `--mtp-recursive-hidden {pre-norm,post-norm}` controls the
+  hidden fed between recursive MTP draft slots. Both now default to `post-norm`,
+  matching MTPLX's Qwen MTP contract; `pre-norm` is the rollback/legacy mode.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- 27B D3 smoke, default post-norm hidden feeds, 16 tokens: equivalence PASS.
+- 27B D7/N8 code prompt, 128 tokens, `--no-warmup`, AC power:
+  - legacy pre/pre single-CB: decode-only `30.2 t/s`, total `25.8 t/s`,
+    emitted/step `3.879`, alpha `0.411`, equivalence PASS.
+  - recursive post-norm only: decode-only `32.0 t/s`, total `27.1 t/s`,
+    emitted/step `4.129`, alpha `0.447`, equivalence PASS.
+  - base+recursive post-norm: decode-only `33.0 t/s`, total `27.8 t/s`,
+    emitted/step `4.267`, alpha `0.467`, equivalence PASS.
+  - D7/N8 oracle: decode-only `74.7 t/s`, total `52.7 t/s`, emitted/step `8.0`,
+    equivalence PASS.
+- 27B D7/N8 narrative prompt, 128 tokens, `--no-warmup`, AC power:
+  - legacy pre/pre single-CB: decode-only `26.8 t/s`, total `21.7 t/s`,
+    emitted/step `3.459`, alpha `0.351`, equivalence PASS.
+  - base+recursive post-norm: decode-only `30.7 t/s`, total `24.2 t/s`,
+    emitted/step `4.000`, alpha `0.429`, equivalence PASS.
+
+READ: the MTPLX `65-80 t/s` screenshot no longer requires a target-verify path
+faster than qwen's oracle for short-prompt decode-only accounting: qwen's D7/N8
+oracle already reaches `74.7 t/s` decode-only. The remaining MTPLX-class gap is
+primarily acceptance/semantics/draft-asset, not target verify for this regime.
+Post-norm hidden semantics are a real acceptance win and are now the MTP bench
+default, but they move emitted/step only to `~4.0-4.3`, still far below the
+`>=5.2` investigation gate and the `8.0` oracle ceiling. Continue the MTP branch
+through semantic parity and acceptance tracing before building tree machinery.
+
 ## 2026-07-07 - v0.509 Token-Embedding Draft Head Is a Hard Kill
 
 Status: bench falsifier. Tests the cheapest MTPLX-inspired draft-head clue: use

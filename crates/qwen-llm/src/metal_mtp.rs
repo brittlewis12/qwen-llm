@@ -290,6 +290,24 @@ pub enum RecordedMtpWork {
     BridgeOnly,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MtpRecursiveHiddenVariant {
+    /// Feed the residual stream before MTP shared-head norm into the next draft.
+    PreNorm,
+    /// Feed the MTP shared-head-normalized hidden into the next draft. MTPLX's
+    /// default native-MTP contract uses this variant.
+    PostNorm,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MtpBaseHiddenVariant {
+    /// Feed the base residual stream before final output norm into MTP.
+    PreNorm,
+    /// Feed the base final-output-normalized hidden into MTP. MTPLX's default
+    /// Qwen contract uses this variant.
+    PostNorm,
+}
+
 #[derive(Clone, Debug)]
 pub struct MtpRankRow {
     pub step: usize,
@@ -360,6 +378,8 @@ pub struct SpeculativeDecoder<'a> {
     pub mtp_head: &'a MetalMtpHead,
     pub mtp_session: MetalMtpSession,
     draft_token_embd_head: bool,
+    recursive_hidden_variant: MtpRecursiveHiddenVariant,
+    base_hidden_variant: MtpBaseHiddenVariant,
 }
 
 impl<'a> SpeculativeDecoder<'a> {
@@ -373,11 +393,50 @@ impl<'a> SpeculativeDecoder<'a> {
             mtp_head,
             mtp_session,
             draft_token_embd_head: false,
+            recursive_hidden_variant: MtpRecursiveHiddenVariant::PreNorm,
+            base_hidden_variant: MtpBaseHiddenVariant::PreNorm,
         }
     }
 
     pub fn set_draft_token_embd_head(&mut self, enabled: bool) {
         self.draft_token_embd_head = enabled;
+    }
+
+    pub fn set_recursive_hidden_variant(&mut self, variant: MtpRecursiveHiddenVariant) {
+        self.recursive_hidden_variant = variant;
+    }
+
+    pub fn set_base_hidden_variant(&mut self, variant: MtpBaseHiddenVariant) {
+        self.base_hidden_variant = variant;
+    }
+
+    fn wants_base_post_norm(&self) -> bool {
+        self.base_hidden_variant == MtpBaseHiddenVariant::PostNorm
+    }
+
+    fn write_base_hidden_variant(
+        &self,
+        pre_norm_hidden: &MetalTensor,
+        dst: &MetalTensor,
+    ) -> Result<(), MtpError> {
+        if !self.wants_base_post_norm() {
+            copy_f32_tensor(pre_norm_hidden, dst)?;
+            return Ok(());
+        }
+        let cmd = self.base.ctx.queue.commandBuffer().expect("cmd buf");
+        let enc = KernelEncoder::begin(&cmd);
+        encode_rms_norm_mul_f32(
+            self.base.ctx,
+            &enc,
+            pre_norm_hidden,
+            &self.base.model.output_norm,
+            dst,
+            RMS_EPS,
+        )?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        Ok(())
     }
 
     /// Draft a single token. The MTP head at slot `position` consumes
@@ -827,6 +886,16 @@ impl<'a> SpeculativeDecoder<'a> {
         )?;
         encode_add_inplace_f32(ctx, enc, &self.mtp_session.x, &self.mtp_session.ffn_out)?;
         if !emit_head {
+            if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
+                encode_rms_norm_mul_f32(
+                    ctx,
+                    enc,
+                    &self.mtp_session.x,
+                    &self.mtp_head.shared_head_norm,
+                    &self.mtp_session.h,
+                    RMS_EPS,
+                )?;
+            }
             return Ok(());
         }
         encode_rms_norm_mul_f32(
@@ -912,6 +981,8 @@ impl<'a> SpeculativeDecoder<'a> {
             };
             let hidden_tensor = if j == 0 {
                 prev_hidden.clone()
+            } else if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
+                self.mtp_session.h.clone()
             } else {
                 self.mtp_session.x.clone()
             };
@@ -1010,6 +1081,8 @@ impl<'a> SpeculativeDecoder<'a> {
             };
             let hidden_tensor = if j == 0 {
                 prev_hidden.clone()
+            } else if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
+                self.mtp_session.h.clone()
             } else {
                 self.mtp_session.x.clone()
             };
@@ -1286,11 +1359,16 @@ impl<'a> SpeculativeDecoder<'a> {
         let n_prompt = prompt_ids.len();
         let mut next_bootstrap_tok: i32 = 0;
         let mut h_last_is_a = true; // which buffer holds the most recent hidden
+        let t_prefill = std::time::Instant::now();
         for (i, &tid) in prompt_ids.iter().enumerate() {
             let dst = if h_last_is_a { &hidden_a } else { &hidden_b };
-            next_bootstrap_tok =
-                self.base
-                    .single_token_argmax_with_hidden(tid, i as u32, base_session, dst)?;
+            next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
+                tid,
+                i as u32,
+                base_session,
+                dst,
+                self.wants_base_post_norm(),
+            )?;
             stats.base_forward_calls += 1;
 
             if i + 1 < n_prompt {
@@ -1306,6 +1384,7 @@ impl<'a> SpeculativeDecoder<'a> {
             // buffer policy consistent with the steady-state loop.)
             h_last_is_a = !h_last_is_a;
         }
+        stats.prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
         // After prefill loop: the LAST hidden (h_{n-1}) is in the OPPOSITE
         // buffer from the one h_last_is_a now points to (since we toggled
         // after consumption). Restore the pointer.
@@ -1351,9 +1430,13 @@ impl<'a> SpeculativeDecoder<'a> {
             // the OTHER buffer so we can keep hidden_at_proc alive for
             // the inline bridge. After: that other buffer holds h_{p_pos}.
             let dst_for_p = if h_last_is_a { &hidden_b } else { &hidden_a };
-            let target_next =
-                self.base
-                    .single_token_argmax_with_hidden(p_tok, p_pos, base_session, dst_for_p)?;
+            let target_next = self.base.single_token_argmax_with_hidden(
+                p_tok,
+                p_pos,
+                base_session,
+                dst_for_p,
+                self.wants_base_post_norm(),
+            )?;
             stats.base_forward_calls += 1;
 
             // D. Lazy sequential verify.
@@ -1386,6 +1469,7 @@ impl<'a> SpeculativeDecoder<'a> {
                     d_pos,
                     base_session,
                     dst_for_d,
+                    self.wants_base_post_norm(),
                 )?;
                 stats.base_forward_calls += 1;
 
@@ -1537,12 +1621,14 @@ impl<'a> SpeculativeDecoder<'a> {
 
         // Prompt prefill: identical streaming contract as H4, but only argmax
         // readback from the base path.
+        let t_prefill = std::time::Instant::now();
         for (i, &tid) in prompt_ids.iter().enumerate() {
             next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
                 tid,
                 i as u32,
                 base_session,
                 &hidden_cur,
+                self.wants_base_post_norm(),
             )?;
             stats.base_forward_calls += 1;
 
@@ -1551,6 +1637,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 stats.mtp_calls += 1;
             }
         }
+        stats.prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
 
         debug_assert_eq!(
             self.mtp_session.kv_n_pos as u32,
@@ -1588,7 +1675,13 @@ impl<'a> SpeculativeDecoder<'a> {
                 draft_logits.push(first.logits.expect("draft logits missing"));
                 stats.mtp_calls += 1;
                 stats.drafts_attempted += 1;
-                copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+                let hidden_src =
+                    if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
+                        &self.mtp_session.h
+                    } else {
+                        &self.mtp_session.x
+                    };
+                copy_f32_tensor(hidden_src, &recursive_hidden)?;
                 for j in 1..spec_tokens {
                     let result = self.draft_inner(
                         drafts[j - 1],
@@ -1600,7 +1693,13 @@ impl<'a> SpeculativeDecoder<'a> {
                     draft_logits.push(result.logits.expect("draft logits missing"));
                     stats.mtp_calls += 1;
                     stats.drafts_attempted += 1;
-                    copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+                    let hidden_src =
+                        if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
+                            &self.mtp_session.h
+                        } else {
+                            &self.mtp_session.x
+                        };
+                    copy_f32_tensor(hidden_src, &recursive_hidden)?;
                 }
                 drafts
             } else if single_cb_draft {
@@ -1615,14 +1714,26 @@ impl<'a> SpeculativeDecoder<'a> {
                 drafts.push(first);
                 stats.mtp_calls += 1;
                 stats.drafts_attempted += 1;
-                copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+                let hidden_src =
+                    if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
+                        &self.mtp_session.h
+                    } else {
+                        &self.mtp_session.x
+                    };
+                copy_f32_tensor(hidden_src, &recursive_hidden)?;
                 for j in 1..spec_tokens {
                     let d =
                         self.draft(drafts[j - 1], &recursive_hidden, processed_pos + j as u32)?;
                     drafts.push(d);
                     stats.mtp_calls += 1;
                     stats.drafts_attempted += 1;
-                    copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+                    let hidden_src =
+                        if self.recursive_hidden_variant == MtpRecursiveHiddenVariant::PostNorm {
+                            &self.mtp_session.h
+                        } else {
+                            &self.mtp_session.x
+                        };
+                    copy_f32_tensor(hidden_src, &recursive_hidden)?;
                 }
                 drafts
             };
@@ -1716,12 +1827,17 @@ impl<'a> SpeculativeDecoder<'a> {
             for j in 0..n_accepted {
                 let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
                 let bridge_position = processed_pos + 1 + j as u32;
-                self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                if self.wants_base_post_norm() {
+                    self.write_base_hidden_variant(&prev_hidden, &hidden_cur)?;
+                    self.draft_kv_only(drafts[j], &hidden_cur, bridge_position)?;
+                } else {
+                    self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                }
                 stats.mtp_calls += 1;
             }
 
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
-            copy_f32_tensor(&next_hidden, &hidden_cur)?;
+            self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
 
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
@@ -1804,12 +1920,14 @@ impl<'a> SpeculativeDecoder<'a> {
 
         // Match the current native path's prompt-side MTP KV prefill so this
         // probe prices decode work, not a different cache state.
+        let t_prefill = std::time::Instant::now();
         for (i, &tid) in prompt_ids.iter().enumerate() {
             next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
                 tid,
                 i as u32,
                 base_session,
                 &hidden_cur,
+                self.wants_base_post_norm(),
             )?;
             stats.base_forward_calls += 1;
 
@@ -1818,6 +1936,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 stats.mtp_calls += 1;
             }
         }
+        stats.prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
 
         let last_layer = [(self.base.model.blocks.len() - 1) as u32];
         let mut emit_tok = next_bootstrap_tok;
@@ -1938,12 +2057,17 @@ impl<'a> SpeculativeDecoder<'a> {
             for j in 0..n_accepted {
                 let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
                 let bridge_position = processed_pos + 1 + j as u32;
-                self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                if self.wants_base_post_norm() {
+                    self.write_base_hidden_variant(&prev_hidden, &hidden_cur)?;
+                    self.draft_kv_only(drafts[j], &hidden_cur, bridge_position)?;
+                } else {
+                    self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                }
                 stats.mtp_calls += 1;
             }
 
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
-            copy_f32_tensor(&next_hidden, &hidden_cur)?;
+            self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
 
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
@@ -2017,15 +2141,18 @@ impl<'a> SpeculativeDecoder<'a> {
 
         // Prompt prefill: only the target base state is needed for replay or
         // oracle drafts, so this intentionally skips MTP KV prefill.
+        let t_prefill = std::time::Instant::now();
         for (i, &tid) in prompt_ids.iter().enumerate() {
             next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
                 tid,
                 i as u32,
                 base_session,
                 &hidden_cur,
+                self.wants_base_post_norm(),
             )?;
             stats.base_forward_calls += 1;
         }
+        stats.prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
 
         if let PackedDraftPlan::Oracle(oracle) = plan {
             if oracle.first().copied() != Some(next_bootstrap_tok) {
@@ -2166,7 +2293,7 @@ impl<'a> SpeculativeDecoder<'a> {
             }
 
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
-            copy_f32_tensor(&next_hidden, &hidden_cur)?;
+            self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
 
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
@@ -2207,6 +2334,11 @@ pub struct SpecStats {
     pub base_forward_calls: u32,
     /// Total MTP draft / draft_kv_only calls (prefill + decode + bridges).
     pub mtp_calls: u32,
+    /// Prompt prefill wall time, including MTP-history prefill when this path
+    /// maintains one. Used to normalize against MTPLX decode-only reporting.
+    pub prefill_ms: f64,
+    /// Decode-loop wall time after prompt/MTP-history prefill.
+    pub decode_ms: f64,
     /// Wall time in milliseconds.
     pub wall_ms: f64,
 }
@@ -2214,6 +2346,7 @@ pub struct SpecStats {
 impl SpecStats {
     fn into_finalized(mut self, t_start: std::time::Instant) -> Self {
         self.wall_ms = t_start.elapsed().as_secs_f64() * 1e3;
+        self.decode_ms = (self.wall_ms - self.prefill_ms).max(0.0);
         self
     }
 

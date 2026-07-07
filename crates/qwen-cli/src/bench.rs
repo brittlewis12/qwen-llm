@@ -58,8 +58,9 @@ use qwen_llm::{
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{
-        DecodeOutput, MetalMtpHead, MetalMtpSession, MtpRankRow, PackedDraftPlan,
-        RecordedDraftStep, RecordedMtpWork, SpeculativeDecoder,
+        DecodeOutput, MetalMtpHead, MetalMtpSession, MtpBaseHiddenVariant, MtpRankRow,
+        MtpRecursiveHiddenVariant, PackedDraftPlan, RecordedDraftStep, RecordedMtpWork,
+        SpeculativeDecoder,
     },
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
@@ -1326,10 +1327,19 @@ struct MtpArgs {
     /// target verify still uses the real output.weight.
     #[arg(long)]
     mtp_draft_token_embd_head: bool,
+    /// Recursive MTP hidden fed into the next draft slot.
+    #[arg(long, value_enum, default_value_t = MtpRecursiveHiddenArg::PostNorm)]
+    mtp_recursive_hidden: MtpRecursiveHiddenArg,
+    /// Base-model hidden variant fed into MTP prompt/bridge draft slots.
+    #[arg(long, value_enum, default_value_t = MtpBaseHiddenArg::PostNorm)]
+    mtp_base_hidden: MtpBaseHiddenArg,
     /// Write MTP target-rank rows as JSONL. This forces full draft-logit
     /// readback and is diagnostic-only, not a timing path.
     #[arg(long)]
     mtp_rank_topk: Option<PathBuf>,
+    /// Write a compact JSON summary for MTPLX/profile-parity sweeps.
+    #[arg(long)]
+    output: Option<PathBuf>,
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
@@ -1357,6 +1367,40 @@ enum MtpProbeMode {
     BridgeOnly,
     /// Use the no-spec greedy stream as a perfect draft oracle.
     Oracle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum MtpRecursiveHiddenArg {
+    /// Current qwen path: MTP residual stream before shared-head norm.
+    PreNorm,
+    /// MTPLX contract default: MTP shared-head-normalized hidden.
+    PostNorm,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum MtpBaseHiddenArg {
+    /// Current qwen path: base residual stream before final output norm.
+    PreNorm,
+    /// MTPLX contract default: base final-output-normalized hidden.
+    PostNorm,
+}
+
+impl From<MtpRecursiveHiddenArg> for MtpRecursiveHiddenVariant {
+    fn from(value: MtpRecursiveHiddenArg) -> Self {
+        match value {
+            MtpRecursiveHiddenArg::PreNorm => Self::PreNorm,
+            MtpRecursiveHiddenArg::PostNorm => Self::PostNorm,
+        }
+    }
+}
+
+impl From<MtpBaseHiddenArg> for MtpBaseHiddenVariant {
+    fn from(value: MtpBaseHiddenArg) -> Self {
+        match value {
+            MtpBaseHiddenArg::PreNorm => Self::PreNorm,
+            MtpBaseHiddenArg::PostNorm => Self::PostNorm,
+        }
+    }
 }
 
 /// Parse a comma-separated list of i32 token ids for `--stop-tokens`.
@@ -9456,7 +9500,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_physical_n,
         mtp_single_cb_draft,
         mtp_draft_token_embd_head,
+        mtp_recursive_hidden,
+        mtp_base_hidden,
         mtp_rank_topk,
+        output,
         tokens,
         stop_tokens,
         no_warmup,
@@ -9518,7 +9565,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} base_hidden={:?} recursive_hidden={:?} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9534,6 +9581,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         planned_verify_n,
         mtp_single_cb_draft,
         mtp_draft_token_embd_head,
+        mtp_base_hidden,
+        mtp_recursive_hidden,
         prompt_ids.len(),
         tokens,
         stops,
@@ -9603,6 +9652,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
         let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
         spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+        spec.set_base_hidden_variant(mtp_base_hidden.into());
+        spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
         let mut verify_scratch =
             MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                 .context("mtp packed verify scratch")?;
@@ -9629,6 +9680,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+            spec.set_base_hidden_variant(mtp_base_hidden.into());
+            spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             let mut verify_scratch =
                 MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                     .context("mtp packed verify scratch")?;
@@ -9657,6 +9710,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+            spec.set_base_hidden_variant(mtp_base_hidden.into());
+            spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             if spec_tokens == 1 {
                 spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
                     .context("spec decode")?
@@ -9689,6 +9744,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+            spec.set_base_hidden_variant(mtp_base_hidden.into());
+            spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             let mut verify_scratch =
                 MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                     .context("mtp packed verify scratch")?;
@@ -9805,7 +9862,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
 
     let spec_emitted = result.tokens.len() - prompt_ids.len();
     let spec_total_ms = result.stats.wall_ms;
-    let spec_decode_tps = spec_emitted as f64 / (spec_total_ms / 1000.0);
+    let spec_decode_ms = result.stats.decode_ms;
+    let spec_prefill_ms = result.stats.prefill_ms;
+    let spec_decode_tps = spec_emitted as f64 / (spec_decode_ms / 1000.0).max(f64::MIN_POSITIVE);
 
     // ----- Compare -----
     let ref_generated = &ref_tokens[prompt_ids.len()..];
@@ -9833,11 +9892,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
          {ref_total_tps:.1}"
     );
     eprintln!(
-        "[mtp-bench] MTP=on : {spec_emitted} tokens, {spec_total_ms:.1} ms total \
-         (prefill + decode lumped — spec_decode internally streams MTP-KV \
-         prefill alongside base prefill)"
+        "[mtp-bench] MTP=on : {spec_emitted} tokens, prefill {spec_prefill_ms:.1} ms + \
+         decode {spec_decode_ms:.1} ms = {spec_total_ms:.1} ms total"
     );
-    eprintln!("[mtp-bench]   t/s: total {spec_total_tps:.1}");
+    eprintln!("[mtp-bench]   t/s: decode-only {spec_decode_tps:.1} | total {spec_total_tps:.1}");
     eprintln!(
         "[mtp-bench]   α (acceptance rate) = {:.3}   steps={}  accepted={}",
         result.stats.acceptance_rate(),
@@ -9880,6 +9938,80 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "[mtp-bench]   spec[..{n_show}]: {:?}",
             &spec_generated[..n_show]
         );
+    }
+
+    if let Some(output_path) = &output {
+        if let Some(dir) = output_path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let steps = result.stats.steps as f64;
+        let emitted_per_step = if result.stats.steps > 0 {
+            serde_json::json!(spec_emitted as f64 / steps)
+        } else {
+            serde_json::Value::Null
+        };
+        let accepted_per_step = if result.stats.steps > 0 {
+            serde_json::json!(result.stats.accepted as f64 / steps)
+        } else {
+            serde_json::Value::Null
+        };
+        let drafts_per_step = if result.stats.steps > 0 {
+            serde_json::json!(result.stats.drafts_attempted as f64 / steps)
+        } else {
+            serde_json::Value::Null
+        };
+        let row = serde_json::json!({
+            "model": model.display().to_string(),
+            "prompt_tokens": prompt_ids.len(),
+            "generated_requested": tokens,
+            "stop_tokens": stops,
+            "spec_tokens": spec_tokens,
+            "logical_verify_n": spec_tokens + 1,
+            "physical_verify_n": planned_verify_n,
+            "probe": format!("{:?}", mtp_probe),
+            "single_cb_draft": mtp_single_cb_draft,
+            "draft_token_embd_head": mtp_draft_token_embd_head,
+            "base_hidden": format!("{:?}", mtp_base_hidden),
+            "recursive_hidden": format!("{:?}", mtp_recursive_hidden),
+            "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
+            "no_warmup": no_warmup,
+            "semantics": {
+                "verify_mode": if spec_tokens == 1 { "lazy_mtp1" } else { "packed_n" },
+                "sampler": "greedy_argmax",
+                "correction_accounting": "deferred_next_step_carry",
+                "equivalence": "target_greedy_sequence",
+            },
+            "reference": {
+                "emitted": ref_emitted,
+                "prefill_ms": ref_prefill_ms,
+                "decode_ms": ref_decode_ms,
+                "total_ms": ref_total_ms,
+                "decode_only_tps": ref_decode_only_tps,
+                "total_tps": ref_total_tps,
+            },
+            "speculative": {
+                "emitted": spec_emitted,
+                "prefill_ms": spec_prefill_ms,
+                "decode_ms": spec_decode_ms,
+                "decode_only_tps": spec_decode_tps,
+                "total_ms": spec_total_ms,
+                "total_tps": spec_total_tps,
+                "steps": result.stats.steps,
+                "accepted": result.stats.accepted,
+                "drafts_attempted": result.stats.drafts_attempted,
+                "acceptance_rate": result.stats.acceptance_rate(),
+                "emitted_per_step": emitted_per_step,
+                "accepted_per_step": accepted_per_step,
+                "drafts_per_step": drafts_per_step,
+                "base_forward_calls": result.stats.base_forward_calls,
+                "mtp_calls": result.stats.mtp_calls,
+                "rank_rows": mtp_rank_rows.len(),
+            },
+            "speedup_total_ms": total_speedup,
+            "identical": identical,
+        });
+        std::fs::write(output_path, serde_json::to_string(&row)? + "\n")?;
+        eprintln!("[mtp-bench] wrote {}", output_path.display());
     }
 
     if !identical {

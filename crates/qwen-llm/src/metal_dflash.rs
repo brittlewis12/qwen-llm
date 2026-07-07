@@ -3971,6 +3971,67 @@ pub fn encode_packed_verify_layer_major_inner(
     let mut gdn_idx = 0usize;
     let mut attn_idx = 0usize;
     for (il, block) in base.model.blocks.iter().enumerate() {
+        if arch.kind == crate::model::ArchKind::Moe {
+            let gdn_ckpt_idx = match block {
+                MetalBlock::Gdn(_) => {
+                    let gi = gdn_idx;
+                    gdn_idx += 1;
+                    Some(gi)
+                }
+                MetalBlock::Attn(_) => {
+                    attn_idx += 1;
+                    None
+                }
+            };
+            for n_idx in 0..n {
+                let position_n = start_position + n_idx as u32;
+                {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &x_pack,
+                        n_idx * h,
+                        &target_session.x,
+                        h,
+                    )?;
+                    base.encode_moe_block_by_index(&enc, il, position_n, target_session)?;
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.x,
+                        &x_pack,
+                        n_idx * h,
+                        h,
+                    )?;
+                    for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                        if lid as usize == il {
+                            let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
+                                + k_idx as u64)
+                                * verify_scratch.hidden_size;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.x,
+                                &verify_scratch.hidden_capture,
+                                elem_off as usize,
+                                h,
+                            )?;
+                        }
+                    }
+                    enc.end();
+                }
+                if let Some(gi) = gdn_ckpt_idx {
+                    let blit = BlitEncoder::begin(&cmd_buf);
+                    let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
+                    blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
+                    let conv_dst = verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
+                    blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
+                    blit.end();
+                }
+            }
+            continue;
+        }
         // 2a: pre-mixer norm BATCHED across all N tokens. The kernel
         //     `kernel_rms_norm_batched_f32` already supports per-row
         //     RMSNorm with shared weight; we treat (n_heads = N,

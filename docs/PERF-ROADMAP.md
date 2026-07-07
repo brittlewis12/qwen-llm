@@ -3240,13 +3240,18 @@ What the latest analysis says:
   coverage. This is not a performance conclusion: D3/N4 still fails because the
   packed-N verifier does not implement qwen35moe base forward, and IQ2/Q2/Q3 base
   MoE still needs native expert-bank kernels rather than F32 residency expansion.
+- v0.514 adds a correctness-first qwen35moe packed-N verifier branch. D3/N4 now
+  executes and passes equivalence on A3B UD-Q4_K_S, but the verifier is
+  row-sequential for MoE blocks and is therefore an acceptance/coverage tool, not
+  the final throughput shape.
 
 Highest-EV speculative kernel targets:
 
-1. Implement qwen35moe packed-N verify support so `--spec-tokens > 1` can run on
-   A3B MoE. Lazy MTP-1 now proves the MoE draft/head/hidden path, but meaningful
-   speculative throughput needs N8-style target verification. Gate on equivalence
-   first, then replay/oracle ceilings and real-prompt emitted/step.
+1. Replace the v0.514 row-sequential MoE packed-N verifier with batched verify
+   phases. Start with routed/shared FFN batching because the current path already
+   proves correctness and because FFN batching should reuse existing MoE prefill
+   grouped kernels. Gate on D3/D7 equivalence first, then real-prompt emitted/step
+   and replay/oracle ceilings.
 2. Run the intended A3B UD-Q4_K_M MTP comparison when the artifact is available.
    Treat it as a measurement gate and coverage probe, not as proof that broad MoE
    MTP is solved; Q4_K_S already showed artifact-specific dtype holes can matter.

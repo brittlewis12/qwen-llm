@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.514 MoE MTP Packed-N Reaches Correctness
+
+Status: correctness-first qwen35moe packed-verify support. This removes the D3/N4
+blocker from v0.513 by adding a MoE branch inside the layer-major packed verifier.
+
+THE CHANGE:
+- `encode_packed_verify_layer_major_inner` now accepts qwen35moe models.
+- For MoE, each packed verify row runs the normal single-token MoE block encoder,
+  scatters the post-block residual back into `x_pack`, and records GDN/conv
+  checkpoints per token for rollback.
+- Dense layer-major packing is unchanged. The MoE path is intentionally
+  correctness-first and does not yet batch routed FFN, GDN, or attention work
+  across verify positions.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B UD-Q4_K_S MoE MTP D3/N4 smoke, 2 tokens, post/post hidden, `--no-warmup`:
+  equivalence PASS; packed-N mode executes and writes compact JSON. Timing is a
+  smoke only: acceptance was `0`, decode-only MTP-on was `23.5 t/s` vs no-spec
+  `98.7 t/s`. Artifact:
+  `target/profiles/v0514-a3b-q4ks-moe-mtp-d3-packed-seq-smoke.json`.
+
+READ: this turns MoE packed-N from unsupported into measurable, but it is not the
+final performance shape. The current MoE verifier is row-sequential by design, so
+it is useful for acceptance/semantics and direct artifact comparisons. The next
+performance work is to replace this fallback with batched MoE verify phases, most
+likely starting with routed/shared FFN batching before GDN/attention rewrites.
+
 ## 2026-07-07 - v0.513 MoE MTP Spec1 Executes on A3B
 
 Status: correctness-first MoE MTP support + Q4 routed-down coverage. This replaces

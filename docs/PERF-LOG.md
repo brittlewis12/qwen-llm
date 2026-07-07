@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.503 Bucketed MTP Verify Finds the N8/N16 Fast Lane
+
+Status: bench diagnostic + optional native-MTP packed-verify bucket. Follow-up to
+v0.502's replay/oracle result and cx resume `019f3dc1-9...`: if D3/N4 is too
+shallow/slow, test whether physical verify packet shape is the real cliff.
+
+THE CHANGE: `qwen-bench mtp --mtp-physical-n <N>` now lets packed MTP run a
+logical speculative depth over a larger physical packed-verify N. Padded tokens
+are valid but outside the logical accept window; after verify, restore rolls KV,
+GDN, and conv state back to the logical keep point. This is available both for
+the real native path and replay/oracle probes.
+
+27B MTP oracle depth curve, short raw prompt, `--tokens 64 --no-warmup`, all
+greedy equivalence PASS and `mtp_calls=0`:
+- D3/N4: `27.0 t/s`, `1.201x`.
+- D4/N5: `20.8 t/s`, `0.921x`; D5/N6: `23.8 t/s`, `1.057x`; D6/N7:
+  `26.9 t/s`, `1.195x`.
+- D7/N8: `52.0 t/s`, `2.306x`.
+- D8/N9: `32.1 t/s`, `1.421x`.
+- D15/N16: `57.1 t/s`, `2.532x`.
+
+Bucketed oracle over physical N8 on the same 27B prompt:
+- D3/N8: `30.8 t/s`, `1.371x` (vs D3/N4 `27.0 t/s`).
+- D4/N8: `36.1 t/s`, `1.598x` (vs D4/N5 `20.8 t/s`).
+- D5/N8: `41.6 t/s`, `1.842x` (vs D5/N6 `23.8 t/s`).
+- D6/N8: `47.6 t/s`, `2.111x` (vs D6/N7 `26.9 t/s`).
+
+Real native D3 bucket:
+- 27B fox prompt, `--spec-tokens 3 --mtp-physical-n 8 --tokens 64`: `23.8 t/s`,
+  `1.056x`, alpha `0.733`, equivalence PASS. Replay-current over the same N8
+  bucket: source `23.6 t/s`, replay `25.4 t/s`, `1.125x`, alpha `0.746`.
+- 27B code prompt, `--tokens 128`: D3/N4 control `21.8 t/s`, `0.912x`, alpha
+  `0.733`; D3/N8 `24.6 t/s`, `1.031x`, same alpha, equivalence PASS.
+- 0.8B tiny smoke D3/N8 regresses (`0.685x` on 8 tokens), so this is not a
+  universal default yet.
+
+READ: native MTP now has a concrete fast lane: physical N=8/N=16 verify packets.
+The MTPLX-class upper bound is not blocked by target verify in general; it is
+blocked by real acceptance depth and draft cost over the right packet shape.
+Next EV: acceptance tracing for D7/N8 and D15/N16, then GPU-resident recursive
+drafting + draft-only LM head only if real emitted/step can exploit those buckets.
+
 ## 2026-07-07 - v0.502 MTP Replay/Oracle Probes Reopen Verify as the Binding Loss
 
 Status: bench diagnostic + strategy update. cx resume

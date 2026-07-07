@@ -1305,12 +1305,18 @@ struct MtpArgs {
     disable_thinking: bool,
     /// Experimental speculative depth. `1` is the original H4 lazy-verify
     /// path. `2` and `3` use a bench-only MTP-N prototype that chains MTP
-    /// drafts recursively and verifies them with the packed base path.
+    /// drafts recursively and verifies them with the packed base path. The
+    /// oracle probe may use larger planned depths up to `15`.
     #[arg(long, default_value = "1")]
     spec_tokens: usize,
     /// Bench-only probe for pricing native-MTP draft overhead.
     #[arg(long, value_enum, default_value_t = MtpProbeMode::Normal)]
     mtp_probe: MtpProbeMode,
+    /// Physical packed-verify N for packed MTP probes. When larger than
+    /// `1 + --spec-tokens`, padded positions are rolled back after the logical
+    /// accept window.
+    #[arg(long)]
+    mtp_physical_n: Option<usize>,
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
@@ -9430,6 +9436,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         disable_thinking,
         spec_tokens,
         mtp_probe,
+        mtp_physical_n,
         tokens,
         stop_tokens,
         no_warmup,
@@ -9437,8 +9444,28 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
 
     let ctx = MetalContext::new().context("init MetalContext")?;
     eprintln!("[mtp-bench] device: {}", ctx.describe());
-    if spec_tokens == 0 || spec_tokens > 3 {
-        anyhow::bail!("`--spec-tokens` must be in 1..=3 for now");
+    let spec_token_limit = if mtp_probe == MtpProbeMode::Oracle {
+        15
+    } else {
+        3
+    };
+    if spec_tokens == 0 || spec_tokens > spec_token_limit {
+        anyhow::bail!(
+            "`--spec-tokens` must be in 1..={spec_token_limit} for probe {:?}",
+            mtp_probe
+        );
+    }
+    if mtp_physical_n.is_some() && spec_tokens == 1 {
+        anyhow::bail!("--mtp-physical-n requires --spec-tokens 2 or higher");
+    }
+    let planned_verify_n = mtp_physical_n.unwrap_or(spec_tokens + 1);
+    if spec_tokens >= 2 {
+        if !(spec_tokens + 1..=16).contains(&planned_verify_n) {
+            anyhow::bail!(
+                "--mtp-physical-n must be in {}..=16 for --spec-tokens {spec_tokens}",
+                spec_tokens + 1
+            );
+        }
     }
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
@@ -9467,7 +9494,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9480,6 +9507,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         },
         spec_tokens,
         mtp_probe,
+        planned_verify_n,
         prompt_ids.len(),
         tokens,
         stops,
@@ -9534,8 +9562,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let ref_generated_vec: Vec<i32> = ref_tokens[prompt_ids.len()..].to_vec();
 
     // ----- MTP=on: speculative decode -----
-    if spec_tokens == 1 && mtp_probe != MtpProbeMode::Normal {
-        anyhow::bail!("--mtp-probe requires --spec-tokens 2 or 3");
+    if spec_tokens == 1 && mtp_probe == MtpProbeMode::ReplayCurrent {
+        anyhow::bail!("--mtp-probe replay-current requires --spec-tokens 2 or 3");
     }
 
     let run_planned = |plan: PackedDraftPlan<'_>, label: &str| -> Result<DecodeOutput> {
@@ -9544,10 +9572,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
         let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
         let mut verify_scratch =
-            MetalDFlashVerifyScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32, 1)
+            MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                 .context("mtp packed verify scratch")?;
         let mut layer_scratch =
-            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32)
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, planned_verify_n as u32)
                 .context("mtp packed layer scratch")?;
         spec.decode_packed_n_planned(
             &prompt_ids,
@@ -9573,10 +9601,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     .context("spec decode")?
             } else {
                 let mut verify_scratch =
-                    MetalDFlashVerifyScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32, 1)
+                    MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                         .context("mtp packed verify scratch")?;
                 let mut layer_scratch =
-                    MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32)
+                    MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, planned_verify_n as u32)
                         .context("mtp packed layer scratch")?;
                 spec.decode_packed_n(
                     &prompt_ids,
@@ -9597,10 +9625,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             let mut verify_scratch =
-                MetalDFlashVerifyScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32, 1)
+                MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                     .context("mtp packed verify scratch")?;
             let mut layer_scratch =
-                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32)
+                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, planned_verify_n as u32)
                     .context("mtp packed layer scratch")?;
             let mut draft_trace = Vec::new();
             let recorded = spec

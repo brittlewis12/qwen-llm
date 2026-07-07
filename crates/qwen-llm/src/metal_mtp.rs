@@ -1093,12 +1093,13 @@ impl<'a> SpeculativeDecoder<'a> {
             });
         }
 
-        let verify_n = spec_tokens + 1;
-        if verify_scratch.n as usize != verify_n {
+        let logical_verify_n = spec_tokens + 1;
+        let physical_verify_n = verify_scratch.n as usize;
+        if physical_verify_n < logical_verify_n {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n.verify_scratch",
                 detail: format!(
-                    "verify_scratch.n={} != verify_n={verify_n}",
+                    "verify_scratch.n={} < logical_verify_n={logical_verify_n}",
                     verify_scratch.n
                 ),
             }));
@@ -1112,10 +1113,13 @@ impl<'a> SpeculativeDecoder<'a> {
                 ),
             }));
         }
-        if layer_scratch.n as usize != verify_n {
+        if layer_scratch.n as usize != physical_verify_n {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n.layer_scratch",
-                detail: format!("layer_scratch.n={} != verify_n={verify_n}", layer_scratch.n),
+                detail: format!(
+                    "layer_scratch.n={} != physical_verify_n={physical_verify_n}",
+                    layer_scratch.n
+                ),
             }));
         }
 
@@ -1182,9 +1186,12 @@ impl<'a> SpeculativeDecoder<'a> {
                 (*trace).push(drafts.clone());
             }
 
-            let mut verify_input: Vec<i32> = Vec::with_capacity(verify_n);
+            let mut verify_input: Vec<i32> = Vec::with_capacity(physical_verify_n);
             verify_input.push(carry_tok);
             verify_input.extend_from_slice(&drafts);
+            while verify_input.len() < physical_verify_n {
+                verify_input.push(carry_tok);
+            }
 
             let verify_argmax = encode_packed_verify_layer_major_inner(
                 self.base,
@@ -1216,7 +1223,7 @@ impl<'a> SpeculativeDecoder<'a> {
             }
 
             let n_keep = (1 + n_accepted) as u32;
-            if n_keep < verify_n as u32 {
+            if n_keep < physical_verify_n as u32 {
                 encode_restore_after_partial_accept_inner(
                     self.base,
                     verify_scratch,
@@ -1269,10 +1276,10 @@ impl<'a> SpeculativeDecoder<'a> {
         layer_scratch: &mut MetalDFlashLayerMajorScratch,
         plan: PackedDraftPlan<'_>,
     ) -> Result<DecodeOutput, MtpError> {
-        if !(2..=3).contains(&spec_tokens) {
+        if !(1..=15).contains(&spec_tokens) {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n_planned",
-                detail: format!("spec_tokens={spec_tokens} must be in [2, 3]"),
+                detail: format!("spec_tokens={spec_tokens} must be in [1, 15]"),
             }));
         }
 
@@ -1296,12 +1303,13 @@ impl<'a> SpeculativeDecoder<'a> {
             });
         }
 
-        let verify_n = spec_tokens + 1;
-        if verify_scratch.n as usize != verify_n || layer_scratch.n as usize != verify_n {
+        let logical_verify_n = spec_tokens + 1;
+        let physical_verify_n = verify_scratch.n as usize;
+        if physical_verify_n < logical_verify_n || layer_scratch.n as usize != physical_verify_n {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n_planned.scratch",
                 detail: format!(
-                    "scratch N mismatch: verify={} layer={} expected={verify_n}",
+                    "scratch N mismatch: verify={} layer={} logical_min={logical_verify_n}",
                     verify_scratch.n, layer_scratch.n
                 ),
             }));
@@ -1353,6 +1361,7 @@ impl<'a> SpeculativeDecoder<'a> {
             if n_draft == 0 {
                 break;
             }
+            let physical_draft_slots = physical_verify_n - 1;
             let carry_tok = emit_tok;
             let start_position = processed_pos + 1;
             let drafts: Vec<i32> = match plan {
@@ -1390,10 +1399,24 @@ impl<'a> SpeculativeDecoder<'a> {
             };
             stats.drafts_attempted += drafts.len() as u32;
 
-            let mut verify_input: Vec<i32> = Vec::with_capacity(1 + drafts.len());
+            let mut verify_input: Vec<i32> = Vec::with_capacity(physical_verify_n);
             verify_input.push(carry_tok);
             verify_input.extend_from_slice(&drafts);
-            let n_eff = verify_input.len() as u32;
+            for pad_j in drafts.len()..physical_draft_slots {
+                let pad_tok = match plan {
+                    PackedDraftPlan::Recorded(trace) => trace
+                        .get(step_idx)
+                        .and_then(|row| row.get(pad_j))
+                        .copied()
+                        .unwrap_or(carry_tok),
+                    PackedDraftPlan::Oracle(oracle) => oracle
+                        .get(emitted_count + pad_j)
+                        .copied()
+                        .unwrap_or(carry_tok),
+                };
+                verify_input.push(pad_tok);
+            }
+            let n_eff = physical_verify_n as u32;
 
             let verify_argmax = encode_packed_verify_layer_major_inner(
                 self.base,

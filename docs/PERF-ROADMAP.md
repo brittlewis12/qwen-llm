@@ -1211,6 +1211,18 @@ and encoder concurrency where phase evidence supports it, (4) draft-only
 LM-head/top-k, then (5) single-CB GPU-resident D3 drafting once verify ceiling
 is no longer the blocker. Tie-guarded exact verify remains the correctness gate
 for any accept-path speed row.
+v0.503 refines that again: the packed verify ceiling has a strong physical-N
+ladder. 27B perfect-oracle D7/N8 reaches `52.0 t/s` (`2.306x`) and D15/N16
+reaches `57.1 t/s` (`2.532x`), while off-ladder D4/N5 is a loss and D8/N9 is
+only `32.1 t/s`. Bucketed verify (logical D over physical N8 with padded slots
+rolled back) rescues the cliff: D4/N8 `36.1 t/s`, D5/N8 `41.6`, D6/N8 `47.6`.
+The actual native D3 path over physical N8 is a small real 27B win: code prompt
+128 tokens moves D3/N4 `0.912x` -> D3/N8 `1.031x` at the same alpha, equivalence
+PASS. Therefore the active MTP branch is now: (1) acceptance tracing for D7/N8
+and D15/N16, (2) bucketed physical N8/N16 verify as the only packet shapes to
+optimize, (3) single-CB recursive drafting + draft-only LM head if emitted/step
+clears the bucket cost model. Do not optimize arbitrary ragged N before padding
+or bucket policy fails.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
@@ -3124,23 +3136,32 @@ What the latest analysis says:
   MTP calls still loses on 27B (`0.967x` total), and a perfect greedy D3 oracle is
   only `1.201x`. This makes packed target-verify structure the current binding
   MTP loss; a single-CB drafter alone cannot explain or close the MTPLX gap.
+- v0.503 finds the sharper constraint: physical verify N, not verify as a whole.
+  Perfect-oracle D7/N8 and D15/N16 already reach `52.0` and `57.1 t/s`, while
+  off-ladder N5/N9 are much weaker. Bucketed logical D over physical N8 turns the
+  actual 27B D3 code prompt from `0.912x` to `1.031x` at the same alpha.
 
 Highest-EV speculative kernel targets:
 
-1. Pack the remaining MTP target-verify GDN work, or build the equivalent compact
-   GDN tape/capture path, because it blocks even perfect-draft D3.
-2. Target packed-verify multi-query attention so consecutive verify queries share
+1. Treat physical N8/N16 as first-class speculative packet shapes. Add acceptance
+   tracing for D7/N8 and D15/N16 before investing in their draft implementation.
+2. Build bucket policy around supported packet shapes; prefer padding/rollback to
+   arbitrary ragged N unless bucketed verification fails a correctness or waste
+   gate.
+3. Single-CB recursive drafting + draft-only LM-head/top-k, gated on real
+   emitted/step over N8/N16 clearing the bucket cost model.
+4. Pack the remaining target-verify GDN work, or build compact GDN tape/capture,
+   measured on N8/N16 fast buckets rather than ragged shapes.
+5. Target packed-verify multi-query attention so consecutive verify queries share
    KV reads; prioritize this over more small-N mat-mat retunes.
-3. Pack verify rope/scatter and coalesce/concurrently issue independent verify
+6. Pack verify rope/scatter and coalesce/concurrently issue independent verify
    phases only where phase traces show the same debt.
-4. DFlash two-range attention reading ctx-cache and noise directly, without
+7. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-5. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+8. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
    `attn-intra` at both 8K and 32K.
-6. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+9. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
    show N16 mat-mat-heavy surfaces remain material after the attention fixes.
-7. Draft-only LM-head/top-k and single-CB GPU-resident D3 drafting, after the
-   replay/oracle rows show target verify can clear a practical MTP win gate.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4
 

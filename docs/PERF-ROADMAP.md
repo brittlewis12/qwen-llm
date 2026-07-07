@@ -3227,44 +3227,56 @@ What the latest analysis says:
   traces now show oracle one-terminal-rescue top16 would finish 128 tokens in
   26 steps on both prompts (`4.923` tokens/step), still below the `>=5.2` gate;
   margin-swap policies remain flat.
+- v0.512 adds A3B MoE MTP asset coverage. Unsloth's
+  `Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf` has a real MoE MTP head at `blk.40`, but qwen
+  only recognizes it and reports unsupported execution. llama.cpp `b9833` runs
+  the same file at `tg128`: `81.71 t/s` with `n_depth=0` and `82.12 t/s` with
+  `n_depth=7`. This is now an explicit unsupported-model gap; the thin lcpp
+  synthetic uplift argues for correctness/acceptance probing before Q2/Q3 MoE
+  MTP kernel work.
 
 Highest-EV speculative kernel targets:
 
-1. Continue MTP semantic parity before tree work, but with cycle history closed.
+1. Add a correctness-first MoE MTP draft path for A3B only if we want native-MTP
+   coverage across the family now. Bind the already-recognized MoE head through a
+   generic/dequantized MTP MoE FFN first, then reuse the existing actual/replay/
+   oracle probes. Gate optimization on real prompt emitted/step and replay/oracle
+   ceilings, not on the lcpp synthetic `tg128` row alone.
+2. Continue dense-27B MTP semantic parity before tree work, but with cycle history closed.
    Remaining concrete variants are position-offset semantics, history-window
    variants rather than full reset, and MTPLX contract/draft-asset details. Gate
    continuation on emitted/step `>=5.2` or `>=25%` over the post-norm committed
    default, equivalence PASS.
-2. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
+3. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
    D3 vs D7, and proper draft-head asset effects. The current qwen oracle already
    reaches the screenshot band decode-only; the open question is how MTPLX gets
    much closer to oracle in actual chain mode.
-3. Prototype a proper low-bit copy of `output.weight` only as a bounded cleanup or
+4. Prototype a proper low-bit copy of `output.weight` only as a bounded cleanup or
    if semantic parity lifts emitted/step enough for draft cost to matter. Do not
    use `token_embd.weight`; v0.509 killed that alias. Gate on `>=5%` whole-run
    gain, `>=40%` recovery of the body-no-lm gap, and `<=5%` relative acceptance
    loss.
-4. Build an alternate-continuation/tree simulator before any tree implementation,
+5. Build an alternate-continuation/tree simulator before any tree implementation,
    but only after post-norm rank traces still show unreachable chain acceptance.
    Gates: N8 `>=5.2` emitted/step to investigate, `>=5.8` to implement; N16 `>=9`
    interesting, `>=11` viable. Require stability across prompts.
-5. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
+6. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.
-6. Demote short-prompt target-verify work while D7/N8 actual emitted/step is
+7. Demote short-prompt target-verify work while D7/N8 actual emitted/step is
    `~4`. Reopen N8/N16 verify phase splits, packed GDN tape/capture, and
    packed multi-query verify attention once acceptance moves, or for long-context
    MTP where attention/GDN verify again becomes the measured limiter.
-7. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
+8. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
    draft-head microbench shows `>=25%` phase recovery or D7/N8 improves `>=5%`.
-8. Build bucket policy around supported packet shapes; prefer padding/rollback to
+9. Build bucket policy around supported packet shapes; prefer padding/rollback to
    arbitrary ragged N unless bucketed verification fails a correctness or waste
    gate.
-9. DFlash two-range attention reading ctx-cache and noise directly, without
+10. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-10. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+11. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
     `attn-intra` at both 8K and 32K.
-11. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+12. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
     show N16 mat-mat-heavy surfaces remain material after the attention fixes.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4

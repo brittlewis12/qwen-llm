@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.512 A3B MoE MTP Asset Exposes Unsupported Head
+
+Status: model-asset + comparator smoke. Downloaded
+`/Users/tito/models/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf` from
+`unsloth/Qwen3.6-35B-A3B-MTP-GGUF` with `hugtug` to add native-MTP MoE coverage.
+
+THE CHANGE:
+- The loader now binds MTP heads for MoE GGUFs instead of silently returning
+  `None` for all `qwen35moe` models.
+- `qwen-bench mtp` now reports a precise unsupported-path error for MoE MTP heads
+  rather than the misleading "GGUF has no MTP head" message.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B UD-IQ3_XXS tensor inventory: `qwen35moe.nextn_predict_layers=1` and
+  `blk.40.nextn.*` are present. The MTP block is MoE-shaped, with routed
+  `gate/up/down=Q2_K/Q2_K/Q3_K` and shared expert `Q6_K` tensors.
+- `qwen-bench mtp` now fails explicitly:
+  `MoE MTP head detected at blk.40 (gate/up/down=Q2_K/Q2_K/Q3_K); native MoE MTP
+  drafting is not yet implemented`.
+- llama.cpp `b9833`, same GGUF, `tg128`, `-d 0,7`, `--no-warmup`, `r=2`:
+  - no MTP (`n_depth=0`): `81.71 t/s`.
+  - native MTP (`n_depth=7`): `82.12 t/s`.
+
+READ: this is a clean unsupported-model gap, not another dense-27B semantic
+guess. The Unsloth A3B MTP file is valid and llama.cpp runs it, while qwen now
+recognizes but cannot execute the MoE MTP draft block. The llama-bench D7 uplift
+on this low-bit A3B file is thin in the synthetic `tg128` row, so the first
+implementation should be correctness-first and acceptance-probing, not native
+Q2/Q3 kernel optimization. Start with a dequantized or generic MoE MTP FFN path
+only if we want to know whether the A3B MTP head has useful real-prompt draft
+economics.
+
 ## 2026-07-07 - v0.511 MTP Cycle History Is a Hard Kill
 
 Status: MTPLX semantic-parity falsifier + rank-sim fix. Adds a bench-only

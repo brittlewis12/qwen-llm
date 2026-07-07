@@ -572,11 +572,7 @@ impl<'a> Model<'a> {
         // located at block index `arch.n_layer` (one past the last base
         // layer). All MTP-aware GGUFs from the patched mtp-converter put
         // it there; older GGUFs (pre-converter-patch) don't have it.
-        let mtp = if arch.kind == ArchKind::Dense {
-            bind_mtp_head(g, &arch)?
-        } else {
-            None
-        };
+        let mtp = bind_mtp_head(g, &arch)?;
 
         Ok(Self {
             arch,
@@ -632,21 +628,60 @@ fn bind_mtp_head<'a>(g: &'a GgufFile, arch: &Arch) -> Result<Option<MtpHead<'a>>
     check_shape(attn_norm, &[arch.hidden_size as u64])?;
     let post_attention_norm = need(g, &format!("blk.{i}.post_attention_norm.weight"))?;
     check_shape(post_attention_norm, &[arch.hidden_size as u64])?;
-    let ffn_gate = need(g, &format!("blk.{i}.ffn_gate.weight"))?;
-    check_shape(
-        ffn_gate,
-        &[arch.hidden_size as u64, arch.intermediate_size as u64],
-    )?;
-    let ffn_up = need(g, &format!("blk.{i}.ffn_up.weight"))?;
-    check_shape(
-        ffn_up,
-        &[arch.hidden_size as u64, arch.intermediate_size as u64],
-    )?;
-    let ffn_down = need(g, &format!("blk.{i}.ffn_down.weight"))?;
-    check_shape(
-        ffn_down,
-        &[arch.intermediate_size as u64, arch.hidden_size as u64],
-    )?;
+    let (ffn_gate, ffn_up, ffn_down, ffn_moe) = if arch.kind == ArchKind::Dense {
+        let ffn_gate = need(g, &format!("blk.{i}.ffn_gate.weight"))?;
+        check_shape(
+            ffn_gate,
+            &[arch.hidden_size as u64, arch.intermediate_size as u64],
+        )?;
+        let ffn_up = need(g, &format!("blk.{i}.ffn_up.weight"))?;
+        check_shape(
+            ffn_up,
+            &[arch.hidden_size as u64, arch.intermediate_size as u64],
+        )?;
+        let ffn_down = need(g, &format!("blk.{i}.ffn_down.weight"))?;
+        check_shape(
+            ffn_down,
+            &[arch.intermediate_size as u64, arch.hidden_size as u64],
+        )?;
+        (ffn_gate, ffn_up, ffn_down, None)
+    } else {
+        let h = arch.hidden_size as u64;
+        let f_exp = arch.expert_feed_forward_length as u64;
+        let f_shared = arch.expert_shared_feed_forward_length as u64;
+        let n_exp = arch.expert_count as u64;
+
+        let gate_inp = need(g, &format!("blk.{i}.ffn_gate_inp.weight"))?;
+        check_shape(gate_inp, &[h, n_exp])?;
+        let gate_exps = need(g, &format!("blk.{i}.ffn_gate_exps.weight"))?;
+        check_shape(gate_exps, &[h, f_exp, n_exp])?;
+        let up_exps = need(g, &format!("blk.{i}.ffn_up_exps.weight"))?;
+        check_shape(up_exps, &[h, f_exp, n_exp])?;
+        let down_exps = need(g, &format!("blk.{i}.ffn_down_exps.weight"))?;
+        check_shape(down_exps, &[f_exp, h, n_exp])?;
+        let gate_inp_shexp = need(g, &format!("blk.{i}.ffn_gate_inp_shexp.weight"))?;
+        check_shape_one_of(gate_inp_shexp, &[&[h], &[h, 1]])?;
+
+        let ffn_gate = need(g, &format!("blk.{i}.ffn_gate_shexp.weight"))?;
+        check_shape(ffn_gate, &[h, f_shared])?;
+        let ffn_up = need(g, &format!("blk.{i}.ffn_up_shexp.weight"))?;
+        check_shape(ffn_up, &[h, f_shared])?;
+        let ffn_down = need(g, &format!("blk.{i}.ffn_down_shexp.weight"))?;
+        check_shape(ffn_down, &[f_shared, h])?;
+
+        (
+            ffn_gate,
+            ffn_up,
+            ffn_down,
+            Some(MoeFfn {
+                gate_inp,
+                gate_exps,
+                up_exps,
+                down_exps,
+                gate_inp_shexp,
+            }),
+        )
+    };
     let q_dim = checked_mul_dim(
         arch.n_q_heads as u64,
         arch.attn_head_dim as u64,
@@ -691,7 +726,7 @@ fn bind_mtp_head<'a>(g: &'a GgufFile, arch: &Arch) -> Result<Option<MtpHead<'a>>
             o,
             q_norm,
             k_norm,
-            ffn_moe: None,
+            ffn_moe,
         },
         eh_proj,
         enorm,

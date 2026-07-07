@@ -6,6 +6,52 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.511 MTP Cycle History Is a Hard Kill
+
+Status: MTPLX semantic-parity falsifier + rank-sim fix. Adds a bench-only
+`--mtp-history {committed,cycle}` switch for packed native-MTP decode and fixes
+`scripts/profile/mtp_rank_sim.py` to account for fixed-token runs by reporting
+the steps needed to reach the requested emitted-token cap.
+
+THE CHANGE:
+- `--mtp-history committed` keeps qwen's canonical MTP KV history for the target
+  prefix. This remains the default.
+- `--mtp-history cycle` resets MTP KV each speculative step, keeping only the
+  within-chain draft KV. This tests the MTPLX `generate_mtpk` default shape.
+- `mtp_rank_sim.py --summary <json>` now clamps to the emitted-token budget and
+  reports `steps_used`, so rescue policies are evaluated as fewer decode steps
+  rather than impossible extra tokens beyond the benchmark limit.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- `uv run python -m py_compile scripts/profile/mtp_rank_sim.py` PASS.
+- 27B D7/N8 code prompt, post/post hidden, 128 tokens, `--no-warmup`, AC power:
+  - committed history: decode-only `32.6 t/s`, total `27.5 t/s`, emitted/step
+    `4.267`, alpha `0.467`, equivalence PASS.
+  - cycle history: decode-only `21.7 t/s`, total `19.4 t/s`, emitted/step
+    `2.783`, alpha `0.255`, equivalence PASS.
+- 27B D7/N8 narrative prompt, post/post hidden, 128 tokens, `--no-warmup`, AC
+  power:
+  - committed history: decode-only `30.7 t/s`, total `24.2 t/s`, emitted/step
+    `4.000`, alpha `0.429`, equivalence PASS.
+  - cycle history: decode-only `18.8 t/s`, total `16.1 t/s`, emitted/step
+    `2.415`, alpha `0.202`, equivalence PASS.
+- Post/post rank traces, clamped to the 128-token budget:
+  - code: one-terminal-rescue oracle top2/top4/top8/top16 finishes in
+    `28/27/26/26` steps = `4.571/4.741/4.923/4.923` tokens/step; margin-swap
+    policies remain flat.
+  - narrative: top2/top4/top8/top16 finishes in `30/27/27/26` steps =
+    `4.267/4.741/4.741/4.923`; margin-swap policies remain flat.
+
+READ: resetting MTP history to the MTPLX cycle-cache shape is decisively worse on
+both prompts despite cheaper draft bookkeeping. This strengthens committed MTP KV
+history as the qwen default and narrows the live semantic-parity lane: post-norm
+hidden feeds are useful, cycle history is not, and simple one-token rescue still
+does not clear the `>=5.2` emitted/step investigation gate. The remaining
+MTPLX-class gap is more likely draft-asset quality, position/contract details not
+covered by cycle history, or a stronger acceptance policy than simple top-k swap.
+
 ## 2026-07-07 - v0.510 MTP Hidden Semantics Reopen Acceptance
 
 Status: bench default + MTPLX parity diagnostic. Splits MTP prompt prefill from

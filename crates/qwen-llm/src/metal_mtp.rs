@@ -308,6 +308,15 @@ pub enum MtpBaseHiddenVariant {
     PostNorm,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MtpHistoryMode {
+    /// Maintain a committed MTP KV history alongside the target cache.
+    Committed,
+    /// Match MTPLX's cycle-style draft cache: each speculative step starts with
+    /// an empty MTP KV cache, then keeps only the within-chain draft keys.
+    Cycle,
+}
+
 #[derive(Clone, Debug)]
 pub struct MtpRankRow {
     pub step: usize,
@@ -380,6 +389,7 @@ pub struct SpeculativeDecoder<'a> {
     draft_token_embd_head: bool,
     recursive_hidden_variant: MtpRecursiveHiddenVariant,
     base_hidden_variant: MtpBaseHiddenVariant,
+    history_mode: MtpHistoryMode,
 }
 
 impl<'a> SpeculativeDecoder<'a> {
@@ -395,6 +405,7 @@ impl<'a> SpeculativeDecoder<'a> {
             draft_token_embd_head: false,
             recursive_hidden_variant: MtpRecursiveHiddenVariant::PreNorm,
             base_hidden_variant: MtpBaseHiddenVariant::PreNorm,
+            history_mode: MtpHistoryMode::Committed,
         }
     }
 
@@ -410,8 +421,16 @@ impl<'a> SpeculativeDecoder<'a> {
         self.base_hidden_variant = variant;
     }
 
+    pub fn set_history_mode(&mut self, mode: MtpHistoryMode) {
+        self.history_mode = mode;
+    }
+
     fn wants_base_post_norm(&self) -> bool {
         self.base_hidden_variant == MtpBaseHiddenVariant::PostNorm
+    }
+
+    fn uses_cycle_mtp_history(&self) -> bool {
+        self.history_mode == MtpHistoryMode::Cycle
     }
 
     fn write_base_hidden_variant(
@@ -1632,18 +1651,22 @@ impl<'a> SpeculativeDecoder<'a> {
             )?;
             stats.base_forward_calls += 1;
 
-            if i + 1 < n_prompt {
+            if i + 1 < n_prompt && !self.uses_cycle_mtp_history() {
                 self.draft_kv_only(prompt_ids[i + 1], &hidden_cur, i as u32)?;
                 stats.mtp_calls += 1;
             }
         }
         stats.prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
 
-        debug_assert_eq!(
-            self.mtp_session.kv_n_pos as u32,
-            (n_prompt - 1) as u32,
-            "after prefill: mtp_kv should have n-1 entries"
-        );
+        if self.uses_cycle_mtp_history() {
+            self.mtp_session.kv_n_pos = 0;
+        } else {
+            debug_assert_eq!(
+                self.mtp_session.kv_n_pos as u32,
+                (n_prompt - 1) as u32,
+                "after prefill: mtp_kv should have n-1 entries"
+            );
+        }
 
         let last_layer = [(self.base.model.blocks.len() - 1) as u32];
         let mut emit_tok = next_bootstrap_tok;
@@ -1658,6 +1681,12 @@ impl<'a> SpeculativeDecoder<'a> {
             }
 
             let carry_tok = emit_tok;
+            let draft_start_position = if self.uses_cycle_mtp_history() {
+                self.mtp_session.kv_n_pos = 0;
+                0
+            } else {
+                processed_pos
+            };
             let start_position = processed_pos + 1;
 
             // Draft chain. First slot uses exact base hidden. Subsequent slots
@@ -1668,7 +1697,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 let first = self.draft_inner(
                     carry_tok,
                     &hidden_cur,
-                    processed_pos,
+                    draft_start_position,
                     DraftReadback::FullLogits,
                 )?;
                 drafts.push(first.argmax.expect("draft argmax missing"));
@@ -1686,7 +1715,7 @@ impl<'a> SpeculativeDecoder<'a> {
                     let result = self.draft_inner(
                         drafts[j - 1],
                         &recursive_hidden,
-                        processed_pos + j as u32,
+                        draft_start_position + j as u32,
                         DraftReadback::FullLogits,
                     )?;
                     drafts.push(result.argmax.expect("draft argmax missing"));
@@ -1703,14 +1732,18 @@ impl<'a> SpeculativeDecoder<'a> {
                 }
                 drafts
             } else if single_cb_draft {
-                let drafts =
-                    self.draft_chain_single_cb(carry_tok, &hidden_cur, processed_pos, spec_tokens)?;
+                let drafts = self.draft_chain_single_cb(
+                    carry_tok,
+                    &hidden_cur,
+                    draft_start_position,
+                    spec_tokens,
+                )?;
                 stats.mtp_calls += 1;
                 stats.drafts_attempted += drafts.len() as u32;
                 drafts
             } else {
                 let mut drafts: Vec<i32> = Vec::with_capacity(spec_tokens);
-                let first = self.draft(carry_tok, &hidden_cur, processed_pos)?;
+                let first = self.draft(carry_tok, &hidden_cur, draft_start_position)?;
                 drafts.push(first);
                 stats.mtp_calls += 1;
                 stats.drafts_attempted += 1;
@@ -1722,8 +1755,11 @@ impl<'a> SpeculativeDecoder<'a> {
                     };
                 copy_f32_tensor(hidden_src, &recursive_hidden)?;
                 for j in 1..spec_tokens {
-                    let d =
-                        self.draft(drafts[j - 1], &recursive_hidden, processed_pos + j as u32)?;
+                    let d = self.draft(
+                        drafts[j - 1],
+                        &recursive_hidden,
+                        draft_start_position + j as u32,
+                    )?;
                     drafts.push(d);
                     stats.mtp_calls += 1;
                     stats.drafts_attempted += 1;
@@ -1741,7 +1777,7 @@ impl<'a> SpeculativeDecoder<'a> {
             if let Some(trace) = draft_trace.as_mut() {
                 (*trace).push(RecordedDraftStep {
                     carry_tok,
-                    start_position,
+                    start_position: draft_start_position,
                     drafts: drafts.clone(),
                 });
             }
@@ -1818,22 +1854,27 @@ impl<'a> SpeculativeDecoder<'a> {
                 )?;
             }
 
-            // Recursive draft slots beyond the first are approximate. Rebuild the
-            // canonical MTP KV for the accepted prefix from captured base hiddens.
-            self.mtp_session.kv_n_pos = processed_pos as usize + 1;
-            // Co-indexed dispatch across two Metal scratch slots and the
-            // drafts[] array; `j` is the slot id, not just an index.
-            #[allow(clippy::needless_range_loop)]
-            for j in 0..n_accepted {
-                let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
-                let bridge_position = processed_pos + 1 + j as u32;
-                if self.wants_base_post_norm() {
-                    self.write_base_hidden_variant(&prev_hidden, &hidden_cur)?;
-                    self.draft_kv_only(drafts[j], &hidden_cur, bridge_position)?;
-                } else {
-                    self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+            if self.uses_cycle_mtp_history() {
+                self.mtp_session.kv_n_pos = 0;
+            } else {
+                // Recursive draft slots beyond the first are approximate. Rebuild
+                // the canonical MTP KV for the accepted prefix from captured base
+                // hiddens.
+                self.mtp_session.kv_n_pos = processed_pos as usize + 1;
+                // Co-indexed dispatch across two Metal scratch slots and the
+                // drafts[] array; `j` is the slot id, not just an index.
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..n_accepted {
+                    let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
+                    let bridge_position = processed_pos + 1 + j as u32;
+                    if self.wants_base_post_norm() {
+                        self.write_base_hidden_variant(&prev_hidden, &hidden_cur)?;
+                        self.draft_kv_only(drafts[j], &hidden_cur, bridge_position)?;
+                    } else {
+                        self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                    }
+                    stats.mtp_calls += 1;
                 }
-                stats.mtp_calls += 1;
             }
 
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);

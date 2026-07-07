@@ -3218,14 +3218,23 @@ What the latest analysis says:
   `26.8 -> 30.7 t/s` and `3.459 -> 4.000` emitted/step. D7/N8 oracle is
   `74.7 t/s` decode-only, so target verify can already explain the MTPLX
   `65-80 t/s` screenshot band when acceptance is ideal and prefill is excluded.
+- v0.511 tests the largest MTPLX history-policy semantic delta. `--mtp-history
+  cycle` resets MTP KV every speculative step and keeps only within-chain draft KV,
+  but it is a hard kill: code prompt emitted/step falls `4.267 -> 2.783` and
+  narrative falls `4.000 -> 2.415`, both equivalence PASS. Committed MTP history
+  remains the default.
+- v0.511 also fixes the rank simulator for fixed-token benches. Post/post rank
+  traces now show oracle one-terminal-rescue top16 would finish 128 tokens in
+  26 steps on both prompts (`4.923` tokens/step), still below the `>=5.2` gate;
+  margin-swap policies remain flat.
 
 Highest-EV speculative kernel targets:
 
-1. Continue MTP semantic parity before tree work: run post-norm default rank traces
-   across at least code + narrative prompts, then test only concrete MTPLX-like
-   semantic variants (position mode, committed/history-window policy, and hidden
-   mix variants) that can plausibly move emitted/step. Gate continuation on
-   emitted/step `>=5.2` or `>=25%` over the post-norm default, equivalence PASS.
+1. Continue MTP semantic parity before tree work, but with cycle history closed.
+   Remaining concrete variants are position-offset semantics, history-window
+   variants rather than full reset, and MTPLX contract/draft-asset details. Gate
+   continuation on emitted/step `>=5.2` or `>=25%` over the post-norm committed
+   default, equivalence PASS.
 2. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
    D3 vs D7, and proper draft-head asset effects. The current qwen oracle already
    reaches the screenshot band decode-only; the open question is how MTPLX gets

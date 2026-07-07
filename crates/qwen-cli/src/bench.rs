@@ -58,8 +58,8 @@ use qwen_llm::{
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{
-        DecodeOutput, MetalMtpHead, MetalMtpSession, MtpBaseHiddenVariant, MtpRankRow,
-        MtpRecursiveHiddenVariant, PackedDraftPlan, RecordedDraftStep, RecordedMtpWork,
+        DecodeOutput, MetalMtpHead, MetalMtpSession, MtpBaseHiddenVariant, MtpHistoryMode,
+        MtpRankRow, MtpRecursiveHiddenVariant, PackedDraftPlan, RecordedDraftStep, RecordedMtpWork,
         SpeculativeDecoder,
     },
     runtime::{LoadedModel, Runtime, SequenceConfig},
@@ -1333,6 +1333,9 @@ struct MtpArgs {
     /// Base-model hidden variant fed into MTP prompt/bridge draft slots.
     #[arg(long, value_enum, default_value_t = MtpBaseHiddenArg::PostNorm)]
     mtp_base_hidden: MtpBaseHiddenArg,
+    /// MTP KV history policy for packed native-MTP decode.
+    #[arg(long, value_enum, default_value_t = MtpHistoryArg::Committed)]
+    mtp_history: MtpHistoryArg,
     /// Write MTP target-rank rows as JSONL. This forces full draft-logit
     /// readback and is diagnostic-only, not a timing path.
     #[arg(long)]
@@ -1385,6 +1388,14 @@ enum MtpBaseHiddenArg {
     PostNorm,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum MtpHistoryArg {
+    /// Keep canonical MTP KV history for the committed target prefix.
+    Committed,
+    /// Reset MTP KV each speculative step; keep only within-chain draft KV.
+    Cycle,
+}
+
 impl From<MtpRecursiveHiddenArg> for MtpRecursiveHiddenVariant {
     fn from(value: MtpRecursiveHiddenArg) -> Self {
         match value {
@@ -1399,6 +1410,15 @@ impl From<MtpBaseHiddenArg> for MtpBaseHiddenVariant {
         match value {
             MtpBaseHiddenArg::PreNorm => Self::PreNorm,
             MtpBaseHiddenArg::PostNorm => Self::PostNorm,
+        }
+    }
+}
+
+impl From<MtpHistoryArg> for MtpHistoryMode {
+    fn from(value: MtpHistoryArg) -> Self {
+        match value {
+            MtpHistoryArg::Committed => Self::Committed,
+            MtpHistoryArg::Cycle => Self::Cycle,
         }
     }
 }
@@ -9502,6 +9522,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_draft_token_embd_head,
         mtp_recursive_hidden,
         mtp_base_hidden,
+        mtp_history,
         mtp_rank_topk,
         output,
         tokens,
@@ -9565,7 +9586,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} base_hidden={:?} recursive_hidden={:?} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9583,6 +9604,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_draft_token_embd_head,
         mtp_base_hidden,
         mtp_recursive_hidden,
+        mtp_history,
         prompt_ids.len(),
         tokens,
         stops,
@@ -9654,6 +9676,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
         spec.set_base_hidden_variant(mtp_base_hidden.into());
         spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
+        spec.set_history_mode(mtp_history.into());
         let mut verify_scratch =
             MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                 .context("mtp packed verify scratch")?;
@@ -9682,6 +9705,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
+            spec.set_history_mode(mtp_history.into());
             let mut verify_scratch =
                 MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                     .context("mtp packed verify scratch")?;
@@ -9712,6 +9736,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
+            spec.set_history_mode(mtp_history.into());
             if spec_tokens == 1 {
                 spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
                     .context("spec decode")?
@@ -9746,6 +9771,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
+            spec.set_history_mode(mtp_history.into());
             let mut verify_scratch =
                 MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                     .context("mtp packed verify scratch")?;
@@ -9973,6 +9999,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "draft_token_embd_head": mtp_draft_token_embd_head,
             "base_hidden": format!("{:?}", mtp_base_hidden),
             "recursive_hidden": format!("{:?}", mtp_recursive_hidden),
+            "mtp_history": format!("{:?}", mtp_history),
             "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
             "no_warmup": no_warmup,
             "semantics": {

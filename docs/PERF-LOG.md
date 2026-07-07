@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.504 Deep Native MTP Acceptance Selects D7/N8, Rejects D15/N16
+
+Status: bench capability + acceptance gate. Extends the native recursive MTP-N
+bench path from D3 to D15 so the v0.503 N8/N16 oracle ceiling can be tested with
+real one-head recursive drafts.
+
+THE CHANGE: `qwen-bench mtp --spec-tokens` now accepts `2..=15` for the packed
+native path. This is still a bench prototype: recursive slots beyond the first
+use the previous MTP hidden as the approximation, and correctness remains gated
+by packed target verify + restore.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- 0.8B D7/N8 tiny smoke, 8 tokens: equivalence PASS, but `0.633x` (low alpha,
+  padding/draft overhead dominate tiny generation).
+- 27B code prompt (`Write a Python function that parses a GGUF file header.`),
+  `--tokens 128 --no-warmup`, all equivalence PASS:
+  - D7/N8 native: `27.7 t/s`, `1.153x`, alpha `0.429`, steps `32`, accepted
+    `96` (`~4.0 emitted/step`), `mtp_calls=331`.
+  - D7/N8 replay-current: source `27.6 t/s`; replay `32.6 t/s`, `1.362x`,
+    alpha `0.436`, steps `32`, accepted `96`, `mtp_calls=0`.
+  - D15/N16 native: `17.1 t/s`, `0.716x`, alpha `0.209`, steps `31`, accepted
+    `97` (`~4.1 emitted/step`), `mtp_calls=573`.
+
+READ: D7/N8 clears the real-acceptance gate; D15/N16 does not for the current
+single-head recursive drafter. D7/N8 already wins despite per-draft command
+buffers, full shared LM-head, and KV bridge costs; removing draft calls in replay
+shows a reachable `1.36x` on this prompt before any single-CB/draft-head rewrite.
+The next native-MTP implementation branch is therefore D7/N8-specific: collapse
+recursive drafting into one GPU-resident command chain and reduce draft LM-head
+cost. D15/N16 should stay oracle/watchlist unless a better asset or acceptance
+policy appears.
+
 ## 2026-07-07 - v0.503 Bucketed MTP Verify Finds the N8/N16 Fast Lane
 
 Status: bench diagnostic + optional native-MTP packed-verify bucket. Follow-up to

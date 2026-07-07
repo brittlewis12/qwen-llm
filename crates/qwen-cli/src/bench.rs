@@ -1304,9 +1304,8 @@ struct MtpArgs {
     #[arg(long)]
     disable_thinking: bool,
     /// Experimental speculative depth. `1` is the original H4 lazy-verify
-    /// path. `2` and `3` use a bench-only MTP-N prototype that chains MTP
-    /// drafts recursively and verifies them with the packed base path. The
-    /// oracle probe may use larger planned depths up to `15`.
+    /// path. `2..=15` use a bench-only MTP-N prototype that chains MTP
+    /// drafts recursively and verifies them with the packed base path.
     #[arg(long, default_value = "1")]
     spec_tokens: usize,
     /// Bench-only probe for pricing native-MTP draft overhead.
@@ -9444,11 +9443,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
 
     let ctx = MetalContext::new().context("init MetalContext")?;
     eprintln!("[mtp-bench] device: {}", ctx.describe());
-    let spec_token_limit = if mtp_probe == MtpProbeMode::Oracle {
-        15
-    } else {
-        3
-    };
+    let spec_token_limit = 15;
     if spec_tokens == 0 || spec_tokens > spec_token_limit {
         anyhow::bail!(
             "`--spec-tokens` must be in 1..={spec_token_limit} for probe {:?}",

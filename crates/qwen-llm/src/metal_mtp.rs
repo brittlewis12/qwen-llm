@@ -1066,10 +1066,10 @@ impl<'a> SpeculativeDecoder<'a> {
         layer_scratch: &mut MetalDFlashLayerMajorScratch,
         mut draft_trace: Option<&mut Vec<Vec<i32>>>,
     ) -> Result<DecodeOutput, MtpError> {
-        if !(2..=3).contains(&spec_tokens) {
+        if !(2..=15).contains(&spec_tokens) {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n",
-                detail: format!("spec_tokens={spec_tokens} must be in [2, 3]"),
+                detail: format!("spec_tokens={spec_tokens} must be in [2, 15]"),
             }));
         }
 

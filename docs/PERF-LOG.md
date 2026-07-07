@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.502 MTP Replay/Oracle Probes Reopen Verify as the Binding Loss
+
+Status: bench diagnostic + strategy update. cx resume
+`019f3dc1-9f10-7dc0-99b2-3da3af5ac384` was pushed with the user's M4 Max
+64 GB MTPLX signal (`~65-80 tok/s` on Qwen3.6 27B native MTP) and local MTPLX
+repo recon; recommendation: prove the draft-free ceiling before a large native
+MTP rewrite.
+
+THE CHANGE: `qwen-bench mtp` now has `--mtp-probe`:
+- `normal`: current native path.
+- `replay-current`: first records the current MTP draft vectors, then reruns the
+  same decode with those token vectors and zero MTP draft calls.
+- `oracle`: uses the no-spec greedy stream as a perfect draft oracle.
+
+The planned modes skip MTP KV prefill/bridges and run the existing packed target
+verify path directly. This prices the target-verify/control ceiling without
+downloading MTPLX assets or building a single-CB drafter first.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- Smoke 0.8B MTP, `--spec-tokens 3 --tokens 8 --no-warmup`:
+  - `normal`: `0.995x`, alpha `0.250`, equivalence PASS.
+  - `replay-current`: source `108.3 t/s`; replay `1.102x`, alpha `0.273`,
+    `mtp_calls=0`, equivalence PASS.
+  - `oracle`: `1.806x`, alpha `1.000`, `mtp_calls=0`, equivalence PASS.
+- Target 27B MTP, short raw prompt, `--spec-tokens 3 --tokens 64 --no-warmup`:
+  - `oracle`: no-spec `22.5 t/s` total (`25.5 t/s` decode-only), oracle
+    `27.0 t/s`, `1.201x`, alpha `1.000`, `mtp_calls=0`, equivalence PASS.
+  - `replay-current`: recorded source `21.0 t/s`, replay `21.8 t/s`, `0.967x`,
+    alpha `0.746`, `mtp_calls=0`, equivalence PASS.
+
+READ: single-CB/GPU-resident drafting is still necessary, but it is NOT sufficient
+on the current 27B packed-verify structure. Removing all MTP draft calls turns
+current-draft D3 from a loss into only a smaller loss; even perfect greedy D3 is
+only `1.20x` total on this target probe, far below the `~65-80 tok/s` MTPLX signal.
+The binding branch shifts from "draft sync alone" to "packed verify structural
+debt first/alongside drafting": packed GDN, packed verify attention, packed
+rope/scatter, and then draft-only LM-head / single-CB drafting.
+
 ## 2026-07-06 - v0.501 Small-N Dispatch Table Wired; Latent Verify Near-Tie Flip Found and Recorded
 
 Status: PRODUCTION dispatch change (first of the verify-path integration

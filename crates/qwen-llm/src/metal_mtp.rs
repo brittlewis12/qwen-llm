@@ -265,6 +265,14 @@ struct DraftResult {
     argmax: Option<i32>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum PackedDraftPlan<'a> {
+    /// Replay draft token vectors recorded from the native MTP drafter.
+    Recorded(&'a [Vec<i32>]),
+    /// Use the no-spec greedy target stream as a perfect draft oracle.
+    Oracle(&'a [i32]),
+}
+
 fn copy_f32_tensor(src: &MetalTensor, dst: &MetalTensor) -> Result<(), MtpError> {
     if src.dtype != GgmlType::F32 || dst.dtype != GgmlType::F32 {
         return Err(MtpError::Metal(MetalError::BadShape {
@@ -1035,6 +1043,29 @@ impl<'a> SpeculativeDecoder<'a> {
         verify_scratch: &mut MetalDFlashVerifyScratch,
         layer_scratch: &mut MetalDFlashLayerMajorScratch,
     ) -> Result<DecodeOutput, MtpError> {
+        self.decode_packed_n_recording(
+            prompt_ids,
+            max_new_tokens,
+            stop_tokens,
+            base_session,
+            spec_tokens,
+            verify_scratch,
+            layer_scratch,
+            None,
+        )
+    }
+
+    pub fn decode_packed_n_recording(
+        &mut self,
+        prompt_ids: &[i32],
+        max_new_tokens: usize,
+        stop_tokens: &[i32],
+        base_session: &mut MetalSession,
+        spec_tokens: usize,
+        verify_scratch: &mut MetalDFlashVerifyScratch,
+        layer_scratch: &mut MetalDFlashLayerMajorScratch,
+        mut draft_trace: Option<&mut Vec<Vec<i32>>>,
+    ) -> Result<DecodeOutput, MtpError> {
         if !(2..=3).contains(&spec_tokens) {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n",
@@ -1147,6 +1178,10 @@ impl<'a> SpeculativeDecoder<'a> {
                 copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
             }
 
+            if let Some(trace) = draft_trace.as_mut() {
+                (*trace).push(drafts.clone());
+            }
+
             let mut verify_input: Vec<i32> = Vec::with_capacity(verify_n);
             verify_input.push(carry_tok);
             verify_input.extend_from_slice(&drafts);
@@ -1211,6 +1246,203 @@ impl<'a> SpeculativeDecoder<'a> {
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
             stats.steps += 1;
+
+            if stop_now {
+                break 'outer;
+            }
+        }
+
+        Ok(DecodeOutput {
+            tokens,
+            stats: stats.into_finalized(t_start),
+        })
+    }
+
+    pub fn decode_packed_n_planned(
+        &mut self,
+        prompt_ids: &[i32],
+        max_new_tokens: usize,
+        stop_tokens: &[i32],
+        base_session: &mut MetalSession,
+        spec_tokens: usize,
+        verify_scratch: &mut MetalDFlashVerifyScratch,
+        layer_scratch: &mut MetalDFlashLayerMajorScratch,
+        plan: PackedDraftPlan<'_>,
+    ) -> Result<DecodeOutput, MtpError> {
+        if !(2..=3).contains(&spec_tokens) {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_planned",
+                detail: format!("spec_tokens={spec_tokens} must be in [2, 3]"),
+            }));
+        }
+
+        let arch = &self.base.model.arch;
+        let h = arch.hidden_size as usize;
+        let t_start = std::time::Instant::now();
+        let mut stats = SpecStats::default();
+        let mut tokens: Vec<i32> = Vec::with_capacity(prompt_ids.len() + max_new_tokens);
+        tokens.extend_from_slice(prompt_ids);
+
+        if prompt_ids.is_empty() {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_planned",
+                detail: "prompt_ids must be non-empty".into(),
+            }));
+        }
+        if max_new_tokens == 0 {
+            return Ok(DecodeOutput {
+                tokens,
+                stats: stats.into_finalized(t_start),
+            });
+        }
+
+        let verify_n = spec_tokens + 1;
+        if verify_scratch.n as usize != verify_n || layer_scratch.n as usize != verify_n {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_planned.scratch",
+                detail: format!(
+                    "scratch N mismatch: verify={} layer={} expected={verify_n}",
+                    verify_scratch.n, layer_scratch.n
+                ),
+            }));
+        }
+
+        let hidden_cur = MetalTensor::zeros_f32(self.base.ctx, vec![h as u64])?;
+        let n_prompt = prompt_ids.len();
+        let mut next_bootstrap_tok: i32 = 0;
+
+        // Prompt prefill: only the target base state is needed for replay or
+        // oracle drafts, so this intentionally skips MTP KV prefill.
+        for (i, &tid) in prompt_ids.iter().enumerate() {
+            next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
+                tid,
+                i as u32,
+                base_session,
+                &hidden_cur,
+            )?;
+            stats.base_forward_calls += 1;
+        }
+
+        if let PackedDraftPlan::Oracle(oracle) = plan {
+            if oracle.first().copied() != Some(next_bootstrap_tok) {
+                return Err(MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_decode_packed_n_planned.oracle",
+                    detail: format!(
+                        "oracle first token {:?} != bootstrap {next_bootstrap_tok}",
+                        oracle.first()
+                    ),
+                }));
+            }
+        }
+
+        let last_layer = [(self.base.model.blocks.len() - 1) as u32];
+        let mut emit_tok = next_bootstrap_tok;
+        let mut processed_pos = (n_prompt - 1) as u32;
+        let mut emitted_count: usize = 0;
+        let mut step_idx: usize = 0;
+
+        'outer: loop {
+            tokens.push(emit_tok);
+            emitted_count += 1;
+            if stop_tokens.contains(&emit_tok) || emitted_count >= max_new_tokens {
+                break;
+            }
+
+            let remaining = max_new_tokens.saturating_sub(emitted_count);
+            let n_draft = spec_tokens.min(remaining);
+            if n_draft == 0 {
+                break;
+            }
+            let carry_tok = emit_tok;
+            let start_position = processed_pos + 1;
+            let drafts: Vec<i32> = match plan {
+                PackedDraftPlan::Recorded(trace) => {
+                    let row = trace.get(step_idx).ok_or_else(|| {
+                        MtpError::Metal(MetalError::BadShape {
+                            kernel: "mtp_decode_packed_n_planned.recorded",
+                            detail: format!("missing draft row for step {step_idx}"),
+                        })
+                    })?;
+                    if row.len() < n_draft {
+                        return Err(MtpError::Metal(MetalError::BadShape {
+                            kernel: "mtp_decode_packed_n_planned.recorded",
+                            detail: format!(
+                                "draft row {step_idx} len {} < needed {n_draft}",
+                                row.len()
+                            ),
+                        }));
+                    }
+                    row[..n_draft].to_vec()
+                }
+                PackedDraftPlan::Oracle(oracle) => {
+                    if emitted_count + n_draft > oracle.len() {
+                        return Err(MtpError::Metal(MetalError::BadShape {
+                            kernel: "mtp_decode_packed_n_planned.oracle",
+                            detail: format!(
+                                "oracle len {} exhausted at emitted={} need={n_draft}",
+                                oracle.len(),
+                                emitted_count
+                            ),
+                        }));
+                    }
+                    oracle[emitted_count..emitted_count + n_draft].to_vec()
+                }
+            };
+            stats.drafts_attempted += drafts.len() as u32;
+
+            let mut verify_input: Vec<i32> = Vec::with_capacity(1 + drafts.len());
+            verify_input.push(carry_tok);
+            verify_input.extend_from_slice(&drafts);
+            let n_eff = verify_input.len() as u32;
+
+            let verify_argmax = encode_packed_verify_layer_major_inner(
+                self.base,
+                &last_layer,
+                &verify_input,
+                start_position,
+                verify_scratch,
+                layer_scratch,
+                base_session,
+                None,
+                Some(n_eff),
+            )?;
+            stats.base_forward_calls += 1;
+
+            let mut n_accepted = 0usize;
+            let mut stop_now = false;
+            for (j, &draft_tok) in drafts.iter().enumerate() {
+                if draft_tok != verify_argmax[j] {
+                    break;
+                }
+                stats.accepted += 1;
+                n_accepted += 1;
+                tokens.push(draft_tok);
+                emitted_count += 1;
+                if stop_tokens.contains(&draft_tok) || emitted_count >= max_new_tokens {
+                    stop_now = true;
+                    break;
+                }
+            }
+
+            let n_keep = (1 + n_accepted) as u32;
+            if n_keep < n_eff {
+                encode_restore_after_partial_accept_inner(
+                    self.base,
+                    verify_scratch,
+                    n_keep,
+                    start_position,
+                    base_session,
+                    Some(n_eff),
+                )?;
+            }
+
+            let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
+            copy_f32_tensor(&next_hidden, &hidden_cur)?;
+
+            processed_pos += 1 + n_accepted as u32;
+            emit_tok = verify_argmax[n_accepted];
+            stats.steps += 1;
+            step_idx += 1;
 
             if stop_now {
                 break 'outer;

@@ -1197,6 +1197,20 @@ verify tiles vs the mat-vec decode chain). The witness is now a
 required gate row; the residual E1-accept-path risk class is recorded
 with tie-guarded verify (E0 recompute under a logit-margin guard, MoE
 3e-4 fallback as the house pattern) as the top correctness follow-up.
+v0.502 reopens native MTP from the MTPLX M4 Max 64 GB signal (`~65-80
+tok/s` on Qwen3.6 27B) but the new qwen-side replay/oracle probes sharply
+change attribution: on 27B MTP, `--spec-tokens 3 --tokens 64 --no-warmup`,
+`replay-current` records source `21.0 t/s` and reruns the same draft token
+vectors with `mtp_calls=0` at only `21.8 t/s` (`0.967x` total), while the
+perfect greedy oracle reaches only `27.0 t/s` (`1.201x` total). Therefore
+single-CB drafting is necessary but not sufficient; the active MTP branch is
+packed-verify structural debt first/alongside drafting, not drafting sync
+alone. Force-rank inside MTP: (1) packed GDN or GDN tape/capture equivalent,
+(2) packed q_len 2..4 verify attention with KV reuse, (3) packed rope/scatter
+and encoder concurrency where phase evidence supports it, (4) draft-only
+LM-head/top-k, then (5) single-CB GPU-resident D3 drafting once verify ceiling
+is no longer the blocker. Tie-guarded exact verify remains the correctness gate
+for any accept-path speed row.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
@@ -3106,18 +3120,27 @@ What the latest analysis says:
   not amortize enough base work and MTP has its own growing KV attention cost.
 - Current DFlash is made safe by adaptive verify `N`, but not fast, because the
   drafter and target still pay too much long-context attention work.
+- v0.502 adds draft-free MTP probes: replaying current D3 draft tokens with zero
+  MTP calls still loses on 27B (`0.967x` total), and a perfect greedy D3 oracle is
+  only `1.201x`. This makes packed target-verify structure the current binding
+  MTP loss; a single-CB drafter alone cannot explain or close the MTPLX gap.
 
 Highest-EV speculative kernel targets:
 
-1. Target packed-verify multi-query attention so consecutive verify queries share
-   KV reads.
-2. DFlash two-range attention reading ctx-cache and noise directly, without
+1. Pack the remaining MTP target-verify GDN work, or build the equivalent compact
+   GDN tape/capture path, because it blocks even perfect-draft D3.
+2. Target packed-verify multi-query attention so consecutive verify queries share
+   KV reads; prioritize this over more small-N mat-mat retunes.
+3. Pack verify rope/scatter and coalesce/concurrently issue independent verify
+   phases only where phase traces show the same debt.
+4. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-3. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+5. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
    `attn-intra` at both 8K and 32K.
-4. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+6. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
    show N16 mat-mat-heavy surfaces remain material after the attention fixes.
-5. Adaptive draft compute width, not only adaptive verify width.
+7. Draft-only LM-head/top-k and single-CB GPU-resident D3 drafting, after the
+   replay/oracle rows show target verify can clear a practical MTP win gate.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4
 

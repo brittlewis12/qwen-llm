@@ -57,7 +57,7 @@ use qwen_llm::{
         MetalBlock, MetalForward, MetalModel, MetalMoeFfn, MetalSession, MoeRouteReplayRow, RMS_EPS,
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
-    metal_mtp::{MetalMtpHead, MetalMtpSession, SpeculativeDecoder},
+    metal_mtp::{DecodeOutput, MetalMtpHead, MetalMtpSession, PackedDraftPlan, SpeculativeDecoder},
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
@@ -1308,6 +1308,9 @@ struct MtpArgs {
     /// drafts recursively and verifies them with the packed base path.
     #[arg(long, default_value = "1")]
     spec_tokens: usize,
+    /// Bench-only probe for pricing native-MTP draft overhead.
+    #[arg(long, value_enum, default_value_t = MtpProbeMode::Normal)]
+    mtp_probe: MtpProbeMode,
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
@@ -1321,6 +1324,16 @@ struct MtpArgs {
     /// Skip the warmup pass.
     #[arg(long)]
     no_warmup: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum MtpProbeMode {
+    /// Run the current native MTP path.
+    Normal,
+    /// Record current MTP draft vectors, then replay them without draft calls.
+    ReplayCurrent,
+    /// Use the no-spec greedy stream as a perfect draft oracle.
+    Oracle,
 }
 
 /// Parse a comma-separated list of i32 token ids for `--stop-tokens`.
@@ -9416,6 +9429,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         system,
         disable_thinking,
         spec_tokens,
+        mtp_probe,
         tokens,
         stop_tokens,
         no_warmup,
@@ -9453,7 +9467,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9465,6 +9479,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "n/a"
         },
         spec_tokens,
+        mtp_probe,
         prompt_ids.len(),
         tokens,
         stops,
@@ -9516,23 +9531,25 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let ref_decode_ms = t_ref_decode.elapsed().as_secs_f64() * 1e3;
     let ref_total_ms = t_ref_total.elapsed().as_secs_f64() * 1e3;
     let ref_decode_tps = ref_emitted as f64 / (ref_decode_ms / 1000.0);
+    let ref_generated_vec: Vec<i32> = ref_tokens[prompt_ids.len()..].to_vec();
 
     // ----- MTP=on: speculative decode -----
-    let mtp_session =
-        MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
-    let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
-    let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
-    let result = if spec_tokens == 1 {
-        spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
-            .context("spec decode")?
-    } else {
+    if spec_tokens == 1 && mtp_probe != MtpProbeMode::Normal {
+        anyhow::bail!("--mtp-probe requires --spec-tokens 2 or 3");
+    }
+
+    let run_planned = |plan: PackedDraftPlan<'_>, label: &str| -> Result<DecodeOutput> {
+        let mtp_session =
+            MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
+        let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
+        let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
         let mut verify_scratch =
             MetalDFlashVerifyScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32, 1)
                 .context("mtp packed verify scratch")?;
         let mut layer_scratch =
             MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32)
                 .context("mtp packed layer scratch")?;
-        spec.decode_packed_n(
+        spec.decode_packed_n_planned(
             &prompt_ids,
             tokens,
             &stops,
@@ -9540,8 +9557,76 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             spec_tokens,
             &mut verify_scratch,
             &mut layer_scratch,
+            plan,
         )
-        .context("spec decode packed-n")?
+        .with_context(|| format!("spec decode packed-n {label}"))
+    };
+
+    let result = match mtp_probe {
+        MtpProbeMode::Normal => {
+            let mtp_session =
+                MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
+            let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
+            let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+            if spec_tokens == 1 {
+                spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
+                    .context("spec decode")?
+            } else {
+                let mut verify_scratch =
+                    MetalDFlashVerifyScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32, 1)
+                        .context("mtp packed verify scratch")?;
+                let mut layer_scratch =
+                    MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32)
+                        .context("mtp packed layer scratch")?;
+                spec.decode_packed_n(
+                    &prompt_ids,
+                    tokens,
+                    &stops,
+                    &mut spec_session,
+                    spec_tokens,
+                    &mut verify_scratch,
+                    &mut layer_scratch,
+                )
+                .context("spec decode packed-n")?
+            }
+        }
+        MtpProbeMode::Oracle => run_planned(PackedDraftPlan::Oracle(&ref_generated_vec), "oracle")?,
+        MtpProbeMode::ReplayCurrent => {
+            let mtp_session =
+                MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
+            let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
+            let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+            let mut verify_scratch =
+                MetalDFlashVerifyScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32, 1)
+                    .context("mtp packed verify scratch")?;
+            let mut layer_scratch =
+                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, (spec_tokens + 1) as u32)
+                    .context("mtp packed layer scratch")?;
+            let mut draft_trace = Vec::new();
+            let recorded = spec
+                .decode_packed_n_recording(
+                    &prompt_ids,
+                    tokens,
+                    &stops,
+                    &mut spec_session,
+                    spec_tokens,
+                    &mut verify_scratch,
+                    &mut layer_scratch,
+                    Some(&mut draft_trace),
+                )
+                .context("spec decode packed-n recording")?;
+            let recorded_emitted = recorded.tokens.len() - prompt_ids.len();
+            let recorded_tps = recorded_emitted as f64 / (recorded.stats.wall_ms / 1000.0);
+            eprintln!(
+                "[mtp-bench] replay-current source: {recorded_emitted} tokens, \
+                 {:.1} ms, {:.1} t/s, steps={}, trace_rows={}",
+                recorded.stats.wall_ms,
+                recorded_tps,
+                recorded.stats.steps,
+                draft_trace.len(),
+            );
+            run_planned(PackedDraftPlan::Recorded(&draft_trace), "replay-current")?
+        }
     };
     let spec_emitted = result.tokens.len() - prompt_ids.len();
     let spec_total_ms = result.stats.wall_ms;

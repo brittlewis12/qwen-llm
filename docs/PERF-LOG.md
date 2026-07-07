@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.505 Single-CB D7 Drafting Is Correct but Not the Big Lever
+
+Status: optional bench branch + falsifier. Implements the D7/N8 single-command
+draft-chain test requested by v0.504, then closes command-buffer/readback removal
+as a major MTP speed source at current acceptance.
+
+THE CHANGE: `qwen-bench mtp --mtp-single-cb-draft` chains recursive MTP draft
+slots inside one command buffer. Each slot feeds the previous GPU argmax directly
+into the next embedding lookup; a tiny blit records each argmax into `draft_ids`
+for packed target verify. The verifier and acceptance path are unchanged.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- 0.8B smoke, `--spec-tokens 3/7 --mtp-physical-n 8 --tokens 8`: equivalence
+  PASS for both single-CB rows.
+- 27B code prompt, `--spec-tokens 7 --mtp-physical-n 8 --tokens 128 --no-warmup`:
+  - prior native D7/N8: `27.7 t/s`, `1.153x`, alpha `0.429`, accepted `96`,
+    `mtp_calls=331`.
+  - single-CB D7/N8: `27.8 t/s`, `1.162x`, alpha `0.429`, accepted `96`,
+    `mtp_calls=139`, equivalence PASS.
+  - replay-current D7/N8 remains `32.6 t/s`, `1.362x`, `mtp_calls=0`.
+
+READ: per-depth command buffers, waits, and CPU argmax readback are not the large
+remaining D7/N8 draft tax. The gap to replay is still material, but it is mostly
+the seven MTP draft bodies and shared full-vocab LM-head work. Next branch should
+first ablate draft body vs LM-head using recorded draft ids, then only build a
+draft-only/fused LM-head path if the ablation says LM-head owns the gap.
+
 ## 2026-07-07 - v0.504 Deep Native MTP Acceptance Selects D7/N8, Rejects D15/N16
 
 Status: bench capability + acceptance gate. Extends the native recursive MTP-N

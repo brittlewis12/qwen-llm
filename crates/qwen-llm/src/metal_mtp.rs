@@ -29,7 +29,7 @@ use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
 use crate::loader::MtpHead;
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
+    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
     attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
     encode_attn_decode_v4_f32, encode_ffn_swiglu_q4_K_f32, encode_get_rows_f32, encode_mul_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
@@ -178,6 +178,7 @@ pub struct MetalMtpSession {
     // dispatch in a future ICB world).
     pub logits: MetalTensor,       // [V]
     pub draft_argmax: MetalTensor, // [1] i32 in F32 buffer
+    pub draft_ids: MetalTensor,    // [16] i32 in F32 buffer
     pub ids_buf: MetalTensor,      // i32 token id (in F32 buffer)
 }
 
@@ -246,6 +247,7 @@ impl MetalMtpSession {
             attn_v4_ml_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_ml_partial_elems])?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
             draft_argmax: MetalTensor::zeros_f32(ctx, vec![1])?,
+            draft_ids: MetalTensor::zeros_f32(ctx, vec![16])?,
             ids_buf: MetalTensor::zeros_f32(ctx, vec![1])?,
         })
     }
@@ -625,6 +627,253 @@ impl<'a> SpeculativeDecoder<'a> {
                 argmax,
             })
         }
+    }
+
+    fn encode_mtp_draft_step(
+        &mut self,
+        enc: &KernelEncoder,
+        id_tensor: &MetalTensor,
+        prev_hidden: &MetalTensor,
+        position: u32,
+    ) -> Result<(), MtpError> {
+        let arch = &self.base.model.arch;
+        let ctx = self.base.ctx;
+        let h = arch.hidden_size as usize;
+
+        encode_get_rows_f32(
+            ctx,
+            enc,
+            &self.base.model.token_embd,
+            id_tensor,
+            &self.mtp_session.e,
+            1,
+            h,
+        )?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            enc,
+            &self.mtp_session.e,
+            &self.mtp_head.enorm,
+            &self.mtp_session.e_normed,
+            RMS_EPS,
+        )?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            enc,
+            prev_hidden,
+            &self.mtp_head.hnorm,
+            &self.mtp_session.h_normed,
+            RMS_EPS,
+        )?;
+        encode_scatter_offset_f32(
+            ctx,
+            enc,
+            &self.mtp_session.e_normed,
+            &self.mtp_session.eh_concat,
+            0,
+            h,
+        )?;
+        encode_scatter_offset_f32(
+            ctx,
+            enc,
+            &self.mtp_session.h_normed,
+            &self.mtp_session.eh_concat,
+            h,
+            h,
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            &self.mtp_head.eh_proj,
+            &self.mtp_session.eh_concat,
+            &self.mtp_session.x,
+            2 * h,
+            h,
+        )?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            enc,
+            &self.mtp_session.x,
+            &self.mtp_head.attn.attn_norm,
+            &self.mtp_session.h,
+            RMS_EPS,
+        )?;
+        self.encode_mtp_attn(enc, position)?;
+        encode_add_inplace_f32(ctx, enc, &self.mtp_session.x, &self.mtp_session.mixer_out)?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            enc,
+            &self.mtp_session.x,
+            &self.mtp_head.attn.post_attn_norm,
+            &self.mtp_session.h,
+            RMS_EPS,
+        )?;
+
+        let g_w = &self.mtp_head.attn.ffn_gate;
+        let u_w = &self.mtp_head.attn.ffn_up;
+        let d_w = &self.mtp_head.attn.ffn_down;
+        let f = arch.intermediate_size as usize;
+        let ffn_fused = g_w.dtype == GgmlType::Q4_K && u_w.dtype == GgmlType::Q4_K;
+        if ffn_fused {
+            encode_ffn_swiglu_q4_K_f32(
+                ctx,
+                enc,
+                g_w,
+                u_w,
+                &self.mtp_session.h,
+                &self.mtp_session.ffn_inner,
+                h,
+                f,
+            )?;
+        } else {
+            encode_mat_vec_dispatch(
+                ctx,
+                enc,
+                g_w,
+                &self.mtp_session.h,
+                &self.mtp_session.ffn_gate,
+                h,
+                f,
+            )?;
+            encode_mat_vec_dispatch(
+                ctx,
+                enc,
+                u_w,
+                &self.mtp_session.h,
+                &self.mtp_session.ffn_up,
+                h,
+                f,
+            )?;
+            encode_silu_mul_f32(
+                ctx,
+                enc,
+                &self.mtp_session.ffn_gate,
+                &self.mtp_session.ffn_up,
+                &self.mtp_session.ffn_inner,
+            )?;
+        }
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            d_w,
+            &self.mtp_session.ffn_inner,
+            &self.mtp_session.ffn_out,
+            f,
+            h,
+        )?;
+        encode_add_inplace_f32(ctx, enc, &self.mtp_session.x, &self.mtp_session.ffn_out)?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            enc,
+            &self.mtp_session.x,
+            &self.mtp_head.shared_head_norm,
+            &self.mtp_session.h,
+            RMS_EPS,
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            &self.base.model.lm_head,
+            &self.mtp_session.h,
+            &self.mtp_session.logits,
+            h,
+            arch.vocab_size as usize,
+        )?;
+        encode_argmax_f32(
+            ctx,
+            enc,
+            &self.mtp_session.logits,
+            &self.mtp_session.draft_argmax,
+            1,
+            arch.vocab_size as usize,
+        )?;
+        Ok(())
+    }
+
+    fn draft_chain_single_cb(
+        &mut self,
+        next_tok: i32,
+        prev_hidden: &MetalTensor,
+        start_position: u32,
+        n_drafts: usize,
+    ) -> Result<Vec<i32>, MtpError> {
+        let arch = &self.base.model.arch;
+        if !(1..=15).contains(&n_drafts) {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_draft_chain_single_cb",
+                detail: format!("n_drafts={n_drafts} must be in [1, 15]"),
+            }));
+        }
+        if next_tok < 0 || (next_tok as u32) >= arch.vocab_size {
+            return Err(MtpError::BadToken(next_tok, arch.vocab_size));
+        }
+        if self.mtp_session.kv_n_pos as u32 != start_position {
+            return Err(MtpError::KvPositionMismatch {
+                position: start_position,
+                kv_n_pos: self.mtp_session.kv_n_pos,
+            });
+        }
+        let h = arch.hidden_size as usize;
+        if prev_hidden.n_elements() != h as u64 {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_draft_chain_single_cb.prev_hidden",
+                detail: format!(
+                    "prev_hidden.n_elements()={} != hidden_size={}",
+                    prev_hidden.n_elements(),
+                    h,
+                ),
+            }));
+        }
+
+        unsafe {
+            let ptr = self.mtp_session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = next_tok;
+        }
+
+        let ctx = self.base.ctx;
+        let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+        for j in 0..n_drafts {
+            let id_tensor = if j == 0 {
+                self.mtp_session.ids_buf.clone()
+            } else {
+                self.mtp_session.draft_argmax.clone()
+            };
+            let hidden_tensor = if j == 0 {
+                prev_hidden.clone()
+            } else {
+                self.mtp_session.x.clone()
+            };
+            let enc = KernelEncoder::begin(&cmd);
+            self.encode_mtp_draft_step(
+                &enc,
+                &id_tensor,
+                &hidden_tensor,
+                start_position + j as u32,
+            )?;
+            enc.end();
+
+            let blit = BlitEncoder::begin(&cmd);
+            blit.copy_buffer(
+                &self.mtp_session.draft_argmax.buffer,
+                self.mtp_session.draft_argmax.offset,
+                &self.mtp_session.draft_ids.buffer,
+                self.mtp_session.draft_ids.offset + (j as u64) * std::mem::size_of::<i32>() as u64,
+                std::mem::size_of::<i32>() as u64,
+            );
+            blit.end();
+        }
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        self.mtp_session.kv_n_pos = start_position as usize + n_drafts;
+        let mut out = vec![0i32; n_drafts];
+        unsafe {
+            let src = (self.mtp_session.draft_ids.buffer.contents().as_ptr() as *const u8)
+                .add(self.mtp_session.draft_ids.offset as usize)
+                as *const i32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n_drafts);
+        }
+        Ok(out)
     }
 
     /// MTP-specific attn step. Mirrors `MetalForward::encode_attn` but
@@ -1052,6 +1301,7 @@ impl<'a> SpeculativeDecoder<'a> {
             verify_scratch,
             layer_scratch,
             None,
+            false,
         )
     }
 
@@ -1065,6 +1315,7 @@ impl<'a> SpeculativeDecoder<'a> {
         verify_scratch: &mut MetalDFlashVerifyScratch,
         layer_scratch: &mut MetalDFlashLayerMajorScratch,
         mut draft_trace: Option<&mut Vec<Vec<i32>>>,
+        single_cb_draft: bool,
     ) -> Result<DecodeOutput, MtpError> {
         if !(2..=15).contains(&spec_tokens) {
             return Err(MtpError::Metal(MetalError::BadShape {
@@ -1168,19 +1419,29 @@ impl<'a> SpeculativeDecoder<'a> {
 
             // Draft chain. First slot uses exact base hidden. Subsequent slots
             // recursively consume the previous MTP hidden as an approximation.
-            let mut drafts: Vec<i32> = Vec::with_capacity(spec_tokens);
-            let first = self.draft(carry_tok, &hidden_cur, processed_pos)?;
-            drafts.push(first);
-            stats.mtp_calls += 1;
-            stats.drafts_attempted += 1;
-            copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
-            for j in 1..spec_tokens {
-                let d = self.draft(drafts[j - 1], &recursive_hidden, processed_pos + j as u32)?;
-                drafts.push(d);
+            let drafts: Vec<i32> = if single_cb_draft {
+                let drafts =
+                    self.draft_chain_single_cb(carry_tok, &hidden_cur, processed_pos, spec_tokens)?;
+                stats.mtp_calls += 1;
+                stats.drafts_attempted += drafts.len() as u32;
+                drafts
+            } else {
+                let mut drafts: Vec<i32> = Vec::with_capacity(spec_tokens);
+                let first = self.draft(carry_tok, &hidden_cur, processed_pos)?;
+                drafts.push(first);
                 stats.mtp_calls += 1;
                 stats.drafts_attempted += 1;
                 copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
-            }
+                for j in 1..spec_tokens {
+                    let d =
+                        self.draft(drafts[j - 1], &recursive_hidden, processed_pos + j as u32)?;
+                    drafts.push(d);
+                    stats.mtp_calls += 1;
+                    stats.drafts_attempted += 1;
+                    copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+                }
+                drafts
+            };
 
             if let Some(trace) = draft_trace.as_mut() {
                 (*trace).push(drafts.clone());

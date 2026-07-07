@@ -1231,6 +1231,12 @@ per-draft sync and shared LM-head costs; D7/N8 replay-current reaches `32.6 t/s`
 recursive drafter: `17.1 t/s` (`0.716x`) at only `~4.1 emitted/step`, far below
 the N16 cost model. Active branch: D7/N8-specific GPU-resident recursive drafting
 and draft LM-head reduction; keep D15/N16 as an oracle/asset-watch row only.
+v0.505 closes the pure orchestration part of that branch: chaining all D7 draft
+slots into one command buffer is correct but moves the 27B code prompt only
+`1.153x -> 1.162x` while replay-current remains `1.362x`. Therefore per-depth
+wait/readback/command-buffer overhead is not the main remaining D7 draft tax;
+force the next branch through a body-vs-LM-head ablation using recorded draft ids
+before building a draft-only head.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
@@ -3151,31 +3157,36 @@ What the latest analysis says:
 - v0.504 runs real recursive acceptance: D7/N8 wins on the 27B code prompt
   (`1.153x`, `~4.0 emitted/step`) and replay-current reaches `1.362x` with zero
   draft calls; D15/N16 loses (`0.716x`) because emitted/step is only `~4.1`.
+- v0.505 shows single-command-buffer D7 drafting is only a thin win (`1.162x`),
+  so command submission/readback is not the major remaining D7 draft tax.
 
 Highest-EV speculative kernel targets:
 
-1. Build D7/N8-specific GPU-resident recursive drafting: one command chain for the
-   seven MTP slots, no per-depth CPU readback/wait, and GPU-side draft id handoff.
-2. Reduce D7 draft LM-head cost with a greedy fused lm_head+argmax or draft-only
-   low-bit/top-k head. Treat this as coupled with single-CB drafting, not a later
-   polish step.
+1. Add a D7 draft body-vs-LM-head ablation using recorded draft ids. Only build a
+   draft-only/fused LM-head path if skipping LM-head recovers most of the
+   current-vs-replay gap without changing acceptance.
+2. Add per-depth target-rank tracing at D7 mismatches. If target argmax is often
+   in draft top-k, investigate rerank/correction; if not, current one-head MTP
+   quality is the acceptance ceiling.
 3. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.
-4. Build bucket policy around supported packet shapes; prefer padding/rollback to
+4. Reduce D7 draft LM-head cost with a greedy fused lm_head+argmax or draft-only
+   low-bit/top-k head only after the ablation clears.
+5. Build bucket policy around supported packet shapes; prefer padding/rollback to
    arbitrary ragged N unless bucketed verification fails a correctness or waste
    gate.
-5. Pack the remaining target-verify GDN work, or build compact GDN tape/capture,
+6. Pack the remaining target-verify GDN work, or build compact GDN tape/capture,
    measured on N8/N16 fast buckets rather than ragged shapes.
-6. Target packed-verify multi-query attention so consecutive verify queries share
+7. Target packed-verify multi-query attention so consecutive verify queries share
    KV reads; prioritize this over more small-N mat-mat retunes.
-7. Pack verify rope/scatter and coalesce/concurrently issue independent verify
+8. Pack verify rope/scatter and coalesce/concurrently issue independent verify
    phases only where phase traces show the same debt.
-8. DFlash two-range attention reading ctx-cache and noise directly, without
+9. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-9. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+10. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
    `attn-intra` at both 8K and 32K.
-10. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+11. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
    show N16 mat-mat-heavy surfaces remain material after the attention fixes.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4

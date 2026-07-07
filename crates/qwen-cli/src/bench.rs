@@ -1316,6 +1316,9 @@ struct MtpArgs {
     /// accept window.
     #[arg(long)]
     mtp_physical_n: Option<usize>,
+    /// Chain all recursive MTP draft slots into one command buffer.
+    #[arg(long)]
+    mtp_single_cb_draft: bool,
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
@@ -9436,6 +9439,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec_tokens,
         mtp_probe,
         mtp_physical_n,
+        mtp_single_cb_draft,
         tokens,
         stop_tokens,
         no_warmup,
@@ -9489,7 +9493,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9503,6 +9507,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec_tokens,
         mtp_probe,
         planned_verify_n,
+        mtp_single_cb_draft,
         prompt_ids.len(),
         tokens,
         stops,
@@ -9601,7 +9606,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 let mut layer_scratch =
                     MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, planned_verify_n as u32)
                         .context("mtp packed layer scratch")?;
-                spec.decode_packed_n(
+                spec.decode_packed_n_recording(
                     &prompt_ids,
                     tokens,
                     &stops,
@@ -9609,6 +9614,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     spec_tokens,
                     &mut verify_scratch,
                     &mut layer_scratch,
+                    None,
+                    mtp_single_cb_draft,
                 )
                 .context("spec decode packed-n")?
             }
@@ -9636,6 +9643,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     &mut verify_scratch,
                     &mut layer_scratch,
                     Some(&mut draft_trace),
+                    mtp_single_cb_draft,
                 )
                 .context("spec decode packed-n recording")?;
             let recorded_emitted = recorded.tokens.len() - prompt_ids.len();

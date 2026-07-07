@@ -290,6 +290,16 @@ pub enum RecordedMtpWork {
     BridgeOnly,
 }
 
+#[derive(Clone, Debug)]
+pub struct MtpRankRow {
+    pub step: usize,
+    pub depth: usize,
+    pub rank: usize,
+    pub accepted: bool,
+    pub draft_tok: i32,
+    pub target_tok: i32,
+}
+
 fn copy_f32_tensor(src: &MetalTensor, dst: &MetalTensor) -> Result<(), MtpError> {
     if src.dtype != GgmlType::F32 || dst.dtype != GgmlType::F32 {
         return Err(MtpError::Metal(MetalError::BadShape {
@@ -1402,6 +1412,7 @@ impl<'a> SpeculativeDecoder<'a> {
             verify_scratch,
             layer_scratch,
             None,
+            None,
             false,
         )
     }
@@ -1416,6 +1427,7 @@ impl<'a> SpeculativeDecoder<'a> {
         verify_scratch: &mut MetalDFlashVerifyScratch,
         layer_scratch: &mut MetalDFlashLayerMajorScratch,
         mut draft_trace: Option<&mut Vec<RecordedDraftStep>>,
+        mut rank_rows: Option<&mut Vec<MtpRankRow>>,
         single_cb_draft: bool,
     ) -> Result<DecodeOutput, MtpError> {
         if !(2..=15).contains(&spec_tokens) {
@@ -1520,7 +1532,35 @@ impl<'a> SpeculativeDecoder<'a> {
 
             // Draft chain. First slot uses exact base hidden. Subsequent slots
             // recursively consume the previous MTP hidden as an approximation.
-            let drafts: Vec<i32> = if single_cb_draft {
+            let mut draft_logits: Vec<Vec<f32>> = Vec::new();
+            let drafts: Vec<i32> = if rank_rows.is_some() {
+                let mut drafts: Vec<i32> = Vec::with_capacity(spec_tokens);
+                let first = self.draft_inner(
+                    carry_tok,
+                    &hidden_cur,
+                    processed_pos,
+                    DraftReadback::FullLogits,
+                )?;
+                drafts.push(first.argmax.expect("draft argmax missing"));
+                draft_logits.push(first.logits.expect("draft logits missing"));
+                stats.mtp_calls += 1;
+                stats.drafts_attempted += 1;
+                copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+                for j in 1..spec_tokens {
+                    let result = self.draft_inner(
+                        drafts[j - 1],
+                        &recursive_hidden,
+                        processed_pos + j as u32,
+                        DraftReadback::FullLogits,
+                    )?;
+                    drafts.push(result.argmax.expect("draft argmax missing"));
+                    draft_logits.push(result.logits.expect("draft logits missing"));
+                    stats.mtp_calls += 1;
+                    stats.drafts_attempted += 1;
+                    copy_f32_tensor(&self.mtp_session.x, &recursive_hidden)?;
+                }
+                drafts
+            } else if single_cb_draft {
                 let drafts =
                     self.draft_chain_single_cb(carry_tok, &hidden_cur, processed_pos, spec_tokens)?;
                 stats.mtp_calls += 1;
@@ -1571,6 +1611,27 @@ impl<'a> SpeculativeDecoder<'a> {
                 None,
             )?;
             stats.base_forward_calls += 1;
+
+            if let Some(rows) = rank_rows.as_mut() {
+                for (j, logits) in draft_logits.iter().enumerate() {
+                    let target_tok = verify_argmax[j];
+                    let target_idx = target_tok as usize;
+                    let target_logit = logits[target_idx];
+                    let rank = 1 + logits.iter().filter(|&&x| x > target_logit).count();
+                    let accepted = drafts[j] == target_tok;
+                    (*rows).push(MtpRankRow {
+                        step: stats.steps as usize,
+                        depth: j,
+                        rank,
+                        accepted,
+                        draft_tok: drafts[j],
+                        target_tok,
+                    });
+                    if !accepted {
+                        break;
+                    }
+                }
+            }
 
             let mut n_accepted = 0usize;
             let mut stop_now = false;

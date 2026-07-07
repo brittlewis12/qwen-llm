@@ -58,8 +58,8 @@ use qwen_llm::{
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{
-        DecodeOutput, MetalMtpHead, MetalMtpSession, PackedDraftPlan, RecordedDraftStep,
-        RecordedMtpWork, SpeculativeDecoder,
+        DecodeOutput, MetalMtpHead, MetalMtpSession, MtpRankRow, PackedDraftPlan,
+        RecordedDraftStep, RecordedMtpWork, SpeculativeDecoder,
     },
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
@@ -1322,6 +1322,10 @@ struct MtpArgs {
     /// Chain all recursive MTP draft slots into one command buffer.
     #[arg(long)]
     mtp_single_cb_draft: bool,
+    /// Write MTP target-rank rows as JSONL. This forces full draft-logit
+    /// readback and is diagnostic-only, not a timing path.
+    #[arg(long)]
+    mtp_rank_topk: Option<PathBuf>,
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
@@ -9447,6 +9451,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_probe,
         mtp_physical_n,
         mtp_single_cb_draft,
+        mtp_rank_topk,
         tokens,
         stop_tokens,
         no_warmup,
@@ -9463,6 +9468,14 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     }
     if mtp_physical_n.is_some() && spec_tokens == 1 {
         anyhow::bail!("--mtp-physical-n requires --spec-tokens 2 or higher");
+    }
+    if mtp_rank_topk.is_some() {
+        if spec_tokens == 1 {
+            anyhow::bail!("--mtp-rank-topk requires --spec-tokens 2 or higher");
+        }
+        if mtp_probe != MtpProbeMode::Normal {
+            anyhow::bail!("--mtp-rank-topk is only supported with --mtp-probe normal");
+        }
     }
     let planned_verify_n = mtp_physical_n.unwrap_or(spec_tokens + 1);
     if spec_tokens >= 2 {
@@ -9628,6 +9641,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             .with_context(|| format!("spec decode packed-n {label}"))
         };
 
+    let mut mtp_rank_rows: Vec<MtpRankRow> = Vec::new();
     let result = match mtp_probe {
         MtpProbeMode::Normal => {
             let mtp_session =
@@ -9653,6 +9667,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     &mut verify_scratch,
                     &mut layer_scratch,
                     None,
+                    mtp_rank_topk.as_ref().map(|_| &mut mtp_rank_rows),
                     mtp_single_cb_draft,
                 )
                 .context("spec decode packed-n")?
@@ -9681,6 +9696,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     &mut verify_scratch,
                     &mut layer_scratch,
                     Some(&mut draft_trace),
+                    None,
                     mtp_single_cb_draft,
                 )
                 .context("spec decode packed-n recording")?;
@@ -9710,6 +9726,53 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             }
         }
     };
+
+    if let Some(rank_path) = &mtp_rank_topk {
+        if let Some(dir) = rank_path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut out = String::new();
+        for row in &mtp_rank_rows {
+            out.push_str(&format!(
+                "{{\"step\":{},\"depth\":{},\"rank\":{},\"accepted\":{},\"draft_tok\":{},\"target_tok\":{}}}\n",
+                row.step, row.depth, row.rank, row.accepted, row.draft_tok, row.target_tok
+            ));
+        }
+        std::fs::write(rank_path, out)?;
+        eprintln!(
+            "[mtp-bench] MTP rank rows: {} -> {}",
+            mtp_rank_rows.len(),
+            rank_path.display()
+        );
+        eprintln!("[mtp-bench] depth\tn\tp1\tp2\tp4\tp8\tp16\tmean_rank\tmax_rank");
+        let max_depth = mtp_rank_rows.iter().map(|r| r.depth).max().unwrap_or(0);
+        for depth in 0..=max_depth {
+            let ranks: Vec<usize> = mtp_rank_rows
+                .iter()
+                .filter(|r| r.depth == depth)
+                .map(|r| r.rank)
+                .collect();
+            if ranks.is_empty() {
+                continue;
+            }
+            let n = ranks.len() as f64;
+            let pk = |k: usize| ranks.iter().filter(|&&r| r <= k).count() as f64 / n;
+            let mean = ranks.iter().sum::<usize>() as f64 / n;
+            let max_rank = ranks.iter().copied().max().unwrap_or(0);
+            eprintln!(
+                "[mtp-bench] {depth}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.1}\t{}",
+                ranks.len(),
+                pk(1),
+                pk(2),
+                pk(4),
+                pk(8),
+                pk(16),
+                mean,
+                max_rank
+            );
+        }
+    }
+
     let spec_emitted = result.tokens.len() - prompt_ids.len();
     let spec_total_ms = result.stats.wall_ms;
     let spec_decode_tps = spec_emitted as f64 / (spec_total_ms / 1000.0);

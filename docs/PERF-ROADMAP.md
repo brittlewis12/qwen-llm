@@ -1247,6 +1247,14 @@ oracle and the external MTPLX `~65-80 t/s` signal. Therefore exact fused
 `lm_head+argmax` is not the next strategic branch unless a microbench proves a
 large whole-run gain; prioritize acceptance/rank tracing and N8/N16 verify
 phase debt, with draft-only low-bit/top-k head gated on acceptance.
+v0.507 adds that rank trace. On the 27B D7/N8 code prompt, terminal mismatches
+still contain the target token in the draft top-2 for `14/28` rows, top-4 for
+`19/28`, top-8 for `24/28`, and top-16 for `26/28`. This reopens reranking and
+tree-rescue as plausible acceptance levers, but only behind an online-policy
+gate: top-k containment is hindsight unless draft-side features can choose the
+non-top1 candidate before target verification. Next branch is top-k logit/id
+capture plus offline policy simulation; do not build tree verify or low-bit
+draft head before that simulator clears.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
@@ -3173,12 +3181,16 @@ What the latest analysis says:
   bridge-only reaches `32.1 t/s` against normal single-CB `27.7 t/s`. Draft
   `lm_head+argmax` is the largest draft-side cost, recursive body is smaller,
   and bridges are closed; the global gap is now acceptance plus verify ceiling.
+- v0.507 rank tracing shows D7/N8 terminal mismatches are often near misses:
+  target is in draft top-2 for `50%`, top-4 for `67.9%`, top-8 for `85.7%`, and
+  top-16 for `92.9%` of terminal mismatches on the 27B code prompt.
 
 Highest-EV speculative kernel targets:
 
-1. Add per-depth target-rank tracing at D7 mismatches. If target argmax is often
-   in draft top-k, investigate rerank/correction; if not, current one-head MTP
-   quality is the acceptance ceiling.
+1. Extend MTP rank tracing to capture draft top-k ids/logits, margin, and depth,
+   then run an offline policy simulator. Only pursue online rerank/correction if
+   draft-side features can raise emitted/step from `~4.0` to `>=5.2` on held-out
+   traces without target hindsight.
 2. Run N8/N16 verify phase splits and no-op probes to choose between GDN
    tape/capture, packed q_len attention, and remaining target-verify memory debt.
 3. Prototype a draft-only low-bit/top-k LM-head only if rank tracing says the

@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.507 MTP Rank Trace Reopens Reranking
+
+Status: bench diagnostic + roadmap update. Adds target-rank tracing for native
+MTP so acceptance misses can be separated into "draft distribution is wrong" vs
+"draft distribution contains target but top-1 selection is wrong."
+
+THE CHANGE: `qwen-bench mtp --mtp-rank-topk <path>` runs the normal packed MTP
+path with full draft-logit readback for the accepted path plus terminal mismatch.
+It writes compact JSONL rows with `step`, `depth`, `rank`, `accepted`,
+`draft_tok`, and `target_tok`, then prints per-depth `p(rank <= k)` summaries.
+The option is diagnostic-only and forces per-draft full-logit readback; it is not
+a timing path.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- 0.8B MTP smoke, D3/N8, 8 tokens: rank JSONL emitted and equivalence PASS.
+- 27B MTP code prompt, D7/N8, 128 tokens, `--no-warmup`, AC power: rank JSONL
+  emitted and equivalence PASS. Because full logits are read back, throughput is
+  diagnostic (`27.5 t/s`) rather than the optimized single-CB path.
+
+27B D7/N8 rank signal:
+- `124` walked-path rows: `96` accepted and `28` terminal mismatches.
+- All rows by depth: d0 `p1=.906 p2=1.000`; d1 `p1=.793 p2=.931 p4=1.000`;
+  d2 `p1=.696 p2=.826 p4=.913 p8=1.000`; d3 `p1=.812 p2=.875 p8=.938`;
+  d4 `p1=.462 p2=.692 p8=.846 p16=.923`; d5 `p1=.833 p4=1.000`; d6
+  `p1=.800 p16=.800`.
+- Terminal mismatches only: target token is in draft top-2 for `14/28` (`50%`),
+  top-4 for `19/28` (`67.9%`), top-8 for `24/28` (`85.7%`), and top-16 for
+  `26/28` (`92.9%`).
+
+READ: the current one-head recursive MTP often ranks the target token very near
+top-1 at the first mismatch. This makes rerank/correction/tree rescue plausible,
+but only as a policy problem: the target token is known only after verify. The
+next gate is therefore not a tree verifier or draft-head kernel; it is a top-k
+trace + offline simulator that uses only draft-side features to ask whether an
+online policy can raise emitted/step from `~4.0` toward `>=5.2` on held-out
+traces. If no such policy exists, the top-k containment is hindsight-only.
+
 ## 2026-07-07 - v0.506 MTP Draft Tax Is Mostly Shared LM-Head
 
 Status: bench diagnostic + prioritization update. Adds recorded-id MTP probes to

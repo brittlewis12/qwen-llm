@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.509 Token-Embedding Draft Head Is a Hard Kill
+
+Status: bench falsifier. Tests the cheapest MTPLX-inspired draft-head clue: use
+the resident Q4_K `token_embd.weight` as the MTP draft LM head instead of the
+Q6_K `output.weight`, without changing target verify.
+
+THE CHANGE: `qwen-bench mtp --mtp-draft-token-embd-head` substitutes
+`token_embd.weight` only for MTP draft logits. Target packed verify remains
+authoritative, so greedy equivalence is still the correctness gate.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- 0.8B MTP smoke, D3/N8, 8 tokens: equivalence PASS.
+- 27B MTP code prompt, D7/N8, 128 tokens, `--no-warmup`, AC power:
+  - control: `4600.3 ms`, `27.8 t/s`, alpha `0.429`, accepted `96`, steps `32`,
+    equivalence PASS.
+  - token-embedding draft head: `23998.2 ms`, `5.3 t/s`, alpha `0.000`, accepted
+    `0`, steps `127`, equivalence PASS.
+
+READ: the no-asset Q4 alias trick is semantically wrong for Qwen3.6 27B MTP.
+This kills only `token_embd` as a draft-head substitute; it does not kill a
+proper low-bit copy of `output.weight`, which is what MTPLX profiles require.
+Given v0.508, keep that proper low-bit draft-head branch behind either a usable
+selection policy or a bounded speed-cleanup gate; do not revisit the embedding
+alias.
+
 ## 2026-07-07 - v0.508 Simple MTP Rerank Is Not Enough
 
 Status: bench diagnostic + simulator. Extends the v0.507 rank trace with draft

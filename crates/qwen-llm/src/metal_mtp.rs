@@ -359,6 +359,7 @@ pub struct SpeculativeDecoder<'a> {
     pub base: &'a MetalForward<'a>,
     pub mtp_head: &'a MetalMtpHead,
     pub mtp_session: MetalMtpSession,
+    draft_token_embd_head: bool,
 }
 
 impl<'a> SpeculativeDecoder<'a> {
@@ -371,7 +372,12 @@ impl<'a> SpeculativeDecoder<'a> {
             base,
             mtp_head,
             mtp_session,
+            draft_token_embd_head: false,
         }
+    }
+
+    pub fn set_draft_token_embd_head(&mut self, enabled: bool) {
+        self.draft_token_embd_head = enabled;
     }
 
     /// Draft a single token. The MTP head at slot `position` consumes
@@ -621,12 +627,17 @@ impl<'a> SpeculativeDecoder<'a> {
             RMS_EPS,
         )?;
 
-        // (12) lm_head: [H] → [V]. Reuses the base lm_head (shared per
-        // Qwen3.5/3.6 tying convention).
+        // (12) lm_head: [H] → [V]. Default reuses the base lm_head; bench
+        // probes can substitute token_embd as a cheap draft-only head.
+        let draft_lm_head = if self.draft_token_embd_head {
+            &self.base.model.token_embd
+        } else {
+            &self.base.model.lm_head
+        };
         encode_mat_vec_dispatch(
             ctx,
             &enc,
-            &self.base.model.lm_head,
+            draft_lm_head,
             &self.mtp_session.h,
             &self.mtp_session.logits,
             h,
@@ -826,10 +837,15 @@ impl<'a> SpeculativeDecoder<'a> {
             &self.mtp_session.h,
             RMS_EPS,
         )?;
+        let draft_lm_head = if self.draft_token_embd_head {
+            &self.base.model.token_embd
+        } else {
+            &self.base.model.lm_head
+        };
         encode_mat_vec_dispatch(
             ctx,
             enc,
-            &self.base.model.lm_head,
+            draft_lm_head,
             &self.mtp_session.h,
             &self.mtp_session.logits,
             h,

@@ -1322,6 +1322,10 @@ struct MtpArgs {
     /// Chain all recursive MTP draft slots into one command buffer.
     #[arg(long)]
     mtp_single_cb_draft: bool,
+    /// Use token_embd.weight as a cheap Q4 draft-only LM head. Bench falsifier;
+    /// target verify still uses the real output.weight.
+    #[arg(long)]
+    mtp_draft_token_embd_head: bool,
     /// Write MTP target-rank rows as JSONL. This forces full draft-logit
     /// readback and is diagnostic-only, not a timing path.
     #[arg(long)]
@@ -9451,6 +9455,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_probe,
         mtp_physical_n,
         mtp_single_cb_draft,
+        mtp_draft_token_embd_head,
         mtp_rank_topk,
         tokens,
         stop_tokens,
@@ -9513,7 +9518,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9528,6 +9533,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_probe,
         planned_verify_n,
         mtp_single_cb_draft,
+        mtp_draft_token_embd_head,
         prompt_ids.len(),
         tokens,
         stops,
@@ -9596,6 +9602,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
         let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
         let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+        spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
         let mut verify_scratch =
             MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                 .context("mtp packed verify scratch")?;
@@ -9621,6 +9628,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+            spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             let mut verify_scratch =
                 MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                     .context("mtp packed verify scratch")?;
@@ -9648,6 +9656,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+            spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             if spec_tokens == 1 {
                 spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
                     .context("spec decode")?
@@ -9679,6 +9688,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+            spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             let mut verify_scratch =
                 MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                     .context("mtp packed verify scratch")?;

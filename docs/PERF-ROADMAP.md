@@ -1262,6 +1262,11 @@ one-token terminal rescue only reaches `4.812` emitted/step at top-16 versus the
 now either real alternate continuation/tree economics, a stronger learned or
 engineered corrector, a better MTP policy/asset, or an MTPLX measurement/reporting
 difference; inspect MTPLX before building tree machinery.
+v0.509 tests the cheapest draft-head clue from MTPLX and kills it: using resident
+Q4_K `token_embd.weight` as the draft LM head preserves target equivalence but
+collapses 27B D7/N8 acceptance to `0/127` (`5.3 t/s`). This only kills the
+embedding-alias shortcut; a proper low-bit copy of `output.weight` remains a
+separate, bounded cleanup idea.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
@@ -3194,6 +3199,8 @@ What the latest analysis says:
 - v0.508 closes simple rerank: best margin-swap policy is only `4.031`
   emitted/step and oracle one-token top-16 terminal rescue is only `4.812`, short
   of the `>=5.2` gate.
+- v0.509 kills `token_embd.weight` as a no-asset Q4 draft-head substitute on 27B:
+  alpha drops to `0.000` and the row falls to `5.3 t/s`.
 
 Highest-EV speculative kernel targets:
 
@@ -3206,9 +3213,10 @@ Highest-EV speculative kernel targets:
    `>=9` interesting, `>=11` viable. Require stability across prompts.
 3. Run N8/N16 verify phase splits and no-op probes to choose between GDN
    tape/capture, packed q_len attention, and remaining target-verify memory debt.
-4. Prototype a draft-only low-bit/top-k LM-head only after a deployable selection
-   policy exists. Gate on `>=8-10%` whole-run gain and `<=5%` relative acceptance
-   loss.
+4. Prototype a proper low-bit copy of `output.weight` only after a deployable
+   selection policy exists or as a bounded draft-side cleanup. Do not use
+   `token_embd.weight`; v0.509 killed that alias. Gate on `>=8-10%` whole-run
+   gain and `<=5%` relative acceptance loss.
 5. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.

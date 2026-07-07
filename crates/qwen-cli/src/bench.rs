@@ -57,7 +57,10 @@ use qwen_llm::{
         MetalBlock, MetalForward, MetalModel, MetalMoeFfn, MetalSession, MoeRouteReplayRow, RMS_EPS,
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
-    metal_mtp::{DecodeOutput, MetalMtpHead, MetalMtpSession, PackedDraftPlan, SpeculativeDecoder},
+    metal_mtp::{
+        DecodeOutput, MetalMtpHead, MetalMtpSession, PackedDraftPlan, RecordedDraftStep,
+        RecordedMtpWork, SpeculativeDecoder,
+    },
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
@@ -1340,6 +1343,10 @@ enum MtpProbeMode {
     Normal,
     /// Record current MTP draft vectors, then replay them without draft calls.
     ReplayCurrent,
+    /// Replay recorded ids while running recursive MTP bodies without lm_head.
+    BodyNoLmHead,
+    /// Replay recorded ids while only maintaining MTP KV bridges.
+    BridgeOnly,
     /// Use the no-spec greedy stream as a perfect draft oracle.
     Oracle,
 }
@@ -9562,8 +9569,13 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let ref_generated_vec: Vec<i32> = ref_tokens[prompt_ids.len()..].to_vec();
 
     // ----- MTP=on: speculative decode -----
-    if spec_tokens == 1 && mtp_probe == MtpProbeMode::ReplayCurrent {
-        anyhow::bail!("--mtp-probe replay-current requires --spec-tokens 2 or 3");
+    if spec_tokens == 1
+        && matches!(
+            mtp_probe,
+            MtpProbeMode::ReplayCurrent | MtpProbeMode::BodyNoLmHead | MtpProbeMode::BridgeOnly
+        )
+    {
+        anyhow::bail!("recorded MTP probes require --spec-tokens 2..=15");
     }
 
     let run_planned = |plan: PackedDraftPlan<'_>, label: &str| -> Result<DecodeOutput> {
@@ -9589,6 +9601,32 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         )
         .with_context(|| format!("spec decode packed-n {label}"))
     };
+
+    let run_recorded_work =
+        |trace: &[RecordedDraftStep], work: RecordedMtpWork, label: &str| -> Result<DecodeOutput> {
+            let mtp_session =
+                MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
+            let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
+            let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
+            let mut verify_scratch =
+                MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
+                    .context("mtp packed verify scratch")?;
+            let mut layer_scratch =
+                MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, planned_verify_n as u32)
+                    .context("mtp packed layer scratch")?;
+            spec.decode_packed_n_recorded_mtp_work(
+                &prompt_ids,
+                tokens,
+                &stops,
+                &mut spec_session,
+                spec_tokens,
+                &mut verify_scratch,
+                &mut layer_scratch,
+                trace,
+                work,
+            )
+            .with_context(|| format!("spec decode packed-n {label}"))
+        };
 
     let result = match mtp_probe {
         MtpProbeMode::Normal => {
@@ -9621,7 +9659,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             }
         }
         MtpProbeMode::Oracle => run_planned(PackedDraftPlan::Oracle(&ref_generated_vec), "oracle")?,
-        MtpProbeMode::ReplayCurrent => {
+        MtpProbeMode::ReplayCurrent | MtpProbeMode::BodyNoLmHead | MtpProbeMode::BridgeOnly => {
             let mtp_session =
                 MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
@@ -9656,7 +9694,20 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 recorded.stats.steps,
                 draft_trace.len(),
             );
-            run_planned(PackedDraftPlan::Recorded(&draft_trace), "replay-current")?
+            match mtp_probe {
+                MtpProbeMode::ReplayCurrent => {
+                    run_planned(PackedDraftPlan::Recorded(&draft_trace), "replay-current")?
+                }
+                MtpProbeMode::BodyNoLmHead => run_recorded_work(
+                    &draft_trace,
+                    RecordedMtpWork::BodyNoLmHead,
+                    "body-no-lm-head",
+                )?,
+                MtpProbeMode::BridgeOnly => {
+                    run_recorded_work(&draft_trace, RecordedMtpWork::BridgeOnly, "bridge-only")?
+                }
+                MtpProbeMode::Normal | MtpProbeMode::Oracle => unreachable!(),
+            }
         }
     };
     let spec_emitted = result.tokens.len() - prompt_ids.len();

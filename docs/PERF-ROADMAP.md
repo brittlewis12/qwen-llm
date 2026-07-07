@@ -1237,6 +1237,16 @@ slots into one command buffer is correct but moves the 27B code prompt only
 wait/readback/command-buffer overhead is not the main remaining D7 draft tax;
 force the next branch through a body-vs-LM-head ablation using recorded draft ids
 before building a draft-only head.
+v0.506 runs that ablation. On the 27B code prompt, D7/N8 body-no-lm-head reaches
+`31.1 t/s` and bridge-only reaches `32.1 t/s` versus normal single-CB `27.7 t/s`
+in the same probe family; all rows preserve greedy equivalence. This says draft
+`lm_head+argmax` dominates the remaining draft-side tax, recursive body is much
+smaller, and bridges/KV repair are not worth optimizing. But deleting draft head
+entirely still only reaches the low-30s t/s, far below the `52.0 t/s` D7/N8
+oracle and the external MTPLX `~65-80 t/s` signal. Therefore exact fused
+`lm_head+argmax` is not the next strategic branch unless a microbench proves a
+large whole-run gain; prioritize acceptance/rank tracing and N8/N16 verify
+phase debt, with draft-only low-bit/top-k head gated on acceptance.
 v0.390 then demotes exact route from the main branch: A3B/A10B route replay still
 repeats (`1.01/1.34 ms`), but
 production already fuses the high-value topk/shared half and the only remaining
@@ -3159,34 +3169,40 @@ What the latest analysis says:
   draft calls; D15/N16 loses (`0.716x`) because emitted/step is only `~4.1`.
 - v0.505 shows single-command-buffer D7 drafting is only a thin win (`1.162x`),
   so command submission/readback is not the major remaining D7 draft tax.
+- v0.506 ablates draft-side work: body-no-lm-head reaches `31.1 t/s` and
+  bridge-only reaches `32.1 t/s` against normal single-CB `27.7 t/s`. Draft
+  `lm_head+argmax` is the largest draft-side cost, recursive body is smaller,
+  and bridges are closed; the global gap is now acceptance plus verify ceiling.
 
 Highest-EV speculative kernel targets:
 
-1. Add a D7 draft body-vs-LM-head ablation using recorded draft ids. Only build a
-   draft-only/fused LM-head path if skipping LM-head recovers most of the
-   current-vs-replay gap without changing acceptance.
-2. Add per-depth target-rank tracing at D7 mismatches. If target argmax is often
+1. Add per-depth target-rank tracing at D7 mismatches. If target argmax is often
    in draft top-k, investigate rerank/correction; if not, current one-head MTP
    quality is the acceptance ceiling.
-3. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
+2. Run N8/N16 verify phase splits and no-op probes to choose between GDN
+   tape/capture, packed q_len attention, and remaining target-verify memory debt.
+3. Prototype a draft-only low-bit/top-k LM-head only if rank tracing says the
+   current target token stays near the draft distribution. Gate on `>=8-10%`
+   whole-run gain and `<=5%` relative acceptance loss.
+4. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.
-4. Reduce D7 draft LM-head cost with a greedy fused lm_head+argmax or draft-only
-   low-bit/top-k head only after the ablation clears.
-5. Build bucket policy around supported packet shapes; prefer padding/rollback to
+5. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
+   draft-head microbench shows `>=25%` phase recovery or D7/N8 improves `>=5%`.
+6. Build bucket policy around supported packet shapes; prefer padding/rollback to
    arbitrary ragged N unless bucketed verification fails a correctness or waste
    gate.
-6. Pack the remaining target-verify GDN work, or build compact GDN tape/capture,
+7. Pack the remaining target-verify GDN work, or build compact GDN tape/capture,
    measured on N8/N16 fast buckets rather than ragged shapes.
-7. Target packed-verify multi-query attention so consecutive verify queries share
+8. Target packed-verify multi-query attention so consecutive verify queries share
    KV reads; prioritize this over more small-N mat-mat retunes.
-8. Pack verify rope/scatter and coalesce/concurrently issue independent verify
+9. Pack verify rope/scatter and coalesce/concurrently issue independent verify
    phases only where phase traces show the same debt.
-9. DFlash two-range attention reading ctx-cache and noise directly, without
+10. DFlash two-range attention reading ctx-cache and noise directly, without
    `k_full` / `v_full` materialization.
-10. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+11. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
    `attn-intra` at both 8K and 32K.
-11. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+12. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
    show N16 mat-mat-heavy surfaces remain material after the attention fixes.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4

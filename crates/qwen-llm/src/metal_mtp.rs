@@ -270,9 +270,24 @@ struct DraftResult {
 #[derive(Clone, Copy, Debug)]
 pub enum PackedDraftPlan<'a> {
     /// Replay draft token vectors recorded from the native MTP drafter.
-    Recorded(&'a [Vec<i32>]),
+    Recorded(&'a [RecordedDraftStep]),
     /// Use the no-spec greedy target stream as a perfect draft oracle.
     Oracle(&'a [i32]),
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordedDraftStep {
+    pub carry_tok: i32,
+    pub start_position: u32,
+    pub drafts: Vec<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordedMtpWork {
+    /// Run recursive MTP bodies with recorded ids, but skip draft lm_head/argmax.
+    BodyNoLmHead,
+    /// Only maintain canonical MTP KV for the carry/accepted-prefix bridges.
+    BridgeOnly,
 }
 
 fn copy_f32_tensor(src: &MetalTensor, dst: &MetalTensor) -> Result<(), MtpError> {
@@ -635,6 +650,7 @@ impl<'a> SpeculativeDecoder<'a> {
         id_tensor: &MetalTensor,
         prev_hidden: &MetalTensor,
         position: u32,
+        emit_head: bool,
     ) -> Result<(), MtpError> {
         let arch = &self.base.model.arch;
         let ctx = self.base.ctx;
@@ -762,6 +778,9 @@ impl<'a> SpeculativeDecoder<'a> {
             h,
         )?;
         encode_add_inplace_f32(ctx, enc, &self.mtp_session.x, &self.mtp_session.ffn_out)?;
+        if !emit_head {
+            return Ok(());
+        }
         encode_rms_norm_mul_f32(
             ctx,
             enc,
@@ -849,6 +868,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 &id_tensor,
                 &hidden_tensor,
                 start_position + j as u32,
+                true,
             )?;
             enc.end();
 
@@ -874,6 +894,87 @@ impl<'a> SpeculativeDecoder<'a> {
             std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n_drafts);
         }
         Ok(out)
+    }
+
+    fn draft_chain_recorded_body_only(
+        &mut self,
+        carry_tok: i32,
+        drafts: &[i32],
+        prev_hidden: &MetalTensor,
+        start_position: u32,
+    ) -> Result<(), MtpError> {
+        let arch = &self.base.model.arch;
+        if !(1..=15).contains(&drafts.len()) {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_draft_chain_recorded_body_only",
+                detail: format!("n_drafts={} must be in [1, 15]", drafts.len()),
+            }));
+        }
+        if carry_tok < 0 || (carry_tok as u32) >= arch.vocab_size {
+            return Err(MtpError::BadToken(carry_tok, arch.vocab_size));
+        }
+        for &tok in drafts {
+            if tok < 0 || (tok as u32) >= arch.vocab_size {
+                return Err(MtpError::BadToken(tok, arch.vocab_size));
+            }
+        }
+        if self.mtp_session.kv_n_pos as u32 != start_position {
+            return Err(MtpError::KvPositionMismatch {
+                position: start_position,
+                kv_n_pos: self.mtp_session.kv_n_pos,
+            });
+        }
+        let h = arch.hidden_size as usize;
+        if prev_hidden.n_elements() != h as u64 {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_draft_chain_recorded_body_only.prev_hidden",
+                detail: format!(
+                    "prev_hidden.n_elements()={} != hidden_size={}",
+                    prev_hidden.n_elements(),
+                    h,
+                ),
+            }));
+        }
+
+        unsafe {
+            let ids_ptr = self.mtp_session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ids_ptr = carry_tok;
+            let draft_ptr = (self.mtp_session.draft_ids.buffer.contents().as_ptr() as *mut u8)
+                .add(self.mtp_session.draft_ids.offset as usize)
+                as *mut i32;
+            std::ptr::copy_nonoverlapping(drafts.as_ptr(), draft_ptr, drafts.len());
+        }
+
+        let ctx = self.base.ctx;
+        let cmd = ctx.queue.commandBuffer().expect("cmd buf");
+        for j in 0..drafts.len() {
+            let id_tensor = if j == 0 {
+                self.mtp_session.ids_buf.clone()
+            } else {
+                self.mtp_session
+                    .draft_ids
+                    .view_subrange((j - 1) as u64, vec![1])
+            };
+            let hidden_tensor = if j == 0 {
+                prev_hidden.clone()
+            } else {
+                self.mtp_session.x.clone()
+            };
+            let enc = KernelEncoder::begin(&cmd);
+            self.encode_mtp_draft_step(
+                &enc,
+                &id_tensor,
+                &hidden_tensor,
+                start_position + j as u32,
+                false,
+            )?;
+            enc.end();
+        }
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        self.mtp_session.kv_n_pos = start_position as usize + drafts.len();
+        Ok(())
     }
 
     /// MTP-specific attn step. Mirrors `MetalForward::encode_attn` but
@@ -1314,7 +1415,7 @@ impl<'a> SpeculativeDecoder<'a> {
         spec_tokens: usize,
         verify_scratch: &mut MetalDFlashVerifyScratch,
         layer_scratch: &mut MetalDFlashLayerMajorScratch,
-        mut draft_trace: Option<&mut Vec<Vec<i32>>>,
+        mut draft_trace: Option<&mut Vec<RecordedDraftStep>>,
         single_cb_draft: bool,
     ) -> Result<DecodeOutput, MtpError> {
         if !(2..=15).contains(&spec_tokens) {
@@ -1444,7 +1545,11 @@ impl<'a> SpeculativeDecoder<'a> {
             };
 
             if let Some(trace) = draft_trace.as_mut() {
-                (*trace).push(drafts.clone());
+                (*trace).push(RecordedDraftStep {
+                    carry_tok,
+                    start_position,
+                    drafts: drafts.clone(),
+                });
             }
 
             let mut verify_input: Vec<i32> = Vec::with_capacity(physical_verify_n);
@@ -1514,6 +1619,229 @@ impl<'a> SpeculativeDecoder<'a> {
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
             stats.steps += 1;
+
+            if stop_now {
+                break 'outer;
+            }
+        }
+
+        Ok(DecodeOutput {
+            tokens,
+            stats: stats.into_finalized(t_start),
+        })
+    }
+
+    pub fn decode_packed_n_recorded_mtp_work(
+        &mut self,
+        prompt_ids: &[i32],
+        max_new_tokens: usize,
+        stop_tokens: &[i32],
+        base_session: &mut MetalSession,
+        spec_tokens: usize,
+        verify_scratch: &mut MetalDFlashVerifyScratch,
+        layer_scratch: &mut MetalDFlashLayerMajorScratch,
+        trace: &[RecordedDraftStep],
+        work: RecordedMtpWork,
+    ) -> Result<DecodeOutput, MtpError> {
+        if !(1..=15).contains(&spec_tokens) {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_recorded_mtp_work",
+                detail: format!("spec_tokens={spec_tokens} must be in [1, 15]"),
+            }));
+        }
+
+        let arch = &self.base.model.arch;
+        let h = arch.hidden_size as usize;
+        let t_start = std::time::Instant::now();
+        let mut stats = SpecStats::default();
+        let mut tokens: Vec<i32> = Vec::with_capacity(prompt_ids.len() + max_new_tokens);
+        tokens.extend_from_slice(prompt_ids);
+
+        if prompt_ids.is_empty() {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_recorded_mtp_work",
+                detail: "prompt_ids must be non-empty".into(),
+            }));
+        }
+        if max_new_tokens == 0 {
+            return Ok(DecodeOutput {
+                tokens,
+                stats: stats.into_finalized(t_start),
+            });
+        }
+
+        let logical_verify_n = spec_tokens + 1;
+        let physical_verify_n = verify_scratch.n as usize;
+        if physical_verify_n < logical_verify_n || layer_scratch.n as usize != physical_verify_n {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_recorded_mtp_work.scratch",
+                detail: format!(
+                    "scratch N mismatch: verify={} layer={} logical_min={logical_verify_n}",
+                    verify_scratch.n, layer_scratch.n
+                ),
+            }));
+        }
+        if verify_scratch.k_target_layers != 1 {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_recorded_mtp_work.scratch",
+                detail: format!(
+                    "verify_scratch.k_target_layers={} != 1",
+                    verify_scratch.k_target_layers
+                ),
+            }));
+        }
+
+        let hidden_cur = MetalTensor::zeros_f32(self.base.ctx, vec![h as u64])?;
+        let n_prompt = prompt_ids.len();
+        let mut next_bootstrap_tok: i32 = 0;
+
+        // Match the current native path's prompt-side MTP KV prefill so this
+        // probe prices decode work, not a different cache state.
+        for (i, &tid) in prompt_ids.iter().enumerate() {
+            next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
+                tid,
+                i as u32,
+                base_session,
+                &hidden_cur,
+            )?;
+            stats.base_forward_calls += 1;
+
+            if i + 1 < n_prompt {
+                self.draft_kv_only(prompt_ids[i + 1], &hidden_cur, i as u32)?;
+                stats.mtp_calls += 1;
+            }
+        }
+
+        let last_layer = [(self.base.model.blocks.len() - 1) as u32];
+        let mut emit_tok = next_bootstrap_tok;
+        let mut processed_pos = (n_prompt - 1) as u32;
+        let mut emitted_count: usize = 0;
+        let mut step_idx: usize = 0;
+
+        'outer: loop {
+            tokens.push(emit_tok);
+            emitted_count += 1;
+            if stop_tokens.contains(&emit_tok) || emitted_count >= max_new_tokens {
+                break;
+            }
+
+            let remaining = max_new_tokens.saturating_sub(emitted_count);
+            let n_draft = spec_tokens.min(remaining);
+            if n_draft == 0 {
+                break;
+            }
+            let physical_draft_slots = physical_verify_n - 1;
+            let carry_tok = emit_tok;
+            let start_position = processed_pos + 1;
+            let row = trace.get(step_idx).ok_or_else(|| {
+                MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_decode_packed_n_recorded_mtp_work.recorded",
+                    detail: format!("missing draft row for step {step_idx}"),
+                })
+            })?;
+            if row.carry_tok != carry_tok || row.start_position != start_position {
+                return Err(MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_decode_packed_n_recorded_mtp_work.recorded",
+                    detail: format!(
+                        "row {step_idx} alignment mismatch: carry {} vs {carry_tok}, \
+                         pos {} vs {start_position}",
+                        row.carry_tok, row.start_position,
+                    ),
+                }));
+            }
+            if row.drafts.len() < n_draft {
+                return Err(MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_decode_packed_n_recorded_mtp_work.recorded",
+                    detail: format!(
+                        "draft row {step_idx} len {} < needed {n_draft}",
+                        row.drafts.len()
+                    ),
+                }));
+            }
+            let drafts: Vec<i32> = row.drafts[..n_draft].to_vec();
+            stats.drafts_attempted += drafts.len() as u32;
+
+            match work {
+                RecordedMtpWork::BodyNoLmHead => {
+                    self.draft_chain_recorded_body_only(
+                        carry_tok,
+                        &drafts,
+                        &hidden_cur,
+                        processed_pos,
+                    )?;
+                    stats.mtp_calls += 1;
+                }
+                RecordedMtpWork::BridgeOnly => {
+                    self.draft_kv_only(carry_tok, &hidden_cur, processed_pos)?;
+                    stats.mtp_calls += 1;
+                }
+            }
+
+            let mut verify_input: Vec<i32> = Vec::with_capacity(physical_verify_n);
+            verify_input.push(carry_tok);
+            verify_input.extend_from_slice(&drafts);
+            for pad_j in drafts.len()..physical_draft_slots {
+                verify_input.push(row.drafts.get(pad_j).copied().unwrap_or(carry_tok));
+            }
+            let n_eff = physical_verify_n as u32;
+
+            let verify_argmax = encode_packed_verify_layer_major_inner(
+                self.base,
+                &last_layer,
+                &verify_input,
+                start_position,
+                verify_scratch,
+                layer_scratch,
+                base_session,
+                None,
+                Some(n_eff),
+            )?;
+            stats.base_forward_calls += 1;
+
+            let mut n_accepted = 0usize;
+            let mut stop_now = false;
+            for (j, &draft_tok) in drafts.iter().enumerate() {
+                if draft_tok != verify_argmax[j] {
+                    break;
+                }
+                stats.accepted += 1;
+                n_accepted += 1;
+                tokens.push(draft_tok);
+                emitted_count += 1;
+                if stop_tokens.contains(&draft_tok) || emitted_count >= max_new_tokens {
+                    stop_now = true;
+                    break;
+                }
+            }
+
+            let n_keep = (1 + n_accepted) as u32;
+            if n_keep < n_eff {
+                encode_restore_after_partial_accept_inner(
+                    self.base,
+                    verify_scratch,
+                    n_keep,
+                    start_position,
+                    base_session,
+                    Some(n_eff),
+                )?;
+            }
+
+            self.mtp_session.kv_n_pos = processed_pos as usize + 1;
+            #[allow(clippy::needless_range_loop)]
+            for j in 0..n_accepted {
+                let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
+                let bridge_position = processed_pos + 1 + j as u32;
+                self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                stats.mtp_calls += 1;
+            }
+
+            let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
+            copy_f32_tensor(&next_hidden, &hidden_cur)?;
+
+            processed_pos += 1 + n_accepted as u32;
+            emit_tok = verify_argmax[n_accepted];
+            stats.steps += 1;
+            step_idx += 1;
 
             if stop_now {
                 break 'outer;
@@ -1633,16 +1961,26 @@ impl<'a> SpeculativeDecoder<'a> {
                             detail: format!("missing draft row for step {step_idx}"),
                         })
                     })?;
-                    if row.len() < n_draft {
+                    if row.carry_tok != carry_tok || row.start_position != start_position {
+                        return Err(MtpError::Metal(MetalError::BadShape {
+                            kernel: "mtp_decode_packed_n_planned.recorded",
+                            detail: format!(
+                                "row {step_idx} alignment mismatch: \
+                                 carry {} vs {carry_tok}, pos {} vs {start_position}",
+                                row.carry_tok, row.start_position,
+                            ),
+                        }));
+                    }
+                    if row.drafts.len() < n_draft {
                         return Err(MtpError::Metal(MetalError::BadShape {
                             kernel: "mtp_decode_packed_n_planned.recorded",
                             detail: format!(
                                 "draft row {step_idx} len {} < needed {n_draft}",
-                                row.len()
+                                row.drafts.len()
                             ),
                         }));
                     }
-                    row[..n_draft].to_vec()
+                    row.drafts[..n_draft].to_vec()
                 }
                 PackedDraftPlan::Oracle(oracle) => {
                     if emitted_count + n_draft > oracle.len() {
@@ -1667,7 +2005,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 let pad_tok = match plan {
                     PackedDraftPlan::Recorded(trace) => trace
                         .get(step_idx)
-                        .and_then(|row| row.get(pad_j))
+                        .and_then(|row| row.drafts.get(pad_j))
                         .copied()
                         .unwrap_or(carry_tok),
                     PackedDraftPlan::Oracle(oracle) => oracle

@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.506 MTP Draft Tax Is Mostly Shared LM-Head
+
+Status: bench diagnostic + prioritization update. Adds recorded-id MTP probes to
+separate recursive draft-body cost, MTP KV bridge cost, and draft
+`lm_head+argmax` cost for the D7/N8 native MTP branch.
+
+THE CHANGE: `qwen-bench mtp --mtp-probe body-no-lm-head` records the current
+draft ids, reruns with normal MTP prompt KV, executes recursive MTP bodies using
+those recorded ids, skips draft `lm_head+argmax`, then runs the same packed
+target verify and accepted-prefix MTP bridges. `--mtp-probe bridge-only` keeps
+only carry/accepted-prefix MTP KV maintenance before the same recorded-id verify.
+Recorded rows now carry `carry_tok` and `start_position` so replay probes fail
+fast if trace alignment drifts.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- 0.8B MTP smoke, D3/N8, 8 tokens: body-no-lm-head and bridge-only equivalence
+  PASS.
+- 27B MTP code prompt, D7/N8, 128 tokens, `--no-warmup`, AC power, all
+  equivalence PASS:
+  - normal single-CB: `4613.9 ms`, `27.7 t/s`, `1.160x`, alpha `0.429`,
+    `mtp_calls=139`.
+  - body-no-lm-head: source `4586.8 ms` / `27.9 t/s`; replay probe
+    `4116.6 ms`, `31.1 t/s`, `1.301x`, alpha `0.436`, `mtp_calls=139`.
+  - bridge-only: source `4597.3 ms` / `27.8 t/s`; replay probe `3991.4 ms`,
+    `32.1 t/s`, `1.341x`, alpha `0.436`, `mtp_calls=139`.
+  - replay-current control in this batch was slower/noisier (`4155.2 ms`,
+    `30.8 t/s`) than the prior v0.504 row (`32.6 t/s`), so use the ablation
+    deltas directionally rather than as a final median packet.
+
+READ: inside the remaining draft-side tax, draft `lm_head+argmax` dominates:
+normal minus body-no-lm-head is about `497 ms / 32 steps ~= 15.5 ms/step`, while
+body-no-lm-head minus bridge-only is about `125 ms / 32 steps ~= 3.9 ms/step`.
+Bridge/KV repair is small and should stay closed. This does not make exact fused
+`lm_head+argmax` the top strategic branch: deleting draft head entirely only
+reaches low-30s t/s, while the D7/N8 oracle remains `52.0 t/s` and MTPLX reports
+`~65-80 t/s`. Next MTP work should measure acceptance/rank at D7 mismatches and
+only then try a draft-only low-bit/top-k head; exact fused argmax is a smaller
+store/reduction cleanup unless a microbench proves otherwise.
+
 ## 2026-07-07 - v0.505 Single-CB D7 Drafting Is Correct but Not the Big Lever
 
 Status: optional bench branch + falsifier. Implements the D7/N8 single-command

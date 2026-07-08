@@ -60,7 +60,7 @@ use qwen_llm::{
     metal_mtp::{
         DecodeOutput, MetalMtpHead, MetalMtpSession, MtpBaseHiddenVariant, MtpHistoryMode,
         MtpRankRow, MtpRecursiveHiddenVariant, PackedDraftPlan, RecordedDraftStep, RecordedMtpWork,
-        SpeculativeDecoder,
+        SpeculativeDecoder, quantize_lm_head_to_q4_0, quantize_lm_head_to_q4_1,
     },
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
@@ -1327,6 +1327,14 @@ struct MtpArgs {
     /// target verify still uses the real output.weight.
     #[arg(long)]
     mtp_draft_token_embd_head: bool,
+    /// Quantize output.weight to Q4_1 at setup and use it as draft-only lm_head.
+    /// Bench probe for MTPLX-style low-bit draft heads.
+    #[arg(long)]
+    mtp_draft_lm_head_q4_1: bool,
+    /// Quantize output.weight to Q4_0 at setup and use it as draft-only lm_head.
+    /// More aggressive bench probe for draft-head bandwidth/cost sensitivity.
+    #[arg(long)]
+    mtp_draft_lm_head_q4_0: bool,
     /// Recursive MTP hidden fed into the next draft slot.
     #[arg(long, value_enum, default_value_t = MtpRecursiveHiddenArg::PostNorm)]
     mtp_recursive_hidden: MtpRecursiveHiddenArg,
@@ -9520,6 +9528,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_physical_n,
         mtp_single_cb_draft,
         mtp_draft_token_embd_head,
+        mtp_draft_lm_head_q4_1,
+        mtp_draft_lm_head_q4_0,
         mtp_recursive_hidden,
         mtp_base_hidden,
         mtp_history,
@@ -9549,6 +9559,12 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         if mtp_probe != MtpProbeMode::Normal {
             anyhow::bail!("--mtp-rank-topk is only supported with --mtp-probe normal");
         }
+    }
+    let draft_lm_head_override_count = usize::from(mtp_draft_token_embd_head)
+        + usize::from(mtp_draft_lm_head_q4_1)
+        + usize::from(mtp_draft_lm_head_q4_0);
+    if draft_lm_head_override_count > 1 {
+        anyhow::bail!("choose at most one draft lm_head override");
     }
     let planned_verify_n = mtp_physical_n.unwrap_or(spec_tokens + 1);
     if spec_tokens >= 2 {
@@ -9586,7 +9602,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} draft_lm_head_q4_1={} draft_lm_head_q4_0={} base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9602,6 +9618,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         planned_verify_n,
         mtp_single_cb_draft,
         mtp_draft_token_embd_head,
+        mtp_draft_lm_head_q4_1,
+        mtp_draft_lm_head_q4_0,
         mtp_base_hidden,
         mtp_recursive_hidden,
         mtp_history,
@@ -9611,6 +9629,29 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     );
 
     let mf = MetalForward::new(&ctx, &mm);
+    let draft_lm_head_override = if mtp_draft_lm_head_q4_1 {
+        let t = Instant::now();
+        eprintln!("[mtp-bench] quantizing output.weight -> draft Q4_1 lm_head");
+        let q =
+            quantize_lm_head_to_q4_1(&ctx, &mm.lm_head).context("quantize draft lm_head Q4_1")?;
+        eprintln!(
+            "[mtp-bench] draft Q4_1 lm_head ready in {:.1} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        Some(q)
+    } else if mtp_draft_lm_head_q4_0 {
+        let t = Instant::now();
+        eprintln!("[mtp-bench] quantizing output.weight -> draft Q4_0 lm_head");
+        let q =
+            quantize_lm_head_to_q4_0(&ctx, &mm.lm_head).context("quantize draft lm_head Q4_0")?;
+        eprintln!(
+            "[mtp-bench] draft Q4_0 lm_head ready in {:.1} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        Some(q)
+    } else {
+        None
+    };
     let cap = prompt_ids.len() + tokens + 16;
 
     if !no_warmup {
@@ -9674,6 +9715,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
         let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
         spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+        spec.set_draft_lm_head_override(draft_lm_head_override.clone());
         spec.set_base_hidden_variant(mtp_base_hidden.into());
         spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
         spec.set_history_mode(mtp_history.into());
@@ -9703,6 +9745,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+            spec.set_draft_lm_head_override(draft_lm_head_override.clone());
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
@@ -9734,6 +9777,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+            spec.set_draft_lm_head_override(draft_lm_head_override.clone());
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
@@ -9769,6 +9813,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
+            spec.set_draft_lm_head_override(draft_lm_head_override.clone());
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
@@ -9997,6 +10042,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "probe": format!("{:?}", mtp_probe),
             "single_cb_draft": mtp_single_cb_draft,
             "draft_token_embd_head": mtp_draft_token_embd_head,
+            "draft_lm_head_q4_1": mtp_draft_lm_head_q4_1,
+            "draft_lm_head_q4_0": mtp_draft_lm_head_q4_0,
             "base_hidden": format!("{:?}", mtp_base_hidden),
             "recursive_hidden": format!("{:?}", mtp_recursive_hidden),
             "mtp_history": format!("{:?}", mtp_history),

@@ -3257,19 +3257,27 @@ What the latest analysis says:
   `QWEN_MTP_MOE_VERIFY_GROUPED_FFN=1` replay-current regresses `337.2 ->
   377.3 ms`. The issue is execution shape, not merely missing a grouped FFN call;
   prefill grouped kernels were built for much larger prompt buckets.
+- v0.516 kills the cheap low-bit draft-head copy. Setup-time GGML Q4_1 and Q4_0
+  copies of `output.weight` preserve equivalence and A3B D7/N8 acceptance, but
+  remain flat/slower than default: Q4_1 totals `399.7 ms`, Q4_0 totals
+  `397.0 ms`, versus the v0.515 default `397.8 ms` on the same 16-token row.
+  This does not kill MTPLX's actual 4-bit affine/group-size-64 draft-head layout
+  or a top-k/head policy, but it closes legacy GGML output clones as the cheap
+  missing lever.
 
 Highest-EV speculative kernel targets:
 
-1. Reduce D7/N8 MTP draft-head cost. v0.515 A3B and v0.506 27B agree that
-   `lm_head+argmax` is the largest draft-side tax after command-buffer chaining.
-   Exact fused `lm_head+argmax` is bounded but safe; larger wins require a
-   quality-gated low-bit/top-k/tree policy rather than `token_embd.weight`, which
-   is killed on both 27B and A3B.
-2. Replace row-sequential packed verify with an N8-native verifier shape. Do not
+1. Replace row-sequential packed verify with an N8-native verifier shape. Do not
    reuse prompt-prefill grouped MoE kernels blindly: v0.515 kills that direct
    transplant at N8. Candidate designs need to batch the real remaining base work
    (GDN/attention plus FFN where profitable) and prove a replay-current win before
    touching normal MTP.
+2. Reduce D7/N8 MTP draft-head cost only through a new execution shape. v0.515
+   A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
+   but v0.516 kills legacy GGML Q4_1/Q4_0 output copies as a cheap fix. Exact
+   fused `lm_head+argmax` remains bounded; a larger win needs an
+   MTPLX-isomorphic 4-bit affine/top-k kernel or a policy that lowers full-vocab
+   work without unacceptable acceptance loss.
 3. Keep A3B Q4_K_M D7/N8 as the MoE MTP acceptance/cost gate. It now clears the
    emitted/step investigation threshold, so use it alongside 27B code/narrative
    rows for MTP changes rather than relying on dense-only evidence.
@@ -3285,11 +3293,11 @@ Highest-EV speculative kernel targets:
    D3 vs D7, and proper draft-head asset effects. The current qwen oracle already
    reaches the screenshot band decode-only; the open question is how MTPLX gets
    much closer to oracle in actual chain mode.
-7. Prototype a proper low-bit copy of `output.weight` only as a bounded cleanup or
-   if semantic parity lifts emitted/step enough for draft cost to matter. Do not
-   use `token_embd.weight`; v0.509 killed that alias. Gate on `>=5%` whole-run
-   gain, `>=40%` recovery of the body-no-lm gap, and `<=5%` relative acceptance
-   loss.
+7. Prototype a proper low-bit draft head only if it is not another legacy GGML
+   output clone. Do not use `token_embd.weight`; v0.509 killed that alias. Do not
+   expect Q4_1/Q4_0 clones to help; v0.516 killed those. Gate a new layout/kernel
+   on `>=5%` whole-run gain, `>=40%` recovery of the body-no-lm gap, and `<=5%`
+   relative acceptance loss.
 8. Build an alternate-continuation/tree simulator before any tree implementation,
    but only after post-norm rank traces still show unreachable chain acceptance.
    Gates: N8 `>=5.2` emitted/step to investigate, `>=5.8` to implement; N16 `>=9`

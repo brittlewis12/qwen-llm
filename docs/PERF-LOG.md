@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.516 Draft Low-Bit LM-Head Probe Kill
+
+Status: simple GGML low-bit copies of `output.weight` do not reproduce the
+MTPLX-style draft-head cost win on A3B Q4_K_M MTP.
+
+THE CHANGE:
+- Added default-off MTP bench probes:
+  - `--mtp-draft-lm-head-q4-1`
+  - `--mtp-draft-lm-head-q4-0`
+- Each probe dequantizes `output.weight` once at setup, requantizes it into a
+  draft-only GGML legacy quant tensor, and keeps target verification on the real
+  `lm_head`.
+- The setup conversion is outside the timed MTP/no-spec loop; this isolates the
+  steady-state draft projection path.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8, 16-token short prompt, post/post hidden,
+  `--mtp-draft-lm-head-q4-1`: equivalence PASS; setup quantization `716.0 ms`;
+  alpha unchanged at `0.619`, `13/21` accepted; MTP-on total `399.7 ms` vs
+  no-spec `326.2 ms` (`0.816x`). Artifact:
+  `target/profiles/v0516-a3b-q4km-moe-mtp-d7-q4_1-draft-head-tok16.json`.
+- Same row with `--mtp-draft-lm-head-q4-0`: equivalence PASS; setup
+  quantization `699.8 ms`; alpha unchanged at `0.619`, `13/21` accepted;
+  MTP-on total `397.0 ms` vs no-spec `320.1 ms` (`0.806x`). Artifact:
+  `target/profiles/v0516-a3b-q4km-moe-mtp-d7-q4_0-draft-head-tok16.json`.
+
+READ: these rows kill the cheap version of the low-bit draft-head hypothesis.
+The v0.515 default row was `397.8 ms`, so GGML Q4_1/Q4_0 draft copies are flat
+within run noise and do not recover the draft `lm_head+argmax` gap. This does
+not disprove MTPLX's actual 4-bit affine/group-size-64 draft-head layout or a
+top-k/head policy, but it says the existing qwen mat-vec path plus legacy GGML
+quant formats are not the missing lever. Near-term MTP work should move back to
+N8-native verifier structure, semantic/asset parity, or a deliberately
+MTPLX-isomorphic draft-head kernel rather than more legacy-quant clones.
+
 ## 2026-07-07 - v0.515 A3B Q4_K_M MTP Split + Grouped-FFN Kill
 
 Status: intended A3B MTP artifact measured; replay probes fixed; first batched

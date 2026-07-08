@@ -4478,7 +4478,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             let h_n = layer_scratch
                                 .h_pack
                                 .view_subrange((n_idx * h) as u64, vec![h as u64]);
-                            // beta_proj (F32) → sigmoid → s.gdn_beta.
+                            // beta_proj (F32) -> sigmoid -> s.gdn_beta.
                             encode_mat_vec_dispatch(
                                 base.ctx,
                                 &enc,

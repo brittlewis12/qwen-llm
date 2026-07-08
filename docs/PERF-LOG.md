@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.523 GDN Pair-L2 Decode Cleanup
+
+Status: Pairing GDN Q/K L2 normalization is a small decode win and now defaults
+on; batched MTP verifier alpha/beta projection is a dispatch-count win but a wall
+time loss and was not kept.
+
+THE CHANGE:
+- Defaulted `QWEN_DECODE_GDN_PAIR_L2=1` with `=0` rollback. Decode GDN now uses
+  the existing pair-L2 kernel for Q/K normalization in both the inline GDN path and
+  the factored `encode_gdn_tail` used by the MTP verifier.
+- Tested but removed a worktree-only `QWEN_MTP_GDN_VERIFY_BATCHED_ALPHA_BETA`
+  probe that batched verifier beta/alpha projections across physical N8.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M `tg128`, runs=3: default pair-L2 `107.64 t/s`, rollback
+  `107.21 t/s` (`1.004x`). Artifacts:
+  `target/profiles/v0523-a3b-q4km-tg128-default-pairl2-runs3.json`,
+  `target/profiles/v0523-a3b-q4km-tg128-rollback-pairl2-runs3.json`.
+- Dense 27B Q4_K_M `tg128`, runs=3: default pair-L2 `25.53 t/s`, rollback
+  `25.37 t/s` (`1.006x`). Artifacts:
+  `target/profiles/v0523-27b-q4km-tg128-default-pairl2-runs3.json`,
+  `target/profiles/v0523-27b-q4km-tg128-rollback-pairl2-runs3.json`.
+- A3B Q4_K_M D7/N8 MTP, 16-token short prompt, pair-L2 forced on before
+  defaulting: equivalence PASS; verifier `171.9 ms`. Artifact:
+  `target/profiles/v0523-a3b-q4km-moe-mtp-d7-gdn-pairl2-notrace-tok16.json`.
+- A3B Q4_K_M D7/N8 MTP, 64-token short prompt, pair-L2 default: equivalence PASS;
+  verifier `507.0 ms`, total `1.053x` versus no-spec. Artifact:
+  `target/profiles/v0523-a3b-q4km-moe-mtp-d7-default-notrace-tok64.json`.
+- Worktree-only batched alpha/beta verifier probe: equivalence PASS but slower;
+  E8P32 skinny path verifier `179.1 ms`, generic mat-mat verifier `186.2 ms`,
+  versus the row-view default smoke at `174.8 ms`. Artifacts:
+  `target/profiles/v0523-a3b-q4km-moe-mtp-d7-gdn-ab-notrace-tok16.json`,
+  `target/profiles/v0523-a3b-q4km-moe-mtp-d7-gdn-ab-generic-notrace-tok16.json`.
+
+READ: count reductions alone are not enough. Pair-L2 is a tiny positive because it
+removes one Q/K normalization dispatch in a mature kernel shape, but the larger
+batched alpha/beta dispatch cut loses wall time. Further GDN verifier work should
+target true body/checkpoint dataflow, not merely replacing many small mat-vecs with
+skinny N8 mat-mats.
+
 ## 2026-07-08 - v0.522 MTP Verifier Counts + Row Views
 
 Status: A3B MoE MTP verifier attribution now names the short-context dispatch

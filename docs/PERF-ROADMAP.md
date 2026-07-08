@@ -3304,6 +3304,13 @@ What the latest analysis says:
   branch answer. The prefill grouped-FFN transplant remains killed at N8: forced
   grouped FFN cuts dispatches to `517`/step but regresses verifier `186.2 ->
   248.6 ms` on the traced 16-token row.
+- v0.523 defaults GDN pair-L2 in decode and the MTP verifier with
+  `QWEN_DECODE_GDN_PAIR_L2=0` as rollback. It is small but positive on repeated
+  primary rows: A3B `tg128` runs=3 moves `107.21 -> 107.64 t/s`, dense 27B moves
+  `25.37 -> 25.53 t/s`, and A3B D7/N8 MTP remains equivalent. A larger-looking
+  MTP verifier batched-alpha/beta probe is killed: it cuts dispatches but slows
+  verifier wall (`179.1/186.2 ms` versus `174.8 ms` row-view default). The lesson
+  is to prioritize GDN body/checkpoint dataflow over skinny N8 projection batching.
 
 Highest-EV speculative kernel targets:
 
@@ -3313,6 +3320,8 @@ Highest-EV speculative kernel targets:
    The next branch should split GDN tail into beta/alpha, decay, conv/L2/step/norm,
    and checkpoint copy cost, then prototype only if it can plausibly save
    `>=15 ms` on the 16-token A3B D7/N8 row or `>=5%` verifier wall at 64 tokens.
+   v0.523 kills the obvious skinny alpha/beta batching shortcut; remaining GDN
+   candidates need to change body/checkpoint data movement, not just dispatch count.
 2. Continue N8-specific MoE verifier work only when it preserves the fast
    per-token decode kernels. Do not reuse prompt-prefill grouped MoE kernels
    blindly: v0.515 and v0.522 both kill that direct transplant at N8. v0.518

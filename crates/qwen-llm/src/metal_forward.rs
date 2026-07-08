@@ -36,10 +36,10 @@ use crate::metal::{
     encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
     encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
     encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32,
-    encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
-    encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
+    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
+    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
+    encode_moe_down_bf16_f32, encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32,
+    encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
@@ -214,6 +214,7 @@ crate::env_flag!(default_off decode_gdn_noop_qkv_flag, "QWEN_DECODE_GDN_NOOP_QKV
 crate::env_flag!(default_off decode_gdn_noop_z_flag, "QWEN_DECODE_GDN_NOOP_Z");
 crate::env_flag!(default_off decode_gdn_noop_beta_flag, "QWEN_DECODE_GDN_NOOP_BETA");
 crate::env_flag!(default_off decode_gdn_noop_alpha_flag, "QWEN_DECODE_GDN_NOOP_ALPHA");
+crate::env_flag!(default_on decode_gdn_pair_l2_enabled, "QWEN_DECODE_GDN_PAIR_L2");
 
 fn decode_gdn_noop_qkv_enabled() -> bool {
     decode_gdn_noop_front_enabled() || decode_gdn_noop_qkv_flag()
@@ -6846,24 +6847,38 @@ impl<'a> MetalForward<'a> {
             .view_subrange((2 * n_k * head_dim) as u64, vec![v_dim as u64]);
 
         // Per-head L2-norm of Q and K.
-        encode_l2_norm_batched_f32(
-            self.ctx,
-            enc,
-            &q_view,
-            &s.gdn_q_norm,
-            n_k,
-            head_dim,
-            RMS_EPS,
-        )?;
-        encode_l2_norm_batched_f32(
-            self.ctx,
-            enc,
-            &k_view,
-            &s.gdn_k_norm,
-            n_k,
-            head_dim,
-            RMS_EPS,
-        )?;
+        if decode_gdn_pair_l2_enabled() {
+            encode_l2_norm_pair_batched_f32(
+                self.ctx,
+                enc,
+                &q_view,
+                &s.gdn_q_norm,
+                &k_view,
+                &s.gdn_k_norm,
+                n_k,
+                head_dim,
+                RMS_EPS,
+            )?;
+        } else {
+            encode_l2_norm_batched_f32(
+                self.ctx,
+                enc,
+                &q_view,
+                &s.gdn_q_norm,
+                n_k,
+                head_dim,
+                RMS_EPS,
+            )?;
+            encode_l2_norm_batched_f32(
+                self.ctx,
+                enc,
+                &k_view,
+                &s.gdn_k_norm,
+                n_k,
+                head_dim,
+                RMS_EPS,
+            )?;
+        }
 
         // Recurrence step (kernel does the head-repeat internally).
         encode_gdn_step_decay_f32(
@@ -6969,24 +6984,38 @@ impl<'a> MetalForward<'a> {
         let v_view = s
             .gdn_qkv_conv
             .view_subrange((2 * n_k * head_dim) as u64, vec![(n_v * head_dim) as u64]);
-        encode_l2_norm_batched_f32(
-            self.ctx,
-            enc,
-            &q_view,
-            &s.gdn_q_norm,
-            n_k,
-            head_dim,
-            RMS_EPS,
-        )?;
-        encode_l2_norm_batched_f32(
-            self.ctx,
-            enc,
-            &k_view,
-            &s.gdn_k_norm,
-            n_k,
-            head_dim,
-            RMS_EPS,
-        )?;
+        if decode_gdn_pair_l2_enabled() {
+            encode_l2_norm_pair_batched_f32(
+                self.ctx,
+                enc,
+                &q_view,
+                &s.gdn_q_norm,
+                &k_view,
+                &s.gdn_k_norm,
+                n_k,
+                head_dim,
+                RMS_EPS,
+            )?;
+        } else {
+            encode_l2_norm_batched_f32(
+                self.ctx,
+                enc,
+                &q_view,
+                &s.gdn_q_norm,
+                n_k,
+                head_dim,
+                RMS_EPS,
+            )?;
+            encode_l2_norm_batched_f32(
+                self.ctx,
+                enc,
+                &k_view,
+                &s.gdn_k_norm,
+                n_k,
+                head_dim,
+                RMS_EPS,
+            )?;
+        }
         encode_gdn_step_decay_f32(
             self.ctx,
             enc,

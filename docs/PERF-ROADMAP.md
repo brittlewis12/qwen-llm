@@ -3270,15 +3270,22 @@ What the latest analysis says:
   `0.5 ms`. Therefore the replay-current loss is verifier structure, not hidden
   MTP bridge/rollback overhead, and the normal-path draft tax is secondary until
   verifier cost moves.
+- v0.518 lands the first N8-native verifier win and defaults it with rollback
+  `QWEN_MTP_MOE_VERIFY_BATCHED_MIXER=0`: MoE packed verify now batches the mixer
+  side across physical N8 and leaves only the MoE FFN tail row-sequential. A3B
+  D7/N8 16-token total improves to `0.910x` from `0.805x`, replay-current becomes
+  a win (`1.112x`), and the 64-token row improves from `0.864x` to `0.953x` while
+  preserving equivalence. The remaining verifier work is now mostly the MoE FFN
+  tail, not GDN/attention mixer projections.
 
 Highest-EV speculative kernel targets:
 
 1. Replace row-sequential packed verify with an N8-native verifier shape. Do not
    reuse prompt-prefill grouped MoE kernels blindly: v0.515 kills that direct
-   transplant at N8. Candidate designs need to batch the real remaining base work
-   (GDN/attention plus FFN where profitable) and prove a replay-current win before
-   touching normal MTP. v0.517 says this branch owns `~239 ms` of A3B D7/N8
-   replay-current decode-loop time across three steps.
+   transplant at N8. v0.518 proves the branch by batching the mixer side and
+   turning replay-current into a win. The next target is the row-sequential MoE
+   FFN tail under N8-specific occupancy, with replay-current as the promotion
+   gate.
 2. Reduce D7/N8 MTP draft-head cost only through a new execution shape. v0.515
    A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
    but v0.516 kills legacy GGML Q4_1/Q4_0 output copies as a cheap fix. Exact

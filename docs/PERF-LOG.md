@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.518 MoE MTP Verifier Batches Mixer
+
+Status: first N8-native verifier win for A3B MoE MTP; defaulted with rollback.
+
+THE CHANGE:
+- Added `QWEN_MTP_MOE_VERIFY_BATCHED_MIXER=0` rollback and defaulted the new
+  path on.
+- The MoE packed verifier now reuses the layer-major dense verifier's batched
+  mixer path for GDN/attention blocks, then runs the MoE FFN tail per row. This
+  batches pre/post norms, GDN front/out projections, attention Q/K/V/O
+  projections, and attention gate epilogues across physical N8 without reusing
+  the killed prefill grouped-FFN path.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8, 16-token short prompt, default-on path: equivalence PASS;
+  MTP total `355.9 ms` vs no-spec `324.0 ms` (`0.910x`); verify phase
+  `~200.0 ms`. Artifact:
+  `target/profiles/v0518-a3b-q4km-moe-mtp-d7-default-on-batched-mixer-tok16.json`.
+- Same row, 16-token forced-on comparison before defaulting: equivalence PASS;
+  total `354.2 ms` vs no-spec `322.3 ms` (`0.910x`); verify `198.5 ms`.
+  Artifact: `target/profiles/v0518-a3b-q4km-moe-mtp-d7-batched-mixer-tok16.json`.
+- Replay-current, 16 tokens, forced-on: equivalence PASS; total `291.3 ms` vs
+  no-spec `323.8 ms` (`1.112x`); verify `195.0 ms`. Artifact:
+  `target/profiles/v0518-a3b-q4km-moe-mtp-d7-batched-mixer-replay-current-tok16.json`.
+- A3B Q4_K_M D7/N8, 64-token short prompt, forced-on: equivalence PASS; total
+  `816.4 ms` vs no-spec `778.4 ms` (`0.953x`); verify `584.3 ms`. Artifact:
+  `target/profiles/v0518-a3b-q4km-moe-mtp-d7-batched-mixer-tok64.json`.
+- Same 64-token row, replay-current forced-on: equivalence PASS; total
+  `678.3 ms` vs no-spec `780.8 ms` (`1.151x`); verify `580.2 ms`. Artifact:
+  `target/profiles/v0518-a3b-q4km-moe-mtp-d7-batched-mixer-replay-current-tok64.json`.
+
+READ: verifier structure was the right target. On the 16-token row, verifier time
+drops from `~243 ms` to `~200 ms`; on the 64-token row, default normal MTP drops
+from `876.8 ms` to `816.4 ms` in the same v0.518 binary family, and replay-current
+is now a real win. Normal MTP still loses because the remaining draft bucket is
+`~115 ms` at 64 tokens and row-sequential MoE FFN still dominates verifier work.
+The next N8 verifier branch should batch or replace the MoE FFN tail with an
+N8-specific shape, not resurrect the prefill grouped-FFN transplant.
+
 ## 2026-07-07 - v0.517 MTP N8 Phase Attribution
 
 Status: MTP bench now reports decode-loop phase timing; A3B D7/N8 is verifier

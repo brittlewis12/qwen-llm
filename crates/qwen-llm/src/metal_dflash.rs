@@ -207,6 +207,8 @@ crate::env_flag!(default_on prefill_moe_grouped_enabled, "QWEN_PREFILL_MOE_GROUP
 
 crate::env_flag!(default_off mtp_moe_verify_grouped_ffn_enabled, "QWEN_MTP_MOE_VERIFY_GROUPED_FFN");
 
+crate::env_flag!(default_on mtp_moe_verify_batched_mixer_enabled, "QWEN_MTP_MOE_VERIFY_BATCHED_MIXER");
+
 fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP")) {
@@ -4218,7 +4220,7 @@ pub fn encode_packed_verify_layer_major_inner(
     let mut gdn_idx = 0usize;
     let mut attn_idx = 0usize;
     for (il, block) in base.model.blocks.iter().enumerate() {
-        if arch.kind == crate::model::ArchKind::Moe {
+        if arch.kind == crate::model::ArchKind::Moe && !mtp_moe_verify_batched_mixer_enabled() {
             let gdn_ckpt_idx = match block {
                 MetalBlock::Gdn(_) => {
                     let gi = gdn_idx;
@@ -4899,6 +4901,78 @@ pub fn encode_packed_verify_layer_major_inner(
                 base.ctx, &enc, &x_pack, post_norm, &h_pack, n, h, RMS_EPS,
             )?;
             enc.end();
+        }
+
+        if arch.kind == crate::model::ArchKind::Moe {
+            let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
+                    base,
+                    &enc,
+                    block,
+                    &x_pack,
+                    &h_pack,
+                    layer_scratch,
+                    n,
+                    h,
+                )?;
+                enc.end();
+                done
+            } else {
+                false
+            };
+            if !ffn_batched {
+                for n_idx in 0..n {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &x_pack,
+                        n_idx * h,
+                        &target_session.x,
+                        h,
+                    )?;
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &h_pack,
+                        n_idx * h,
+                        &target_session.h,
+                        h,
+                    )?;
+                    base.encode_moe_ffn_after_mixer_by_index(&enc, il, target_session)?;
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.x,
+                        &x_pack,
+                        n_idx * h,
+                        h,
+                    )?;
+                    enc.end();
+                }
+            }
+            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                if lid as usize == il {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    for n_idx in 0..n {
+                        let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
+                            + k_idx as u64)
+                            * verify_scratch.hidden_size;
+                        let x_n = x_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &x_n,
+                            &verify_scratch.hidden_capture,
+                            elem_off as usize,
+                            h,
+                        )?;
+                    }
+                    enc.end();
+                }
+            }
+            continue;
         }
 
         // 2f: SwiGLU FFN. Dtype dispatch (codex Q5) — the WIN.

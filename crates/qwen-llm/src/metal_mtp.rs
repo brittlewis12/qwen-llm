@@ -326,6 +326,10 @@ pub enum PackedDraftPlan<'a> {
 #[derive(Clone, Debug)]
 pub struct RecordedDraftStep {
     pub carry_tok: i32,
+    /// Base-model packed verify start position for this speculative step.
+    /// The native drafter may use a different start position for its own
+    /// KV history (for committed history this is one slot earlier), but
+    /// replay probes consume recorded draft ids in the verifier timeline.
     pub start_position: u32,
     pub drafts: Vec<i32>,
 }
@@ -1951,7 +1955,7 @@ impl<'a> SpeculativeDecoder<'a> {
             if let Some(trace) = draft_trace.as_mut() {
                 (*trace).push(RecordedDraftStep {
                     carry_tok,
-                    start_position: draft_start_position,
+                    start_position,
                     drafts: drafts.clone(),
                 });
             }

@@ -3244,47 +3244,63 @@ What the latest analysis says:
   executes and passes equivalence on A3B UD-Q4_K_S, but the verifier is
   row-sequential for MoE blocks and is therefore an acceptance/coverage tool, not
   the final throughput shape.
+- v0.515 measures the intended A3B Q4_K_M MTP artifact. Same-file qwen no-spec
+  `tg128` is green (`94.97 t/s` vs llama.cpp b9833 D0 `77.78` / D7 `79.02`).
+  Native D7/N8 has the acceptance signal the Q4_K_S smoke lacked: `5.333`
+  emitted/step, alpha `0.619`, equivalence PASS. But total remains a loss
+  (`0.815x`) because cost dominates. Replay-current is now unblocked and reaches
+  `0.962x` with `mtp_calls=0`, while a perfect oracle reaches `1.213x`.
+  Therefore the A3B branch is live, but the current cost split is verifier
+  row-sequential work plus full draft `lm_head+argmax`, not acceptance alone.
+- v0.515 also kills the naive first batched-MoE-verifier idea. Reusing prefill
+  grouped routed/shared FFN at physical N8 is correctness-safe but slower:
+  `QWEN_MTP_MOE_VERIFY_GROUPED_FFN=1` replay-current regresses `337.2 ->
+  377.3 ms`. The issue is execution shape, not merely missing a grouped FFN call;
+  prefill grouped kernels were built for much larger prompt buckets.
 
 Highest-EV speculative kernel targets:
 
-1. Replace the v0.514 row-sequential MoE packed-N verifier with batched verify
-   phases. Start with routed/shared FFN batching because the current path already
-   proves correctness and because FFN batching should reuse existing MoE prefill
-   grouped kernels. Gate on D3/D7 equivalence first, then real-prompt emitted/step
-   and replay/oracle ceilings.
-2. Run the intended A3B UD-Q4_K_M MTP comparison when the artifact is available.
-   Treat it as a measurement gate and coverage probe, not as proof that broad MoE
-   MTP is solved; Q4_K_S already showed artifact-specific dtype holes can matter.
-3. Add native IQ2_S MoE expert-bank gate/up support, then evaluate Q2_K/Q3_K. Do
+1. Reduce D7/N8 MTP draft-head cost. v0.515 A3B and v0.506 27B agree that
+   `lm_head+argmax` is the largest draft-side tax after command-buffer chaining.
+   Exact fused `lm_head+argmax` is bounded but safe; larger wins require a
+   quality-gated low-bit/top-k/tree policy rather than `token_embd.weight`, which
+   is killed on both 27B and A3B.
+2. Replace row-sequential packed verify with an N8-native verifier shape. Do not
+   reuse prompt-prefill grouped MoE kernels blindly: v0.515 kills that direct
+   transplant at N8. Candidate designs need to batch the real remaining base work
+   (GDN/attention plus FFN where profitable) and prove a replay-current win before
+   touching normal MTP.
+3. Keep A3B Q4_K_M D7/N8 as the MoE MTP acceptance/cost gate. It now clears the
+   emitted/step investigation threshold, so use it alongside 27B code/narrative
+   rows for MTP changes rather than relying on dense-only evidence.
+4. Add native IQ2_S MoE expert-bank gate/up support, then evaluate Q2_K/Q3_K. Do
    not dequantize base MoE expert banks to F32. The one-block MTP F32 bridge is
    acceptable; base low-bit MoE needs native routed bank kernels for residency.
-4. Continue dense-27B MTP semantic parity before tree work, but with cycle history closed.
+5. Continue dense-27B MTP semantic parity before tree work, but with cycle history closed.
    Remaining concrete variants are position-offset semantics, history-window
    variants rather than full reset, and MTPLX contract/draft-asset details. Gate
    continuation on emitted/step `>=5.2` or `>=25%` over the post-norm committed
    default, equivalence PASS.
-5. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
+6. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
    D3 vs D7, and proper draft-head asset effects. The current qwen oracle already
    reaches the screenshot band decode-only; the open question is how MTPLX gets
    much closer to oracle in actual chain mode.
-6. Prototype a proper low-bit copy of `output.weight` only as a bounded cleanup or
+7. Prototype a proper low-bit copy of `output.weight` only as a bounded cleanup or
    if semantic parity lifts emitted/step enough for draft cost to matter. Do not
    use `token_embd.weight`; v0.509 killed that alias. Gate on `>=5%` whole-run
    gain, `>=40%` recovery of the body-no-lm gap, and `<=5%` relative acceptance
    loss.
-7. Build an alternate-continuation/tree simulator before any tree implementation,
+8. Build an alternate-continuation/tree simulator before any tree implementation,
    but only after post-norm rank traces still show unreachable chain acceptance.
    Gates: N8 `>=5.2` emitted/step to investigate, `>=5.8` to implement; N16 `>=9`
    interesting, `>=11` viable. Require stability across prompts.
-8. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
+9. Keep physical N8 as the first native MTP packet shape. Use padding/rollback for
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.
-9. Demote short-prompt target-verify work while D7/N8 actual emitted/step is
-   `~4`. Reopen N8/N16 verify phase splits, packed GDN tape/capture, and
-   packed multi-query verify attention once acceptance moves, or for long-context
-   MTP where attention/GDN verify again becomes the measured limiter.
-10. Treat exact fused `lm_head+argmax` as a smaller cleanup unless an isolated
-   draft-head microbench shows `>=25%` phase recovery or D7/N8 improves `>=5%`.
+10. Keep target-verify work tied to replay-current gates. A3B now clears the
+   emitted/step threshold, but the direct prefill-grouped FFN transplant regressed;
+   reopen packed GDN/tape, packed multi-query attention, or an N8-specific MoE
+   kernel only with a measured replay-current win.
 11. Build bucket policy around supported packet shapes; prefer padding/rollback to
    arbitrary ragged N unless bucketed verification fails a correctness or waste
    gate.

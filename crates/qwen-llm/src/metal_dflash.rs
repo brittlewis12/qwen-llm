@@ -205,6 +205,8 @@ crate::env_flag!(default_off prefill_noop_moe_grouped_reduce_enabled, "QWEN_PREF
 
 crate::env_flag!(default_on prefill_moe_grouped_enabled, "QWEN_PREFILL_MOE_GROUPED");
 
+crate::env_flag!(default_off mtp_moe_verify_grouped_ffn_enabled, "QWEN_MTP_MOE_VERIFY_GROUPED_FFN");
+
 fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP")) {
@@ -3719,6 +3721,251 @@ fn encode_packed_verify_inner_impl(
 // =============================================================================
 // encode_packed_verify_layer_major_inner — H5.3b.4-5 layer-major path
 // =============================================================================
+
+fn encode_packed_verify_moe_grouped_ffn_after_mixer(
+    base: &MetalForward<'_>,
+    enc: &KernelEncoder,
+    block: &MetalBlock,
+    x_pack: &MetalTensor,
+    h_pack: &MetalTensor,
+    layer_scratch: &MetalDFlashLayerMajorScratch,
+    n: usize,
+    h: usize,
+) -> Result<bool, DFlashError> {
+    let arch = &base.model.arch;
+    let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+        MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+        MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+    };
+    let Some(moe) = moe else {
+        return Ok(false);
+    };
+
+    let router_mat_mat_eligible = |dtype: GgmlType| {
+        matches!(
+            dtype,
+            GgmlType::F32
+                | GgmlType::F16
+                | GgmlType::BF16
+                | GgmlType::Q4_K
+                | GgmlType::Q5_K
+                | GgmlType::Q6_K
+                | GgmlType::Q8_0
+        )
+    };
+
+    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+    let n_expert = arch.expert_count as usize;
+    let f_exp = arch.expert_feed_forward_length as usize;
+    let f_shared = arch.expert_shared_feed_forward_length as usize;
+    if topk == 0 || topk > 16 || n_expert == 0 || n_expert > 256 || h % 256 != 0 || f_exp % 256 != 0
+    {
+        return Ok(false);
+    }
+
+    let grouped_gate_up_dtype_eligible = match (moe.gate_exps.dtype, moe.up_exps.dtype) {
+        (GgmlType::Q4_K, GgmlType::Q4_K) => true,
+        (GgmlType::Q5_K, GgmlType::Q5_K) => {
+            prefill_moe_grouped_q5_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::Q6_K, GgmlType::Q6_K) => {
+            prefill_moe_grouped_q6_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::Q8_0, GgmlType::Q8_0) => {
+            prefill_moe_grouped_q8_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS) | (GgmlType::IQ3_S, GgmlType::IQ3_S) => {
+            n >= 32 && prefill_moe_grouped_iq3_gateup_enabled(h, f_exp, n_expert)
+        }
+        (GgmlType::F32, GgmlType::F32) => n >= 32 && prefill_moe_grouped_f32_gateup_enabled(),
+        (GgmlType::BF16, GgmlType::BF16) => {
+            n >= 32 && prefill_moe_grouped_bf16_gateup_enabled(h, f_exp, n_expert)
+        }
+        _ => false,
+    };
+    let grouped_down_dtype_eligible = matches!(
+        moe.down_exps.dtype,
+        GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0 | GgmlType::IQ4_XS | GgmlType::BF16
+    );
+    if !(prefill_moe_grouped_enabled()
+        && grouped_gate_up_dtype_eligible
+        && grouped_down_dtype_eligible)
+    {
+        return Ok(false);
+    }
+    if !(prefill_moe_packed_route_enabled()
+        && router_mat_mat_eligible(moe.gate_inp.dtype)
+        && moe.gate_inp_shexp.dtype == GgmlType::F32)
+    {
+        return Ok(false);
+    }
+    let packed_shared_path = f_shared == 0
+        || (prefill_moe_packed_shared_enabled()
+            && router_mat_mat_eligible(ffn_gate.dtype)
+            && router_mat_mat_eligible(ffn_up.dtype)
+            && router_mat_mat_eligible(ffn_down.dtype));
+    if !packed_shared_path {
+        return Ok(false);
+    }
+
+    let moe_topk_idx_pack = layer_scratch
+        .moe_topk_idx_pack
+        .view_subrange(0, vec![(n * topk) as u64]);
+    let moe_router_probs_pack = layer_scratch
+        .moe_router_probs_pack
+        .view_subrange(0, vec![(n * n_expert) as u64]);
+    let moe_topk_weight_pack = layer_scratch
+        .moe_topk_weight_pack
+        .view_subrange(0, vec![(n * topk) as u64]);
+    let moe_shared_gate_pack = layer_scratch
+        .moe_shared_gate_pack
+        .view_subrange(0, vec![n as u64]);
+    let moe_group_count_pack = layer_scratch
+        .moe_group_count_pack
+        .view_subrange(0, vec![n_expert as u64]);
+    let moe_group_ids_pack = layer_scratch
+        .moe_group_ids_pack
+        .view_subrange(0, vec![(n_expert * n) as u64]);
+    let moe_group_inner_pack = layer_scratch
+        .moe_group_inner_pack
+        .view_subrange(0, vec![(n * topk * f_exp) as u64]);
+    let moe_group_out_pack = layer_scratch
+        .moe_group_out_pack
+        .view_subrange(0, vec![(n * topk * h) as u64]);
+    let ffn_delta_pack = layer_scratch
+        .mixer_out_pack
+        .view_subrange(0, vec![(n * h) as u64]);
+    let shared_gate_pack = layer_scratch
+        .moe_shared_ffn_gate_pack
+        .view_subrange(0, vec![(n * f_shared) as u64]);
+    let shared_up_pack = layer_scratch
+        .moe_shared_ffn_up_pack
+        .view_subrange(0, vec![(n * f_shared) as u64]);
+    let shared_inner_pack = layer_scratch
+        .moe_shared_ffn_inner_pack
+        .view_subrange(0, vec![(n * f_shared) as u64]);
+    let shared_out_pack = layer_scratch
+        .moe_shared_ffn_out_pack
+        .view_subrange(0, vec![(n * h) as u64]);
+
+    encode_moe_route_logits_dispatch(
+        base.ctx,
+        enc,
+        &moe.gate_inp,
+        h_pack,
+        &moe_router_probs_pack,
+        h,
+        n_expert,
+        n,
+    )?;
+    encode_fill_f32(base.ctx, enc, &moe_group_count_pack, 0.0)?;
+    crate::metal::encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
+        base.ctx,
+        enc,
+        &moe_router_probs_pack,
+        &moe.gate_inp_shexp,
+        h_pack,
+        &moe_topk_idx_pack,
+        &moe_topk_weight_pack,
+        &moe_shared_gate_pack,
+        &moe_group_count_pack,
+        &moe_group_ids_pack,
+        n_expert,
+        topk,
+        h,
+        n,
+    )?;
+    encode_prefill_moe_grouped_swiglu(
+        base.ctx,
+        enc,
+        moe,
+        h_pack,
+        &moe_group_count_pack,
+        &moe_group_ids_pack,
+        &moe_group_inner_pack,
+        h,
+        f_exp,
+        n_expert,
+        topk,
+        n,
+        prefill_moe_grouped_q4_n32_all_enabled(arch, n),
+        prefill_moe_hot_expert_min_slots(),
+    )?;
+    encode_prefill_moe_grouped_down(
+        base.ctx,
+        enc,
+        &moe.down_exps,
+        &moe_group_inner_pack,
+        &moe_group_count_pack,
+        &moe_group_ids_pack,
+        &moe_group_out_pack,
+        f_exp,
+        h,
+        n_expert,
+        n,
+    )?;
+    crate::metal::encode_moe_weighted_sum_packed_f32(
+        base.ctx,
+        enc,
+        &moe_group_out_pack,
+        &moe_topk_weight_pack,
+        &ffn_delta_pack,
+        h,
+        topk,
+        n,
+    )?;
+
+    if f_shared > 0 {
+        encode_mat_mat_dispatch(
+            base.ctx,
+            enc,
+            ffn_gate,
+            h_pack,
+            &shared_gate_pack,
+            h,
+            f_shared,
+            n,
+        )?;
+        encode_mat_mat_dispatch(
+            base.ctx,
+            enc,
+            ffn_up,
+            h_pack,
+            &shared_up_pack,
+            h,
+            f_shared,
+            n,
+        )?;
+        encode_silu_mul_f32(
+            base.ctx,
+            enc,
+            &shared_gate_pack,
+            &shared_up_pack,
+            &shared_inner_pack,
+        )?;
+        encode_mat_mat_dispatch(
+            base.ctx,
+            enc,
+            ffn_down,
+            &shared_inner_pack,
+            &shared_out_pack,
+            f_shared,
+            h,
+            n,
+        )?;
+        encode_axpy_rowwise_f32(
+            base.ctx,
+            enc,
+            &shared_out_pack,
+            &moe_shared_gate_pack,
+            &ffn_delta_pack,
+            h,
+            n,
+        )?;
+    }
+    encode_add_inplace_f32(base.ctx, enc, x_pack, &ffn_delta_pack)?;
+    Ok(true)
+}
 //
 // Per H5 plan rev 6 §H5.3b.4-5 (codex layer-major partner session, v0.65):
 // rewrite packed_verify so that each layer's batched-batchable kernels
@@ -3995,7 +4242,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         &target_session.x,
                         h,
                     )?;
-                    base.encode_moe_block_by_index(&enc, il, position_n, target_session)?;
+                    base.encode_moe_mixer_prep_by_index(&enc, il, position_n, target_session)?;
                     encode_scatter_offset_f32(
                         base.ctx,
                         &enc,
@@ -4004,21 +4251,14 @@ pub fn encode_packed_verify_layer_major_inner(
                         n_idx * h,
                         h,
                     )?;
-                    for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
-                        if lid as usize == il {
-                            let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
-                                + k_idx as u64)
-                                * verify_scratch.hidden_size;
-                            encode_scatter_offset_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.x,
-                                &verify_scratch.hidden_capture,
-                                elem_off as usize,
-                                h,
-                            )?;
-                        }
-                    }
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.h,
+                        &h_pack,
+                        n_idx * h,
+                        h,
+                    )?;
                     enc.end();
                 }
                 if let Some(gi) = gdn_ckpt_idx {
@@ -4028,6 +4268,74 @@ pub fn encode_packed_verify_layer_major_inner(
                     let conv_dst = verify_scratch.conv_ckpt_slot(gi as u32, n_idx as u32);
                     blit.copy_tensor(&target_session.gdn_conv[gi], &conv_dst);
                     blit.end();
+                }
+            }
+            let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
+                    base,
+                    &enc,
+                    block,
+                    &x_pack,
+                    &h_pack,
+                    layer_scratch,
+                    n,
+                    h,
+                )?;
+                enc.end();
+                done
+            } else {
+                false
+            };
+            if !ffn_batched {
+                for n_idx in 0..n {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &x_pack,
+                        n_idx * h,
+                        &target_session.x,
+                        h,
+                    )?;
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &h_pack,
+                        n_idx * h,
+                        &target_session.h,
+                        h,
+                    )?;
+                    base.encode_moe_ffn_after_mixer_by_index(&enc, il, target_session)?;
+                    encode_scatter_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &target_session.x,
+                        &x_pack,
+                        n_idx * h,
+                        h,
+                    )?;
+                    enc.end();
+                }
+            }
+            for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
+                if lid as usize == il {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    for n_idx in 0..n {
+                        let elem_off = (n_idx as u64 * verify_scratch.k_target_layers as u64
+                            + k_idx as u64)
+                            * verify_scratch.hidden_size;
+                        let x_n = x_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &x_n,
+                            &verify_scratch.hidden_capture,
+                            elem_off as usize,
+                            h,
+                        )?;
+                    }
+                    enc.end();
                 }
             }
             continue;

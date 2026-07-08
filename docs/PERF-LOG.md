@@ -6,6 +6,55 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.515 A3B Q4_K_M MTP Split + Grouped-FFN Kill
+
+Status: intended A3B MTP artifact measured; replay probes fixed; first batched
+MoE verifier FFN attempt gated off as a negative result.
+
+THE CHANGE:
+- Downloaded and measured the intended Unsloth A3B MTP target:
+  `/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`.
+- Fixed recorded MTP probe alignment: `RecordedDraftStep::start_position` now
+  records the base packed-verify start position, not the drafter KV start. This
+  unblocks `--mtp-probe replay-current` for committed-history MTP.
+- Added `QWEN_MTP_MOE_VERIFY_GROUPED_FFN=1` as a default-off probe that runs the
+  MoE packed verifier's post-mixer FFN through prefill-style grouped routed and
+  packed shared paths.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- Same-file no-spec decode, `tg128`, `--no-warmup`:
+  - qwen current: `94.97 t/s`.
+  - llama.cpp b9833: D0 `77.78 t/s`, D7 `79.02 t/s`.
+- A3B Q4_K_M D7/N8, 16-token short prompt, post/post hidden, default verifier:
+  equivalence PASS; alpha `0.619`, `13/21` accepted, `5.333` emitted/step;
+  MTP-on total `397.8 ms` vs no-spec `324.1 ms` (`0.815x`). Artifact:
+  `target/profiles/v0515-a3b-q4km-moe-mtp-d7-default-postgate-tok16.json`.
+- Replay-current on the same row now works with `mtp_calls=0`: equivalence PASS;
+  total `337.2 ms` vs no-spec `324.5 ms` (`0.962x`). Artifact:
+  `target/profiles/v0515-a3b-q4km-moe-mtp-d7-default-replay-current-postgate-tok16.json`.
+- Perfect greedy oracle remains a real ceiling: total `264.9 ms` vs no-spec
+  `321.3 ms` (`1.213x`). Artifact:
+  `target/profiles/v0515-current-a3b-q4km-moe-mtp-d7-oracle-tok16.json`.
+- `QWEN_MTP_MOE_VERIFY_GROUPED_FFN=1` is correctness-safe but regresses:
+  replay-current total `377.3 ms` vs default replay-current `337.2 ms`. Artifact:
+  `target/profiles/v0515-a3b-q4km-moe-mtp-d7-grouped-ffn-replay-current-tok16.json`.
+- Cheap `token_embd.weight` draft head is also a hard kill on this A3B artifact:
+  alpha `0.000`, total `1852.4 ms` (`0.174x`). Artifact:
+  `target/profiles/v0515-current-a3b-q4km-moe-mtp-d7-token-embd-head-tok16.json`.
+
+READ: the intended Q4_K_M asset validates the acceptance premise that the Q4_K_S
+smoke could not answer: A3B D7/N8 reaches the `>=5.2 emitted/step` investigation
+gate. The loss is now cost, not semantics. Replay-current says verifier shape is
+nearly good enough in total short-prompt wall because MTP prefill is cheaper, but
+decode-only still pays row-sequential base work. Normal-vs-replay says the full
+MTP draft `lm_head+argmax` costs about `60 ms` on this 16-token row. The grouped
+FFN probe is a useful falsifier: prefill grouped MoE kernels are the wrong N=8
+shape here and should not be promoted. Next work should target MTP draft-head cost
+and/or a verifier design that batches GDN/attention/base work, not another direct
+prefill-grouped FFN transplant.
+
 ## 2026-07-07 - v0.514 MoE MTP Packed-N Reaches Correctness
 
 Status: correctness-first qwen35moe packed-verify support. This removes the D3/N4

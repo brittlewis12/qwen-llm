@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.524 Batch MTP Verifier Routing
+
+Status: A3B MoE D7/N8 MTP verifier now batches route logits/top-k across physical
+N8 while preserving the fast per-row FFN kernels.
+
+THE CHANGE:
+- Defaulted `QWEN_MTP_MOE_VERIFY_BATCHED_ROUTE=1` with `=0` rollback.
+- The MoE packed verifier now computes route logits, top-k weights, and shared
+  gate once per layer across `h_pack[N, H]`, then binds each packed row's route
+  views into `target_session` before running the existing per-token FFN waves.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8 count trace, 16-token short prompt: equivalence PASS; MoE FFN
+  row-loop dispatches drop `2240 -> 1600`/step, with `80` route-pack
+  dispatches/step added. Artifact:
+  `target/profiles/v0524-a3b-q4km-moe-mtp-d7-batched-route-counts-tok16.json`.
+- Same row, untraced 16-token pair: default verifier `172.5 ms`, batched route
+  `170.6 ms`; total moves `0.997x -> 1.003x` versus no-spec. Artifacts:
+  `target/profiles/v0524-a3b-q4km-moe-mtp-d7-default-notrace-tok16.json`,
+  `target/profiles/v0524-a3b-q4km-moe-mtp-d7-batched-route-notrace-tok16.json`.
+- Same row, untraced 64-token pair: default verifier `505.6 ms`, batched route
+  `495.1 ms`; total moves `1.056x -> 1.073x` versus no-spec. Artifacts:
+  `target/profiles/v0524-a3b-q4km-moe-mtp-d7-default-notrace-tok64.json`,
+  `target/profiles/v0524-a3b-q4km-moe-mtp-d7-batched-route-notrace-tok64.json`.
+
+READ: this is the right N8 verifier pattern: batch the cheap regular route work,
+but keep the mature per-token routed/shared FFN kernels that beat the grouped
+prefill transplant. The remaining short-context dispatch budget is now mostly the
+per-row FFN waves and GDN tail/checkpoint work; further MoE verifier work should
+target the FFN wave structure itself, not route staging.
+
 ## 2026-07-08 - v0.523 GDN Pair-L2 Decode Cleanup
 
 Status: Pairing GDN Q/K L2 normalization is a small decode win and now defaults

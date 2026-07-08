@@ -3311,6 +3311,13 @@ What the latest analysis says:
   MTP verifier batched-alpha/beta probe is killed: it cuts dispatches but slows
   verifier wall (`179.1/186.2 ms` versus `174.8 ms` row-view default). The lesson
   is to prioritize GDN body/checkpoint dataflow over skinny N8 projection batching.
+- v0.524 defaults N8 MoE verifier batched routing with
+  `QWEN_MTP_MOE_VERIFY_BATCHED_ROUTE=0` as rollback. It batches route logits,
+  top-k, and shared gate across physical N8, then feeds row views into the existing
+  per-token FFN waves. This keeps the prefill grouped-FFN transplant killed while
+  removing regular route work from the row loop: dispatches move from `2240` FFN
+  row-loop/step to `1600 + 80` route-pack/step, and A3B D7/N8 64-token verifier
+  improves `505.6 -> 495.1 ms` with equivalence PASS.
 
 Highest-EV speculative kernel targets:
 
@@ -3326,8 +3333,9 @@ Highest-EV speculative kernel targets:
    per-token decode kernels. Do not reuse prompt-prefill grouped MoE kernels
    blindly: v0.515 and v0.522 both kill that direct transplant at N8. v0.518
    proves the branch by batching the mixer side, v0.519 reuses decode's FFN wave
-   split, and v0.522 removes staging copies/scatter; further MoE work needs a new
-   surgical row-loop reduction with a `>=15 ms` verifier gate.
+   split, v0.522 removes staging copies/scatter, and v0.524 batches route work;
+   further MoE work needs to change the FFN wave structure itself with a `>=15 ms`
+   verifier gate.
 3. Reduce D7/N8 MTP draft-head cost only through a proven execution shape. v0.515
    A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
    but v0.516 kills legacy GGML Q4_1/Q4_0 output copies, and v0.521 kills the

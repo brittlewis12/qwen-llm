@@ -215,6 +215,8 @@ crate::env_flag!(default_off mtp_verify_trace_counts_enabled, "QWEN_MTP_VERIFY_T
 
 crate::env_flag!(default_on mtp_moe_verify_row_views_enabled, "QWEN_MTP_MOE_VERIFY_ROW_VIEWS");
 
+crate::env_flag!(default_on mtp_moe_verify_batched_route_enabled, "QWEN_MTP_MOE_VERIFY_BATCHED_ROUTE");
+
 fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP")) {
@@ -4958,6 +4960,26 @@ pub fn encode_packed_verify_layer_major_inner(
             let concurrent_ffn = mtp_moe_verify_concurrent_ffn_enabled()
                 && moe.gate_exps.dtype == GgmlType::Q4_K
                 && moe.up_exps.dtype == GgmlType::Q4_K;
+            let topk = arch.expert_used_count.min(arch.expert_count) as usize;
+            let n_expert = arch.expert_count as usize;
+            let router_mat_mat_eligible = matches!(
+                moe.gate_inp.dtype,
+                GgmlType::F32
+                    | GgmlType::F16
+                    | GgmlType::BF16
+                    | GgmlType::Q4_K
+                    | GgmlType::Q5_K
+                    | GgmlType::Q6_K
+                    | GgmlType::Q8_0
+            );
+            let use_batched_route = mtp_moe_verify_batched_route_enabled()
+                && mtp_moe_verify_row_views_enabled()
+                && topk > 0
+                && topk <= 16
+                && n_expert > 0
+                && n_expert <= 256
+                && router_mat_mat_eligible
+                && moe.gate_inp_shexp.dtype == GgmlType::F32;
             let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
                 let enc = KernelEncoder::begin(&cmd_buf);
                 let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
@@ -4977,15 +4999,79 @@ pub fn encode_packed_verify_layer_major_inner(
                 false
             };
             if !ffn_batched {
+                let packed_route = if use_batched_route {
+                    let router_probs_pack = layer_scratch
+                        .moe_router_probs_pack
+                        .view_subrange(0, vec![(n * n_expert) as u64]);
+                    let topk_idx_pack = layer_scratch
+                        .moe_topk_idx_pack
+                        .view_subrange(0, vec![(n * topk) as u64]);
+                    let topk_weight_pack = layer_scratch
+                        .moe_topk_weight_pack
+                        .view_subrange(0, vec![(n * topk) as u64]);
+                    let shared_gate_pack = layer_scratch
+                        .moe_shared_gate_pack
+                        .view_subrange(0, vec![n as u64]);
+                    {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_moe_route_logits_dispatch(
+                            base.ctx,
+                            &enc,
+                            &moe.gate_inp,
+                            &h_pack,
+                            &router_probs_pack,
+                            h,
+                            n_expert,
+                            n,
+                        )?;
+                        encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                            base.ctx,
+                            &enc,
+                            &router_probs_pack,
+                            &moe.gate_inp_shexp,
+                            &h_pack,
+                            &topk_idx_pack,
+                            &topk_weight_pack,
+                            &shared_gate_pack,
+                            n_expert,
+                            topk,
+                            h,
+                            n,
+                        )?;
+                        enc.end();
+                    }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "route_pack");
+                    Some((topk_idx_pack, topk_weight_pack, shared_gate_pack))
+                } else {
+                    None
+                };
                 if mtp_moe_verify_row_views_enabled() {
                     for n_idx in 0..n {
                         let row_x = x_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
                         let row_h = h_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
                         let old_x = std::mem::replace(&mut target_session.x, row_x);
                         let old_h = std::mem::replace(&mut target_session.h, row_h);
+                        let route_old = if let Some((idx_pack, weight_pack, shared_pack)) =
+                            packed_route.as_ref()
+                        {
+                            let row_idx =
+                                idx_pack.view_subrange((n_idx * topk) as u64, vec![topk as u64]);
+                            let row_weight =
+                                weight_pack.view_subrange((n_idx * topk) as u64, vec![topk as u64]);
+                            let row_shared = shared_pack.view_subrange(n_idx as u64, vec![1_u64]);
+                            Some((
+                                std::mem::replace(&mut target_session.moe_topk_idx, row_idx),
+                                std::mem::replace(&mut target_session.moe_topk_weight, row_weight),
+                                std::mem::replace(&mut target_session.moe_shared_gate, row_shared),
+                            ))
+                        } else {
+                            None
+                        };
                         let row_result = (|| -> Result<(), DFlashError> {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                            if route_old.is_none() {
+                                base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                            }
                             if concurrent_ffn {
                                 enc.end();
                                 base.encode_moe_ffn_apply_gpu_concurrent_shared(
@@ -5011,6 +5097,11 @@ pub fn encode_packed_verify_layer_major_inner(
                         })();
                         target_session.x = old_x;
                         target_session.h = old_h;
+                        if let Some((old_idx, old_weight, old_shared)) = route_old {
+                            target_session.moe_topk_idx = old_idx;
+                            target_session.moe_topk_weight = old_weight;
+                            target_session.moe_shared_gate = old_shared;
+                        }
                         row_result?;
                     }
                 } else {

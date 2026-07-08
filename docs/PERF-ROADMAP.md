@@ -3277,15 +3277,21 @@ What the latest analysis says:
   a win (`1.112x`), and the 64-token row improves from `0.864x` to `0.953x` while
   preserving equivalence. The remaining verifier work is now mostly the MoE FFN
   tail, not GDN/attention mixer projections.
+- v0.519 defaults `QWEN_MTP_MOE_VERIFY_CONCURRENT_FFN=1` for Q4_K/Q4_K MoE
+  verifier gate/up banks, with `=0` rollback. This reuses normal decode's
+  routed/shared FFN wave split inside the N8 verifier. A3B D7/N8 64-token normal
+  MTP now wins (`1.035x`) and replay-current reaches `1.262x`; the 16-token row
+  is near parity (`0.980x`) but remains fixed-cost/draft-cost limited.
 
 Highest-EV speculative kernel targets:
 
 1. Replace row-sequential packed verify with an N8-native verifier shape. Do not
    reuse prompt-prefill grouped MoE kernels blindly: v0.515 kills that direct
    transplant at N8. v0.518 proves the branch by batching the mixer side and
-   turning replay-current into a win. The next target is the row-sequential MoE
-   FFN tail under N8-specific occupancy, with replay-current as the promotion
-   gate.
+   turning replay-current into a win; v0.519 then reuses decode's FFN wave split
+   and turns 64-token normal MTP positive. Keep improving verifier only where it
+   lowers `verify_ms` under replay-current; the next broad MTP blocker is now
+   draft-side full-vocab cost and short-prompt fixed overhead.
 2. Reduce D7/N8 MTP draft-head cost only through a new execution shape. v0.515
    A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
    but v0.516 kills legacy GGML Q4_1/Q4_0 output copies as a cheap fix. Exact

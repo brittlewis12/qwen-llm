@@ -209,6 +209,8 @@ crate::env_flag!(default_off mtp_moe_verify_grouped_ffn_enabled, "QWEN_MTP_MOE_V
 
 crate::env_flag!(default_on mtp_moe_verify_batched_mixer_enabled, "QWEN_MTP_MOE_VERIFY_BATCHED_MIXER");
 
+crate::env_flag!(default_on mtp_moe_verify_concurrent_ffn_enabled, "QWEN_MTP_MOE_VERIFY_CONCURRENT_FFN");
+
 fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP")) {
@@ -4904,6 +4906,19 @@ pub fn encode_packed_verify_layer_major_inner(
         }
 
         if arch.kind == crate::model::ArchKind::Moe {
+            let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+                MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+                MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
+            };
+            let moe = moe.ok_or_else(|| {
+                DFlashError::Metal(MetalError::BadShape {
+                    kernel: "packed_verify_moe_batched_mixer",
+                    detail: "MoE verifier block has no ffn_moe".into(),
+                })
+            })?;
+            let concurrent_ffn = mtp_moe_verify_concurrent_ffn_enabled()
+                && moe.gate_exps.dtype == GgmlType::Q4_K
+                && moe.up_exps.dtype == GgmlType::Q4_K;
             let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
                 let enc = KernelEncoder::begin(&cmd_buf);
                 let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
@@ -4940,16 +4955,46 @@ pub fn encode_packed_verify_layer_major_inner(
                         &target_session.h,
                         h,
                     )?;
-                    base.encode_moe_ffn_after_mixer_by_index(&enc, il, target_session)?;
-                    encode_scatter_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &target_session.x,
-                        &x_pack,
-                        n_idx * h,
-                        h,
-                    )?;
-                    enc.end();
+                    base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                    if concurrent_ffn {
+                        enc.end();
+                        base.encode_moe_ffn_apply_gpu_concurrent_shared(
+                            &cmd_buf,
+                            target_session,
+                            ffn_gate,
+                            ffn_up,
+                            ffn_down,
+                            moe,
+                        )?;
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.x,
+                            &x_pack,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
+                    } else {
+                        base.encode_moe_ffn_apply_gpu(
+                            &enc,
+                            target_session,
+                            ffn_gate,
+                            ffn_up,
+                            ffn_down,
+                            moe,
+                        )?;
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.x,
+                            &x_pack,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
+                    }
                 }
             }
             for (k_idx, &lid) in target_layer_ids.iter().enumerate() {

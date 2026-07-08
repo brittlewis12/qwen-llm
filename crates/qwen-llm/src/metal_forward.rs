@@ -2466,7 +2466,7 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    fn encode_moe_ffn_apply_gpu_concurrent_shared(
+    pub(crate) fn encode_moe_ffn_apply_gpu_concurrent_shared(
         &self,
         cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         session: &mut MetalSession,

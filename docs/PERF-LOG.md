@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.519 MoE MTP Verifier Concurrent FFN
+
+Status: A3B Q4_K_M D7/N8 normal MTP now wins at 64 generated tokens.
+
+THE CHANGE:
+- Added `QWEN_MTP_MOE_VERIFY_CONCURRENT_FFN=0` rollback and defaulted the
+  concurrent verifier FFN path on for Q4_K/Q4_K MoE gate/up banks.
+- The N8 verifier now keeps the v0.518 batched mixer path, then runs each row's
+  routed/shared MoE FFN through the same wave split used by normal MoE decode.
+  Non-Q4_K gate/up banks stay on the old single-encoder FFN path.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8, 16-token short prompt, default-on path: equivalence PASS;
+  MTP total `332.5 ms` vs no-spec `325.7 ms` (`0.980x`); verify `177.2 ms`.
+  Artifact:
+  `target/profiles/v0519-a3b-q4km-moe-mtp-d7-default-on-concurrent-ffn-tok16.json`.
+- Same row, forced-on comparison before defaulting: equivalence PASS; total
+  `334.2 ms` vs no-spec `325.0 ms` (`0.973x`); verify `178.2 ms`. Artifact:
+  `target/profiles/v0519-a3b-q4km-moe-mtp-d7-concurrent-ffn-tok16.json`.
+- Replay-current, 16 tokens, forced-on: equivalence PASS; total `271.8 ms` vs
+  no-spec `323.6 ms` (`1.191x`); verify `175.2 ms`. Artifact:
+  `target/profiles/v0519-a3b-q4km-moe-mtp-d7-concurrent-ffn-replay-current-tok16.json`.
+- A3B Q4_K_M D7/N8, 64-token short prompt, forced-on: equivalence PASS; total
+  `754.9 ms` vs no-spec `781.1 ms` (`1.035x`); verify `521.6 ms`. Artifact:
+  `target/profiles/v0519-a3b-q4km-moe-mtp-d7-concurrent-ffn-tok64.json`.
+- Same 64-token row, replay-current forced-on: equivalence PASS; total
+  `617.7 ms` vs no-spec `779.7 ms` (`1.262x`); verify `519.4 ms`. Artifact:
+  `target/profiles/v0519-a3b-q4km-moe-mtp-d7-concurrent-ffn-replay-current-tok64.json`.
+
+READ: this is the first measured normal-MTP win on the intended A3B Q4_K_M path:
+the 64-token row moves from v0.518 `0.953x` to `1.035x`, while replay-current
+reaches `1.262x`. The 16-token row is still slightly negative because prompt and
+draft fixed costs dominate, but verifier work is no longer the immediate blocker.
+The remaining normal-path gap is now draft cost (`~115 ms` at 64 tokens) plus
+short-prompt fixed overhead; next work should target draft full-vocab cost or
+larger/real-prompt gates, not bridge/restore.
+
 ## 2026-07-07 - v0.518 MoE MTP Verifier Batches Mixer
 
 Status: first N8-native verifier win for A3B MoE MTP; defaulted with rollback.

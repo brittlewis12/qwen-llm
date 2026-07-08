@@ -76,6 +76,47 @@ long-context, MTP/speculative, or quant-specific sweeps may still expose red
 cells, but near-term branches should be hardware-headroom driven unless a fresh
 paired repeat contradicts this spot.
 
+## Hardware-Saturation Recalibration (2026-07-08)
+
+External audit + cx review after v0.526 updates the live ordering. The key
+change is that recent N8 verifier probes repeatedly show reduced dispatch count
+is not the same as reduced wall: grouped prefill FFN, skinny GDN alpha/beta,
+checkpoint write plumbing, sparse checkpoint replay, and batched shared-expert
+mat-mat are all correctness-safe and slower or too small. Keep one true R=2
+row-wave only if it preserves the mature per-token kernels and stays small;
+otherwise pivot to broader long-context attention / DFlash dataflow work.
+
+Force-ranked implementation bets from this vantage:
+
+1. **DFlash attention dataflow rewrite**: remove `k_full` / `v_full`
+   materialization by reading target context cache and noise rows as two ranges,
+   then collapse the documented 3-pass QK recompute into online softmax. Gate on
+   DFlash draft wall `>=10%` at long context with existing DFlash correctness
+   oracles and no short-context regression. Treat this as one dataflow branch;
+   an online-softmax kernel that still materializes `k_full/v_full` is not enough.
+2. **`attn_v4` decode Phase-A MMA for group 8/16**: use the in-file prompt
+   matrix-attention MMA sidecar as reference, but promote only on full decode
+   rows. Gate on A3B `ctx16k/32k` full decode `>=3%` or attention phase `>=10%`,
+   with no `ctx4k` regression.
+3. **Final bounded MTP MoE row-wave probe**: only R=2, only disjoint row scratch
+   / scheduling, and no N8 mat-mat or grouped prefill kernels. Gate on D7/N8
+   `tok16` verifier `>=10 ms` or `tok64` verifier `>=15 ms`, equivalence PASS.
+   If this is not a small patch, skip it.
+4. **GDN verifier L2-in-step micro**: fuse Q/K normalization into
+   `gdn_step_decay` while keeping `rmsnorm_gated` separate. Require one-layer
+   tail `>=10-15%` and full-verifier `>=8-10 ms` before integration.
+5. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
+   closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
+   `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
+6. **Small shelves**: Q/K proj+norm+RoPE fusion, concurrent Q/K RoPE, stale
+   default-off fused residual+rmsnorm, and Q4_K mat-mat raw-block staging for
+   N32/N64 are useful only if implementation is tiny and full-wall gates pass.
+
+Defer ICB/MTL4, binary archives, residency sets, and `newBufferWithBytesNoCopy`
+as throughput priorities. They can matter for product TTFT, memory footprint, or
+future command-model work, but current warm decode is GPU-busy enough that they
+are not the next hardware-saturation lever.
+
 Dense decode update: v0.340 production-wires dense GDN front-projection overlap
 and defaults it with `QWEN_DECODE_DENSE_CONCURRENT_GDN=0` as rollback. Sequential
 `tg128` A/B improves the dense family by about `+2.4-3.8%`:
@@ -3326,6 +3367,12 @@ What the latest analysis says:
   0.994x`). Do not continue checkpoint-write fusion or suffix-replay variants
   without a cheap no-tail replay design; checkpoint blits are no longer the top
   active MTP verifier lever.
+- v0.526 kills the batched shared-expert verifier probe. Keeping
+  routed FFN per-token but computing the shared branch as N8 mat-mats preserves
+  equivalence yet regresses the A3B D7/N8 16-token verifier `166.0 -> 196.9 ms`
+  and total to `0.927x`. This closes batched shared as the cheap MoE FFN exit;
+  any remaining row-wave branch must keep both routed and shared per-token
+  kernels and change only scratch independence / scheduling.
 
 Highest-EV speculative kernel targets:
 
@@ -3333,10 +3380,12 @@ Highest-EV speculative kernel targets:
    per-token decode kernels. Do not reuse prompt-prefill grouped MoE kernels
    blindly: v0.515 and v0.522 both kill that direct transplant at N8. v0.518
    proves the branch by batching the mixer side, v0.519 reuses decode's FFN wave
-   split, v0.522 removes staging copies/scatter, and v0.524 batches route work;
-   further MoE work needs to change the FFN wave structure itself with a `>=15 ms`
-   verifier gate. The next concrete shape is row-pair or row-quad FFN waves with
-   disjoint per-row scratch, not grouped prefill kernels.
+   split, v0.522 removes staging copies/scatter, v0.524 batches route work, and
+   v0.526 kills N8 shared mat-mat. Further MoE work
+   needs to change only the FFN wave schedule/scratch shape with a `>=15 ms`
+   verifier gate. The remaining concrete shape is row-pair FFN waves with
+   disjoint per-row scratch while keeping both routed and shared per-token
+   kernels; do not retry grouped prefill or batched shared kernels.
 2. Revisit GDN verifier tail only for body fusion, not checkpoint writes. v0.523
    kills skinny alpha/beta batching and v0.525 kills both inline checkpoint
    writes and sparse checkpoint suffix replay. A future GDN branch should start

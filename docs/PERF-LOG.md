@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.526 Batched Shared MTP Verifier Falsifier
+
+Status: worktree-only batched shared-expert verifier branch was correctness-safe
+but slower and was removed. This closes another "N8 mat-mat the FFN tail" exit;
+the remaining MoE verifier idea is only a true row-wave that preserves per-token
+kernels.
+
+THE CHANGE:
+- Dirty-tested, then removed, a verifier-only branch that kept the routed MoE FFN
+  per-token but computed shared gate/up/down across all physical N8 rows with
+  batched mat-mats and a rowwise shared gate. The row loop then ran only routed
+  FFN work and added the precomputed shared delta.
+
+GATES:
+- A3B Q4_K_M D7/N8 16-token smoke equivalence PASS.
+- Wall regressed: baseline verifier `166.0 ms`; batched shared verifier
+  `196.9 ms`; total speedup fell to `0.927x`.
+  Artifact: `target/profiles/v0526-a3b-q4km-moe-mtp-d7-batched-shared-tok16.json`.
+
+READ: N8 shared-expert mat-mat has the same wrong-shape signature as the killed
+grouped prefill FFN transplant and skinny GDN alpha/beta batching: fewer row-loop
+operations do not imply lower wall time. Do not retry batched shared FFN unless
+a new kernel first beats the per-token shared path in isolation. A true row-wave
+must keep both routed and shared per-token kernels and only change scheduling /
+scratch independence.
+
 ## 2026-07-08 - v0.525 GDN Checkpoint Falsifiers
 
 Status: two checkpoint-dataflow probes were correctness-safe but not worth

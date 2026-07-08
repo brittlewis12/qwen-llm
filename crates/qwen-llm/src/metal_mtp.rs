@@ -545,6 +545,8 @@ pub enum MtpBaseHiddenVariant {
 pub enum MtpHistoryMode {
     /// Maintain a committed MTP KV history alongside the target cache.
     Committed,
+    /// Keep accepted draft-chain KV instead of repairing it from target hiddens.
+    DraftAccepted,
     /// Match MTPLX's cycle-style draft cache: each speculative step starts with
     /// an empty MTP KV cache, then keeps only the within-chain draft keys.
     Cycle,
@@ -680,6 +682,10 @@ impl<'a> SpeculativeDecoder<'a> {
 
     fn uses_cycle_mtp_history(&self) -> bool {
         self.history_mode == MtpHistoryMode::Cycle
+    }
+
+    fn uses_draft_accepted_mtp_history(&self) -> bool {
+        self.history_mode == MtpHistoryMode::DraftAccepted
     }
 
     fn write_base_hidden_variant(
@@ -2230,6 +2236,8 @@ impl<'a> SpeculativeDecoder<'a> {
             let t_bridge = std::time::Instant::now();
             if self.uses_cycle_mtp_history() {
                 self.mtp_session.kv_n_pos = 0;
+            } else if self.uses_draft_accepted_mtp_history() {
+                self.mtp_session.kv_n_pos = processed_pos as usize + 1 + n_accepted;
             } else {
                 // Recursive draft slots beyond the first are approximate. Rebuild
                 // the canonical MTP KV for the accepted prefix from captured base
@@ -2475,18 +2483,22 @@ impl<'a> SpeculativeDecoder<'a> {
             }
 
             let t_bridge = std::time::Instant::now();
-            self.mtp_session.kv_n_pos = processed_pos as usize + 1;
-            #[allow(clippy::needless_range_loop)]
-            for j in 0..n_accepted {
-                let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
-                let bridge_position = processed_pos + 1 + j as u32;
-                if self.wants_base_post_norm() {
-                    self.write_base_hidden_variant(&prev_hidden, &hidden_cur)?;
-                    self.draft_kv_only(drafts[j], &hidden_cur, bridge_position)?;
-                } else {
-                    self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+            if self.uses_draft_accepted_mtp_history() {
+                self.mtp_session.kv_n_pos = processed_pos as usize + 1 + n_accepted;
+            } else {
+                self.mtp_session.kv_n_pos = processed_pos as usize + 1;
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..n_accepted {
+                    let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
+                    let bridge_position = processed_pos + 1 + j as u32;
+                    if self.wants_base_post_norm() {
+                        self.write_base_hidden_variant(&prev_hidden, &hidden_cur)?;
+                        self.draft_kv_only(drafts[j], &hidden_cur, bridge_position)?;
+                    } else {
+                        self.draft_kv_only(drafts[j], &prev_hidden, bridge_position)?;
+                    }
+                    stats.mtp_calls += 1;
                 }
-                stats.mtp_calls += 1;
             }
 
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);

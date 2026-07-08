@@ -3282,6 +3282,11 @@ What the latest analysis says:
   routed/shared FFN wave split inside the N8 verifier. A3B D7/N8 64-token normal
   MTP now wins (`1.035x`) and replay-current reaches `1.262x`; the 16-token row
   is near parity (`0.980x`) but remains fixed-cost/draft-cost limited.
+- v0.520 validates that the win survives a 128-token row: A3B D7/N8 normal MTP
+  reaches `1.052x`, replay-current `1.294x`, and perfect oracle `1.364x`.
+  It also kills accepted-draft KV history as a bridge shortcut: bridge drops, but
+  alpha falls `0.873 -> 0.688` and the 64-token row regresses to `0.890x`.
+  Canonical accepted-KV repair is worth its cost for this asset.
 
 Highest-EV speculative kernel targets:
 
@@ -3298,7 +3303,8 @@ Highest-EV speculative kernel targets:
    fused `lm_head+argmax` remains bounded; a larger win needs an
    MTPLX-isomorphic 4-bit affine/top-k kernel or a policy that lowers full-vocab
    work without unacceptable acceptance loss. v0.517 sizes the normal A3B D7/N8
-   draft bucket at `~52 ms`, so this is meaningful but no longer first.
+   draft bucket at `~52 ms` for 16 tokens, and v0.520 sizes it at `~201 ms` for
+   128 tokens, so this is now the top normal-path cost target.
 3. Keep A3B Q4_K_M D7/N8 as the MoE MTP acceptance/cost gate. It now clears the
    emitted/step investigation threshold, so use it alongside 27B code/narrative
    rows for MTP changes rather than relying on dense-only evidence.
@@ -3332,13 +3338,15 @@ Highest-EV speculative kernel targets:
     kernel only with a measured replay-current win. The next useful attribution is
     inside the `verify_ms` bucket, not bridge/restore/draft bookkeeping.
 11. Build bucket policy around supported packet shapes; prefer padding/rollback to
-   arbitrary ragged N unless bucketed verification fails a correctness or waste
-   gate.
-12. DFlash two-range attention reading ctx-cache and noise directly, without
-   `k_full` / `v_full` materialization.
-13. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
+    arbitrary ragged N unless bucketed verification fails a correctness or waste
+    gate.
+12. Do not skip accepted-KV repair by keeping approximate draft-chain KV. v0.520
+    kills that shortcut: it saves bridge time but harms acceptance enough to lose.
+13. DFlash two-range attention reading ctx-cache and noise directly, without
+    `k_full` / `v_full` materialization.
+14. Compressed-KV only if a non-Q8_0 layout/body first beats tuned F16 in
     `attn-intra` at both 8K and 32K.
-14. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
+15. Retile the `N=16` mat-mat specializations only if verify/draft phase profiles
     show N16 mat-mat-heavy surfaces remain material after the attention fixes.
 
 ### 12. Mid-Graph Flush / Overlap Before ICB / MTL4

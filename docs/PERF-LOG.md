@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.520 MTP 128-Token Validation + Draft-History Kill
+
+Status: v0.519 A3B MoE MTP win survives 128 generated tokens; skipping
+canonical accepted-KV repair is a hard negative.
+
+THE CHANGE:
+- Added `--mtp-history draft-accepted` as a bench-only semantic probe. It keeps
+  accepted draft-chain MTP KV instead of repairing accepted slots from target
+  hiddens, while target verification and output equivalence remain exact.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8, 128-token short prompt, default history: equivalence PASS;
+  MTP total `1314.9 ms` vs no-spec `1382.6 ms` (`1.052x`); alpha `0.933`,
+  `7.53` emitted/step; phases: draft `201.0 ms`, verify `977.9 ms`, bridge
+  `40.5 ms`. Artifact:
+  `target/profiles/v0520-a3b-q4km-moe-mtp-d7-default-tok128.json`.
+- Same row, replay-current: equivalence PASS; total `1064.2 ms` vs no-spec
+  `1377.2 ms` (`1.294x`); verify `967.3 ms`. Artifact:
+  `target/profiles/v0520-a3b-q4km-moe-mtp-d7-replay-current-tok128.json`.
+- Same row, perfect oracle: equivalence PASS; total `1017.1 ms` vs no-spec
+  `1387.0 ms` (`1.364x`); verify `918.4 ms`. Artifact:
+  `target/profiles/v0520-a3b-q4km-moe-mtp-d7-oracle-tok128.json`.
+- `--mtp-history draft-accepted`, 64-token short prompt: equivalence PASS but
+  alpha falls `0.873 -> 0.688`, emitted/step falls `7.111 -> 5.818`, and total
+  regresses to `874.3 ms` vs no-spec `778.3 ms` (`0.890x`). Artifact:
+  `target/profiles/v0520-a3b-q4km-moe-mtp-d7-draft-accepted-tok64.json`.
+
+READ: the v0.519 verifier work scales in the intended direction: the normal path
+is `1.052x` at 128 tokens, replay-current is `1.294x`, and the stale oracle
+ceiling refreshes to `1.364x`. But accepted-KV repair is semantically valuable:
+keeping approximate draft-chain KV saves bridge work but destroys enough
+acceptance to lose badly. Do not pursue bridge skipping as a speed path. The live
+normal-path delta remains draft full-vocab work (`~201 ms` at 128) and any
+verifier reductions that preserve the replay-current win.
+
 ## 2026-07-07 - v0.519 MoE MTP Verifier Concurrent FFN
 
 Status: A3B Q4_K_M D7/N8 normal MTP now wins at 64 generated tokens.

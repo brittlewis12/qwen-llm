@@ -1400,6 +1400,8 @@ enum MtpBaseHiddenArg {
 enum MtpHistoryArg {
     /// Keep canonical MTP KV history for the committed target prefix.
     Committed,
+    /// Keep accepted draft-chain KV without canonical target-hidden repair.
+    DraftAccepted,
     /// Reset MTP KV each speculative step; keep only within-chain draft KV.
     Cycle,
 }
@@ -1426,6 +1428,7 @@ impl From<MtpHistoryArg> for MtpHistoryMode {
     fn from(value: MtpHistoryArg) -> Self {
         match value {
             MtpHistoryArg::Committed => Self::Committed,
+            MtpHistoryArg::DraftAccepted => Self::DraftAccepted,
             MtpHistoryArg::Cycle => Self::Cycle,
         }
     }

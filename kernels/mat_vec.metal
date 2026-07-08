@@ -821,6 +821,67 @@ kernel void kernel_mat_vec_q4_1_f32(
     }
 }
 
+struct mtp_draft_affine_q4_args {
+    uint n_in;
+    uint n_out;
+    uint n_groups;
+};
+
+kernel void kernel_mtp_draft_affine_q4_gs64_f32(
+        constant mtp_draft_affine_q4_args & args [[buffer(0)]],
+        device const uint     * weight [[buffer(1)]],
+        device const half     * scales [[buffer(2)]],
+        device const half     * biases [[buffer(3)]],
+        device const float    * x      [[buffer(4)]],
+        device       float    * y      [[buffer(5)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uint RESULTS_PER_SIMDGROUP = 4;
+    constexpr uint SIMDGROUPS_PER_TG = 2;
+    constexpr uint GROUP_SIZE = 64;
+    constexpr uint PACK_FACTOR = 8;
+
+    const uint first_row = (tgpig * SIMDGROUPS_PER_TG + sgitg) * RESULTS_PER_SIMDGROUP;
+    const uint packs_per_row = args.n_in / PACK_FACTOR;
+    float acc[RESULTS_PER_SIMDGROUP] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (uint pack = tiisg; pack < packs_per_row; pack += 32u) {
+        const uint base = pack * PACK_FACTOR;
+        const uint group = base / GROUP_SIZE;
+        float xv[PACK_FACTOR];
+        float x_sum = 0.0f;
+        for (uint j = 0; j < PACK_FACTOR; ++j) {
+            const float v = x[base + j];
+            xv[j] = v;
+            x_sum += v;
+        }
+
+        for (uint r = 0; r < RESULTS_PER_SIMDGROUP; ++r) {
+            const uint row = first_row + r;
+            if (row >= args.n_out) {
+                continue;
+            }
+            const uint packed = weight[row * packs_per_row + pack];
+            float qdot = 0.0f;
+            for (uint j = 0; j < PACK_FACTOR; ++j) {
+                const uint q = (packed >> (4u * j)) & 0xFu;
+                qdot += xv[j] * float(q);
+            }
+            const uint gb = row * args.n_groups + group;
+            acc[r] += float(scales[gb]) * qdot + float(biases[gb]) * x_sum;
+        }
+    }
+
+    for (uint r = 0; r < RESULTS_PER_SIMDGROUP; ++r) {
+        const float total = simd_sum(acc[r]);
+        const uint row = first_row + r;
+        if (tiisg == 0 && row < args.n_out) {
+            y[row] = total;
+        }
+    }
+}
+
 kernel void kernel_mat_vec_q3_K_f32(
         constant mat_vec_args & args   [[buffer(0)]],
         device const block_q3_k_local * weight [[buffer(1)]],

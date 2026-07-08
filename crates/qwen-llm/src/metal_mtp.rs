@@ -33,10 +33,10 @@ use crate::metal::{
     attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
     encode_attn_decode_v4_f32, encode_axpy_scalar_f32, encode_ffn_swiglu_q4_K_f32,
     encode_get_rows_f32, encode_moe_down_f32_f32, encode_moe_mat_vec_f32,
-    encode_moe_weighted_sum_f32, encode_mul_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
-    encode_sigmoid_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32,
+    encode_moe_weighted_sum_f32, encode_mtp_draft_affine_q4_gs64_f32, encode_mul_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
+    encode_split_q_gate_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
 };
 use crate::metal_dflash::{
     MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, encode_packed_verify_layer_major_inner,
@@ -83,6 +83,15 @@ pub struct MetalMtpHead {
     pub hnorm: MetalTensor,
     /// `nextn.shared_head_norm.weight` — `[H]`.
     pub shared_head_norm: MetalTensor,
+}
+
+#[derive(Clone)]
+pub struct MtpDraftAffineQ4Head {
+    pub weight: MetalTensor,
+    pub scales: MetalTensor,
+    pub biases: MetalTensor,
+    pub n_in: usize,
+    pub n_out: usize,
 }
 
 pub fn quantize_lm_head_to_q4_1(
@@ -264,6 +273,127 @@ pub fn quantize_lm_head_to_q4_0(
         src.shape.clone(),
         GgmlType::Q4_0,
     )?)
+}
+
+pub fn quantize_lm_head_to_affine_q4_gs64(
+    ctx: &MetalContext,
+    src: &MetalTensor,
+) -> Result<MtpDraftAffineQ4Head, MtpError> {
+    const GROUP_SIZE: usize = 64;
+    const PACK_FACTOR: usize = 8;
+    let kernel = "mtp_draft_lm_head_affine_q4_gs64";
+    if src.shape.len() != 2 {
+        return Err(MtpError::Metal(MetalError::BadShape {
+            kernel,
+            detail: format!("expected rank-2 lm_head, got {:?}", src.shape),
+        }));
+    }
+    let n_in = usize::try_from(src.shape[0]).map_err(|_| {
+        MtpError::Metal(MetalError::BadShape {
+            kernel,
+            detail: format!("n_in overflows usize: {}", src.shape[0]),
+        })
+    })?;
+    let n_out = usize::try_from(src.shape[1]).map_err(|_| {
+        MtpError::Metal(MetalError::BadShape {
+            kernel,
+            detail: format!("n_out overflows usize: {}", src.shape[1]),
+        })
+    })?;
+    if n_in % GROUP_SIZE != 0 {
+        return Err(MtpError::Metal(MetalError::BadShape {
+            kernel,
+            detail: format!("n_in={n_in} is not divisible by {GROUP_SIZE}"),
+        }));
+    }
+
+    let n_bytes = usize::try_from(src.n_bytes()).map_err(|_| {
+        MtpError::Metal(MetalError::BadShape {
+            kernel,
+            detail: format!("source byte length overflows usize: {}", src.n_bytes()),
+        })
+    })?;
+    let bytes = unsafe {
+        let ptr = (src.buffer.contents().as_ptr() as *const u8).add(src.offset as usize);
+        std::slice::from_raw_parts(ptr, n_bytes)
+    };
+    let desc = TensorDesc {
+        name: "mtp_draft_lm_head_affine_q4_gs64_src".to_string(),
+        shape: src.shape.clone(),
+        dtype: src.dtype,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: src.n_bytes(),
+    };
+    let f32 = dequant_to_f32(&desc, bytes)?;
+    let packs_per_row = n_in / PACK_FACTOR;
+    let groups_per_row = n_in / GROUP_SIZE;
+    let mut packed = vec![0u8; n_out * packs_per_row * std::mem::size_of::<u32>()];
+    let mut scales = vec![0u8; n_out * groups_per_row * std::mem::size_of::<half::f16>()];
+    let mut biases = vec![0u8; n_out * groups_per_row * std::mem::size_of::<half::f16>()];
+
+    for row in 0..n_out {
+        let row_base = row * n_in;
+        for group in 0..groups_per_row {
+            let group_base = row_base + group * GROUP_SIZE;
+            let vals = &f32[group_base..group_base + GROUP_SIZE];
+            let mut min_v = f32::INFINITY;
+            let mut max_v = f32::NEG_INFINITY;
+            for &v in vals {
+                min_v = min_v.min(v);
+                max_v = max_v.max(v);
+            }
+            let scale = if max_v > min_v {
+                (max_v - min_v) / 15.0
+            } else {
+                0.0
+            };
+            let group_dst = row * groups_per_row + group;
+            scales[group_dst * 2..group_dst * 2 + 2]
+                .copy_from_slice(&half::f16::from_f32(scale).to_bits().to_le_bytes());
+            biases[group_dst * 2..group_dst * 2 + 2]
+                .copy_from_slice(&half::f16::from_f32(min_v).to_bits().to_le_bytes());
+
+            for pack_in_group in 0..(GROUP_SIZE / PACK_FACTOR) {
+                let mut word = 0u32;
+                let pack_base = group * GROUP_SIZE / PACK_FACTOR + pack_in_group;
+                for j in 0..PACK_FACTOR {
+                    let v = vals[pack_in_group * PACK_FACTOR + j];
+                    let q = if scale > 0.0 {
+                        ((v - min_v) / scale).round().clamp(0.0, 15.0) as u32
+                    } else {
+                        0
+                    };
+                    word |= q << (4 * j);
+                }
+                let dst = (row * packs_per_row + pack_base) * std::mem::size_of::<u32>();
+                packed[dst..dst + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+    }
+
+    Ok(MtpDraftAffineQ4Head {
+        weight: MetalTensor::from_bytes(
+            ctx,
+            &packed,
+            vec![n_out as u64, packs_per_row as u64],
+            GgmlType::F32,
+        )?,
+        scales: MetalTensor::from_bytes(
+            ctx,
+            &scales,
+            vec![n_out as u64, groups_per_row as u64],
+            GgmlType::F16,
+        )?,
+        biases: MetalTensor::from_bytes(
+            ctx,
+            &biases,
+            vec![n_out as u64, groups_per_row as u64],
+            GgmlType::F16,
+        )?,
+        n_in,
+        n_out,
+    })
 }
 
 impl MetalMtpHead {
@@ -623,6 +753,7 @@ pub struct SpeculativeDecoder<'a> {
     pub mtp_session: MetalMtpSession,
     draft_token_embd_head: bool,
     draft_lm_head_override: Option<MetalTensor>,
+    draft_affine_q4_head_override: Option<MtpDraftAffineQ4Head>,
     recursive_hidden_variant: MtpRecursiveHiddenVariant,
     base_hidden_variant: MtpBaseHiddenVariant,
     history_mode: MtpHistoryMode,
@@ -640,6 +771,7 @@ impl<'a> SpeculativeDecoder<'a> {
             mtp_session,
             draft_token_embd_head: false,
             draft_lm_head_override: None,
+            draft_affine_q4_head_override: None,
             recursive_hidden_variant: MtpRecursiveHiddenVariant::PreNorm,
             base_hidden_variant: MtpBaseHiddenVariant::PreNorm,
             history_mode: MtpHistoryMode::Committed,
@@ -654,6 +786,10 @@ impl<'a> SpeculativeDecoder<'a> {
         self.draft_lm_head_override = head;
     }
 
+    pub fn set_draft_affine_q4_head_override(&mut self, head: Option<MtpDraftAffineQ4Head>) {
+        self.draft_affine_q4_head_override = head;
+    }
+
     fn draft_lm_head(&self) -> &MetalTensor {
         if self.draft_token_embd_head {
             &self.base.model.token_embd
@@ -662,6 +798,49 @@ impl<'a> SpeculativeDecoder<'a> {
         } else {
             &self.base.model.lm_head
         }
+    }
+
+    fn encode_draft_lm_head_logits(
+        &self,
+        enc: &KernelEncoder,
+        h: usize,
+        vocab_size: usize,
+    ) -> Result<(), MtpError> {
+        let ctx = self.base.ctx;
+        if let Some(head) = &self.draft_affine_q4_head_override {
+            if head.n_in != h || head.n_out != vocab_size {
+                return Err(MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_draft_affine_q4_head",
+                    detail: format!(
+                        "head dims {}/{} do not match expected {h}/{vocab_size}",
+                        head.n_in, head.n_out
+                    ),
+                }));
+            }
+            encode_mtp_draft_affine_q4_gs64_f32(
+                ctx,
+                enc,
+                &head.weight,
+                &head.scales,
+                &head.biases,
+                &self.mtp_session.h,
+                &self.mtp_session.logits,
+                head.n_in,
+                head.n_out,
+            )?;
+        } else {
+            let draft_lm_head = self.draft_lm_head();
+            encode_mat_vec_dispatch(
+                ctx,
+                enc,
+                draft_lm_head,
+                &self.mtp_session.h,
+                &self.mtp_session.logits,
+                h,
+                vocab_size,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn set_recursive_hidden_variant(&mut self, variant: MtpRecursiveHiddenVariant) {
@@ -1139,17 +1318,8 @@ impl<'a> SpeculativeDecoder<'a> {
         )?;
 
         // (12) lm_head: [H] → [V]. Default reuses the base lm_head; bench
-        // probes can substitute token_embd as a cheap draft-only head.
-        let draft_lm_head = self.draft_lm_head();
-        encode_mat_vec_dispatch(
-            ctx,
-            &enc,
-            draft_lm_head,
-            &self.mtp_session.h,
-            &self.mtp_session.logits,
-            h,
-            arch.vocab_size as usize,
-        )?;
+        // probes can substitute draft-only alternatives.
+        self.encode_draft_lm_head_logits(&enc, h, arch.vocab_size as usize)?;
 
         if !matches!(readback, DraftReadback::None) {
             encode_argmax_f32(
@@ -1302,16 +1472,7 @@ impl<'a> SpeculativeDecoder<'a> {
             &self.mtp_session.h,
             RMS_EPS,
         )?;
-        let draft_lm_head = self.draft_lm_head();
-        encode_mat_vec_dispatch(
-            ctx,
-            enc,
-            draft_lm_head,
-            &self.mtp_session.h,
-            &self.mtp_session.logits,
-            h,
-            arch.vocab_size as usize,
-        )?;
+        self.encode_draft_lm_head_logits(enc, h, arch.vocab_size as usize)?;
         encode_argmax_f32(
             ctx,
             enc,

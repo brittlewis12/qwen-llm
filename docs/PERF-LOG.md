@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.521 MTP Draft-Head Falsifiers
+
+Status: MTPLX-style low-bit draft heads and exact fused Q6 top-1 do not beat the
+current Q6_K `lm_head` path on the A3B MoE MTP gate.
+
+THE CHANGE:
+- Added `--mtp-draft-lm-head-q4-affine64`, a bench-only affine Q4 group-size-64
+  draft-head probe modeled after MTPLX/MLX `QuantizedLinear` layout. Target verify
+  still uses the real `output.weight`.
+- Tested an exact two-pass Q6_K draft `lm_head+argmax` probe that avoids
+  full-logit materialization; it regressed enough that the kernel was not kept.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8, 16-token short prompt, final default path: equivalence PASS;
+  MTP total `334.8 ms` vs no-spec `325.7 ms` (`0.973x`); draft `50.9 ms`,
+  verify `179.3 ms`. Artifact:
+  `target/profiles/v0521-a3b-q4km-moe-mtp-d7-default-final-tok16.json`.
+- Same row, affine Q4 gs64 draft head: equivalence PASS and alpha unchanged
+  (`0.619`), but draft regresses to `62.4 ms` and decode to `246.5 ms` versus
+  default `234.0 ms`. Artifact:
+  `target/profiles/v0521-a3b-q4km-moe-mtp-d7-affine64-tok16.json`.
+- Same row, exact fused Q6_K draft argmax forced on: equivalence PASS, but draft
+  regresses to `87.2 ms` and decode to `271.4 ms`. Artifact:
+  `target/profiles/v0521-a3b-q4km-moe-mtp-d7-fused-q6-argmax-tok16.json`.
+- Same row, body-no-lm-head replay probe: equivalence PASS; draft body without
+  full-vocab head is only `9.2 ms`, while verify is `169.9 ms`. Artifact:
+  `target/profiles/v0521-a3b-q4km-moe-mtp-d7-body-no-lm-head-tok16.json`.
+
+READ: draft `lm_head+argmax` is real cost, but the mature default Q6_K mat-vec is
+harder to beat than the byte model suggested. Do not continue broad draft-head
+cleverness without a microbench that beats Q6_K row throughput. The active MTP
+branch returns to verifier-internal attribution and measured verifier reductions;
+draft-head work is narrowed to either reusing an already-mature Q4_K-style kernel
+or an exact MTPLX layout/kernel reproduction with a `>=20%` draft-phase gate.
+
 ## 2026-07-07 - v0.520 MTP 128-Token Validation + Draft-History Kill
 
 Status: v0.519 A3B MoE MTP win survives 128 generated tokens; skipping

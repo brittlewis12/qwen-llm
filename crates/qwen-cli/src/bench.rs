@@ -60,7 +60,8 @@ use qwen_llm::{
     metal_mtp::{
         DecodeOutput, MetalMtpHead, MetalMtpSession, MtpBaseHiddenVariant, MtpHistoryMode,
         MtpRankRow, MtpRecursiveHiddenVariant, PackedDraftPlan, RecordedDraftStep, RecordedMtpWork,
-        SpeculativeDecoder, quantize_lm_head_to_q4_0, quantize_lm_head_to_q4_1,
+        SpeculativeDecoder, quantize_lm_head_to_affine_q4_gs64, quantize_lm_head_to_q4_0,
+        quantize_lm_head_to_q4_1,
     },
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
@@ -1335,6 +1336,10 @@ struct MtpArgs {
     /// More aggressive bench probe for draft-head bandwidth/cost sensitivity.
     #[arg(long)]
     mtp_draft_lm_head_q4_0: bool,
+    /// Quantize output.weight to affine Q4 group-size-64 for the draft lm_head.
+    /// MTPLX-isomorphic bench probe; target verify still uses output.weight.
+    #[arg(long)]
+    mtp_draft_lm_head_q4_affine64: bool,
     /// Recursive MTP hidden fed into the next draft slot.
     #[arg(long, value_enum, default_value_t = MtpRecursiveHiddenArg::PostNorm)]
     mtp_recursive_hidden: MtpRecursiveHiddenArg,
@@ -9533,6 +9538,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_draft_token_embd_head,
         mtp_draft_lm_head_q4_1,
         mtp_draft_lm_head_q4_0,
+        mtp_draft_lm_head_q4_affine64,
         mtp_recursive_hidden,
         mtp_base_hidden,
         mtp_history,
@@ -9565,7 +9571,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     }
     let draft_lm_head_override_count = usize::from(mtp_draft_token_embd_head)
         + usize::from(mtp_draft_lm_head_q4_1)
-        + usize::from(mtp_draft_lm_head_q4_0);
+        + usize::from(mtp_draft_lm_head_q4_0)
+        + usize::from(mtp_draft_lm_head_q4_affine64);
     if draft_lm_head_override_count > 1 {
         anyhow::bail!("choose at most one draft lm_head override");
     }
@@ -9605,7 +9612,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} draft_lm_head_q4_1={} draft_lm_head_q4_0={} base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ({} tokens) gen={} stop_tokens={:?}",
+        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} draft_lm_head_q4_1={} draft_lm_head_q4_0={} draft_lm_head_q4_affine64={} base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ({} tokens) gen={} stop_tokens={:?}",
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -9623,6 +9630,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_draft_token_embd_head,
         mtp_draft_lm_head_q4_1,
         mtp_draft_lm_head_q4_0,
+        mtp_draft_lm_head_q4_affine64,
         mtp_base_hidden,
         mtp_recursive_hidden,
         mtp_history,
@@ -9649,6 +9657,19 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             quantize_lm_head_to_q4_0(&ctx, &mm.lm_head).context("quantize draft lm_head Q4_0")?;
         eprintln!(
             "[mtp-bench] draft Q4_0 lm_head ready in {:.1} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        Some(q)
+    } else {
+        None
+    };
+    let draft_affine_q4_head_override = if mtp_draft_lm_head_q4_affine64 {
+        let t = Instant::now();
+        eprintln!("[mtp-bench] quantizing output.weight -> draft affine Q4 gs64 lm_head");
+        let q = quantize_lm_head_to_affine_q4_gs64(&ctx, &mm.lm_head)
+            .context("quantize draft affine Q4 gs64 lm_head")?;
+        eprintln!(
+            "[mtp-bench] draft affine Q4 gs64 lm_head ready in {:.1} ms",
             t.elapsed().as_secs_f64() * 1e3
         );
         Some(q)
@@ -9719,6 +9740,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
         spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
         spec.set_draft_lm_head_override(draft_lm_head_override.clone());
+        spec.set_draft_affine_q4_head_override(draft_affine_q4_head_override.clone());
         spec.set_base_hidden_variant(mtp_base_hidden.into());
         spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
         spec.set_history_mode(mtp_history.into());
@@ -9749,6 +9771,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             spec.set_draft_lm_head_override(draft_lm_head_override.clone());
+            spec.set_draft_affine_q4_head_override(draft_affine_q4_head_override.clone());
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
@@ -9781,6 +9804,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             spec.set_draft_lm_head_override(draft_lm_head_override.clone());
+            spec.set_draft_affine_q4_head_override(draft_affine_q4_head_override.clone());
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
@@ -9817,6 +9841,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             let mut spec = SpeculativeDecoder::new(&mf, &mtp_head, mtp_session);
             spec.set_draft_token_embd_head(mtp_draft_token_embd_head);
             spec.set_draft_lm_head_override(draft_lm_head_override.clone());
+            spec.set_draft_affine_q4_head_override(draft_affine_q4_head_override.clone());
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
@@ -10068,6 +10093,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "draft_token_embd_head": mtp_draft_token_embd_head,
             "draft_lm_head_q4_1": mtp_draft_lm_head_q4_1,
             "draft_lm_head_q4_0": mtp_draft_lm_head_q4_0,
+            "draft_lm_head_q4_affine64": mtp_draft_lm_head_q4_affine64,
             "base_hidden": format!("{:?}", mtp_base_hidden),
             "recursive_hidden": format!("{:?}", mtp_recursive_hidden),
             "mtp_history": format!("{:?}", mtp_history),

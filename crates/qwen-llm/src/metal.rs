@@ -1671,6 +1671,112 @@ pub fn encode_mat_vec_q4_1_f32(
     )
 }
 
+pub fn encode_mtp_draft_affine_q4_gs64_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    scales: &MetalTensor,
+    biases: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    const GROUP_SIZE: usize = 64;
+    const PACK_FACTOR: usize = 8;
+    const ROWS_PER_TG: usize = 8;
+    let kernel_name = "kernel_mtp_draft_affine_q4_gs64_f32";
+    if n_in % GROUP_SIZE != 0 {
+        return Err(MetalError::BadShape {
+            kernel: kernel_name,
+            detail: format!("n_in={n_in} not divisible by {GROUP_SIZE}"),
+        });
+    }
+    if weight.dtype != GgmlType::F32
+        || scales.dtype != GgmlType::F16
+        || biases.dtype != GgmlType::F16
+    {
+        return Err(MetalError::BadShape {
+            kernel: kernel_name,
+            detail: format!(
+                "weight/scales/biases expected packed-u32-as-F32/F16/F16, got {:?}/{:?}/{:?}",
+                weight.dtype, scales.dtype, biases.dtype
+            ),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: kernel_name,
+            detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
+        });
+    }
+    if x.n_elements() as usize != n_in || y.n_elements() as usize != n_out {
+        return Err(MetalError::BadShape {
+            kernel: kernel_name,
+            detail: format!(
+                "x/y elements {}/{} do not match n_in/n_out {n_in}/{n_out}",
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    let packs_per_row = n_in / PACK_FACTOR;
+    let n_groups = n_in / GROUP_SIZE;
+    if weight.n_elements() as usize != n_out * packs_per_row
+        || scales.n_elements() as usize != n_out * n_groups
+        || biases.n_elements() as usize != n_out * n_groups
+    {
+        return Err(MetalError::BadShape {
+            kernel: kernel_name,
+            detail: format!(
+                "bad packed head sizes: weight={} scales={} biases={} expected {}/{}/{}",
+                weight.n_elements(),
+                scales.n_elements(),
+                biases.n_elements(),
+                n_out * packs_per_row,
+                n_out * n_groups,
+                n_out * n_groups
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline(kernel_name)?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_groups: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_groups: n_groups as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, scales);
+    enc.set_tensor(3, biases);
+    enc.set_tensor(4, x);
+    enc.set_tensor(5, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(ROWS_PER_TG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 crate::env_flag!(default_on matvec_iq4_nl_fast_enabled, "QWEN_MATVEC_IQ4_NL_FAST");
 
 pub fn encode_mat_vec_iq4_nl_f32(

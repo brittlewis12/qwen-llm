@@ -3287,44 +3287,52 @@ What the latest analysis says:
   It also kills accepted-draft KV history as a bridge shortcut: bridge drops, but
   alpha falls `0.873 -> 0.688` and the 64-token row regresses to `0.890x`.
   Canonical accepted-KV repair is worth its cost for this asset.
+- v0.521 narrows draft-head work. An MTPLX-style affine Q4 group-size-64 draft
+  head preserves A3B D7/N8 alpha but is slower than the default Q6_K head
+  (`draft 62.4 ms` vs `51.1 ms` at 16 tokens). A worktree-only exact fused Q6_K
+  `lm_head+argmax` probe is also slower (`87.2 ms`) and was not kept.
+  Body-no-lm-head replay confirms the head is real cost (`9.2 ms` draft body),
+  but cheaper-looking kernels are not enough; future draft-head work needs
+  row-throughput evidence before integration.
 
 Highest-EV speculative kernel targets:
 
-1. Replace row-sequential packed verify with an N8-native verifier shape. Do not
+1. Attribute and reduce the largest remaining packed-verifier subphase. v0.518
+   and v0.519 made the N8 verifier profitable, but v0.520 still spends
+   `~967-978 ms` verifying 128 tokens. v0.521 demotes broad draft-head work, so
+   the next verifier branch should add intra-verify buckets only to pick a
+   concrete kernel target, then require a subphase that is `>=15%` of verify time
+   and plausibly worth `>=5%` end-to-end before implementation.
+2. Replace row-sequential packed verify with an N8-native verifier shape. Do not
    reuse prompt-prefill grouped MoE kernels blindly: v0.515 kills that direct
    transplant at N8. v0.518 proves the branch by batching the mixer side and
    turning replay-current into a win; v0.519 then reuses decode's FFN wave split
    and turns 64-token normal MTP positive. Keep improving verifier only where it
-   lowers `verify_ms` under replay-current; the next broad MTP blocker is now
-   draft-side full-vocab cost and short-prompt fixed overhead.
-2. Reduce D7/N8 MTP draft-head cost only through a new execution shape. v0.515
+   lowers `verify_ms` under replay-current; avoid another broad transplant until
+   the intra-verify split names the dominant subphase.
+3. Reduce D7/N8 MTP draft-head cost only through a proven execution shape. v0.515
    A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
-   but v0.516 kills legacy GGML Q4_1/Q4_0 output copies as a cheap fix. Exact
-   fused `lm_head+argmax` remains bounded; a larger win needs an
-   MTPLX-isomorphic 4-bit affine/top-k kernel or a policy that lowers full-vocab
-   work without unacceptable acceptance loss. v0.517 sizes the normal A3B D7/N8
-   draft bucket at `~52 ms` for 16 tokens, and v0.520 sizes it at `~201 ms` for
-   128 tokens, so this is now the top normal-path cost target.
-3. Keep A3B Q4_K_M D7/N8 as the MoE MTP acceptance/cost gate. It now clears the
+   but v0.516 kills legacy GGML Q4_1/Q4_0 output copies, and v0.521 kills the
+   first affine Q4 gs64 and exact fused-Q6 top-1 probes. Keep only candidates
+   that first beat default Q6_K row throughput in isolation, such as a mature
+   Q4_K-style draft layout or an exact MTPLX kernel/layout reproduction. Gate on
+   `>=20%` draft-phase reduction at both 16-token and 128-token rows with alpha
+   loss `<0.02`.
+4. Keep A3B Q4_K_M D7/N8 as the MoE MTP acceptance/cost gate. It now clears the
    emitted/step investigation threshold, so use it alongside 27B code/narrative
    rows for MTP changes rather than relying on dense-only evidence.
-4. Add native IQ2_S MoE expert-bank gate/up support, then evaluate Q2_K/Q3_K. Do
+5. Add native IQ2_S MoE expert-bank gate/up support, then evaluate Q2_K/Q3_K. Do
    not dequantize base MoE expert banks to F32. The one-block MTP F32 bridge is
    acceptable; base low-bit MoE needs native routed bank kernels for residency.
-5. Continue dense-27B MTP semantic parity before tree work, but with cycle history closed.
+6. Continue dense-27B MTP semantic parity before tree work, but with cycle history closed.
    Remaining concrete variants are position-offset semantics, history-window
    variants rather than full reset, and MTPLX contract/draft-asset details. Gate
    continuation on emitted/step `>=5.2` or `>=25%` over the post-norm committed
    default, equivalence PASS.
-6. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
+7. Inspect MTPLX acceptance/reporting enough to separate decode-only vs total,
    D3 vs D7, and proper draft-head asset effects. The current qwen oracle already
    reaches the screenshot band decode-only; the open question is how MTPLX gets
    much closer to oracle in actual chain mode.
-7. Prototype a proper low-bit draft head only if it is not another legacy GGML
-   output clone. Do not use `token_embd.weight`; v0.509 killed that alias. Do not
-   expect Q4_1/Q4_0 clones to help; v0.516 killed those. Gate a new layout/kernel
-   on `>=5%` whole-run gain, `>=40%` recovery of the body-no-lm gap, and `<=5%`
-   relative acceptance loss.
 8. Build an alternate-continuation/tree simulator before any tree implementation,
    but only after post-norm rank traces still show unreachable chain acceptance.
    Gates: N8 `>=5.2` emitted/step to investigate, `>=5.8` to implement; N16 `>=9`

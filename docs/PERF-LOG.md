@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-07 - v0.517 MTP N8 Phase Attribution
+
+Status: MTP bench now reports decode-loop phase timing; A3B D7/N8 is verifier
+dominated, not draft-head dominated.
+
+THE CHANGE:
+- Added `SpecStats` decode phase buckets for MTP:
+  - `draft_ms`
+  - `verify_ms`
+  - `restore_ms`
+  - `bridge_ms`
+- `qwen-bench mtp` prints the phase split and writes it under
+  `speculative.phase_ms` in JSON outputs.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8 default, 16-token short prompt: equivalence PASS; total
+  `398.7 ms` vs no-spec `320.9 ms` (`0.805x`); decode phases: draft `51.7 ms`,
+  verify `242.8 ms`, restore `1.0 ms`, bridge `4.9 ms`. Artifact:
+  `target/profiles/v0517-a3b-q4km-moe-mtp-d7-default-phase-tok16.json`.
+- Same row with `--mtp-probe replay-current`: equivalence PASS; total `336.2 ms`
+  vs no-spec `323.1 ms` (`0.961x`); decode phases: draft `0.0 ms`, verify
+  `239.2 ms`, restore `0.9 ms`, bridge `0.5 ms`. Artifact:
+  `target/profiles/v0517-a3b-q4km-moe-mtp-d7-replay-current-phase-tok16.json`.
+
+READ: the replay-current loss is almost entirely packed target verification.
+Normal MTP adds a real `~52 ms` draft tax on this row, but even removing native
+MTP calls leaves `~239 ms` of verifier decode-loop time versus `~157 ms` for
+no-spec decode. This makes N8-native verifier structure the top MTP branch.
+Bridge/restore are too small to lead, and draft-head work should stay secondary
+unless a new path avoids full-vocab projection cost outright.
+
 ## 2026-07-07 - v0.516 Draft Low-Bit LM-Head Probe Kill
 
 Status: simple GGML low-bit copies of `output.weight` do not reproduce the

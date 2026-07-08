@@ -2059,6 +2059,7 @@ impl<'a> SpeculativeDecoder<'a> {
             // Draft chain. First slot uses exact base hidden. Subsequent slots
             // recursively consume the previous MTP hidden as an approximation.
             let mut draft_logits: Vec<Vec<f32>> = Vec::new();
+            let t_draft = std::time::Instant::now();
             let drafts: Vec<i32> = if rank_rows.is_some() {
                 let mut drafts: Vec<i32> = Vec::with_capacity(spec_tokens);
                 let first = self.draft_inner(
@@ -2140,6 +2141,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 }
                 drafts
             };
+            stats.draft_ms += t_draft.elapsed().as_secs_f64() * 1e3;
 
             if let Some(trace) = draft_trace.as_mut() {
                 (*trace).push(RecordedDraftStep {
@@ -2156,6 +2158,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 verify_input.push(carry_tok);
             }
 
+            let t_verify = std::time::Instant::now();
             let verify_argmax = encode_packed_verify_layer_major_inner(
                 self.base,
                 &last_layer,
@@ -2167,6 +2170,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 None,
                 None,
             )?;
+            stats.verify_ms += t_verify.elapsed().as_secs_f64() * 1e3;
             stats.base_forward_calls += 1;
 
             if let Some(rows) = rank_rows.as_mut() {
@@ -2211,6 +2215,7 @@ impl<'a> SpeculativeDecoder<'a> {
 
             let n_keep = (1 + n_accepted) as u32;
             if n_keep < physical_verify_n as u32 {
+                let t_restore = std::time::Instant::now();
                 encode_restore_after_partial_accept_inner(
                     self.base,
                     verify_scratch,
@@ -2219,8 +2224,10 @@ impl<'a> SpeculativeDecoder<'a> {
                     base_session,
                     None,
                 )?;
+                stats.restore_ms += t_restore.elapsed().as_secs_f64() * 1e3;
             }
 
+            let t_bridge = std::time::Instant::now();
             if self.uses_cycle_mtp_history() {
                 self.mtp_session.kv_n_pos = 0;
             } else {
@@ -2246,6 +2253,7 @@ impl<'a> SpeculativeDecoder<'a> {
 
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
             self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
+            stats.bridge_ms += t_bridge.elapsed().as_secs_f64() * 1e3;
 
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
@@ -2395,6 +2403,7 @@ impl<'a> SpeculativeDecoder<'a> {
             let drafts: Vec<i32> = row.drafts[..n_draft].to_vec();
             stats.drafts_attempted += drafts.len() as u32;
 
+            let t_draft = std::time::Instant::now();
             match work {
                 RecordedMtpWork::BodyNoLmHead => {
                     self.draft_chain_recorded_body_only(
@@ -2410,6 +2419,7 @@ impl<'a> SpeculativeDecoder<'a> {
                     stats.mtp_calls += 1;
                 }
             }
+            stats.draft_ms += t_draft.elapsed().as_secs_f64() * 1e3;
 
             let mut verify_input: Vec<i32> = Vec::with_capacity(physical_verify_n);
             verify_input.push(carry_tok);
@@ -2419,6 +2429,7 @@ impl<'a> SpeculativeDecoder<'a> {
             }
             let n_eff = physical_verify_n as u32;
 
+            let t_verify = std::time::Instant::now();
             let verify_argmax = encode_packed_verify_layer_major_inner(
                 self.base,
                 &last_layer,
@@ -2430,6 +2441,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 None,
                 Some(n_eff),
             )?;
+            stats.verify_ms += t_verify.elapsed().as_secs_f64() * 1e3;
             stats.base_forward_calls += 1;
 
             let mut n_accepted = 0usize;
@@ -2450,6 +2462,7 @@ impl<'a> SpeculativeDecoder<'a> {
 
             let n_keep = (1 + n_accepted) as u32;
             if n_keep < n_eff {
+                let t_restore = std::time::Instant::now();
                 encode_restore_after_partial_accept_inner(
                     self.base,
                     verify_scratch,
@@ -2458,8 +2471,10 @@ impl<'a> SpeculativeDecoder<'a> {
                     base_session,
                     Some(n_eff),
                 )?;
+                stats.restore_ms += t_restore.elapsed().as_secs_f64() * 1e3;
             }
 
+            let t_bridge = std::time::Instant::now();
             self.mtp_session.kv_n_pos = processed_pos as usize + 1;
             #[allow(clippy::needless_range_loop)]
             for j in 0..n_accepted {
@@ -2476,6 +2491,7 @@ impl<'a> SpeculativeDecoder<'a> {
 
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
             self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
+            stats.bridge_ms += t_bridge.elapsed().as_secs_f64() * 1e3;
 
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
@@ -2659,6 +2675,7 @@ impl<'a> SpeculativeDecoder<'a> {
             }
             let n_eff = physical_verify_n as u32;
 
+            let t_verify = std::time::Instant::now();
             let verify_argmax = encode_packed_verify_layer_major_inner(
                 self.base,
                 &last_layer,
@@ -2670,6 +2687,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 None,
                 Some(n_eff),
             )?;
+            stats.verify_ms += t_verify.elapsed().as_secs_f64() * 1e3;
             stats.base_forward_calls += 1;
 
             let mut n_accepted = 0usize;
@@ -2690,6 +2708,7 @@ impl<'a> SpeculativeDecoder<'a> {
 
             let n_keep = (1 + n_accepted) as u32;
             if n_keep < n_eff {
+                let t_restore = std::time::Instant::now();
                 encode_restore_after_partial_accept_inner(
                     self.base,
                     verify_scratch,
@@ -2698,10 +2717,13 @@ impl<'a> SpeculativeDecoder<'a> {
                     base_session,
                     Some(n_eff),
                 )?;
+                stats.restore_ms += t_restore.elapsed().as_secs_f64() * 1e3;
             }
 
+            let t_bridge = std::time::Instant::now();
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
             self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
+            stats.bridge_ms += t_bridge.elapsed().as_secs_f64() * 1e3;
 
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
@@ -2747,6 +2769,14 @@ pub struct SpecStats {
     pub prefill_ms: f64,
     /// Decode-loop wall time after prompt/MTP-history prefill.
     pub decode_ms: f64,
+    /// Decode-loop wall time spent producing draft tokens or recorded draft work.
+    pub draft_ms: f64,
+    /// Decode-loop wall time spent in packed target verification.
+    pub verify_ms: f64,
+    /// Decode-loop wall time spent rolling back rejected packed slots.
+    pub restore_ms: f64,
+    /// Decode-loop wall time spent repairing/carrying hidden or MTP KV state.
+    pub bridge_ms: f64,
     /// Wall time in milliseconds.
     pub wall_ms: f64,
 }

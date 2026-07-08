@@ -9978,6 +9978,20 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
          (= prompt prefill + step-B drafts + step-E bridges)",
         result.stats.base_forward_calls, result.stats.mtp_calls,
     );
+    let spec_phase_known_ms = result.stats.draft_ms
+        + result.stats.verify_ms
+        + result.stats.restore_ms
+        + result.stats.bridge_ms;
+    let spec_phase_other_ms = (spec_decode_ms - spec_phase_known_ms).max(0.0);
+    eprintln!(
+        "[mtp-bench]   decode phases ms: draft={:.1} verify={:.1} restore={:.1} \
+         bridge={:.1} other={:.1}",
+        result.stats.draft_ms,
+        result.stats.verify_ms,
+        result.stats.restore_ms,
+        result.stats.bridge_ms,
+        spec_phase_other_ms,
+    );
 
     // Wall-time speedup: total-vs-total, the apples-to-apples ratio that
     // matches docs/H4-MTP.md §3.2's `1/(1+ε)` prediction. The earlier
@@ -10031,6 +10045,13 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         } else {
             serde_json::Value::Null
         };
+        let speculative_phase_ms = serde_json::json!({
+            "draft": result.stats.draft_ms,
+            "verify": result.stats.verify_ms,
+            "restore": result.stats.restore_ms,
+            "bridge": result.stats.bridge_ms,
+            "other": spec_phase_other_ms,
+        });
         let row = serde_json::json!({
             "model": model.display().to_string(),
             "prompt_tokens": prompt_ids.len(),
@@ -10080,6 +10101,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 "base_forward_calls": result.stats.base_forward_calls,
                 "mtp_calls": result.stats.mtp_calls,
                 "rank_rows": mtp_rank_rows.len(),
+                "phase_ms": speculative_phase_ms,
             },
             "speedup_total_ms": total_speedup,
             "identical": identical,

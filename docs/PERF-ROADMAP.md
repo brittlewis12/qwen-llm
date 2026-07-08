@@ -3264,6 +3264,12 @@ What the latest analysis says:
   This does not kill MTPLX's actual 4-bit affine/group-size-64 draft-head layout
   or a top-k/head policy, but it closes legacy GGML output clones as the cheap
   missing lever.
+- v0.517 adds explicit MTP decode phase buckets. A3B Q4_K_M D7/N8 default spends
+  draft `51.7 ms`, verifier `242.8 ms`, restore `1.0 ms`, and bridge `4.9 ms`;
+  replay-current spends verifier `239.2 ms`, restore `0.9 ms`, and bridge
+  `0.5 ms`. Therefore the replay-current loss is verifier structure, not hidden
+  MTP bridge/rollback overhead, and the normal-path draft tax is secondary until
+  verifier cost moves.
 
 Highest-EV speculative kernel targets:
 
@@ -3271,13 +3277,15 @@ Highest-EV speculative kernel targets:
    reuse prompt-prefill grouped MoE kernels blindly: v0.515 kills that direct
    transplant at N8. Candidate designs need to batch the real remaining base work
    (GDN/attention plus FFN where profitable) and prove a replay-current win before
-   touching normal MTP.
+   touching normal MTP. v0.517 says this branch owns `~239 ms` of A3B D7/N8
+   replay-current decode-loop time across three steps.
 2. Reduce D7/N8 MTP draft-head cost only through a new execution shape. v0.515
    A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
    but v0.516 kills legacy GGML Q4_1/Q4_0 output copies as a cheap fix. Exact
    fused `lm_head+argmax` remains bounded; a larger win needs an
    MTPLX-isomorphic 4-bit affine/top-k kernel or a policy that lowers full-vocab
-   work without unacceptable acceptance loss.
+   work without unacceptable acceptance loss. v0.517 sizes the normal A3B D7/N8
+   draft bucket at `~52 ms`, so this is meaningful but no longer first.
 3. Keep A3B Q4_K_M D7/N8 as the MoE MTP acceptance/cost gate. It now clears the
    emitted/step investigation threshold, so use it alongside 27B code/narrative
    rows for MTP changes rather than relying on dense-only evidence.
@@ -3306,9 +3314,10 @@ Highest-EV speculative kernel targets:
    shallower adaptive depths; do not pursue D15/N16 until a better asset/policy
    proves much higher emitted/step.
 10. Keep target-verify work tied to replay-current gates. A3B now clears the
-   emitted/step threshold, but the direct prefill-grouped FFN transplant regressed;
-   reopen packed GDN/tape, packed multi-query attention, or an N8-specific MoE
-   kernel only with a measured replay-current win.
+    emitted/step threshold, but the direct prefill-grouped FFN transplant regressed;
+    reopen packed GDN/tape, packed multi-query attention, or an N8-specific MoE
+    kernel only with a measured replay-current win. The next useful attribution is
+    inside the `verify_ms` bucket, not bridge/restore/draft bookkeeping.
 11. Build bucket policy around supported packet shapes; prefer padding/rollback to
    arbitrary ragged N unless bucketed verification fails a correctness or waste
    gate.

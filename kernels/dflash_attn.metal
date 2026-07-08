@@ -265,3 +265,136 @@ kernel void kernel_dflash_attn_f32(
         o_base[j * NW_DFLASH + tiisg] = o_acc[j];
     }
 }
+
+// Same math and mask contract as `kernel_dflash_attn_f32`, but reads the
+// committed-context K/V cache and the N noise rows from two separate ranges.
+// This avoids materializing `k_full/v_full = ctx || noise` before every
+// drafter attention layer. It deliberately keeps the 3-pass softmax shape so
+// the dataflow change can be isolated before the online-softmax rewrite.
+kernel void kernel_dflash_attn_two_range_f32(
+        constant dflash_attn_args & args [[buffer(0)]],
+        device const float * q          [[buffer(1)]],
+        device const float * k_ctx      [[buffer(2)]],
+        device const float * v_ctx      [[buffer(3)]],
+        device const float * k_noise    [[buffer(4)]],
+        device const float * v_noise    [[buffer(5)]],
+        device const int   * pos_ctx    [[buffer(6)]],
+        device       float * o          [[buffer(7)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint q_head = tgpig.x;
+    const uint q_idx  = tgpig.y;
+    if (q_head >= args.n_q_heads || q_idx >= args.n_rows) return;
+    const uint group = args.n_q_heads / args.n_kv_heads;
+    const uint kv_head = q_head / group;
+    const uint head_dim = args.head_dim;
+    const ushort dk_per_lane = head_dim / NW_DFLASH;
+    const uint q_pos = args.noise_start_pos + q_idx;
+    const bool full_attn = (args.swa_window == 0);
+    const ulong k_stride = (ulong)args.n_kv_heads * head_dim;
+
+    float q_reg[8];
+    {
+        device const float * q_base =
+            q + ((ulong)q_idx * args.n_q_heads + (ulong)q_head) * head_dim;
+        for (ushort j = 0; j < dk_per_lane; ++j) {
+            q_reg[j] = q_base[j * NW_DFLASH + tiisg];
+        }
+    }
+
+    float m_run = -INFINITY;
+    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+        bool allowed;
+        device const float * k_row;
+        if (kk < args.ctx_len) {
+            if (full_attn) {
+                allowed = true;
+            } else {
+                const uint k_pos = (uint)pos_ctx[kk];
+                const bool causal = (k_pos <= q_pos);
+                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
+            }
+            k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
+        } else {
+            const uint noise_idx = kk - args.ctx_len;
+            allowed = (noise_idx <= q_idx);
+            k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
+        }
+        if (!allowed) continue;
+        float partial = 0.0f;
+        for (ushort j = 0; j < dk_per_lane; ++j) {
+            partial += q_reg[j] * k_row[j * NW_DFLASH + tiisg];
+        }
+        const float s = simd_sum(partial) * args.scale;
+        m_run = max(m_run, s);
+    }
+
+    float l_sum = 0.0f;
+    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+        bool allowed;
+        device const float * k_row;
+        if (kk < args.ctx_len) {
+            if (full_attn) {
+                allowed = true;
+            } else {
+                const uint k_pos = (uint)pos_ctx[kk];
+                const bool causal = (k_pos <= q_pos);
+                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
+            }
+            k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
+        } else {
+            const uint noise_idx = kk - args.ctx_len;
+            allowed = (noise_idx <= q_idx);
+            k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
+        }
+        if (!allowed) continue;
+        float partial = 0.0f;
+        for (ushort j = 0; j < dk_per_lane; ++j) {
+            partial += q_reg[j] * k_row[j * NW_DFLASH + tiisg];
+        }
+        const float s = simd_sum(partial) * args.scale;
+        l_sum += exp(s - m_run);
+    }
+    const float inv_l = (l_sum > 0.0f) ? (1.0f / l_sum) : 0.0f;
+
+    float o_acc[8];
+    for (ushort j = 0; j < dk_per_lane; ++j) o_acc[j] = 0.0f;
+
+    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+        bool allowed;
+        device const float * k_row;
+        device const float * v_row;
+        if (kk < args.ctx_len) {
+            if (full_attn) {
+                allowed = true;
+            } else {
+                const uint k_pos = (uint)pos_ctx[kk];
+                const bool causal = (k_pos <= q_pos);
+                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
+            }
+            k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
+            v_row = v_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
+        } else {
+            const uint noise_idx = kk - args.ctx_len;
+            allowed = (noise_idx <= q_idx);
+            k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
+            v_row = v_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
+        }
+        if (!allowed) continue;
+        float partial = 0.0f;
+        for (ushort j = 0; j < dk_per_lane; ++j) {
+            partial += q_reg[j] * k_row[j * NW_DFLASH + tiisg];
+        }
+        const float s = simd_sum(partial) * args.scale;
+        const float w = exp(s - m_run) * inv_l;
+        for (ushort j = 0; j < dk_per_lane; ++j) {
+            o_acc[j] += w * v_row[j * NW_DFLASH + tiisg];
+        }
+    }
+
+    device float * o_base =
+        o + ((ulong)q_idx * args.n_q_heads + (ulong)q_head) * head_dim;
+    for (ushort j = 0; j < dk_per_lane; ++j) {
+        o_base[j * NW_DFLASH + tiisg] = o_acc[j];
+    }
+}

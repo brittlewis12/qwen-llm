@@ -6,6 +6,62 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.527 DFlash Batched Projections
+
+Status: DFlash drafter phase 1/2 projection batching is a large win and now
+defaults on. The two-range DFlash attention sidecar is correctness-safe but not a
+default win by itself; keep it as scaffolding for the next phase-3 attention
+rewrite.
+
+THE CHANGE:
+- Defaulted `QWEN_DFLASH_BATCHED_PROJ=1` with `=0` rollback.
+- Phase 1 now batches the target-context FC projection with mat-mat and applies a
+  batched RMSNorm over the delta rows instead of one mat-vec + one norm per row.
+- Phase 2 now batches noise Q/K/V projections, ctx-delta K/V projections, and
+  consecutive RoPE for noise Q/K plus contiguous ctx K deltas.
+- Added default-off `QWEN_DFLASH_ATTN_TWO_RANGE=1`: DFlash attention can read
+  ctx-cache K/V and noise K/V as two ranges without materializing `k_full/v_full`.
+
+GATES:
+- `cargo test -p qwen-llm dflash_attn_matches_cpu_oracle_under_mask_regimes -- --nocapture`
+  PASS; concat and two-range attention both match the CPU oracle.
+- `cargo build --release --bin qwen-bench` PASS.
+- `cargo test --release -p qwen-llm --test dflash_correctness metal_drafter_cosine_vs_cpu -- --nocapture`
+  PASS: every noise row reports `cos=1.000000`, argmax all-match.
+- Default DFlash static-16 smoke, 27B Q4_K_M + spiritbuun drafter, 2 generated
+  tokens: greedy equivalence PASS; draft mean `36.1 ms`. Artifact:
+  `target/profiles/v0527-dflash-default-batched-proj-smoke.out`.
+
+PERF:
+- Synthetic 2520-token prompt, static-16, 64 generated tokens, skip-equivalence:
+  base decode `2762.5 ms` / `23.17 t/s`; batched projections decode
+  `1770.5 ms` / `36.15 t/s` (`1.56x`). Draft mean improves
+  `238.1 -> 82.0 ms` (`2.90x`). Artifacts:
+  `target/profiles/v0527-dflash-two-range-base-ctxlong-tok64.out`,
+  `target/profiles/v0527-dflash-batched-proj-ctxlong-tok64.out`.
+- Same row phase sums: phase1 `721.08 -> 56.99 ms` (`12.65x`), phase2
+  `289.72 -> 44.02 ms` (`6.58x`), phase3 stays `332.27 -> 333.35 ms` and is
+  now the dominant drafter bucket.
+- Adding two-range attention on top of batched projections is only a tiny
+  incremental move: decode `1770.5 -> 1767.7 ms`, phase3 `333.35 -> 326.14 ms`.
+  Artifact: `target/profiles/v0527-dflash-batched-proj-two-range-ctxlong-tok64.out`.
+- Favorable synthetic 1260-token prompt, static-16, 16 generated tokens with
+  equivalence: DFlash decode `330.0 ms` vs no-spec `649.4 ms` (`1.967x`), PASS.
+  Artifact: `target/profiles/v0527-dflash-batched-proj-equivalence-ctx1260-tok16.out`.
+- Real `the_current.md` 2464-token prompt, static-16, 16 generated tokens:
+  base DFlash decode `3251.4 ms`; batched projections `2291.1 ms` (`1.42x`),
+  but low acceptance (`alpha_chain=1.0`) still leaves static-16 at `0.290x` vs
+  no-spec. Equivalence PASS. Artifacts:
+  `target/profiles/v0527-dflash-base-realprompt-tok16.out`,
+  `target/profiles/v0527-dflash-batched-proj-realprompt-tok16.out`.
+
+READ: The old DFlash bottleneck attribution was stale. At long prompt, phase 1/2
+were still tuple-at-a-time despite existing mat-mat infrastructure; batching them
+turns DFlash from obviously hopeless to potentially viable on high-acceptance
+contexts. The next DFlash work should attack phase 3 itself or recalibrate the
+adaptive policy; static DFlash is still not a product win on real prompts when
+acceptance is poor.
+
 ## 2026-07-08 - v0.526 Batched Shared MTP Verifier Falsifier
 
 Status: worktree-only batched shared-expert verifier branch was correctness-safe

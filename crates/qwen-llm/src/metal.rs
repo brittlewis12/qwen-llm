@@ -14860,6 +14860,151 @@ pub fn encode_dflash_attn_f32(
     Ok(())
 }
 
+/// DFlash drafter attention over two K/V ranges: committed context cache
+/// plus the current noise block. Same math as `encode_dflash_attn_f32`, but
+/// skips the per-layer materialization of `k_full/v_full = ctx || noise`.
+pub fn encode_dflash_attn_two_range_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_ctx: &MetalTensor,
+    v_ctx: &MetalTensor,
+    k_noise: &MetalTensor,
+    v_noise: &MetalTensor,
+    pos_ctx: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+) -> Result<(), MetalError> {
+    if head_dim % 32 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range",
+            detail: format!("head_dim={head_dim} not divisible by 32"),
+        });
+    }
+    if head_dim > 256 {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range",
+            detail: format!(
+                "head_dim={head_dim} > 256: kernel registers q_reg/o_acc are sized for head_dim <= 256"
+            ),
+        });
+    }
+    if n_q_heads % n_kv_heads != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range",
+            detail: format!("n_q_heads={n_q_heads} not divisible by n_kv_heads={n_kv_heads}"),
+        });
+    }
+    if q.n_elements() as usize != n * n_q_heads * head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range.q",
+            detail: format!(
+                "q.n_elements={} != N*n_q*head_dim={}",
+                q.n_elements(),
+                n * n_q_heads * head_dim
+            ),
+        });
+    }
+    let kv_stride = n_kv_heads * head_dim;
+    let ctx_elems = ctx_len * kv_stride;
+    if (k_ctx.n_elements() as usize) < ctx_elems || (v_ctx.n_elements() as usize) < ctx_elems {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range.ctx_kv",
+            detail: format!(
+                "ctx k/v need at least ctx_len*kv_stride = {ctx_len}*{kv_stride} = {ctx_elems} elements"
+            ),
+        });
+    }
+    let noise_elems = n * kv_stride;
+    if k_noise.n_elements() as usize != noise_elems || v_noise.n_elements() as usize != noise_elems
+    {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range.noise_kv",
+            detail: format!(
+                "noise k/v expected N*kv_stride = {n}*{kv_stride} = {noise_elems} elements"
+            ),
+        });
+    }
+    if (pos_ctx.n_elements() as usize) < ctx_len {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range.pos_ctx",
+            detail: format!(
+                "pos_ctx.n_elements={} < ctx_len={ctx_len}",
+                pos_ctx.n_elements()
+            ),
+        });
+    }
+    if o.n_elements() as usize != n * n_q_heads * head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_two_range.o",
+            detail: format!(
+                "o.n_elements={} != N*n_q*head_dim={}",
+                o.n_elements(),
+                n * n_q_heads * head_dim
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_dflash_attn_two_range_f32")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_kv_total: u32,
+        ctx_len: u32,
+        n_rows: u32,
+        noise_start_pos: u32,
+        swa_window: u32,
+        scale: f32,
+    }
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    enc.set_bytes(
+        0,
+        &Args {
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: head_dim as u32,
+            n_kv_total: (ctx_len + n) as u32,
+            ctx_len: ctx_len as u32,
+            n_rows: n as u32,
+            noise_start_pos,
+            swa_window,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_ctx);
+    enc.set_tensor(3, v_ctx);
+    enc.set_tensor(4, k_noise);
+    enc.set_tensor(5, v_noise);
+    enc.set_tensor(6, pos_ctx);
+    enc.set_tensor(7, o);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_q_heads,
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Per-head L2-norm: `y[h, :] = x[h, :] / max(||x[h, :]||, eps)` for
 /// `h ∈ [0, n_heads)`. One dispatch covers all heads. Used in the GDN
 /// front-end where Q and K are l2-normed per K-head before the
@@ -25504,6 +25649,86 @@ mod tests {
         Ok(read_back_f32(&o_t.buffer, n * n_q_heads * head_dim))
     }
 
+    /// One-shot helper for the two-range DFlash attention sidecar.
+    fn dflash_attn_two_range_readback(
+        ctx: &MetalContext,
+        q: &[f32],
+        k_ctx: &[f32],
+        v_ctx: &[f32],
+        k_noise: &[f32],
+        v_noise: &[f32],
+        pos_ctx: &[i32],
+        n: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        ctx_len: usize,
+        noise_start_pos: u32,
+        swa_window: u32,
+    ) -> Result<Vec<f32>, MetalError> {
+        let q_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(q),
+            vec![(n * n_q_heads * head_dim) as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
+        let ctx_rows = ctx_len.max(1);
+        let kv_stride = n_kv_heads * head_dim;
+        let k_ctx_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(k_ctx),
+            vec![(ctx_rows * kv_stride) as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
+        let v_ctx_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(v_ctx),
+            vec![(ctx_rows * kv_stride) as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
+        let k_noise_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(k_noise),
+            vec![(n * kv_stride) as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
+        let v_noise_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(v_noise),
+            vec![(n * kv_stride) as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
+        let pos_rows = ctx_len.max(1);
+        let pos_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(pos_ctx),
+            vec![pos_rows as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
+        let o_t = MetalTensor::zeros_f32(ctx, vec![(n * n_q_heads * head_dim) as u64])?;
+        one_shot(ctx, |enc| {
+            encode_dflash_attn_two_range_f32(
+                ctx,
+                enc,
+                &q_t,
+                &k_ctx_t,
+                &v_ctx_t,
+                &k_noise_t,
+                &v_noise_t,
+                &pos_t,
+                &o_t,
+                n,
+                n_q_heads,
+                n_kv_heads,
+                head_dim,
+                ctx_len,
+                noise_start_pos,
+                swa_window,
+            )
+        })?;
+        Ok(read_back_f32(&o_t.buffer, n * n_q_heads * head_dim))
+    }
+
     /// **v0.72.2 codex code-review test #1**: dflash attention kernel
     /// matches the CPU oracle bit-tight under each mask regime.
     ///
@@ -25642,6 +25867,19 @@ mod tests {
             }
             let k = make_buf(2, n_kv_total * kv_stride);
             let v = make_buf(3, n_kv_total * kv_stride);
+            let ctx_rows = c.ctx_len.max(1);
+            let mut k_ctx = vec![0.0_f32; ctx_rows * kv_stride];
+            let mut v_ctx = vec![0.0_f32; ctx_rows * kv_stride];
+            if c.ctx_len > 0 {
+                k_ctx[..c.ctx_len * kv_stride].copy_from_slice(&k[..c.ctx_len * kv_stride]);
+                v_ctx[..c.ctx_len * kv_stride].copy_from_slice(&v[..c.ctx_len * kv_stride]);
+            }
+            let k_noise = k[c.ctx_len * kv_stride..].to_vec();
+            let v_noise = v[c.ctx_len * kv_stride..].to_vec();
+            let mut pos_ctx = vec![0_i32; c.ctx_len.max(1)];
+            if c.ctx_len > 0 {
+                pos_ctx[..c.ctx_len].copy_from_slice(&pos_ctx_vec);
+            }
 
             let cpu = dflash_attn_cpu_oracle(
                 &q,
@@ -25673,26 +25911,62 @@ mod tests {
                 c.swa_window,
             )
             .expect("dflash_attn dispatch");
+            let gpu_two_range = dflash_attn_two_range_readback(
+                &ctx,
+                &q,
+                &k_ctx,
+                &v_ctx,
+                &k_noise,
+                &v_noise,
+                &pos_ctx,
+                n,
+                n_q,
+                n_kv,
+                hd,
+                c.ctx_len,
+                c.noise_start_pos,
+                c.swa_window,
+            )
+            .expect("dflash_attn_two_range dispatch");
 
             let mut max_abs = 0.0f32;
+            let mut max_abs_two_range = 0.0f32;
             let mut sum_sq_diff = 0.0f64;
+            let mut sum_sq_diff_two_range = 0.0f64;
             let mut sum_sq_cpu = 0.0f64;
             for i in 0..cpu.len() {
                 let d = (gpu[i] - cpu[i]).abs();
                 if d > max_abs {
                     max_abs = d;
                 }
+                let d_two_range = (gpu_two_range[i] - cpu[i]).abs();
+                if d_two_range > max_abs_two_range {
+                    max_abs_two_range = d_two_range;
+                }
                 let dd = (gpu[i] - cpu[i]) as f64;
                 sum_sq_diff += dd * dd;
+                let dd_two_range = (gpu_two_range[i] - cpu[i]) as f64;
+                sum_sq_diff_two_range += dd_two_range * dd_two_range;
                 sum_sq_cpu += (cpu[i] as f64).powi(2);
             }
             let rel_l2 = sum_sq_diff.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
+            let rel_l2_two_range = sum_sq_diff_two_range.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
             eprintln!(
-                "[dflash-attn-mask {label}] max|Δ|={max_abs:.3e} rel_l2={rel_l2:.3e}",
+                "[dflash-attn-mask {label}] max|Δ|={max_abs:.3e} rel_l2={rel_l2:.3e} two_range_max|Δ|={max_abs_two_range:.3e} two_range_rel_l2={rel_l2_two_range:.3e}",
                 label = c.label
             );
             assert!(max_abs < 1e-4, "{}: max|Δ|={max_abs} too large", c.label);
             assert!(rel_l2 < 1e-5, "{}: rel_l2={rel_l2} too large", c.label);
+            assert!(
+                max_abs_two_range < 1e-4,
+                "{}: two-range max|Δ|={max_abs_two_range} too large",
+                c.label
+            );
+            assert!(
+                rel_l2_two_range < 1e-5,
+                "{}: two-range rel_l2={rel_l2_two_range} too large",
+                c.label
+            );
         }
     }
 

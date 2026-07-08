@@ -78,37 +78,42 @@ paired repeat contradicts this spot.
 
 ## Hardware-Saturation Recalibration (2026-07-08)
 
-External audit + cx review after v0.526 updates the live ordering. The key
-change is that recent N8 verifier probes repeatedly show reduced dispatch count
-is not the same as reduced wall: grouped prefill FFN, skinny GDN alpha/beta,
-checkpoint write plumbing, sparse checkpoint replay, and batched shared-expert
-mat-mat are all correctness-safe and slower or too small. Keep one true R=2
-row-wave only if it preserves the mature per-token kernels and stays small;
-otherwise pivot to broader long-context attention / DFlash dataflow work.
+External audit + cx review after v0.526 initially moved attention/DFlash dataflow
+to the top. v0.527 then found and fixed the larger stale DFlash bottleneck:
+phase 1/2 were still tuple-at-a-time. Default batched projections improve a
+2520-token static-16 DFlash row from `23.17 -> 36.15 t/s` decode-only, cut draft
+mean `238.1 -> 82.0 ms`, and make phase 3 the dominant drafter bucket. The same
+branch improves a real `the_current.md` prompt's static DFlash decode
+`3251.4 -> 2291.1 ms`, but low acceptance still leaves it slower than no-spec.
 
 Force-ranked implementation bets from this vantage:
 
-1. **DFlash attention dataflow rewrite**: remove `k_full` / `v_full`
-   materialization by reading target context cache and noise rows as two ranges,
-   then collapse the documented 3-pass QK recompute into online softmax. Gate on
-   DFlash draft wall `>=10%` at long context with existing DFlash correctness
-   oracles and no short-context regression. Treat this as one dataflow branch;
-   an online-softmax kernel that still materializes `k_full/v_full` is not enough.
+1. **DFlash phase-3 attack**: now that phase 1/2 are batched, split or directly
+   optimize `phase3_attn_oproj_ffn_residuals`. The default-off two-range attention
+   sidecar is correctness-safe but only a tiny standalone win; the live bet is an
+   online-softmax/two-range kernel or another phase-3 change that moves DFlash
+   draft wall `>=10%` and full decode `>=5%` on long static rows. Keep real-prompt
+   acceptance as a separate gate before changing adaptive policy.
 2. **`attn_v4` decode Phase-A MMA for group 8/16**: use the in-file prompt
    matrix-attention MMA sidecar as reference, but promote only on full decode
    rows. Gate on A3B `ctx16k/32k` full decode `>=3%` or attention phase `>=10%`,
    with no `ctx4k` regression.
-3. **Final bounded MTP MoE row-wave probe**: only R=2, only disjoint row scratch
+3. **DFlash adaptive-policy recalibration**: v0.527 makes static-16 profitable on
+   a favorable 1260-token synthetic prompt (`1.967x` decode-only), while the
+   existing adaptive policy still disables speculation at that context. Do not
+   widen adaptive by optimism: require real-prompt rows where acceptance and total
+   decode both beat no-spec.
+4. **Final bounded MTP MoE row-wave probe**: only R=2, only disjoint row scratch
    / scheduling, and no N8 mat-mat or grouped prefill kernels. Gate on D7/N8
    `tok16` verifier `>=10 ms` or `tok64` verifier `>=15 ms`, equivalence PASS.
    If this is not a small patch, skip it.
-4. **GDN verifier L2-in-step micro**: fuse Q/K normalization into
+5. **GDN verifier L2-in-step micro**: fuse Q/K normalization into
    `gdn_step_decay` while keeping `rmsnorm_gated` separate. Require one-layer
    tail `>=10-15%` and full-verifier `>=8-10 ms` before integration.
-5. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
+6. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
    closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
    `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
-6. **Small shelves**: Q/K proj+norm+RoPE fusion, concurrent Q/K RoPE, stale
+7. **Small shelves**: Q/K proj+norm+RoPE fusion, concurrent Q/K RoPE, stale
    default-off fused residual+rmsnorm, and Q4_K mat-mat raw-block staging for
    N32/N64 are useful only if implementation is tiny and full-wall gates pass.
 

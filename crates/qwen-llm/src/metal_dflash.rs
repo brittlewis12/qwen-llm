@@ -32,10 +32,10 @@ use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
-    encode_fill_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32,
-    encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
+    encode_dflash_attn_two_range_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32,
+    encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
     encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
@@ -60,6 +60,10 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_PACKED");
+
+crate::env_flag!(default_on dflash_batched_proj_enabled, "QWEN_DFLASH_BATCHED_PROJ");
+
+crate::env_flag!(default_off dflash_attn_two_range_enabled, "QWEN_DFLASH_ATTN_TWO_RANGE");
 
 crate::env_flag!(default_on prefill_gdn_batched_enabled, "QWEN_PREFILL_GDN_BATCHED");
 
@@ -10289,18 +10293,19 @@ impl<'a> DFlashDecoder<'a> {
         }
         let phase1_start = self.session.ctx_h_ready_n;
         if ctx_len > phase1_start {
+            let phase1_delta = ctx_len - phase1_start;
             let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
-            for c in phase1_start..ctx_len {
+            if dflash_batched_proj_enabled() && phase1_delta > 1 {
                 let src = self.session.target_ctx_stacked.view_subrange(
-                    (c * n_target_features) as u64,
-                    vec![n_target_features as u64],
+                    (phase1_start * n_target_features) as u64,
+                    vec![(phase1_delta * n_target_features) as u64],
                 );
                 let dst = self
                     .session
                     .ctx_h
-                    .view_subrange((c * h) as u64, vec![h as u64]);
-                encode_mat_vec_dispatch(
+                    .view_subrange((phase1_start * h) as u64, vec![(phase1_delta * h) as u64]);
+                encode_mat_mat_dispatch(
                     ctx_metal,
                     &enc,
                     &self.head.fc,
@@ -10308,23 +10313,54 @@ impl<'a> DFlashDecoder<'a> {
                     &dst,
                     n_target_features,
                     h,
+                    phase1_delta,
                 )?;
-            }
-            // RMSNorm per column. Reads x then writes y in two passes per
-            // threadgroup, so x==y aliasing is safe (rms_norm.metal:38-61).
-            for c in phase1_start..ctx_len {
-                let view = self
-                    .session
-                    .ctx_h
-                    .view_subrange((c * h) as u64, vec![h as u64]);
-                encode_rms_norm_mul_f32(
+                encode_rms_norm_batched_f32(
                     ctx_metal,
                     &enc,
-                    &view,
+                    &dst,
                     &self.head.hidden_norm,
-                    &view,
+                    &dst,
+                    phase1_delta,
+                    h,
                     RMS_EPS,
                 )?;
+            } else {
+                for c in phase1_start..ctx_len {
+                    let src = self.session.target_ctx_stacked.view_subrange(
+                        (c * n_target_features) as u64,
+                        vec![n_target_features as u64],
+                    );
+                    let dst = self
+                        .session
+                        .ctx_h
+                        .view_subrange((c * h) as u64, vec![h as u64]);
+                    encode_mat_vec_dispatch(
+                        ctx_metal,
+                        &enc,
+                        &self.head.fc,
+                        &src,
+                        &dst,
+                        n_target_features,
+                        h,
+                    )?;
+                }
+                // RMSNorm per column. Reads x then writes y in two passes per
+                // threadgroup, so x==y aliasing is safe (rms_norm.metal:38-61).
+                for c in phase1_start..ctx_len {
+                    let view = self
+                        .session
+                        .ctx_h
+                        .view_subrange((c * h) as u64, vec![h as u64]);
+                    encode_rms_norm_mul_f32(
+                        ctx_metal,
+                        &enc,
+                        &view,
+                        &self.head.hidden_norm,
+                        &view,
+                        RMS_EPS,
+                    )?;
+                }
             }
             enc.end();
             cmd.commit();
@@ -10337,9 +10373,8 @@ impl<'a> DFlashDecoder<'a> {
 
         // ----- Phase 2 (Metal): noise embed + per-layer fwd through
         //     pre-attn-norm, Q/K/V projections, per-head Q/K-norm, RoPE.
-        //     Then we read back to CPU for asymmetric SWA-masked
-        //     attention + ffn (correctness first; H5.3 swaps to packed
-        //     Metal).
+        //     v0.527 batches the regular projection/RoPE work; phase 3
+        //     handles asymmetric SWA attention and the FFN fully on Metal.
         let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
         let enc = KernelEncoder::begin(&cmd);
         encode_get_rows_f32(
@@ -10388,6 +10423,7 @@ impl<'a> DFlashDecoder<'a> {
         }
         let phase2_ctx_start = self.session.kv_ctx_ready_n;
         let phase2_ctx_delta = ctx_len.saturating_sub(phase2_ctx_start);
+        let batched_proj = dflash_batched_proj_enabled();
 
         for (layer_idx, layer) in self.head.layers.iter().enumerate() {
             // Pre-attn norm: x → h (Metal).
@@ -10403,44 +10439,114 @@ impl<'a> DFlashDecoder<'a> {
                 h,
                 RMS_EPS,
             )?;
-            // Q proj per noise row.
-            for i in 0..n {
-                let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
-                let row_out = self
-                    .session
-                    .q_buf
-                    .view_subrange((i * q_dim) as u64, vec![q_dim as u64]);
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.q, &row_in, &row_out, h, q_dim)?;
-            }
-            // K, V proj on noise rows.
-            for i in 0..n {
-                let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
-                let k_row = self
-                    .session
-                    .k_noise
-                    .view_subrange((i * kv_dim) as u64, vec![kv_dim as u64]);
-                let v_row = self
-                    .session
-                    .v_noise
-                    .view_subrange((i * kv_dim) as u64, vec![kv_dim as u64]);
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.k, &row_in, &k_row, h, kv_dim)?;
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.v, &row_in, &v_row, h, kv_dim)?;
+            if batched_proj {
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.q,
+                    &self.session.h,
+                    &self.session.q_buf,
+                    h,
+                    q_dim,
+                    n,
+                )?;
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.k,
+                    &self.session.h,
+                    &self.session.k_noise,
+                    h,
+                    kv_dim,
+                    n,
+                )?;
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.v,
+                    &self.session.h,
+                    &self.session.v_noise,
+                    h,
+                    kv_dim,
+                    n,
+                )?;
+            } else {
+                // Q proj per noise row.
+                for i in 0..n {
+                    let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                    let row_out = self
+                        .session
+                        .q_buf
+                        .view_subrange((i * q_dim) as u64, vec![q_dim as u64]);
+                    encode_mat_vec_dispatch(
+                        ctx_metal, &enc, &layer.q, &row_in, &row_out, h, q_dim,
+                    )?;
+                }
+                // K, V proj on noise rows.
+                for i in 0..n {
+                    let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                    let k_row = self
+                        .session
+                        .k_noise
+                        .view_subrange((i * kv_dim) as u64, vec![kv_dim as u64]);
+                    let v_row = self
+                        .session
+                        .v_noise
+                        .view_subrange((i * kv_dim) as u64, vec![kv_dim as u64]);
+                    encode_mat_vec_dispatch(ctx_metal, &enc, &layer.k, &row_in, &k_row, h, kv_dim)?;
+                    encode_mat_vec_dispatch(ctx_metal, &enc, &layer.v, &row_in, &v_row, h, kv_dim)?;
+                }
             }
             // v0.74.1: K, V proj on cross-context rows — ONLY the new
             // delta `[phase2_ctx_start, ctx_len)`. Cached rows
             // `[0, phase2_ctx_start)` retain their post-norm post-RoPE
             // values from prior outer steps. Write into per-layer cache.
-            for c in phase2_ctx_start..ctx_len {
-                let row_in = self
-                    .session
-                    .ctx_h
-                    .view_subrange((c * h) as u64, vec![h as u64]);
-                let k_row = self.session.k_ctx_cache[layer_idx]
-                    .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
-                let v_row = self.session.v_ctx_cache[layer_idx]
-                    .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.k, &row_in, &k_row, h, kv_dim)?;
-                encode_mat_vec_dispatch(ctx_metal, &enc, &layer.v, &row_in, &v_row, h, kv_dim)?;
+            if batched_proj && phase2_ctx_delta > 1 {
+                let row_in = self.session.ctx_h.view_subrange(
+                    (phase2_ctx_start * h) as u64,
+                    vec![(phase2_ctx_delta * h) as u64],
+                );
+                let k_rows = self.session.k_ctx_cache[layer_idx].view_subrange(
+                    (phase2_ctx_start * kv_dim) as u64,
+                    vec![(phase2_ctx_delta * kv_dim) as u64],
+                );
+                let v_rows = self.session.v_ctx_cache[layer_idx].view_subrange(
+                    (phase2_ctx_start * kv_dim) as u64,
+                    vec![(phase2_ctx_delta * kv_dim) as u64],
+                );
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.k,
+                    &row_in,
+                    &k_rows,
+                    h,
+                    kv_dim,
+                    phase2_ctx_delta,
+                )?;
+                encode_mat_mat_dispatch(
+                    ctx_metal,
+                    &enc,
+                    &layer.v,
+                    &row_in,
+                    &v_rows,
+                    h,
+                    kv_dim,
+                    phase2_ctx_delta,
+                )?;
+            } else {
+                for c in phase2_ctx_start..ctx_len {
+                    let row_in = self
+                        .session
+                        .ctx_h
+                        .view_subrange((c * h) as u64, vec![h as u64]);
+                    let k_row = self.session.k_ctx_cache[layer_idx]
+                        .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
+                    let v_row = self.session.v_ctx_cache[layer_idx]
+                        .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
+                    encode_mat_vec_dispatch(ctx_metal, &enc, &layer.k, &row_in, &k_row, h, kv_dim)?;
+                    encode_mat_vec_dispatch(ctx_metal, &enc, &layer.v, &row_in, &v_row, h, kv_dim)?;
+                }
             }
             // Per-head Q/K-norm.
             encode_rms_norm_batched_f32(
@@ -10482,48 +10588,96 @@ impl<'a> DFlashDecoder<'a> {
                     RMS_EPS,
                 )?;
             }
-            // RoPE Q at noise positions.
-            for i in 0..n {
-                let row = self
-                    .session
-                    .q_buf
-                    .view_subrange((i * q_dim) as u64, vec![q_dim as u64]);
-                encode_rope_neox_f32(
+            if batched_proj {
+                encode_rope_neox_f32_packed_consecutive(
                     ctx_metal,
                     &enc,
-                    &row,
+                    &self.session.q_buf,
+                    n,
                     n_q,
                     head_dim,
                     n_rot,
-                    noise_start_pos + i as u32,
+                    noise_start_pos,
                     theta,
                 )?;
-            }
-            // RoPE K_noise.
-            for i in 0..n {
-                let row = self
-                    .session
-                    .k_noise
-                    .view_subrange((i * kv_dim) as u64, vec![kv_dim as u64]);
-                encode_rope_neox_f32(
+                encode_rope_neox_f32_packed_consecutive(
                     ctx_metal,
                     &enc,
-                    &row,
+                    &self.session.k_noise,
+                    n,
                     n_kv,
                     head_dim,
                     n_rot,
-                    noise_start_pos + i as u32,
+                    noise_start_pos,
                     theta,
                 )?;
+            } else {
+                // RoPE Q at noise positions.
+                for i in 0..n {
+                    let row = self
+                        .session
+                        .q_buf
+                        .view_subrange((i * q_dim) as u64, vec![q_dim as u64]);
+                    encode_rope_neox_f32(
+                        ctx_metal,
+                        &enc,
+                        &row,
+                        n_q,
+                        head_dim,
+                        n_rot,
+                        noise_start_pos + i as u32,
+                        theta,
+                    )?;
+                }
+                // RoPE K_noise.
+                for i in 0..n {
+                    let row = self
+                        .session
+                        .k_noise
+                        .view_subrange((i * kv_dim) as u64, vec![kv_dim as u64]);
+                    encode_rope_neox_f32(
+                        ctx_metal,
+                        &enc,
+                        &row,
+                        n_kv,
+                        head_dim,
+                        n_rot,
+                        noise_start_pos + i as u32,
+                        theta,
+                    )?;
+                }
             }
             // v0.74.1: RoPE K_ctx — only the new delta. Pre-cached
             // rows were RoPE'd on a prior outer step at their stable
             // pos_ctx[c] positions; positions don't change.
-            for c in phase2_ctx_start..ctx_len {
-                let pos = pos_ctx_cpu[c] as u32;
-                let row = self.session.k_ctx_cache[layer_idx]
-                    .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
-                encode_rope_neox_f32(ctx_metal, &enc, &row, n_kv, head_dim, n_rot, pos, theta)?;
+            let ctx_positions_are_consecutive = phase2_ctx_delta > 0
+                && pos_ctx_cpu[phase2_ctx_start] >= 0
+                && (0..phase2_ctx_delta).all(|i| {
+                    pos_ctx_cpu[phase2_ctx_start + i] == pos_ctx_cpu[phase2_ctx_start] + i as i32
+                });
+            if batched_proj && ctx_positions_are_consecutive {
+                let row = self.session.k_ctx_cache[layer_idx].view_subrange(
+                    (phase2_ctx_start * kv_dim) as u64,
+                    vec![(phase2_ctx_delta * kv_dim) as u64],
+                );
+                encode_rope_neox_f32_packed_consecutive(
+                    ctx_metal,
+                    &enc,
+                    &row,
+                    phase2_ctx_delta,
+                    n_kv,
+                    head_dim,
+                    n_rot,
+                    pos_ctx_cpu[phase2_ctx_start] as u32,
+                    theta,
+                )?;
+            } else {
+                for c in phase2_ctx_start..ctx_len {
+                    let pos = pos_ctx_cpu[c] as u32;
+                    let row = self.session.k_ctx_cache[layer_idx]
+                        .view_subrange((c * kv_dim) as u64, vec![kv_dim as u64]);
+                    encode_rope_neox_f32(ctx_metal, &enc, &row, n_kv, head_dim, n_rot, pos, theta)?;
+                }
             }
             enc.end();
             cmd.commit();
@@ -10543,106 +10697,127 @@ impl<'a> DFlashDecoder<'a> {
             // + per-row O proj + per-row FFN mat-vec on Metal. All in
             // one command buffer; no readback until the lm_head tail.
             //
-            // Drafter weights are still F32 (dequant'd at load); v0.72.4
-            // will switch to native Q8_0 mat-vec/mat-mat.
+            // Drafter projection/FFN weights stay native where the GGUF dtype
+            // is supported; the dispatchers route Q8_0 and K-quants directly.
+            let two_range_attn = dflash_attn_two_range_enabled();
             let pos_k_uploaded;
             {
-                // Build pos_k on host: pos_ctx (length ctx_len) ++
-                // [noise_start_pos..noise_start_pos+N] (length N).
+                // Build pos_k on host. The legacy concat kernel wants
+                // pos_ctx ++ noise positions; the two-range kernel only
+                // needs ctx positions because noise positions are implicit.
                 let n_kv_total = ctx_len + n;
-                pos_k_uploaded = n_kv_total;
-                let mut pos_k_host: Vec<i32> = Vec::with_capacity(n_kv_total);
+                pos_k_uploaded = if two_range_attn { ctx_len } else { n_kv_total };
+                let mut pos_k_host: Vec<i32> = Vec::with_capacity(pos_k_uploaded);
                 pos_k_host.extend(pos_ctx_cpu.iter().take(ctx_len).copied());
-                for i in 0..n {
-                    pos_k_host.push((noise_start_pos + i as u32) as i32);
+                if !two_range_attn {
+                    for i in 0..n {
+                        pos_k_host.push((noise_start_pos + i as u32) as i32);
+                    }
                 }
                 unsafe {
                     let dst = self.session.pos_k.buffer.contents().as_ptr() as *mut i32;
-                    std::ptr::copy_nonoverlapping(pos_k_host.as_ptr(), dst, n_kv_total);
+                    std::ptr::copy_nonoverlapping(pos_k_host.as_ptr(), dst, pos_k_uploaded);
                 }
             }
 
             let cmd = ctx_metal.queue.commandBuffer().expect("cmd phase3");
             let enc = KernelEncoder::begin(&cmd);
 
-            // (a) Concat K_ctx + K_noise into k_full; same for V.
-            //     k_full[0 .. ctx_len*kv_dim] <- k_ctx_cache[layer_idx][..ctx_len*kv_dim]
-            //     k_full[ctx_len*kv_dim .. (ctx_len+N)*kv_dim] <- k_noise[..]
-            // v0.74.1: read from per-layer K/V cache (post-norm post-RoPE).
-            if ctx_len > 0 {
-                let src_k_ctx = self.session.k_ctx_cache[layer_idx]
-                    .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
-                let src_v_ctx = self.session.v_ctx_cache[layer_idx]
-                    .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
+            // (a) Fused attention: writes attn_o_full [N, n_q*head_dim].
+            let n_kv_total = ctx_len + n;
+            let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
+            if two_range_attn {
+                let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
+                encode_dflash_attn_two_range_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.q_buf,
+                    &self.session.k_ctx_cache[layer_idx],
+                    &self.session.v_ctx_cache[layer_idx],
+                    &self.session.k_noise,
+                    &self.session.v_noise,
+                    &pos_ctx_view,
+                    &self.session.attn_o_full,
+                    n,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    ctx_len,
+                    noise_start_pos,
+                    swa_window_arg,
+                )?;
+            } else {
+                // Concat K_ctx + K_noise into k_full; same for V.
+                // v0.74.1: read from per-layer K/V cache (post-norm post-RoPE).
+                if ctx_len > 0 {
+                    let src_k_ctx = self.session.k_ctx_cache[layer_idx]
+                        .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
+                    let src_v_ctx = self.session.v_ctx_cache[layer_idx]
+                        .view_subrange(0, vec![(ctx_len * kv_dim) as u64]);
+                    encode_scatter_offset_f32(
+                        ctx_metal,
+                        &enc,
+                        &src_k_ctx,
+                        &self.session.k_full,
+                        0,
+                        ctx_len * kv_dim,
+                    )?;
+                    encode_scatter_offset_f32(
+                        ctx_metal,
+                        &enc,
+                        &src_v_ctx,
+                        &self.session.v_full,
+                        0,
+                        ctx_len * kv_dim,
+                    )?;
+                }
                 encode_scatter_offset_f32(
                     ctx_metal,
                     &enc,
-                    &src_k_ctx,
+                    &self.session.k_noise,
                     &self.session.k_full,
-                    0,
                     ctx_len * kv_dim,
+                    n * kv_dim,
                 )?;
                 encode_scatter_offset_f32(
                     ctx_metal,
                     &enc,
-                    &src_v_ctx,
+                    &self.session.v_noise,
                     &self.session.v_full,
-                    0,
                     ctx_len * kv_dim,
+                    n * kv_dim,
+                )?;
+
+                let k_view = self
+                    .session
+                    .k_full
+                    .view_subrange(0, vec![(n_kv_total * kv_dim) as u64]);
+                let v_view = self
+                    .session
+                    .v_full
+                    .view_subrange(0, vec![(n_kv_total * kv_dim) as u64]);
+                let pos_view = self.session.pos_k.view_subrange(0, vec![n_kv_total as u64]);
+                encode_dflash_attn_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.q_buf,
+                    &k_view,
+                    &v_view,
+                    &pos_view,
+                    &self.session.attn_o_full,
+                    n,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    n_kv_total,
+                    ctx_len,
+                    noise_start_pos,
+                    swa_window_arg,
                 )?;
             }
-            encode_scatter_offset_f32(
-                ctx_metal,
-                &enc,
-                &self.session.k_noise,
-                &self.session.k_full,
-                ctx_len * kv_dim,
-                n * kv_dim,
-            )?;
-            encode_scatter_offset_f32(
-                ctx_metal,
-                &enc,
-                &self.session.v_noise,
-                &self.session.v_full,
-                ctx_len * kv_dim,
-                n * kv_dim,
-            )?;
-
-            // (b) Slice the live regions of k_full/v_full/pos_k to the
-            //     n_kv_total active rows. The rest is unused this layer.
-            let n_kv_total = ctx_len + n;
-            let k_view = self
-                .session
-                .k_full
-                .view_subrange(0, vec![(n_kv_total * kv_dim) as u64]);
-            let v_view = self
-                .session
-                .v_full
-                .view_subrange(0, vec![(n_kv_total * kv_dim) as u64]);
-            let pos_view = self.session.pos_k.view_subrange(0, vec![n_kv_total as u64]);
-
-            // (c) Fused attention: writes attn_o_full [N, n_q*head_dim].
-            let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
-            encode_dflash_attn_f32(
-                ctx_metal,
-                &enc,
-                &self.session.q_buf,
-                &k_view,
-                &v_view,
-                &pos_view,
-                &self.session.attn_o_full,
-                n,
-                n_q,
-                n_kv,
-                head_dim,
-                n_kv_total,
-                ctx_len,
-                noise_start_pos,
-                swa_window_arg,
-            )?;
             let _ = pos_k_uploaded;
 
-            // (d) O proj — v0.74.2: batched mat-mat across all N noise
+            // (b) O proj — v0.74.2: batched mat-mat across all N noise
             //     rows when drafter weights are mat-mat eligible (Q8_0
             //     post-v0.73b.1; pre-v0.73b.1 was F32 dequant'd at load
             //     and per-row mat-vec was the only path). The reviewer's

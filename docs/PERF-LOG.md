@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.525 GDN Checkpoint Falsifiers
+
+Status: two checkpoint-dataflow probes were correctness-safe but not worth
+keeping. The next MTP verifier branch should move off checkpoint write plumbing
+and onto MoE FFN row-wave structure.
+
+THE CHANGE:
+- Dirty-tested, then removed, a verifier-only inline checkpoint write path where
+  the GDN conv and recurrence kernels wrote rollback checkpoint slots directly
+  instead of using the post-tail blit pass.
+- Dirty-tested, then removed, sparse GDN checkpoints for physical N8 using slots
+  `0/3/5/7` plus exact suffix replay from the nearest saved slot.
+
+GATES:
+- Inline checkpoint writes: A3B Q4_K_M D7/N8 16-token smoke equivalence PASS,
+  but verifier regressed `166.0 -> 200.2 ms` and total speedup fell
+  `1.004x -> 0.914x`. Artifacts:
+  `target/profiles/v0525-a3b-q4km-moe-mtp-d7-default-inlineckpt-off-tok16.json`,
+  `target/profiles/v0525-a3b-q4km-moe-mtp-d7-inlineckpt-tok16.json`.
+- Sparse checkpoints: same row equivalence PASS; verifier improved only
+  `166.0 -> 161.3 ms`, but restore/replay rose `1.0 -> 11.4 ms` and total
+  speedup fell `1.004x -> 0.994x`. Artifact:
+  `target/profiles/v0525-a3b-q4km-moe-mtp-d7-sparseckpt-tok16.json`.
+
+READ: checkpoint blits are not the next verifier unlock. Writing checkpoints
+from the hot kernels hurts more than it saves, and sparse checkpoints need a
+cheap no-tail replay path before they can pay. Do not keep checkpoint-write
+fusion or suffix-replay variants in tree. Move the active branch to N8 MoE FFN
+row-wave scheduling that preserves the mature per-token kernels.
+
 ## 2026-07-08 - v0.524 Batch MTP Verifier Routing
 
 Status: A3B MoE D7/N8 MTP verifier now batches route logits/top-k across physical

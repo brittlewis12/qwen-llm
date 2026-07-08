@@ -3318,24 +3318,30 @@ What the latest analysis says:
   removing regular route work from the row loop: dispatches move from `2240` FFN
   row-loop/step to `1600 + 80` route-pack/step, and A3B D7/N8 64-token verifier
   improves `505.6 -> 495.1 ms` with equivalence PASS.
+- v0.525 kills the two most direct GDN checkpoint dataflow exits. Inline
+  checkpoint writes from the conv/step kernels pass equivalence but regress the
+  A3B D7/N8 16-token verifier `166.0 -> 200.2 ms`. Sparse N8 checkpoints at
+  slots `0/3/5/7` plus exact suffix replay save only `4.7 ms` of verifier work
+  and lose it back in restore/replay (`1.0 -> 11.4 ms`, total `1.004x ->
+  0.994x`). Do not continue checkpoint-write fusion or suffix-replay variants
+  without a cheap no-tail replay design; checkpoint blits are no longer the top
+  active MTP verifier lever.
 
 Highest-EV speculative kernel targets:
 
-1. Compact packed-verifier GDN tail/checkpoint work. v0.522 names it as the
-   second-largest short-context dispatch bucket (`2160` dispatches/verify step)
-   after MoE row-loop work, and the easy MoE row-view cleanup is already banked.
-   The next branch should split GDN tail into beta/alpha, decay, conv/L2/step/norm,
-   and checkpoint copy cost, then prototype only if it can plausibly save
-   `>=15 ms` on the 16-token A3B D7/N8 row or `>=5%` verifier wall at 64 tokens.
-   v0.523 kills the obvious skinny alpha/beta batching shortcut; remaining GDN
-   candidates need to change body/checkpoint data movement, not just dispatch count.
-2. Continue N8-specific MoE verifier work only when it preserves the fast
+1. Continue N8-specific MoE verifier work only when it preserves the fast
    per-token decode kernels. Do not reuse prompt-prefill grouped MoE kernels
    blindly: v0.515 and v0.522 both kill that direct transplant at N8. v0.518
    proves the branch by batching the mixer side, v0.519 reuses decode's FFN wave
    split, v0.522 removes staging copies/scatter, and v0.524 batches route work;
    further MoE work needs to change the FFN wave structure itself with a `>=15 ms`
-   verifier gate.
+   verifier gate. The next concrete shape is row-pair or row-quad FFN waves with
+   disjoint per-row scratch, not grouped prefill kernels.
+2. Revisit GDN verifier tail only for body fusion, not checkpoint writes. v0.523
+   kills skinny alpha/beta batching and v0.525 kills both inline checkpoint
+   writes and sparse checkpoint suffix replay. A future GDN branch should start
+   with a one-layer `L2-in-step` or `step+rmsnorm_gated` body micro-oracle and
+   require `>=20%` tail-body win before full verifier integration.
 3. Reduce D7/N8 MTP draft-head cost only through a proven execution shape. v0.515
    A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
    but v0.516 kills legacy GGML Q4_1/Q4_0 output copies, and v0.521 kills the

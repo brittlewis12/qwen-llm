@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.528 DFlash Online Two-Range Attention
+
+Status: DFlash phase-3 attention now uses a default-on online-softmax two-range
+kernel. This compounds with v0.527 projection batching and gives another large
+drafter win on long static rows.
+
+THE CHANGE:
+- Defaulted `QWEN_DFLASH_ATTN_ONLINE_TWO_RANGE=1` with `=0` rollback.
+- Added `kernel_dflash_attn_online_two_range_f32`: one pass over ctx-cache K/V
+  plus noise K/V with online softmax, preserving the existing SWA/full-attn/noise
+  mask contract while removing the legacy 3-pass QK recompute.
+- Kept `QWEN_DFLASH_ATTN_TWO_RANGE=1` as a default-off 3-pass dataflow sidecar;
+  online two-range implies the two-range path and bypasses `k_full/v_full`.
+
+GATES:
+- `cargo test -p qwen-llm dflash_attn_matches_cpu_oracle_under_mask_regimes -- --nocapture`
+  PASS. Concat, two-range, and online two-range all match the CPU oracle across
+  noise-only, SWA, full-attn, boundary, and gapped-position cases.
+- `cargo build --release --bin qwen-bench` PASS.
+- Default DFlash static-16 smoke, 27B Q4_K_M + spiritbuun drafter, 2 generated
+  tokens: greedy equivalence PASS; draft mean `36.5 ms`. Artifact:
+  `target/profiles/v0528-dflash-default-online-smoke.out`.
+
+PERF:
+- Synthetic 2520-token prompt, static-16, 64 generated tokens, skip-equivalence:
+  v0.527 batched-proj default decode `1770.5 ms` / `36.15 t/s`; online
+  two-range decode `1641.9 ms` / `38.98 t/s` (`1.078x`). Draft mean improves
+  `82.0 -> 60.8 ms`; phase3 improves `333.35 -> 208.57 ms` (`1.60x`).
+  Artifacts: `target/profiles/v0527-dflash-batched-proj-ctxlong-tok64.out`,
+  `target/profiles/v0528-dflash-online-two-range-ctxlong-tok64.out`.
+- Favorable synthetic 1260-token prompt, static-16, 16 generated tokens with
+  equivalence: DFlash decode `319.1 ms` vs no-spec `647.8 ms` (`2.030x`), PASS.
+  Artifact: `target/profiles/v0528-dflash-online-two-range-equivalence-ctx1260-tok16.out`.
+- Real `the_current.md` 2464-token prompt, static-16, 16 generated tokens:
+  online two-range improves DFlash decode to `2141.8 ms` (`1.07x` over v0.527,
+  `1.52x` over pre-v0.527 base), but low acceptance (`alpha_chain=1.0`) still
+  leaves static-16 at `0.314x` vs no-spec. Equivalence PASS. Artifact:
+  `target/profiles/v0528-dflash-online-two-range-realprompt-tok16.out`.
+
+READ: The phase-3 attention bet was real once phase 1/2 stopped dominating. On
+favorable high-acceptance prompts, DFlash now clears `2x` decode-only. On real
+low-acceptance prompts, the remaining problem is acceptance / repeated verify,
+not just drafter speed. The next DFlash kernel work should split and attack the
+remaining phase-3 O/FFN work; adaptive-policy changes need real-prompt wins.
+
 ## 2026-07-08 - v0.527 DFlash Batched Projections
 
 Status: DFlash drafter phase 1/2 projection batching is a large win and now

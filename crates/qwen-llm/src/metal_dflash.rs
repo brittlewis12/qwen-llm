@@ -32,12 +32,12 @@ use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
-    encode_dflash_attn_two_range_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
-    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32,
-    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32,
-    encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
-    encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
+    encode_dflash_attn_online_two_range_f32, encode_dflash_attn_two_range_f32, encode_fill_f32,
+    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32,
+    encode_gdn_step_decay_packed_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
+    encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    encode_moe_mat_vec_f32, encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
     encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
@@ -64,6 +64,11 @@ crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_
 crate::env_flag!(default_on dflash_batched_proj_enabled, "QWEN_DFLASH_BATCHED_PROJ");
 
 crate::env_flag!(default_off dflash_attn_two_range_enabled, "QWEN_DFLASH_ATTN_TWO_RANGE");
+
+crate::env_flag!(
+    default_on dflash_attn_online_two_range_enabled,
+    "QWEN_DFLASH_ATTN_ONLINE_TWO_RANGE"
+);
 
 crate::env_flag!(default_on prefill_gdn_batched_enabled, "QWEN_PREFILL_GDN_BATCHED");
 
@@ -10699,7 +10704,8 @@ impl<'a> DFlashDecoder<'a> {
             //
             // Drafter projection/FFN weights stay native where the GGUF dtype
             // is supported; the dispatchers route Q8_0 and K-quants directly.
-            let two_range_attn = dflash_attn_two_range_enabled();
+            let online_two_range_attn = dflash_attn_online_two_range_enabled();
+            let two_range_attn = online_two_range_attn || dflash_attn_two_range_enabled();
             let pos_k_uploaded;
             {
                 // Build pos_k on host. The legacy concat kernel wants
@@ -10726,7 +10732,27 @@ impl<'a> DFlashDecoder<'a> {
             // (a) Fused attention: writes attn_o_full [N, n_q*head_dim].
             let n_kv_total = ctx_len + n;
             let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
-            if two_range_attn {
+            if online_two_range_attn {
+                let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
+                encode_dflash_attn_online_two_range_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.q_buf,
+                    &self.session.k_ctx_cache[layer_idx],
+                    &self.session.v_ctx_cache[layer_idx],
+                    &self.session.k_noise,
+                    &self.session.v_noise,
+                    &pos_ctx_view,
+                    &self.session.attn_o_full,
+                    n,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    ctx_len,
+                    noise_start_pos,
+                    swa_window_arg,
+                )?;
+            } else if two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
                 encode_dflash_attn_two_range_f32(
                     ctx_metal,

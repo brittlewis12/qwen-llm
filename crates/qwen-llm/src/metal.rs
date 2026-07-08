@@ -14881,15 +14881,100 @@ pub fn encode_dflash_attn_two_range_f32(
     noise_start_pos: u32,
     swa_window: u32,
 ) -> Result<(), MetalError> {
+    encode_dflash_attn_two_range_pipeline(
+        ctx,
+        enc,
+        q,
+        k_ctx,
+        v_ctx,
+        k_noise,
+        v_noise,
+        pos_ctx,
+        o,
+        n,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        ctx_len,
+        noise_start_pos,
+        swa_window,
+        "dflash_attn_two_range",
+        "kernel_dflash_attn_two_range_f32",
+    )
+}
+
+/// Online-softmax DFlash drafter attention over two K/V ranges. Same mask and
+/// output contract as `encode_dflash_attn_two_range_f32`, but removes the
+/// legacy 3-pass QK recompute inside the attention body.
+pub fn encode_dflash_attn_online_two_range_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_ctx: &MetalTensor,
+    v_ctx: &MetalTensor,
+    k_noise: &MetalTensor,
+    v_noise: &MetalTensor,
+    pos_ctx: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+) -> Result<(), MetalError> {
+    encode_dflash_attn_two_range_pipeline(
+        ctx,
+        enc,
+        q,
+        k_ctx,
+        v_ctx,
+        k_noise,
+        v_noise,
+        pos_ctx,
+        o,
+        n,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        ctx_len,
+        noise_start_pos,
+        swa_window,
+        "dflash_attn_online_two_range",
+        "kernel_dflash_attn_online_two_range_f32",
+    )
+}
+
+fn encode_dflash_attn_two_range_pipeline(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_ctx: &MetalTensor,
+    v_ctx: &MetalTensor,
+    k_noise: &MetalTensor,
+    v_noise: &MetalTensor,
+    pos_ctx: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+    kernel_label: &'static str,
+    pipeline_name: &'static str,
+) -> Result<(), MetalError> {
     if head_dim % 32 != 0 {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range",
+            kernel: kernel_label,
             detail: format!("head_dim={head_dim} not divisible by 32"),
         });
     }
     if head_dim > 256 {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range",
+            kernel: kernel_label,
             detail: format!(
                 "head_dim={head_dim} > 256: kernel registers q_reg/o_acc are sized for head_dim <= 256"
             ),
@@ -14897,13 +14982,13 @@ pub fn encode_dflash_attn_two_range_f32(
     }
     if n_q_heads % n_kv_heads != 0 {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range",
+            kernel: kernel_label,
             detail: format!("n_q_heads={n_q_heads} not divisible by n_kv_heads={n_kv_heads}"),
         });
     }
     if q.n_elements() as usize != n * n_q_heads * head_dim {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range.q",
+            kernel: kernel_label,
             detail: format!(
                 "q.n_elements={} != N*n_q*head_dim={}",
                 q.n_elements(),
@@ -14915,7 +15000,7 @@ pub fn encode_dflash_attn_two_range_f32(
     let ctx_elems = ctx_len * kv_stride;
     if (k_ctx.n_elements() as usize) < ctx_elems || (v_ctx.n_elements() as usize) < ctx_elems {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range.ctx_kv",
+            kernel: kernel_label,
             detail: format!(
                 "ctx k/v need at least ctx_len*kv_stride = {ctx_len}*{kv_stride} = {ctx_elems} elements"
             ),
@@ -14925,7 +15010,7 @@ pub fn encode_dflash_attn_two_range_f32(
     if k_noise.n_elements() as usize != noise_elems || v_noise.n_elements() as usize != noise_elems
     {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range.noise_kv",
+            kernel: kernel_label,
             detail: format!(
                 "noise k/v expected N*kv_stride = {n}*{kv_stride} = {noise_elems} elements"
             ),
@@ -14933,7 +15018,7 @@ pub fn encode_dflash_attn_two_range_f32(
     }
     if (pos_ctx.n_elements() as usize) < ctx_len {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range.pos_ctx",
+            kernel: kernel_label,
             detail: format!(
                 "pos_ctx.n_elements={} < ctx_len={ctx_len}",
                 pos_ctx.n_elements()
@@ -14942,7 +15027,7 @@ pub fn encode_dflash_attn_two_range_f32(
     }
     if o.n_elements() as usize != n * n_q_heads * head_dim {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_two_range.o",
+            kernel: kernel_label,
             detail: format!(
                 "o.n_elements={} != N*n_q*head_dim={}",
                 o.n_elements(),
@@ -14951,7 +15036,7 @@ pub fn encode_dflash_attn_two_range_f32(
         });
     }
 
-    let pso = ctx.pipeline("kernel_dflash_attn_two_range_f32")?;
+    let pso = ctx.pipeline(pipeline_name)?;
     enc.set_pipeline(&pso);
 
     #[repr(C)]
@@ -25665,6 +25750,7 @@ mod tests {
         ctx_len: usize,
         noise_start_pos: u32,
         swa_window: u32,
+        online: bool,
     ) -> Result<Vec<f32>, MetalError> {
         let q_t = MetalTensor::from_bytes(
             ctx,
@@ -25707,24 +25793,45 @@ mod tests {
         )?;
         let o_t = MetalTensor::zeros_f32(ctx, vec![(n * n_q_heads * head_dim) as u64])?;
         one_shot(ctx, |enc| {
-            encode_dflash_attn_two_range_f32(
-                ctx,
-                enc,
-                &q_t,
-                &k_ctx_t,
-                &v_ctx_t,
-                &k_noise_t,
-                &v_noise_t,
-                &pos_t,
-                &o_t,
-                n,
-                n_q_heads,
-                n_kv_heads,
-                head_dim,
-                ctx_len,
-                noise_start_pos,
-                swa_window,
-            )
+            if online {
+                encode_dflash_attn_online_two_range_f32(
+                    ctx,
+                    enc,
+                    &q_t,
+                    &k_ctx_t,
+                    &v_ctx_t,
+                    &k_noise_t,
+                    &v_noise_t,
+                    &pos_t,
+                    &o_t,
+                    n,
+                    n_q_heads,
+                    n_kv_heads,
+                    head_dim,
+                    ctx_len,
+                    noise_start_pos,
+                    swa_window,
+                )
+            } else {
+                encode_dflash_attn_two_range_f32(
+                    ctx,
+                    enc,
+                    &q_t,
+                    &k_ctx_t,
+                    &v_ctx_t,
+                    &k_noise_t,
+                    &v_noise_t,
+                    &pos_t,
+                    &o_t,
+                    n,
+                    n_q_heads,
+                    n_kv_heads,
+                    head_dim,
+                    ctx_len,
+                    noise_start_pos,
+                    swa_window,
+                )
+            }
         })?;
         Ok(read_back_f32(&o_t.buffer, n * n_q_heads * head_dim))
     }
@@ -25926,13 +26033,34 @@ mod tests {
                 c.ctx_len,
                 c.noise_start_pos,
                 c.swa_window,
+                false,
             )
             .expect("dflash_attn_two_range dispatch");
+            let gpu_online_two_range = dflash_attn_two_range_readback(
+                &ctx,
+                &q,
+                &k_ctx,
+                &v_ctx,
+                &k_noise,
+                &v_noise,
+                &pos_ctx,
+                n,
+                n_q,
+                n_kv,
+                hd,
+                c.ctx_len,
+                c.noise_start_pos,
+                c.swa_window,
+                true,
+            )
+            .expect("dflash_attn_online_two_range dispatch");
 
             let mut max_abs = 0.0f32;
             let mut max_abs_two_range = 0.0f32;
+            let mut max_abs_online_two_range = 0.0f32;
             let mut sum_sq_diff = 0.0f64;
             let mut sum_sq_diff_two_range = 0.0f64;
+            let mut sum_sq_diff_online_two_range = 0.0f64;
             let mut sum_sq_cpu = 0.0f64;
             for i in 0..cpu.len() {
                 let d = (gpu[i] - cpu[i]).abs();
@@ -25943,16 +26071,24 @@ mod tests {
                 if d_two_range > max_abs_two_range {
                     max_abs_two_range = d_two_range;
                 }
+                let d_online_two_range = (gpu_online_two_range[i] - cpu[i]).abs();
+                if d_online_two_range > max_abs_online_two_range {
+                    max_abs_online_two_range = d_online_two_range;
+                }
                 let dd = (gpu[i] - cpu[i]) as f64;
                 sum_sq_diff += dd * dd;
                 let dd_two_range = (gpu_two_range[i] - cpu[i]) as f64;
                 sum_sq_diff_two_range += dd_two_range * dd_two_range;
+                let dd_online_two_range = (gpu_online_two_range[i] - cpu[i]) as f64;
+                sum_sq_diff_online_two_range += dd_online_two_range * dd_online_two_range;
                 sum_sq_cpu += (cpu[i] as f64).powi(2);
             }
             let rel_l2 = sum_sq_diff.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
             let rel_l2_two_range = sum_sq_diff_two_range.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
+            let rel_l2_online_two_range =
+                sum_sq_diff_online_two_range.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
             eprintln!(
-                "[dflash-attn-mask {label}] max|Δ|={max_abs:.3e} rel_l2={rel_l2:.3e} two_range_max|Δ|={max_abs_two_range:.3e} two_range_rel_l2={rel_l2_two_range:.3e}",
+                "[dflash-attn-mask {label}] max|Δ|={max_abs:.3e} rel_l2={rel_l2:.3e} two_range_max|Δ|={max_abs_two_range:.3e} two_range_rel_l2={rel_l2_two_range:.3e} online_two_range_max|Δ|={max_abs_online_two_range:.3e} online_two_range_rel_l2={rel_l2_online_two_range:.3e}",
                 label = c.label
             );
             assert!(max_abs < 1e-4, "{}: max|Δ|={max_abs} too large", c.label);
@@ -25965,6 +26101,16 @@ mod tests {
             assert!(
                 rel_l2_two_range < 1e-5,
                 "{}: two-range rel_l2={rel_l2_two_range} too large",
+                c.label
+            );
+            assert!(
+                max_abs_online_two_range < 1e-4,
+                "{}: online two-range max|Δ|={max_abs_online_two_range} too large",
+                c.label
+            );
+            assert!(
+                rel_l2_online_two_range < 1e-5,
+                "{}: online two-range rel_l2={rel_l2_online_two_range} too large",
                 c.label
             );
         }

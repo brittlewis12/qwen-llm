@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-08 - v0.522 MTP Verifier Counts + Row Views
+
+Status: A3B MoE MTP verifier attribution now names the short-context dispatch
+budget; a direct row-view verifier FFN cleanup is exact and positive but small.
+
+THE CHANGE:
+- Added `QWEN_MTP_VERIFY_TRACE_COUNTS=1`, a count-only packed-verifier trace that
+  emits encoder/concurrent-encoder/dispatch deltas without splitting command
+  buffers or timing phases.
+- Added default-on `QWEN_MTP_MOE_VERIFY_ROW_VIEWS=1` with `=0` rollback. The MoE
+  verifier row loop now binds `target_session.x/h` to the current `x_pack/h_pack`
+  row, preserving the fast per-token routed/shared FFN kernels while removing
+  per-row staging copies and the final scatter back to `x_pack`.
+
+GATES:
+- `cargo check -p qwen-cli --bin qwen-bench` PASS (pre-existing warnings only).
+- `cargo build --release -p qwen-cli --bin qwen-bench` PASS.
+- A3B Q4_K_M D7/N8 count trace, 16-token short prompt, old row staging: equivalence
+  PASS; verifier counts over three verify steps are MoE FFN row loop `3200`
+  dispatches/step, GDN tail+checkpoint `2160`, attention body `400`, tail
+  lm_head+argmax `3`. Artifact:
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-verify-counts-tok16.json`.
+- Same row, forced prefill-style grouped FFN: equivalence PASS but slower; verifier
+  `248.6 ms` versus `186.2 ms` in the traced old-staging run, despite cutting MoE
+  FFN dispatches to `517`/step. Artifact:
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-grouped-verify-counts-tok16.json`.
+- Same row, row views forced on with counts: equivalence PASS; MoE FFN row-loop
+  dispatches drop `3200 -> 2240`/step and total verifier dispatches drop
+  `18156 -> 15276` over three steps. Artifact:
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-rowviews-counts-tok16.json`.
+- Untraced 16-token pair: old staging verifier `178.1 ms`, row views `173.1 ms`;
+  spec decode `235.7 -> 230.2 ms`. Artifacts:
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-base-notrace-tok16.json`,
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-rowviews-notrace-tok16.json`.
+- Untraced 64-token pair: old staging verifier `520.7 ms`, row views `508.6 ms`;
+  total row moves `1.035x -> 1.049x` versus no-spec. Artifacts:
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-base-notrace-tok64.json`,
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-rowviews-notrace-tok64.json`.
+- Final default-on 16-token smoke: equivalence PASS; verifier `174.8 ms`, total
+  `0.984x` versus no-spec. Artifact:
+  `target/profiles/v0522-a3b-q4km-moe-mtp-d7-default-rowviews-tok16.json`.
+
+READ: the verifier dispatch budget is now concrete. MoE row staging was real waste
+and worth removing, but the win is only `~2-3%` verifier wall; it does not satisfy
+the `>=15 ms` branch gate. The direct prefill grouped-FFN transplant remains a hard
+negative at N8. The next high-EV verifier work is GDN tail/checkpoint compaction
+or a more surgical N8 MoE row-loop reduction that preserves the mature per-token
+kernels; short-context attention and tail lm_head are not current verifier
+dispatch bottlenecks.
+
 ## 2026-07-08 - v0.521 MTP Draft-Head Falsifiers
 
 Status: MTPLX-style low-bit draft heads and exact fused Q6 top-1 do not beat the

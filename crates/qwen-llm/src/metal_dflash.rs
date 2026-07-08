@@ -211,6 +211,10 @@ crate::env_flag!(default_on mtp_moe_verify_batched_mixer_enabled, "QWEN_MTP_MOE_
 
 crate::env_flag!(default_on mtp_moe_verify_concurrent_ffn_enabled, "QWEN_MTP_MOE_VERIFY_CONCURRENT_FFN");
 
+crate::env_flag!(default_off mtp_verify_trace_counts_enabled, "QWEN_MTP_VERIFY_TRACE_COUNTS");
+
+crate::env_flag!(default_on mtp_moe_verify_row_views_enabled, "QWEN_MTP_MOE_VERIFY_ROW_VIEWS");
+
 fn prefill_moe_grouped_q5_gateup_enabled(h: usize, f_exp: usize, n_expert: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_MOE_GROUPED_Q5_GATEUP")) {
@@ -1016,6 +1020,20 @@ fn emit_prefill_count_phase(
         delta.encoders,
         delta.concurrent_encoders,
         delta.dispatches,
+    );
+}
+
+fn emit_mtp_verify_count_phase(enabled: bool, layer_idx: isize, kind: &str, phase: &str) {
+    if !enabled {
+        return;
+    }
+    let delta = kernel_trace_take_delta();
+    if delta.is_zero() {
+        return;
+    }
+    eprintln!(
+        "[mtp-verify-count-phase] layer={} kind={} phase={} encoders={} concurrent_encoders={} dispatches={}",
+        layer_idx, kind, phase, delta.encoders, delta.concurrent_encoders, delta.dispatches,
     );
 }
 
@@ -4201,6 +4219,9 @@ pub fn encode_packed_verify_layer_major_inner(
         .verify_argmax
         .view_subrange(0, vec![n as u64]);
 
+    let trace_counts = mtp_verify_trace_counts_enabled();
+    let _kernel_trace_guard = trace_counts.then(kernel_trace_begin);
+
     let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
 
     // === Phase 1: batched embed of all N tokens into x_pack [N, H]. ===
@@ -4217,11 +4238,16 @@ pub fn encode_packed_verify_layer_major_inner(
         )?;
         enc.end();
     }
+    emit_mtp_verify_count_phase(trace_counts, -1, "embed", "get_rows");
 
     // === Phase 2: layer loop. ===
     let mut gdn_idx = 0usize;
     let mut attn_idx = 0usize;
     for (il, block) in base.model.blocks.iter().enumerate() {
+        let block_kind = match block {
+            MetalBlock::Gdn(_) => "gdn",
+            MetalBlock::Attn(_) => "attn",
+        };
         if arch.kind == crate::model::ArchKind::Moe && !mtp_moe_verify_batched_mixer_enabled() {
             let gdn_ckpt_idx = match block {
                 MetalBlock::Gdn(_) => {
@@ -4287,6 +4313,7 @@ pub fn encode_packed_verify_layer_major_inner(
                     h,
                 )?;
                 enc.end();
+                emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_grouped");
                 done
             } else {
                 false
@@ -4342,6 +4369,7 @@ pub fn encode_packed_verify_layer_major_inner(
                     enc.end();
                 }
             }
+            emit_mtp_verify_count_phase(trace_counts, il as isize, "moe_legacy", "layer");
             continue;
         }
         // 2a: pre-mixer norm BATCHED across all N tokens. The kernel
@@ -4359,6 +4387,7 @@ pub fn encode_packed_verify_layer_major_inner(
             )?;
             enc.end();
         }
+        emit_mtp_verify_count_phase(trace_counts, il as isize, block_kind, "pre_norm");
         // 2b: mixer. Two paths.
         //
         //   GDN: per-token inner loop (recurrent; can't batch over
@@ -4433,6 +4462,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         )?;
                         enc.end();
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "gdn", "front");
 
                     // Per-token loop (recurrence is inherently sequential).
                     // Step B: per-token alpha/beta (F32 mat-vec; small) +
@@ -4517,6 +4547,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             blit.end();
                         }
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "gdn", "tail_ckpt");
 
                     // Step C: batched out_proj across all N. Reads
                     // gdn_normed_pack [N, v_dim], writes mixer_out_pack [N, H].
@@ -4534,6 +4565,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         )?;
                         enc.end();
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "gdn", "out");
                 } else {
                     // Mixed-dtype fall-through: existing per-token
                     // encode_gdn pattern, unchanged. NOTE (v0.425): since
@@ -4575,6 +4607,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             blit.end();
                         }
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "gdn", "fallback_tail");
                 }
             }
             MetalBlock::Attn(a) => {
@@ -4690,6 +4723,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         )?;
                         enc.end();
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "front");
 
                     // Per-token loop (KV append + softmax are inherently
                     // sequential per token; attn-v4 sees a different
@@ -4791,6 +4825,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             enc.end();
                         }
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "body");
 
                     // Step C: gate-sigmoid + mul (flat elementwise on N*q_dim)
                     // followed by batched o_proj mat-mat. One encoder per layer.
@@ -4824,6 +4859,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         )?;
                         enc.end();
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "out");
                 } else {
                     // F32 oracle / mixed-dtype fallback: existing per-token
                     // encode_attn pattern, unchanged. Keeps the 0.8B oracle
@@ -4851,6 +4887,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         )?;
                         enc.end();
                     }
+                    emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "fallback_body");
                 }
             }
         }
@@ -4863,6 +4900,7 @@ pub fn encode_packed_verify_layer_major_inner(
             encode_add_inplace_f32(base.ctx, &enc, &x_pack, &mixer_out_pack)?;
             enc.end();
         }
+        emit_mtp_verify_count_phase(trace_counts, il as isize, block_kind, "residual1");
 
         // **v0.74.4 capture-point fix**: hidden_capture moved from
         // here (after residual #1, before FFN) to AFTER residual #2
@@ -4904,6 +4942,7 @@ pub fn encode_packed_verify_layer_major_inner(
             )?;
             enc.end();
         }
+        emit_mtp_verify_count_phase(trace_counts, il as isize, block_kind, "post_norm");
 
         if arch.kind == crate::model::ArchKind::Moe {
             let (ffn_gate, ffn_up, ffn_down, moe) = match block {
@@ -4932,70 +4971,110 @@ pub fn encode_packed_verify_layer_major_inner(
                     h,
                 )?;
                 enc.end();
+                emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_grouped");
                 done
             } else {
                 false
             };
             if !ffn_batched {
-                for n_idx in 0..n {
-                    let enc = KernelEncoder::begin(&cmd_buf);
-                    encode_copy_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &x_pack,
-                        n_idx * h,
-                        &target_session.x,
-                        h,
-                    )?;
-                    encode_copy_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &h_pack,
-                        n_idx * h,
-                        &target_session.h,
-                        h,
-                    )?;
-                    base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
-                    if concurrent_ffn {
-                        enc.end();
-                        base.encode_moe_ffn_apply_gpu_concurrent_shared(
-                            &cmd_buf,
-                            target_session,
-                            ffn_gate,
-                            ffn_up,
-                            ffn_down,
-                            moe,
-                        )?;
+                if mtp_moe_verify_row_views_enabled() {
+                    for n_idx in 0..n {
+                        let row_x = x_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        let row_h = h_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                        let old_x = std::mem::replace(&mut target_session.x, row_x);
+                        let old_h = std::mem::replace(&mut target_session.h, row_h);
+                        let row_result = (|| -> Result<(), DFlashError> {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                            if concurrent_ffn {
+                                enc.end();
+                                base.encode_moe_ffn_apply_gpu_concurrent_shared(
+                                    &cmd_buf,
+                                    target_session,
+                                    ffn_gate,
+                                    ffn_up,
+                                    ffn_down,
+                                    moe,
+                                )?;
+                            } else {
+                                base.encode_moe_ffn_apply_gpu(
+                                    &enc,
+                                    target_session,
+                                    ffn_gate,
+                                    ffn_up,
+                                    ffn_down,
+                                    moe,
+                                )?;
+                                enc.end();
+                            }
+                            Ok(())
+                        })();
+                        target_session.x = old_x;
+                        target_session.h = old_h;
+                        row_result?;
+                    }
+                } else {
+                    for n_idx in 0..n {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_scatter_offset_f32(
+                        encode_copy_offset_f32(
                             base.ctx,
                             &enc,
-                            &target_session.x,
                             &x_pack,
                             n_idx * h,
+                            &target_session.x,
                             h,
                         )?;
-                        enc.end();
-                    } else {
-                        base.encode_moe_ffn_apply_gpu(
-                            &enc,
-                            target_session,
-                            ffn_gate,
-                            ffn_up,
-                            ffn_down,
-                            moe,
-                        )?;
-                        encode_scatter_offset_f32(
+                        encode_copy_offset_f32(
                             base.ctx,
                             &enc,
-                            &target_session.x,
-                            &x_pack,
+                            &h_pack,
                             n_idx * h,
+                            &target_session.h,
                             h,
                         )?;
-                        enc.end();
+                        base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                        if concurrent_ffn {
+                            enc.end();
+                            base.encode_moe_ffn_apply_gpu_concurrent_shared(
+                                &cmd_buf,
+                                target_session,
+                                ffn_gate,
+                                ffn_up,
+                                ffn_down,
+                                moe,
+                            )?;
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.x,
+                                &x_pack,
+                                n_idx * h,
+                                h,
+                            )?;
+                            enc.end();
+                        } else {
+                            base.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                target_session,
+                                ffn_gate,
+                                ffn_up,
+                                ffn_down,
+                                moe,
+                            )?;
+                            encode_scatter_offset_f32(
+                                base.ctx,
+                                &enc,
+                                &target_session.x,
+                                &x_pack,
+                                n_idx * h,
+                                h,
+                            )?;
+                            enc.end();
+                        }
                     }
                 }
+                emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_row_loop");
             }
             for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
                 if lid as usize == il {
@@ -5017,6 +5096,7 @@ pub fn encode_packed_verify_layer_major_inner(
                     enc.end();
                 }
             }
+            emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "capture");
             continue;
         }
 
@@ -5132,6 +5212,7 @@ pub fn encode_packed_verify_layer_major_inner(
 
             enc.end();
         }
+        emit_mtp_verify_count_phase(trace_counts, il as isize, block_kind, "dense_ffn");
     }
 
     // === Phase 3: BATCHED tail (final norm + lm_head + argmax). ===
@@ -5226,6 +5307,7 @@ pub fn encode_packed_verify_layer_major_inner(
         }
         enc.end();
     }
+    emit_mtp_verify_count_phase(trace_counts, -1, "tail", "lm_head_argmax");
 
     cmd_buf.commit();
     cmd_buf.waitUntilCompleted();

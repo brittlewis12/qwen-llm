@@ -3294,22 +3294,31 @@ What the latest analysis says:
   Body-no-lm-head replay confirms the head is real cost (`9.2 ms` draft body),
   but cheaper-looking kernels are not enough; future draft-head work needs
   row-throughput evidence before integration.
+- v0.522 adds count-only packed-verifier attribution and defaults a small exact
+  MoE row-view cleanup. The old A3B D7/N8 row-staging verifier spends, per verify
+  step, MoE FFN row loop `3200` dispatches, GDN tail+checkpoint `2160`, attention
+  body `400`, and tail lm_head+argmax only `3`. Row views remove the per-row
+  `x/h` staging copies plus final scatter while keeping mature per-token FFN
+  kernels; MoE row-loop dispatches drop `3200 -> 2240`/step and 64-token verifier
+  time drops `520.7 -> 508.6 ms`. This is worth defaulting but too small to be the
+  branch answer. The prefill grouped-FFN transplant remains killed at N8: forced
+  grouped FFN cuts dispatches to `517`/step but regresses verifier `186.2 ->
+  248.6 ms` on the traced 16-token row.
 
 Highest-EV speculative kernel targets:
 
-1. Attribute and reduce the largest remaining packed-verifier subphase. v0.518
-   and v0.519 made the N8 verifier profitable, but v0.520 still spends
-   `~967-978 ms` verifying 128 tokens. v0.521 demotes broad draft-head work, so
-   the next verifier branch should add intra-verify buckets only to pick a
-   concrete kernel target, then require a subphase that is `>=15%` of verify time
-   and plausibly worth `>=5%` end-to-end before implementation.
-2. Replace row-sequential packed verify with an N8-native verifier shape. Do not
-   reuse prompt-prefill grouped MoE kernels blindly: v0.515 kills that direct
-   transplant at N8. v0.518 proves the branch by batching the mixer side and
-   turning replay-current into a win; v0.519 then reuses decode's FFN wave split
-   and turns 64-token normal MTP positive. Keep improving verifier only where it
-   lowers `verify_ms` under replay-current; avoid another broad transplant until
-   the intra-verify split names the dominant subphase.
+1. Compact packed-verifier GDN tail/checkpoint work. v0.522 names it as the
+   second-largest short-context dispatch bucket (`2160` dispatches/verify step)
+   after MoE row-loop work, and the easy MoE row-view cleanup is already banked.
+   The next branch should split GDN tail into beta/alpha, decay, conv/L2/step/norm,
+   and checkpoint copy cost, then prototype only if it can plausibly save
+   `>=15 ms` on the 16-token A3B D7/N8 row or `>=5%` verifier wall at 64 tokens.
+2. Continue N8-specific MoE verifier work only when it preserves the fast
+   per-token decode kernels. Do not reuse prompt-prefill grouped MoE kernels
+   blindly: v0.515 and v0.522 both kill that direct transplant at N8. v0.518
+   proves the branch by batching the mixer side, v0.519 reuses decode's FFN wave
+   split, and v0.522 removes staging copies/scatter; further MoE work needs a new
+   surgical row-loop reduction with a `>=15 ms` verifier gate.
 3. Reduce D7/N8 MTP draft-head cost only through a proven execution shape. v0.515
    A3B and v0.506 27B agree that `lm_head+argmax` is the largest draft-side tax,
    but v0.516 kills legacy GGML Q4_1/Q4_0 output copies, and v0.521 kills the

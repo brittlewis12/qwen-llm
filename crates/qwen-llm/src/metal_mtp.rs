@@ -32,9 +32,10 @@ use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, attn_v4_choose_nwg,
     attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
     encode_attn_decode_v4_f32, encode_axpy_scalar_f32, encode_ffn_swiglu_q4_K_f32,
-    encode_get_rows_f32, encode_moe_down_f32_f32, encode_moe_mat_vec_f32,
-    encode_moe_weighted_sum_f32, encode_mtp_draft_affine_q4_gs64_f32, encode_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
+    encode_get_rows_f32, encode_moe_down_f32_f32,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2, encode_moe_mat_vec_f32,
+    encode_moe_swiglu_q4_K_f32, encode_moe_weighted_sum_f32, encode_mtp_draft_affine_q4_gs64_f32,
+    encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
     encode_split_q_gate_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
 };
@@ -64,8 +65,60 @@ pub enum MtpError {
     NoMtpHead,
     #[error("token {0} out of vocab range {1}")]
     BadToken(i32, u32),
+    #[error("invalid QWEN_MTP_MOE_NATIVE_BANKS value {0:?}; expected 0, gate_up, down, 1, or all")]
+    InvalidMoeBankPolicy(String),
+    #[error(
+        "MTP MoE bank policy {policy:?} does not support source gate/up/down={gate:?}/{up:?}/{down:?} shapes={gate_shape:?}/{up_shape:?}/{down_shape:?}"
+    )]
+    UnsupportedMoeBankPolicy {
+        policy: MtpMoeBankPolicy,
+        gate: GgmlType,
+        up: GgmlType,
+        down: GgmlType,
+        gate_shape: Vec<u64>,
+        up_shape: Vec<u64>,
+        down_shape: Vec<u64>,
+    },
     #[error("MTP KV invariant: caller passed position={position} but kv_n_pos={kv_n_pos}")]
     KvPositionMismatch { position: u32, kv_n_pos: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MtpMoeBankPolicy {
+    F32,
+    GateUp,
+    Down,
+    All,
+}
+
+impl MtpMoeBankPolicy {
+    fn parse(raw: Option<&str>) -> Result<Self, MtpError> {
+        match raw {
+            None | Some("0") => Ok(Self::F32),
+            Some("gate_up") => Ok(Self::GateUp),
+            Some("down") => Ok(Self::Down),
+            Some("1" | "all") => Ok(Self::All),
+            Some(other) => Err(MtpError::InvalidMoeBankPolicy(other.to_string())),
+        }
+    }
+
+    fn from_env() -> Result<Self, MtpError> {
+        match std::env::var("QWEN_MTP_MOE_NATIVE_BANKS") {
+            Ok(raw) => Self::parse(Some(&raw)),
+            Err(std::env::VarError::NotPresent) => Self::parse(None),
+            Err(std::env::VarError::NotUnicode(raw)) => Err(MtpError::InvalidMoeBankPolicy(
+                raw.to_string_lossy().into_owned(),
+            )),
+        }
+    }
+
+    fn native_gate_up(self) -> bool {
+        matches!(self, Self::GateUp | Self::All)
+    }
+
+    fn native_down(self) -> bool {
+        matches!(self, Self::Down | Self::All)
+    }
 }
 
 /// All MTP head weights, resident as `MetalTensor`s. Loaded once at session
@@ -83,6 +136,7 @@ pub struct MetalMtpHead {
     pub hnorm: MetalTensor,
     /// `nextn.shared_head_norm.weight` — `[H]`.
     pub shared_head_norm: MetalTensor,
+    pub moe_bank_policy: MtpMoeBankPolicy,
 }
 
 #[derive(Clone)]
@@ -402,6 +456,15 @@ impl MetalMtpHead {
     /// (Q4_K, Q5_K, Q6_K, F32) stay in their on-disk dtype; norms +
     /// elementwise weights are dequant'd to F32.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, mtp: &MtpHead<'_>) -> Result<Self, MtpError> {
+        Self::load_with_moe_bank_policy(ctx, gguf, mtp, MtpMoeBankPolicy::from_env()?)
+    }
+
+    pub fn load_with_moe_bank_policy(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        mtp: &MtpHead<'_>,
+        moe_bank_policy: MtpMoeBankPolicy,
+    ) -> Result<Self, MtpError> {
         let load_f32 = |desc: &TensorDesc| -> Result<MetalTensor, MtpError> {
             if desc.dtype == GgmlType::F32 {
                 Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
@@ -423,14 +486,42 @@ impl MetalMtpHead {
             }
         };
         let load_moe = |moe: &crate::loader::MoeFfn<'_>| -> Result<MetalMoeFfn, MtpError> {
+            if (moe_bank_policy.native_gate_up()
+                && (moe.gate_exps.dtype != GgmlType::Q4_K
+                    || moe.up_exps.dtype != GgmlType::Q4_K
+                    || moe.gate_exps.shape.as_slice() != [2048, 512, 256]
+                    || moe.up_exps.shape.as_slice() != [2048, 512, 256]))
+                || (moe_bank_policy.native_down()
+                    && (moe.down_exps.dtype != GgmlType::Q5_K
+                        || moe.down_exps.shape.as_slice() != [512, 2048, 256]))
+            {
+                return Err(MtpError::UnsupportedMoeBankPolicy {
+                    policy: moe_bank_policy,
+                    gate: moe.gate_exps.dtype,
+                    up: moe.up_exps.dtype,
+                    down: moe.down_exps.dtype,
+                    gate_shape: moe.gate_exps.shape.clone(),
+                    up_shape: moe.up_exps.shape.clone(),
+                    down_shape: moe.down_exps.shape.clone(),
+                });
+            }
             Ok(MetalMoeFfn {
                 gate_inp: load_f32(moe.gate_inp)?,
-                // Correctness-first MoE MTP path: dequant expert banks to F32 so
-                // low-bit A3B MTP heads can run before native Q2/Q3 routed kernels
-                // exist for this block.
-                gate_exps: load_f32(moe.gate_exps)?,
-                up_exps: load_f32(moe.up_exps)?,
-                down_exps: load_f32(moe.down_exps)?,
+                gate_exps: if moe_bank_policy.native_gate_up() {
+                    load_weight(moe.gate_exps)?
+                } else {
+                    load_f32(moe.gate_exps)?
+                },
+                up_exps: if moe_bank_policy.native_gate_up() {
+                    load_weight(moe.up_exps)?
+                } else {
+                    load_f32(moe.up_exps)?
+                },
+                down_exps: if moe_bank_policy.native_down() {
+                    load_weight(moe.down_exps)?
+                } else {
+                    load_f32(moe.down_exps)?
+                },
                 gate_inp_shexp: load_f32(moe.gate_inp_shexp)?,
                 gate_inp_cpu: dequant_to_f32(moe.gate_inp, gguf.slice(moe.gate_inp))?,
                 gate_inp_shexp_cpu: dequant_to_f32(
@@ -461,6 +552,7 @@ impl MetalMtpHead {
             enorm: load_f32(mtp.enorm)?,
             hnorm: load_f32(mtp.hnorm)?,
             shared_head_norm: load_f32(mtp.shared_head_norm)?,
+            moe_bank_policy,
         })
     }
 }
@@ -1024,52 +1116,102 @@ impl<'a> SpeculativeDecoder<'a> {
             topk,
             h,
         )?;
-        encode_moe_mat_vec_f32(
-            ctx,
-            enc,
-            &moe.gate_exps,
-            &self.mtp_session.h,
-            &topk_idx,
-            &routed_gate,
-            h,
-            f_exp,
-            n_expert,
-            topk,
-        )?;
-        encode_moe_mat_vec_f32(
-            ctx,
-            enc,
-            &moe.up_exps,
-            &self.mtp_session.h,
-            &topk_idx,
-            &routed_up,
-            h,
-            f_exp,
-            n_expert,
-            topk,
-        )?;
-        encode_silu_mul_f32(ctx, enc, &routed_gate, &routed_up, &routed_inner)?;
-        encode_moe_down_f32_f32(
-            ctx,
-            enc,
-            &moe.down_exps,
-            &routed_inner,
-            &topk_idx,
-            &routed_out,
-            f_exp,
-            h,
-            n_expert,
-            topk,
-        )?;
-        encode_moe_weighted_sum_f32(
-            ctx,
-            enc,
-            &routed_out,
-            &topk_w,
-            &self.mtp_session.mixer_out,
-            h,
-            topk,
-        )?;
+        match (moe.gate_exps.dtype, moe.up_exps.dtype) {
+            (GgmlType::F32, GgmlType::F32) => {
+                encode_moe_mat_vec_f32(
+                    ctx,
+                    enc,
+                    &moe.gate_exps,
+                    &self.mtp_session.h,
+                    &topk_idx,
+                    &routed_gate,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_mat_vec_f32(
+                    ctx,
+                    enc,
+                    &moe.up_exps,
+                    &self.mtp_session.h,
+                    &topk_idx,
+                    &routed_up,
+                    h,
+                    f_exp,
+                    n_expert,
+                    topk,
+                )?;
+                encode_silu_mul_f32(ctx, enc, &routed_gate, &routed_up, &routed_inner)?;
+            }
+            (GgmlType::Q4_K, GgmlType::Q4_K) => encode_moe_swiglu_q4_K_f32(
+                ctx,
+                enc,
+                &moe.gate_exps,
+                &moe.up_exps,
+                &self.mtp_session.h,
+                &topk_idx,
+                &routed_inner,
+                h,
+                f_exp,
+                n_expert,
+                topk,
+            )?,
+            (gate, up) => {
+                return Err(MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_moe_gate_up",
+                    detail: format!("unsupported expert gate/up dtypes {gate:?}/{up:?}"),
+                }));
+            }
+        }
+
+        match moe.down_exps.dtype {
+            GgmlType::F32 => {
+                encode_moe_down_f32_f32(
+                    ctx,
+                    enc,
+                    &moe.down_exps,
+                    &routed_inner,
+                    &topk_idx,
+                    &routed_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                )?;
+                encode_moe_weighted_sum_f32(
+                    ctx,
+                    enc,
+                    &routed_out,
+                    &topk_w,
+                    &self.mtp_session.mixer_out,
+                    h,
+                    topk,
+                )?;
+            }
+            GgmlType::Q5_K if f_exp == 512 => {
+                encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
+                    ctx,
+                    enc,
+                    &moe.down_exps,
+                    &routed_inner,
+                    &topk_idx,
+                    &topk_w,
+                    &self.mtp_session.mixer_out,
+                    f_exp,
+                    h,
+                    n_expert,
+                    topk,
+                    1,
+                )?;
+            }
+            down => {
+                return Err(MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_moe_down",
+                    detail: format!("unsupported expert down dtype/shape {down:?}/K{f_exp}"),
+                }));
+            }
+        }
 
         let shared_gate = self
             .mtp_session
@@ -2995,6 +3137,201 @@ mod tests {
     use crate::forward::{Forward, GdnState, KvCache};
     use crate::loader::Model;
     use crate::metal_forward::MetalModel;
+
+    #[test]
+    fn mtp_moe_bank_policy_parser_is_strict() {
+        assert_eq!(
+            MtpMoeBankPolicy::parse(None).unwrap(),
+            MtpMoeBankPolicy::F32
+        );
+        assert_eq!(
+            MtpMoeBankPolicy::parse(Some("0")).unwrap(),
+            MtpMoeBankPolicy::F32
+        );
+        assert_eq!(
+            MtpMoeBankPolicy::parse(Some("gate_up")).unwrap(),
+            MtpMoeBankPolicy::GateUp
+        );
+        assert_eq!(
+            MtpMoeBankPolicy::parse(Some("down")).unwrap(),
+            MtpMoeBankPolicy::Down
+        );
+        assert_eq!(
+            MtpMoeBankPolicy::parse(Some("1")).unwrap(),
+            MtpMoeBankPolicy::All
+        );
+        assert_eq!(
+            MtpMoeBankPolicy::parse(Some("all")).unwrap(),
+            MtpMoeBankPolicy::All
+        );
+        assert!(MtpMoeBankPolicy::parse(Some("true")).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires local A3B Q4_K_M MTP fixture and several GiB of Metal memory"]
+    fn mtp_moe_native_bank_fixture_ledger() {
+        let path =
+            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mtp-moe-bank-ledger] skipped - fixture missing");
+            return;
+        }
+        let ctx = MetalContext::new().expect("metal context");
+        let g = GgufFile::open(path).expect("open fixture");
+        let m = Model::from_gguf(&g).expect("load model");
+        let mtp = m.mtp.as_ref().expect("MTP head");
+        assert_eq!(mtp.block_idx, 40);
+        let source = mtp.attn.ffn_moe.as_ref().expect("MoE MTP block");
+        assert_eq!(source.gate_exps.dtype, GgmlType::Q4_K);
+        assert_eq!(source.up_exps.dtype, GgmlType::Q4_K);
+        assert_eq!(source.down_exps.dtype, GgmlType::Q5_K);
+        assert_eq!(source.gate_exps.shape, vec![2048, 512, 256]);
+        assert_eq!(source.up_exps.shape, vec![2048, 512, 256]);
+        assert_eq!(source.down_exps.shape, vec![512, 2048, 256]);
+
+        let expected = [
+            (
+                MtpMoeBankPolicy::F32,
+                [GgmlType::F32, GgmlType::F32, GgmlType::F32],
+                3_221_225_472u64,
+            ),
+            (
+                MtpMoeBankPolicy::GateUp,
+                [GgmlType::Q4_K, GgmlType::Q4_K, GgmlType::F32],
+                1_375_731_712u64,
+            ),
+            (
+                MtpMoeBankPolicy::Down,
+                [GgmlType::F32, GgmlType::F32, GgmlType::Q5_K],
+                2_332_033_024u64,
+            ),
+            (
+                MtpMoeBankPolicy::All,
+                [GgmlType::Q4_K, GgmlType::Q4_K, GgmlType::Q5_K],
+                486_539_264u64,
+            ),
+        ];
+        for (policy, dtypes, bytes) in expected {
+            let head = MetalMtpHead::load_with_moe_bank_policy(&ctx, &g, mtp, policy)
+                .expect("load MTP bank policy");
+            let moe = head.attn.ffn_moe.as_ref().expect("loaded MoE MTP block");
+            assert_eq!(
+                [moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype],
+                dtypes
+            );
+            let loaded_bytes =
+                moe.gate_exps.n_bytes() + moe.up_exps.n_bytes() + moe.down_exps.n_bytes();
+            assert_eq!(loaded_bytes, bytes);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local A3B Q4_K_M MTP fixture"]
+    fn mtp_moe_native_banks_match_f32_draft_logits() {
+        let path =
+            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mtp-moe-native-oracle] skipped - fixture missing");
+            return;
+        }
+        let ctx = MetalContext::new().expect("metal context");
+        let g = GgufFile::open(path).expect("open fixture");
+        let m = Model::from_gguf(&g).expect("load model");
+        let mtp = m.mtp.as_ref().expect("MTP head");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("load base model");
+        let f32_head =
+            MetalMtpHead::load_with_moe_bank_policy(&ctx, &g, mtp, MtpMoeBankPolicy::F32)
+                .expect("load F32 MTP head");
+        let native_head =
+            MetalMtpHead::load_with_moe_bank_policy(&ctx, &g, mtp, MtpMoeBankPolicy::All)
+                .expect("load native MTP head");
+        let mf = MetalForward::new(&ctx, &mm);
+        let tok = crate::tokenizer::Tokenizer::open(path).expect("tokenizer");
+        let ids = tok
+            .encode("Write a Python function that parses a GGUF header.", false)
+            .expect("tokenize prompt");
+        assert!(ids.len() >= 4);
+
+        let h = m.arch.hidden_size as u64;
+        let mut base_session = MetalSession::fresh(&ctx, &mm, 16).expect("base session");
+        let mut hiddens = Vec::new();
+        for (position, &token) in ids.iter().take(3).enumerate() {
+            let hidden = MetalTensor::zeros_f32(&ctx, vec![h]).expect("hidden capture");
+            mf.single_token_argmax_with_hidden(
+                token,
+                position as u32,
+                &mut base_session,
+                &hidden,
+                true,
+            )
+            .expect("base hidden capture");
+            hiddens.push(hidden);
+        }
+
+        let f32_session =
+            MetalMtpSession::fresh(&ctx, &f32_head, &m.arch, 16).expect("F32 session");
+        let native_session =
+            MetalMtpSession::fresh(&ctx, &native_head, &m.arch, 16).expect("native session");
+        let mut f32_spec = SpeculativeDecoder::new(&mf, &f32_head, f32_session);
+        let mut native_spec = SpeculativeDecoder::new(&mf, &native_head, native_session);
+
+        for step in 0..3 {
+            let next_tok = ids[step + 1];
+            let f32_logits = f32_spec
+                .draft_inner(
+                    next_tok,
+                    &hiddens[step],
+                    step as u32,
+                    DraftReadback::FullLogits,
+                )
+                .expect("F32 MTP draft")
+                .logits
+                .expect("F32 logits");
+            let native_logits = native_spec
+                .draft_inner(
+                    next_tok,
+                    &hiddens[step],
+                    step as u32,
+                    DraftReadback::FullLogits,
+                )
+                .expect("native MTP draft")
+                .logits
+                .expect("native logits");
+
+            let mut dot = 0.0f64;
+            let mut f32_norm = 0.0f64;
+            let mut native_norm = 0.0f64;
+            let mut max_abs = 0.0f32;
+            let mut top1 = (0usize, f32::NEG_INFINITY);
+            let mut top2 = f32::NEG_INFINITY;
+            for (idx, (&reference, &candidate)) in
+                f32_logits.iter().zip(native_logits.iter()).enumerate()
+            {
+                max_abs = max_abs.max((reference - candidate).abs());
+                dot += reference as f64 * candidate as f64;
+                f32_norm += (reference as f64).powi(2);
+                native_norm += (candidate as f64).powi(2);
+                if reference > top1.1 {
+                    top2 = top1.1;
+                    top1 = (idx, reference);
+                } else if reference > top2 {
+                    top2 = reference;
+                }
+            }
+            let cosine = dot / (f32_norm.sqrt() * native_norm.sqrt() + 1e-30);
+            let f32_argmax = argmax_i32(&f32_logits);
+            let native_argmax = argmax_i32(&native_logits);
+            let margin = top1.1 - top2;
+            eprintln!(
+                "[mtp-moe-native-oracle] step={step} cos={cosine:.6} max_abs={max_abs:.6} margin={margin:.6} argmax={f32_argmax}/{native_argmax}"
+            );
+            assert!(cosine > 0.9999, "step {step}: cosine {cosine}");
+            assert!(max_abs < 0.05, "step {step}: max_abs {max_abs}");
+            if margin > 2.0 * max_abs {
+                assert_eq!(f32_argmax, native_argmax, "step {step}: stable argmax");
+            }
+        }
+    }
 
     /// H4.2 cosine test: Metal MTP draft logits must match CPU MTP draft
     /// logits at cosine ≥ 0.9999 for identical `(next_tok, prev_hidden,

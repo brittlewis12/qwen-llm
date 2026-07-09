@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.537 Native MoE MTP Expert Banks
+
+Status: exact A3B Q4_K_M tuple supported as an opt-in; default gate missed.
+
+- Added staged `QWEN_MTP_MOE_NATIVE_BANKS=gate_up|down|all` execution for the
+  exact MTP block-40 `Q4_K/Q4_K/Q5_K`, K512 bank tuple. `=0` and unset retain
+  the F32 baseline. Forced unsupported dtypes or shapes fail at load.
+- Reused the production Q4_K routed SwiGLU and Q5_K K512 R2 fused
+  down+weighted-sum kernels. No new Metal kernels, verifier changes, or scratch
+  resizing were needed.
+- Expert-bank residency drops `3,221,225,472 -> 486,539,264` bytes (`-84.9%`).
+  Gate/up-only and down-only attribution are independently available.
+- The F32/native composed draft oracle passed over three sequential positions:
+  cosine `1.000000`, max logit delta `3-4e-6`, and matching argmax. All staged
+  tok16, single-CB, body, and scored tok16/tok128 rows preserve target-greedy
+  equivalence and unchanged acceptance.
+- Tok16 three-pair medians improve draft `49.09 -> 31.35 ms` (`-36.1%`) and
+  speculative decode `224.64 -> 205.60 ms` (`-8.5%`). Isolated body-no-lm-head
+  improves `9.04 -> 5.70 ms` at tok16 and `55.79 -> 35.30 ms` at tok128
+  (`-36.9%/-36.7%`).
+- Tok128 aggregate draft improves only `199.89 -> 165.08 ms` (`-17.4%`). Paired
+  speculative decode wins are `2.19%/3.33%/2.99%`, with a strict median of
+  `2.99%`. These miss the pre-registered `20%` draft and `3.0%` paired-wall
+  default gates. Keep the exact path opt-in; do not round it into a default win.
+
+Artifacts:
+`target/profiles/v0537-a3b-mtp-native-banks-{f32,all}-r{1,2,3}-tok{16,128}.json`
+plus the staged, body-no-lm-head, and single-CB `v0537` rows. Reviews: `cx ask`
+sessions `019f4922-05cc-7bd0-90d7-65c7459f01d6` and
+`019f4936-858c-7c73-95f0-ce43535c721b`.
+
 ## 2026-07-09 - v0.535 DFlash Full-Cost Probe Falsifier
 
 Status: killed; no adaptive-cost policy code retained.

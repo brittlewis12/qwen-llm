@@ -10009,6 +10009,12 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
 
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
     let mtp_head = MetalMtpHead::load(&ctx, &g, mtp_view).context("metal-load MTP head")?;
+    let mtp_moe_bank_ledger = mtp_head.attn.ffn_moe.as_ref().map(|moe| {
+        (
+            [moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype],
+            moe.gate_exps.n_bytes() + moe.up_exps.n_bytes() + moe.down_exps.n_bytes(),
+        )
+    });
     let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
 
     if !qwen_chat && (system.is_some() || disable_thinking) {
@@ -10049,6 +10055,12 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         tokens,
         stops,
     );
+    if let Some((dtypes, bytes)) = mtp_moe_bank_ledger {
+        eprintln!(
+            "[mtp-bench] MTP MoE banks: policy={:?} gate/up/down={:?}/{:?}/{:?} bytes={bytes}",
+            mtp_head.moe_bank_policy, dtypes[0], dtypes[1], dtypes[2],
+        );
+    }
 
     let mf = MetalForward::new(&ctx, &mm);
     let draft_lm_head_override = if mtp_draft_lm_head_q4_1 {
@@ -10491,6 +10503,16 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "bridge": result.stats.bridge_ms,
             "other": spec_phase_other_ms,
         });
+        let mtp_moe_banks =
+            mtp_moe_bank_ledger.map_or(serde_json::Value::Null, |(dtypes, bytes)| {
+                serde_json::json!({
+                    "policy": format!("{:?}", mtp_head.moe_bank_policy),
+                    "gate_dtype": format!("{:?}", dtypes[0]),
+                    "up_dtype": format!("{:?}", dtypes[1]),
+                    "down_dtype": format!("{:?}", dtypes[2]),
+                    "bytes": bytes,
+                })
+            });
         let row = serde_json::json!({
             "model": model.display().to_string(),
             "prompt_tokens": prompt_ids.len(),
@@ -10508,6 +10530,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "base_hidden": format!("{:?}", mtp_base_hidden),
             "recursive_hidden": format!("{:?}", mtp_recursive_hidden),
             "mtp_history": format!("{:?}", mtp_history),
+            "mtp_moe_banks": mtp_moe_banks,
             "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
             "no_warmup": no_warmup,
             "semantics": {

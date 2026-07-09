@@ -102,9 +102,9 @@ Force-ranked prerequisites:
 7. Add a named canonical fidelity/capability profile and effective-settings
    ledger; broad environment-variable cleanup is not a prerequisite.
 
-After those gates, rank work as: native-quantized MoE MTP expert-bank residency;
-native quantized embedding residency; small DFlash dead-buffer/full-accept
-cleanup; measured-only RoPE precompute. Treat 397B-A17B as
+After those gates, rank work as: native quantized embedding residency; a
+microkernel/layout prerequisite for the MTP draft LM head; small DFlash
+dead-buffer/full-accept cleanup; measured-only RoPE precompute. Treat 397B-A17B as
 offload/distributed/ultra-low-bit enablement, not a local kernel target.
 
 ## Hardware-Saturation Recalibration (2026-07-08)
@@ -132,19 +132,21 @@ immediate terminal fallback still reaches only `0.894x` the no-spec comparator.
 The corrected comparator makes the loss larger, not smaller. Keep cheap
 non-speculative predictors conceptually open, but do not spend another corpus on
 an online Spec16 probe.
+v0.537 then cuts the exact A3B MTP routed-bank residency `3.0 GiB -> 464 MiB` and
+isolated MTP body time by about `37%` using existing native kernels. The path is
+supported behind `QWEN_MTP_MOE_NATIVE_BANKS=all`, but stays opt-in: tok128 paired
+draft savings are only `16.7-17.7%`, and paired speculative-decode wins
+`2.19%/3.33%/2.99%` have a strict `2.99%` median. Both default gates miss.
 
 Force-ranked implementation bets from this vantage:
 
-1. **Native-quantized MoE MTP expert banks**: the single A3B MTP block still
-   expands routed gate/up/down banks to F32, while the base engine already has
-   native Q4_K gate/up and Q4_K/Q5_K/Q6_K down kernels. Bound the first proof to
-   the Q4_K_M MTP artifact. Require greedy equivalence, acceptance delta `<0.02`,
-   `>=70%` lower expert-bank bytes, `>=20%` draft-phase reduction at 16 and 128
-   tokens, `>=3%` 128-token speculative decode-wall improvement, and no 16-token
-   regression beyond `1%`.
-2. **Native quantized embedding residency**: retain this as a memory/TTFT cleanup
-   behind MTP banks. Decode reads one embedding row per token, so it lacks the
-   repeated warm-throughput mechanism of the expert banks.
+1. **Native quantized embedding residency**: treat this as a bounded memory/TTFT
+   cleanup, not an assumed warm-throughput win. Require exact row-lookup parity,
+   material resident-byte reduction, and no decode regression before defaulting.
+2. **MTP draft head only after a primitive win**: native expert banks are now
+   opt-in and close most of the MTP body cost, but the full-vocab Q6_K draft head
+   dominates the remaining draft phase. Do not reopen broad quantization; require
+   a layout/microkernel that first beats the mature Q6_K row path by `>=20%`.
 3. **Bounded DFlash attention shelf**: SWA scan pruning landed. Do not start a
    larger DFlash attention rewrite from static synthetic rows alone. Reopen only
    if a real long-context, high-acceptance workload shows full static decode

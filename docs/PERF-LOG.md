@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.532 MTP R2 Row-Wave Falsifier
+
+Status: killed; no verifier code retained.
+
+- Tested a default-off physical-N8 R2 row-wave that preserved the mature
+  per-token MoE kernels. Two rows used disjoint existing scratch packs and
+  shared gate/up, SiLU, down, and final encoder waves; no mat-mat or grouped
+  prefill kernels were introduced.
+- A3B Q4_K_M D7/N8, 16 tokens, kept exact output equivalence and unchanged
+  acceptance (`0.619`). Verifier time moved only `168.7 -> 166.1 ms` (`2.6 ms`),
+  far below the pre-registered `10 ms` gate.
+- The branch was removed without a 64-token follow-up. Encoder transition
+  reduction alone is exhausted for this FFN shape; do not reopen row-wave work
+  without a kernel-level mechanism that changes dispatch or memory cost.
+
+Artifacts: `target/profiles/v0532-a3b-mtp-d7-n8-rowwave-base-tok16.json` and
+`target/profiles/v0532-a3b-mtp-d7-n8-rowwave-r2-tok16.json`.
+
 ## 2026-07-09 - v0.531 G8 Phase-A MMA Falsifier
 
 Status: killed; no kernel or dispatch code retained.

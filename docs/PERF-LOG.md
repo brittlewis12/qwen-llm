@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.531 G8 Phase-A MMA Falsifier
+
+Status: killed; no kernel or dispatch code retained.
+
+- Tested a default-off G8/tile4/C64 Phase-A sidecar using direct transposed F16
+  K matrix loads, a padded 8x8 Q fragment, and FP32 simdgroup-matrix
+  accumulators. Partial C64 tiles kept the scalar path.
+- Correctness cleared: the forced G8 subgroup oracle passed at 4096/6144
+  positions with cosine `1.000000` and max absolute error below `8.2e-10`; the
+  broad `attn_v4` CPU-naive suite also passed.
+- A3B ctx16384 `attn-intra`, runs=5, regressed main from `0.1224` to
+  `0.1393 ms/layer` (`-13.8%`). One-layer total moved `0.3136 -> 0.3151 ms`.
+- The pre-registered `>=10%` main improvement gate failed decisively, so 32K,
+  full-decode, and G16 work were skipped. Do not reopen this direct skinny-MMA
+  shape without a materially different reuse or execution plan.
+
+Artifacts:
+`target/profiles/v0531-a3b-attn-intra-ctx16384-base.out` and
+`target/profiles/v0531-a3b-attn-intra-ctx16384-mma.out`.
+
 ## 2026-07-09 - v0.529 DFlash SWA Scan Pruning
 
 Status: DFlash phase-3 attribution falsified Q8 O/FFN as the long-context

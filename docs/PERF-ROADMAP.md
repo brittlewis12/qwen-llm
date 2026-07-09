@@ -102,9 +102,9 @@ Force-ranked prerequisites:
 7. Add a named canonical fidelity/capability profile and effective-settings
    ledger; broad environment-variable cleanup is not a prerequisite.
 
-After those gates, rank work as: mixed-real-prompt DFlash policy recalibration;
-native quantized embedding/MTP-bank residency; small DFlash dead-buffer/full-
-accept cleanup; measured-only RoPE precompute. Treat 397B-A17B as
+After those gates, rank work as: native-quantized MoE MTP expert-bank residency;
+native quantized embedding residency; small DFlash dead-buffer/full-accept
+cleanup; measured-only RoPE precompute. Treat 397B-A17B as
 offload/distributed/ultra-low-bit enablement, not a local kernel target.
 
 ## Hardware-Saturation Recalibration (2026-07-08)
@@ -126,23 +126,33 @@ different reuse plan. v0.532 also closes MTP N8 R2 row-wave scheduling: exact
 output held, but verifier time improved only `2.6 ms`, far below its `10 ms`
 short-row gate. v0.533 closes duplicated L2 normalization inside each GDN state
 row: it improves verifier-shaped N8 replay `7.1%`, below both integration gates.
+v0.535 closes full-cost DFlash policy probing for 64-token product windows: a
+zero-accept Spec16 probe at ctx3440 costs `414.0 ms` (`10.05` Off steps), and
+immediate terminal fallback still reaches only `0.894x` the no-spec comparator.
+The corrected comparator makes the loss larger, not smaller. Keep cheap
+non-speculative predictors conceptually open, but do not spend another corpus on
+an online Spec16 probe.
 
 Force-ranked implementation bets from this vantage:
 
-1. **DFlash adaptive-policy recalibration**: v0.528/v0.529 make static-16
-   profitable on favorable synthetic prompts (`2.085x` decode-only at ctx1260),
-   while real prompts remain acceptance-limited. Do not widen adaptive by
-   optimism: require real-prompt rows where acceptance and total decode both beat
-   no-spec. Reprice `Off/N4/N8/N16` on a mixed prompt corpus; context-only `768`
-   is now stale, but a bad probe has measurable regret.
-2. **Bounded DFlash attention shelf**: SWA scan pruning landed. Do not start a
+1. **Native-quantized MoE MTP expert banks**: the single A3B MTP block still
+   expands routed gate/up/down banks to F32, while the base engine already has
+   native Q4_K gate/up and Q4_K/Q5_K/Q6_K down kernels. Bound the first proof to
+   the Q4_K_M MTP artifact. Require greedy equivalence, acceptance delta `<0.02`,
+   `>=70%` lower expert-bank bytes, `>=20%` draft-phase reduction at 16 and 128
+   tokens, `>=3%` 128-token speculative decode-wall improvement, and no 16-token
+   regression beyond `1%`.
+2. **Native quantized embedding residency**: retain this as a memory/TTFT cleanup
+   behind MTP banks. Decode reads one embedding row per token, so it lacks the
+   repeated warm-throughput mechanism of the expert banks.
+3. **Bounded DFlash attention shelf**: SWA scan pruning landed. Do not start a
    larger DFlash attention rewrite from static synthetic rows alone. Reopen only
    if a real long-context, high-acceptance workload shows full static decode
    `>=3%` available after scan, with greedy equivalence and unchanged acceptance.
-3. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
+4. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
    closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
    `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
-4. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
+5. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
    concurrent Q/K RoPE, stale default-off fused residual+rmsnorm, and Q4_K
    mat-mat raw-block staging for N32/N64 are useful only if implementation is
    tiny and full-wall gates pass. DFlash O/FFN specifically needs a short,

@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.535 DFlash Full-Cost Probe Falsifier
+
+Status: killed; no adaptive-cost policy code retained.
+
+- Calibrated current 27B Q4_K_M Off transitions at ctx
+  `768/1260/2048/3072/4095`: `39.62/39.99/41.14/41.44/40.80 ms`.
+- Tested a benchmark-only controller that took one full Spec16 probe below
+  ctx4096, then switched terminally Off on zero/low acceptance or measured
+  negative economics. The first `the_current.md` ctx3440 probe accepted zero
+  drafts and cost `414.0 ms`, or `10.05` Off-step equivalents.
+- The controller disabled immediately, but 64-token decode still measured
+  `2982.2 ms` versus the same-run no-spec comparator's `2667.4 ms` (`0.894x`),
+  failing the pre-registered `0.95x` worst-row floor. Greedy equivalence passed.
+- v0.534 fixes a favorable-to-spec comparator defect: no-spec decoded one
+  unused transition beyond the requested token limit. Removing that roughly
+  `41.2 ms` step would strengthen this row to about `0.881x`; no rerun or broad
+  corpus spend is warranted.
+- A full Spec16 probe imposes about `9.05` incremental Off steps of regret here,
+  while the 64-token `0.95x` floor permits only `3.32`. Do not reopen online
+  full-cost DFlash probing for short product windows. This does not close cheap
+  predictors that avoid speculation or explicit static-16 opt-in workloads.
+
+Artifact:
+`target/profiles/v0534-dflash-adaptive-cost-the-current-ctx3441-tok64.out`.
+Adjudication: `cx ask` session `019f491a-cc50-7a51-88e5-a72c352d0da4`.
+
 ## 2026-07-09 - v0.533 GDN L2-In-Step Micro Falsifier
 
 Status: positive but below gate; no kernel code retained.

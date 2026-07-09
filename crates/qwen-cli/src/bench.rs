@@ -10122,7 +10122,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     for _ in 0..tokens {
         ref_tokens.push(next_tok);
         ref_emitted += 1;
-        if stops.contains(&next_tok) {
+        if stops.contains(&next_tok) || ref_emitted >= tokens {
             break;
         }
         pos += 1;

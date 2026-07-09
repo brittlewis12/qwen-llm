@@ -30,14 +30,15 @@ use crate::codec::dequant_to_f32;
 use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
-    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32, encode_dflash_attn_f32,
-    encode_dflash_attn_online_two_range_f32, encode_dflash_attn_two_range_f32, encode_fill_f32,
-    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32,
-    encode_gdn_step_decay_packed_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32,
-    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
-    encode_moe_mat_vec_f32, encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
+    BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTimestampSampleBuffer,
+    encode_add_inplace_f32, encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32,
+    encode_dflash_attn_f32, encode_dflash_attn_online_two_range_scan_f32,
+    encode_dflash_attn_two_range_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32,
+    encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
+    encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
     encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
@@ -63,12 +64,42 @@ crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_
 
 crate::env_flag!(default_on dflash_batched_proj_enabled, "QWEN_DFLASH_BATCHED_PROJ");
 
+crate::env_flag!(default_off dflash_trace_phase3_split_enabled, "QWEN_DFLASH_TRACE_PHASE3_SPLIT");
+
 crate::env_flag!(default_off dflash_attn_two_range_enabled, "QWEN_DFLASH_ATTN_TWO_RANGE");
 
 crate::env_flag!(
     default_on dflash_attn_online_two_range_enabled,
     "QWEN_DFLASH_ATTN_ONLINE_TWO_RANGE"
 );
+
+crate::env_flag!(default_on dflash_attn_swa_scan_enabled, "QWEN_DFLASH_ATTN_SWA_SCAN");
+
+fn dflash_swa_ctx_scan_start(
+    pos_ctx: &[i32],
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+) -> usize {
+    if ctx_len == 0 || swa_window == 0 {
+        return 0;
+    }
+    let rows = &pos_ctx[..ctx_len];
+    let mut prev = None;
+    for &pos in rows {
+        if pos < 0 {
+            return 0;
+        }
+        if let Some(prev) = prev {
+            if pos < prev {
+                return 0;
+            }
+        }
+        prev = Some(pos);
+    }
+    let min_pos = noise_start_pos.saturating_sub(swa_window);
+    rows.partition_point(|&pos| (pos as u32) < min_pos)
+}
 
 crate::env_flag!(default_on prefill_gdn_batched_enabled, "QWEN_PREFILL_GDN_BATCHED");
 
@@ -1846,6 +1877,95 @@ pub struct MetalDFlashSession {
     /// Populated when `enable_phase_timers = true`. Cleared by the
     /// caller between bench runs.
     pub phase_timings: Vec<(String, f64)>,
+}
+
+struct DFlashPhase3SplitRecord {
+    name: &'static str,
+    start_sample: usize,
+    end_sample: usize,
+}
+
+struct DFlashPhase3SplitRecorder {
+    samples: MetalTimestampSampleBuffer,
+    next_sample: usize,
+    records: Vec<DFlashPhase3SplitRecord>,
+}
+
+impl DFlashPhase3SplitRecorder {
+    fn new(ctx: &MetalContext, n_stages: usize) -> Result<Self, DFlashError> {
+        let sample_count = n_stages.checked_mul(2).ok_or_else(|| {
+            DFlashError::Metal(MetalError::Counter(
+                "dflash sample count overflow".to_string(),
+            ))
+        })?;
+        Ok(Self {
+            samples: ctx.timestamp_sample_buffer(sample_count)?,
+            next_sample: 0,
+            records: Vec::with_capacity(n_stages),
+        })
+    }
+
+    fn begin(
+        &mut self,
+        cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        name: &'static str,
+    ) -> Result<KernelEncoder, DFlashError> {
+        let start_sample = self.next_sample;
+        let end_sample = start_sample + 1;
+        if end_sample >= self.samples.sample_count() {
+            return Err(DFlashError::Metal(MetalError::Counter(format!(
+                "dflash phase3 timestamp buffer exhausted at sample {end_sample}"
+            ))));
+        }
+        self.next_sample += 2;
+        self.records.push(DFlashPhase3SplitRecord {
+            name,
+            start_sample,
+            end_sample,
+        });
+        Ok(KernelEncoder::begin_sampled(
+            cmd,
+            &self.samples,
+            start_sample,
+            end_sample,
+            false,
+        ))
+    }
+
+    fn record(
+        self,
+        ctx: &MetalContext,
+        session: &mut MetalDFlashSession,
+        total_gpu_ms: f64,
+    ) -> Result<(), DFlashError> {
+        let timestamps = ctx.resolve_timestamp_samples(&self.samples, self.next_sample)?;
+        let sampled_span_ticks = match (self.records.first(), self.records.last()) {
+            (Some(first), Some(last)) => {
+                timestamps[last.end_sample].saturating_sub(timestamps[first.start_sample])
+            }
+            _ => 0,
+        };
+        let scale_ms_per_tick = if sampled_span_ticks > 0 {
+            total_gpu_ms / sampled_span_ticks as f64
+        } else {
+            0.0
+        };
+        let mut recorded_ms = 0.0f64;
+        for record in self.records {
+            let ticks =
+                timestamps[record.end_sample].saturating_sub(timestamps[record.start_sample]);
+            let ms = ticks as f64 * scale_ms_per_tick;
+            recorded_ms += ms;
+            session.phase_timings.push((record.name.to_string(), ms));
+        }
+        let unattributed_ms = (total_gpu_ms - recorded_ms).max(0.0);
+        if unattributed_ms > 0.0 {
+            session
+                .phase_timings
+                .push(("phase3_split_unattributed".to_string(), unattributed_ms));
+        }
+        Ok(())
+    }
 }
 
 impl MetalDFlashSession {
@@ -10727,14 +10847,39 @@ impl<'a> DFlashDecoder<'a> {
             }
 
             let cmd = ctx_metal.queue.commandBuffer().expect("cmd phase3");
-            let enc = KernelEncoder::begin(&cmd);
+            let phase3_attention_label = if layer.is_swa {
+                "phase3_split_attention_swa"
+            } else {
+                "phase3_split_attention_full"
+            };
+            let mut phase3_split =
+                if self.session.enable_phase_timers && dflash_trace_phase3_split_enabled() {
+                    Some(DFlashPhase3SplitRecorder::new(ctx_metal, 7)?)
+                } else {
+                    None
+                };
+            let mut enc = if let Some(recorder) = phase3_split.as_mut() {
+                recorder.begin(&cmd, phase3_attention_label)?
+            } else {
+                KernelEncoder::begin(&cmd)
+            };
 
             // (a) Fused attention: writes attn_o_full [N, n_q*head_dim].
             let n_kv_total = ctx_len + n;
             let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
             if online_two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
-                encode_dflash_attn_online_two_range_f32(
+                let ctx_scan_start = if dflash_attn_swa_scan_enabled() {
+                    dflash_swa_ctx_scan_start(
+                        &pos_ctx_cpu,
+                        ctx_len,
+                        noise_start_pos,
+                        swa_window_arg,
+                    )
+                } else {
+                    0
+                };
+                encode_dflash_attn_online_two_range_scan_f32(
                     ctx_metal,
                     &enc,
                     &self.session.q_buf,
@@ -10751,6 +10896,7 @@ impl<'a> DFlashDecoder<'a> {
                     ctx_len,
                     noise_start_pos,
                     swa_window_arg,
+                    ctx_scan_start,
                 )?;
             } else if two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
@@ -10843,6 +10989,11 @@ impl<'a> DFlashDecoder<'a> {
             }
             let _ = pos_k_uploaded;
 
+            if let Some(recorder) = phase3_split.as_mut() {
+                enc.end();
+                enc = recorder.begin(&cmd, "phase3_split_o_proj")?;
+            }
+
             // (b) O proj — v0.74.2: batched mat-mat across all N noise
             //     rows when drafter weights are mat-mat eligible (Q8_0
             //     post-v0.73b.1; pre-v0.73b.1 was F32 dequant'd at load
@@ -10896,6 +11047,11 @@ impl<'a> DFlashDecoder<'a> {
                 }
             }
 
+            if let Some(recorder) = phase3_split.as_mut() {
+                enc.end();
+                enc = recorder.begin(&cmd, "phase3_split_resid1_post_norm")?;
+            }
+
             // (e) Residual #1: x += ffn_out_buf (reusing ffn_out_buf as
             //     a transient holder for the O proj output).
             encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, &self.session.ffn_out_buf)?;
@@ -10911,6 +11067,11 @@ impl<'a> DFlashDecoder<'a> {
                 h,
                 RMS_EPS,
             )?;
+
+            if let Some(recorder) = phase3_split.as_mut() {
+                enc.end();
+                enc = recorder.begin(&cmd, "phase3_split_gate_up")?;
+            }
 
             // (g) SwiGLU FFN — v0.74.2: batched mat-mat ffn_gate / ffn_up
             //     / ffn_down when drafter weights are eligible. Same
@@ -10967,6 +11128,11 @@ impl<'a> DFlashDecoder<'a> {
                     )?;
                 }
             }
+
+            if let Some(recorder) = phase3_split.as_mut() {
+                enc.end();
+                enc = recorder.begin(&cmd, "phase3_split_silu_mul")?;
+            }
             // silu_mul over the entire N*F flat buffer (elementwise) —
             // unchanged whether the gate/up paths were batched or per-row;
             // the byte layout is bit-identical.
@@ -10977,6 +11143,10 @@ impl<'a> DFlashDecoder<'a> {
                 &self.session.ffn_up_buf,
                 &self.session.ffn_inner_buf,
             )?;
+            if let Some(recorder) = phase3_split.as_mut() {
+                enc.end();
+                enc = recorder.begin(&cmd, "phase3_split_down")?;
+            }
             // Batched ffn_down: ffn_inner_buf [N, F] → ffn_out_buf [N, H].
             if phase3_batched {
                 encode_mat_mat_dispatch(
@@ -11010,14 +11180,22 @@ impl<'a> DFlashDecoder<'a> {
                     )?;
                 }
             }
+            if let Some(recorder) = phase3_split.as_mut() {
+                enc.end();
+                enc = recorder.begin(&cmd, "phase3_split_resid2")?;
+            }
             // (h) Residual #2: x += ffn_out_buf.
             encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, &self.session.ffn_out_buf)?;
 
             enc.end();
             cmd.commit();
             cmd.waitUntilCompleted();
+            let phase3_gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
             self.session
                 .maybe_record("phase3_attn_oproj_ffn_residuals", &cmd);
+            if let Some(recorder) = phase3_split {
+                recorder.record(ctx_metal, &mut self.session, phase3_gpu_ms)?;
+            }
         }
 
         // v0.74.1: all drafter layers now have post-norm post-RoPE

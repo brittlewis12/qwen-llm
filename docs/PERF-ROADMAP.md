@@ -81,27 +81,29 @@ paired repeat contradicts this spot.
 External audit + cx review after v0.526 initially moved attention/DFlash dataflow
 to the top. v0.527/v0.528 then found and fixed the stale DFlash drafter buckets:
 phase 1/2 were still tuple-at-a-time, and phase 3 attention still recomputed QK
-three times. Default batched projections plus online two-range attention improve
-a 2520-token static-16 row from `23.17 -> 38.98 t/s` decode-only and draft mean
-`238.1 -> 60.8 ms`. Favorable high-acceptance synthetic prompts now clear `2x`
-decode-only; real `the_current.md` static-16 improves `3251.4 -> 2141.8 ms` but
-still loses to no-spec because acceptance is poor.
+three times. v0.529 then split phase 3 and falsified O/FFN as the long-context
+target: at ctx7561, phase3 is `622.6 ms`, of which SWA attention is `285.0 ms`,
+full attention is `234.1 ms`, and all Q8 O/FFN projections together are only
+`101.1 ms` (`2.7%` of static decode). Exact SWA scan pruning is default-on and
+improves that row `3787.4 -> 3727.3 ms` decode-only, but DFlash remains governed
+by acceptance and verify cost.
 
 Force-ranked implementation bets from this vantage:
 
-1. **Remaining DFlash phase-3 O/FFN work**: online attention made phase 3 smaller
-   but still dominant (`208.6 ms` of `334.6 ms` drafter GPU on the 2520-token
-   row). Split or directly microbench O proj, Q8 gate/up, `silu_mul`, and down;
-   promote only on `>=10%` phase3 reduction or `>=5%` full static decode. Fused
-   Q8 batched SwiGLU is plausible only if gate/up+silu is the convicted slice.
-2. **DFlash adaptive-policy recalibration**: v0.528 makes static-16 profitable on
-   favorable synthetic prompts (`2.030x` decode-only), while real prompts remain
-   acceptance-limited. Do not widen adaptive by optimism: require real-prompt rows
-   where acceptance and total decode both beat no-spec.
-3. **`attn_v4` decode Phase-A MMA for group 8/16**: use the in-file prompt
+1. **DFlash adaptive-policy recalibration**: v0.528/v0.529 make static-16
+   profitable on favorable synthetic prompts (`2.085x` decode-only at ctx1260),
+   while real prompts remain acceptance-limited. Do not widen adaptive by
+   optimism: require real-prompt rows where acceptance and total decode both beat
+   no-spec. Reprice `Off/N4/N8/N16` on a mixed prompt corpus; context-only `768`
+   is now stale, but a bad probe has measurable regret.
+2. **`attn_v4` decode Phase-A MMA for group 8/16**: use the in-file prompt
    matrix-attention MMA sidecar as reference, but promote only on full decode
    rows. Gate on A3B `ctx16k/32k` full decode `>=3%` or attention phase `>=10%`,
    with no `ctx4k` regression.
+3. **Bounded DFlash attention shelf**: SWA scan pruning landed. Do not start a
+   larger DFlash attention rewrite from static synthetic rows alone. Reopen only
+   if a real long-context, high-acceptance workload shows full static decode
+   `>=3%` available after scan, with greedy equivalence and unchanged acceptance.
 4. **Final bounded MTP MoE row-wave probe**: only R=2, only disjoint row scratch
    / scheduling, and no N8 mat-mat or grouped prefill kernels. Gate on D7/N8
    `tok16` verifier `>=10 ms` or `tok64` verifier `>=15 ms`, equivalence PASS.
@@ -112,9 +114,11 @@ Force-ranked implementation bets from this vantage:
 6. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
    closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
    `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
-7. **Small shelves**: Q/K proj+norm+RoPE fusion, concurrent Q/K RoPE, stale
-   default-off fused residual+rmsnorm, and Q4_K mat-mat raw-block staging for
-   N32/N64 are useful only if implementation is tiny and full-wall gates pass.
+7. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
+   concurrent Q/K RoPE, stale default-off fused residual+rmsnorm, and Q4_K
+   mat-mat raw-block staging for N32/N64 are useful only if implementation is
+   tiny and full-wall gates pass. DFlash O/FFN specifically needs a short,
+   product-shaped high-acceptance row before re-promotion.
 
 Defer ICB/MTL4, binary archives, residency sets, and `newBufferWithBytesNoCopy`
 as throughput priorities. They can matter for product TTFT, memory footprint, or

@@ -11144,16 +11144,30 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
                 e.0 += ms;
                 e.1 += 1;
             }
-            let total_gpu_ms: f64 = agg.values().map(|(s, _)| *s).sum();
+            let has_phase3_split = agg.keys().any(|name| name.starts_with("phase3_split_"));
+            let total_gpu_ms: f64 = agg
+                .iter()
+                .filter(|(name, _)| !name.starts_with("phase3_split_"))
+                .map(|(_, (s, _))| *s)
+                .sum();
             // Sort by descending sum.
             let mut sorted: Vec<_> = agg.iter().collect();
             sorted.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
             for (name, (sum_ms, count)) in &sorted {
                 let avg = *sum_ms / (*count as f64);
-                let pct = 100.0 * *sum_ms / total_gpu_ms;
+                let pct = if total_gpu_ms > 0.0 {
+                    100.0 * *sum_ms / total_gpu_ms
+                } else {
+                    0.0
+                };
                 eprintln!(
                     "[dflash]   {name:>40}  sum={sum_ms:>8.2} ms  ({pct:>5.1}%)  \
                      n={count:>4}  avg={avg:>6.2} ms"
+                );
+            }
+            if has_phase3_split {
+                eprintln!(
+                    "[dflash]   (phase3_split_* rows are attribution-only and excluded from TOTAL_DRAFTER_GPU)"
                 );
             }
             eprintln!(

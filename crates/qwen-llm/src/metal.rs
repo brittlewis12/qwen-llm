@@ -581,18 +581,36 @@ impl MetalContext {
         &self,
         sample_count: usize,
     ) -> Result<MetalTimestampSampleBuffer, MetalError> {
+        self.timestamp_sample_buffer_at(sample_count, MTLCounterSamplingPoint::AtStageBoundary)
+    }
+
+    pub fn timestamp_dispatch_sample_buffer(
+        &self,
+        sample_count: usize,
+    ) -> Result<MetalTimestampSampleBuffer, MetalError> {
+        self.timestamp_sample_buffer_at(sample_count, MTLCounterSamplingPoint::AtDispatchBoundary)
+    }
+
+    fn timestamp_sample_buffer_at(
+        &self,
+        sample_count: usize,
+        sampling_point: MTLCounterSamplingPoint,
+    ) -> Result<MetalTimestampSampleBuffer, MetalError> {
         if sample_count == 0 {
             return Err(MetalError::Counter(
                 "timestamp sample count must be non-zero".to_string(),
             ));
         }
-        if !self
-            .device
-            .supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary)
-        {
-            return Err(MetalError::Counter(
-                "device does not support stage-boundary counter sampling".to_string(),
-            ));
+        if !self.device.supportsCounterSampling(sampling_point) {
+            let label = match sampling_point {
+                MTLCounterSamplingPoint::AtStageBoundary => "stage-boundary",
+                MTLCounterSamplingPoint::AtDispatchBoundary => "dispatch-boundary",
+                MTLCounterSamplingPoint::AtBlitBoundary => "blit-boundary",
+                _ => "requested",
+            };
+            return Err(MetalError::Counter(format!(
+                "device does not support {label} counter sampling"
+            )));
         }
         let set = self.timestamp_counter_set()?;
         let desc = MTLCounterSampleBufferDescriptor::new();
@@ -1059,6 +1077,21 @@ impl KernelEncoder {
 
     pub fn insert_debug_signpost(&self, label: &str) {
         self.raw.insertDebugSignpost(&NSString::from_str(label));
+    }
+
+    pub fn sample_counters(
+        &self,
+        samples: &MetalTimestampSampleBuffer,
+        sample_index: usize,
+        barrier: bool,
+    ) {
+        unsafe {
+            self.raw.sampleCountersInBuffer_atSampleIndex_withBarrier(
+                &samples.raw,
+                sample_index,
+                barrier,
+            );
+        }
     }
 
     pub fn end(self) {
@@ -14822,6 +14855,7 @@ pub fn encode_dflash_attn_f32(
         // would silently OOB without this.
         noise_start_pos: u32,
         swa_window: u32,
+        ctx_scan_start: u32,
         scale: f32,
     }
     let scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -14836,6 +14870,7 @@ pub fn encode_dflash_attn_f32(
             n_rows: n as u32,
             noise_start_pos,
             swa_window,
+            ctx_scan_start: 0,
             scale,
         },
     );
@@ -14898,6 +14933,7 @@ pub fn encode_dflash_attn_two_range_f32(
         ctx_len,
         noise_start_pos,
         swa_window,
+        0,
         "dflash_attn_two_range",
         "kernel_dflash_attn_two_range_f32",
     )
@@ -14924,6 +14960,48 @@ pub fn encode_dflash_attn_online_two_range_f32(
     noise_start_pos: u32,
     swa_window: u32,
 ) -> Result<(), MetalError> {
+    encode_dflash_attn_online_two_range_scan_f32(
+        ctx,
+        enc,
+        q,
+        k_ctx,
+        v_ctx,
+        k_noise,
+        v_noise,
+        pos_ctx,
+        o,
+        n,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+        ctx_len,
+        noise_start_pos,
+        swa_window,
+        0,
+    )
+}
+
+/// Online-softmax DFlash attention with an optional SWA context scan start.
+/// `ctx_scan_start` is ignored for full-attention layers (`swa_window == 0`).
+pub fn encode_dflash_attn_online_two_range_scan_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_ctx: &MetalTensor,
+    v_ctx: &MetalTensor,
+    k_noise: &MetalTensor,
+    v_noise: &MetalTensor,
+    pos_ctx: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+    ctx_scan_start: usize,
+) -> Result<(), MetalError> {
     encode_dflash_attn_two_range_pipeline(
         ctx,
         enc,
@@ -14941,6 +15019,7 @@ pub fn encode_dflash_attn_online_two_range_f32(
         ctx_len,
         noise_start_pos,
         swa_window,
+        ctx_scan_start,
         "dflash_attn_online_two_range",
         "kernel_dflash_attn_online_two_range_f32",
     )
@@ -14963,6 +15042,7 @@ fn encode_dflash_attn_two_range_pipeline(
     ctx_len: usize,
     noise_start_pos: u32,
     swa_window: u32,
+    ctx_scan_start: usize,
     kernel_label: &'static str,
     pipeline_name: &'static str,
 ) -> Result<(), MetalError> {
@@ -15025,6 +15105,12 @@ fn encode_dflash_attn_two_range_pipeline(
             ),
         });
     }
+    if ctx_scan_start > ctx_len {
+        return Err(MetalError::BadShape {
+            kernel: kernel_label,
+            detail: format!("ctx_scan_start={ctx_scan_start} > ctx_len={ctx_len}"),
+        });
+    }
     if o.n_elements() as usize != n * n_q_heads * head_dim {
         return Err(MetalError::BadShape {
             kernel: kernel_label,
@@ -15050,6 +15136,7 @@ fn encode_dflash_attn_two_range_pipeline(
         n_rows: u32,
         noise_start_pos: u32,
         swa_window: u32,
+        ctx_scan_start: u32,
         scale: f32,
     }
     let scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -15064,6 +15151,7 @@ fn encode_dflash_attn_two_range_pipeline(
             n_rows: n as u32,
             noise_start_pos,
             swa_window,
+            ctx_scan_start: ctx_scan_start as u32,
             scale,
         },
     );
@@ -25751,6 +25839,7 @@ mod tests {
         noise_start_pos: u32,
         swa_window: u32,
         online: bool,
+        ctx_scan_start: usize,
     ) -> Result<Vec<f32>, MetalError> {
         let q_t = MetalTensor::from_bytes(
             ctx,
@@ -25794,7 +25883,7 @@ mod tests {
         let o_t = MetalTensor::zeros_f32(ctx, vec![(n * n_q_heads * head_dim) as u64])?;
         one_shot(ctx, |enc| {
             if online {
-                encode_dflash_attn_online_two_range_f32(
+                encode_dflash_attn_online_two_range_scan_f32(
                     ctx,
                     enc,
                     &q_t,
@@ -25811,6 +25900,7 @@ mod tests {
                     ctx_len,
                     noise_start_pos,
                     swa_window,
+                    ctx_scan_start,
                 )
             } else {
                 encode_dflash_attn_two_range_f32(
@@ -26034,6 +26124,7 @@ mod tests {
                 c.noise_start_pos,
                 c.swa_window,
                 false,
+                0,
             )
             .expect("dflash_attn_two_range dispatch");
             let gpu_online_two_range = dflash_attn_two_range_readback(
@@ -26052,15 +26143,43 @@ mod tests {
                 c.noise_start_pos,
                 c.swa_window,
                 true,
+                0,
             )
             .expect("dflash_attn_online_two_range dispatch");
+            let ctx_scan_start = if c.swa_window > 0 && c.ctx_len > 0 {
+                let min_pos = c.noise_start_pos.saturating_sub(c.swa_window);
+                pos_ctx_vec.partition_point(|&pos| pos >= 0 && (pos as u32) < min_pos)
+            } else {
+                0
+            };
+            let gpu_online_two_range_scan = dflash_attn_two_range_readback(
+                &ctx,
+                &q,
+                &k_ctx,
+                &v_ctx,
+                &k_noise,
+                &v_noise,
+                &pos_ctx,
+                n,
+                n_q,
+                n_kv,
+                hd,
+                c.ctx_len,
+                c.noise_start_pos,
+                c.swa_window,
+                true,
+                ctx_scan_start,
+            )
+            .expect("dflash_attn_online_two_range scan dispatch");
 
             let mut max_abs = 0.0f32;
             let mut max_abs_two_range = 0.0f32;
             let mut max_abs_online_two_range = 0.0f32;
+            let mut max_abs_online_two_range_scan = 0.0f32;
             let mut sum_sq_diff = 0.0f64;
             let mut sum_sq_diff_two_range = 0.0f64;
             let mut sum_sq_diff_online_two_range = 0.0f64;
+            let mut sum_sq_diff_online_two_range_scan = 0.0f64;
             let mut sum_sq_cpu = 0.0f64;
             for i in 0..cpu.len() {
                 let d = (gpu[i] - cpu[i]).abs();
@@ -26075,20 +26194,29 @@ mod tests {
                 if d_online_two_range > max_abs_online_two_range {
                     max_abs_online_two_range = d_online_two_range;
                 }
+                let d_online_two_range_scan = (gpu_online_two_range_scan[i] - cpu[i]).abs();
+                if d_online_two_range_scan > max_abs_online_two_range_scan {
+                    max_abs_online_two_range_scan = d_online_two_range_scan;
+                }
                 let dd = (gpu[i] - cpu[i]) as f64;
                 sum_sq_diff += dd * dd;
                 let dd_two_range = (gpu_two_range[i] - cpu[i]) as f64;
                 sum_sq_diff_two_range += dd_two_range * dd_two_range;
                 let dd_online_two_range = (gpu_online_two_range[i] - cpu[i]) as f64;
                 sum_sq_diff_online_two_range += dd_online_two_range * dd_online_two_range;
+                let dd_online_two_range_scan = (gpu_online_two_range_scan[i] - cpu[i]) as f64;
+                sum_sq_diff_online_two_range_scan +=
+                    dd_online_two_range_scan * dd_online_two_range_scan;
                 sum_sq_cpu += (cpu[i] as f64).powi(2);
             }
             let rel_l2 = sum_sq_diff.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
             let rel_l2_two_range = sum_sq_diff_two_range.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
             let rel_l2_online_two_range =
                 sum_sq_diff_online_two_range.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
+            let rel_l2_online_two_range_scan =
+                sum_sq_diff_online_two_range_scan.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
             eprintln!(
-                "[dflash-attn-mask {label}] max|Δ|={max_abs:.3e} rel_l2={rel_l2:.3e} two_range_max|Δ|={max_abs_two_range:.3e} two_range_rel_l2={rel_l2_two_range:.3e} online_two_range_max|Δ|={max_abs_online_two_range:.3e} online_two_range_rel_l2={rel_l2_online_two_range:.3e}",
+                "[dflash-attn-mask {label}] max|Δ|={max_abs:.3e} rel_l2={rel_l2:.3e} two_range_max|Δ|={max_abs_two_range:.3e} two_range_rel_l2={rel_l2_two_range:.3e} online_two_range_max|Δ|={max_abs_online_two_range:.3e} online_two_range_rel_l2={rel_l2_online_two_range:.3e} scan_start={ctx_scan_start} online_scan_max|Δ|={max_abs_online_two_range_scan:.3e} online_scan_rel_l2={rel_l2_online_two_range_scan:.3e}",
                 label = c.label
             );
             assert!(max_abs < 1e-4, "{}: max|Δ|={max_abs} too large", c.label);
@@ -26111,6 +26239,16 @@ mod tests {
             assert!(
                 rel_l2_online_two_range < 1e-5,
                 "{}: online two-range rel_l2={rel_l2_online_two_range} too large",
+                c.label
+            );
+            assert!(
+                max_abs_online_two_range_scan < 1e-4,
+                "{}: online scan max|Δ|={max_abs_online_two_range_scan} too large",
+                c.label
+            );
+            assert!(
+                rel_l2_online_two_range_scan < 1e-5,
+                "{}: online scan rel_l2={rel_l2_online_two_range_scan} too large",
                 c.label
             );
         }

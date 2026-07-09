@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.529 DFlash SWA Scan Pruning
+
+Status: DFlash phase-3 attribution falsified Q8 O/FFN as the long-context
+target, then an exact SWA context-scan prune landed behind a rollback flag.
+
+THE CHANGE:
+- Added `QWEN_DFLASH_TRACE_PHASE3_SPLIT=1`: a sampled, same-command-buffer
+  phase-3 split for DFlash attention, O projection, residual/norm, gate/up,
+  `silu_mul`, down, residual, plus an unattributed row. Dispatch-boundary
+  counter sampling is not available on this device, so this uses sampled serial
+  encoders and is attribution-only.
+- Split attention labels into `phase3_split_attention_swa` and
+  `phase3_split_attention_full` to separate the four SWA drafter layers from
+  the single full-attention drafter layer.
+- Defaulted `QWEN_DFLASH_ATTN_SWA_SCAN=1` with `=0` rollback. For SWA layers
+  with monotonic, non-negative context positions, the online two-range kernel
+  starts at the first context row that can satisfy the sliding-window mask;
+  full-attention layers and unsafe/gapped-order cases fall back to scan start 0.
+
+GATES:
+- `cargo test -p qwen-llm dflash_attn_matches_cpu_oracle_under_mask_regimes -- --nocapture`
+  PASS, including an online two-range scan case with `scan_start=48`.
+- `cargo build --release --bin qwen-bench` PASS.
+- Favorable 1260-token static-16 equivalence row: greedy equivalence PASS;
+  DFlash decode `325.3 ms` vs no-spec `678.2 ms` (`2.085x`). Artifact:
+  `target/profiles/v0529-dflash-swa-scan-equivalence-ctx1260-tok16.out`.
+
+PERF:
+- 7561-token repeated prompt, static-16, 64 generated tokens, skip-equivalence:
+  `QWEN_DFLASH_ATTN_SWA_SCAN=0` decode `3787.4 ms`, draft mean `84.8 ms`,
+  phase3 `622.54 ms`, drafter GPU `971.22 ms`; scan-on decode `3727.3 ms`
+  (`1.016x`), draft mean `80.5 ms`, phase3 `582.45 ms` (`1.069x`), drafter
+  GPU `919.70 ms` (`1.056x`). Artifacts:
+  `target/profiles/v0529-dflash-swa-scan-off-ctx7561-tok64.out`,
+  `target/profiles/v0529-dflash-swa-scan-on-ctx7561-tok64.out`.
+- Phase-3 split on the same 7561-token shape attributes phase3 to attention:
+  SWA attention `284.99 ms`, full attention `234.05 ms`, gate/up `46.66 ms`,
+  down `44.87 ms`, O `10.10 ms`, unattributed `0.44 ms`. Artifact:
+  `target/profiles/v0529-dflash-phase3-split-swa-full-ctx7561-tok64.out`.
+- 1260-token favorable row, static-16, 16 generated tokens: scan-off decode
+  `320.0 ms`, phase3 `23.58 ms`; scan-on decode `322.7 ms`, phase3
+  `23.39 ms`. This is effectively flat/slightly noisy at short context.
+  Artifacts: `target/profiles/v0529-dflash-swa-scan-off-ctx1260-tok16.out`,
+  `target/profiles/v0529-dflash-swa-scan-on-ctx1260-tok16.out`.
+
+READ: DFlash Q8 O/FFN tuning is demoted. At ctx7561, all O/FFN projections
+together are only about `2.7%` of static DFlash decode, while attention is the
+dominant long-context phase-3 slope. SWA scan pruning is exact and gives a real
+long-row drafter/phase3 cleanup, but only `~1.6%` full static decode on this
+row; it does not solve the acceptance/verify economics. The next broad exact
+kernel bet remains normal-decode `attn_v4` group-8/16 Phase-A MMA, while DFlash
+policy must be repriced on real prompts before widening default speculation.
+
 ## 2026-07-08 - v0.528 DFlash Online Two-Range Attention
 
 Status: DFlash phase-3 attention now uses a default-on online-softmax two-range

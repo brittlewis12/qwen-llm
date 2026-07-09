@@ -106,6 +106,8 @@ struct dflash_attn_args {
                                  // codex flag: full-attn ALSO drops the causal
                                  // restriction over ctx, matching the CPU
                                  // oracle in `forward.rs::dflash_draft`.
+    uint  ctx_scan_start;        // first context row worth scanning for SWA;
+                                 // ignored for full-attn layers.
     float scale;                 // 1/sqrt(head_dim)
 };
 
@@ -168,7 +170,8 @@ kernel void kernel_dflash_attn_f32(
     //     never wraps.
     //   * Noise key: block-causal (noise_idx <= q_idx).
     float m_run = -INFINITY;
-    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+    const uint kk_start = full_attn ? 0 : min(args.ctx_scan_start, args.ctx_len);
+    for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
             if (full_attn) {
@@ -196,7 +199,7 @@ kernel void kernel_dflash_attn_f32(
     // ---- PASS 2: running sum (stable softmax) ----
     // Same mask as PASS 1 — see PASS 1 comment.
     float l_sum = 0.0f;
-    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+    for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
             if (full_attn) {
@@ -227,7 +230,7 @@ kernel void kernel_dflash_attn_f32(
     float o_acc[8];
     for (ushort j = 0; j < dk_per_lane; ++j) o_acc[j] = 0.0f;
 
-    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+    for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
             if (full_attn) {
@@ -292,6 +295,7 @@ kernel void kernel_dflash_attn_two_range_f32(
     const uint q_pos = args.noise_start_pos + q_idx;
     const bool full_attn = (args.swa_window == 0);
     const ulong k_stride = (ulong)args.n_kv_heads * head_dim;
+    const uint kk_start = full_attn ? 0 : min(args.ctx_scan_start, args.ctx_len);
 
     float q_reg[8];
     {
@@ -303,7 +307,7 @@ kernel void kernel_dflash_attn_two_range_f32(
     }
 
     float m_run = -INFINITY;
-    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+    for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         device const float * k_row;
         if (kk < args.ctx_len) {
@@ -330,7 +334,7 @@ kernel void kernel_dflash_attn_two_range_f32(
     }
 
     float l_sum = 0.0f;
-    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+    for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         device const float * k_row;
         if (kk < args.ctx_len) {
@@ -360,7 +364,7 @@ kernel void kernel_dflash_attn_two_range_f32(
     float o_acc[8];
     for (ushort j = 0; j < dk_per_lane; ++j) o_acc[j] = 0.0f;
 
-    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+    for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         device const float * k_row;
         device const float * v_row;
@@ -424,6 +428,7 @@ kernel void kernel_dflash_attn_online_two_range_f32(
     const uint q_pos = args.noise_start_pos + q_idx;
     const bool full_attn = (args.swa_window == 0);
     const ulong k_stride = (ulong)args.n_kv_heads * head_dim;
+    const uint kk_start = full_attn ? 0 : min(args.ctx_scan_start, args.ctx_len);
 
     float q_reg[8];
     {
@@ -439,7 +444,7 @@ kernel void kernel_dflash_attn_online_two_range_f32(
     float o_acc[8];
     for (ushort j = 0; j < dk_per_lane; ++j) o_acc[j] = 0.0f;
 
-    for (uint kk = 0; kk < args.n_kv_total; ++kk) {
+    for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         device const float * k_row;
         device const float * v_row;

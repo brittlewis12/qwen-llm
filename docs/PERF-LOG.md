@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.533 GDN L2-In-Step Micro Falsifier
+
+Status: positive but below gate; no kernel code retained.
+
+- Tested a default-off `gdn_step_decay` sidecar that reads raw Q/K and computes
+  the exact pair-L2 scales inside each state-row simdgroup. The existing
+  `rmsnorm_gated` stage remained separate.
+- Correctness passed for both 16/16 dense and 48/16 A3B head mappings. The A3B
+  CPU smoke kept cosine `1.000000` and matching argmax.
+- A3B verifier-shaped N8 GDN replay improved GPU time
+  `0.8805 -> 0.8183 ms/layer` (`7.1%`). This misses the pre-registered
+  `10-15%` one-layer gate and projects to only about `5-6 ms` on the 16-token
+  verifier, below the `8-10 ms` integration gate.
+- The sidecar was removed without a full MTP run. Keep pair-L2 as the default;
+  do not duplicate norms in every state-row TG without a stronger ownership
+  change.
+
+Artifacts: `target/profiles/v0533-a3b-gdn-layer-replay-n8-base.out` and
+`target/profiles/v0533-a3b-gdn-layer-replay-n8-step-l2.out`.
+
 ## 2026-07-09 - v0.532 MTP R2 Row-Wave Falsifier
 
 Status: killed; no verifier code retained.

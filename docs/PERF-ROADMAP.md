@@ -103,7 +103,6 @@ Force-ranked prerequisites:
    ledger; broad environment-variable cleanup is not a prerequisite.
 
 After those gates, rank work as: mixed-real-prompt DFlash policy recalibration;
-GDN L2-in-step micro;
 native quantized embedding/MTP-bank residency; small DFlash dead-buffer/full-
 accept cleanup; measured-only RoPE precompute. Treat 397B-A17B as
 offload/distributed/ultra-low-bit enablement, not a local kernel target.
@@ -125,7 +124,8 @@ C64 sidecar passed its oracles but regressed A3B ctx16384 main
 `0.1224 -> 0.1393 ms/layer`. Do not extend it to G16/C128 without a materially
 different reuse plan. v0.532 also closes MTP N8 R2 row-wave scheduling: exact
 output held, but verifier time improved only `2.6 ms`, far below its `10 ms`
-short-row gate.
+short-row gate. v0.533 closes duplicated L2 normalization inside each GDN state
+row: it improves verifier-shaped N8 replay `7.1%`, below both integration gates.
 
 Force-ranked implementation bets from this vantage:
 
@@ -135,17 +135,14 @@ Force-ranked implementation bets from this vantage:
    optimism: require real-prompt rows where acceptance and total decode both beat
    no-spec. Reprice `Off/N4/N8/N16` on a mixed prompt corpus; context-only `768`
    is now stale, but a bad probe has measurable regret.
-2. **GDN verifier L2-in-step micro**: fuse Q/K normalization into
-   `gdn_step_decay` while keeping `rmsnorm_gated` separate. Require one-layer
-   tail `>=10-15%` and full-verifier `>=8-10 ms` before integration.
-3. **Bounded DFlash attention shelf**: SWA scan pruning landed. Do not start a
+2. **Bounded DFlash attention shelf**: SWA scan pruning landed. Do not start a
    larger DFlash attention rewrite from static synthetic rows alone. Reopen only
    if a real long-context, high-acceptance workload shows full static decode
    `>=3%` available after scan, with greedy equivalence and unchanged acceptance.
-4. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
+3. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
    closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
    `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
-5. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
+4. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
    concurrent Q/K RoPE, stale default-off fused residual+rmsnorm, and Q4_K
    mat-mat raw-block staging for N32/N64 are useful only if implementation is
    tiny and full-wall gates pass. DFlash O/FFN specifically needs a short,

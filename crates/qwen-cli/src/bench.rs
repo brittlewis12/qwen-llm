@@ -16,6 +16,9 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
+#[path = "../source_identity.rs"]
+mod source_identity;
+
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use objc2::rc::Retained;
@@ -68,7 +71,8 @@ use qwen_llm::{
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
 };
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -407,12 +411,23 @@ fn pp_register_moe_residency_set(
     about = "end-to-end throughput benchmark for qwen-llm"
 )]
 struct Args {
+    /// Permit benchmarks from a known dirty source checkout. The dirty state
+    /// remains recorded in every canonical JSON row.
+    #[arg(long, global = true)]
+    allow_dirty: bool,
+    /// Permit a benchmark when the compiled binary cannot verify its source
+    /// checkout. Commit mismatches are never overridable.
+    #[arg(long, global = true)]
+    allow_unverifiable_build: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Report compiled and runtime source identity without initializing Metal
+    /// or loading a model.
+    BuildInfo(BuildInfoArgs),
     /// Decode N tokens after a prompt using the plain no-spec path.
     ///
     /// Packed prefill is the default no-spec path. `--sequential-prefill`
@@ -534,6 +549,13 @@ enum Cmd {
     PpFfnAb(PpFfnAbArgs),
     #[command(hide = true)]
     PpWait(PpWaitArgs),
+}
+
+#[derive(Parser, Debug)]
+struct BuildInfoArgs {
+    /// Output format. JSON emits one object rather than a benchmark-row array.
+    #[arg(short = 'o', long, value_enum, default_value = "json")]
+    output: OutputFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -1499,7 +1521,7 @@ fn render_qwen_single_turn_prompt(
 /// JSON schema version for `BenchRow`. Bump when fields are renamed,
 /// removed, or have their semantics changed. Adding new optional fields
 /// (always-null on old emitters) does NOT require a bump.
-const BENCH_SCHEMA_VERSION: u32 = 1;
+const BENCH_SCHEMA_VERSION: u32 = 2;
 
 /// One bench result row. Field names match `llama-bench`'s JSON schema where
 /// the meaning is the same; engine-specific fields are `Option<T>` and
@@ -1510,8 +1532,10 @@ struct BenchRow {
     schema_version: u32,
     engine: &'static str,
     build_commit: &'static str,
-    /// `1` if probed dirty at runtime via tracked-only git status.
+    /// `1` if source changes or hidden index flags were observed at build time
+    /// or runtime.
     build_dirty: u8,
+    build_identity: BuildIdentity,
     test_time: String,
     model_filename: String,
     model_size: u64,
@@ -1775,29 +1799,367 @@ fn fresh_prefill_scratch_for_prompt(
     .context("prefill scratch")
 }
 
-/// Returns `(commit, dirty)` for stamping into JSON output.
-///
-/// Commit comes from `build.rs` (env at compile time → git → "unknown").
-///
-/// Dirty is probed at *runtime* via tracked-only
-/// `git status --porcelain --untracked-files=no` because cargo's
-/// `rerun-if-changed` directives only watch `.git/HEAD` and `.git/index`:
-/// editing a tracked file without staging it does NOT invalidate the cached
-/// build, so a stale `QWEN_BUILD_DIRTY=0` from the last clean compile would
-/// otherwise lie about a dirty worktree. Untracked artifacts are ignored so the
-/// benchmark harness does not poison its own provenance by writing output under
-/// the repo. We fall back to the compile-time value when the runtime probe
-/// fails (no git binary, not in a repo).
+#[derive(Clone, Debug, serde::Serialize)]
+struct BuildIdentity {
+    schema_version: u32,
+    build_commit: String,
+    build_commit_short: String,
+    build_dirty: Option<bool>,
+    build_source_state: Option<String>,
+    stamp_source: String,
+    stamp_error: Option<String>,
+    runtime_commit: Option<String>,
+    runtime_dirty: Option<bool>,
+    runtime_source_state: Option<String>,
+    status: String,
+    problems: Vec<String>,
+    overrides: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BuildIdentityPolicy {
+    allow_dirty: bool,
+    allow_unverifiable: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RuntimeGitIdentity {
+    commit: Option<String>,
+    dirty: Option<bool>,
+    source_state: Option<String>,
+}
+
+static BUILD_IDENTITY: OnceLock<BuildIdentity> = OnceLock::new();
+static BUILD_IDENTITY_POLICY: OnceLock<BuildIdentityPolicy> = OnceLock::new();
+
+fn runtime_git_identity() -> RuntimeGitIdentity {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let commit = source_identity::git_text(repo, &["rev-parse", "HEAD"])
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| source_identity::full_object_id(value));
+    RuntimeGitIdentity {
+        commit,
+        dirty: source_identity::git_dirty(repo),
+        source_state: source_identity::tracked_source_state(repo),
+    }
+}
+
+fn classify_build_identity(
+    build_commit: &str,
+    build_dirty: Option<bool>,
+    build_source_state: Option<&str>,
+    stamp_source: &str,
+    stamp_error: Option<&str>,
+    runtime: RuntimeGitIdentity,
+) -> BuildIdentity {
+    let normalized_build = build_commit.to_ascii_lowercase();
+    let mut problems = Vec::new();
+    if !source_identity::full_object_id(&normalized_build) {
+        problems.push("build_commit_unknown".to_string());
+    }
+    if build_dirty.is_none() {
+        problems.push("build_dirty_unknown".to_string());
+    }
+    let normalized_build_state = build_source_state
+        .filter(|state| source_identity::valid_source_state(state))
+        .map(str::to_ascii_lowercase);
+    if normalized_build_state.is_none() {
+        problems.push("build_source_state_unknown".to_string());
+    }
+    if let Some(error) = stamp_error.filter(|error| *error != "none") {
+        problems.push(error.to_string());
+    }
+    if runtime.commit.is_none() {
+        problems.push("runtime_commit_unknown".to_string());
+    }
+    if runtime.dirty.is_none() {
+        problems.push("runtime_dirty_unknown".to_string());
+    }
+    if runtime.source_state.is_none() {
+        problems.push("runtime_source_state_unknown".to_string());
+    }
+    if source_identity::full_object_id(&normalized_build)
+        && let Some(runtime_commit) = runtime.commit.as_deref()
+        && normalized_build != runtime_commit
+    {
+        problems.push("commit_mismatch".to_string());
+    }
+    if let (Some(build_dirty), Some(runtime_dirty)) = (build_dirty, runtime.dirty)
+        && build_dirty != runtime_dirty
+    {
+        problems.push("dirty_state_mismatch".to_string());
+    }
+    if let (Some(build_state), Some(runtime_state)) = (
+        normalized_build_state.as_deref(),
+        runtime.source_state.as_deref(),
+    ) && build_state != runtime_state
+    {
+        problems.push("source_state_mismatch".to_string());
+    }
+    if build_dirty == Some(true) || runtime.dirty == Some(true) {
+        problems.push("dirty".to_string());
+    }
+
+    let status = if problems
+        .iter()
+        .any(|problem| problem.ends_with("_mismatch"))
+    {
+        "mismatch"
+    } else if problems.iter().any(|p| p != "dirty") {
+        "unverifiable"
+    } else if problems.iter().any(|p| p == "dirty") {
+        "dirty"
+    } else {
+        "match"
+    };
+    let short = if source_identity::full_object_id(&normalized_build) {
+        normalized_build[..9].to_string()
+    } else {
+        "unknown".to_string()
+    };
+
+    BuildIdentity {
+        schema_version: 2,
+        build_commit: normalized_build,
+        build_commit_short: short,
+        build_dirty,
+        build_source_state: normalized_build_state,
+        stamp_source: stamp_source.to_string(),
+        stamp_error: stamp_error
+            .filter(|error| *error != "none")
+            .map(str::to_string),
+        runtime_commit: runtime.commit,
+        runtime_dirty: runtime.dirty,
+        runtime_source_state: runtime.source_state,
+        status: status.to_string(),
+        problems,
+        overrides: Vec::new(),
+    }
+}
+
+fn qwen_build_identity_packet() -> &'static BuildIdentity {
+    BUILD_IDENTITY.get_or_init(|| {
+        let build_dirty = match env!("QWEN_BUILD_DIRTY") {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        };
+        classify_build_identity(
+            env!("QWEN_BUILD_COMMIT"),
+            build_dirty,
+            Some(env!("QWEN_BUILD_SOURCE_STATE")),
+            env!("QWEN_BUILD_STAMP_SOURCE"),
+            Some(env!("QWEN_BUILD_STAMP_ERROR")),
+            runtime_git_identity(),
+        )
+    })
+}
+
+fn validate_build_identity(identity: &BuildIdentity, policy: BuildIdentityPolicy) -> Result<()> {
+    if identity.status == "mismatch" {
+        return Err(anyhow!(
+            "benchmark binary/source identity mismatch ({:?}): binary={} source={}; rebuild qwen-bench from the current checkout",
+            identity.problems,
+            identity.build_commit,
+            identity.runtime_commit.as_deref().unwrap_or("unknown")
+        ));
+    }
+    let unverifiable = identity.status == "unverifiable";
+    if unverifiable && !policy.allow_unverifiable {
+        return Err(anyhow!(
+            "benchmark build identity is unverifiable ({:?}); rebuild in a Git checkout or pass --allow-unverifiable-build for a non-canonical run",
+            identity.problems
+        ));
+    }
+    let dirty = identity.problems.iter().any(|p| p == "dirty");
+    if dirty && !policy.allow_dirty {
+        return Err(anyhow!(
+            "benchmark source/build is dirty; commit the changes or pass --allow-dirty for a non-canonical run"
+        ));
+    }
+    Ok(())
+}
+
+fn recorded_build_identity() -> BuildIdentity {
+    let mut identity = qwen_build_identity_packet().clone();
+    let policy = BUILD_IDENTITY_POLICY.get().copied().unwrap_or_default();
+    if policy.allow_dirty && identity.problems.iter().any(|p| p == "dirty") {
+        identity.overrides.push("allow_dirty".to_string());
+    }
+    if policy.allow_unverifiable && identity.status == "unverifiable" {
+        identity
+            .overrides
+            .push("allow_unverifiable_build".to_string());
+    }
+    identity
+}
+
+/// Legacy aliases retained for llama-bench-compatible row consumers.
 fn qwen_build_identity() -> (&'static str, u8) {
-    let commit = env!("QWEN_BUILD_COMMIT");
-    let baked_dirty = env!("QWEN_BUILD_DIRTY").parse::<u8>().unwrap_or(0);
-    let runtime_dirty = std::process::Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=no"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()
-        .map(|o| if o.stdout.is_empty() { 0u8 } else { 1u8 });
-    (commit, runtime_dirty.unwrap_or(baked_dirty))
+    let identity = qwen_build_identity_packet();
+    let dirty =
+        u8::from(identity.build_dirty == Some(true) || identity.runtime_dirty == Some(true));
+    (env!("QWEN_BUILD_COMMIT_SHORT"), dirty)
+}
+
+#[cfg(test)]
+mod build_identity_tests {
+    use super::*;
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const STATE_A: &str = concat!(
+        "git-source-sha256-v2:",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    const STATE_B: &str = concat!(
+        "git-source-sha256-v2:",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+
+    fn identity(
+        build_commit: &str,
+        build_dirty: Option<bool>,
+        runtime_commit: Option<&str>,
+        runtime_dirty: Option<bool>,
+    ) -> BuildIdentity {
+        classify_build_identity(
+            build_commit,
+            build_dirty,
+            Some(STATE_A),
+            "test",
+            None,
+            RuntimeGitIdentity {
+                commit: runtime_commit.map(str::to_string),
+                dirty: runtime_dirty,
+                source_state: Some(STATE_A.to_string()),
+            },
+        )
+    }
+
+    #[test]
+    fn clean_matching_identity_passes() {
+        let id = identity(A, Some(false), Some(A), Some(false));
+        assert_eq!(id.status, "match");
+        assert!(validate_build_identity(&id, BuildIdentityPolicy::default()).is_ok());
+    }
+
+    #[test]
+    fn commit_mismatch_is_never_overridable() {
+        let id = identity(A, Some(false), Some(B), Some(false));
+        assert_eq!(id.status, "mismatch");
+        assert!(
+            validate_build_identity(
+                &id,
+                BuildIdentityPolicy {
+                    allow_dirty: true,
+                    allow_unverifiable: true,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dirty_identity_requires_explicit_override() {
+        let id = identity(A, Some(true), Some(A), Some(true));
+        assert_eq!(id.status, "dirty");
+        assert!(validate_build_identity(&id, BuildIdentityPolicy::default()).is_err());
+        assert!(
+            validate_build_identity(
+                &id,
+                BuildIdentityPolicy {
+                    allow_dirty: true,
+                    allow_unverifiable: false,
+                },
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unknown_runtime_identity_requires_unverifiable_override() {
+        let id = identity(A, Some(false), None, None);
+        assert_eq!(id.status, "unverifiable");
+        assert!(validate_build_identity(&id, BuildIdentityPolicy::default()).is_err());
+        assert!(
+            validate_build_identity(
+                &id,
+                BuildIdentityPolicy {
+                    allow_dirty: false,
+                    allow_unverifiable: true,
+                },
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn invalid_compile_stamp_is_unverifiable() {
+        let id = classify_build_identity(
+            "unknown",
+            None,
+            None,
+            "environment-invalid",
+            Some("identity_override_triple_required"),
+            RuntimeGitIdentity {
+                commit: Some(A.to_string()),
+                dirty: Some(false),
+                source_state: Some(STATE_A.to_string()),
+            },
+        );
+        assert_eq!(id.status, "unverifiable");
+        assert!(
+            id.problems
+                .iter()
+                .any(|p| p == "identity_override_triple_required")
+        );
+    }
+
+    #[test]
+    fn dirty_state_disagreement_is_never_overridable() {
+        let id = identity(A, Some(false), Some(A), Some(true));
+        assert_eq!(id.status, "mismatch");
+        assert!(id.problems.iter().any(|p| p == "dirty_state_mismatch"));
+        assert!(
+            validate_build_identity(
+                &id,
+                BuildIdentityPolicy {
+                    allow_dirty: true,
+                    allow_unverifiable: true,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_state_disagreement_is_never_overridable() {
+        let id = classify_build_identity(
+            A,
+            Some(true),
+            Some(STATE_A),
+            "test",
+            None,
+            RuntimeGitIdentity {
+                commit: Some(A.to_string()),
+                dirty: Some(true),
+                source_state: Some(STATE_B.to_string()),
+            },
+        );
+        assert_eq!(id.status, "mismatch");
+        assert!(id.problems.iter().any(|p| p == "source_state_mismatch"));
+        assert!(
+            validate_build_identity(
+                &id,
+                BuildIdentityPolicy {
+                    allow_dirty: true,
+                    allow_unverifiable: true,
+                },
+            )
+            .is_err()
+        );
+    }
 }
 
 fn synthetic_prompt_ids(n: usize, vocab_size: u32, seed: u64) -> Vec<i32> {
@@ -2239,7 +2601,16 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let policy = BuildIdentityPolicy {
+        allow_dirty: args.allow_dirty,
+        allow_unverifiable: args.allow_unverifiable_build,
+    };
+    let _ = BUILD_IDENTITY_POLICY.set(policy);
+    if !matches!(&args.cmd, Cmd::BuildInfo(_)) {
+        validate_build_identity(qwen_build_identity_packet(), policy)?;
+    }
     match args.cmd {
+        Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),
@@ -2277,6 +2648,46 @@ fn main() -> Result<()> {
         Cmd::PpFfnAb(a) => run_pp_ffn_ab(a),
         Cmd::PpWait(a) => run_pp_wait(a),
     }
+}
+
+fn run_build_info(args: BuildInfoArgs) -> Result<()> {
+    let identity = qwen_build_identity_packet();
+    match args.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(identity)?),
+        OutputFormat::Text => {
+            println!("status\t{}", identity.status);
+            println!("build_commit\t{}", identity.build_commit);
+            println!(
+                "runtime_commit\t{}",
+                identity.runtime_commit.as_deref().unwrap_or("unknown")
+            );
+            println!(
+                "build_source_state\t{}",
+                identity.build_source_state.as_deref().unwrap_or("unknown")
+            );
+            println!(
+                "runtime_source_state\t{}",
+                identity
+                    .runtime_source_state
+                    .as_deref()
+                    .unwrap_or("unknown")
+            );
+            println!(
+                "dirty\tbuild={} runtime={}",
+                identity
+                    .build_dirty
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                identity
+                    .runtime_dirty
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            println!("stamp_source\t{}", identity.stamp_source);
+            println!("problems\t{}", identity.problems.join(","));
+        }
+    }
+    Ok(())
 }
 
 fn run_metal_counters(_args: MetalCountersArgs) -> Result<()> {
@@ -11455,6 +11866,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
             engine: "qwen-llm",
             build_commit: commit,
             build_dirty: dirty,
+            build_identity: recorded_build_identity(),
             test_time: utc_iso8601_now(),
             model_filename: model.display().to_string(),
             model_size: model_weight_bytes(g),
@@ -11889,6 +12301,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
             engine: "qwen-llm",
             build_commit: commit,
             build_dirty: dirty,
+            build_identity: recorded_build_identity(),
             test_time: utc_iso8601_now(),
             model_filename: model.display().to_string(),
             model_size,
@@ -12065,6 +12478,7 @@ fn run_suite_pp_row(
         engine: "qwen-llm",
         build_commit: row_ctx.build_commit,
         build_dirty: row_ctx.build_dirty,
+        build_identity: recorded_build_identity(),
         test_time: utc_iso8601_now(),
         model_filename: row_ctx.model_filename.clone(),
         model_size: row_ctx.model_size,
@@ -12198,6 +12612,7 @@ fn run_suite_tg_row(
         engine: "qwen-llm",
         build_commit: row_ctx.build_commit,
         build_dirty: row_ctx.build_dirty,
+        build_identity: recorded_build_identity(),
         test_time: utc_iso8601_now(),
         model_filename: row_ctx.model_filename.clone(),
         model_size: row_ctx.model_size,
@@ -12439,6 +12854,7 @@ fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
             engine: "qwen-llm",
             build_commit: commit,
             build_dirty: dirty,
+            build_identity: recorded_build_identity(),
             test_time: utc_iso8601_now(),
             model_filename: model.display().to_string(),
             model_size: model_weight_bytes(&g),
@@ -12771,6 +13187,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
             engine: "qwen-llm",
             build_commit: commit,
             build_dirty: dirty,
+            build_identity: recorded_build_identity(),
             test_time: utc_iso8601_now(),
             model_filename: model.display().to_string(),
             model_size,
@@ -12825,6 +13242,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
                 engine: "qwen-llm",
                 build_commit: commit,
                 build_dirty: dirty,
+                build_identity: recorded_build_identity(),
                 test_time: utc_iso8601_now(),
                 model_filename: model.display().to_string(),
                 model_size,

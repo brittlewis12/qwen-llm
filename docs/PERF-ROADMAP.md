@@ -76,6 +76,38 @@ long-context, MTP/speculative, or quant-specific sweeps may still expose red
 cells, but near-term branches should be hardware-headroom driven unless a fresh
 paired repeat contradicts this spot.
 
+## Audit Reset — Provenance And Correctness Before New Promotion
+
+The audit baseline was v0.529 (`890738b`), but the headline family table is
+still the v0.345 runs=1 board. A real stale-binary defect was reproduced: a normal symbolic-HEAD
+commit can advance `refs/heads/main` without invalidating qwen-cli's build
+script, while `qwen-bench` and `family.py` trust the baked commit. No new
+performance result is promotion-grade until binary/source identity is
+fail-closed and a runs>=3 HEAD board replaces the current snapshot.
+
+Force-ranked prerequisites:
+
+1. Fix build identity tracking; add model-free `qwen-bench build-info`; reject
+   stale, unknown, or unverifiable identities in canonical family runs.
+2. Quarantine `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL`: it places true
+   routed/shared RAW chains in an unordered concurrent encoder.
+3. Guard raw forward APIs for sequential position, KV capacity, overflow, and
+   command-buffer failure; validate MTP metadata/tensors and MoE role/dtype
+   support at load.
+4. Make required fixture/oracle coverage machine-readable and non-vacuous;
+   `qwen-bench --oracle` must fail and emit structured status on gate failure.
+5. Fix product stop-set/EOS/TTFT semantics and use the existing GPU argmax.
+6. Add tie-margin E0 recomputation for speculative accept decisions. An
+   exact-validation metallib is deferred until a strict-fidelity contract exists.
+7. Add a named canonical fidelity/capability profile and effective-settings
+   ledger; broad environment-variable cleanup is not a prerequisite.
+
+After those gates, rank work as: mixed-real-prompt DFlash policy recalibration;
+bounded G8/G16 `attn_v4` Phase-A MMA; MTP R2 row-wave; GDN L2-in-step micro;
+native quantized embedding/MTP-bank residency; small DFlash dead-buffer/full-
+accept cleanup; measured-only RoPE precompute. Treat 397B-A17B as
+offload/distributed/ultra-low-bit enablement, not a local kernel target.
+
 ## Hardware-Saturation Recalibration (2026-07-08)
 
 External audit + cx review after v0.526 initially moved attention/DFlash dataflow

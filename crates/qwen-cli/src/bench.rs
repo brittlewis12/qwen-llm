@@ -11451,7 +11451,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let t_ref_decode = Instant::now();
         for _ in 0..tokens {
             ref_emitted.push(next_tok);
-            if stops.contains(&next_tok) {
+            if stops.contains(&next_tok) || ref_emitted.len() >= tokens {
                 break;
             }
             pos += 1;

@@ -66,6 +66,7 @@ use qwen_llm::{
         SpeculativeDecoder, quantize_lm_head_to_affine_q4_gs64, quantize_lm_head_to_q4_0,
         quantize_lm_head_to_q4_1,
     },
+    prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, ProposalSource},
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
@@ -510,6 +511,8 @@ enum Cmd {
     /// call counts. Requires an MTP-aware GGUF (e.g. brittlewis12/
     /// Qwen3.6-27B-MTP-GGUF or the 0.8B-MTP variant).
     Mtp(MtpArgs),
+    /// Target-only prompt lookup with a frozen L8/D7 recent-match policy.
+    Pld(PldArgs),
     /// **H5.2.5 lazy DFlash acceptance gate**: measure α for the DFlash
     /// drafter using H4-style single-token sequential verify (no packed
     /// kernels yet). The acceptance rate signal tells us whether the
@@ -1394,6 +1397,37 @@ struct MtpArgs {
     /// Skip the warmup pass.
     #[arg(long)]
     no_warmup: bool,
+}
+
+#[derive(Parser, Debug)]
+struct PldArgs {
+    /// Path to a target GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Prompt text.
+    #[arg(short = 'p', long)]
+    prompt: String,
+    /// Render the prompt through a Qwen chat template.
+    #[arg(long)]
+    qwen_chat: bool,
+    /// Optional system prompt for `--qwen-chat` rendering.
+    #[arg(long)]
+    system: Option<String>,
+    /// Render an empty thinking block for `--qwen-chat`.
+    #[arg(long)]
+    disable_thinking: bool,
+    /// Number of tokens to generate after the prompt.
+    #[arg(long, default_value = "128")]
+    tokens: usize,
+    /// Stop tokens for generation, comma-separated.
+    #[arg(long, value_parser = parse_stop_tokens)]
+    stop_tokens: Option<Vec<i32>>,
+    /// Skip the warmup pass.
+    #[arg(long)]
+    no_warmup: bool,
+    /// Write a compact charged-path JSON summary.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -2642,6 +2676,7 @@ fn main() -> Result<()> {
         Cmd::DispatchCensus(a) => run_dispatch_census(a),
         Cmd::DecodeWindow(a) => run_decode_window(a),
         Cmd::Mtp(a) => run_mtp(a),
+        Cmd::Pld(a) => run_pld(a),
         Cmd::DflashLazy(a) => run_dflash_lazy(a),
         Cmd::Dflash(a) => run_dflash(a),
         Cmd::Tok(a) => run_tok(a),
@@ -9964,6 +9999,15 @@ mod tok_tests {
         assert!(args.include_token_ids);
         assert_eq!(args.output, Some(PathBuf::from("fixture.json")));
     }
+
+    #[test]
+    fn pld_terminal_window_counts_target_transitions() {
+        let drafts = [11, 12, 13, 14, 15, 16, 17];
+        assert_eq!(pld_terminal_draft_count(&drafts, 1, 128, &[99]), None);
+        assert_eq!(pld_terminal_draft_count(&drafts, 121, 128, &[99]), Some(7));
+        assert_eq!(pld_terminal_draft_count(&drafts, 125, 128, &[99]), Some(3));
+        assert_eq!(pld_terminal_draft_count(&drafts, 1, 128, &[14]), Some(4));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -10141,6 +10185,371 @@ fn audit_mtp_target_state(
         continuation_logits_max_abs,
         continuation_logits_cosine,
     })
+}
+
+#[derive(Default)]
+struct PldStats {
+    index_build_ms: f64,
+    index_update_ms: f64,
+    lookup_ms: f64,
+    serial_ms: f64,
+    verify_ms: f64,
+    restore_ms: f64,
+    decode_ms: f64,
+    attempts: u32,
+    abstentions: u32,
+    verify_calls: u32,
+    restore_calls: u32,
+    accepted: u32,
+    drafts_scored: u32,
+    prompt_attempts: u32,
+    self_attempts: u32,
+    target_transitions: u32,
+    final_effective_verify_n: u32,
+    accept_histogram: [u32; DRAFT_TOKENS + 1],
+}
+
+fn pld_terminal_draft_count(
+    drafts: &[i32; DRAFT_TOKENS],
+    emitted: usize,
+    max_new_tokens: usize,
+    stop_tokens: &[i32],
+) -> Option<usize> {
+    let remaining = max_new_tokens.saturating_sub(emitted);
+    let eligible = remaining.min(DRAFT_TOKENS);
+    if let Some(index) = drafts[..eligible]
+        .iter()
+        .position(|token| stop_tokens.contains(token))
+    {
+        return Some(index + 1);
+    }
+    (remaining <= DRAFT_TOKENS).then_some(remaining)
+}
+
+fn run_pld(args: PldArgs) -> Result<()> {
+    let PldArgs {
+        model,
+        prompt,
+        qwen_chat,
+        system,
+        disable_thinking,
+        tokens,
+        stop_tokens,
+        no_warmup,
+        output,
+    } = args;
+    anyhow::ensure!(tokens > 0, "--tokens must be positive");
+    if !qwen_chat && (system.is_some() || disable_thinking) {
+        anyhow::bail!("`--system` and `--disable-thinking` require `--qwen-chat`");
+    }
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    eprintln!("[pld] device: {}", ctx.describe());
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let stops = resolve_stop_tokens(&g, stop_tokens)?;
+    let m = Model::from_gguf(&g).context("parse model arch")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
+    let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
+    let rendered_prompt = if qwen_chat {
+        render_qwen_single_turn_prompt(&prompt, system.as_deref(), !disable_thinking)
+    } else {
+        prompt.clone()
+    };
+    let prompt_ids = tok
+        .encode(&rendered_prompt, false)
+        .context("tokenize prompt")?;
+    anyhow::ensure!(!prompt_ids.is_empty(), "prompt tokenized to zero tokens");
+    eprintln!(
+        "[pld] model={} prompt_tokens={} gen={} stop_tokens={stops:?}",
+        model.display(),
+        prompt_ids.len(),
+        tokens,
+    );
+
+    let mf = MetalForward::new(&ctx, &mm);
+    let cap = prompt_ids.len() + tokens + 16;
+    if !no_warmup {
+        let mut session = MetalSession::fresh(&ctx, &mm, cap).context("warmup session")?;
+        let _ = mf.single_token(prompt_ids[0], 0, &mut session)?;
+    }
+
+    let mut ref_session = MetalSession::fresh(&ctx, &mm, cap).context("ref session")?;
+    let mut ref_scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16)
+        .context("ref prefill scratch")?;
+    let ref_total_start = Instant::now();
+    let ref_prefill_start = Instant::now();
+    let ref_last_logits = prefill_tokens_with_multi_hidden(
+        &mf,
+        &prompt_ids,
+        0,
+        &mut ref_session,
+        &mut ref_scratch,
+        &[],
+        None,
+    )
+    .context("ref packed prefill")?;
+    let ref_prefill_ms = ref_prefill_start.elapsed().as_secs_f64() * 1e3;
+    let ref_decode_start = Instant::now();
+    let mut ref_generated = Vec::with_capacity(tokens);
+    let mut ref_carry = argmax_i32(&ref_last_logits);
+    let mut ref_processed_pos = (prompt_ids.len() - 1) as u32;
+    loop {
+        ref_generated.push(ref_carry);
+        if stops.contains(&ref_carry) || ref_generated.len() >= tokens {
+            break;
+        }
+        let position = ref_processed_pos + 1;
+        let logits = mf.single_token(ref_carry, position, &mut ref_session)?;
+        ref_carry = argmax_i32(&logits);
+        ref_processed_pos = position;
+    }
+    let ref_decode_ms = ref_decode_start.elapsed().as_secs_f64() * 1e3;
+    let ref_total_ms = ref_total_start.elapsed().as_secs_f64() * 1e3;
+
+    let mut candidate_session = MetalSession::fresh(&ctx, &mm, cap).context("candidate session")?;
+    let mut candidate_prefill_scratch = MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16)
+        .context("candidate prefill scratch")?;
+    let mut verify_scratch =
+        MetalDFlashVerifyScratch::fresh(&ctx, &mm, 8, 0).context("PLD verify scratch")?;
+    let mut layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, 8).context("PLD layer scratch")?;
+    let candidate_total_start = Instant::now();
+    let index_start = Instant::now();
+    let mut proposer = PromptLookupProposer::new(&prompt_ids);
+    let mut stats = PldStats {
+        index_build_ms: index_start.elapsed().as_secs_f64() * 1e3,
+        ..PldStats::default()
+    };
+    let candidate_prefill_start = Instant::now();
+    let candidate_last_logits = prefill_tokens_with_multi_hidden(
+        &mf,
+        &prompt_ids,
+        0,
+        &mut candidate_session,
+        &mut candidate_prefill_scratch,
+        &[],
+        None,
+    )
+    .context("candidate packed prefill")?;
+    let candidate_prefill_ms = candidate_prefill_start.elapsed().as_secs_f64() * 1e3;
+    let decode_start = Instant::now();
+    let mut candidate_generated = Vec::with_capacity(tokens);
+    let mut carry = argmax_i32(&candidate_last_logits);
+    let mut processed_pos = (prompt_ids.len() - 1) as u32;
+    'outer: loop {
+        candidate_generated.push(carry);
+        let update_start = Instant::now();
+        proposer.commit_verified(&[carry]);
+        stats.index_update_ms += update_start.elapsed().as_secs_f64() * 1e3;
+        if stops.contains(&carry) || candidate_generated.len() >= tokens {
+            break;
+        }
+
+        let lookup_start = Instant::now();
+        let candidate = proposer.propose();
+        stats.lookup_ms += lookup_start.elapsed().as_secs_f64() * 1e3;
+        let Some(candidate) = candidate else {
+            stats.abstentions += 1;
+            let serial_start = Instant::now();
+            let position = processed_pos + 1;
+            let logits = mf.single_token(carry, position, &mut candidate_session)?;
+            stats.serial_ms += serial_start.elapsed().as_secs_f64() * 1e3;
+            stats.target_transitions += 1;
+            carry = argmax_i32(&logits);
+            processed_pos = position;
+            continue;
+        };
+
+        stats.attempts += 1;
+        match candidate.source {
+            ProposalSource::Prompt => stats.prompt_attempts += 1,
+            ProposalSource::SelfOutput => stats.self_attempts += 1,
+        }
+        let terminal_count = pld_terminal_draft_count(
+            &candidate.proposal,
+            candidate_generated.len(),
+            tokens,
+            &stops,
+        );
+        let mut verify_input = Vec::with_capacity(8);
+        verify_input.push(carry);
+        let (n_eff, n_drafts_scored) = if let Some(count) = terminal_count {
+            verify_input.extend_from_slice(&candidate.proposal[..count.saturating_sub(1)]);
+            (count, count)
+        } else {
+            verify_input.extend_from_slice(&candidate.proposal);
+            (8, DRAFT_TOKENS)
+        };
+        stats.drafts_scored += n_drafts_scored as u32;
+        stats.final_effective_verify_n = n_eff as u32;
+        let start_position = processed_pos + 1;
+        let verify_start = Instant::now();
+        let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
+            &mf,
+            &[],
+            &verify_input,
+            start_position,
+            &mut verify_scratch,
+            &mut layer_scratch,
+            &mut candidate_session,
+            None,
+            Some(n_eff as u32),
+        )
+        .context("PLD packed verify")?;
+        stats.verify_ms += verify_start.elapsed().as_secs_f64() * 1e3;
+        stats.verify_calls += 1;
+        stats.target_transitions += n_eff as u32;
+
+        let mut accepted_tokens = Vec::with_capacity(n_drafts_scored);
+        let mut stop_now = false;
+        for (&draft, &target) in candidate.proposal[..n_drafts_scored]
+            .iter()
+            .zip(&verify_argmax)
+        {
+            if draft != target {
+                break;
+            }
+            accepted_tokens.push(draft);
+            candidate_generated.push(draft);
+            stats.accepted += 1;
+            if stops.contains(&draft) || candidate_generated.len() >= tokens {
+                stop_now = true;
+                break;
+            }
+        }
+        let n_accepted = accepted_tokens.len();
+        stats.accept_histogram[n_accepted] += 1;
+        let n_keep = if stop_now { n_accepted } else { 1 + n_accepted };
+        if n_keep < n_eff {
+            let restore_start = Instant::now();
+            qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
+                &mf,
+                &verify_scratch,
+                n_keep as u32,
+                start_position,
+                &mut candidate_session,
+                Some(n_eff as u32),
+            )
+            .context("PLD restore after partial accept")?;
+            stats.restore_ms += restore_start.elapsed().as_secs_f64() * 1e3;
+            stats.restore_calls += 1;
+        }
+        let update_start = Instant::now();
+        proposer.commit_verified(&accepted_tokens);
+        stats.index_update_ms += update_start.elapsed().as_secs_f64() * 1e3;
+        if stop_now {
+            break 'outer;
+        }
+        processed_pos += 1 + n_accepted as u32;
+        carry = verify_argmax[n_accepted];
+    }
+    stats.decode_ms = decode_start.elapsed().as_secs_f64() * 1e3;
+    let candidate_total_ms = candidate_total_start.elapsed().as_secs_f64() * 1e3;
+
+    let identical = ref_generated == candidate_generated;
+    anyhow::ensure!(identical, "PLD generated tokens differ from serial target");
+    let pending_terminal_token = *ref_generated.last().context("PLD emitted no tokens")?;
+    let expected_position = prompt_ids.len() + ref_generated.len() - 1;
+    let audit = audit_mtp_target_state(
+        &mf,
+        &mut ref_session,
+        &mut candidate_session,
+        expected_position,
+        pending_terminal_token,
+    )?;
+    anyhow::ensure!(audit.resume_audit_pass, "PLD terminal resume audit failed");
+
+    let decode_speedup = ref_decode_ms / stats.decode_ms;
+    let total_speedup = ref_total_ms / candidate_total_ms;
+    eprintln!(
+        "[pld] ref prefill={ref_prefill_ms:.1} decode={ref_decode_ms:.1} total={ref_total_ms:.1} ms"
+    );
+    eprintln!(
+        "[pld] pld index={:.3} prefill={candidate_prefill_ms:.1} decode={:.1} \
+         total={candidate_total_ms:.1} ms",
+        stats.index_build_ms, stats.decode_ms,
+    );
+    eprintln!(
+        "[pld] speedup decode={decode_speedup:.3}x total={total_speedup:.3}x \
+         attempts={} abstentions={} verifies={} restores={} accepted={}/{}",
+        stats.attempts,
+        stats.abstentions,
+        stats.verify_calls,
+        stats.restore_calls,
+        stats.accepted,
+        stats.drafts_scored,
+    );
+    eprintln!(
+        "[pld] phases lookup={:.3} update={:.3} serial={:.1} verify={:.1} restore={:.1} ms",
+        stats.lookup_ms, stats.index_update_ms, stats.serial_ms, stats.verify_ms, stats.restore_ms,
+    );
+
+    if let Some(output_path) = output {
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let row = serde_json::json!({
+            "schema_version": 1,
+            "model": model.display().to_string(),
+            "prompt_tokens": prompt_ids.len(),
+            "generated_requested": tokens,
+            "generated_emitted": ref_generated.len(),
+            "stop_tokens": stops,
+            "policy": {
+                "sources": "prompt_and_committed_output",
+                "selector": "most_recent",
+                "match_tokens": 8,
+                "draft_tokens": DRAFT_TOKENS,
+                "physical_verify_n": 8,
+            },
+            "reference": {
+                "prefill_ms": ref_prefill_ms,
+                "decode_ms": ref_decode_ms,
+                "total_ms": ref_total_ms,
+            },
+            "candidate": {
+                "index_build_ms": stats.index_build_ms,
+                "prefill_ms": candidate_prefill_ms,
+                "decode_ms": stats.decode_ms,
+                "total_ms": candidate_total_ms,
+                "lookup_ms": stats.lookup_ms,
+                "index_update_ms": stats.index_update_ms,
+                "serial_ms": stats.serial_ms,
+                "verify_ms": stats.verify_ms,
+                "restore_ms": stats.restore_ms,
+                "attempts": stats.attempts,
+                "abstentions": stats.abstentions,
+                "verify_calls": stats.verify_calls,
+                "restore_calls": stats.restore_calls,
+                "accepted": stats.accepted,
+                "drafts_scored": stats.drafts_scored,
+                "prompt_attempts": stats.prompt_attempts,
+                "self_attempts": stats.self_attempts,
+                "target_transitions": stats.target_transitions,
+                "final_effective_verify_n": (stats.verify_calls > 0)
+                    .then_some(stats.final_effective_verify_n),
+                "accept_histogram": stats.accept_histogram,
+            },
+            "decode_speedup": decode_speedup,
+            "total_speedup": total_speedup,
+            "identical": identical,
+            "target_state": {
+                "resume_audit_pass": audit.resume_audit_pass,
+                "kv_position_equal": audit.kv_position_equal,
+                "kv_payload_exact": audit.kv_payload_exact,
+                "kv_payload_max_abs": audit.kv_payload_max_abs,
+                "kv_payload_cosine": audit.kv_payload_cosine,
+                "gdn_state_max_abs": audit.gdn_state_max_abs,
+                "gdn_conv_max_abs": audit.gdn_conv_max_abs,
+                "continuation_argmax_equal": audit.continuation_argmax_equal,
+                "continuation_logits_max_abs": audit.continuation_logits_max_abs,
+                "continuation_logits_cosine": audit.continuation_logits_cosine,
+            },
+        });
+        std::fs::write(&output_path, serde_json::to_string(&row)? + "\n")?;
+        eprintln!("[pld] wrote {}", output_path.display());
+    }
+    Ok(())
 }
 
 fn run_mtp(args: MtpArgs) -> Result<()> {

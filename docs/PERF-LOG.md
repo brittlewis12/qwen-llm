@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.550 Lazy Decoded-Piece Cache Promoted
+
+Status: exact first-TTFT and process-cold work removal; default promoted.
+
+- `NativeTokenizer` no longer decodes and separately allocates every vocabulary
+  piece during construction. A per-token `OnceLock<Box<[u8]>>` runs the identical
+  decoder on first access and memoizes the owned bytes for later calls.
+- Full-vocabulary native-versus-llama.cpp piece parity passes, as does random
+  token-sequence parity. An eight-thread same/different-token test validates
+  concurrent first initialization. All 20 product A/B outputs match the control,
+  and every first/warm pair passes exact prompt, token, and stop equality.
+- Ten fresh-process eager/lazy pairs ran in alternating order on redirected 0.8B
+  Q4 `Hello`, four-token output. Median tokenizer construction improves
+  `69.017 -> 36.847 ms`, saving `32.170 ms` (`46.61%`).
+- First TTFT improves `105.135 -> 72.705 ms`, saving `32.430 ms` (`30.85%`),
+  and total request wall improves `114.866 -> 82.273 ms`, saving `32.593 ms`
+  (`28.38%`). Model-load plus first-flush wall improves `33.191 ms` (`10.96%`),
+  proving underlying work removal rather than readiness-boundary movement.
+- Warm TTFT/total are effectively neutral at `13.208/22.102 ms` eager versus
+  `13.246/22.132 ms` lazy. First-callback p95 moves only
+  `0.0409 -> 0.0481 ms`; observed-max regression is `0.0093 ms`, both far below
+  the `0.10 ms` transfer gate.
+- Empty lazy slots add about `1.9 MiB` metadata at a 248K vocabulary, but normal
+  use avoids decoded payload and heap allocation for unobserved IDs. A fully
+  populated cache retains eager payload plus that metadata and is the explicit
+  adversarial memory case. Existing token text storage is unchanged.
+- Promote for the native Qwen 3.5/3.6 tokenizer. The measured `31%` TTFT effect is
+  specific to this 0.8B cell; do not generalize its percentage or net host-memory
+  effect without measurement. The next exact subphase is transient GGUF token and
+  merge string cloning inside the remaining `36.85 ms` construction path.
+
+Artifacts: `target/profiles/v0550-tokenizer-ab2/{eager,lazy}-{1..10}.{jsonl,out,err}`.
+Adjudication: `cx ask` session `019f4dc0-9fcb-7161-bc99-f494712920d3`.
+
 ## 2026-07-10 - v0.549 PSO First-TTFT Contribution Falsifier
 
 Status: causal instrumentation plus bounded 0.8B PSO materiality kill; no runtime

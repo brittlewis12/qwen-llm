@@ -30,7 +30,7 @@ use std::collections::BinaryHeap;
 use std::ffi::CString;
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 const NATIVE_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -471,7 +471,7 @@ pub struct NativeTokenizer {
     pair_merges: HashMap<u64, MergeInfo>,
     byte_token_ids: [i32; 256],
     special_matcher: SpecialMatcher,
-    decoded_piece_bytes: Vec<Box<[u8]>>,
+    decoded_piece_bytes: Vec<OnceLock<Box<[u8]>>>,
     bos: Option<i32>,
     eos: Option<i32>,
     add_bos: bool,
@@ -595,10 +595,7 @@ impl NativeTokenizer {
         });
         let special_matcher = SpecialMatcher::new(&special_tokens);
 
-        let decoded_piece_bytes = id_to_token
-            .iter()
-            .map(|token| decode_token_bytes_uncached(token).into_boxed_slice())
-            .collect();
+        let decoded_piece_bytes = (0..id_to_token.len()).map(|_| OnceLock::new()).collect();
 
         Ok(Self {
             id_to_token,
@@ -754,7 +751,9 @@ impl NativeTokenizer {
     }
 
     fn decode_token_bytes(&self, token: usize) -> &[u8] {
-        &self.decoded_piece_bytes[token]
+        self.decoded_piece_bytes[token].get_or_init(|| {
+            decode_token_bytes_uncached(&self.id_to_token[token]).into_boxed_slice()
+        })
     }
 
     pub fn decode_piece(&self, token: i32) -> String {
@@ -1784,6 +1783,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn native_lazy_decode_cache_is_thread_safe() {
+        let Some(pair) = oracle_pair() else { return };
+        let native = &pair.native;
+        let ids = [0, native.n_vocab() as i32 / 2, native.n_vocab() as i32 - 1];
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(move || {
+                    for id in ids {
+                        native.try_decode_piece(id).expect("concurrent decode");
+                    }
+                });
+            }
+        });
     }
 
     #[test]

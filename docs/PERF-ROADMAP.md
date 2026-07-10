@@ -157,13 +157,21 @@ explains only `6.62%` of the `26.65 ms` prefill gap and at most `1.60%` of first
 TTFT. Close PSO prewarming or compiler optimization as a material lever in this
 cell. Do not relabel the unexplained `24.89 ms` first-prefill gap as PSO.
 
+v0.550 removes eager decoded-byte materialization for every tokenizer vocabulary
+entry. Exact `OnceLock` memoization decodes only token IDs actually emitted. In 10
+alternating fresh-process eager/lazy pairs, 0.8B tokenizer construction improves
+`69.017 -> 36.847 ms`, first TTFT `105.135 -> 72.705 ms`, and total request wall
+`114.866 -> 82.273 ms`. Process-load-plus-TTFT improves `33.191 ms`; this is work
+removal, not readiness-boundary movement. Warm TTFT is neutral within `0.038 ms`,
+and first-callback p95 regresses only `0.0072 ms`.
+
 Next contract work:
 
-1. Price exact removal of eager full-vocabulary decoded-byte materialization in
-   `NativeTokenizer::from_gguf`. Preserve full decode parity and reject callback or
-   total-wall transfer; do not assume it explains all tokenizer construction.
-2. Replicate the surviving tokenizer candidate across fresh processes, then use
-   one realistic interactive prompt and one dissimilar longer guardrail.
+1. Price removal of transient tokenizer metadata cloning. Borrow token and merge
+   strings from loaded GGUF metadata while building owned runtime structures; do
+   not alter BPE ranks, duplicate validation, or final tokenizer ownership.
+2. If that exact candidate survives, use one realistic interactive prompt and one
+   dissimilar longer guardrail before leaving tokenizer construction.
 3. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
@@ -316,9 +324,9 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Remove eager decoded-byte work from tokenizer construction if an exact lazy
-   oracle saves at least `5 ms` TTFT without transferring it into first callback,
-   total wall, or host memory. PSO warmup is closed in the measured 0.8B cell.
+1. Remove transient GGUF token/merge string clones from the remaining `36.85 ms`
+   tokenizer construction path if an exact oracle saves at least `5 ms` TTFT.
+   Lazy decoded-piece caching is promoted; PSO warmup is closed in the 0.8B cell.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

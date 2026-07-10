@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.559 Causal PLD Survey Promotes One Charged Path
+
+Status: frozen dense-27B prompt-lookup policy clears the offline mechanism gate;
+promoted to one narrow target-only charged implementation.
+
+- `qwen-bench mtp --include-token-ids` now freezes exact prompt and serial-target
+  IDs after timed generation. `scripts/profile/proposal_economics.py` consumes
+  them causally: lookup sees the fixed prompt and committed output only, self-copy
+  requires a fully committed source continuation, and rejection advances by the
+  carry plus accepted prefix.
+- The simulator records every attempt, abstention, source span, full proposal,
+  eligible terminal window, accepted prefix, deferred-carry progress, and cost
+  class. A linear longest-match pass keeps a repetitive 32K/D7 simulation bounded.
+  Ten deterministic tests cover naive/linear parity, future-leak prevention,
+  rejection, D7/N8 progress, and both terminal boundaries.
+- Development selected one fixed policy: prompt plus committed-output sources,
+  most-recent occurrence, literal match `L=8`, seven drafts, physical N8. Recent
+  and longest-recent had identical outcomes; recent is the cheaper tie-break.
+- Development optimistic decode ratios are `2.4168x` exact quotation, `2.1485x`
+  periodic output, `2.2206x` ambiguous repeated prefix, `1.0238x` Reva
+  interactive, and `1.0000x` Fibonacci. The last row makes no attempts.
+- The frozen policy then ran on four independent held-out target trajectories.
+  Quotation is `2.4185x` with 15/15 full accepts. Repetition is `2.1595x` with 13
+  full accepts plus lengths 3 and 5. Ambiguous repeated prefix is `2.0884x` with
+  14 full accepts plus lengths 2 and 5. Generic prose is `1.0000x`, with zero
+  attempts and 127 serial abstentions.
+- These are mechanism tests, not prevalence estimates for natural workloads.
+  They establish high ceiling on exact-copy and highly periodic greedy paths and
+  one generic abstention guardrail. The cost model uses each row's average oracle
+  packet, including its shortened terminal packet; it omits production lookup,
+  orchestration, and partial restore costs.
+- The favorable rows retain `2.10-2.42 s` additional wall budget before falling
+  to `1.10x`; each partial event could cost more than one second extra before its
+  row misses. This margin promotes charged execution instead of another corpus or
+  verifier retune.
+- Next implementation is target-only, dense 27B, and policy-frozen. Keep normal
+  packed prefill; build prompt index once and self index incrementally; serially
+  advance on abstention; use physical-N8 verify plus actual restore on attempt;
+  preserve terminal/deferred-carry semantics; time index, lookup, serial, verify,
+  restore, and total decode separately. Do not create MTP state or history.
+
+Kill gates: exact target stream and terminal resume; actual partial restores on
+repetition/adversarial rows; each favorable held-out row `>=1.10x`; generic zero
+packed verifies/restores and charged decode regression `<=2%`; no packed-prefill
+regression.
+
+Artifacts: `target/profiles/v0558-proposal-survey-dev/` and
+`target/profiles/v0558-proposal-survey-heldout/`. Adversarial design/reviews:
+`cx ask` sessions `019f4e34-3400-7f62-94f3-b22dd6fa9ce9`,
+`019f4e3a-2264-7aa3-97e3-ecbe25f56b18`,
+`019f4e3e-95f9-79f3-8a72-3267217a8f6d`, and
+`019f4e4e-77f2-7ad3-9626-550d0eeed878`.
+
 ## 2026-07-10 - v0.556 Physical-N8 Denominator Splits Dense and MoE
 
 Status: dense-27B proposer family promoted to offline survey; current A3B

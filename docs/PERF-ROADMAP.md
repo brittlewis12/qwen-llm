@@ -218,14 +218,24 @@ packed-MoE/GDN physical-N8 implementation in the numerical/exact lane. This does
 not prove that every state-preserving A3B verifier organization is impossible.
 Do not invent a weaker contract merely to retain this implementation.
 
+v0.559 clears the next dense-27B semantic gate. A causal offline PLD simulator
+freezes one development-selected policy: prompt plus committed-output sources,
+most-recent `L=8` match, D7/physical N8. On held-out mechanism rows, optimistic
+decode is `2.4185x` exact quotation, `2.1595x` periodic output, and `2.0884x`
+ambiguous repeated prefix; generic prose abstains on every transition at
+`1.0000x` before production lookup cost. Favorable rows have `2.10-2.42 s` of
+extra wall budget before missing `1.10x`. This promotes one target-only charged
+implementation, not a prevalence claim or broad product default.
+
 Next contract work:
 
-1. Build one causal, closed-loop proposal-economics artifact for dense 27B. Put
-   prompt lookup and recorded native-MTP proposals in the same schema and charge
-   N8 attempts against serial fallback using the measured denominator.
-2. Implement a target-only prompt-lookup path only if a fixed offline policy
-   clears the charged fixture gates with enough margin. It must use normal packed
-   prefill, adaptive abstention, and no MTP asset or history construction.
+1. Build the minimum target-only charged PLD path for the frozen dense-27B policy.
+   Keep normal packed prefill, use serial target steps on abstention, and charge
+   physical-N8 verify plus partial restore on attempts. No MTP asset state or
+   prompt history belongs in the path.
+2. Replay the four frozen held-out rows. Require exact streams and resume state,
+   actual partial restores, `>=1.10x` on favorable rows, and `<=2%` generic decode
+   regression with zero generic verifies/restores.
 3. Keep the current A3B physical-N8 path closed unless a materially different
    verifier reproduces serial recurrent state or an explicitly approximate lane
    first demonstrates enough upside to justify quality validation.
@@ -340,8 +350,9 @@ speedup is `(B + D) / B`.
 1. **Dense-27B prompt lookup/ngram proposals**: target-verified decode for
    repetitive workloads, with no learned drafter or MTP state. The measured
    fixed-N8 decode-only ceiling is `2.60-2.63x` in the measured 12/418-token
-   regimes. Belief is medium for quotation and self-repetition, low for generic
-   prose, and survey cost is low. An offline causal survey precedes implementation.
+   regimes. Held-out mechanism rows predict `2.09-2.42x` on exact-copy/periodic
+   paths while a generic row fully abstains. Confidence is high enough for one
+   charged target-only implementation, but natural-workload coverage remains low.
 2. **Model/length chunk policy**: measured long-prefill gains are about 3% on
    selected A3B rows and 6% on selected A10B rows, with little dense benefit.
    Numerical contract, high measured-cell confidence, and low cost.
@@ -383,23 +394,15 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Build a versioned dense-27B `proposal-economics.jsonl`. Simulate causally and
-   closed-loop over code, self-repetition, quotation/retrieval, real-long, generic
-   narrative, and adversarial repeated-prefix fixtures. Split prompt and output
-   sources; test literal match gates `8/16/32`; forbid uncommitted self-copy; and
-   compare a small preregistered occurrence-policy set with adaptive abstention.
-   Select policy on development rows, then freeze it before held-out evaluation.
-2. Charge each attempted proposal with the measured context-specific N8 packet
-   and each abstention with one serial transition. Replay or calibrate rejection-
-   depth correction/restore costs rather than charging the all-accepted packet
-   universally. Report availability, accepted-run histograms, emitted progress,
-   fallback fraction, CPU cost, p50/p10 row economics, decode ratio, and total-
-   request ratio. Put recorded native-MTP proposals in the same schema rather
-   than granting heritage priority.
-3. If one fixed prompt-lookup policy clears the offline gates comfortably, build
-   the minimum target-only dense-27B path. Use normal packed prefill, no MTP asset
-   or history, and adaptive serial fallback. Kill on `<1.10x` charged decode,
-   `>3%` TTFT regression, `>1%` proposer CPU, or failed stream/resume gates.
+1. Implement the frozen `both/recent/L8/D7` policy in a target-only dense-27B
+   bench path. Build the prompt index once, update the self index only from
+   committed tokens, and re-evaluate after every serial or speculative advance.
+2. Preserve normal packed prefill. On abstention, execute one target transition.
+   On attempt, use physical-N8 packed verify and actual partial restore. Preserve
+   stop/output-limit truncation and deferred bonus-token semantics.
+3. Report index-build, lookup, serial, verify, restore, and total decode wall.
+   Replay the four frozen held-out fixtures and kill on `<1.10x` favorable decode,
+   `>2%` generic regression, any generic verify/restore, or failed stream/resume.
 4. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
    default-off G8 fused-QKV path as a separate oracle because it duplicates the
    Q/K/V bank and is not yet a memory-light production layout.
@@ -434,6 +437,8 @@ better than a decode win; each result must retain its objective-lane label.
   The current dense-27B denominator sets a zero-overhead, zero-abstention
   necessary floor of about `3.35` emitted tokens per charged N8 packet. Apply the
   promotion gate to a frozen policy on held-out rows, not its selection corpus.
+  The v0.559 frozen policy clears only the offline mechanism gate. Promotion to a
+  product path still requires charged lookup, partial restore, and generic wall.
   A failed proposer demotes prompt lookup; a failed verifier-only oracle demotes
   all proposal sources only in the measured model/context regime.
 - **Native MTP**: total request `>=1.10x` on at least two named archetypes at 128+

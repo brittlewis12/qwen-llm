@@ -526,8 +526,26 @@ Interpretation rules:
 - Use `--requests-jsonl -` for a resident stdin loop. Stats rows include
   `schema_version`, model path, arrival/finish timestamps, prompt hash, configured
   cache-prefix hash, and matched-prefix hash for trace replay/accounting.
-- `model_ttft_ms` is model-internal accounting. This JSONL mode writes after full
-  decode, so it is not a streamed first-byte measurement.
+- `model_ttft_ms` is model-internal first-token-ready accounting. This JSONL mode
+  writes after full generation, so it is not a streamed first-byte measurement.
+- Request-stats schema 3 records `first_token_ms`, `first_token_callback_ms`,
+  `decode_transitions`, `transition_ms`, and `transition_tps`. `first_token_ms`
+  ends after selection; the callback field ends after buffered recording in
+  JSONL mode. For `N` non-stop output tokens, normal generation performs `N-1`
+  target transitions when `N >= 1`: prefill already predicts the first token,
+  and the terminal token is not consumed when no successor logits are requested.
+  Zero-token requests are rejected.
+- `decode_ms` includes selection, token callbacks, and transitions after prefill;
+  `decode_tps` is emitted tokens over that wall and is not steady-state
+  transition throughput. `transition_ms` includes only successful target
+  transitions. `first_decode_ms` retains its field name for parser compatibility,
+  but schema 3 defines it as the first actual transition and sets it to zero when
+  no transition occurs.
+- `prefix_cache_stats.py` rejects mixed request-stats schemas and cross-schema
+  comparisons. Do not append schema 3 rows to an existing schema 2 stats file.
+- The older `qwen-bench prefix-cache` TTFT label means prefill plus consumption
+  of the predicted token. Treat it as a legacy transition-inclusive metric, not
+  client-visible first-token latency.
 - `--prefix-cache-max-mib` bounds normal eviction pressure, but an oversized newest
   snapshot is retained alone by runtime cache policy.
 - Treat 1K+ repeated prefixes as the first product-worthy regime unless fresh data
@@ -710,6 +728,19 @@ hyperfine --warmup 1 --runs 5 \
 
 Use `hyperfine` for before/after comparisons, not for attribution. Keep the
 command, model, prompt, build profile, and environment fixed across variants.
+
+### Serialized GPU lease
+
+Timed GPU work is globally exclusive across the repository, including parallel
+agents. Until automated enforcement lands, only the coordinating session may run
+benchmarks; subagents remain read-only and return benchmark plans to it.
+
+The planned enforcement surface is `target/profiles/GPU-LEASE.json`, carrying
+owner, process identity, purpose, creation time, and expiry. Timed `qwen-bench`
+modes should refuse a live foreign lease and record lease identity in artifacts.
+Stale recovery must verify the exact owner process and expiry; it must never kill
+processes by pattern. Build and non-GPU analysis may proceed outside the lease,
+but not concurrently with a promotion-grade timed run.
 
 ### qwen-bench pp prompt sweeps
 

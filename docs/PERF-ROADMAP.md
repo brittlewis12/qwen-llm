@@ -14,44 +14,90 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current North Star
 
-Maximize useful throughput on Apple Silicon across dense and MoE Qwen 3.5/3.6
-workloads. Beating llama.cpp is a required milestone and regression guard, not
-the endpoint; when a path is far below measured or estimated hardware roofline,
-keep hunting even if the current llama.cpp row is already green.
+Make one loaded model answer one fresh prompt as quickly, efficiently, lightly,
+and accurately as possible on the local M4 Max. The primary product contract is
+serial batch-size-one inference, not aggregate serving throughput.
 
-Primary guardrails:
+The two co-primary latency objectives are:
 
-- Dense: `Qwen3.6-27B-Q4_K_M.gguf`
-- MoE A3B: `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`
-- MoE A10B: `Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf`
-- Treat llama.cpp parity as the floor. Promotion-grade wins should also improve
-  the hardware-utilization story: higher effective bandwidth for decode, higher
-  effective FLOP/s for prefill, or removal of a measured serial/memory pass.
-- Scoreboards should carry both comparison axes: qwen/lcpp for external parity
-  and qwen/roofline for hardware headroom. v0.285 adds `qwen-bench roofline`;
-  current M4 Max anchors are `474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s`
-  Q4_K mat-mat through our dispatcher, and `3.03 TFLOP/s` scalar FMA sanity.
+1. Model-ready fresh TTFT: prompt arrival through first token delivery.
+2. Warm serial inter-token latency: one live sequence with no request batching.
+
+Track peak session memory and quality beside both latency objectives. Report a
+balanced comparison as `sqrt(TTFT speedup * decode speedup)`, but never hide the
+two phase results inside that scalar. Also report total request wall for named
+prompt/output lengths.
+
+Named request archetypes carry decision authority:
+
+- **Interactive short**: up to 512 prompt tokens and 128 output tokens.
+- **Agentic long-prompt**: 8K-32K prompt tokens and 256 output tokens.
+- **Generation-heavy**: up to 2K prompt tokens and 1024 output tokens.
+
+Use canonical real fixtures inside those shapes. Report phase gains, balanced
+gain, and total wall for every applicable archetype.
+
+Scope rules:
+
+- Internal prompt-token matmul width is part of BS=1 prefill and remains in scope.
+- Speculative future-token verification is intra-request width and remains in
+  scope. Greedy equivalence is not distribution exactness; stochastic exactness
+  requires correct target/drafter rejection sampling.
+- Multi-request batching, independent-stream concurrency, shared-prefix
+  multi-query execution, and asynchronous serving form a secondary roadmap lane.
+  They remain important, but do not rank against fresh serial BS=1 work today.
+- Prefix caching is relevant only when a prefix is reused or reconstructed. It is
+  not a fresh-prompt optimization.
+- Process-cold model loading and first residency are a separate product lane.
+  They must not displace loaded-model TTFT or warm decode work.
+
+Exactness labels:
+
+- **Bitwise**: identical represented values and terminal model state.
+- **Numerical**: the same model with an explicit floating-point tolerance.
+- **Greedy semantic**: the target-authoritative greedy token stream is unchanged.
+- **Distributional**: stochastic outputs follow the exact target distribution.
+- **Approximate**: input, model, or target arithmetic changes and needs quality
+  validation.
+
+Primary sentinels:
+
+- Lightweight dense: 0.8B or 4B, plus one low-bit stress format.
+- Dense quality anchor: `Qwen3.6-27B-Q4_K_M.gguf`.
+- MoE responsiveness anchor: `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`.
+- MoE heavy anchor: `Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf`.
+- True-long anchor: A3B Q4 at 32K and 131K.
+- Treat A17B as a separate capability/residency objective until a local model,
+  memory contract, and measured phase profile exist.
+
+Decision rules:
+
+- Prefer removing prompt tokens, target evaluations, arithmetic, or bytes over
+  improving the same work unit. Prefer a new work unit over another local retune.
+- Same-work kernel changes must name the measured phase and whole-phase ceiling.
+- Work taking more than one week needs at least 5% expected whole-phase gain and
+  a credible 10% ceiling in a primary cell. Lossy work needs at least 15%
+  expected gain or a major memory benefit to pay for quality validation.
+- Cheap exact work under two days may proceed with a credible 2-3% whole-phase
+  gain, but it does not displace a larger strategic branch.
+- Use one highest-ceiling sentinel and one dissimilar guardrail before widening.
+- Estimate the minimum detectable effect for each packet. Reject a gate below its
+  protocol tier's MDE, and reject any packet whose zero-cost ceiling is below its
+  promotion gate.
 - Never run performance benchmarks in parallel.
-- Use the repo-pinned llama.cpp benchmark lock for scoreboard comparisons:
-  `scripts/bench/llama-cpp.lock.json`, built by
-  `scripts/bench/ensure_llama_cpp.py`. Ambient local llama.cpp binaries are
-  one-off only and require `--allow-unpinned-lcpp`.
-- Treat battery power, battery warnings, and thermal/performance warnings as
-  benchmark confounds unless an AC-power rerun confirms the result.
-- Treat `prefill_chunk=1024` as a safe default cap, not a long-context optimum;
-  candidate long-prompt branches need larger chunk sweeps when feasible.
-- Always keep dense 27B in perf analysis while optimizing MoE.
-- `scripts/profile/prefill_sweep.py` runs the static GGUF fast-path audit by
-  default; use `--require-fastpath-clean` for scoreboard runs where unexplained
-  coverage misses should invalidate the comparison.
-- Use `qwen-bench suite` for qwen-side synthetic family spot checks when one
-  model should be loaded once across many pp/tg shapes. It still allocates fresh
-  sequence state per measured row; keep env-variant A/B as process-per-variant
-  until hot-path knobs move out of process-global env caches.
-- v0.455 supersedes the old v0.389 counter caveat: a user-saved Instruments
-  template (`metal-counters`) now makes Apple performance-limiter counters
-  headlessly available via `scripts/profile/gpu_limiter_capture.py`. Use them for
-  kernel-shape claims; keep throughput claims on untraced `qwen-bench` runs.
+- Treat llama.cpp parity as a floor, not the endpoint. Carry qwen/lcpp and
+  qwen/roofline comparisons where each is meaningful.
+- Current M4 Max anchors are `474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s`
+  Q4_K mat-mat through our dispatcher, and `3.03 TFLOP/s` scalar FMA sanity.
+- Use the repo-pinned llama.cpp lock at `scripts/bench/llama-cpp.lock.json`.
+- Treat battery or thermal/performance warnings as benchmark confounds.
+- Keep dense 27B in analysis while optimizing MoE.
+- Use limiter captures for kernel-shape claims and untraced runs for throughput.
+- Treat `prefill_chunk=1024` as a safe cap, not a universal long-prompt optimum.
+- Require fast-path-clean validation for promotion-grade family rows.
+- Keep process-global environment variants in separate processes.
+- Until an enforceable GPU lease exists, only the coordinating session may run
+  timed GPU work; research subagents must remain read-only.
 
 ## Latest Baseline Snapshot
 
@@ -70,43 +116,38 @@ performance warnings. Artifact:
 | 35B A3B | `1.07x` | `1.19x` | `1.42x` | v0.344 Q5 K512 R2 included |
 | 122B A10B | `1.02x` | `1.15x` | `1.25x` | runs=1 spot |
 
-Read: the current narrow paired board remains green after refreshing llama.cpp.
-Treat old v0.203/b9481 rows as history, not the active decision spine. Broader
-long-context, MTP/speculative, or quant-specific sweeps may still expose red
-cells, but near-term branches should be hardware-headroom driven unless a fresh
-paired repeat contradicts this spot.
+Read: this board is a warm prompt-throughput and decode regression guard, not a
+fresh-TTFT scoreboard. Default `qwen-bench pp` warms the model, excludes session
+and scratch allocation, normally skips the final tail, and does not measure first
+token delivery. Do not infer product responsiveness from `pp<N>` alone.
 
-## Audit Reset — Provenance And Correctness Before New Promotion
+## BS=1 Objective Reset — 2026-07-10
 
-The audit baseline was v0.529 (`890738b`), but the headline family table is
-still the v0.345 runs=1 board. A real stale-binary defect was reproduced: a normal symbolic-HEAD
-commit can advance `refs/heads/main` without invalidating qwen-cli's build
-script, while `qwen-bench` and `family.py` trust the baked commit. No new
-performance result is promotion-grade until binary/source identity is
-fail-closed and a runs>=3 HEAD board replaces the current snapshot.
+The provenance/correctness audit found and fixed real defects, but it is no longer
+the optimization strategy. v0.546 completes the first demand-side correction:
+both CLI generation loops now record or flush each selected token before its
+target transition, and they skip EOS and output-limit terminal transitions.
 
-Force-ranked prerequisites:
+The output token stream remains greedy semantic exact, but terminal model state
+differs: the last emitted token remains unconsumed because no successor logits are
+requested. Current prefix snapshots are taken during prompt prefill and are not
+affected. Any future resumable or end-of-request snapshot must record the pending
+terminal token explicitly. Stop-set expansion beyond the current single EOS and
+CPU/GPU argmax tie semantics remain separate work.
 
-1. Fix build identity tracking; add model-free `qwen-bench build-info`; reject
-   stale, unknown, or unverifiable identities in canonical family runs.
-2. Quarantine `QWEN_PREFILL_MOE_GROUPED_CONCURRENT_TAIL`: it places true
-   routed/shared RAW chains in an unordered concurrent encoder.
-3. Guard raw forward APIs for sequential position, KV capacity, overflow, and
-   command-buffer failure; validate MTP metadata/tensors and MoE role/dtype
-   support at load.
-4. Make required fixture/oracle coverage machine-readable and non-vacuous;
-   `qwen-bench --oracle` must fail and emit structured status on gate failure.
-5. Fix product stop-set/EOS/TTFT semantics and use the existing GPU argmax.
-6. Add tie-margin E0 recomputation for speculative accept decisions. An
-   exact-validation metallib is deferred until a strict-fidelity contract exists.
-7. Add a named canonical fidelity/capability profile and effective-settings
-   ledger; broad environment-variable cleanup is not a prerequisite.
+Next contract work:
 
-After those gates, rank work as: real-workload-gated DFlash attention/dataflow;
-a genuinely new compressed-KV reader/layout; and bounded memory work for further
-embedding formats. Treat generated MTP Q4_K draft heads as closed after v0.539.
-Treat 397B-A17B as
-offload/distributed/ultra-low-bit enablement, not a local kernel target.
+1. Add a model-ready fresh-TTFT surface that times the production request path,
+   includes the final token-selection tail, and records first-token delivery.
+2. Record first post-load and warm loaded repetitions explicitly. Keep
+   process-cold load/residency and warm `pp<N>` throughput as separate rows.
+3. Include tokenization, request allocation, prompt staging, prefill tail, token
+   selection, detokenization, and first delivery in product TTFT.
+4. Report allocation, GPU, first-token, transition, total request, peak memory,
+   and exactness without turning the packet into a broad benchmark matrix.
+
+This is a product correction plus a bounded objective measurement, not a return to
+provenance-first work. Build identity and correctness gates remain guardrails.
 
 ## Hardware-Saturation Recalibration (2026-07-08)
 
@@ -194,46 +235,211 @@ because paid-cost attribution cannot repair the prerequisite acceptance miss.
 Close this sequence with no policy, prompt, floor, split, profile, or anchor
 rescue. The narrow v0.541 Reva kernel result remains intact.
 
-Force-ranked next work from this vantage:
+## Force-Ranked BS=1 Opportunity Frontier
 
-The active performance experiment queue is empty. No code experiment is
-currently authorized, and no measurement-only discriminator presently has a
-concrete measured leverage premise.
+The active queue is not empty. The exhausted neighborhood is narrower: serial
+N=1, same-model, same-graph, current-layout local retuning. The active frontier is
+work removal, intra-request target-step amortization, and structurally different
+prefill or long-attention work units.
 
-Dormant reopen conditions below are not active ranks:
+Gain bands below are whole-phase estimates, not isolated-kernel ratios. Unknown
+bands remain unknown until a costed oracle establishes them.
 
-- **Structural routed-Q5 down**: current-layout work is NO-GO. The v0.311
-  no-weight oracle improves total decode only `+2.2%/+2.4%` on A3B/A10B, while
-  the down wave itself improves only about `19%/18%`. Tile, staging, load,
-  scatter, reducer, pipeline, and monolith variants are closed. Reopen only when
-  a future written mechanism predicts `>=22%` down-wave improvement on both A3B
-  and A10B. Until then, do not measure or implement another current-layout
-  routed-Q5 variant.
-- **Compressed KV**: exact-Q8 reader/layout work and direct canonical Q4_0 are
-  closed by v0.437/v0.542/v0.543. Other formats or materially different
-  attention bodies are untested, but remain dormant until a concrete lower-byte
-  mechanism, fidelity contract, and production-faithful latency premise exist.
-  Stored-byte reduction alone is not authorization.
+Completed v0.546 removes the token-0 transition from TTFT and the unused terminal
+transition from total request wall. For base TTFT `B` and removed transition `D`,
+speedup is `(B + D) / B`.
 
-Do not refill the queue from the closed Mei sequence, S8, BF16, exact-Q8 or
-direct-Q4 KV, F16 partial/reducer work, decode glue, generated MTP heads, local
-GDN reshuffles, or any other measured closure. Re-rank only when a genuinely new
-mechanism arrives with a quantified production-wall premise.
+1. **Prompt lookup/ngram proposals**: target-verified decode for repetitive
+   workloads, with no learned drafter or MTP state. Gain is unknown until closed-
+   loop proposals are charged through the actual N8 verifier. Confidence is
+   medium-low and cost is medium.
+2. **Native MTP D7/N8**: asset-dependent target-verified decode. Existing A3B
+   gains are low-single-digit while dense 27B code evidence is stronger. Prompt
+   history construction is a separate TTFT cost. Confidence and cost are medium.
+3. **Model/length chunk policy**: measured long-prefill gains are about 3% on
+   selected A3B rows and 6% on selected A10B rows, with little dense benefit.
+   Numerical contract, high measured-cell confidence, and low cost.
+4. **Route-ledger-aware fused MoE tail**: a conditional prefill work-unit reset
+   that must remove named slot buffers, dispatches, or bank passes beyond the
+   current grouped path. Gain is unknown, confidence is low, and cost is high.
+5. **Structurally new exact true-long attention body**: A3B Q4 at 131K only until
+   widened. The measured `7.5 -> 5.8 ms` attention floor implies about 10-11%
+   whole-token latency reduction at that cell. Confidence is medium-low and cost
+   is very high. The floor is byte-derived, not a demonstrated candidate. The
+   open class is a register-lighter online body or split-partition organization
+   that preserves G8 reuse while increasing latency hiding, not another local
+   tile/NWG/layout retune.
+6. **Format-specific decode storage/ABI**: conditional on a measured quant and
+   tensor-shape deficit. Current Q4/Q5 reorder and load results do not establish a
+   generic low-bit gain band. Confidence is low and cost is high.
+7. **One-dispatch or matmul-shaped GDN recurrence**: conditional research only.
+   The prior chunk16 formulation nearly doubled 27B prefill time; a new all-in
+   primitive must reopen the class. Confidence is low and cost is very high.
 
-S8 replay remains explicitly parked pending empirical arrival traces that clear
-blended `>=5-8%` net wall with p95 non-regression. No scheduler, runtime,
-attention-slice, or replay-kernel implementation is authorized. Normalized F16
-attention partial storage remains closed by v0.370, and the Q/K decode-glue
-bundle remains closed by v0.452 unless decode stops being GPU-bound.
-One-dispatch or matmul-shaped chunked GDN is a conditional reopen class, not a
-ranked implementation, until a concrete all-in primitive beats the current
-packed recurrence. Q6_K embedding residency and generated MTP heads remain in
-memory and asset backlogs rather than the throughput implementation ranking.
+Memory sidecar: native quantized embeddings already save `1.49-4.37 GB` across
+measured A3B/A10B/27B models with near-neutral throughput. Adjudicate product
+memory, TTFT, and the small 27B throughput risk without presenting it as a latency
+win.
 
-Defer ICB/MTL4, binary archives, residency sets, and `newBufferWithBytesNoCopy`
-as throughput priorities. They can matter for product TTFT, memory footprint, or
-future command-model work, but current warm decode is GPU-busy enough that they
-are not the next hardware-saturation lever.
+Dense fresh-TTFT truth: no current exact branch has a credible material gain band
+for large dense prefill. Current packed compute is near the measured mat-mat
+anchor. Material movement requires a new GDN work unit, fewer prompt/model bytes,
+or a model/input/precision tradeoff; another ordinary projection retune is not an
+active expectation.
+
+The ranking reflects equal concern for TTFT and decode, breadth, probability, and
+engineering cost. It does not claim that a TTFT-only or long-only win is globally
+better than a decode win; each result must retain its objective-lane label.
+
+### Active attack sequence
+
+1. Add the bounded model-ready TTFT contract and named request-archetype totals.
+2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
+   proposer. If the verifier-only oracle cannot clear the product wall gate in a
+   model/context regime, demote every proposal source in that regime.
+3. Build a family-level prompt-lookup survey over short code, canonical real-long,
+   and adversarial fixtures. Split prompt-sourced from self-output-sourced copies;
+   gate proposals on literal match length `8/16/32`; charge surviving closed-loop
+   proposals through physical N8 with native MTP disabled.
+4. Survey bounded native-MTP attention history with physical N8 fixed. First vary
+   read windows `32/64/128/256/full` while retaining full history construction.
+   Price lazy first-engagement construction, hidden capture/storage, and suffix
+   replay explicitly; only design suffix construction if proposal quality holds.
+5. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
+   default-off G8 fused-QKV path as a separate oracle because it duplicates the
+   Q/K/V bank and is not yet a memory-light production layout.
+6. Establish canonical quality-harness v0 before promoting model-changing work:
+   code-edit exact match, Mei-class long-document QA, and narrative constraint
+   following, with bounded per-candidate runtime and versioned fixtures.
+7. Capture real Q/K/V once at 32K/131K to price both exact body headroom and the
+   retained-KV/error frontier for sparse or retrieval attention. Use current F16
+   KV for the exact lane; treat v0.541 split partitioning as a prior pattern, not
+   a directly transferable N1 result.
+8. Select one structural prefill branch only after it names removed work:
+   - a route-ledger-aware fused MoE tail beyond the current grouped path; or
+   - an all-in one-dispatch/matmul-shaped GDN recurrence.
+9. Open a format-specific decode ABI branch only after one quant/tensor sentinel
+   shows enough phase and primitive headroom for `>=5%` full-token movement.
+10. Keep exact and approximate true-long attention work in the 32K-131K lane.
+
+### Decisive gates
+
+- **N8 verifier**: every speculative ratio names a current denominator artifact.
+  Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
+  authorizing a new proposal source there.
+- **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
+  Require median decode `>=1.10x` over the prompt fixture triad, no important row
+  below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.
+  A failed proposer demotes prompt lookup; a failed verifier-only oracle demotes
+  all proposal sources only in the measured model/context regime.
+- **Native MTP**: total request `>=1.10x` on at least two named archetypes at 128+
+  output tokens, TTFT regression `<=3%`, and greedy-equivalence green.
+  Distribution exactness remains a separate rejection-sampling implementation.
+- **Route-ledger-aware MoE tail**: name the removed intermediate work, improve the
+  complete routed tail `>=15%` on A3B and A10B, and improve whole prefill `>=5%`
+  on one and `>=3%` on the other.
+- **Format-specific decode ABI**: actual-shape primitive gain `>=10%` on two
+  important tensor classes and full-token movement `>=5%` before widening.
+- **GDN recurrence**: complete one-layer all-in gain `>=20%`, projected prefill
+  gain `>=5%`, and exact state or an explicit numerical contract.
+- **True-long attention**: main-body gain `>=15%`, whole-token gain `>=6%` at
+  131K, and no material 32K regression before model/context widening.
+- **Approximate/model-changing**: quality-harness v0 must pass the declared task
+  tolerance, and expected gain must clear the lossy admission threshold.
+
+### Work-reduction and quality frontier
+
+These deployment/model choices can dominate engine work but alter input or target
+semantics. Keep them explicit rather than mixing them with exact kernel claims.
+The bands are unvalidated priors until quality-harness v0 prices them.
+
+1. **Smallest quality-passing model**: `1.5-10x` TTFT and `1.5-15x` decode;
+   evaluate as a different model on a fixed hard-task Pareto set.
+2. **Prompt/context reduction**: `1.1-2x` TTFT and `5-30%` true-long decode;
+   ablate prompt classes before approximate compression.
+3. **Sensitivity-aware mixed quant**: `0-10%` TTFT and `5-20%` decode;
+   search tensor classes rather than a per-tensor combinatorial grid. Calibrated
+   class-level error injection may rank sensitivity cheaply, but does not replace
+   validation with a real quantized asset.
+4. **Adaptive MoE top-k**: `3-15%` MoE TTFT and `4-10%` short MoE decode;
+   replay expert outputs offline before changing target execution.
+5. **Sparse/retrieval attention**: `10-35%` true-long TTFT and `15-35%`
+   decode near 131K; establish a captured Q/K/V retention frontier first.
+
+Lossy branches need a quality corpus, hard-task guardrails, and a materially larger
+gain than exact local work. Apply approximate MoE or precision changes inside a
+target-verified drafter first when that preserves target authority.
+
+### Search discipline
+
+- Use a sparse decision surface: one highest-ceiling sentinel plus one dissimilar
+  guardrail. Do not build every model x quant x context cell.
+- Use a prompt fixture triad for workload-sensitive claims: favorable short,
+  canonical real-long, and an adversarial witness. One prompt cannot promote a
+  proposal, policy, or approximate model change.
+- Require a costed oracle before a kernel for speculation, top-k, sparse
+  attention, mixed precision, and compressed KV.
+- Constrain configuration dimensions from prior evidence: physical N8 for MTP,
+  tensor classes for mixed quant, static per-layer top-k before adaptive policy,
+  and retained-KV fraction before sparse-attention implementation.
+- Measure model-ready TTFT, p50 inter-token latency, total request wall, peak
+  memory, and quality/exactness. Do not promote on a microkernel ratio alone.
+
+Every candidate should record: objective lane, model/context/format scope,
+current work unit, specific work removed or reused, zero-cost oracle ceiling,
+added work/state cost, exactness class, serving-state consequence, cheapest
+decisive experiment, result, closure boundary, and explicit reopen condition.
+
+Maintain a lightweight mechanism ledger from these rows: attempts, kills,
+promotions, measured net gain, and reopen condition per lane. Use a one-time
+history digest to calibrate admission thresholds; do not build a prose-mining
+system that displaces engine work.
+
+Advance through an oracle ladder: Amdahl ceiling, offline semantic oracle,
+actual-shape primitive including packing/reduction/state writes, one body/layer,
+whole-phase sentinel plus guardrail, then product request. Stop when the remaining
+whole-phase gain no longer pays for the next level.
+
+### Secondary batch-serving lane
+
+Preserve a deliberate path to paged KV/state, continuous batching, independent
+request overlap, prefix sharing, and layer-synchronous execution. Primary BS=1
+changes should avoid hard-coding state ownership or layouts that make those
+facilities unnecessarily difficult later.
+
+Low-cost architectural seams to preserve now:
+
+- Keep mutable target, draft, KV, GDN, and rollback state sequence-owned.
+- Put speculative mutation behind explicit checkpoint, commit, and rollback.
+- Pass logical positions through state APIs rather than adding new baked linear
+  offsets that would block future slot/page mappings.
+- Version new weight ABIs and support views so prefill and decode do not require
+  duplicate banks.
+- Represent an emitted but unconsumed terminal token explicitly if a resumable
+  API later returns live sequence state.
+
+When this lane becomes active, rank work by aggregate throughput, per-request
+p50/p95 latency, memory per live sequence, scheduler occupancy, and exactness.
+Existing S2/S8 evidence is prior information, not a current implementation order.
+Do not require serving arrival traces to justify BS=1 work, and do not use BS=1
+latency gates to reject a serving mode whose contract explicitly trades latency
+for aggregate throughput.
+
+### Closed and deferred neighborhoods
+
+- Current-layout routed-Q5 work remains NO-GO. The no-weight oracle improves total
+  decode only `2.2-2.4%`; reopen only for a representation or work unit predicting
+  `>=22%` down-wave improvement on both A3B and A10B.
+- Same-body exact Q8 KV and direct canonical Q4_0 remain closed. Reopen compressed
+  KV only with a materially different format/body and a real-model fidelity gate.
+- Keep BF16 parity archaeology, F16 partial/reducer work, decode glue, generated
+  MTP heads, local GDN reshuffles, generic persistence, and standalone argmax out
+  of the active queue.
+- Multi-request S8 replay, shared-prefix multi-query execution, independent
+  streams, and paged attention remain in the secondary serving lane. Their
+  serving evidence does not rank against serial BS=1.
+- Defer ICB/MTL4, binary archives, no-copy loading, and residency sets as warm
+  throughput priorities. Revisit them for process-cold load or memory objectives.
 
 Dense decode update: v0.340 production-wires dense GDN front-projection overlap
 and defaults it with `QWEN_DECODE_DENSE_CONCURRENT_GDN=0` as rollback. Sequential

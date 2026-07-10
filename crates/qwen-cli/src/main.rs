@@ -158,8 +158,13 @@ struct RequestStatsRow {
     prefill_ms: f64,
     decode_ms: f64,
     model_ttft_ms: f64,
+    first_token_ms: f64,
+    first_token_callback_ms: f64,
     first_decode_ms: f64,
     decode_tps: f64,
+    decode_transitions: usize,
+    transition_ms: f64,
+    transition_tps: f64,
     total_ms: f64,
     cache_entries: usize,
     cache_bytes: u64,
@@ -212,6 +217,7 @@ fn prompt_text(args: &Args) -> Result<Option<String>> {
 
 fn run_single_turn(model_path: &Path, prompt: &str, args: &Args) -> Result<()> {
     ensure!(args.prefill_chunk > 0, "--prefill-chunk must be >= 1");
+    ensure!(args.tokens > 0, "--tokens must be >= 1");
 
     let arrival_ms = unix_epoch_ms()?;
     let load_t0 = Instant::now();
@@ -262,7 +268,7 @@ fn run_single_turn(model_path: &Path, prompt: &str, args: &Args) -> Result<()> {
     let forward = loaded.forward();
 
     let prefill_t0 = Instant::now();
-    let mut logits = prefill_tokens_with_multi_hidden(
+    let logits = prefill_tokens_with_multi_hidden(
         &forward,
         &prompt_ids,
         0,
@@ -275,53 +281,60 @@ fn run_single_turn(model_path: &Path, prompt: &str, args: &Args) -> Result<()> {
     sequence.advance_by(prompt_ids.len())?;
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
-    let eos = tokenizer.eos();
-    let mut generated = Vec::with_capacity(args.tokens);
     let mut stdout = std::io::stdout().lock();
-    let decode_t0 = Instant::now();
-    let mut first_decode_ms = 0.0;
-    for i in 0..args.tokens {
-        let token = argmax_i32(&logits);
-        let step_t0 = Instant::now();
-        logits = forward
-            .single_token(
-                token,
-                u32::try_from(prompt_ids.len() + i).context("position does not fit u32")?,
-                sequence.metal_session_mut(),
-            )
-            .context("decode token")?;
-        sequence.advance_by(1)?;
-        if i == 0 {
-            first_decode_ms = step_t0.elapsed().as_secs_f64() * 1e3;
-        }
-
-        generated.push(token);
-        write!(stdout, "{}", tokenizer.decode_piece(token))?;
-        stdout.flush()?;
-
-        if Some(token) == eos {
-            break;
-        }
-    }
+    let generation = generate_greedy(
+        logits,
+        args.tokens,
+        tokenizer.eos(),
+        |token| {
+            write!(stdout, "{}", tokenizer.decode_piece(token))?;
+            stdout.flush().context("flush generated token")
+        },
+        |token| {
+            let position = sequence.position();
+            let next = forward
+                .single_token(
+                    token,
+                    u32::try_from(position).context("position does not fit u32")?,
+                    sequence.metal_session_mut(),
+                )
+                .context("decode token")?;
+            sequence.advance_by(1)?;
+            Ok(next)
+        },
+    )?;
+    let generated = generation.tokens;
     if !generated.is_empty() {
         writeln!(stdout)?;
     }
-    let decode_ms = decode_t0.elapsed().as_secs_f64() * 1e3;
-    let ttft_ms = prefill_ms + first_decode_ms;
+    let decode_ms = generation.wall_ms;
+    let ttft_ms = prefill_ms + generation.first_token_callback_ms.unwrap_or(0.0);
     let decode_tps = if decode_ms > 0.0 {
         generated.len() as f64 / (decode_ms / 1e3)
     } else {
         0.0
     };
+    let transition_tps = if generation.transition_ms > 0.0 {
+        generation.transitions as f64 / (generation.transition_ms / 1e3)
+    } else {
+        0.0
+    };
 
     eprintln!(
-        "stats: prompt_tokens={} generated_tokens={} load_ms={:.1} prefill_ms={:.1} ttft_ms={:.1} decode_tps={:.2} cache_entries={} cache_mib={:.1}/{:.1}",
+        concat!(
+            "stats: prompt_tokens={} generated_tokens={} transitions={} ",
+            "load_ms={:.1} prefill_ms={:.1} ttft_ms={:.1} ",
+            "decode_tps={:.2} transition_tps={:.2} cache_entries={} ",
+            "cache_mib={:.1}/{:.1}"
+        ),
         prompt_ids.len(),
         generated.len(),
+        generation.transitions,
         load_ms,
         prefill_ms,
         ttft_ms,
         decode_tps,
+        transition_tps,
         loaded.prefix_cache_stats().entries,
         loaded.prefix_cache_stats().total_bytes as f64 / 1024.0 / 1024.0,
         loaded.prefix_cache_stats().max_bytes as f64 / 1024.0 / 1024.0,
@@ -336,6 +349,7 @@ fn run_single_turn(model_path: &Path, prompt: &str, args: &Args) -> Result<()> {
 
 fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> Result<()> {
     ensure!(args.prefill_chunk > 0, "--prefill-chunk must be >= 1");
+    ensure!(args.tokens > 0, "--tokens must be >= 1");
 
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
@@ -601,6 +615,7 @@ fn run_jsonl_request(
     let prompt_ids = &prepared.prompt_ids;
 
     let n_generate = request.tokens.unwrap_or(args.tokens);
+    ensure!(n_generate > 0, "tokens must be >= 1 for request {id}");
     let min_capacity = prompt_ids
         .len()
         .checked_add(n_generate)
@@ -734,7 +749,7 @@ fn run_jsonl_request(
         }
     };
 
-    let (generated, generated_text, decode_ms, first_decode_ms) = decode_greedy(
+    let (generation, generated_text) = decode_greedy(
         &forward,
         tokenizer,
         &mut sequence,
@@ -742,15 +757,22 @@ fn run_jsonl_request(
         prompt_ids.len(),
         n_generate,
     )?;
+    let generated = generation.tokens;
+    let decode_ms = generation.wall_ms;
     let decode_tps = if decode_ms > 0.0 {
         generated.len() as f64 / (decode_ms / 1e3)
+    } else {
+        0.0
+    };
+    let transition_tps = if generation.transition_ms > 0.0 {
+        generation.transitions as f64 / (generation.transition_ms / 1e3)
     } else {
         0.0
     };
     let stats_now = loaded.prefix_cache_stats();
     let finish_ms = unix_epoch_ms_u64()?;
     let stats = RequestStatsRow {
-        schema_version: 2,
+        schema_version: 3,
         id: id.to_string(),
         line: prepared.line,
         model: loaded.path().display().to_string(),
@@ -781,9 +803,17 @@ fn run_jsonl_request(
         prefix_insert_ms,
         prefill_ms,
         decode_ms,
-        model_ttft_ms: restore_ms + prefix_insert_ms + prefill_ms + first_decode_ms,
-        first_decode_ms,
+        model_ttft_ms: restore_ms
+            + prefix_insert_ms
+            + prefill_ms
+            + generation.first_token_ready_ms.unwrap_or(0.0),
+        first_token_ms: generation.first_token_ready_ms.unwrap_or(0.0),
+        first_token_callback_ms: generation.first_token_callback_ms.unwrap_or(0.0),
+        first_decode_ms: generation.first_transition_ms.unwrap_or(0.0),
         decode_tps,
+        decode_transitions: generation.transitions,
+        transition_ms: generation.transition_ms,
+        transition_tps,
         total_ms: total_t0.elapsed().as_secs_f64() * 1e3,
         cache_entries: stats_now.entries,
         cache_bytes: stats_now.total_bytes,
@@ -832,46 +862,99 @@ fn prefill_span(
     Ok((logits, t0.elapsed().as_secs_f64() * 1e3))
 }
 
+#[derive(Debug)]
+struct GreedyGeneration {
+    tokens: Vec<i32>,
+    wall_ms: f64,
+    first_token_ready_ms: Option<f64>,
+    first_token_callback_ms: Option<f64>,
+    transitions: usize,
+    transition_ms: f64,
+    first_transition_ms: Option<f64>,
+}
+
+fn generate_greedy<OnToken, Transition>(
+    mut logits: Vec<f32>,
+    max_tokens: usize,
+    eos: Option<i32>,
+    mut on_token: OnToken,
+    mut transition: Transition,
+) -> Result<GreedyGeneration>
+where
+    OnToken: FnMut(i32) -> Result<()>,
+    Transition: FnMut(i32) -> Result<Vec<f32>>,
+{
+    ensure!(max_tokens > 0, "max_tokens must be >= 1");
+    let wall_t0 = Instant::now();
+    let mut tokens = Vec::with_capacity(max_tokens);
+    let mut first_token_ready_ms = None;
+    let mut first_token_callback_ms = None;
+    let mut transitions = 0usize;
+    let mut transition_ms = 0.0;
+    let mut first_transition_ms = None;
+
+    while tokens.len() < max_tokens {
+        let token = argmax_i32(&logits);
+        first_token_ready_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
+        tokens.push(token);
+        on_token(token)?;
+        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
+
+        if Some(token) == eos || tokens.len() == max_tokens {
+            break;
+        }
+
+        let transition_t0 = Instant::now();
+        logits = transition(token)?;
+        let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
+        transition_ms += elapsed_ms;
+        first_transition_ms.get_or_insert(elapsed_ms);
+        transitions += 1;
+    }
+
+    Ok(GreedyGeneration {
+        tokens,
+        wall_ms: wall_t0.elapsed().as_secs_f64() * 1e3,
+        first_token_ready_ms,
+        first_token_callback_ms,
+        transitions,
+        transition_ms,
+        first_transition_ms,
+    })
+}
+
 fn decode_greedy(
     forward: &MetalForward<'_>,
     tokenizer: &Tokenizer,
     sequence: &mut Sequence,
-    mut logits: Vec<f32>,
+    logits: Vec<f32>,
     start_position: usize,
     max_tokens: usize,
-) -> Result<(Vec<i32>, String, f64, f64)> {
+) -> Result<(GreedyGeneration, String)> {
     sequence.check_position(start_position)?;
-    let eos = tokenizer.eos();
-    let mut generated = Vec::with_capacity(max_tokens);
     let mut generated_text = String::new();
-    let decode_t0 = Instant::now();
-    let mut first_decode_ms = 0.0;
-    for i in 0..max_tokens {
-        let token = argmax_i32(&logits);
-        let step_t0 = Instant::now();
-        logits = forward
-            .single_token(
-                token,
-                u32::try_from(start_position + i).context("position does not fit u32")?,
-                sequence.metal_session_mut(),
-            )
-            .context("decode token")?;
-        sequence.advance_by(1)?;
-        if i == 0 {
-            first_decode_ms = step_t0.elapsed().as_secs_f64() * 1e3;
-        }
-        generated.push(token);
-        generated_text.push_str(&tokenizer.decode_piece(token));
-        if Some(token) == eos {
-            break;
-        }
-    }
-    Ok((
-        generated,
-        generated_text,
-        decode_t0.elapsed().as_secs_f64() * 1e3,
-        first_decode_ms,
-    ))
+    let generation = generate_greedy(
+        logits,
+        max_tokens,
+        tokenizer.eos(),
+        |token| {
+            generated_text.push_str(&tokenizer.decode_piece(token));
+            Ok(())
+        },
+        |token| {
+            let position = sequence.position();
+            let next = forward
+                .single_token(
+                    token,
+                    u32::try_from(position).context("position does not fit u32")?,
+                    sequence.metal_session_mut(),
+                )
+                .context("decode token")?;
+            sequence.advance_by(1)?;
+            Ok(next)
+        },
+    )?;
+    Ok((generation, generated_text))
 }
 
 fn prefix_cache_max_bytes(args: &Args) -> Result<u64> {
@@ -1036,6 +1119,13 @@ fn print_model_info(model_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn logits_with_argmax(token: usize) -> Vec<f32> {
+        let mut logits = vec![0.0; 4];
+        logits[token] = 1.0;
+        logits
+    }
 
     fn prepared(id: &str, tokens: &[i32]) -> PreparedJsonlRequest {
         PreparedJsonlRequest {
@@ -1071,5 +1161,127 @@ mod tests {
         assert_eq!(requests[1].auto_cache_future_hits, 1);
         assert_eq!(requests[2].auto_cache_prefix_tokens, None);
         assert_eq!(requests[3].auto_cache_prefix_tokens, None);
+    }
+
+    #[test]
+    fn greedy_generation_delivers_before_transition_and_skips_terminal_step() {
+        let events = RefCell::new(Vec::new());
+        let generation = generate_greedy(
+            logits_with_argmax(1),
+            3,
+            None,
+            |token| {
+                events.borrow_mut().push(format!("token:{token}"));
+                Ok(())
+            },
+            |token| {
+                events.borrow_mut().push(format!("transition:{token}"));
+                Ok(logits_with_argmax(match token {
+                    1 => 2,
+                    2 => 0,
+                    _ => panic!("unexpected transition token {token}"),
+                }))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(generation.tokens, [1, 2, 0]);
+        assert_eq!(generation.transitions, 2);
+        assert_eq!(
+            events.into_inner(),
+            [
+                "token:1",
+                "transition:1",
+                "token:2",
+                "transition:2",
+                "token:0",
+            ]
+        );
+    }
+
+    #[test]
+    fn greedy_generation_does_not_transition_eos() {
+        let generation = generate_greedy(
+            logits_with_argmax(1),
+            4,
+            Some(1),
+            |_| Ok(()),
+            |_| -> Result<Vec<f32>> { panic!("EOS must not be consumed") },
+        )
+        .unwrap();
+
+        assert_eq!(generation.tokens, [1]);
+        assert_eq!(generation.transitions, 0);
+        assert_eq!(generation.transition_ms, 0.0);
+        assert!(generation.first_transition_ms.is_none());
+    }
+
+    #[test]
+    fn greedy_generation_one_token_needs_no_transition() {
+        let generation = generate_greedy(
+            logits_with_argmax(2),
+            1,
+            None,
+            |_| Ok(()),
+            |_| -> Result<Vec<f32>> { panic!("terminal token must not be consumed") },
+        )
+        .unwrap();
+
+        assert_eq!(generation.tokens, [2]);
+        assert_eq!(generation.transitions, 0);
+    }
+
+    #[test]
+    fn greedy_generation_rejects_zero_token_limit() {
+        let error = generate_greedy(
+            logits_with_argmax(2),
+            0,
+            None,
+            |_| Ok(()),
+            |_| Ok(logits_with_argmax(0)),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("max_tokens must be >= 1"));
+    }
+
+    #[test]
+    fn greedy_generation_does_not_transition_middle_eos() {
+        let generation = generate_greedy(
+            logits_with_argmax(1),
+            4,
+            Some(2),
+            |_| Ok(()),
+            |token| {
+                assert_eq!(token, 1);
+                Ok(logits_with_argmax(2))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(generation.tokens, [1, 2]);
+        assert_eq!(generation.transitions, 1);
+    }
+
+    #[test]
+    fn greedy_generation_delivers_token_before_transition_error() {
+        let events = RefCell::new(Vec::new());
+        let error = generate_greedy(
+            logits_with_argmax(1),
+            3,
+            None,
+            |token| {
+                events.borrow_mut().push(format!("token:{token}"));
+                Ok(())
+            },
+            |token| {
+                events.borrow_mut().push(format!("transition:{token}"));
+                bail!("transition failed")
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("transition failed"));
+        assert_eq!(events.into_inner(), ["token:1", "transition:1"]);
     }
 }

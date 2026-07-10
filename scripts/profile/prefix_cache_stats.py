@@ -15,6 +15,7 @@ from typing import Any
 @dataclass(frozen=True)
 class CacheRow:
     path: Path
+    schema_version: int
     request_id: str
     prompt_tokens: int
     generated_tokens: int
@@ -67,6 +68,7 @@ def parse_stats(path: Path) -> list[CacheRow]:
         rows.append(
             CacheRow(
                 path=path,
+                schema_version=as_int(raw, "schema_version", 1),
                 request_id=str(raw.get("id", f"line-{line_no}")),
                 prompt_tokens=as_int(raw, "prompt_tokens"),
                 generated_tokens=as_int(raw, "generated_tokens"),
@@ -94,7 +96,16 @@ def parse_stats(path: Path) -> list[CacheRow]:
         )
     if not rows:
         raise SystemExit(f"no prefix-cache stats rows found in {path}")
+    require_single_schema(rows, str(path))
     return rows
+
+
+def require_single_schema(rows: list[CacheRow], label: str) -> int:
+    versions = {row.schema_version for row in rows}
+    if len(versions) != 1:
+        rendered = ", ".join(str(version) for version in sorted(versions))
+        raise SystemExit(f"{label}: mixed request-stats schemas: {rendered}")
+    return next(iter(versions))
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -176,6 +187,14 @@ def save_pct(baseline: float, candidate: float) -> float:
 
 
 def compare_rows(baseline: list[CacheRow], candidate: list[CacheRow]) -> None:
+    baseline_schema = require_single_schema(baseline, "baseline")
+    candidate_schema = require_single_schema(candidate, "candidate")
+    if baseline_schema != candidate_schema:
+        raise SystemExit(
+            "cannot compare request-stats schemas "
+            f"{baseline_schema} and {candidate_schema}"
+        )
+
     baseline_by_id = {row.request_id: row for row in baseline}
     pairs = [
         (baseline_by_id[row.request_id], row)
@@ -270,6 +289,7 @@ def main() -> None:
     rows: list[CacheRow] = []
     for path in args.stats:
         rows.extend(parse_stats(path))
+    require_single_schema(rows, "combined stats")
     summarize(rows)
 
 

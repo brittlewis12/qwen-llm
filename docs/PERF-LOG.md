@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.546 Terminal Overdecode Removed
+
+Status: product responsiveness and total-work correction; source, tests, stats,
+and operator documentation updated.
+
+- Both CLI generation loops now select and record or flush each token before
+  consuming it through `single_token`. EOS and the final token selected at the
+  output limit are not consumed because no successor logits are requested.
+- For `N >= 1` non-stop outputs, generation now performs `N-1` target
+  transitions. The tracked `Sequence::position()` supplies every real transition
+  position. The output token stream remains greedy semantic exact; terminal model
+  state differs because the final emitted token remains unconsumed.
+- Request-stats schema 3 adds first-token and transition accounting. The active
+  reducer rejects mixed or cross-schema comparisons so the semantic timing change
+  cannot be mistaken for an ordinary performance delta. Zero-token requests are
+  rejected before generation work; default zero-token CLI values fail before
+  model loading.
+- Unit gates cover token-before-transition ordering, one-token and EOS-terminal
+  zero-transition paths, middle EOS, zero-token rejection, and transition failure
+  after delivery. Rust checks and all seven qwen CLI tests pass; three schema
+  reducer tests pass.
+- 0.8B Q4 `Hello` smokes preserve exact rendered output at one and four tokens.
+  The new rows report `0/3` transitions. The four-token directional smoke moves
+  internal TTFT `41.5 -> 35.3 ms`, but prefill also moves `38.0 -> 35.0 ms`;
+  this is not a promotion-grade speed estimate. The next packet is a bounded
+  product-shaped TTFT surface.
+
+Artifacts: `target/profiles/v0546-{before,after}-08b-n{1,4}.{out,err}` and
+`target/profiles/v0546-schema3-{stats,output}.jsonl`.
+Design and result reviews: `cx ask` sessions
+`019f4d1d-2f37-7160-b3e9-d94cb4297e3c` and
+`019f4d3a-6dd8-71b2-a97a-cd98ccf240ac`; final packet review and fixes:
+`019f4d4f-b263-78d2-9149-d4ea589cd998` and
+`019f4d5f-c3cb-7250-a851-3bb98ad3a00d`.
+
 ## 2026-07-10 - v0.545 Mei Medium DFlash Preflight Falsifier
 
 Status: killed at the first preregistered product-economics gate; P/A2 and

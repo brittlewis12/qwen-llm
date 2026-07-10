@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.562 Charged Target-Only PLD Clears Held-Out Gate
+
+Status: charged dense-27B mechanism promoted to correctness hardening, then
+default-off product integration.
+
+- `qwen-bench pld` now runs the frozen both/recent/L8/D7 policy without an MTP
+  head, MTP session, hidden capture, or prompt history. Reference and candidate
+  use the same normal packed prefill. Candidate abstentions execute one serial
+  target transition; attempts execute physical-N8 target verify and immediate
+  partial restore.
+- The Rust proposer keeps only the latest eligible endpoint per 8-token key.
+  Prompt indexing is one-time; committed-output endpoints become visible only
+  after their full seven-token continuation is target-verified. Generic lookup
+  and updates total less than `0.02 ms` over 128 output tokens.
+- Clean dense-27B held-out quotation improves decode `2.5503x`, with 15 attempts,
+  seven abstentions, and `105/105` accepted drafts. Repetition improves `2.0470x`,
+  with 15 attempts, 14 abstentions, and `99/100` accepted drafts. Its accepted-5
+  event uses stop-truncated N6 with `n_keep=6`, so no restore is required; the
+  final accepted-3 event is output-limited N3.
+- Ambiguous repeated prefix improves decode `2.2891x`, with 16 attempts, seven
+  abstentions, `105/110` accepted drafts, 132 target transitions, and one actual
+  N8 partial restore. Generic prose is `0.99944x`, with zero attempts, verifies,
+  or restores and 127 serial abstentions.
+- All four rows preserve the exact 128-token greedy stream, exact KV positions,
+  continuation argmax, and the declared numerical terminal resume gate. Live
+  source/attempt/accept histograms match the frozen offline policy.
+- Total-request ratios are `1.43-1.86x` on favorable rows, but are not promotion
+  evidence: reference always prefills first and the candidate second. Decode
+  margins and generic target-operation identity establish the mechanism; fresh
+  product TTFT and SLA estimates require counterbalanced execution.
+- Dirty 0.8B smokes independently cover full acceptance, stop/output-limit
+  shortening, one real partial restore, generic fallback, and exact resume. They
+  are correctness evidence only.
+
+Next: add optional event traces for exact live/offline parity, lock every short
+terminal width and stop position, and extend the outside-timing resume witness.
+Then integrate the same loop behind a default-off product rollback flag and run
+counterbalanced fresh TTFT/decode packets. Do not spend another corpus or verifier
+retune before this integration gate.
+
+Artifact: `target/profiles/v0561-pld-heldout/`. Adversarial review: `cx ask`
+sessions `019f4e5e-0b00-7cb1-8062-7bfb17dede39` and
+`019f4e68-aabb-7d60-b9c1-315fab70eb5d`.
+
 ## 2026-07-10 - v0.559 Causal PLD Survey Promotes One Charged Path
 
 Status: frozen dense-27B prompt-lookup policy clears the offline mechanism gate;

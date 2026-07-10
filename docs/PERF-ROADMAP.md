@@ -227,22 +227,30 @@ ambiguous repeated prefix; generic prose abstains on every transition at
 extra wall budget before missing `1.10x`. This promotes one target-only charged
 implementation, not a prevalence claim or broad product default.
 
+v0.562 clears charged target-only execution. Clean dense-27B decode improves
+`2.5503x` quotation, `2.0470x` periodic output, and `2.2891x` ambiguous repeated
+prefix. The adversarial row executes a real partial restore. Generic prose is
+`0.99944x` with zero attempts, verifies, or restores. Every row preserves the
+exact stream and numerical terminal resume gate. The fixed reference-first order
+means prefill and total ratios are not promotion evidence; use this as decisive
+mechanism proof, then counterbalance the product packet.
+
 Next contract work:
 
-1. Build the minimum target-only charged PLD path for the frozen dense-27B policy.
-   Keep normal packed prefill, use serial target steps on abstention, and charge
-   physical-N8 verify plus partial restore on attempts. No MTP asset state or
-   prompt history belongs in the path.
-2. Replay the four frozen held-out rows. Require exact streams and resume state,
-   actual partial restores, `>=1.10x` on favorable rows, and `<=2%` generic decode
-   regression with zero generic verifies/restores.
-3. Keep the current A3B physical-N8 path closed unless a materially different
+1. Harden the live path with optional event traces, every output-limit/stop
+   terminal width, exact offline event parity, and a longer continuation witness.
+2. Integrate the same target-only loop behind a default-off product rollback flag.
+   Preserve callback, sequence, prefix-cache, stop, and output-limit semantics.
+3. Run counterbalanced fresh product packets. Require favorable median decode
+   `>=1.50x`, generic regression `<=1%`, and TTFT regression no worse than 1% or
+   1 ms. Keep index construction separately visible.
+4. Keep the current A3B physical-N8 path closed unless a materially different
    verifier reproduces serial recurrent state or an explicitly approximate lane
    first demonstrates enough upside to justify quality validation.
-4. Separate work removal from boundary movement: constructing the tokenizer or
+5. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
-5. Keep process-cold load/residency and warm `pp<N>` throughput as separate rows.
+6. Keep process-cold load/residency and warm `pp<N>` throughput as separate rows.
 
 This is a product correction plus a bounded objective measurement, not a return to
 provenance-first work. Build identity and correctness gates remain guardrails.
@@ -353,6 +361,7 @@ speedup is `(B + D) / B`.
    regimes. Held-out mechanism rows predict `2.09-2.42x` on exact-copy/periodic
    paths while a generic row fully abstains. Confidence is high enough for one
    charged target-only implementation, but natural-workload coverage remains low.
+   Charged held-out decode now measures `2.05-2.55x`, with generic at `0.99944x`.
 2. **Model/length chunk policy**: measured long-prefill gains are about 3% on
    selected A3B rows and 6% on selected A10B rows, with little dense benefit.
    Numerical contract, high measured-cell confidence, and low cost.
@@ -394,36 +403,36 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Implement the frozen `both/recent/L8/D7` policy in a target-only dense-27B
-   bench path. Build the prompt index once, update the self index only from
-   committed tokens, and re-evaluate after every serial or speculative advance.
-2. Preserve normal packed prefill. On abstention, execute one target transition.
-   On attempt, use physical-N8 packed verify and actual partial restore. Preserve
-   stop/output-limit truncation and deferred bonus-token semantics.
-3. Report index-build, lookup, serial, verify, restore, and total decode wall.
-   Replay the four frozen held-out fixtures and kill on `<1.10x` favorable decode,
-   `>2%` generic regression, any generic verify/restore, or failed stream/resume.
-4. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
+1. Emit optional semantic event traces from the charged path and compare them to
+   the frozen offline rows. Lock carry, source, proposal, accepted prefix,
+   terminal cause, effective N, keep count, restore decision, and final position.
+2. Extend terminal tests across remaining widths 1-7 and proposed stop positions
+   0-6. Extend the outside-timing continuation witness before product integration.
+3. Integrate default-off PLD into the product greedy decoder without changing the
+   flag-off path. Preserve per-token callbacks, stop/output limits, sequence state,
+   and prefix-cache semantics.
+4. Run counterbalanced product TTFT/decode packets before any default decision.
+5. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
    default-off G8 fused-QKV path as a separate oracle because it duplicates the
    Q/K/V bank and is not yet a memory-light production layout.
-5. Survey bounded native-MTP attention history only if its recorded proposal
+6. Survey bounded native-MTP attention history only if its recorded proposal
    rows beat prompt lookup after charged economics. First vary
    read windows `32/64/128/256/full` while retaining full history construction.
    Price lazy first-engagement construction, hidden capture/storage, and suffix
    replay explicitly; only design suffix construction if proposal quality holds.
-6. Establish canonical quality-harness v0 before promoting model-changing work:
+7. Establish canonical quality-harness v0 before promoting model-changing work:
    code-edit exact match, Mei-class long-document QA, and narrative constraint
    following, with bounded per-candidate runtime and versioned fixtures.
-7. Capture real Q/K/V once at 32K/131K to price both exact body headroom and the
+8. Capture real Q/K/V once at 32K/131K to price both exact body headroom and the
    retained-KV/error frontier for sparse or retrieval attention. Use current F16
    KV for the exact lane; treat v0.541 split partitioning as a prior pattern, not
    a directly transferable N1 result.
-8. Select one structural prefill branch only after it names removed work:
+9. Select one structural prefill branch only after it names removed work:
    - a route-ledger-aware fused MoE tail beyond the current grouped path; or
    - an all-in one-dispatch/matmul-shaped GDN recurrence.
-9. Open a format-specific decode ABI branch only after one quant/tensor sentinel
+10. Open a format-specific decode ABI branch only after one quant/tensor sentinel
    shows enough phase and primitive headroom for `>=5%` full-token movement.
-10. Keep exact and approximate true-long attention work in the 32K-131K lane.
+11. Keep exact and approximate true-long attention work in the 32K-131K lane.
 
 ### Decisive gates
 
@@ -437,8 +446,8 @@ better than a decode win; each result must retain its objective-lane label.
   The current dense-27B denominator sets a zero-overhead, zero-abstention
   necessary floor of about `3.35` emitted tokens per charged N8 packet. Apply the
   promotion gate to a frozen policy on held-out rows, not its selection corpus.
-  The v0.559 frozen policy clears only the offline mechanism gate. Promotion to a
-  product path still requires charged lookup, partial restore, and generic wall.
+  The v0.562 charged bench clears the mechanism gate. Product promotion still
+  requires longer resume coverage and counterbalanced fresh TTFT/decode evidence.
   A failed proposer demotes prompt lookup; a failed verifier-only oracle demotes
   all proposal sources only in the measured model/context regime.
 - **Native MTP**: total request `>=1.10x` on at least two named archetypes at 128+

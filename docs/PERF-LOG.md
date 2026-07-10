@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.542 Split-Plane Q8 KV Falsifier
+
+Status: killed; all experiment source removed.
+
+- Tested an A3B production-group8 Q8_0 KV layout with physically separate int8
+  payload and F16 scale planes. It retained exact Q8_0 reconstruction, the same
+  272 bytes per head-row, the tuned F16 launch grid, direct scale-plane loads,
+  and no scale shuffle.
+- Correctness was exact versus the current interleaved Q8 oracle at `ctx8192`
+  and `ctx32768`: cosine was `1.0` and maximum absolute error was zero. Versus
+  F16 KV, cosine was `0.999992853/0.999993345` and maximum absolute error was
+  `8.900e-6/4.634e-6`, passing both preregistered numerical gates.
+- The valid `ctx32768` A1/P/A2 main medians were
+  `0.163876/0.181417/0.165000 ms`; main+reduce medians were
+  `0.211583/0.232459/0.217751 ms`. Anchor spreads were `1.006860x` and
+  `1.029148x`. Against the slower anchor, the candidate regressed `9.95%` main
+  and `6.75%` main+reduce, failing both the `<=0.90x` main gate and pair
+  non-regression.
+- The `ctx8192` row is formally excluded because A1/A2 main spread was
+  `1.0635x`. Its direction was uniformly negative, about `20.2%` main and
+  `14.2%` main+reduce versus the slower anchor, but those are not decision-grade
+  effect sizes.
+- The packet used 120-second cooldowns, A1/P/A2 ordering, one-dispatch main-only
+  samples and two-dispatch main+reduce samples, plus a 128 MiB GPU read+write
+  scrub before every timed sample. The current interleaved Q8 path was a
+  correctness oracle only and was not timed. This is an `attn-intra` primitive
+  result, not an end-to-end inference result or a causal diagnosis of the
+  regression.
+- Kill this exact split-plane Q8_0 reader/layout with no rerun or rescue retune.
+  Together with v0.437, exact-reconstruction Q8_0 at 272 bytes per head-row is
+  closed in the two tested reader-layout families. Other compressed-KV formats
+  or materially different attention/dequant bodies remain untested.
+
+Artifacts:
+`target/profiles/v0542b-q8-split-plane-primitive-{a1,p,a2}.out`.
+Exclude the earlier `v0542-q8-split-plane-primitive-a1.out` prepacket because
+timing order and ramp instability violated the protocol. Design/adjudication:
+`cx ask` sessions `019f4a85-f35f-7ae3-bf9d-2238062cbac8`,
+`019f4a9c-0525-74c0-a410-582d1a14b59c`, and
+`019f4c39-e000-7e80-aad0-a92d11ebd572`. Final diff and queue reviews:
+`019f4c42-5982-7620-9e24-a1bb67d8043d` and
+`019f4c4c-0b12-7be0-8350-3a7cb92a0127`.
+
 ## 2026-07-10 - v0.541 DFlash Full-Attention GQA Split-4
 
 Status: all preregistered gates passed; retained and defaulted only for the

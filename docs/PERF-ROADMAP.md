@@ -160,25 +160,46 @@ shape and `ctx_len=7986..8241`, with
 promotion, not a DFlash policy, total-request, SWA, verifier, or general
 attention claim. Candidate 2 remains unrun; no split, context, prompt, or model
 widening is authorized.
+v0.542 then executes and kills the allowed different-layout Q8_0 KV branch. The
+payload/scale split-plane reader is exact versus current Q8 and passes both F16
+correctness gates. At the protocol-valid 32K row it regresses `9.95%` main and
+`6.75%` main+reduce versus the slower F16 anchor. The 8K row is excluded because
+anchor spread was `1.0635x`, although its direction was uniformly negative. All
+experiment source is removed. Exact Q8_0 at the unchanged 272-byte head-row is
+now closed in the two tested reader-layout families, not for every possible
+compressed-KV format or attention body.
 
-Force-ranked implementation bets from this vantage:
+Force-ranked next gates from this vantage:
 
-1. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
-   closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
-   `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
-2. **Q6_K embedding residency is memory-only follow-up**: the generic Q6_K
-   fallback is proven safe. Add a native row reader only when another exact
-   multi-GiB residency reduction is worth more than the top throughput bets;
-   do not infer a warm-throughput win from fewer resident bytes.
-3. **MTP draft heads require a materially new asset or execution shape**:
-   generated Q4_K is closed despite a `27.8%` primitive win. Reopen only for a
-   prequantized asset or mechanism that clears setup, draft, decode, and total
-   gates from scratch; do not pivot into orchestration or verifier retuning.
-4. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
-   concurrent Q/K RoPE, stale default-off fused residual+rmsnorm, and Q4_K
-   mat-mat raw-block staging for N32/N64 are useful only if implementation is
-   tiny and full-wall gates pass. Do not widen the landed DFlash split-4 path
-   without a separately preregistered shape and wall packet.
+1. **Materially lower-byte non-Q8 KV, primitive only**: exact Q8_0 is closed in
+   both tested reader-layout families. The only authorized code experiment is a
+   bounded A3B group8 `attn-intra` sidecar for a genuinely lower-byte format,
+   beginning with direct interleaved Q4_0 at 144 bytes per head-row. Preserve
+   the tuned F16 grids and unchanged F32 reducer. Require `cos > 0.9999`,
+   `max_abs < 0.01`, main `<=0.90x` the slower F16 anchor, and main+reduce
+   non-regression at both 8K and 32K. The primitive alone does not authorize
+   cache or runtime integration.
+2. **BF16 `mul_mm_id`/layout parity remains measurement-gated**: rerun
+   current-HEAD matched qwen/llama A3B BF16 projection attribution before
+   writing another kernel. Authorize a structural sidecar only if named
+   categories explain `>=90%` of qwen wall, or one category is `>=40%` with a
+   credible `>=1.5x` replacement. Do not retread vector loads, local SwiGLU
+   tiles, reduce/finalizer work, or command-buffer splitting.
+3. **Structural routed-Q5 down remains mechanism-gated**: the real no-weight
+   ceiling is only `+2.2%/+2.4%` total decode and the local tile, staging, load,
+   scatter, reducer, and monolith shelves are closed. Reopen only for a new
+   byte/dequant/dataflow mechanism that first clears `>=10%` on
+   production-faithful captured MoE compute for both A3B and A10B.
+
+S8 replay remains explicitly parked pending empirical arrival traces that clear
+blended `>=5-8%` net wall with p95 non-regression. No scheduler, runtime,
+attention-slice, or replay-kernel implementation is authorized. Normalized F16
+attention partial storage remains closed by v0.370, and the Q/K decode-glue
+bundle remains closed by v0.452 unless decode stops being GPU-bound.
+One-dispatch or matmul-shaped chunked GDN is a conditional reopen class, not a
+ranked implementation, until a concrete all-in primitive beats the current
+packed recurrence. Q6_K embedding residency and generated MTP heads remain in
+memory and asset backlogs rather than the throughput implementation ranking.
 
 Defer ICB/MTL4, binary archives, residency sets, and `newBufferWithBytesNoCopy`
 as throughput priorities. They can matter for product TTFT, memory footprint, or
@@ -1001,6 +1022,13 @@ Recent measured negatives:
   `ctx32768` (main `0.1767 -> 0.2213 ms`). Do not reopen scalar Q8, forced-tile
   Q8, group-tile/NWG sweeps, or same-layout Q8x4 variants without a new
   capture/counter signal and clean 8K+32K `attn-intra` wins.
+- v0.542 falsifies the direct payload/scale split-plane Q8_0 layout on the same
+  production group8 grids. It is exact versus the current Q8 oracle and passes
+  F16 correctness, but the valid 32K candidate regresses `9.95%` main and
+  `6.75%` main+reduce versus the slower F16 anchor. The 8K row is excluded for
+  anchor instability, though its direction is uniformly negative. Do not claim
+  a comparison with current interleaved Q8, which was not timed. Layout
+  rearrangement alone is no longer a sufficient Q8_0 reopen condition.
 - v0.341 kills the naive MoE FFN expert-pipeline proof. Splitting top-k routed
   experts into two groups and overlapping group-A down with group-B gate/up was
   exact on the A3B serial-vs-pipeline smoke, but regressed `tg128`: A3B
@@ -1789,8 +1817,11 @@ scatter, and changes the reader to Q8x4 float4 accumulation. Correctness is gree
 against F16 KV (`cos > 0.9999`, `max_abs < 0.01`), but clean A3B phase probes
 are negative: `ctx8192` main `0.1113 -> 0.1221 ms`, `ctx32768` main
 `0.1767 -> 0.2213 ms`. Keep `QWEN_KV_Q8=1` default-off as an oracle only. Future
-compressed-KV work needs a materially different layout/body or a capture signal;
-do not spend more blind time on Q8_0 reader variants.
+compressed-KV work needs a materially different body, format, or capture signal;
+do not spend more blind time on Q8_0 reader variants. v0.542 later tests and
+kills the allowed payload/scale split-plane Q8_0 layout: its valid 32K row is
+`1.0995x` F16 main and `1.0675x` F16 main+reduce. Exact Q8_0 at 272 bytes per
+head-row is closed for these two reader-layout families.
 v0.438 then returns to the top replay uncertainty and adds real-window economics
 timing to `decode-block-slice-real-margin`. S8 blocks=2 survives the conservative
 validated path, S6 is marginal, and S4 is dead. The next replay branch must be an
@@ -3286,8 +3317,10 @@ Priority rule:
   lead with kernel work that removes repeated long-context attention cost.
 - v0.416 audit digest reopened KV compression ahead of packed-N verify attention;
   v0.437 closes the same-layout Q8_0 reader variant as negative. Future
-  compressed-KV work must start from a different layout/body and a fresh
-  `attn-intra` win; do not keep packed verify blocked on Q8_0 specifically.
+  compressed-KV work must start from a materially lower-byte format or materially
+  different attention/dequant body and a fresh `attn-intra` win. v0.542 shows
+  that layout rearrangement alone is insufficient; do not keep packed verify
+  blocked on Q8_0 specifically.
 
 What the latest analysis says:
 
@@ -3521,7 +3554,7 @@ Acceptance gates:
 - Only pursue after double-buffered decode and structural cleanup are measured.
 - Require trace evidence of additional idle gap before escalating further.
 
-### 13. KV-Q8 / Quantized KV Cache For Long Context
+### 13. Compressed KV Cache - Exact Q8_0 Branch Closed
 
 Optimizes: long-context decode, DFlash usefulness at long context, memory.
 
@@ -3540,20 +3573,28 @@ Current read:
   remains viable.
 - v0.437 closes that micro-oracle for same-layout Q8_0. A vector-shaped Q8x4
   reader is correctness-clean but regresses A3B `attn-intra` at both 8K and 32K.
+- v0.542 closes the allowed different-layout Q8_0 branch. A direct payload/scale
+  split-plane reader is exact versus current Q8 and correctness-clean versus F16,
+  but its valid 32K row regresses `9.95%` main and `6.75%` main+reduce against
+  the slower F16 anchor. The 8K row is protocol-invalid for anchor instability
+  and only supplies a uniformly negative directional signal. No experiment code
+  remains.
 
-Expected payoff: still potentially large for compressed KV in theory, but Q8_0
-in the current layout/body is not the path. Do not spend more blind sweep time on
-this implementation family.
+Expected payoff: still potentially large for compressed KV in theory, but exact
+Q8_0 at 272 bytes per head-row is closed in the two tested reader-layout
+families. Q6/FP8-like and other materially lower-byte formats are untested, not
+disproved. Do not spend more blind sweep time on Q8_0 rearrangements.
 
 Risks and constraints:
 
 - Easy time sink.
-- Needs a different compression format, layout, or attention body to be worth
-  revisiting; same-layout Q8_0 reader retunes are closed.
+- Needs a materially lower-byte compression format, hardware-native conversion,
+  or a different attention/dequant body to be worth revisiting. Another Q8_0
+  layout rearrangement is not sufficient.
 
 Acceptance gates:
 
-- Revisit only with a concrete non-Q8_0 or different-layout structure and a fast
+- Revisit only with a concrete lower-byte or different-body structure and a fast
   `attn-intra` feedback plan that preserves Q-head grid parallelism and avoids
   large staged-KV TGM.
 - Cut quickly if the reader does not beat tuned F16 at both 8K and 32K before

@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+import random
+import sys
+import time
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import proposal_economics as pe
+
+
+class ProposalEconomicsTests(unittest.TestCase):
+    def test_linear_backward_matches_equal_naive_reference(self) -> None:
+        rng = random.Random(557)
+        for _ in range(100):
+            visible = [rng.randrange(4) for _ in range(rng.randrange(1, 40))]
+            source = [rng.randrange(4) for _ in range(rng.randrange(1, 40))]
+            ends = list(range(1, len(source) + 1))
+            actual = pe.backward_match_lengths(visible, source, ends)
+            expected = {
+                end: pe.backward_match_len(visible, source, end) for end in ends
+            }
+            self.assertEqual(actual, expected)
+
+    def test_no_match_equals_serial_baseline(self) -> None:
+        policy = pe.Policy("both", "longest-recent", 2, 2)
+        result = pe.simulate(
+            "none", "development", [1, 2], [10, 11, 12], policy, 1.0, 3.0
+        )
+
+        self.assertEqual(result.summary["attempts"], 0)
+        self.assertEqual(result.summary["abstentions"], 2)
+        self.assertEqual(result.summary["optimistic_decode_speedup"], 1.0)
+        self.assertEqual(result.events[-1]["action"], "terminal_emit")
+        self.assertEqual(result.events[-1]["cost_ms"], 0.0)
+
+    def test_prompt_copy_advances_closed_loop(self) -> None:
+        policy = pe.Policy("prompt", "longest-recent", 2, 2)
+        prompt = [5, 9, 10, 11, 12, 6, 9]
+        target = [10, 11, 12, 20]
+        result = pe.simulate("prompt", "development", prompt, target, policy, 1.0, 1.0)
+
+        attempts = [event for event in result.events if event["attempted"]]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["proposal_token_ids"], [11, 12])
+        self.assertEqual(attempts[0]["accepted_prefix_len"], 2)
+        self.assertEqual(attempts[0]["progress"], 3)
+        self.assertEqual(result.summary["optimistic_decode_speedup"], 3.0)
+
+    def test_rejection_accepts_prefix_only(self) -> None:
+        policy = pe.Policy("prompt", "recent", 2, 2)
+        prompt = [5, 9, 10, 11, 99, 6, 9]
+        target = [10, 11, 12]
+        result = pe.simulate("reject", "development", prompt, target, policy, 1.0, 2.0)
+
+        attempt = next(event for event in result.events if event["attempted"])
+        self.assertEqual(attempt["accepted_prefix_len"], 1)
+        self.assertEqual(attempt["progress"], 2)
+        self.assertEqual(attempt["target_token_ids"], [11, 12])
+
+    def test_terminal_attempt_truncates_irrelevant_proposals(self) -> None:
+        policy = pe.Policy("prompt", "recent", 2, 2)
+        prompt = [9, 10, 11, 8, 9]
+        result = pe.simulate(
+            "terminal", "development", prompt, [10, 11], policy, 1.0, 2.0
+        )
+
+        attempt = next(event for event in result.events if event["attempted"])
+        self.assertEqual(attempt["proposal_token_ids"], [11, 8])
+        self.assertEqual(attempt["scored_proposal_token_ids"], [11])
+        self.assertEqual(attempt["eligible_draft_count"], 1)
+        self.assertTrue(attempt["output_limited"])
+        self.assertTrue(attempt["terminal_window"])
+        self.assertEqual(attempt["target_token_ids"], [11])
+        self.assertEqual(attempt["effective_verify_n"], 1)
+        self.assertEqual(attempt["progress"], 2)
+
+    def test_self_copy_requires_committed_continuation(self) -> None:
+        candidate = pe.best_self_candidate(
+            prompt_len=0,
+            committed_output=[1, 2, 1, 2],
+            match_tokens=2,
+            proposal_tokens=3,
+            selector="longest-recent",
+        )
+        self.assertIsNone(candidate)
+
+        candidate = pe.best_self_candidate(
+            prompt_len=0,
+            committed_output=[1, 2, 3, 1, 2, 3],
+            match_tokens=2,
+            proposal_tokens=3,
+            selector="longest-recent",
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.proposal, (1, 2, 3))
+
+    def test_d7_full_accept_advances_eight_tokens(self) -> None:
+        policy = pe.Policy("prompt", "recent", 2, 7)
+        prompt = [9, 10, 11, 12, 13, 14, 15, 16, 17, 8, 9]
+        target = [10, 11, 12, 13, 14, 15, 16, 17, 20]
+        result = pe.simulate("d7", "development", prompt, target, policy, 1.0, 3.0)
+
+        attempt = next(event for event in result.events if event["attempted"])
+        self.assertEqual(attempt["accepted_prefix_len"], 7)
+        self.assertEqual(attempt["progress"], 8)
+        self.assertEqual(attempt["cost_class"], "fixed_n8_optimistic")
+        self.assertFalse(attempt["terminal_window"])
+        self.assertEqual(attempt["effective_verify_n"], 8)
+
+    def test_exact_d_terminal_window_uses_no_bonus_transition(self) -> None:
+        policy = pe.Policy("prompt", "recent", 2, 7)
+        prompt = [9, 10, 11, 12, 13, 14, 15, 16, 17, 8, 9]
+        target = [10, 11, 12, 13, 14, 15, 16, 17]
+        result = pe.simulate(
+            "terminal-d7", "development", prompt, target, policy, 1.0, 3.0
+        )
+
+        attempt = next(event for event in result.events if event["attempted"])
+        self.assertEqual(attempt["eligible_draft_count"], 7)
+        self.assertFalse(attempt["output_limited"])
+        self.assertTrue(attempt["terminal_window"])
+        self.assertEqual(attempt["effective_verify_n"], 7)
+
+    def test_repetitive_32k_prompt_is_bounded(self) -> None:
+        policy = pe.Policy("prompt", "longest-recent", 32, 7)
+        started = time.perf_counter()
+        result = pe.simulate(
+            "repetitive",
+            "development",
+            [1] * 32_768,
+            [1] * 128,
+            policy,
+            1.0,
+            3.0,
+        )
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(result.summary["attempts"], 16)
+        self.assertLess(elapsed, 5.0)
+
+    def test_longest_selector_beats_more_recent_short_match(self) -> None:
+        candidates = [
+            pe.Candidate("prompt", 0, 4, 4, 4, (1, 2)),
+            pe.Candidate("self", 8, 10, 100, 2, (3, 4)),
+        ]
+        self.assertEqual(pe.select_candidate(candidates, "recent"), candidates[1])
+        self.assertEqual(
+            pe.select_candidate(candidates, "longest-recent"), candidates[0]
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

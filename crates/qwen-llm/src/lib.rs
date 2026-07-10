@@ -37,6 +37,7 @@ pub mod metal_forward;
 pub mod metal_mtp;
 pub mod model;
 pub mod prefix_cache;
+pub mod prompt_lookup;
 pub mod runtime;
 pub mod tensor;
 pub mod tokenizer;

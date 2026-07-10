@@ -1378,6 +1378,9 @@ struct MtpArgs {
     /// Write a compact JSON summary for MTPLX/profile-parity sweeps.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Include exact prompt and serial target token IDs in `--output`.
+    #[arg(long, requires = "output")]
+    include_token_ids: bool,
     /// Number of tokens to generate after the prompt.
     #[arg(long, default_value = "64")]
     tokens: usize,
@@ -9933,6 +9936,34 @@ mod tok_tests {
             Some(true)
         );
     }
+
+    #[test]
+    fn mtp_token_ids_require_output() {
+        let missing_output = Args::try_parse_from([
+            "qwen-bench",
+            "mtp",
+            "-m",
+            "model.gguf",
+            "--include-token-ids",
+        ]);
+        assert!(missing_output.is_err());
+
+        let parsed = Args::try_parse_from([
+            "qwen-bench",
+            "mtp",
+            "-m",
+            "model.gguf",
+            "--output",
+            "fixture.json",
+            "--include-token-ids",
+        ])
+        .expect("parse token fixture arguments");
+        let Cmd::Mtp(args) = parsed.cmd else {
+            panic!("expected mtp command");
+        };
+        assert!(args.include_token_ids);
+        assert_eq!(args.output, Some(PathBuf::from("fixture.json")));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -10132,6 +10163,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_history,
         mtp_rank_topk,
         output,
+        include_token_ids,
         tokens,
         stop_tokens,
         no_warmup,
@@ -10815,6 +10847,15 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "phase_ms": speculative_phase_ms,
             "target_state": target_state,
         });
+        let token_fixture = if include_token_ids {
+            serde_json::json!({
+                "schema_version": 1,
+                "prompt_token_ids": prompt_ids,
+                "target_generated_token_ids": ref_generated,
+            })
+        } else {
+            serde_json::Value::Null
+        };
         let row = serde_json::json!({
             "model": model.display().to_string(),
             "prompt_tokens": prompt_ids.len(),
@@ -10841,6 +10882,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
             "no_warmup": no_warmup,
             "semantics": semantics,
+            "token_fixture": token_fixture,
             "reference": reference,
             "speculative": speculative,
             "speedup_total_ms": total_speedup,

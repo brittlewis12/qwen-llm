@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.553 Tokenizer Prompt Guardrails Passed
+
+Status: measurement-only closure; tokenizer micro-construction closed.
+
+- Compared the v0.549 eager tokenizer against the final v0.552 stack in five
+  alternating fresh-process pairs on two frozen Reva-derived prompts using 0.8B
+  Q4, four requested tokens, and the same redirected stdout endpoint.
+- The interactive prefix is 437 tokens. Median tokenizer construction improves
+  `68.415 -> 17.060 ms`; first TTFT improves `147.370 -> 95.087 ms`, saving
+  `52.283 ms` (`35.48%`). Total request wall saves the same `52.283 ms` because
+  this prompt reaches EOS on the first generated token.
+- The canonical longer guardrail is 7,986 tokens. Construction improves
+  `75.753 -> 18.629 ms`; first TTFT improves `1130.679 -> 1075.137 ms`, saving
+  `55.542 ms` (`4.91%`), and total request saves `55.651 ms`.
+- Warm TTFT is neutral: `56.793/56.818 ms` interactive and
+  `1034.625/1034.884 ms` long. Every numbered eager/final output matches, and all
+  first/warm prompt, generated-token, and stop gates pass.
+- The final interpretation is fixed-cost work removal: roughly `52-56 ms`
+  generalizes across these shapes, while the percentage naturally shrinks as
+  prefill dominates. Close tokenizer micro-construction and park the packed owned
+  vocabulary arena as a representation-level reopen condition.
+- The next attack is the physical-N8 verifier denominator. Existing oracle output
+  equality is insufficient because it consumes the output-limit terminal token
+  while the corrected serial loop leaves it pending. Fix and assert equivalent
+  terminal target state before using verifier results to govern proposer work.
+
+Artifacts: `target/profiles/v0553-tokenizer-guardrails/` and
+`target/profiles/v0553-interactive-reva-prefix.txt`.
+Review and N8 design: `cx ask` session
+`019f4dd3-f708-7c41-b467-81be02b054db`.
+
 ## 2026-07-10 - v0.552 Reused Merge Lookup Scratch Promoted
 
 Status: exact first-TTFT and process-cold work removal; default promoted;

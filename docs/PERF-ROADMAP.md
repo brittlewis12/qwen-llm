@@ -180,13 +180,20 @@ first TTFT, and `114.866 -> 61.756 ms` total wall. Close cheap tokenizer
 micro-construction. A packed owned vocabulary arena remains a representation
 redesign, not authorization for another local allocation chain.
 
+v0.553 closes the tokenizer lane on realistic prompt guardrails. Against the
+v0.549 eager baseline, the final stack removes `52.283 ms` TTFT at 437 tokens
+(`147.370 -> 95.087 ms`) and `55.542 ms` at 7,986 tokens
+(`1130.679 -> 1075.137 ms`). Warm TTFT is neutral within `0.26 ms`, and all
+numbered eager/final outputs match. The absolute fixed-cost win generalizes; its
+percentage correctly falls from `35.48%` interactive to `4.91%` long-prompt.
+
 Next contract work:
 
-1. Measure the promoted tokenizer stack on one realistic interactive prompt and
-   one dissimilar longer guardrail. Retain exact output and callback/total-wall
-   gates; do not require the tiny-prompt percentage to generalize.
-2. Then move to the current physical-N8 verifier oracle. Do not delay it for a
-   packed-vocabulary redesign unless the guardrails expose a tokenizer blocker.
+1. Correct the physical-N8 oracle's terminal-state semantics: compare 127 serial
+   target transitions against target-equivalent packet work for 128 emitted
+   tokens, and assert final KV/GDN/conv positions outside timing.
+2. Then run the current physical-N8 verifier oracle on the frozen 437-token Reva
+   prefix for A3B and 27B. Do not delay it for packed-vocabulary work.
 3. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
@@ -339,9 +346,8 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Guardrail the promoted tokenizer stack on realistic interactive and longer
-   prompts, then close tokenizer micro-construction. The packed-vocabulary arena
-   is parked as a materially different reopen condition.
+1. Fix and assert terminal target state in the physical-N8 oracle, then price the
+   verifier on the frozen 437-token Reva prefix for A3B and 27B.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

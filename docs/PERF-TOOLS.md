@@ -208,7 +208,8 @@ test -f "$MTP_MODEL"
 
 # Perfect-proposer physical-N8 verifier oracle.
 ./target/release/qwen-bench mtp \
-  -m "$MTP_MODEL" --prompt "$(<target/profiles/v0553-interactive-reva-prefix.txt)" \
+  -m "$MTP_MODEL" \
+  --prompt "$(<docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt)" \
   --spec-tokens 7 --mtp-physical-n 8 --mtp-probe oracle \
   --tokens 128 --no-warmup --output target/profiles/n8-oracle.json
 
@@ -225,6 +226,9 @@ test -f "$MTP_MODEL"
 
 Physical-N8 oracle rules:
 
+- Use a complete generation prompt that naturally reaches the requested output
+  length. The old 437-token tokenizer prefix emits EOS first and exercises zero
+  target transitions, so it is not a valid decode denominator fixture.
 - Oracle mode still requires and loads an MTP-aware asset, but timed draft work
   must report `mtp_calls=0`.
 - For 128 emitted tokens, the serial target executes 127 transitions. The final
@@ -234,6 +238,9 @@ Physical-N8 oracle rules:
   KV cosine, and equal next-token argmax with tight continuation-logit metrics.
 - Use `reference.decode_ms / speculative.decode_ms` for the whole-decode oracle.
   Do not use total speedup because the two prefill implementations differ.
+- The current dense-27B implementation passes the declared numerical resume gate
+  at 128 tokens. The current A3B packed-MoE/GDN implementation does not; stop at
+  that correctness failure rather than averaging timing rows.
 
 DFlash rules:
 

@@ -1428,6 +1428,9 @@ struct PldArgs {
     /// Write a compact charged-path JSON summary.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Include semantic per-step events in `--output`.
+    #[arg(long, requires = "output")]
+    trace_events: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -10003,10 +10006,30 @@ mod tok_tests {
     #[test]
     fn pld_terminal_window_counts_target_transitions() {
         let drafts = [11, 12, 13, 14, 15, 16, 17];
-        assert_eq!(pld_terminal_draft_count(&drafts, 1, 128, &[99]), None);
-        assert_eq!(pld_terminal_draft_count(&drafts, 121, 128, &[99]), Some(7));
-        assert_eq!(pld_terminal_draft_count(&drafts, 125, 128, &[99]), Some(3));
-        assert_eq!(pld_terminal_draft_count(&drafts, 1, 128, &[14]), Some(4));
+        let count = |emitted, stop| {
+            pld_terminal_draft_count(&drafts, emitted, 128, stop).map(|window| window.count)
+        };
+        assert_eq!(count(1, &[99]), None);
+        assert_eq!(count(121, &[99]), Some(7));
+        assert_eq!(count(125, &[99]), Some(3));
+        assert_eq!(count(1, &[14]), Some(4));
+
+        for remaining in 1..=DRAFT_TOKENS {
+            let window = pld_terminal_draft_count(&drafts, 128 - remaining, 128, &[99])
+                .expect("output-limit window");
+            assert_eq!(window.count, remaining);
+            assert_eq!(window.cause, PldTerminalCause::OutputLimit);
+        }
+        for stop_index in 0..DRAFT_TOKENS {
+            let window = pld_terminal_draft_count(&drafts, 1, 128, &[drafts[stop_index]])
+                .expect("stop-token window");
+            assert_eq!(window.count, stop_index + 1);
+            assert_eq!(window.cause, PldTerminalCause::StopToken);
+        }
+        let output_first = pld_terminal_draft_count(&drafts, 125, 128, &[16])
+            .expect("output limit precedes proposed stop");
+        assert_eq!(output_first.count, 3);
+        assert_eq!(output_first.cause, PldTerminalCause::OutputLimit);
     }
 }
 
@@ -10209,21 +10232,59 @@ struct PldStats {
     accept_histogram: [u32; DRAFT_TOKENS + 1],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PldTerminalCause {
+    StopToken,
+    OutputLimit,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PldTerminalWindow {
+    count: usize,
+    cause: PldTerminalCause,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PldEvent {
+    event: usize,
+    carry_index: usize,
+    carry_token: i32,
+    action: &'static str,
+    source: Option<&'static str>,
+    source_start: Option<usize>,
+    source_end: Option<usize>,
+    proposal: Option<[i32; DRAFT_TOKENS]>,
+    accepted_prefix: usize,
+    terminal_cause: Option<PldTerminalCause>,
+    effective_verify_n: Option<usize>,
+    n_keep: Option<usize>,
+    restored: bool,
+    resulting_position: usize,
+    emitted_after: usize,
+}
+
 fn pld_terminal_draft_count(
     drafts: &[i32; DRAFT_TOKENS],
     emitted: usize,
     max_new_tokens: usize,
     stop_tokens: &[i32],
-) -> Option<usize> {
+) -> Option<PldTerminalWindow> {
     let remaining = max_new_tokens.saturating_sub(emitted);
     let eligible = remaining.min(DRAFT_TOKENS);
     if let Some(index) = drafts[..eligible]
         .iter()
         .position(|token| stop_tokens.contains(token))
     {
-        return Some(index + 1);
+        return Some(PldTerminalWindow {
+            count: index + 1,
+            cause: PldTerminalCause::StopToken,
+        });
     }
-    (remaining <= DRAFT_TOKENS).then_some(remaining)
+    (remaining <= DRAFT_TOKENS).then_some(PldTerminalWindow {
+        count: remaining,
+        cause: PldTerminalCause::OutputLimit,
+    })
 }
 
 fn run_pld(args: PldArgs) -> Result<()> {
@@ -10237,6 +10298,7 @@ fn run_pld(args: PldArgs) -> Result<()> {
         stop_tokens,
         no_warmup,
         output,
+        trace_events,
     } = args;
     anyhow::ensure!(tokens > 0, "--tokens must be positive");
     if !qwen_chat && (system.is_some() || disable_thinking) {
@@ -10336,12 +10398,39 @@ fn run_pld(args: PldArgs) -> Result<()> {
     let mut candidate_generated = Vec::with_capacity(tokens);
     let mut carry = argmax_i32(&candidate_last_logits);
     let mut processed_pos = (prompt_ids.len() - 1) as u32;
+    let mut events = Vec::new();
+    let mut event_index = 0usize;
     'outer: loop {
+        let carry_index = candidate_generated.len();
+        let event_carry = carry;
         candidate_generated.push(carry);
         let update_start = Instant::now();
         proposer.commit_verified(&[carry]);
         stats.index_update_ms += update_start.elapsed().as_secs_f64() * 1e3;
         if stops.contains(&carry) || candidate_generated.len() >= tokens {
+            if trace_events {
+                events.push(PldEvent {
+                    event: event_index,
+                    carry_index,
+                    carry_token: event_carry,
+                    action: "terminal_emit",
+                    source: None,
+                    source_start: None,
+                    source_end: None,
+                    proposal: None,
+                    accepted_prefix: 0,
+                    terminal_cause: Some(if stops.contains(&carry) {
+                        PldTerminalCause::StopToken
+                    } else {
+                        PldTerminalCause::OutputLimit
+                    }),
+                    effective_verify_n: None,
+                    n_keep: None,
+                    restored: false,
+                    resulting_position: candidate_session.kv_n_pos[0],
+                    emitted_after: candidate_generated.len(),
+                });
+            }
             break;
         }
 
@@ -10357,6 +10446,26 @@ fn run_pld(args: PldArgs) -> Result<()> {
             stats.target_transitions += 1;
             carry = argmax_i32(&logits);
             processed_pos = position;
+            if trace_events {
+                events.push(PldEvent {
+                    event: event_index,
+                    carry_index,
+                    carry_token: event_carry,
+                    action: "abstain",
+                    source: None,
+                    source_start: None,
+                    source_end: None,
+                    proposal: None,
+                    accepted_prefix: 0,
+                    terminal_cause: None,
+                    effective_verify_n: None,
+                    n_keep: Some(1),
+                    restored: false,
+                    resulting_position: candidate_session.kv_n_pos[0],
+                    emitted_after: candidate_generated.len(),
+                });
+            }
+            event_index += 1;
             continue;
         };
 
@@ -10365,7 +10474,7 @@ fn run_pld(args: PldArgs) -> Result<()> {
             ProposalSource::Prompt => stats.prompt_attempts += 1,
             ProposalSource::SelfOutput => stats.self_attempts += 1,
         }
-        let terminal_count = pld_terminal_draft_count(
+        let terminal_window = pld_terminal_draft_count(
             &candidate.proposal,
             candidate_generated.len(),
             tokens,
@@ -10373,7 +10482,8 @@ fn run_pld(args: PldArgs) -> Result<()> {
         );
         let mut verify_input = Vec::with_capacity(8);
         verify_input.push(carry);
-        let (n_eff, n_drafts_scored) = if let Some(count) = terminal_count {
+        let (n_eff, n_drafts_scored) = if let Some(window) = terminal_window {
+            let count = window.count;
             verify_input.extend_from_slice(&candidate.proposal[..count.saturating_sub(1)]);
             (count, count)
         } else {
@@ -10420,7 +10530,8 @@ fn run_pld(args: PldArgs) -> Result<()> {
         let n_accepted = accepted_tokens.len();
         stats.accept_histogram[n_accepted] += 1;
         let n_keep = if stop_now { n_accepted } else { 1 + n_accepted };
-        if n_keep < n_eff {
+        let restored = n_keep < n_eff;
+        if restored {
             let restore_start = Instant::now();
             qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
                 &mf,
@@ -10437,11 +10548,36 @@ fn run_pld(args: PldArgs) -> Result<()> {
         let update_start = Instant::now();
         proposer.commit_verified(&accepted_tokens);
         stats.index_update_ms += update_start.elapsed().as_secs_f64() * 1e3;
+        if !stop_now {
+            processed_pos += 1 + n_accepted as u32;
+            carry = verify_argmax[n_accepted];
+        }
+        if trace_events {
+            events.push(PldEvent {
+                event: event_index,
+                carry_index,
+                carry_token: event_carry,
+                action: "attempt",
+                source: Some(match candidate.source {
+                    ProposalSource::Prompt => "prompt",
+                    ProposalSource::SelfOutput => "self",
+                }),
+                source_start: Some(candidate.source_start),
+                source_end: Some(candidate.source_end),
+                proposal: Some(candidate.proposal),
+                accepted_prefix: n_accepted,
+                terminal_cause: terminal_window.map(|window| window.cause),
+                effective_verify_n: Some(n_eff),
+                n_keep: Some(n_keep),
+                restored,
+                resulting_position: candidate_session.kv_n_pos[0],
+                emitted_after: candidate_generated.len(),
+            });
+        }
+        event_index += 1;
         if stop_now {
             break 'outer;
         }
-        processed_pos += 1 + n_accepted as u32;
-        carry = verify_argmax[n_accepted];
     }
     stats.decode_ms = decode_start.elapsed().as_secs_f64() * 1e3;
     let candidate_total_ms = candidate_total_start.elapsed().as_secs_f64() * 1e3;
@@ -10488,6 +10624,11 @@ fn run_pld(args: PldArgs) -> Result<()> {
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let event_trace = if trace_events {
+            serde_json::to_value(&events)?
+        } else {
+            serde_json::Value::Null
+        };
         let row = serde_json::json!({
             "schema_version": 1,
             "model": model.display().to_string(),
@@ -10533,6 +10674,7 @@ fn run_pld(args: PldArgs) -> Result<()> {
             "decode_speedup": decode_speedup,
             "total_speedup": total_speedup,
             "identical": identical,
+            "events": event_trace,
             "target_state": {
                 "resume_audit_pass": audit.resume_audit_pass,
                 "kv_position_equal": audit.kv_position_equal,

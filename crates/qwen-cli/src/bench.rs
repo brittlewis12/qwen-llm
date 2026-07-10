@@ -10045,6 +10045,7 @@ struct MtpTargetStateAudit {
     gdn_state_max_abs: f32,
     gdn_conv_max_abs: f32,
     continuation_argmax_equal: bool,
+    continuation_token: i32,
     continuation_logits_max_abs: f32,
     continuation_logits_cosine: f64,
 }
@@ -10189,6 +10190,7 @@ fn audit_mtp_target_state(
     let continuation_logits_cosine =
         dot / (reference_norm.sqrt() * candidate_norm.sqrt() + f64::MIN_POSITIVE);
     let continuation_argmax_equal = argmax_i32(&reference_logits) == argmax_i32(&candidate_logits);
+    let continuation_token = argmax_i32(&reference_logits);
     let resume_audit_pass = kv_position_equal
         && kv_payload_cosine >= 0.99999
         && continuation_argmax_equal
@@ -10205,9 +10207,30 @@ fn audit_mtp_target_state(
         gdn_state_max_abs,
         gdn_conv_max_abs,
         continuation_argmax_equal,
+        continuation_token,
         continuation_logits_max_abs,
         continuation_logits_cosine,
     })
+}
+
+fn merge_target_state_audit(aggregate: &mut MtpTargetStateAudit, next: MtpTargetStateAudit) {
+    aggregate.resume_audit_pass &= next.resume_audit_pass;
+    aggregate.kv_position_equal &= next.kv_position_equal;
+    aggregate.kv_payload_exact &= next.kv_payload_exact;
+    aggregate.kv_payload_max_abs = aggregate.kv_payload_max_abs.max(next.kv_payload_max_abs);
+    aggregate.kv_payload_cosine = aggregate.kv_payload_cosine.min(next.kv_payload_cosine);
+    aggregate.reference_final_position = next.reference_final_position;
+    aggregate.candidate_final_position = next.candidate_final_position;
+    aggregate.gdn_state_max_abs = aggregate.gdn_state_max_abs.max(next.gdn_state_max_abs);
+    aggregate.gdn_conv_max_abs = aggregate.gdn_conv_max_abs.max(next.gdn_conv_max_abs);
+    aggregate.continuation_argmax_equal &= next.continuation_argmax_equal;
+    aggregate.continuation_token = next.continuation_token;
+    aggregate.continuation_logits_max_abs = aggregate
+        .continuation_logits_max_abs
+        .max(next.continuation_logits_max_abs);
+    aggregate.continuation_logits_cosine = aggregate
+        .continuation_logits_cosine
+        .min(next.continuation_logits_cosine);
 }
 
 #[derive(Default)]
@@ -10586,13 +10609,27 @@ fn run_pld(args: PldArgs) -> Result<()> {
     anyhow::ensure!(identical, "PLD generated tokens differ from serial target");
     let pending_terminal_token = *ref_generated.last().context("PLD emitted no tokens")?;
     let expected_position = prompt_ids.len() + ref_generated.len() - 1;
-    let audit = audit_mtp_target_state(
+    const PLD_CONTINUATION_AUDIT_STEPS: usize = 16;
+    let mut audit = audit_mtp_target_state(
         &mf,
         &mut ref_session,
         &mut candidate_session,
         expected_position,
         pending_terminal_token,
     )?;
+    for offset in 1..PLD_CONTINUATION_AUDIT_STEPS {
+        let next_token = audit.continuation_token;
+        let next = audit_mtp_target_state(
+            &mf,
+            &mut ref_session,
+            &mut candidate_session,
+            expected_position + offset,
+            next_token,
+        )?;
+        merge_target_state_audit(&mut audit, next);
+    }
+    audit.resume_audit_pass &= audit.gdn_state_max_abs <= 1e-2;
+    audit.resume_audit_pass &= audit.gdn_conv_max_abs <= 1e-1;
     anyhow::ensure!(audit.resume_audit_pass, "PLD terminal resume audit failed");
 
     let decode_speedup = ref_decode_ms / stats.decode_ms;
@@ -10676,6 +10713,7 @@ fn run_pld(args: PldArgs) -> Result<()> {
             "identical": identical,
             "events": event_trace,
             "target_state": {
+                "continuation_steps": PLD_CONTINUATION_AUDIT_STEPS,
                 "resume_audit_pass": audit.resume_audit_pass,
                 "kv_position_equal": audit.kv_position_equal,
                 "kv_payload_exact": audit.kv_payload_exact,

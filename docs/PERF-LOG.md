@@ -6,6 +6,65 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.541 DFlash Full-Attention GQA Split-4
+
+Status: all preregistered gates passed; retained and defaulted only for the
+exact eligible DFlash full-attention shape, with
+`QWEN_DFLASH_ATTN_FULL_GQA_SPLIT4=0` as rollback.
+
+- Added a fixed N16, Q32/KV8, head-dim-128 GQA-4 shared-K/V attention path for
+  the single Qwen3.6 DFlash full-attention layer. Four online-softmax context
+  partitions feed a serial partial reduction. Eligibility is restricted to
+  `ctx_len=7986..8241`; SWA layers, verifier, policy, assets, and prompt geometry
+  are unchanged.
+- The protocol-valid v0541c primitive A1/P/A2 medians at contexts
+  `7986/8114/8241` were respectively `19.048708/1.463000/19.515209`,
+  `19.560792/1.118958/19.626793`, and `19.302333/1.124041/19.371792 ms`.
+  Candidate/min-anchor ratios were `0.076803x/0.057204x/0.058233x`; anchor
+  spreads were `1.024490x/1.003374x/1.003598x`. All clear the preregistered
+  `<=0.50` primitive gate.
+- Long-context validation at the same three contexts kept max absolute error at
+  `2.468e-8..2.515e-8` and relative L2 at `2.169e-6..2.178e-6`. This is
+  numerical oracle agreement, not a claim of bit-identical internal attention
+  values.
+- The valid canonical 7,986-token Reva wall A1/P/A2 static-decode times were
+  `10,675.7/9,975.8/10,671.9 ms`; anchor spread was `1.000356x`. The
+  preregistered conservative gate passes:
+  `9975.85 <= 0.97 * 10671.85 = 10351.6945`, a conservative `6.522%`
+  static-decode win.
+- Draft mean fell `67.7 -> 48.6 ms` (`-28.2%`). Every row emitted exactly 256
+  tokens with identical target-greedy output and unchanged accounting: `36`
+  outer steps, `220` accepted drafts, `36` drafter/verify calls, `34` restores,
+  `36` static-16 steps, and identical counts at all 15 draft positions. The
+  predicate plus one full layer structurally implies one candidate
+  full-attention invocation per drafter call, or 36 invocations.
+- The wall packet used one rebuilt binary, 120-second cooldowns before every
+  invocation, unprofiled static-16, explicit production settings, and
+  `--allow-dirty` only for the measured precommit candidate. Before/after
+  identity was unchanged at commit
+  `6ca239d9d08a99b1a16f773547bf237fa99aab2b`, full-index diff SHA-256
+  `7565c1105ea860efeb68db4c3acae5c485d44d4e54155540fda9158afeec7a0f`, and
+  binary SHA-256
+  `93ffbdc7f7a7c10ddef4e600073025694cae46467197890f14880fa752283ab0`.
+- Exclude `v0541-dflash-split4-reva-wall-a1-valid.out`: shell substitution
+  removed the fixture's final newline, producing 7,985 rather than 7,986 tokens
+  and different acceptance accounting. Exclude every v0541b primitive file
+  because the ctx8241 anchor spread exceeded `1.03`. Do not pool either packet
+  into the promotion result.
+- This establishes a narrow static-decode kernel win. It does not establish a
+  total-request, prefill, DFlash-versus-no-spec, adaptive-policy, acceptance,
+  SWA, verifier, other-context, other-prompt, or other-model-family win.
+  Candidate 2 remains unrun and no widening is authorized by this result.
+
+Artifacts:
+`target/profiles/v0541-dflash-split4-reva-wall-{a1-canonical-prompt,p,a2}.out`,
+`target/profiles/v0541-dflash-split4-wall-identity-{before,after}.out`, and
+`target/profiles/v0541c-dflash-split4-validated-primitive-{a1,p,a2}.out`.
+Reviews: `cx ask` sessions `019f4a03-924f-7c40-bea5-7d13d9e113f2`,
+`019f4a16-56b7-7ef2-8d48-3fa92ce50f23`,
+`019f4a2a-f2e4-7cf2-a84d-98a1b46aea83`, and
+`019f4a4a-5411-7223-9c19-2af9c896f6a1`.
+
 ## 2026-07-09 - v0.540 Real DFlash Full-Attention Cost Witness
 
 Status: paid-cost gate passed; exactly one bounded implementation is authorized.

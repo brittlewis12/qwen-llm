@@ -15183,6 +15183,174 @@ fn encode_dflash_attn_two_range_pipeline(
     Ok(())
 }
 
+/// Fixed-shape GQA-sharing split-4 path for the Qwen3.6 DFlash full-attention
+/// layer. The serial main/reduce pair writes exact online-softmax partials.
+pub fn encode_dflash_attn_full_gqa_split4_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_ctx: &MetalTensor,
+    v_ctx: &MetalTensor,
+    k_noise: &MetalTensor,
+    v_noise: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    ctx_len: usize,
+) -> Result<(), MetalError> {
+    const N: usize = 16;
+    const N_Q: usize = 32;
+    const N_KV: usize = 8;
+    const HEAD_DIM: usize = 128;
+    const GROUP: usize = 4;
+    const SPLIT: usize = 4;
+    const KERNEL: &str = "dflash_attn_full_gqa_split4";
+
+    if enc.concurrent {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "main/reduce dependency requires a serial encoder".into(),
+        });
+    }
+    if (n, n_q_heads, n_kv_heads, head_dim) != (N, N_Q, N_KV, HEAD_DIM) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected N/n_q/n_kv/head_dim={N}/{N_Q}/{N_KV}/{HEAD_DIM}, got \
+                 {n}/{n_q_heads}/{n_kv_heads}/{head_dim}"
+            ),
+        });
+    }
+    let tensors = [q, k_ctx, v_ctx, k_noise, v_noise, o_partial, ml_partial, o];
+    if tensors.iter().any(|tensor| tensor.dtype != GgmlType::F32) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "all inputs, scratch, and output must be F32".into(),
+        });
+    }
+    let q_elems = N * N_Q * HEAD_DIM;
+    let kv_stride = N_KV * HEAD_DIM;
+    let ctx_elems = ctx_len
+        .checked_mul(kv_stride)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "context element count overflow".into(),
+        })?;
+    let noise_elems = N * kv_stride;
+    let o_partial_elems = N * N_KV * SPLIT * GROUP * HEAD_DIM;
+    let ml_partial_elems = N * N_KV * SPLIT * GROUP * 2;
+    if q.n_elements() as usize != q_elems
+        || o.n_elements() as usize != q_elems
+        || (k_ctx.n_elements() as usize) < ctx_elems
+        || (v_ctx.n_elements() as usize) < ctx_elems
+        || k_noise.n_elements() as usize != noise_elems
+        || v_noise.n_elements() as usize != noise_elems
+        || (o_partial.n_elements() as usize) < o_partial_elems
+        || (ml_partial.n_elements() as usize) < ml_partial_elems
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "shape mismatch: q={} o={} k_ctx={} v_ctx={} k_noise={} v_noise={} \
+                 o_partial={} ml_partial={} ctx_len={ctx_len}",
+                q.n_elements(),
+                o.n_elements(),
+                k_ctx.n_elements(),
+                v_ctx.n_elements(),
+                k_noise.n_elements(),
+                v_noise.n_elements(),
+                o_partial.n_elements(),
+                ml_partial.n_elements(),
+            ),
+        });
+    }
+    let total_rows = ctx_len.checked_add(N).ok_or_else(|| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "ctx_len + N overflow".into(),
+    })?;
+    let n_kv_total = u32::try_from(total_rows).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "ctx_len + N does not fit u32".into(),
+    })?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_kv_total: u32,
+        ctx_len: u32,
+        n_rows: u32,
+        noise_start_pos: u32,
+        swa_window: u32,
+        ctx_scan_start: u32,
+        scale: f32,
+    }
+    let args = Args {
+        n_q_heads: N_Q as u32,
+        n_kv_heads: N_KV as u32,
+        head_dim: HEAD_DIM as u32,
+        n_kv_total,
+        ctx_len: u32::try_from(ctx_len).map_err(|_| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "ctx_len does not fit u32".into(),
+        })?,
+        n_rows: N as u32,
+        noise_start_pos: 0,
+        swa_window: 0,
+        ctx_scan_start: 0,
+        scale: 1.0 / (HEAD_DIM as f32).sqrt(),
+    };
+
+    let main = ctx.pipeline("kernel_dflash_attn_full_gqa_split4_main_f32")?;
+    enc.set_pipeline(&main);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_ctx);
+    enc.set_tensor(3, v_ctx);
+    enc.set_tensor(4, k_noise);
+    enc.set_tensor(5, v_noise);
+    enc.set_tensor(6, o_partial);
+    enc.set_tensor(7, ml_partial);
+    enc.dispatch(
+        MTLSize {
+            width: N_KV,
+            height: N,
+            depth: SPLIT,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    let reduce = ctx.pipeline("kernel_dflash_attn_full_gqa_split4_reduce_f32")?;
+    enc.set_pipeline(&reduce);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, o_partial);
+    enc.set_tensor(2, ml_partial);
+    enc.set_tensor(3, o);
+    enc.dispatch(
+        MTLSize {
+            width: N_Q,
+            height: N,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Per-head L2-norm: `y[h, :] = x[h, :] / max(||x[h, :]||, eps)` for
 /// `h ∈ [0, n_heads)`. One dispatch covers all heads. Used in the GDN
 /// front-end where Q and K are l2-normed per K-head before the
@@ -26100,6 +26268,7 @@ mod tests {
         noise_start_pos: u32,
         swa_window: u32,
         online: bool,
+        full_gqa_split4: bool,
         ctx_scan_start: usize,
     ) -> Result<Vec<f32>, MetalError> {
         let q_t = MetalTensor::from_bytes(
@@ -26142,8 +26311,42 @@ mod tests {
             crate::tensor::GgmlType::F32,
         )?;
         let o_t = MetalTensor::zeros_f32(ctx, vec![(n * n_q_heads * head_dim) as u64])?;
+        let o_partial_len = 16 * 8 * 4 * 4 * 128;
+        let ml_partial_len = 16 * 8 * 4 * 4 * 2;
+        let o_partial_host = vec![f32::NAN; o_partial_len];
+        let ml_partial_host = vec![f32::NAN; ml_partial_len];
+        let o_partial_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&o_partial_host),
+            vec![o_partial_len as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
+        let ml_partial_t = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&ml_partial_host),
+            vec![ml_partial_len as u64],
+            crate::tensor::GgmlType::F32,
+        )?;
         one_shot(ctx, |enc| {
-            if online {
+            if full_gqa_split4 {
+                encode_dflash_attn_full_gqa_split4_f32(
+                    ctx,
+                    enc,
+                    &q_t,
+                    &k_ctx_t,
+                    &v_ctx_t,
+                    &k_noise_t,
+                    &v_noise_t,
+                    &o_partial_t,
+                    &ml_partial_t,
+                    &o_t,
+                    n,
+                    n_q_heads,
+                    n_kv_heads,
+                    head_dim,
+                    ctx_len,
+                )
+            } else if online {
                 encode_dflash_attn_online_two_range_scan_f32(
                     ctx,
                     enc,
@@ -26385,6 +26588,7 @@ mod tests {
                 c.noise_start_pos,
                 c.swa_window,
                 false,
+                false,
                 0,
             )
             .expect("dflash_attn_two_range dispatch");
@@ -26404,6 +26608,7 @@ mod tests {
                 c.noise_start_pos,
                 c.swa_window,
                 true,
+                false,
                 0,
             )
             .expect("dflash_attn_online_two_range dispatch");
@@ -26429,9 +26634,36 @@ mod tests {
                 c.noise_start_pos,
                 c.swa_window,
                 true,
+                false,
                 ctx_scan_start,
             )
             .expect("dflash_attn_online_two_range scan dispatch");
+            let gpu_full_gqa_split4 = if c.swa_window == 0 {
+                Some(
+                    dflash_attn_two_range_readback(
+                        &ctx,
+                        &q,
+                        &k_ctx,
+                        &v_ctx,
+                        &k_noise,
+                        &v_noise,
+                        &pos_ctx,
+                        n,
+                        n_q,
+                        n_kv,
+                        hd,
+                        c.ctx_len,
+                        c.noise_start_pos,
+                        c.swa_window,
+                        false,
+                        true,
+                        0,
+                    )
+                    .expect("dflash_attn_full_gqa_split4 dispatch"),
+                )
+            } else {
+                None
+            };
 
             let mut max_abs = 0.0f32;
             let mut max_abs_two_range = 0.0f32;
@@ -26512,6 +26744,36 @@ mod tests {
                 "{}: online scan rel_l2={rel_l2_online_two_range_scan} too large",
                 c.label
             );
+            if let Some(gpu_full_gqa_split4) = gpu_full_gqa_split4 {
+                let mut candidate_max_abs = 0.0f32;
+                let mut candidate_sq_diff = 0.0f64;
+                for (&got, &want) in gpu_full_gqa_split4.iter().zip(&cpu) {
+                    assert!(
+                        got.is_finite(),
+                        "{}: split4 produced nonfinite output",
+                        c.label
+                    );
+                    let diff = (got - want).abs();
+                    candidate_max_abs = candidate_max_abs.max(diff);
+                    candidate_sq_diff += (diff as f64).powi(2);
+                }
+                let candidate_rel_l2 = candidate_sq_diff.sqrt() / (sum_sq_cpu.sqrt() + 1e-30);
+                eprintln!(
+                    "[dflash-attn-mask split4 {}] max|delta|={candidate_max_abs:.3e} \
+                     rel_l2={candidate_rel_l2:.3e}",
+                    c.label
+                );
+                assert!(
+                    candidate_max_abs < 1e-4,
+                    "{}: split4 max|delta|={candidate_max_abs} too large",
+                    c.label
+                );
+                assert!(
+                    candidate_rel_l2 < 1e-5,
+                    "{}: split4 rel_l2={candidate_rel_l2} too large",
+                    c.label
+                );
+            }
         }
     }
 

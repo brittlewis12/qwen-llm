@@ -32,11 +32,12 @@ use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTimestampSampleBuffer,
     encode_add_inplace_f32, encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32,
-    encode_dflash_attn_f32, encode_dflash_attn_online_two_range_scan_f32,
-    encode_dflash_attn_two_range_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
-    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32,
-    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32,
-    encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
+    encode_dflash_attn_f32, encode_dflash_attn_full_gqa_split4_f32,
+    encode_dflash_attn_online_two_range_scan_f32, encode_dflash_attn_two_range_f32,
+    encode_fill_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32,
+    encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
     encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
@@ -74,6 +75,11 @@ crate::env_flag!(
 );
 
 crate::env_flag!(default_on dflash_attn_swa_scan_enabled, "QWEN_DFLASH_ATTN_SWA_SCAN");
+
+crate::env_flag!(
+    default_on dflash_attn_full_gqa_split4_enabled,
+    "QWEN_DFLASH_ATTN_FULL_GQA_SPLIT4"
+);
 
 fn dflash_swa_ctx_scan_start(
     pos_ctx: &[i32],
@@ -10824,8 +10830,16 @@ impl<'a> DFlashDecoder<'a> {
             //
             // Drafter projection/FFN weights stay native where the GGUF dtype
             // is supported; the dispatchers route Q8_0 and K-quants directly.
+            let full_gqa_split4_attn = dflash_attn_full_gqa_split4_enabled()
+                && !layer.is_swa
+                && n == 16
+                && n_q == 32
+                && n_kv == 8
+                && head_dim == 128
+                && (7986..=8241).contains(&ctx_len);
             let online_two_range_attn = dflash_attn_online_two_range_enabled();
-            let two_range_attn = online_two_range_attn || dflash_attn_two_range_enabled();
+            let two_range_attn =
+                full_gqa_split4_attn || online_two_range_attn || dflash_attn_two_range_enabled();
             let pos_k_uploaded;
             {
                 // Build pos_k on host. The legacy concat kernel wants
@@ -10867,7 +10881,29 @@ impl<'a> DFlashDecoder<'a> {
             // (a) Fused attention: writes attn_o_full [N, n_q*head_dim].
             let n_kv_total = ctx_len + n;
             let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
-            if online_two_range_attn {
+            if full_gqa_split4_attn {
+                const O_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 128;
+                const ML_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 2;
+                let o_partial = self.session.k_full.view_subrange(0, vec![O_PARTIAL_ELEMS]);
+                let ml_partial = self.session.v_full.view_subrange(0, vec![ML_PARTIAL_ELEMS]);
+                encode_dflash_attn_full_gqa_split4_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.q_buf,
+                    &self.session.k_ctx_cache[layer_idx],
+                    &self.session.v_ctx_cache[layer_idx],
+                    &self.session.k_noise,
+                    &self.session.v_noise,
+                    &o_partial,
+                    &ml_partial,
+                    &self.session.attn_o_full,
+                    n,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    ctx_len,
+                )?;
+            } else if online_two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
                 let ctx_scan_start = if dflash_attn_swa_scan_enabled() {
                     dflash_swa_ctx_scan_start(

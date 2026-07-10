@@ -14,9 +14,8 @@
 //     * SWA layers (Qwen3.6: layers 0..3): allow ctx key k iff
 //       `k_pos <= q_pos` AND `q_pos - k_pos <= swa_window`. Noise key
 //       k iff `k_pos == k - ctx_len <= q_idx` (block-causal over noise).
-//     * Full-attn layer (Qwen3.6: layer 4): allow ctx key k iff
-//       `k_pos <= q_pos` (NO sliding window). Noise key block-causal
-//       same as SWA.
+//     * Full-attn layer (Qwen3.6: layer 4): allow every ctx key. Noise
+//       keys remain block-causal as in the SWA layers.
 //   * Q/K-norm + RoPE are applied OUTSIDE this kernel (already Metal
 //     since v0.51). This kernel just does scoring + softmax + V agg.
 //
@@ -487,4 +486,152 @@ kernel void kernel_dflash_attn_online_two_range_f32(
     for (ushort j = 0; j < dk_per_lane; ++j) {
         o_base[j * NW_DFLASH + tiisg] = o_acc[j] * inv_l;
     }
+}
+
+// Fixed Qwen3.6 DFlash full-attention path. One simdgroup handles the four
+// sibling Q heads for a KV head, so each K/V value is loaded once instead of
+// once per sibling. Four context partitions preserve the baseline's 512 main
+// threadgroups. The final partition also consumes the causal noise prefix.
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_dflash_attn_full_gqa_split4_main_f32(
+        constant dflash_attn_args & args [[buffer(0)]],
+        device const float * q          [[buffer(1)]],
+        device const float * k_ctx      [[buffer(2)]],
+        device const float * v_ctx      [[buffer(3)]],
+        device const float * k_noise    [[buffer(4)]],
+        device const float * v_noise    [[buffer(5)]],
+        device       float * o_partial  [[buffer(6)]],
+        device       float * ml_partial [[buffer(7)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uint NKV = 8;
+    constexpr uint GROUP = 4;
+    constexpr uint HD = 128;
+    constexpr uint SPLIT = 4;
+    const uint kv_head = tgpig.x;
+    const uint q_idx = tgpig.y;
+    const uint part = tgpig.z;
+    if (kv_head >= NKV || q_idx >= 16 || part >= SPLIT) return;
+
+    const ulong q_row = (ulong)q_idx * 32 * HD + (ulong)kv_head * GROUP * HD;
+    const uint d0 = tiisg;
+    const uint d1 = d0 + 32;
+    const uint d2 = d1 + 32;
+    const uint d3 = d2 + 32;
+    const float4 q0 = float4(q[q_row + d0], q[q_row + d1],
+                             q[q_row + d2], q[q_row + d3]);
+    const float4 q1 = float4(q[q_row + HD + d0], q[q_row + HD + d1],
+                             q[q_row + HD + d2], q[q_row + HD + d3]);
+    const float4 q2 = float4(q[q_row + 2 * HD + d0], q[q_row + 2 * HD + d1],
+                             q[q_row + 2 * HD + d2], q[q_row + 2 * HD + d3]);
+    const float4 q3 = float4(q[q_row + 3 * HD + d0], q[q_row + 3 * HD + d1],
+                             q[q_row + 3 * HD + d2], q[q_row + 3 * HD + d3]);
+
+    float4 m_run = float4(-INFINITY);
+    float4 l_sum = float4(0.0f);
+    float4 o0 = float4(0.0f);
+    float4 o1 = float4(0.0f);
+    float4 o2 = float4(0.0f);
+    float4 o3 = float4(0.0f);
+    const uint ctx_begin = uint(((ulong)args.ctx_len * part) / SPLIT);
+    const uint ctx_end = uint(((ulong)args.ctx_len * (part + 1)) / SPLIT);
+    const uint scan_end = ctx_end + ((part == SPLIT - 1) ? q_idx + 1 : 0);
+    const ulong kv_stride = NKV * HD;
+
+    for (uint kk = ctx_begin; kk < scan_end; ++kk) {
+        device const float * k_row;
+        device const float * v_row;
+        if (kk < ctx_end) {
+            k_row = k_ctx + (ulong)kk * kv_stride + (ulong)kv_head * HD;
+            v_row = v_ctx + (ulong)kk * kv_stride + (ulong)kv_head * HD;
+        } else {
+            const uint noise_idx = kk - ctx_end;
+            k_row = k_noise + (ulong)noise_idx * kv_stride + (ulong)kv_head * HD;
+            v_row = v_noise + (ulong)noise_idx * kv_stride + (ulong)kv_head * HD;
+        }
+        const float4 k4 = float4(k_row[d0], k_row[d1], k_row[d2], k_row[d3]);
+        const float4 s = float4(simd_sum(dot(q0, k4)), simd_sum(dot(q1, k4)),
+                                simd_sum(dot(q2, k4)), simd_sum(dot(q3, k4))) * args.scale;
+        const float4 m_new = max(m_run, s);
+        const float4 old_scale = exp(m_run - m_new);
+        const float4 new_scale = exp(s - m_new);
+        const float4 v4 = float4(v_row[d0], v_row[d1], v_row[d2], v_row[d3]);
+        o0 = o0 * old_scale.x + v4 * new_scale.x;
+        o1 = o1 * old_scale.y + v4 * new_scale.y;
+        o2 = o2 * old_scale.z + v4 * new_scale.z;
+        o3 = o3 * old_scale.w + v4 * new_scale.w;
+        l_sum = l_sum * old_scale + new_scale;
+        m_run = m_new;
+    }
+
+    const ulong group_base = (((ulong)q_idx * NKV + kv_head) * SPLIT + part) * GROUP;
+    device float * po = o_partial + group_base * HD;
+    po[d0] = o0.x; po[d1] = o0.y; po[d2] = o0.z; po[d3] = o0.w;
+    po[HD + d0] = o1.x; po[HD + d1] = o1.y;
+    po[HD + d2] = o1.z; po[HD + d3] = o1.w;
+    po[2 * HD + d0] = o2.x; po[2 * HD + d1] = o2.y;
+    po[2 * HD + d2] = o2.z; po[2 * HD + d3] = o2.w;
+    po[3 * HD + d0] = o3.x; po[3 * HD + d1] = o3.y;
+    po[3 * HD + d2] = o3.z; po[3 * HD + d3] = o3.w;
+    if (tiisg == 0) {
+        device float * ml = ml_partial + group_base * 2;
+        ml[0] = m_run.x; ml[1] = l_sum.x;
+        ml[2] = m_run.y; ml[3] = l_sum.y;
+        ml[4] = m_run.z; ml[5] = l_sum.z;
+        ml[6] = m_run.w; ml[7] = l_sum.w;
+    }
+}
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_dflash_attn_full_gqa_split4_reduce_f32(
+        constant dflash_attn_args & args [[buffer(0)]],
+        device const float * o_partial  [[buffer(1)]],
+        device const float * ml_partial [[buffer(2)]],
+        device       float * o          [[buffer(3)]],
+        uint2  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uint NKV = 8;
+    constexpr uint GROUP = 4;
+    constexpr uint HD = 128;
+    constexpr uint SPLIT = 4;
+    const uint q_head = tgpig.x;
+    const uint q_idx = tgpig.y;
+    if (q_head >= 32 || q_idx >= 16) return;
+    const uint kv_head = q_head / GROUP;
+    const uint g = q_head % GROUP;
+    const ulong pair_base = (ulong)q_idx * NKV + kv_head;
+
+    float4 m;
+    float4 l;
+    for (uint part = 0; part < SPLIT; ++part) {
+        const ulong group_base = (pair_base * SPLIT + part) * GROUP + g;
+        m[part] = ml_partial[group_base * 2];
+        l[part] = ml_partial[group_base * 2 + 1];
+    }
+    float m_global = -INFINITY;
+    for (uint part = 0; part < SPLIT; ++part) {
+        if (l[part] > 0.0f) m_global = max(m_global, m[part]);
+    }
+    float4 factor = float4(0.0f);
+    for (uint part = 0; part < SPLIT; ++part) {
+        if (l[part] > 0.0f) factor[part] = exp(m[part] - m_global);
+    }
+    const float denom = dot(l, factor);
+
+    const uint d0 = tiisg;
+    const uint d1 = d0 + 32;
+    const uint d2 = d1 + 32;
+    const uint d3 = d2 + 32;
+    float4 acc = float4(0.0f);
+    for (uint part = 0; part < SPLIT; ++part) {
+        const ulong group_base = (pair_base * SPLIT + part) * GROUP + g;
+        device const float * po = o_partial + group_base * HD;
+        acc += float4(po[d0], po[d1], po[d2], po[d3]) * factor[part];
+    }
+    const float inv_denom = (denom > 0.0f) ? 1.0f / denom : 0.0f;
+    device float * out = o + ((ulong)q_idx * 32 + q_head) * HD;
+    out[d0] = acc.x * inv_denom;
+    out[d1] = acc.y * inv_denom;
+    out[d2] = acc.z * inv_denom;
+    out[d3] = acc.w * inv_denom;
 }

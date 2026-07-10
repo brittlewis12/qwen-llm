@@ -149,37 +149,36 @@ Seven N1 heads improve to `0.72187x` Q6_K time, yet fixed body/orchestration cos
 limits paired tok16/tok128 draft wins to `10.05%/15.20%`, decode wins to
 `0.89%/2.28%`, and total wins to `0.85%/2.07%`. All semantic gates pass, but all
 wall gates miss and streamed setup takes `13.079 s`. No experiment code remains.
-v0.540 supplies the missing real DFlash witness. The canonical 7,986-token Reva
-replay holds exact 256-token equivalence and `220/36 = 6.111` accepted drafts per
-step across stable A1/P/A2 anchors. Post-scan full attention costs a conservative
-`6.84766%` of static decode; total paid attention is `13.7565%`. This passes a
-necessary attribution gate, not a speedup claim, and authorizes exactly one
-full-layer-only GQA-4 shared-K/V split-4 attempt. Candidate 2 remains unrun.
+v0.541 executes and closes the one authorized DFlash full-attention attempt
+positively. The fixed N16 Q32/KV8 GQA-4 split-4 path clears the primitive gate
+at all three preregistered contexts and improves the valid canonical Reva
+static-decode wall `10,675.7/10,671.9 -> 9,975.8 ms`. The conservative result is
+`6.522%`, with exact 256-token target-greedy equivalence and every acceptance
+and call count unchanged. Default the path only for the measured full-layer
+shape and `ctx_len=7986..8241`, with
+`QWEN_DFLASH_ATTN_FULL_GQA_SPLIT4=0` rollback. This is a bounded static-decode
+promotion, not a DFlash policy, total-request, SWA, verifier, or general
+attention claim. Candidate 2 remains unrun; no split, context, prompt, or model
+widening is authorized.
 
 Force-ranked implementation bets from this vantage:
 
-1. **One bounded DFlash full-attention dataflow attempt is authorized**: add only
-   a fixed-shape GQA-4 shared-K/V, split-4 online-softmax main and exact partial
-   reduction for the full layer. Require combined primitive ratio `<=0.50` at
-   contexts `7986/8114/8241`, then an unprofiled Reva static-decode win `>=3%`
-   with exact tokens and all acceptance/call counts unchanged. Do not modify SWA,
-   verifier, policy, assets, or prompt geometry; any failed gate closes the work.
-2. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
+1. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
    closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
    `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
-3. **Q6_K embedding residency is memory-only follow-up**: the generic Q6_K
+2. **Q6_K embedding residency is memory-only follow-up**: the generic Q6_K
    fallback is proven safe. Add a native row reader only when another exact
    multi-GiB residency reduction is worth more than the top throughput bets;
    do not infer a warm-throughput win from fewer resident bytes.
-4. **MTP draft heads require a materially new asset or execution shape**:
+3. **MTP draft heads require a materially new asset or execution shape**:
    generated Q4_K is closed despite a `27.8%` primitive win. Reopen only for a
    prequantized asset or mechanism that clears setup, draft, decode, and total
    gates from scratch; do not pivot into orchestration or verifier retuning.
-5. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
+4. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
    concurrent Q/K RoPE, stale default-off fused residual+rmsnorm, and Q4_K
    mat-mat raw-block staging for N32/N64 are useful only if implementation is
-   tiny and full-wall gates pass. DFlash O/FFN specifically needs a short,
-   product-shaped high-acceptance row before re-promotion.
+   tiny and full-wall gates pass. Do not widen the landed DFlash split-4 path
+   without a separately preregistered shape and wall packet.
 
 Defer ICB/MTL4, binary archives, residency sets, and `newBufferWithBytesNoCopy`
 as throughput priorities. They can matter for product TTFT, memory footprint, or

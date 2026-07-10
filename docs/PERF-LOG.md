@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.545 Mei Medium DFlash Preflight Falsifier
+
+Status: killed at the first preregistered product-economics gate; P/A2 and
+every candidate remain unrun. No source code changed.
+
+- The valid A1 witness ran clean matched HEAD `76f4b43` after a 120-second
+  cooldown on AC/high-power mode, with 95% free memory and no recorded thermal,
+  performance, or CPU-power warning. It used the canonical 23,122-token Mei
+  medium preserve replay, Static16 only, and generated exactly 256 tokens.
+- Target-greedy equivalence versus DFlash-off passed. Accounting was `96` outer
+  steps, `159` accepted drafts, and `96` drafter, verifier, and restore calls.
+  Thus `alpha_chain = 159/96 = 1.65625` and mean emitted per step was `2.65625`.
+- This fails the preregistered `accepted_drafts >= 3 * outer_steps` prerequisite:
+  the required count was `288`, a shortfall of `129`. Acceptance reached
+  position 7 twice, accepted neither attempt, and never reached positions 8-14.
+- Static16 decode was `39,635.3 ms`; the embedded DFlash-off comparison was
+  `11,927.8 ms`, for `0.301x` decode throughput. Total walls were
+  `345,955.0/317,603.7 ms`, or `0.918x`. DFlash-off was not a formal
+  preregistered non-regression gate, so these are corroborating economics rather
+  than a separate gate failure.
+- A1 is a valid first-stage preregistered falsifier, not a complete A1/P/A2
+  paid-cost packet. No stable paid-bucket fraction or anchor spread is claimed.
+  P/A2 cannot repair the prerequisite acceptance failure and must not run.
+- Close candidate authorization for this exact Mei-medium Static16 witness. This
+  does not retract greedy correctness or the narrow v0.541 Reva kernel win. No
+  policy tuning, adaptive rescue, alternate prompt, lower floor, split-4
+  widening, profile-only completion, or extra anchor is authorized.
+
+Artifact: `target/profiles/v0545-dflash-mei-medium-paid-a1.out`.
+Design/preregistration/stop reviews: `cx ask` sessions
+`019f4cab-a2fe-7620-b05a-615904cdfd41`,
+`019f4cb7-7fff-74d2-b239-735341e534af`, and
+`019f4ccb-af89-79e1-bb58-323fe6315bb7`.
+Queue reconciliation: `019f4ccd-fb2b-72c0-9422-b63dca278b87`.
+
 ## 2026-07-10 - v0.544 BF16 Measurement Gate Killed
 
 Status: validity-green measurement-only packet; structural BF16 proposal killed.

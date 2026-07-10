@@ -183,24 +183,42 @@ trace-entry threshold, but pinned upstream llama.cpp emits zero Metal operation
 profile records. The required same-operation/shape mapping and `>=1.5x` ratio
 are unavailable; preregistered missing-data handling makes this KILL, not a
 rescue rerun. Preserve the small warmed deficit as a guardrail only.
+v0.545 executes and closes the Mei-medium DFlash preflight at its first valid A1.
+The canonical 23,122-token row emits 256 tokens with exact target-greedy
+equivalence, but acceptance is only `159/96`, or `alpha_chain=1.65625`, and mean
+emitted per step is `2.65625`. This fails the preregistered `alpha_chain >= 3.0`
+candidate-authorization gate. Static16 decode is `39,635.3 ms` versus the
+embedded `11,927.8 ms` DFlash-off comparator (`0.301x`); that comparison is
+corroborating economics, not a formal non-regression gate. P/A2 remain unrun
+because paid-cost attribution cannot repair the prerequisite acceptance miss.
+Close this sequence with no policy, prompt, floor, split, profile, or anchor
+rescue. The narrow v0.541 Reva kernel result remains intact.
 
-Force-ranked next gates from this vantage:
+Force-ranked next work from this vantage:
 
-1. **Structural routed-Q5 down remains mechanism-gated**: the real no-weight
-   ceiling is only `+2.2%/+2.4%` total decode and the local tile, staging, load,
-   scatter, reducer, and monolith shelves are closed. Reopen only for a new
-   byte/dequant/dataflow mechanism that first clears `>=10%` on
-   production-faithful captured MoE compute for both A3B and A10B.
-2. **Compressed KV remains format/body-gated**: both exact-Q8 reader layouts and
-   direct canonical Q4_0 now have decisive falsifiers. Q6/FP8-like formats and
-   materially different attention/dequant bodies remain untested, but no next
-   code experiment is authorized without a concrete mechanism and new fidelity
-   contract. Do not infer that fewer stored bytes will improve this
-   latency/occupancy-limited attention body.
-3. **No third code experiment is currently authorized**: S8 replay, BF16,
-   partial-storage/reducer work, decode glue, generated MTP heads, and local GDN
-   reshuffles all remain closed or evidence-gated. Re-rank only from a concrete
-   measured mechanism, not generic cleanup or another local parameter sweep.
+The active performance experiment queue is empty. No code experiment is
+currently authorized, and no measurement-only discriminator presently has a
+concrete measured leverage premise.
+
+Dormant reopen conditions below are not active ranks:
+
+- **Structural routed-Q5 down**: current-layout work is NO-GO. The v0.311
+  no-weight oracle improves total decode only `+2.2%/+2.4%` on A3B/A10B, while
+  the down wave itself improves only about `19%/18%`. Tile, staging, load,
+  scatter, reducer, pipeline, and monolith variants are closed. Reopen only when
+  a future written mechanism predicts `>=22%` down-wave improvement on both A3B
+  and A10B. Until then, do not measure or implement another current-layout
+  routed-Q5 variant.
+- **Compressed KV**: exact-Q8 reader/layout work and direct canonical Q4_0 are
+  closed by v0.437/v0.542/v0.543. Other formats or materially different
+  attention bodies are untested, but remain dormant until a concrete lower-byte
+  mechanism, fidelity contract, and production-faithful latency premise exist.
+  Stored-byte reduction alone is not authorization.
+
+Do not refill the queue from the closed Mei sequence, S8, BF16, exact-Q8 or
+direct-Q4 KV, F16 partial/reducer work, decode glue, generated MTP heads, local
+GDN reshuffles, or any other measured closure. Re-rank only when a genuinely new
+mechanism arrives with a quantified production-wall premise.
 
 S8 replay remains explicitly parked pending empirical arrival traces that clear
 blended `>=5-8%` net wall with p95 non-regression. No scheduler, runtime,
@@ -3346,6 +3364,11 @@ Priority rule:
   different attention/dequant body and a fresh `attn-intra` win. v0.542 shows
   that layout rearrangement alone is insufficient; do not keep packed verify
   blocked on Q8_0 specifically.
+- v0.545 closes the bounded Mei-medium DFlash witness sequence before paid-cost
+  attribution. Exact target-greedy output holds, but `alpha_chain=1.65625` and
+  mean emitted per step is `2.65625`, below both preregistered authorization
+  floors. P/A2 and every split-4 widening remain unrun; do not reopen the
+  sequence through policy, prompt, floor, profile, or anchor rescue.
 
 What the latest analysis says:
 

@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.538 Native Quantized Embedding Residency
+
+Status: exact Q4_K/Q8_0 memory path retained as an opt-in; default gate missed.
+
+- Added direct Metal Q4_K and Q8_0 row lookup so token embeddings can remain in
+  their GGUF dtype under `QWEN_NATIVE_QUANT_EMBED=1`. Unset or `=0` keeps the F32
+  baseline. Q6_K and unsupported or misaligned layouts still dequantize to F32.
+- Hardened the shared row-gather primitive while preserving its flattened-F32
+  contract: dimensions and buffer ranges are checked, integer narrowing is
+  fail-closed, and malformed row IDs produce zeros instead of out-of-bounds
+  reads.
+- Real first/last/adjacent/repeated-row fixtures are bit-exact for both Q4_K and
+  Q8_0: max absolute error and RMSE are zero, cosine is `1.0`, and repeated rows
+  match bit-for-bit. Exact 128-token streams match the F32 baseline on 27B,
+  A3B, and A10B. Serial MTP and DFlash equivalence checks also pass.
+- Token-embedding device allocation falls exactly as predicted:
+  - 27B Q4_K: `5,085,593,600 -> 715,161,600` bytes, saving `4,370,432,000`
+  - A3B Q8_0: `2,034,237,440 -> 540,344,320` bytes, saving `1,493,893,120`
+  - A10B Q8_0: `3,051,356,160 -> 810,516,480` bytes, saving `2,240,839,680`
+- The post-hardening loaded-once five-repetition AC suite establishes parity, not
+  a warm-throughput win. Native/F32 median ratios are:
+  - 27B: `pp512=0.99284`, `tg128=0.98895`
+  - A3B: `pp512=1.00150`, `tg128=0.99917`
+  - A10B: `pp512=1.00004`, `tg128=1.00106`
+  The clean 27B decode row misses the pre-registered `0.99` floor. 27B prefill
+  and A10B prefill also retain run-order/first-run variance. Keep the feature
+  default-off and make no TTFT, warm-throughput, or total-process-memory claim.
+
+Artifacts:
+`target/profiles/v0538-{27b,a3b,a10b}-embed-{f32,native}-final-suite.json`,
+the corresponding `decode128` streams, and the serial MTP/DFlash smoke rows.
+Reviews: `cx ask` sessions `019f4972-8259-7563-a2f5-abcc77fff56e` and
+`019f4985-7443-7733-996c-18281088bf10`; final readiness review
+`019f4995-a692-7dd0-8114-21b63cc6d4a9`.
+
 ## 2026-07-09 - v0.537 Native MoE MTP Expert Banks
 
 Status: exact A3B Q4_K_M tuple supported as an opt-in; default gate missed.

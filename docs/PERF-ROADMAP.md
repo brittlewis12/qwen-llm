@@ -102,9 +102,10 @@ Force-ranked prerequisites:
 7. Add a named canonical fidelity/capability profile and effective-settings
    ledger; broad environment-variable cleanup is not a prerequisite.
 
-After those gates, rank work as: native quantized embedding residency; a
-microkernel/layout prerequisite for the MTP draft LM head; small DFlash
-dead-buffer/full-accept cleanup; measured-only RoPE precompute. Treat 397B-A17B as
+After those gates, rank work as: a microkernel/layout prerequisite for the MTP
+draft LM head; real-workload-gated DFlash attention/dataflow; and a genuinely new
+compressed-KV reader/layout. Treat further embedding formats as bounded memory
+work, not warm-throughput work. Treat 397B-A17B as
 offload/distributed/ultra-low-bit enablement, not a local kernel target.
 
 ## Hardware-Saturation Recalibration (2026-07-08)
@@ -137,23 +138,30 @@ isolated MTP body time by about `37%` using existing native kernels. The path is
 supported behind `QWEN_MTP_MOE_NATIVE_BANKS=all`, but stays opt-in: tok128 paired
 draft savings are only `16.7-17.7%`, and paired speculative-decode wins
 `2.19%/3.33%/2.99%` have a strict `2.99%` median. Both default gates miss.
+v0.538 adds bit-exact Q4_K/Q8_0 token-embedding row lookup behind
+`QWEN_NATIVE_QUANT_EMBED=1`. It saves exactly `4,370,432,000` bytes on 27B,
+`1,493,893,120` on A3B, and `2,240,839,680` on A10B versus F32 token-embedding
+residency. Exact 128-token streams, Q6_K fallback, and serial MTP/DFlash checks
+pass. This remains memory leverage, not a throughput promotion: the post-hardening
+suite is near parity, and clean 27B `tg128=0.98895x` misses the `0.99` floor.
 
 Force-ranked implementation bets from this vantage:
 
-1. **Native quantized embedding residency**: treat this as a bounded memory/TTFT
-   cleanup, not an assumed warm-throughput win. Require exact row-lookup parity,
-   material resident-byte reduction, and no decode regression before defaulting.
-2. **MTP draft head only after a primitive win**: native expert banks are now
+1. **MTP draft head only after a primitive win**: native expert banks are now
    opt-in and close most of the MTP body cost, but the full-vocab Q6_K draft head
    dominates the remaining draft phase. Do not reopen broad quantization; require
    a layout/microkernel that first beats the mature Q6_K row path by `>=20%`.
-3. **Bounded DFlash attention shelf**: SWA scan pruning landed. Do not start a
+2. **Bounded DFlash attention/dataflow**: SWA scan pruning landed. Do not start a
    larger DFlash attention rewrite from static synthetic rows alone. Reopen only
    if a real long-context, high-acceptance workload shows full static decode
    `>=3%` available after scan, with greedy equivalence and unchanged acceptance.
-4. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
+3. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
    closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
    `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.
+4. **Q6_K embedding residency is memory-only follow-up**: the generic Q6_K
+   fallback is proven safe. Add a native row reader only when another exact
+   multi-GiB residency reduction is worth more than the top throughput bets;
+   do not infer a warm-throughput win from fewer resident bytes.
 5. **Small shelves**: DFlash Q8 O/FFN fusion/tuning, Q/K proj+norm+RoPE fusion,
    concurrent Q/K RoPE, stale default-off fused residual+rmsnorm, and Q4_K
    mat-mat raw-block staging for N32/N64 are useful only if implementation is

@@ -205,8 +205,17 @@ crate::env_flag!(default_on decode_moe_q5_down_k512_r2_enabled, "QWEN_DECODE_MOE
 crate::env_flag!(default_on decode_moe_fused_finalizer_enabled, "QWEN_DECODE_MOE_FUSED_FINALIZER");
 crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
 crate::env_flag!(default_off moe_router_f16_enabled, "QWEN_MOE_ROUTER_F16");
+crate::env_flag!(default_off native_quant_embed_enabled, "QWEN_NATIVE_QUANT_EMBED");
 crate::env_flag!(default_off decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
 crate::env_flag!(default_off decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
+
+fn native_quant_embedding_supported(dtype: GgmlType, shape: &[u64]) -> bool {
+    shape.len() == 2
+        && shape[0] > 0
+        && shape[1] > 0
+        && ((dtype == GgmlType::Q4_K && shape[0] % 256 == 0)
+            || (dtype == GgmlType::Q8_0 && shape[0] % 32 == 0))
+}
 
 // Per-projection GDN no-op ablations: each is its own opt-in flag, OR'd
 // with the broad `..NOOP_FRONT` umbrella flag above.
@@ -443,7 +452,8 @@ impl MetalModel {
     /// For weights that aren't matmul'd by a quant-supporting kernel
     /// (e.g. norms, ssm_a, dt_bias — they need F32 for the elementwise
     /// kernels), we dequant via the codec at load time. The big tensors
-    /// (mat_vec inputs, embeddings, lm_head) keep their native dtype.
+    /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q8_0
+    /// embeddings can opt into native residency once their row kernels apply.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
         // Helper: load a tensor that *must* be F32 in memory (used by
         // elementwise kernels, norms, etc.). Dequants via codec if needed.
@@ -475,7 +485,10 @@ impl MetalModel {
             }
         };
         let load_embedding = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            if matches!(desc.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) {
+            let native_quant = native_quant_embed_enabled()
+                && native_quant_embedding_supported(desc.dtype, &desc.shape);
+            if matches!(desc.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) || native_quant
+            {
                 Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
             } else {
                 load_f32(desc)
@@ -497,8 +510,7 @@ impl MetalModel {
             )?)
         };
 
-        // Embedding has native get_rows kernels for F32/F16/BF16. Quantized
-        // embeddings still dequant to F32 until they get native get_rows.
+        // Quantized embedding residency is opt-in until family performance gates.
         let token_embd = load_embedding(model.token_embd)?;
         let output_norm = load_f32(model.output_norm)?;
         let lm_head = load_weight(model.lm_head)?;
@@ -8269,6 +8281,91 @@ mod tests {
     use crate::loader::Model;
 
     #[test]
+    fn native_quant_embedding_support_is_exact() {
+        assert!(native_quant_embedding_supported(
+            GgmlType::Q4_K,
+            &[5120, 248_320]
+        ));
+        assert!(native_quant_embedding_supported(
+            GgmlType::Q8_0,
+            &[2048, 248_320]
+        ));
+        assert!(native_quant_embedding_supported(
+            GgmlType::Q8_0,
+            &[3072, 248_320]
+        ));
+        assert!(!native_quant_embedding_supported(
+            GgmlType::Q6_K,
+            &[5120, 248_320]
+        ));
+        assert!(!native_quant_embedding_supported(
+            GgmlType::Q4_K,
+            &[5119, 248_320]
+        ));
+        assert!(!native_quant_embedding_supported(
+            GgmlType::Q8_0,
+            &[2047, 248_320]
+        ));
+        assert!(!native_quant_embedding_supported(GgmlType::Q8_0, &[2048]));
+        assert!(!native_quant_embedding_supported(
+            GgmlType::Q8_0,
+            &[0, 248_320]
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires QWEN_EMBED_RESIDENCY_MODEL local fixture"]
+    fn quantized_embedding_residency_load_probe() {
+        let path = std::env::var("QWEN_EMBED_RESIDENCY_MODEL")
+            .expect("set QWEN_EMBED_RESIDENCY_MODEL to a local GGUF");
+        let ctx = MetalContext::new().expect("metal context");
+        let g = GgufFile::open(&path).expect("open fixture");
+        let m = Model::from_gguf(&g).expect("bind model");
+        let source = m.token_embd;
+        assert!(
+            !matches!(source.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16),
+            "probe requires a quantized token embedding"
+        );
+        let f32_bytes = source.n_elements().checked_mul(4).expect("F32 byte size");
+        let allocated_before = ctx.current_allocated_size();
+        let started = std::time::Instant::now();
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let load_ms = started.elapsed().as_secs_f64() * 1e3;
+        let allocated_after = ctx.current_allocated_size();
+        let allocated_delta = allocated_after.saturating_sub(allocated_before);
+        let resident_bytes = mm.token_embd.buffer.length() as u64;
+        let expect_native = native_quant_embed_enabled()
+            && native_quant_embedding_supported(source.dtype, &source.shape);
+
+        assert_eq!(mm.token_embd.dtype == source.dtype, expect_native);
+        assert_eq!(resident_bytes, mm.token_embd.n_bytes());
+        if expect_native {
+            assert_eq!(resident_bytes, source.n_bytes);
+            let theoretical_savings = f32_bytes - source.n_bytes;
+            let observed_savings = f32_bytes - resident_bytes;
+            assert!(observed_savings * 100 >= theoretical_savings * 95);
+        } else if !matches!(source.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) {
+            assert_eq!(mm.token_embd.dtype, GgmlType::F32);
+            assert_eq!(resident_bytes, f32_bytes);
+        }
+        eprintln!(
+            concat!(
+                "[embed-residency] model={} source={:?} resident={:?} ",
+                "source_bytes={} resident_bytes={} f32_bytes={} device_delta={} ",
+                "load_ms={:.3}"
+            ),
+            path,
+            source.dtype,
+            mm.token_embd.dtype,
+            source.n_bytes,
+            resident_bytes,
+            f32_bytes,
+            allocated_delta,
+            load_ms,
+        );
+    }
+
+    #[test]
     fn checked_u64_div_exact_rejects_zero_or_remainder() {
         assert!(checked_u64_div_exact(12, 3, "ok").is_ok());
         assert!(checked_u64_div_exact(12, 0, "zero").is_err());
@@ -9265,7 +9362,8 @@ mod tests {
         // or fallback to F32?
         // Match the policy in MetalModel::load:
         //   * load_f32 (ALWAYS dequant to F32): norms, ssm_a, ssm_dt, conv1d,
-        //     ssm_norm, q_norm, k_norm, output_norm, token_embd
+        //     ssm_norm, q_norm, k_norm, output_norm; token_embd is F32 by
+        //     default and Q4_K/Q8_0-native under QWEN_NATIVE_QUANT_EMBED.
         //   * load_weight (preserves F32/Q4_K/Q6_K, falls back to F32 for
         //     others): all the mat_vec weights — lm_head, ffn_*, attn_q/k/v/o,
         //     attn_qkv, attn_gate, in_proj_qkv, in_proj_z, beta_proj,
@@ -9286,7 +9384,7 @@ mod tests {
         // Top-level tensors.
         bump(
             &mut stats,
-            "token_embd (load_f32)",
+            "token_embd (F32 default; Q4_K/Q8_0 native opt-in)",
             m.token_embd.n_bytes,
             f32_size(&m.token_embd.shape),
         );

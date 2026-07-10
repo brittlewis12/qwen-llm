@@ -639,6 +639,7 @@ kernel void kernel_scatter_offset_f32_to_q8_0_kv(
 struct get_rows_args {
     uint n_rows;
     uint n_cols;
+    uint n_vocab;
 };
 
 static inline float bf16_to_float(ushort v) {
@@ -655,7 +656,12 @@ kernel void kernel_get_rows_f32(
     const uint i = gid.x;
     if (r >= args.n_rows || i >= args.n_cols) return;
     const int row = ids[r];
-    y[r * args.n_cols + i] = embed[(uint)row * args.n_cols + i];
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+    y[out_index] = embed[(ulong)(uint)row * args.n_cols + i];
 }
 
 kernel void kernel_get_rows_f16(
@@ -668,7 +674,12 @@ kernel void kernel_get_rows_f16(
     const uint i = gid.x;
     if (r >= args.n_rows || i >= args.n_cols) return;
     const int row = ids[r];
-    y[r * args.n_cols + i] = float(embed[(uint)row * args.n_cols + i]);
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+    y[out_index] = float(embed[(ulong)(uint)row * args.n_cols + i]);
 }
 
 kernel void kernel_get_rows_bf16(
@@ -681,7 +692,94 @@ kernel void kernel_get_rows_bf16(
     const uint i = gid.x;
     if (r >= args.n_rows || i >= args.n_cols) return;
     const int row = ids[r];
-    y[r * args.n_cols + i] = bf16_to_float(embed[(uint)row * args.n_cols + i]);
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+    y[out_index] = bf16_to_float(embed[(ulong)(uint)row * args.n_cols + i]);
+}
+
+static inline void get_rows_q4_K_scale_min(
+        uint subblock,
+        device const uchar * scales,
+        thread uchar & scale,
+        thread uchar & min_value) {
+    if (subblock < 4) {
+        scale = scales[subblock] & 63;
+        min_value = scales[subblock + 4] & 63;
+    } else {
+        scale = (scales[subblock + 4] & 0x0F) |
+                ((scales[subblock - 4] >> 6) << 4);
+        min_value = (scales[subblock + 4] >> 4) |
+                    ((scales[subblock] >> 6) << 4);
+    }
+}
+
+kernel void kernel_get_rows_q4_K_f32(
+        constant get_rows_args & args [[buffer(0)]],
+        device const uchar * embed [[buffer(1)]],
+        device const int   * ids   [[buffer(2)]],
+        device       float * y     [[buffer(3)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint r = gid.y;
+    const uint i = gid.x;
+    if (r >= args.n_rows || i >= args.n_cols) return;
+
+    constexpr ulong Q4_K_BYTES = 144;
+    constexpr uint QK_K = 256;
+    const int row_i = ids[r];
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row_i >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+    const uint row = (uint)row_i;
+    const ulong blocks_per_row = (ulong)args.n_cols / QK_K;
+    const ulong block_index = (ulong)row * blocks_per_row + i / QK_K;
+    device const uchar * block = embed + block_index * Q4_K_BYTES;
+    const uint in_block = i % QK_K;
+    const uint subblock = in_block / 32;
+    const uint quant_index = in_block % 32;
+    device const uchar * scales = block + 4;
+    device const uchar * qs = block + 16;
+
+    uchar scale_u;
+    uchar min_u;
+    get_rows_q4_K_scale_min(subblock, scales, scale_u, min_u);
+    const uchar packed = qs[(subblock / 2) * 32 + quant_index];
+    const uchar quant = (subblock & 1) ? (packed >> 4) : (packed & 0x0F);
+    const float dl = float(((device const half *)block)[0]) * float(scale_u);
+    const float ml = float(((device const half *)block)[1]) * float(min_u);
+    y[out_index] = dl * float(quant) - ml;
+}
+
+kernel void kernel_get_rows_q8_0_f32(
+        constant get_rows_args & args [[buffer(0)]],
+        device const uchar * embed [[buffer(1)]],
+        device const int   * ids   [[buffer(2)]],
+        device       float * y     [[buffer(3)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint r = gid.y;
+    const uint i = gid.x;
+    if (r >= args.n_rows || i >= args.n_cols) return;
+
+    constexpr ulong Q8_0_BYTES = 34;
+    constexpr uint QK8_0 = 32;
+    const int row_i = ids[r];
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row_i >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+    const uint row = (uint)row_i;
+    const ulong blocks_per_row = (ulong)args.n_cols / QK8_0;
+    const ulong block_index = (ulong)row * blocks_per_row + i / QK8_0;
+    device const uchar * block = embed + block_index * Q8_0_BYTES;
+    const uint quant_index = i % QK8_0;
+    const float d = float(((device const half *)block)[0]);
+    const int8_t quant = ((device const int8_t *)(block + 2))[quant_index];
+    y[out_index] = d * float(quant);
 }
 
 // GDN α-chain fusion (replaces 3 dispatches: add_inplace + softplus + mul).

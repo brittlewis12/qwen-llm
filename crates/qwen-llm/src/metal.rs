@@ -467,6 +467,11 @@ impl MetalContext {
         })
     }
 
+    /// Bytes currently allocated through this Metal device.
+    pub fn current_allocated_size(&self) -> u64 {
+        self.device.currentAllocatedSize() as u64
+    }
+
     /// Allocate a buffer populated from a `bytemuck::Pod` slice.
     /// Uses `StorageModeShared` (unified memory).
     pub fn buffer_from<T: bytemuck::Pod>(&self, data: &[T]) -> Result<Buffer, MetalError> {
@@ -15332,9 +15337,9 @@ pub fn encode_l2_norm_pair_batched_f32(
     Ok(())
 }
 
-/// Embedding lookup: `y[r * n_cols + i] = embed[ids[r] * n_cols + i]`.
-/// `embed` is `[vocab, n_cols]` in F32/F16/BF16; `ids` is `[n_rows]` i32.
-/// Decode uses `n_rows = 1`; prefill uses `n_rows = batch`.
+/// Row lookup: `y[r * n_cols + i] = source[ids[r] * n_cols + i]`.
+/// The source may be flat or multidimensional; its logical element count
+/// defines the row count. GGUF embeddings are normally `[n_cols, vocab]`.
 pub fn encode_get_rows_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -15344,7 +15349,19 @@ pub fn encode_get_rows_f32(
     n_rows: usize,
     n_cols: usize,
 ) -> Result<(), MetalError> {
-    if y.n_elements() as usize != n_rows * n_cols {
+    if n_rows == 0 || n_cols == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!("n_rows={n_rows} and n_cols={n_cols} must be nonzero"),
+        });
+    }
+    let output_elements = n_rows
+        .checked_mul(n_cols)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "get_rows",
+            detail: "n_rows*n_cols overflow".into(),
+        })?;
+    if y.n_elements() as usize != output_elements {
         return Err(MetalError::BadShape {
             kernel: "get_rows",
             detail: format!(
@@ -15360,10 +15377,81 @@ pub fn encode_get_rows_f32(
             detail: format!("ids.n={} != n_rows={n_rows}", ids.n_elements()),
         });
     }
-    let kernel_name = match embed.dtype {
-        GgmlType::F32 => "kernel_get_rows_f32",
-        GgmlType::F16 => "kernel_get_rows_f16",
-        GgmlType::BF16 => "kernel_get_rows_bf16",
+    let ids_bytes = n_rows
+        .checked_mul(std::mem::size_of::<i32>())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "get_rows",
+            detail: "ids byte size overflow".into(),
+        })?;
+    let ids_end = ids
+        .offset
+        .checked_add(ids_bytes as u64)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "get_rows",
+            detail: "ids buffer range overflow".into(),
+        })?;
+    if ids_end > ids.buffer.length() as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                "ids range offset={} bytes={ids_bytes} exceeds buffer={}",
+                ids.offset,
+                ids.buffer.length()
+            ),
+        });
+    }
+    if y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!("expected F32 output, got {:?}", y.dtype),
+        });
+    }
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "get_rows",
+            detail: "output byte size overflow".into(),
+        })?;
+    let output_end =
+        y.offset
+            .checked_add(output_bytes as u64)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "get_rows",
+                detail: "output buffer range overflow".into(),
+            })?;
+    if output_end > y.buffer.length() as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                "output range offset={} bytes={output_bytes} exceeds buffer={}",
+                y.offset,
+                y.buffer.length()
+            ),
+        });
+    }
+    let source_elements =
+        usize::try_from(embed.n_elements()).map_err(|_| MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!("source element count {} exceeds usize", embed.n_elements()),
+        })?;
+    if source_elements == 0 || source_elements % n_cols != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                concat!(
+                    "source shape {:?} with {} elements is not a nonempty ",
+                    "collection of {}-element rows"
+                ),
+                embed.shape, source_elements, n_cols,
+            ),
+        });
+    }
+    let source_rows = source_elements / n_cols;
+    let block_layout = match embed.dtype {
+        GgmlType::F32 => (1usize, 4usize),
+        GgmlType::F16 | GgmlType::BF16 => (1, 2),
+        GgmlType::Q4_K => (256, 144),
+        GgmlType::Q8_0 => (32, 34),
         other => {
             return Err(MetalError::BadShape {
                 kernel: "get_rows",
@@ -15371,19 +15459,81 @@ pub fn encode_get_rows_f32(
             });
         }
     };
+    let (block_elements, block_bytes) = block_layout;
+    if n_cols % block_elements != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                "n_cols={n_cols} is not divisible by {:?} block size {block_elements}",
+                embed.dtype
+            ),
+        });
+    }
+    let n_rows_u32 = u32::try_from(n_rows).map_err(|_| MetalError::BadShape {
+        kernel: "get_rows",
+        detail: format!("n_rows={n_rows} exceeds u32"),
+    })?;
+    let n_cols_u32 = u32::try_from(n_cols).map_err(|_| MetalError::BadShape {
+        kernel: "get_rows",
+        detail: format!("n_cols={n_cols} exceeds u32"),
+    })?;
+    let source_rows_u32 = u32::try_from(source_rows).map_err(|_| MetalError::BadShape {
+        kernel: "get_rows",
+        detail: format!("source row count {source_rows} exceeds u32"),
+    })?;
+    let expected_bytes = n_cols
+        .checked_div(block_elements)
+        .and_then(|blocks| blocks.checked_mul(block_bytes))
+        .and_then(|row_bytes| row_bytes.checked_mul(source_rows))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "get_rows",
+            detail: "embedding byte size overflow".into(),
+        })?;
+    let buffer_end = embed
+        .offset
+        .checked_add(expected_bytes as u64)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "get_rows",
+            detail: "embedding buffer range overflow".into(),
+        })?;
+    if embed.n_bytes() as usize != expected_bytes || buffer_end > embed.buffer.length() as u64 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                concat!(
+                    "embedding bytes mismatch: logical={} expected={} ",
+                    "offset={} buffer={}"
+                ),
+                embed.n_bytes(),
+                expected_bytes,
+                embed.offset,
+                embed.buffer.length()
+            ),
+        });
+    }
+    let kernel_name = match embed.dtype {
+        GgmlType::F32 => "kernel_get_rows_f32",
+        GgmlType::F16 => "kernel_get_rows_f16",
+        GgmlType::BF16 => "kernel_get_rows_bf16",
+        GgmlType::Q4_K => "kernel_get_rows_q4_K_f32",
+        GgmlType::Q8_0 => "kernel_get_rows_q8_0_f32",
+        _ => unreachable!(),
+    };
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct GetRowsArgs {
         n_rows: u32,
         n_cols: u32,
+        n_vocab: u32,
     }
     let pso = ctx.pipeline(kernel_name)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
         &GetRowsArgs {
-            n_rows: n_rows as u32,
-            n_cols: n_cols as u32,
+            n_rows: n_rows_u32,
+            n_cols: n_cols_u32,
+            n_vocab: source_rows_u32,
         },
     );
     enc.set_tensor(1, embed);
@@ -22497,7 +22647,7 @@ mod tests {
     }
 
     #[test]
-    fn get_rows_matches_cpu() {
+    fn get_rows_flat_f32_matches_cpu_and_guards_ids() {
         let ctx = match MetalContext::new() {
             Ok(c) => c,
             Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
@@ -22506,13 +22656,13 @@ mod tests {
         let vocab = 100usize;
         let n_cols = 64usize;
         let embed: Vec<f32> = (0..vocab * n_cols).map(|i| i as f32 * 0.001).collect();
-        let ids: Vec<i32> = vec![3, 17, 42, 99];
+        let ids: Vec<i32> = vec![3, 17, 42, 99, -1, vocab as i32];
         let n_rows = ids.len();
 
         let embed_t = MetalTensor::from_bytes(
             &ctx,
             bytemuck::cast_slice(&embed),
-            vec![n_cols as u64, vocab as u64],
+            vec![(n_cols * vocab) as u64],
             GgmlType::F32,
         )
         .unwrap();
@@ -22530,9 +22680,12 @@ mod tests {
         .unwrap();
         let gpu = read_back_f32(&y_t.buffer, n_rows * n_cols);
         for r in 0..n_rows {
-            let row = ids[r] as usize;
             for i in 0..n_cols {
-                let expected = embed[row * n_cols + i];
+                let expected = if ids[r] < 0 || ids[r] as usize >= vocab {
+                    0.0
+                } else {
+                    embed[ids[r] as usize * n_cols + i]
+                };
                 let got = gpu[r * n_cols + i];
                 assert!(
                     (got - expected).abs() < 1e-7,
@@ -22541,6 +22694,114 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn quantized_get_rows_fixture(path: &str, expected_dtype: GgmlType, bit_exact: bool) {
+        assert!(
+            std::path::Path::new(path).exists(),
+            "required fixture missing: {path}"
+        );
+        let ctx = MetalContext::new().expect("metal context");
+        let g = crate::gguf::GgufFile::open(path).expect("open fixture");
+        let model = crate::loader::Model::from_gguf(&g).expect("load model");
+        let desc = model.token_embd;
+        assert_eq!(desc.dtype, expected_dtype);
+        assert_eq!(desc.shape.len(), 2);
+        let n_cols = desc.shape[0] as usize;
+        let vocab = desc.shape[1] as usize;
+        let ids = vec![0i32, (vocab - 1) as i32, 1, (vocab - 2) as i32, 17, 17];
+        let n_rows = ids.len();
+        let embed = MetalTensor::from_gguf_tensor(&ctx, desc, g.slice(desc)).expect("embedding");
+        let ids_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&ids),
+            vec![n_rows as u64],
+            GgmlType::F32,
+        )
+        .expect("ids");
+        let output =
+            MetalTensor::zeros_f32(&ctx, vec![n_rows as u64, n_cols as u64]).expect("output");
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed, &ids_t, &output, n_rows, n_cols)
+        })
+        .expect("get rows");
+        let gpu = read_back_f32(&output.buffer, n_rows * n_cols);
+
+        let tensor_bytes = g.slice(desc);
+        let row_bytes = desc.n_bytes as usize / vocab;
+        let mut expected = Vec::with_capacity(n_rows * n_cols);
+        for &id in &ids {
+            let row = id as usize;
+            let mut row_desc = desc.clone();
+            row_desc.name = format!("{}.row.{row}", desc.name);
+            row_desc.shape = vec![n_cols as u64];
+            row_desc.data_offset = 0;
+            row_desc.n_bytes = row_bytes as u64;
+            expected.extend(
+                crate::codec::dequant_to_f32(
+                    &row_desc,
+                    &tensor_bytes[row * row_bytes..(row + 1) * row_bytes],
+                )
+                .expect("dequant row"),
+            );
+        }
+
+        let mut max_abs = 0.0f32;
+        let mut squared = 0.0f64;
+        let mut dot = 0.0f64;
+        let mut gpu_norm = 0.0f64;
+        let mut cpu_norm = 0.0f64;
+        for (&candidate, &reference) in gpu.iter().zip(expected.iter()) {
+            assert!(candidate.is_finite());
+            max_abs = max_abs.max((candidate - reference).abs());
+            squared += ((candidate - reference) as f64).powi(2);
+            dot += candidate as f64 * reference as f64;
+            gpu_norm += (candidate as f64).powi(2);
+            cpu_norm += (reference as f64).powi(2);
+            if bit_exact {
+                assert_eq!(candidate.to_bits(), reference.to_bits());
+            }
+        }
+        let rmse = (squared / gpu.len() as f64).sqrt();
+        let cosine = dot / (gpu_norm.sqrt() * cpu_norm.sqrt() + 1e-30);
+        let repeated_a = &gpu[4 * n_cols..5 * n_cols];
+        let repeated_b = &gpu[5 * n_cols..6 * n_cols];
+        assert!(
+            repeated_a
+                .iter()
+                .zip(repeated_b.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        eprintln!(
+            concat!(
+                "[quant-get-rows] dtype={:?} rows={} cols={} ",
+                "max_abs={:.3e} rmse={:.3e} cos={:.10}"
+            ),
+            expected_dtype, n_rows, n_cols, max_abs, rmse, cosine,
+        );
+        assert!(max_abs <= 1e-6);
+        assert!(rmse <= 1e-7);
+        assert!(cosine >= 0.99999999);
+    }
+
+    #[test]
+    #[ignore = "requires local 27B Q4_K fixture"]
+    fn get_rows_q4_k_matches_selected_cpu_rows() {
+        quantized_get_rows_fixture(
+            "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            GgmlType::Q4_K,
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local A3B Q8_0 embedding fixture"]
+    fn get_rows_q8_0_matches_selected_cpu_rows() {
+        quantized_get_rows_fixture(
+            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            GgmlType::Q8_0,
+            true,
+        );
     }
 
     /// CPU reference: forward::rope_in_place — applies NEOX-pairing partial

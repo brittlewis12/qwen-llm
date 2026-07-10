@@ -6,6 +6,60 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.556 Physical-N8 Denominator Splits Dense and MoE
+
+Status: dense-27B proposer family promoted to offline survey; current A3B
+packed-MoE/GDN verifier killed in the numerical/exact lane.
+
+- The planned 437-token Reva tokenizer prefix is not a valid decode fixture. Both
+  models emit EOS on the first generated token, producing one emitted token and
+  zero target transitions in all 14 rows. Those rows contain no verifier economics
+  and are retained only as a fixture-failure record.
+- Replaced it with a frozen, complete 418-token Qwen chat prompt that naturally
+  emits all 128 requested tokens. The fixture is
+  `docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt`.
+- Dense 27B passes every stream, 127-transition, physical-N8, final-N7, no-MTP,
+  position, continuation-argmax, and numerical resume gate in seven fresh
+  processes. Decode-only ratios are `2.591826/2.462549/2.602307/2.609565/`
+  `2.606604/2.613965/2.601653x`: median `2.602307x`, range
+  `2.462549-2.613965x`, and seeded-bootstrap one-sided 95% lower bound
+  `2.591826x`.
+- The 418-token median is `4904.666 -> 1884.317 ms` decode. Median serial cost is
+  `38.619 ms/transition`; median verifier cost is `117.633 ms/packet`.
+  `8*C1/C8=2.626`, so one N8 packet costs about `3.047` serial transitions. The
+  zero-overhead, zero-abstention necessary floor for `1.10x` is about `3.35`
+  emitted tokens per charged packet. Real policy thresholds rise with serial
+  fallback, proposer work, and rejection-depth correction/restore costs.
+- A separate seven-row 12-token code guardrail passes every dense-27B gate at
+  `2.630660x` median (`2.625705-2.633475x`). The similar short and 418-token
+  results make the dense interactive ceiling credible, but do not authorize MoE,
+  true-long contexts, bitwise identity, or stochastic distribution claims.
+- A3B fails before economics. The 418-token chat fixture diverges from the serial
+  greedy stream. The code fixture preserves the observed 128-token stream and one
+  continuation argmax but fails resume numerics at both 16 and 128 tokens. At 128,
+  KV cosine is `0.999698864`, continuation-logit cosine is `0.999197009`, maximum
+  logit delta is `0.437913`, GDN state delta is `0.064119`, and conv delta is
+  `0.336788`. Exact positions disfavor a terminal cursor error.
+- Kill only the current A3B packed-MoE/GDN implementation under the declared
+  numerical/exact contract. Reopen for a materially state-preserving verifier or
+  an economically justified, explicitly approximate contract; do not relabel one
+  favorable observed greedy window as family-level exactness.
+- Next EV is a causal offline proposal-economics artifact for dense 27B. It will
+  compare prompt lookup and recorded native-MTP proposals in one schema, split
+  prompt/self sources, test match gates `8/16/32`, prevent future-token leakage,
+  model adaptive serial fallback, and charge every attempt with this N8
+  denominator before any target-only proposer implementation. Policy selection
+  uses development rows; promotion uses a frozen held-out triad and narrative
+  guardrail with event-level rejection and fallback accounting.
+
+Artifacts: `target/profiles/v0555-n8-oracle/` (invalid original fixture) and
+`target/profiles/v0555-n8-oracle-final/` (canonical packets), plus
+`target/profiles/v0555-n8-oracle-chat/` (A3B code-state and dense short guards).
+Canonical final rows use clean HEAD `74503e4`, a post-commit release rebuild, and
+30-second inter-row cooldowns. Adversarial reviews: `cx ask` sessions
+`019f4e15-fe81-7713-969e-f261b9e62e27` and
+`019f4e2b-589e-7da1-9a43-3f84a92c4e14`.
+
 ## 2026-07-10 - v0.554 Physical-N8 Terminal Oracle Corrected
 
 Status: verifier-harness correctness; no verifier performance conclusion.

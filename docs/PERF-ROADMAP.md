@@ -196,17 +196,43 @@ A 27B eight-token smoke passes `7/7` transitions, effective N7, equal positions,
 KV cosine `0.9999999124`, exact continuation argmax, and continuation cosine
 `0.9999999994`. This validates the harness, not verifier economics.
 
+v0.556 prices that denominator and splits the family by architecture. The frozen
+437-token tokenizer prefix is not a decode fixture: both models emit EOS first,
+so its zero-transition rows carry no verifier evidence. A frozen, complete
+418-token Qwen chat replacement emits 128 tokens. Dense 27B passes every stream,
+transition, terminal, and numerical resume gate in seven fresh processes. Its
+decode-only oracle is `2.602307x` median (`2.462549-2.613965x`) with a bootstrap
+one-sided 95% lower bound of `2.591826x`. A separate seven-row 12-token code
+guardrail is `2.630660x` median. The 418-token median serial transition is
+`38.619 ms`; the physical-N8 verifier packet is `117.633 ms`, so a charged packet
+costs about `3.047` serial transitions. The zero-overhead, zero-abstention
+necessary floor for `1.10x` is about `3.35` emitted tokens per charged packet;
+real policies need more after fallback, proposer, correction, and restore costs.
+
+A3B does not clear the corrected state contract. The complete chat fixture
+diverges from the serial greedy stream. A 12-token code prompt keeps the observed
+128-token stream and next argmax but fails resume numerics by token 16 and again
+at token 128; the latter reaches KV cosine `0.999698864`, continuation-logit
+cosine `0.999197009`, and maximum logit delta `0.437913`. Kill the current
+packed-MoE/GDN physical-N8 implementation in the numerical/exact lane. This does
+not prove that every state-preserving A3B verifier organization is impossible.
+Do not invent a weaker contract merely to retain this implementation.
+
 Next contract work:
 
-1. Run seven fresh-process physical-N8 oracle rows on the frozen 437-token Reva
-   prefix for A3B and 27B. Use decode-only ratios and require every transition,
-   no-MTP-call, stream, and resume-audit gate to pass.
-2. Extend once to eleven only if the paired log-ratio interval still cannot decide
-   the `1.10x` regime gate. Do not delay it for packed-vocabulary work.
-3. Separate work removal from boundary movement: constructing the tokenizer or
+1. Build one causal, closed-loop proposal-economics artifact for dense 27B. Put
+   prompt lookup and recorded native-MTP proposals in the same schema and charge
+   N8 attempts against serial fallback using the measured denominator.
+2. Implement a target-only prompt-lookup path only if a fixed offline policy
+   clears the charged fixture gates with enough margin. It must use normal packed
+   prefill, adaptive abstention, and no MTP asset or history construction.
+3. Keep the current A3B physical-N8 path closed unless a materially different
+   verifier reproduces serial recurrent state or an explicitly approximate lane
+   first demonstrates enough upside to justify quality validation.
+4. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
-4. Keep process-cold load/residency and warm `pp<N>` throughput as separate rows.
+5. Keep process-cold load/residency and warm `pp<N>` throughput as separate rows.
 
 This is a product correction plus a bounded objective measurement, not a return to
 provenance-first work. Build identity and correctness gates remain guardrails.
@@ -311,16 +337,18 @@ Completed v0.546 removes the token-0 transition from TTFT and the unused termina
 transition from total request wall. For base TTFT `B` and removed transition `D`,
 speedup is `(B + D) / B`.
 
-1. **Prompt lookup/ngram proposals**: target-verified decode for repetitive
-   workloads, with no learned drafter or MTP state. Gain is unknown until closed-
-   loop proposals are charged through the actual N8 verifier. Confidence is
-   medium-low and cost is medium.
-2. **Native MTP D7/N8**: asset-dependent target-verified decode. Existing A3B
-   gains are low-single-digit while dense 27B code evidence is stronger. Prompt
-   history construction is a separate TTFT cost. Confidence and cost are medium.
-3. **Model/length chunk policy**: measured long-prefill gains are about 3% on
+1. **Dense-27B prompt lookup/ngram proposals**: target-verified decode for
+   repetitive workloads, with no learned drafter or MTP state. The measured
+   fixed-N8 decode-only ceiling is `2.60-2.63x` in the measured 12/418-token
+   regimes. Belief is medium for quotation and self-repetition, low for generic
+   prose, and survey cost is low. An offline causal survey precedes implementation.
+2. **Model/length chunk policy**: measured long-prefill gains are about 3% on
    selected A3B rows and 6% on selected A10B rows, with little dense benefit.
    Numerical contract, high measured-cell confidence, and low cost.
+3. **Native MTP D7/N8**: asset-dependent target-verified decode. It must compete
+   in the same charged proposal-economics schema as prompt lookup and pay history,
+   capture, replay, and TTFT costs. Current A3B gains are low-single-digit; the
+   current A3B packed verifier also fails the numerical resume contract.
 4. **Route-ledger-aware fused MoE tail**: a conditional prefill work-unit reset
    that must remove named slot buffers, dispatches, or bank passes beyond the
    current grouped path. Gain is unknown, confidence is low, and cost is high.
@@ -355,22 +383,31 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Price the corrected physical-N8 oracle on seven fresh A3B and 27B rows using
-   the frozen 437-token Reva prefix and decode-only regime gate.
-2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
-   proposer. If the verifier-only oracle cannot clear the product wall gate in a
-   model/context regime, demote every proposal source in that regime.
-3. Build a family-level prompt-lookup survey over short code, canonical real-long,
-   and adversarial fixtures. Split prompt-sourced from self-output-sourced copies;
-   gate proposals on literal match length `8/16/32`; charge surviving closed-loop
-   proposals through physical N8 with native MTP disabled.
-4. Survey bounded native-MTP attention history with physical N8 fixed. First vary
+1. Build a versioned dense-27B `proposal-economics.jsonl`. Simulate causally and
+   closed-loop over code, self-repetition, quotation/retrieval, real-long, generic
+   narrative, and adversarial repeated-prefix fixtures. Split prompt and output
+   sources; test literal match gates `8/16/32`; forbid uncommitted self-copy; and
+   compare a small preregistered occurrence-policy set with adaptive abstention.
+   Select policy on development rows, then freeze it before held-out evaluation.
+2. Charge each attempted proposal with the measured context-specific N8 packet
+   and each abstention with one serial transition. Replay or calibrate rejection-
+   depth correction/restore costs rather than charging the all-accepted packet
+   universally. Report availability, accepted-run histograms, emitted progress,
+   fallback fraction, CPU cost, p50/p10 row economics, decode ratio, and total-
+   request ratio. Put recorded native-MTP proposals in the same schema rather
+   than granting heritage priority.
+3. If one fixed prompt-lookup policy clears the offline gates comfortably, build
+   the minimum target-only dense-27B path. Use normal packed prefill, no MTP asset
+   or history, and adaptive serial fallback. Kill on `<1.10x` charged decode,
+   `>3%` TTFT regression, `>1%` proposer CPU, or failed stream/resume gates.
+4. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
+   default-off G8 fused-QKV path as a separate oracle because it duplicates the
+   Q/K/V bank and is not yet a memory-light production layout.
+5. Survey bounded native-MTP attention history only if its recorded proposal
+   rows beat prompt lookup after charged economics. First vary
    read windows `32/64/128/256/full` while retaining full history construction.
    Price lazy first-engagement construction, hidden capture/storage, and suffix
    replay explicitly; only design suffix construction if proposal quality holds.
-5. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
-   default-off G8 fused-QKV path as a separate oracle because it duplicates the
-   Q/K/V bank and is not yet a memory-light production layout.
 6. Establish canonical quality-harness v0 before promoting model-changing work:
    code-edit exact match, Mei-class long-document QA, and narrative constraint
    following, with bounded per-candidate runtime and versioned fixtures.
@@ -389,10 +426,14 @@ better than a decode win; each result must retain its objective-lane label.
 
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
-  authorizing a new proposal source there.
+  authorizing a new proposal source there. Dense 27B short/interactive clears;
+  the current A3B packed-MoE/GDN implementation fails its state contract.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.
+  The current dense-27B denominator sets a zero-overhead, zero-abstention
+  necessary floor of about `3.35` emitted tokens per charged N8 packet. Apply the
+  promotion gate to a frozen policy on held-out rows, not its selection corpus.
   A failed proposer demotes prompt lookup; a failed verifier-only oracle demotes
   all proposal sources only in the measured model/context regime.
 - **Native MTP**: total request `>=1.10x` on at least two named archetypes at 128+
@@ -439,7 +480,9 @@ target-verified drafter first when that preserves target authority.
   guardrail. Do not build every model x quant x context cell.
 - Use a prompt fixture triad for workload-sensitive claims: favorable short,
   canonical real-long, and an adversarial witness. One prompt cannot promote a
-  proposal, policy, or approximate model change.
+  proposal, policy, or approximate model change. Use separate development rows
+  to select proposal policy, then gate on a frozen held-out triad plus a generic-
+  narrative guardrail.
 - Require a costed oracle before a kernel for speculation, top-k, sparse
   attention, mixed precision, and compressed KV.
 - Constrain configuration dimensions from prior evidence: physical N8 for MTP,

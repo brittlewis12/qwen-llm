@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.548 Paired First-vs-Warm TTFT Discriminator
+
+Status: causal measurement split; no optimization or performance promotion.
+
+- `--request-timing-warm-followup` now runs exactly two identical single-turn
+  requests after one model load. Request 0 constructs the tokenizer; request 1
+  reuses it. Both reacquire and retokenize the prompt, create fresh scratch and
+  sequence state, prefill from position zero, and stream through the same stdout
+  endpoint. Prefix-cache restore and insertion remain absent.
+- Schema 2 records request index/epoch, tokenizer reuse, pair identity, explicit
+  no-cache status, and allocation deltas against process-model-ready and each
+  request start. Neither row is written until prompt bytes, prompt token IDs,
+  complete generated token IDs, and stop reason match. The two rows are serialized
+  into one buffer before one `write_all` and flush; crash durability is not
+  claimed.
+- A redirected 0.8B Q4 `Hello`, four-token pair emitted the exact control stream
+  twice. First/warm TTFT was `106.72/13.44 ms` (`7.94x`); total request wall was
+  `116.57/22.77 ms` (`5.12x`). Transition wall was close at `8.86/8.20 ms`.
+- The observed first-position TTFT tax is `93.28 ms`. Directly bracketed tokenizer
+  construction accounts for `70.52 ms`; prefill moves `35.44 -> 12.64 ms`, a
+  `22.79 ms` difference. These differences numerically explain nearly the entire
+  gap in this one tiny-prompt observation.
+- The prefill delta is not yet a PSO claim. Pipeline compilation, first command
+  submission, residency, allocator/driver state, GPU power state, and other first
+  touches are confounded. The warm row also begins with a persistent device-wide
+  `256 KiB` allocation left after request 0; no additional request-1 allocation
+  remains after its state drop.
+- This result changes the search split but not the winner: instrument PSO-cache
+  misses/compile wall, replicate fresh processes, then use one realistic
+  interactive prompt and one longer guardrail. Moving tokenizer or pipeline work
+  before model-ready is boundary movement unless process-cold first flush improves.
+
+Artifacts: `target/profiles/v0548-08b-pair.{jsonl,out,err}`.
+Design and result reviews: `cx ask` sessions
+`019f4d9b-9d95-7590-afec-beae247c5e93` and
+`019f4da5-741e-7d82-aeb9-a686fe447c72`.
+
 ## 2026-07-10 - v0.547 First-Post-Load TTFT Contract
 
 Status: measurement infrastructure; no optimization or performance promotion.

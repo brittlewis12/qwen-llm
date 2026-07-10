@@ -142,16 +142,25 @@ tokenization, validation, request allocations, prefill, first-token selection,
 callback delivery, transitions, and total wall. Device allocation is sampled at
 named milestones; it is not a peak-memory measurement.
 
+v0.548 adds one opt-in identical warm follow-up in the same process. It recreates
+prompt acquisition, tokenization, scratch, sequence, prefill, and generation while
+retaining the loaded model, tokenizer, and unavoidable process/runtime warm state.
+The pair is an aggregate first-position discriminator, not a tokenizer-only A/B.
+The first 0.8B one-token-prompt sentinel shows a `93.28 ms` TTFT gap: explicitly
+bracketed tokenizer construction accounts for `70.52 ms`, while prefill moves
+`35.44 -> 12.64 ms`. This is a causal search-space split, not a promotion.
+
 Next contract work:
 
-1. Add a same-process warm follow-up that retains only the loaded model and
-   tokenizer while recreating request state and replaying the identical request.
-2. Record request index, first versus warm epoch, tokenizer reuse, and exact
-   per-request output equivalence. Compare paired deltas across fresh processes.
-3. Add named request-archetype totals after the lifecycle discriminator is valid.
-   Keep process-cold load/residency and warm `pp<N>` throughput separate.
-4. Do not rank tokenizer construction, PSO compilation, or first touch as a
-   recurring optimization target until the paired row isolates it.
+1. Add per-request PSO-cache miss count and compilation wall, then replicate the
+   pair across fresh processes. Do not attribute the prefill delta to PSO without
+   this direct counter.
+2. Measure one realistic interactive prompt and one dissimilar longer guardrail
+   before deciding whether the fixed first-position tax is operationally material.
+3. Separate work removal from boundary movement: constructing the tokenizer or
+   warming pipelines before declaring model-ready improves TTFT but not process-
+   cold first flush unless the underlying work also becomes cheaper.
+4. Keep process-cold load/residency and warm `pp<N>` throughput as separate rows.
 
 This is a product correction plus a bounded objective measurement, not a return to
 provenance-first work. Build identity and correctness gates remain guardrails.
@@ -300,8 +309,9 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Complete the same-process warm-loaded discriminator and named archetype totals
-   on top of the v0.547 bounded first-post-model-load TTFT contract.
+1. Attribute the v0.548 first-position tax with PSO miss/compile counters and one
+   interactive plus one dissimilar prompt guardrail. Use that split to choose
+   tokenizer construction, pipeline warmup, or neither; reject boundary-only wins.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

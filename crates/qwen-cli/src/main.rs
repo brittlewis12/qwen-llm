@@ -70,6 +70,10 @@ struct Args {
     #[arg(long)]
     request_timings: Option<PathBuf>,
 
+    /// Run one identical warm follow-up for paired request timing.
+    #[arg(long)]
+    request_timing_warm_followup: bool,
+
     /// Do not ask the tokenizer to add model-defined special tokens.
     #[arg(long)]
     no_special_tokens: bool,
@@ -142,11 +146,13 @@ enum StopReason {
 struct MetalAllocationSample {
     current_bytes: u64,
     delta_from_model_ready_bytes: i64,
+    delta_from_request_start_bytes: i64,
 }
 
 #[derive(Debug, Serialize)]
 struct MetalAllocationSamples {
-    model_ready: MetalAllocationSample,
+    process_model_ready: MetalAllocationSample,
+    request_start: MetalAllocationSample,
     after_scratch: MetalAllocationSample,
     after_sequence: MetalAllocationSample,
     after_prefill: MetalAllocationSample,
@@ -160,6 +166,13 @@ struct MetalAllocationSamples {
 struct RequestTimingRow {
     schema_version: u32,
     request_epoch: &'static str,
+    request_index: usize,
+    tokenizer_reused: bool,
+    pair_requested: bool,
+    pair_id: Option<String>,
+    pair_request_equal: Option<bool>,
+    pair_generated_tokens_equal: Option<bool>,
+    prefix_cache_used: bool,
     build_commit: &'static str,
     build_dirty: &'static str,
     build_source_state: &'static str,
@@ -203,6 +216,35 @@ struct RequestTimingRow {
     metal_allocated: MetalAllocationSamples,
 }
 
+#[derive(Debug)]
+struct PreparedRequest {
+    request_start_unix_ms: u64,
+    request_t0: Instant,
+    request_start_allocated: Option<u64>,
+    prompt: String,
+    prompt_source: PromptSource,
+    prompt_ids: Vec<i32>,
+    prompt_acquisition_ms: f64,
+    tokenizer_init_ms: f64,
+    tokenization_ms: f64,
+    tokenizer_reused: bool,
+}
+
+#[derive(Debug)]
+struct SingleTurnResult {
+    row: Option<RequestTimingRow>,
+    prompt: String,
+    prompt_source: PromptSource,
+    prompt_ids: Vec<i32>,
+    generated: Vec<i32>,
+    transitions: usize,
+    prefill_ms: f64,
+    ttft_ms: f64,
+    decode_tps: f64,
+    transition_tps: f64,
+    tokenizer_init_ms: f64,
+}
+
 fn allocation_delta(current: u64, model_ready: u64) -> i64 {
     if current >= model_ready {
         i64::try_from(current - model_ready).unwrap_or(i64::MAX)
@@ -211,15 +253,17 @@ fn allocation_delta(current: u64, model_ready: u64) -> i64 {
     }
 }
 
-fn allocation_sample(current: u64, model_ready: u64) -> MetalAllocationSample {
+fn allocation_sample(current: u64, model_ready: u64, request_start: u64) -> MetalAllocationSample {
     MetalAllocationSample {
         current_bytes: current,
         delta_from_model_ready_bytes: allocation_delta(current, model_ready),
+        delta_from_request_start_bytes: allocation_delta(current, request_start),
     }
 }
 
 fn metal_allocation_samples(
     model_ready: u64,
+    request_start: u64,
     after_scratch: u64,
     after_sequence: u64,
     after_prefill: u64,
@@ -229,6 +273,7 @@ fn metal_allocation_samples(
 ) -> MetalAllocationSamples {
     let sampled_max = [
         model_ready,
+        request_start,
         after_scratch,
         after_sequence,
         after_prefill,
@@ -240,16 +285,26 @@ fn metal_allocation_samples(
     .max()
     .unwrap_or(model_ready);
     MetalAllocationSamples {
-        model_ready: allocation_sample(model_ready, model_ready),
-        after_scratch: allocation_sample(after_scratch, model_ready),
-        after_sequence: allocation_sample(after_sequence, model_ready),
-        after_prefill: allocation_sample(after_prefill, model_ready),
-        after_first_stdout_flush: allocation_sample(after_first_stdout_flush, model_ready),
+        process_model_ready: allocation_sample(model_ready, model_ready, request_start),
+        request_start: allocation_sample(request_start, model_ready, request_start),
+        after_scratch: allocation_sample(after_scratch, model_ready, request_start),
+        after_sequence: allocation_sample(after_sequence, model_ready, request_start),
+        after_prefill: allocation_sample(after_prefill, model_ready, request_start),
+        after_first_stdout_flush: allocation_sample(
+            after_first_stdout_flush,
+            model_ready,
+            request_start,
+        ),
         request_end_before_state_drop: allocation_sample(
             request_end_before_state_drop,
             model_ready,
+            request_start,
         ),
-        after_request_state_drop: allocation_sample(after_request_state_drop, model_ready),
+        after_request_state_drop: allocation_sample(
+            after_request_state_drop,
+            model_ready,
+            request_start,
+        ),
         current_allocated_sampled_max_bytes: sampled_max,
     }
 }
@@ -368,6 +423,10 @@ fn main() -> Result<()> {
 }
 
 fn validate_request_timing_mode(args: &Args) -> Result<()> {
+    ensure!(
+        !args.request_timing_warm_followup || args.request_timings.is_some(),
+        "--request-timing-warm-followup requires --request-timings"
+    );
     let Some(path) = args.request_timings.as_ref() else {
         return Ok(());
     };
@@ -424,30 +483,215 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         )
         .with_context(|| format!("load model {}", model_path.display()))?;
     let runtime_and_model_load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    let process_model_ready_allocated =
+        timing_enabled.then(|| loaded.context().current_allocated_size());
+    let stdout_sink = if std::io::stdout().is_terminal() {
+        "terminal"
+    } else {
+        "redirected"
+    };
+    let pair_id = if args.request_timing_warm_followup {
+        Some(format!("{}-{}", std::process::id(), unix_epoch_ms_u64()?))
+    } else {
+        None
+    };
 
-    let request_start_unix_ms = unix_epoch_ms_u64()?;
-    let request_t0 = Instant::now();
-    let model_ready_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
-
+    ensure!(
+        loaded.prefix_cache_stats().entries == 0,
+        "single-turn timing requires an empty prefix cache"
+    );
+    let first_request_t0 = Instant::now();
+    let first_request_start_unix_ms = unix_epoch_ms_u64()?;
+    let first_request_start_allocated =
+        timing_enabled.then(|| loaded.context().current_allocated_size());
     let prompt_t0 = Instant::now();
-    let (prompt, prompt_source) = prompt_text(args)?;
-    let prompt_acquisition_ms = prompt_t0.elapsed().as_secs_f64() * 1e3;
-
+    let (first_prompt, first_prompt_source) = prompt_text(args)?;
+    let first_prompt_acquisition_ms = prompt_t0.elapsed().as_secs_f64() * 1e3;
     let tokenizer_t0 = Instant::now();
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
-    let tokenizer_init_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
-
+    let first_tokenizer_init_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
     let tokenization_t0 = Instant::now();
-    let prompt_ids = tokenizer
-        .encode(&prompt, !args.no_special_tokens)
+    let first_prompt_ids = tokenizer
+        .encode(&first_prompt, !args.no_special_tokens)
         .context("tokenize prompt")?;
-    let tokenization_ms = tokenization_t0.elapsed().as_secs_f64() * 1e3;
+    let first_tokenization_ms = tokenization_t0.elapsed().as_secs_f64() * 1e3;
+    let first_prepared = PreparedRequest {
+        request_start_unix_ms: first_request_start_unix_ms,
+        request_t0: first_request_t0,
+        request_start_allocated: first_request_start_allocated,
+        prompt: first_prompt,
+        prompt_source: first_prompt_source,
+        prompt_ids: first_prompt_ids,
+        prompt_acquisition_ms: first_prompt_acquisition_ms,
+        tokenizer_init_ms: first_tokenizer_init_ms,
+        tokenization_ms: first_tokenization_ms,
+        tokenizer_reused: false,
+    };
+    let first = execute_single_turn_request(
+        &loaded,
+        &tokenizer,
+        model_path,
+        args,
+        runtime_and_model_load_ms,
+        process_model_ready_allocated,
+        pair_id.as_deref(),
+        0,
+        "first_post_model_load",
+        first_prepared,
+        stdout_sink,
+    )?;
+    let mut results = vec![first];
 
+    if args.request_timing_warm_followup {
+        ensure!(
+            loaded.prefix_cache_stats().entries == 0,
+            "warm follow-up requires an unused prefix cache"
+        );
+        let warm_request_t0 = Instant::now();
+        let warm_request_start_unix_ms = unix_epoch_ms_u64()?;
+        let warm_request_start_allocated =
+            timing_enabled.then(|| loaded.context().current_allocated_size());
+        let prompt_t0 = Instant::now();
+        let (warm_prompt, warm_prompt_source) = prompt_text(args)?;
+        let warm_prompt_acquisition_ms = prompt_t0.elapsed().as_secs_f64() * 1e3;
+        let tokenization_t0 = Instant::now();
+        let warm_prompt_ids = tokenizer
+            .encode(&warm_prompt, !args.no_special_tokens)
+            .context("retokenize warm follow-up prompt")?;
+        let warm_tokenization_ms = tokenization_t0.elapsed().as_secs_f64() * 1e3;
+        ensure!(
+            warm_prompt_source == results[0].prompt_source
+                && warm_prompt == results[0].prompt
+                && warm_prompt_ids == results[0].prompt_ids,
+            "warm follow-up prompt bytes or token IDs differ from request 0"
+        );
+        let warm_prepared = PreparedRequest {
+            request_start_unix_ms: warm_request_start_unix_ms,
+            request_t0: warm_request_t0,
+            request_start_allocated: warm_request_start_allocated,
+            prompt: warm_prompt,
+            prompt_source: warm_prompt_source,
+            prompt_ids: warm_prompt_ids,
+            prompt_acquisition_ms: warm_prompt_acquisition_ms,
+            tokenizer_init_ms: 0.0,
+            tokenization_ms: warm_tokenization_ms,
+            tokenizer_reused: true,
+        };
+        let warm = execute_single_turn_request(
+            &loaded,
+            &tokenizer,
+            model_path,
+            args,
+            runtime_and_model_load_ms,
+            process_model_ready_allocated,
+            pair_id.as_deref(),
+            1,
+            "warm_followup",
+            warm_prepared,
+            stdout_sink,
+        )?;
+        let first_stop = results[0].row.as_ref().map(|row| row.stop_reason);
+        let warm_stop = warm.row.as_ref().map(|row| row.stop_reason);
+        ensure!(
+            warm.generated == results[0].generated && warm_stop == first_stop,
+            "warm follow-up generated tokens or stop reason differ from request 0"
+        );
+        results.push(warm);
+        for result in &mut results {
+            let row = result.row.as_mut().expect("paired timing row");
+            row.pair_request_equal = Some(true);
+            row.pair_generated_tokens_equal = Some(true);
+        }
+    }
+
+    if let Some(file) = timing_file.as_mut() {
+        let mut payload = Vec::new();
+        for result in &results {
+            serde_json::to_writer(&mut payload, result.row.as_ref().expect("timing row"))
+                .context("serialize request timings")?;
+            payload.push(b'\n');
+        }
+        file.write_all(&payload).context("write request timings")?;
+        file.flush().context("flush request timings")?;
+    }
+
+    let cache_stats = loaded.prefix_cache_stats();
+    for (index, result) in results.iter().enumerate() {
+        let load_ms = if index == 0 {
+            runtime_and_model_load_ms + result.tokenizer_init_ms
+        } else {
+            0.0
+        };
+        let stats_prefix = if args.request_timing_warm_followup {
+            format!("stats[{index}]")
+        } else {
+            "stats".to_owned()
+        };
+        eprintln!(
+            concat!(
+                "{}: prompt_tokens={} generated_tokens={} transitions={} ",
+                "load_ms={:.1} prefill_ms={:.1} ttft_ms={:.1} ",
+                "decode_tps={:.2} transition_tps={:.2} cache_entries={} ",
+                "cache_mib={:.1}/{:.1}"
+            ),
+            stats_prefix,
+            result.prompt_ids.len(),
+            result.generated.len(),
+            result.transitions,
+            load_ms,
+            result.prefill_ms,
+            result.ttft_ms,
+            result.decode_tps,
+            result.transition_tps,
+            cache_stats.entries,
+            cache_stats.total_bytes as f64 / 1024.0 / 1024.0,
+            cache_stats.max_bytes as f64 / 1024.0 / 1024.0,
+        );
+    }
+
+    if let Some(path) = args.trace_request.as_ref() {
+        append_request_trace(
+            path,
+            arrival_ms,
+            results[0].prompt_ids.len(),
+            results[0].generated.len(),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_single_turn_request(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    model_path: &Path,
+    args: &Args,
+    runtime_and_model_load_ms: f64,
+    process_model_ready_allocated: Option<u64>,
+    pair_id: Option<&str>,
+    request_index: usize,
+    request_epoch: &'static str,
+    prepared: PreparedRequest,
+    stdout_sink: &'static str,
+) -> Result<SingleTurnResult> {
+    let PreparedRequest {
+        request_start_unix_ms,
+        request_t0,
+        request_start_allocated,
+        prompt,
+        prompt_source,
+        prompt_ids,
+        prompt_acquisition_ms,
+        tokenizer_init_ms,
+        tokenization_ms,
+        tokenizer_reused,
+    } = prepared;
+    let timing_enabled = process_model_ready_allocated.is_some();
     let validation_t0 = Instant::now();
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to zero tokens");
     }
-
     let min_capacity = prompt_ids
         .len()
         .checked_add(args.tokens)
@@ -461,7 +705,6 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         prompt_ids.len(),
         args.tokens
     );
-
     let chunk = args.prefill_chunk.min(prompt_ids.len().max(1));
     let block_size = u32::try_from(chunk).context("prefill chunk does not fit u32")?;
     let matrix_max_pos = prompt_ids.len().max(chunk);
@@ -501,12 +744,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let after_prefill_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
 
-    let stdout_sink = if std::io::stdout().is_terminal() {
-        "terminal"
-    } else {
-        "redirected"
-    };
-    let mut stdout = std::io::stdout().lock();
+    let stdout_handle = std::io::stdout();
+    let mut stdout = stdout_handle.lock();
     let generation_start_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let mut first_delivery_ms = None;
     let mut first_callback_duration_ms = None;
@@ -548,15 +787,15 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     }
     let total_request_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let request_end_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
+    drop(stdout);
 
-    let decode_ms = generation.wall_ms;
     let ttft_ms = first_delivery_ms.context("generation produced no first-token delivery")?;
     let first_token_ready_ms = generation_start_ms
         + generation
             .first_token_ready_ms
             .context("generation produced no first-token selection")?;
-    let decode_tps = if decode_ms > 0.0 {
-        generated.len() as f64 / (decode_ms / 1e3)
+    let decode_tps = if generation.wall_ms > 0.0 {
+        generated.len() as f64 / (generation.wall_ms / 1e3)
     } else {
         0.0
     };
@@ -565,11 +804,10 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     } else {
         0.0
     };
-    let legacy_load_ms = runtime_and_model_load_ms + tokenizer_init_ms;
-
     let timing_values = timing_enabled.then(|| {
         (
-            model_ready_allocated.expect("timing sample"),
+            process_model_ready_allocated.expect("timing sample"),
+            request_start_allocated.expect("timing sample"),
             after_scratch_allocated.expect("timing sample"),
             after_sequence_allocated.expect("timing sample"),
             after_prefill_allocated.expect("timing sample"),
@@ -582,11 +820,18 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     let after_state_drop_allocated =
         timing_enabled.then(|| loaded.context().current_allocated_size());
 
-    if let (Some(file), Some(samples)) = (timing_file.as_mut(), timing_values) {
+    let row = timing_values.map(|samples| {
         let model_identity = model_identity.expect("timing identity");
-        let row = RequestTimingRow {
-            schema_version: 1,
-            request_epoch: "first_post_model_load",
+        RequestTimingRow {
+            schema_version: 2,
+            request_epoch,
+            request_index,
+            tokenizer_reused,
+            pair_requested: pair_id.is_some(),
+            pair_id: pair_id.map(str::to_owned),
+            pair_request_equal: None,
+            pair_generated_tokens_equal: None,
+            prefix_cache_used: false,
             build_commit: env!("QWEN_BUILD_COMMIT"),
             build_dirty: env!("QWEN_BUILD_DIRTY"),
             build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
@@ -635,9 +880,12 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
                 samples.3,
                 samples.4,
                 samples.5,
+                samples.6,
                 after_state_drop_allocated.expect("timing sample"),
             ),
-        };
+        }
+    });
+    if let Some(row) = row.as_ref() {
         validate_request_timing_invariants(
             row.first_token_ready_ms,
             row.ttft_ms,
@@ -646,36 +894,20 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             row.generated_tokens,
             row.transition_count,
         )?;
-        let json = serde_json::to_string(&row).context("serialize request timings")?;
-        writeln!(file, "{json}").context("write request timings")?;
-        file.flush().context("flush request timings")?;
     }
-
-    eprintln!(
-        concat!(
-            "stats: prompt_tokens={} generated_tokens={} transitions={} ",
-            "load_ms={:.1} prefill_ms={:.1} ttft_ms={:.1} ",
-            "decode_tps={:.2} transition_tps={:.2} cache_entries={} ",
-            "cache_mib={:.1}/{:.1}"
-        ),
-        prompt_ids.len(),
-        generated.len(),
-        generation.transitions,
-        legacy_load_ms,
+    Ok(SingleTurnResult {
+        row,
+        prompt,
+        prompt_source,
+        prompt_ids,
+        generated,
+        transitions: generation.transitions,
         prefill_ms,
         ttft_ms,
         decode_tps,
         transition_tps,
-        loaded.prefix_cache_stats().entries,
-        loaded.prefix_cache_stats().total_bytes as f64 / 1024.0 / 1024.0,
-        loaded.prefix_cache_stats().max_bytes as f64 / 1024.0 / 1024.0,
-    );
-
-    if let Some(path) = args.trace_request.as_ref() {
-        append_request_trace(path, arrival_ms, prompt_ids.len(), generated.len())?;
-    }
-
-    Ok(())
+        tokenizer_init_ms,
+    })
 }
 
 fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> Result<()> {
@@ -1635,11 +1867,17 @@ mod tests {
 
     #[test]
     fn metal_allocation_samples_keep_signed_deltas_and_sampled_max() {
-        let samples = metal_allocation_samples(100, 120, 90, 150, 140, 130, 80);
+        let samples = metal_allocation_samples(100, 110, 120, 90, 150, 140, 130, 80);
 
-        assert_eq!(samples.model_ready.delta_from_model_ready_bytes, 0);
+        assert_eq!(
+            samples.process_model_ready.delta_from_request_start_bytes,
+            -10
+        );
+        assert_eq!(samples.request_start.delta_from_request_start_bytes, 0);
         assert_eq!(samples.after_scratch.delta_from_model_ready_bytes, 20);
+        assert_eq!(samples.after_scratch.delta_from_request_start_bytes, 10);
         assert_eq!(samples.after_sequence.delta_from_model_ready_bytes, -10);
+        assert_eq!(samples.after_sequence.delta_from_request_start_bytes, -20);
         assert_eq!(samples.after_request_state_drop.current_bytes, 80);
         assert_eq!(samples.current_allocated_sampled_max_bytes, 150);
     }
@@ -1657,6 +1895,19 @@ mod tests {
         ])
         .unwrap();
         validate_request_timing_mode(&valid).unwrap();
+
+        let valid_pair = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--request-timings",
+            "timings.jsonl",
+            "--request-timing-warm-followup",
+        ])
+        .unwrap();
+        validate_request_timing_mode(&valid_pair).unwrap();
 
         for argv in [
             vec!["qwen", "--info", "--request-timings", "timings.jsonl"],
@@ -1691,6 +1942,14 @@ mod tests {
                 "hello",
                 "--request-timings",
                 "timings.jsonl",
+            ],
+            vec![
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--prompt",
+                "hello",
+                "--request-timing-warm-followup",
             ],
         ] {
             let args = Args::try_parse_from(argv).unwrap();

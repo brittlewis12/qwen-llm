@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.544 BF16 Measurement Gate Killed
+
+Status: validity-green measurement-only packet; structural BF16 proposal killed.
+No source code changed.
+
+- Clean matched HEAD `05debe323` ran against pinned llama.cpp b9833/c818263f2.
+  Identity, AC power, thermal, memory, fast-path, and packet checks passed. All
+  three-sample child spreads were `<=1.0252x`; paired base-a/base-b medians
+  differed by `<=1.00167x`. Per-block base medians were
+  `356.326/357.219/356.855 ms`, a `1.00251x` max/min spread, and every gate
+  fraction varied by at most `0.00784` across blocks.
+- Retained warmed A3B BF16 `pp512` qwen/llama throughput ratios from median
+  sample walls were `0.978545/0.982736/0.981591x`. This is a small stable
+  normal-wall deficit, not evidence for a structural kernel replacement. Both
+  engines used 512 synthetic tokens, but not the same token stream.
+- Combined GDN-body, attention-body+out, and FFN no-op fractions were
+  `0.764342/0.765824/0.764283`, failing the preregistered `min >= 0.90` arm.
+  No-FFN was `0.575923/0.577019/0.583757`; no-routed was
+  `0.515134/0.513492/0.513316`. Both entered the `>=0.40` differential arm.
+- The serialized qwen last-pass trace was complete: 1,050 records and
+  `405.6 GPU ms`. Routed SwiGLU bins summed to `137.45 ms`, routed-down bins to
+  `100.18 ms`, `route_fused` to `6.31 ms`, and `routed_reduce` to `2.84 ms`.
+- Pinned upstream llama.cpp emitted zero `GGML_METAL_PROFILE_OPS` records.
+  Same-operation/shape mapping coverage was therefore zero and no `>=1.5x`
+  replacement ratio existed. The preregistered rule classifies missing or
+  ambiguous names/shapes as KILL, not as an inconclusive rerun condition.
+- No local-fork profiling substitution, profiling/tooling work, `pp1024`
+  rescue, extra no-op variants, or closed-kernel retread is authorized. No-op
+  fractions are non-additive semantic intervention ceilings: they alter hidden
+  states, routing, synchronization, and overlap. The serialized qwen trace is
+  trace-local and is not directly comparable to the untraced wall.
+
+Artifacts: `target/profiles/v0544-bf16-gate/{anchor-pp512,sweep-pp512}.json`,
+`qwen-trace-pp512-summary.json`, and `llama-profile-pp512-summary.json`.
+Design/adjudication: `cx ask` sessions
+`019f4c72-4de2-77b0-a385-333b6d72b03d` and
+`019f4ca1-6184-70c3-9c24-3289f84b14f0`.
+
 ## 2026-07-10 - v0.543 Canonical Q4_0 KV Fidelity Falsifier
 
 Status: killed at the first correctness gate; all experiment source removed.

@@ -175,26 +175,32 @@ scale signs. The real A3B block-3 `ctx8192` attention output nevertheless reache
 only `0.996111664` cosine with `0.1653642654` maximum absolute error, failing both
 fidelity gates. The required 32K correctness row and every performance sample
 remain unrun after the mandatory stop. All experiment source is removed.
+v0.544 executes and kills the measurement-gated BF16 branch without source
+changes. Current-HEAD warmed A3B BF16 `pp512` is only about 2% behind pinned
+llama.cpp (`0.9785/0.9827/0.9816x`). The combined causal no-op ceiling is only
+`0.7643-0.7658`, failing the `>=90%` arm. No-FFN and no-routed clear the `>=40%`
+trace-entry threshold, but pinned upstream llama.cpp emits zero Metal operation
+profile records. The required same-operation/shape mapping and `>=1.5x` ratio
+are unavailable; preregistered missing-data handling makes this KILL, not a
+rescue rerun. Preserve the small warmed deficit as a guardrail only.
 
 Force-ranked next gates from this vantage:
 
-1. **BF16 `mul_mm_id`/layout parity remains measurement-gated**: rerun
-   current-HEAD matched qwen/llama A3B BF16 projection attribution before
-   writing another kernel. Authorize a structural sidecar only if named
-   categories explain `>=90%` of qwen wall, or one category is `>=40%` with a
-   credible `>=1.5x` replacement. Do not retread vector loads, local SwiGLU
-   tiles, reduce/finalizer work, or command-buffer splitting.
-2. **Structural routed-Q5 down remains mechanism-gated**: the real no-weight
+1. **Structural routed-Q5 down remains mechanism-gated**: the real no-weight
    ceiling is only `+2.2%/+2.4%` total decode and the local tile, staging, load,
    scatter, reducer, and monolith shelves are closed. Reopen only for a new
    byte/dequant/dataflow mechanism that first clears `>=10%` on
    production-faithful captured MoE compute for both A3B and A10B.
-3. **Compressed KV remains format/body-gated**: both exact-Q8 reader layouts and
+2. **Compressed KV remains format/body-gated**: both exact-Q8 reader layouts and
    direct canonical Q4_0 now have decisive falsifiers. Q6/FP8-like formats and
    materially different attention/dequant bodies remain untested, but no next
    code experiment is authorized without a concrete mechanism and new fidelity
    contract. Do not infer that fewer stored bytes will improve this
    latency/occupancy-limited attention body.
+3. **No third code experiment is currently authorized**: S8 replay, BF16,
+   partial-storage/reducer work, decode glue, generated MTP heads, and local GDN
+   reshuffles all remain closed or evidence-gated. Re-rank only from a concrete
+   measured mechanism, not generic cleanup or another local parameter sweep.
 
 S8 replay remains explicitly parked pending empirical arrival traces that clear
 blended `>=5-8%` net wall with p95 non-regression. No scheduler, runtime,
@@ -2400,7 +2406,14 @@ policy and move back to S8 replay or chunked GDN.
    `>=1.5x` no-trace production fix. v0.489 independently rechecks grouped BF16
    `bfloat4x4` A loads and again loses on warmed A3B BF16 `pp512` samples
    (`657.3/1373.2` scalar versus `645.0/1371.3 t/s` vector). Do not reapply
-   grouped-MoE vector A-loads.
+   grouped-MoE vector A-loads. v0.544 executes the final measurement gate at
+   current HEAD. Warmed paired `pp512` is only `0.9785-0.9827x` llama.cpp;
+   combined causal no-ops explain only `0.7643-0.7658`, below the `>=90%` arm.
+   No-FFN and no-routed clear `>=40%`, but pinned upstream llama.cpp supplies
+   zero operation-profile records, so the required same-shape `>=1.5x`
+   replacement proof fails under preregistered missing-data handling. Close
+   structural BF16 work; no local-fork profiler substitution, `pp1024` rescue,
+   extra no-op row, or old kernel-family retread is authorized.
 9. Short MoE decode execution-shape, only with fresh evidence: v0.292-v0.311 make
    decode materially greener, but v0.312 says the current default is already
    GPU-active at `~95.8-97.8%` wall on warmed A3B/A10B `tg128`. The GDN-concurrent

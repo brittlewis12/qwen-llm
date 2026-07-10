@@ -9935,6 +9935,183 @@ mod tok_tests {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MtpTargetStateAudit {
+    resume_audit_pass: bool,
+    kv_position_equal: bool,
+    kv_payload_exact: bool,
+    kv_payload_max_abs: f32,
+    kv_payload_cosine: f64,
+    reference_final_position: Option<usize>,
+    candidate_final_position: Option<usize>,
+    gdn_state_max_abs: f32,
+    gdn_conv_max_abs: f32,
+    continuation_argmax_equal: bool,
+    continuation_logits_max_abs: f32,
+    continuation_logits_cosine: f64,
+}
+
+fn max_abs_f32_tensor_pairs(reference: &[MetalTensor], candidate: &[MetalTensor]) -> Result<f32> {
+    anyhow::ensure!(
+        reference.len() == candidate.len(),
+        "state tensor count mismatch"
+    );
+    let mut max_abs = 0.0f32;
+    for (a, b) in reference.iter().zip(candidate) {
+        anyhow::ensure!(
+            a.dtype == GgmlType::F32
+                && b.dtype == GgmlType::F32
+                && a.shape == b.shape
+                && a.n_bytes() == b.n_bytes(),
+            "state tensor shape or dtype mismatch"
+        );
+        unsafe {
+            let pa =
+                (a.buffer.contents().as_ptr() as *const u8).add(a.offset as usize) as *const f32;
+            let pb =
+                (b.buffer.contents().as_ptr() as *const u8).add(b.offset as usize) as *const f32;
+            for i in 0..a.n_elements() as usize {
+                let delta = (*pa.add(i) - *pb.add(i)).abs();
+                if !delta.is_finite() {
+                    return Ok(f32::INFINITY);
+                }
+                max_abs = max_abs.max(delta);
+            }
+        }
+    }
+    Ok(max_abs)
+}
+
+fn kv_bytes_metrics(reference: &[u8], candidate: &[u8], dtype: GgmlType) -> Result<(f32, f64)> {
+    anyhow::ensure!(
+        reference.len() == candidate.len(),
+        "KV byte length mismatch"
+    );
+    let values: Box<dyn Iterator<Item = (f32, f32)> + '_> = match dtype {
+        GgmlType::F16 => Box::new(
+            reference
+                .chunks_exact(2)
+                .zip(candidate.chunks_exact(2))
+                .map(|(a, b)| {
+                    let a = half::f16::from_bits(u16::from_le_bytes([a[0], a[1]])).to_f32();
+                    let b = half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32();
+                    (a, b)
+                }),
+        ),
+        GgmlType::F32 => Box::new(
+            reference
+                .chunks_exact(4)
+                .zip(candidate.chunks_exact(4))
+                .map(|(a, b)| {
+                    let a = f32::from_le_bytes([a[0], a[1], a[2], a[3]]);
+                    let b = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                    (a, b)
+                }),
+        ),
+        other => anyhow::bail!("unsupported KV audit dtype {other:?}"),
+    };
+    let (mut max_abs, mut dot, mut reference_norm, mut candidate_norm) =
+        (0.0f32, 0.0f64, 0.0f64, 0.0f64);
+    for (a, b) in values {
+        max_abs = max_abs.max((a - b).abs());
+        dot += a as f64 * b as f64;
+        reference_norm += (a as f64).powi(2);
+        candidate_norm += (b as f64).powi(2);
+    }
+    let cosine = dot / (reference_norm.sqrt() * candidate_norm.sqrt() + f64::MIN_POSITIVE);
+    Ok((max_abs, cosine))
+}
+
+fn audit_mtp_target_state(
+    forward: &MetalForward<'_>,
+    reference: &mut MetalSession,
+    candidate: &mut MetalSession,
+    expected_position: usize,
+    pending_terminal_token: i32,
+) -> Result<MtpTargetStateAudit> {
+    let reference_position_valid = reference
+        .kv_n_pos
+        .iter()
+        .all(|&position| position == expected_position);
+    let candidate_position_valid = candidate
+        .kv_n_pos
+        .iter()
+        .all(|&position| position == expected_position);
+    let kv_position_equal = reference_position_valid
+        && candidate_position_valid
+        && reference.kv_n_pos == candidate.kv_n_pos;
+    let reference_final_position = reference.kv_n_pos.first().copied();
+    let candidate_final_position = candidate.kv_n_pos.first().copied();
+    let gdn_state_max_abs = max_abs_f32_tensor_pairs(&reference.gdn_state, &candidate.gdn_state)?;
+    let gdn_conv_max_abs = max_abs_f32_tensor_pairs(&reference.gdn_conv, &candidate.gdn_conv)?;
+    let snapshot_identity = reference.snapshot_identity(0, 0);
+    let reference_snapshot =
+        reference.snapshot(snapshot_identity.clone(), vec![0; expected_position], None);
+    let candidate_snapshot =
+        candidate.snapshot(snapshot_identity, vec![0; expected_position], None);
+    let kv_payload_exact = reference_snapshot.kv_k_arena == candidate_snapshot.kv_k_arena
+        && reference_snapshot.kv_v_arena == candidate_snapshot.kv_v_arena;
+    let kv_dtype = reference
+        .kv_k
+        .first()
+        .map(|tensor| tensor.dtype)
+        .context("target state has no KV layers")?;
+    anyhow::ensure!(
+        candidate.kv_k.first().map(|tensor| tensor.dtype) == Some(kv_dtype),
+        "candidate KV dtype mismatch"
+    );
+    let (kv_k_max_abs, kv_k_cosine) = kv_bytes_metrics(
+        &reference_snapshot.kv_k_arena,
+        &candidate_snapshot.kv_k_arena,
+        kv_dtype,
+    )?;
+    let (kv_v_max_abs, kv_v_cosine) = kv_bytes_metrics(
+        &reference_snapshot.kv_v_arena,
+        &candidate_snapshot.kv_v_arena,
+        kv_dtype,
+    )?;
+    let kv_payload_max_abs = kv_k_max_abs.max(kv_v_max_abs);
+    let kv_payload_cosine = kv_k_cosine.min(kv_v_cosine);
+    let reference_logits =
+        forward.single_token(pending_terminal_token, expected_position as u32, reference)?;
+    let candidate_logits =
+        forward.single_token(pending_terminal_token, expected_position as u32, candidate)?;
+    anyhow::ensure!(
+        reference_logits.len() == candidate_logits.len(),
+        "continuation logits length mismatch"
+    );
+    let mut continuation_logits_max_abs = 0.0f32;
+    let (mut dot, mut reference_norm, mut candidate_norm) = (0.0f64, 0.0f64, 0.0f64);
+    for (&a, &b) in reference_logits.iter().zip(&candidate_logits) {
+        continuation_logits_max_abs = continuation_logits_max_abs.max((a - b).abs());
+        dot += a as f64 * b as f64;
+        reference_norm += (a as f64).powi(2);
+        candidate_norm += (b as f64).powi(2);
+    }
+    let continuation_logits_cosine =
+        dot / (reference_norm.sqrt() * candidate_norm.sqrt() + f64::MIN_POSITIVE);
+    let continuation_argmax_equal = argmax_i32(&reference_logits) == argmax_i32(&candidate_logits);
+    let resume_audit_pass = kv_position_equal
+        && kv_payload_cosine >= 0.99999
+        && continuation_argmax_equal
+        && continuation_logits_max_abs <= 5e-2
+        && continuation_logits_cosine >= 0.99999;
+    Ok(MtpTargetStateAudit {
+        resume_audit_pass,
+        kv_position_equal,
+        kv_payload_exact,
+        kv_payload_max_abs,
+        kv_payload_cosine,
+        reference_final_position,
+        candidate_final_position,
+        gdn_state_max_abs,
+        gdn_conv_max_abs,
+        continuation_argmax_equal,
+        continuation_logits_max_abs,
+        continuation_logits_cosine,
+    })
+}
+
 fn run_mtp(args: MtpArgs) -> Result<()> {
     let MtpArgs {
         model,
@@ -10156,7 +10333,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         anyhow::bail!("recorded MTP probes require --spec-tokens 2..=15");
     }
 
-    let run_planned = |plan: PackedDraftPlan<'_>, label: &str| -> Result<DecodeOutput> {
+    let mut planned_state_audit: Option<MtpTargetStateAudit> = None;
+    let mut run_planned = |plan: PackedDraftPlan<'_>, label: &str| -> Result<DecodeOutput> {
+        let audit_target_state = matches!(plan, PackedDraftPlan::Oracle(_));
         let mtp_session =
             MetalMtpSession::fresh(&ctx, &mtp_head, &m.arch, cap).context("MTP session")?;
         let mut spec_session = MetalSession::fresh(&ctx, &mm, cap).context("spec session")?;
@@ -10173,17 +10352,38 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         let mut layer_scratch =
             MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, planned_verify_n as u32)
                 .context("mtp packed layer scratch")?;
-        spec.decode_packed_n_planned(
-            &prompt_ids,
-            tokens,
-            &stops,
-            &mut spec_session,
-            spec_tokens,
-            &mut verify_scratch,
-            &mut layer_scratch,
-            plan,
-        )
-        .with_context(|| format!("spec decode packed-n {label}"))
+        let output = spec
+            .decode_packed_n_planned(
+                &prompt_ids,
+                tokens,
+                &stops,
+                &mut spec_session,
+                spec_tokens,
+                &mut verify_scratch,
+                &mut layer_scratch,
+                plan,
+            )
+            .with_context(|| format!("spec decode packed-n {label}"))?;
+        if audit_target_state {
+            let generated = &ref_generated_vec[..ref_generated_vec.len().saturating_sub(1)];
+            let pending_terminal_token = *ref_generated_vec
+                .last()
+                .context("oracle produced no terminal token")?;
+            let mut serial_session =
+                MetalSession::fresh(&ctx, &mm, cap).context("state-audit serial session")?;
+            for (position, &token) in prompt_ids.iter().chain(generated).enumerate() {
+                mf.single_token(token, position as u32, &mut serial_session)
+                    .context("state-audit serial transition")?;
+            }
+            planned_state_audit = Some(audit_mtp_target_state(
+                &mf,
+                &mut serial_session,
+                &mut spec_session,
+                prompt_ids.len() + generated.len(),
+                pending_terminal_token,
+            )?);
+        }
+        Ok(output)
     };
 
     let run_recorded_work =
@@ -10392,6 +10592,29 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let ref_generated = &ref_tokens[prompt_ids.len()..];
     let spec_generated = &result.tokens[prompt_ids.len()..];
     let identical = ref_generated == spec_generated;
+    let expected_target_transitions = ref_emitted.saturating_sub(1);
+    let oracle_state_audit = if mtp_probe == MtpProbeMode::Oracle {
+        let audit = planned_state_audit.context("oracle target-state audit missing")?;
+        anyhow::ensure!(identical, "oracle emitted tokens differ from serial target");
+        anyhow::ensure!(
+            result.stats.mtp_calls == 0,
+            "oracle unexpectedly executed {} MTP calls",
+            result.stats.mtp_calls
+        );
+        anyhow::ensure!(
+            result.stats.target_transitions as usize == expected_target_transitions,
+            "oracle target transitions {} != expected {}",
+            result.stats.target_transitions,
+            expected_target_transitions
+        );
+        anyhow::ensure!(
+            audit.resume_audit_pass,
+            "oracle terminal resume audit failed: {audit:?}"
+        );
+        Some(audit)
+    } else {
+        None
+    };
 
     // Apples-to-apples reporting. The earlier version mixed phases —
     // comparing MTP=off decode-only t/s (excludes prefill) with
@@ -10464,6 +10687,23 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec_emitted,
         ref_emitted,
     );
+    if let Some(audit) = oracle_state_audit {
+        eprintln!(
+            "[mtp-bench] terminal resume: PASS target_transitions={} final_n={} \
+             kv_pos={:?} kv_max_abs={:.3e} kv_cos={:.10} \
+             gdn_state_max_abs={:.3e} gdn_conv_max_abs={:.3e} \
+             continuation_max_abs={:.3e} continuation_cos={:.10}",
+            result.stats.target_transitions,
+            result.stats.final_effective_verify_n,
+            audit.candidate_final_position,
+            audit.kv_payload_max_abs,
+            audit.kv_payload_cosine,
+            audit.gdn_state_max_abs,
+            audit.gdn_conv_max_abs,
+            audit.continuation_logits_max_abs,
+            audit.continuation_logits_cosine,
+        );
+    }
     if !identical {
         let n_show = 8usize.min(ref_generated.len()).min(spec_generated.len());
         eprintln!(
@@ -10513,6 +10753,68 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     "bytes": bytes,
                 })
             });
+        let target_state = oracle_state_audit.map_or(serde_json::Value::Null, |audit| {
+            serde_json::json!({
+                "resume_audit_pass": audit.resume_audit_pass,
+                "kv_position_equal": audit.kv_position_equal,
+                "kv_payload_exact": audit.kv_payload_exact,
+                "kv_payload_max_abs": audit.kv_payload_max_abs,
+                "kv_payload_cosine": audit.kv_payload_cosine,
+                "reference_final_position": audit.reference_final_position,
+                "candidate_final_position": audit.candidate_final_position,
+                "gdn_state_max_abs": audit.gdn_state_max_abs,
+                "gdn_conv_max_abs": audit.gdn_conv_max_abs,
+                "continuation_argmax_equal": audit.continuation_argmax_equal,
+                "continuation_logits_max_abs": audit.continuation_logits_max_abs,
+                "continuation_logits_cosine": audit.continuation_logits_cosine,
+            })
+        });
+        let semantics = serde_json::json!({
+            "verify_mode": if spec_tokens == 1 { "lazy_mtp1" } else { "packed_n" },
+            "sampler": "greedy_argmax",
+            "correction_accounting": "deferred_next_step_carry",
+            "equivalence": if mtp_probe == MtpProbeMode::Oracle {
+                "target_greedy_sequence_and_terminal_resume_audit"
+            } else {
+                "target_greedy_sequence"
+            },
+        });
+        let reference = serde_json::json!({
+            "emitted": ref_emitted,
+            "target_transitions": expected_target_transitions,
+            "prefill_ms": ref_prefill_ms,
+            "decode_ms": ref_decode_ms,
+            "total_ms": ref_total_ms,
+            "decode_only_tps": ref_decode_only_tps,
+            "total_tps": ref_total_tps,
+        });
+        let planned_metrics = matches!(
+            mtp_probe,
+            MtpProbeMode::Oracle | MtpProbeMode::ReplayCurrent
+        );
+        let speculative = serde_json::json!({
+            "emitted": spec_emitted,
+            "prefill_ms": spec_prefill_ms,
+            "decode_ms": spec_decode_ms,
+            "decode_only_tps": spec_decode_tps,
+            "total_ms": spec_total_ms,
+            "total_tps": spec_total_tps,
+            "steps": result.stats.steps,
+            "accepted": result.stats.accepted,
+            "drafts_attempted": result.stats.drafts_attempted,
+            "acceptance_rate": result.stats.acceptance_rate(),
+            "emitted_per_step": emitted_per_step,
+            "accepted_per_step": accepted_per_step,
+            "drafts_per_step": drafts_per_step,
+            "base_forward_calls": result.stats.base_forward_calls,
+            "mtp_calls": result.stats.mtp_calls,
+            "target_transitions": planned_metrics.then_some(result.stats.target_transitions),
+            "final_effective_verify_n": planned_metrics
+                .then_some(result.stats.final_effective_verify_n),
+            "rank_rows": mtp_rank_rows.len(),
+            "phase_ms": speculative_phase_ms,
+            "target_state": target_state,
+        });
         let row = serde_json::json!({
             "model": model.display().to_string(),
             "prompt_tokens": prompt_ids.len(),
@@ -10521,6 +10823,11 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "spec_tokens": spec_tokens,
             "logical_verify_n": spec_tokens + 1,
             "physical_verify_n": planned_verify_n,
+            "terminal_token_target_transition_consumed": if mtp_probe == MtpProbeMode::Oracle {
+                Some(false)
+            } else {
+                None
+            },
             "probe": format!("{:?}", mtp_probe),
             "single_cb_draft": mtp_single_cb_draft,
             "draft_token_embd_head": mtp_draft_token_embd_head,
@@ -10533,39 +10840,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "mtp_moe_banks": mtp_moe_banks,
             "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
             "no_warmup": no_warmup,
-            "semantics": {
-                "verify_mode": if spec_tokens == 1 { "lazy_mtp1" } else { "packed_n" },
-                "sampler": "greedy_argmax",
-                "correction_accounting": "deferred_next_step_carry",
-                "equivalence": "target_greedy_sequence",
-            },
-            "reference": {
-                "emitted": ref_emitted,
-                "prefill_ms": ref_prefill_ms,
-                "decode_ms": ref_decode_ms,
-                "total_ms": ref_total_ms,
-                "decode_only_tps": ref_decode_only_tps,
-                "total_tps": ref_total_tps,
-            },
-            "speculative": {
-                "emitted": spec_emitted,
-                "prefill_ms": spec_prefill_ms,
-                "decode_ms": spec_decode_ms,
-                "decode_only_tps": spec_decode_tps,
-                "total_ms": spec_total_ms,
-                "total_tps": spec_total_tps,
-                "steps": result.stats.steps,
-                "accepted": result.stats.accepted,
-                "drafts_attempted": result.stats.drafts_attempted,
-                "acceptance_rate": result.stats.acceptance_rate(),
-                "emitted_per_step": emitted_per_step,
-                "accepted_per_step": accepted_per_step,
-                "drafts_per_step": drafts_per_step,
-                "base_forward_calls": result.stats.base_forward_calls,
-                "mtp_calls": result.stats.mtp_calls,
-                "rank_rows": mtp_rank_rows.len(),
-                "phase_ms": speculative_phase_ms,
-            },
+            "semantics": semantics,
+            "reference": reference,
+            "speculative": speculative,
             "speedup_total_ms": total_speedup,
             "identical": identical,
         });

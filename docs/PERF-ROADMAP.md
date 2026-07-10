@@ -187,13 +187,22 @@ v0.549 eager baseline, the final stack removes `52.283 ms` TTFT at 437 tokens
 numbered eager/final outputs match. The absolute fixed-cost win generalizes; its
 percentage correctly falls from `35.48%` interactive to `4.91%` long-prompt.
 
+v0.554 corrects the physical-N8 oracle's terminal state. A terminal-limited
+packet now executes only the target transitions required to validate the final
+pending token, using effective N inside physical-N8 scratch. The harness records
+target transitions and final N, reconstructs an outside-timing serial state,
+compares committed KV numerically, and validates one-token continuation logits.
+A 27B eight-token smoke passes `7/7` transitions, effective N7, equal positions,
+KV cosine `0.9999999124`, exact continuation argmax, and continuation cosine
+`0.9999999994`. This validates the harness, not verifier economics.
+
 Next contract work:
 
-1. Correct the physical-N8 oracle's terminal-state semantics: compare 127 serial
-   target transitions against target-equivalent packet work for 128 emitted
-   tokens, and assert final KV/GDN/conv positions outside timing.
-2. Then run the current physical-N8 verifier oracle on the frozen 437-token Reva
-   prefix for A3B and 27B. Do not delay it for packed-vocabulary work.
+1. Run seven fresh-process physical-N8 oracle rows on the frozen 437-token Reva
+   prefix for A3B and 27B. Use decode-only ratios and require every transition,
+   no-MTP-call, stream, and resume-audit gate to pass.
+2. Extend once to eleven only if the paired log-ratio interval still cannot decide
+   the `1.10x` regime gate. Do not delay it for packed-vocabulary work.
 3. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
@@ -346,8 +355,8 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Fix and assert terminal target state in the physical-N8 oracle, then price the
-   verifier on the frozen 437-token Reva prefix for A3B and 27B.
+1. Price the corrected physical-N8 oracle on seven fresh A3B and 27B rows using
+   the frozen 437-token Reva prefix and decode-only regime gate.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

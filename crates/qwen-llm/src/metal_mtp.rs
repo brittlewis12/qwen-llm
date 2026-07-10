@@ -726,6 +726,18 @@ pub enum PackedDraftPlan<'a> {
     Oracle(&'a [i32]),
 }
 
+fn terminal_draft_count(
+    drafts: &[i32],
+    emitted_count: usize,
+    max_new_tokens: usize,
+    stop_tokens: &[i32],
+) -> Option<usize> {
+    drafts.iter().enumerate().find_map(|(j, &draft_tok)| {
+        (stop_tokens.contains(&draft_tok) || emitted_count.saturating_add(j + 1) >= max_new_tokens)
+            .then_some(j + 1)
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct RecordedDraftStep {
     pub carry_tok: i32,
@@ -2926,7 +2938,7 @@ impl<'a> SpeculativeDecoder<'a> {
             let physical_draft_slots = physical_verify_n - 1;
             let carry_tok = emit_tok;
             let start_position = processed_pos + 1;
-            let drafts: Vec<i32> = match plan {
+            let mut drafts: Vec<i32> = match plan {
                 PackedDraftPlan::Recorded(trace) => {
                     let row = trace.get(step_idx).ok_or_else(|| {
                         MtpError::Metal(MetalError::BadShape {
@@ -2969,26 +2981,36 @@ impl<'a> SpeculativeDecoder<'a> {
                     oracle[emitted_count..emitted_count + n_draft].to_vec()
                 }
             };
+            let terminal_draft_count =
+                terminal_draft_count(&drafts, emitted_count, max_new_tokens, stop_tokens);
+            if let Some(count) = terminal_draft_count {
+                drafts.truncate(count);
+            }
             stats.drafts_attempted += drafts.len() as u32;
 
             let mut verify_input: Vec<i32> = Vec::with_capacity(physical_verify_n);
             verify_input.push(carry_tok);
-            verify_input.extend_from_slice(&drafts);
-            for pad_j in drafts.len()..physical_draft_slots {
-                let pad_tok = match plan {
-                    PackedDraftPlan::Recorded(trace) => trace
-                        .get(step_idx)
-                        .and_then(|row| row.drafts.get(pad_j))
-                        .copied()
-                        .unwrap_or(carry_tok),
-                    PackedDraftPlan::Oracle(oracle) => oracle
-                        .get(emitted_count + pad_j)
-                        .copied()
-                        .unwrap_or(carry_tok),
-                };
-                verify_input.push(pad_tok);
-            }
-            let n_eff = physical_verify_n as u32;
+            let n_eff = if let Some(count) = terminal_draft_count {
+                verify_input.extend_from_slice(&drafts[..count.saturating_sub(1)]);
+                count as u32
+            } else {
+                verify_input.extend_from_slice(&drafts);
+                for pad_j in drafts.len()..physical_draft_slots {
+                    let pad_tok = match plan {
+                        PackedDraftPlan::Recorded(trace) => trace
+                            .get(step_idx)
+                            .and_then(|row| row.drafts.get(pad_j))
+                            .copied()
+                            .unwrap_or(carry_tok),
+                        PackedDraftPlan::Oracle(oracle) => oracle
+                            .get(emitted_count + pad_j)
+                            .copied()
+                            .unwrap_or(carry_tok),
+                    };
+                    verify_input.push(pad_tok);
+                }
+                physical_verify_n as u32
+            };
 
             let t_verify = std::time::Instant::now();
             let verify_argmax = encode_packed_verify_layer_major_inner(
@@ -3004,6 +3026,8 @@ impl<'a> SpeculativeDecoder<'a> {
             )?;
             stats.verify_ms += t_verify.elapsed().as_secs_f64() * 1e3;
             stats.base_forward_calls += 1;
+            stats.target_transitions += n_eff;
+            stats.final_effective_verify_n = n_eff;
 
             let mut n_accepted = 0usize;
             let mut stop_now = false;
@@ -3021,7 +3045,11 @@ impl<'a> SpeculativeDecoder<'a> {
                 }
             }
 
-            let n_keep = (1 + n_accepted) as u32;
+            let n_keep = if stop_now {
+                n_accepted as u32
+            } else {
+                (1 + n_accepted) as u32
+            };
             if n_keep < n_eff {
                 let t_restore = std::time::Instant::now();
                 encode_restore_after_partial_accept_inner(
@@ -3035,6 +3063,13 @@ impl<'a> SpeculativeDecoder<'a> {
                 stats.restore_ms += t_restore.elapsed().as_secs_f64() * 1e3;
             }
 
+            stats.steps += 1;
+            step_idx += 1;
+
+            if stop_now {
+                break 'outer;
+            }
+
             let t_bridge = std::time::Instant::now();
             let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
             self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
@@ -3042,12 +3077,6 @@ impl<'a> SpeculativeDecoder<'a> {
 
             processed_pos += 1 + n_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
-            stats.steps += 1;
-            step_idx += 1;
-
-            if stop_now {
-                break 'outer;
-            }
         }
 
         Ok(DecodeOutput {
@@ -3079,6 +3108,10 @@ pub struct SpecStats {
     pub base_forward_calls: u32,
     /// Total MTP draft / draft_kv_only calls (prefill + decode + bridges).
     pub mtp_calls: u32,
+    /// Target transitions executed by planned packed verification.
+    pub target_transitions: u32,
+    /// Effective N used by the final planned packed verification.
+    pub final_effective_verify_n: u32,
     /// Prompt prefill wall time, including MTP-history prefill when this path
     /// maintains one. Used to normalize against MTPLX decode-only reporting.
     pub prefill_ms: f64,
@@ -3137,6 +3170,14 @@ mod tests {
     use crate::forward::{Forward, GdnState, KvCache};
     use crate::loader::Model;
     use crate::metal_forward::MetalModel;
+
+    #[test]
+    fn planned_terminal_draft_count_preserves_pending_final_token() {
+        let drafts = [10, 11, 12, 13, 14, 15, 16];
+        assert_eq!(terminal_draft_count(&drafts, 1, 8, &[]), Some(7));
+        assert_eq!(terminal_draft_count(&drafts, 1, 99, &[12]), Some(3));
+        assert_eq!(terminal_draft_count(&drafts, 1, 99, &[]), None);
+    }
 
     #[test]
     fn mtp_moe_bank_policy_parser_is_strict() {

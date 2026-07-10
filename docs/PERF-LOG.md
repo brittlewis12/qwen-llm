@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.554 Physical-N8 Terminal Oracle Corrected
+
+Status: verifier-harness correctness; no verifier performance conclusion.
+
+- `decode_packed_n_planned` now detects the first accepted stop/output-limit draft
+  before verification. It truncates irrelevant later drafts and uses effective N
+  equal to the target transitions needed to validate the pending terminal token
+  inside the configured physical scratch.
+- Accepted terminal exit retains `n_accepted` inputs, performs no unnecessary
+  restore, and skips hidden/carry advancement because no next speculative step
+  exists. Rejection retains carry plus accepted drafts as before. Planned stats
+  now record executed target transitions and final effective N.
+- Oracle JSON reports terminal consumption semantics and planned-path accounting;
+  non-planned probes emit null instead of misleading zero transition fields.
+- The outside-timing resume audit reconstructs serial state through every emitted
+  token except the pending final token. It checks exact KV positions, numerical
+  committed-KV cosine, GDN/conv deltas, then consumes the same pending token and
+  requires equal continuation argmax plus tight logit cosine/max-absolute error.
+- A dirty 27B `Hello`, eight-token smoke passes exact output, `7/7` serial/packed
+  transitions, `mtp_calls=0`, physical scratch N8 with final effective N7, and
+  positions `8/8`. KV cosine is `0.9999999124`; continuation argmax is exact,
+  cosine is `0.9999999994`, and maximum logit error is `0.000765`.
+- The smoke's decode-only walls are `268.29/237.51 ms`, but one dirty one-packet
+  row is not an economics claim. The next packet is seven fresh-process A3B and
+  27B rows on the frozen 437-token Reva prefix.
+
+Artifact: `target/profiles/v0554-27b-n8-terminal-smoke5.{json,out,err}`.
+Design and reviews: `cx ask` sessions
+`019f4dd3-f708-7c41-b467-81be02b054db`,
+`019f4de7-a337-7da0-9d20-ab84028f4713`, and
+`019f4df0-1c56-7ce0-b93d-30659b8cc330`.
+
 ## 2026-07-10 - v0.553 Tokenizer Prompt Guardrails Passed
 
 Status: measurement-only closure; tokenizer micro-construction closed.

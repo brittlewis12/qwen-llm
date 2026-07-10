@@ -206,6 +206,12 @@ test -f "$MTP_MODEL"
 ./target/release/qwen-bench mtp \
   -m "$MTP_MODEL" --tokens 64 --spec-tokens 1
 
+# Perfect-proposer physical-N8 verifier oracle.
+./target/release/qwen-bench mtp \
+  -m "$MTP_MODEL" --prompt "$(<target/profiles/v0553-interactive-reva-prefix.txt)" \
+  --spec-tokens 7 --mtp-physical-n 8 --mtp-probe oracle \
+  --tokens 128 --no-warmup --output target/profiles/n8-oracle.json
+
 # DFlash acceptance signal; use --effective-n to see where alpha decays.
 ./target/release/qwen-bench dflash-lazy \
   -m "$TARGET_MODEL" --drafter "$DRAFTER_MODEL" \
@@ -216,6 +222,18 @@ test -f "$MTP_MODEL"
   -m "$TARGET_MODEL" --drafter "$DRAFTER_MODEL" \
   --tokens 64 --profile --n-policy adaptive
 ```
+
+Physical-N8 oracle rules:
+
+- Oracle mode still requires and loads an MTP-aware asset, but timed draft work
+  must report `mtp_calls=0`.
+- For 128 emitted tokens, the serial target executes 127 transitions. The final
+  packet uses physical N8 scratch with effective N7 so the terminal emitted token
+  remains pending. Require equal transition counts and `final_effective_verify_n=7`.
+- The outside-timing resume audit requires exact KV positions, numerical committed
+  KV cosine, and equal next-token argmax with tight continuation-logit metrics.
+- Use `reference.decode_ms / speculative.decode_ms` for the whole-decode oracle.
+  Do not use total speedup because the two prefill implementations differ.
 
 DFlash rules:
 

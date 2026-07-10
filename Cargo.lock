@@ -1027,6 +1027,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "clap",
+ "half",
  "objc2",
  "objc2-foundation",
  "objc2-metal",

@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.539 Q4_K MTP Draft-Head Falsifier
+
+Status: killed; no Q4_K override, streamed quantizer, or fixture micro retained.
+
+- Streamed the exact A3B `output.weight` from Q6_K to true GGML Q4_K without a
+  full-head F32 allocation. The generated tensor was exactly `286,064,640`
+  bytes versus `417,177,600` bytes for Q6_K, but conversion took `13.079 s` and
+  failed the pre-registered `<=2 s` on-load gate.
+- The isolated seven-head N1 primitive passed decisively. Q6_K/Q4_K GPU medians
+  were `5.662/4.087 ms` (`0.72187x`) for head-only and `6.043/4.463 ms`
+  (`0.73851x`) for head plus separate argmax. CV stayed at or below `0.17%`.
+- Q4_K CPU/GPU output matched at cosine `1.0`, max absolute error `7e-6`, and
+  identical argmax. One synthetic Q4_K/Q6_K row had centered cosine `0.996997`,
+  NRMSE `0.0775`, identical argmax, and a healthy retained winner margin.
+- Cooled three-pair A3B D7/N8 integration with native MTP banks preserved exact
+  target-greedy streams and acceptance on every row: tok16 stayed `13/21` and
+  tok128 stayed `110/119`.
+- The primitive win did not clear the fixed body/orchestration cost. Median
+  tok16/tok128 draft improvements were only `10.05%/15.20%`; decode improved
+  `0.89%/2.28%`, and total speculative wall improved `0.85%/2.07%`. These miss
+  the pre-registered `>=20%` draft-both-shapes, `>=3%` tok128 decode, and
+  `>=2.5%` total gates.
+- Setup-excluded steady-state gains do not override the load-gate failure. Close
+  streamed/generated Q4_K draft heads; do not spend a wider corpus or 512-state
+  fidelity packet. Reopen only for a materially different prequantized asset or
+  execution shape that passes every original gate from scratch.
+
+Artifacts: `target/profiles/v0539-a3b-mtp-q4k-head-micro.out` and
+`target/profiles/v0539-a3b-mtp-{q6,q4k}-head-tok{16,128}-r{1,2,3}*.json`.
+Design/adjudication: `cx ask` sessions `019f49a1-9d6a-79b0-9f33-b8a22a5ea5f5`
+and `019f49be-59b7-7383-88c0-cb123d77fcdc`.
+
 ## 2026-07-09 - v0.538 Native Quantized Embedding Residency
 
 Status: exact Q4_K/Q8_0 memory path retained as an opt-in; default gate missed.

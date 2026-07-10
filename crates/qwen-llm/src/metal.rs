@@ -397,6 +397,36 @@ pub struct MetalPipelineInfo {
     pub supports_indirect_command_buffers: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MetalPipelineCacheMetrics {
+    pub misses: u64,
+    pub miss_wall_ns: u64,
+    pub compiler_wall_ns: u64,
+}
+
+impl MetalPipelineCacheMetrics {
+    pub fn saturating_delta_since(self, earlier: Self) -> Self {
+        Self {
+            misses: self.misses.saturating_sub(earlier.misses),
+            miss_wall_ns: self.miss_wall_ns.saturating_sub(earlier.miss_wall_ns),
+            compiler_wall_ns: self
+                .compiler_wall_ns
+                .saturating_sub(earlier.compiler_wall_ns),
+        }
+    }
+}
+
+#[derive(Default)]
+struct MetalPipelineCache {
+    pipelines: HashMap<String, Pipeline>,
+    metrics_enabled: bool,
+    metrics: MetalPipelineCacheMetrics,
+}
+
+fn duration_ns_saturating(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 // ===========================================================================
 // MetalContext
 // ===========================================================================
@@ -405,7 +435,7 @@ pub struct MetalContext {
     pub device: Device,
     pub queue: Queue,
     pub library: Library,
-    pso_cache: Arc<Mutex<HashMap<String, Pipeline>>>,
+    pso_cache: Arc<Mutex<MetalPipelineCache>>,
 }
 
 // SAFETY: `Retained<ProtocolObject<dyn MTL*>>` are thread-safe per Apple's
@@ -430,7 +460,7 @@ impl MetalContext {
             device,
             queue,
             library,
-            pso_cache: Arc::new(Mutex::new(HashMap::new())),
+            pso_cache: Arc::new(Mutex::new(MetalPipelineCache::default())),
         })
     }
 
@@ -438,22 +468,75 @@ impl MetalContext {
     /// object on first request and caching it thereafter.
     pub fn pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
         census_record_pso(name);
-        if let Some(p) = self.pso_cache.lock().get(name) {
-            return Ok(p.clone());
-        }
+        let metrics_enabled = {
+            let mut cache = self.pso_cache.lock();
+            if let Some(p) = cache.pipelines.get(name) {
+                return Ok(p.clone());
+            }
+            if cache.metrics_enabled {
+                cache.metrics.misses = cache.metrics.misses.saturating_add(1);
+            }
+            cache.metrics_enabled
+        };
+        let miss_t0 = metrics_enabled.then(std::time::Instant::now);
         let func_name = NSString::from_str(name);
-        let function = self
-            .library
-            .newFunctionWithName(&func_name)
-            .ok_or_else(|| MetalError::NoFunction(name.to_string()))?;
-        let pso = self
+        let Some(function) = self.library.newFunctionWithName(&func_name) else {
+            if let Some(start) = miss_t0 {
+                self.record_pipeline_miss_wall(start.elapsed(), None);
+            }
+            return Err(MetalError::NoFunction(name.to_string()));
+        };
+        let compiler_t0 = metrics_enabled.then(std::time::Instant::now);
+        let pso_result = self
             .device
-            .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|e: Retained<NSError>| {
-                MetalError::Pipeline(name.to_string(), e.localizedDescription().to_string())
-            })?;
-        self.pso_cache.lock().insert(name.to_string(), pso.clone());
+            .newComputePipelineStateWithFunction_error(&function);
+        if let Some(start) = miss_t0 {
+            self.record_pipeline_miss_wall(
+                start.elapsed(),
+                compiler_t0.map(|compiler_start| compiler_start.elapsed()),
+            );
+        }
+        let pso = pso_result.map_err(|e: Retained<NSError>| {
+            MetalError::Pipeline(name.to_string(), e.localizedDescription().to_string())
+        })?;
+        self.pso_cache
+            .lock()
+            .pipelines
+            .insert(name.to_string(), pso.clone());
         Ok(pso)
+    }
+
+    pub fn set_pipeline_cache_metrics_enabled(&self, enabled: bool) {
+        let mut cache = self.pso_cache.lock();
+        cache.metrics_enabled = enabled;
+        if enabled {
+            cache.metrics = MetalPipelineCacheMetrics::default();
+        }
+    }
+
+    pub fn pipeline_cache_metrics(&self) -> MetalPipelineCacheMetrics {
+        self.pso_cache.lock().metrics
+    }
+
+    fn record_pipeline_miss_wall(
+        &self,
+        miss_wall: std::time::Duration,
+        compiler_wall: Option<std::time::Duration>,
+    ) {
+        let mut cache = self.pso_cache.lock();
+        if !cache.metrics_enabled {
+            return;
+        }
+        cache.metrics.miss_wall_ns = cache
+            .metrics
+            .miss_wall_ns
+            .saturating_add(duration_ns_saturating(miss_wall));
+        if let Some(compiler_wall) = compiler_wall {
+            cache.metrics.compiler_wall_ns = cache
+                .metrics
+                .compiler_wall_ns
+                .saturating_add(duration_ns_saturating(compiler_wall));
+        }
     }
 
     pub fn pipeline_info(&self, name: &str) -> Result<MetalPipelineInfo, MetalError> {

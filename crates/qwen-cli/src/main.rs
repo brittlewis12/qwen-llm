@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
+use qwen_llm::metal::MetalPipelineCacheMetrics;
 use qwen_llm::metal_dflash::{MetalDFlashLayerMajorScratch, prefill_tokens_with_multi_hidden};
 use qwen_llm::metal_forward::MetalForward;
 use qwen_llm::runtime::{LoadedModel, LoadedModelConfig, Runtime, Sequence, SequenceConfig};
@@ -213,7 +214,22 @@ struct RequestTimingRow {
     transition_tps: f64,
     inference_complete_ms: f64,
     total_request_ms: f64,
+    pso_cache: PipelineCachePhaseMetrics,
     metal_allocated: MetalAllocationSamples,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct PipelineCacheMetricDelta {
+    misses: u64,
+    miss_wall_ns: u64,
+    compiler_wall_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct PipelineCachePhaseMetrics {
+    prefill: PipelineCacheMetricDelta,
+    generation: PipelineCacheMetricDelta,
+    total: PipelineCacheMetricDelta,
 }
 
 #[derive(Debug)]
@@ -221,6 +237,7 @@ struct PreparedRequest {
     request_start_unix_ms: u64,
     request_t0: Instant,
     request_start_allocated: Option<u64>,
+    pipeline_cache_start: Option<MetalPipelineCacheMetrics>,
     prompt: String,
     prompt_source: PromptSource,
     prompt_ids: Vec<i32>,
@@ -228,6 +245,31 @@ struct PreparedRequest {
     tokenizer_init_ms: f64,
     tokenization_ms: f64,
     tokenizer_reused: bool,
+}
+
+fn pipeline_cache_delta(
+    after: MetalPipelineCacheMetrics,
+    before: MetalPipelineCacheMetrics,
+) -> PipelineCacheMetricDelta {
+    let delta = after.saturating_delta_since(before);
+    PipelineCacheMetricDelta {
+        misses: delta.misses,
+        miss_wall_ns: delta.miss_wall_ns,
+        compiler_wall_ns: delta.compiler_wall_ns,
+    }
+}
+
+fn pipeline_cache_phase_metrics(
+    request_start: MetalPipelineCacheMetrics,
+    prefill_entry: MetalPipelineCacheMetrics,
+    prefill_exit: MetalPipelineCacheMetrics,
+    generation_exit: MetalPipelineCacheMetrics,
+) -> PipelineCachePhaseMetrics {
+    PipelineCachePhaseMetrics {
+        prefill: pipeline_cache_delta(prefill_exit, prefill_entry),
+        generation: pipeline_cache_delta(generation_exit, prefill_exit),
+        total: pipeline_cache_delta(generation_exit, request_start),
+    }
 }
 
 #[derive(Debug)]
@@ -483,6 +525,9 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         )
         .with_context(|| format!("load model {}", model_path.display()))?;
     let runtime_and_model_load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    if timing_enabled {
+        loaded.context().set_pipeline_cache_metrics_enabled(true);
+    }
     let process_model_ready_allocated =
         timing_enabled.then(|| loaded.context().current_allocated_size());
     let stdout_sink = if std::io::stdout().is_terminal() {
@@ -500,6 +545,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         loaded.prefix_cache_stats().entries == 0,
         "single-turn timing requires an empty prefix cache"
     );
+    let first_pipeline_cache_start =
+        timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let first_request_t0 = Instant::now();
     let first_request_start_unix_ms = unix_epoch_ms_u64()?;
     let first_request_start_allocated =
@@ -519,6 +566,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         request_start_unix_ms: first_request_start_unix_ms,
         request_t0: first_request_t0,
         request_start_allocated: first_request_start_allocated,
+        pipeline_cache_start: first_pipeline_cache_start,
         prompt: first_prompt,
         prompt_source: first_prompt_source,
         prompt_ids: first_prompt_ids,
@@ -547,6 +595,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             loaded.prefix_cache_stats().entries == 0,
             "warm follow-up requires an unused prefix cache"
         );
+        let warm_pipeline_cache_start =
+            timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
         let warm_request_t0 = Instant::now();
         let warm_request_start_unix_ms = unix_epoch_ms_u64()?;
         let warm_request_start_allocated =
@@ -569,6 +619,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             request_start_unix_ms: warm_request_start_unix_ms,
             request_t0: warm_request_t0,
             request_start_allocated: warm_request_start_allocated,
+            pipeline_cache_start: warm_pipeline_cache_start,
             prompt: warm_prompt,
             prompt_source: warm_prompt_source,
             prompt_ids: warm_prompt_ids,
@@ -679,6 +730,7 @@ fn execute_single_turn_request(
         request_start_unix_ms,
         request_t0,
         request_start_allocated,
+        pipeline_cache_start,
         prompt,
         prompt_source,
         prompt_ids,
@@ -729,6 +781,8 @@ fn execute_single_turn_request(
     let model_identity = timing_enabled.then(|| loaded.snapshot_identity(&sequence));
     let forward = loaded.forward();
 
+    let pipeline_cache_prefill_entry =
+        timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let prefill_t0 = Instant::now();
     let logits = prefill_tokens_with_multi_hidden(
         &forward,
@@ -742,6 +796,8 @@ fn execute_single_turn_request(
     .context("prefill prompt")?;
     sequence.advance_by(prompt_ids.len())?;
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+    let pipeline_cache_prefill_exit =
+        timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let after_prefill_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
 
     let stdout_handle = std::io::stdout();
@@ -780,6 +836,8 @@ fn execute_single_turn_request(
         },
     )?;
     let inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
+    let pipeline_cache_generation_exit =
+        timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let generated = generation.tokens;
     if !generated.is_empty() {
         writeln!(stdout)?;
@@ -823,7 +881,7 @@ fn execute_single_turn_request(
     let row = timing_values.map(|samples| {
         let model_identity = model_identity.expect("timing identity");
         RequestTimingRow {
-            schema_version: 2,
+            schema_version: 3,
             request_epoch,
             request_index,
             tokenizer_reused,
@@ -873,6 +931,12 @@ fn execute_single_turn_request(
             transition_tps,
             inference_complete_ms,
             total_request_ms,
+            pso_cache: pipeline_cache_phase_metrics(
+                pipeline_cache_start.expect("timing PSO snapshot"),
+                pipeline_cache_prefill_entry.expect("timing PSO snapshot"),
+                pipeline_cache_prefill_exit.expect("timing PSO snapshot"),
+                pipeline_cache_generation_exit.expect("timing PSO snapshot"),
+            ),
             metal_allocated: metal_allocation_samples(
                 samples.0,
                 samples.1,
@@ -1963,5 +2027,30 @@ mod tests {
         assert!(validate_request_timing_invariants(12.0, 11.0, 20.0, 21.0, 4, 3).is_err());
         assert!(validate_request_timing_invariants(10.0, 11.0, 20.0, 21.0, 4, 4).is_err());
         assert!(validate_request_timing_invariants(10.0, f64::NAN, 20.0, 21.0, 4, 3).is_err());
+    }
+
+    #[test]
+    fn pipeline_cache_phase_metrics_align_prefill_and_generation() {
+        let snapshot = |misses, miss_wall_ns, compiler_wall_ns| MetalPipelineCacheMetrics {
+            misses,
+            miss_wall_ns,
+            compiler_wall_ns,
+        };
+        let metrics = pipeline_cache_phase_metrics(
+            snapshot(0, 0, 0),
+            snapshot(1, 10, 8),
+            snapshot(3, 30, 25),
+            snapshot(4, 40, 33),
+        );
+
+        assert_eq!(metrics.prefill.misses, 2);
+        assert_eq!(metrics.prefill.miss_wall_ns, 20);
+        assert_eq!(metrics.prefill.compiler_wall_ns, 17);
+        assert_eq!(metrics.generation.misses, 1);
+        assert_eq!(metrics.generation.miss_wall_ns, 10);
+        assert_eq!(metrics.generation.compiler_wall_ns, 8);
+        assert_eq!(metrics.total.misses, 4);
+        assert_eq!(metrics.total.miss_wall_ns, 40);
+        assert_eq!(metrics.total.compiler_wall_ns, 33);
     }
 }

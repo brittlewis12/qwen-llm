@@ -150,13 +150,20 @@ The first 0.8B one-token-prompt sentinel shows a `93.28 ms` TTFT gap: explicitly
 bracketed tokenizer construction accounts for `70.52 ms`, while prefill moves
 `35.44 -> 12.64 ms`. This is a causal search-space split, not a promotion.
 
+v0.549 directly prices PSO misses. On the same 0.8B sentinel, request-0 prefill
+has 22 misses costing `1.763 ms`, of which `1.686 ms` is the Metal compiler API.
+Generation has 11 misses costing `0.376 ms`; the warm request has none. PSO work
+explains only `6.62%` of the `26.65 ms` prefill gap and at most `1.60%` of first
+TTFT. Close PSO prewarming or compiler optimization as a material lever in this
+cell. Do not relabel the unexplained `24.89 ms` first-prefill gap as PSO.
+
 Next contract work:
 
-1. Add per-request PSO-cache miss count and compilation wall, then replicate the
-   pair across fresh processes. Do not attribute the prefill delta to PSO without
-   this direct counter.
-2. Measure one realistic interactive prompt and one dissimilar longer guardrail
-   before deciding whether the fixed first-position tax is operationally material.
+1. Price exact removal of eager full-vocabulary decoded-byte materialization in
+   `NativeTokenizer::from_gguf`. Preserve full decode parity and reject callback or
+   total-wall transfer; do not assume it explains all tokenizer construction.
+2. Replicate the surviving tokenizer candidate across fresh processes, then use
+   one realistic interactive prompt and one dissimilar longer guardrail.
 3. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
@@ -309,9 +316,9 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Attribute the v0.548 first-position tax with PSO miss/compile counters and one
-   interactive plus one dissimilar prompt guardrail. Use that split to choose
-   tokenizer construction, pipeline warmup, or neither; reject boundary-only wins.
+1. Remove eager decoded-byte work from tokenizer construction if an exact lazy
+   oracle saves at least `5 ms` TTFT without transferring it into first callback,
+   total wall, or host memory. PSO warmup is closed in the measured 0.8B cell.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

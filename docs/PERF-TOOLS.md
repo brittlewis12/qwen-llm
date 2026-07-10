@@ -553,7 +553,7 @@ Interpretation rules:
 
 ### First post-model-load streamed TTFT
 
-`qwen --request-timings PATH` appends one schema-2 JSONL row for a successful
+`qwen --request-timings PATH` appends one schema-3 JSONL row for a successful
 single-turn `--prompt` or `--prompt-file` request. It runs the production request
 once and does not support JSONL serving, model-info mode, or stdout as the timing
 destination.
@@ -604,6 +604,12 @@ Contract:
   `first_post_model_load/warm_followup`, and record tokenizer reuse. Both equality
   fields become true only after prompt bytes, prompt token IDs, complete generated
   token IDs, and stop reasons match. Prefix-cache use remains structurally absent.
+- `pso_cache.prefill`, `.generation`, and `.total` report cache-miss count,
+  complete miss-resolution wall, and Metal compiler-API wall. Metrics are enabled
+  only for request timing. Prefill and generation use phase-aligned snapshots;
+  total begins at request start and can also include future setup-time PSO work.
+  Use at least two requested tokens and require a positive transition count before
+  interpreting generation misses.
 - The warm row is a second-position aggregate lifecycle measurement, not isolated
   tokenizer reuse. Run independent fresh processes against one stable redirected
   sink; do not infer a latency distribution from a single pair.

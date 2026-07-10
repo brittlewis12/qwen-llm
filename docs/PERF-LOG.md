@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.549 PSO First-TTFT Contribution Falsifier
+
+Status: causal instrumentation plus bounded 0.8B PSO materiality kill; no runtime
+optimization promoted.
+
+- `MetalContext` now exposes opt-in context-cumulative PSO metrics. Disabled cache
+  hits retain the old lookup path with no atomics or counter update. An enabled
+  miss records complete function-lookup/compiler resolution wall and compiler-API
+  wall with saturating counters under the existing cache mutex.
+- Request-timing schema 3 snapshots metrics at request start, prefill entry,
+  prefill exit, and generation exit. It reports phase-aligned prefill and
+  generation deltas plus request-total deltas. The oracle uses four output tokens,
+  so all rows execute three target transitions and cover decode-only misses.
+- On redirected 0.8B Q4 `Hello`, request-0 prefill was `39.389 ms` versus warm
+  `12.739 ms`, a `26.649 ms` gap. Its 22 PSO misses cost only `1.763 ms`; the
+  Metal compiler API accounts for `1.686 ms`. Thus measured PSO resolution
+  explains `6.62%` of the prefill gap.
+- Request-0 generation has 11 further misses costing `0.376 ms`, including
+  `0.341 ms` compiler wall. The warm request records zero misses in both phases.
+  First-TTFT PSO opportunity is bounded by prefill miss wall, `1.60%` of
+  `110.368 ms`; generation misses occur after the first token flush.
+- Close PSO prewarming/compiler work as a material first-TTFT lever for this cell.
+  The unexplained `24.886 ms` first-prefill delta remains aggregate first-touch
+  behavior, not evidence for another PSO treatment. Do not widen a sub-gate
+  `1.76 ms` ceiling into a broad warmup matrix.
+- The next exact work-removal candidate is NativeTokenizer's eager decoded-byte
+  table: lazily memoize only emitted token IDs, preserve full-vocabulary decode
+  parity, and reject any construction gain transferred into callback or total
+  wall. The full `~70 ms` tokenizer cost is not attributed to this one subphase.
+
+Artifact: `target/profiles/v0549-08b-pso-pair.{jsonl,out,err}`.
+Design and adjudication reviews: `cx ask` sessions
+`019f4daf-863e-7862-856c-4caaa38a3971` and
+`019f4db8-2cf2-7b23-9532-b478bda2d454`.
+
 ## 2026-07-10 - v0.548 Paired First-vs-Warm TTFT Discriminator
 
 Status: causal measurement split; no optimization or performance promotion.

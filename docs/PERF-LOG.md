@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-09 - v0.540 Real DFlash Full-Attention Cost Witness
+
+Status: paid-cost gate passed; exactly one bounded implementation is authorized.
+
+- Used the preregistered canonical Qwen3.6 Reva preserve replay: prompt SHA-256
+  `7bc9c088...cec16`, `7,986` tokens, static-16, and `256` requested/emitted
+  tokens. Target, drafter, prompt, clean build identity, and production attention
+  settings were pinned before measurement.
+- The protocol-valid A1/P/A2 static-decode walls were
+  `10,665.9/10,681.8/10,673.3 ms`. Conservative A1/A2 spread was `1.00070x`.
+  Runs used 120-second cooldowns on AC/high-power mode with no recorded thermal,
+  performance, or CPU-power warning and `96%` free memory.
+- Every row preserved exact 256-token greedy equivalence and identical integer
+  accounting: `36` outer steps, `220` accepted drafts, `36` drafter/verify calls,
+  `34` restores, and the same 15 per-position counts. Durable acceptance was
+  `220/36 = 6.111` drafts per step, comfortably above the `3.0` witness floor.
+- Profile counts reconcile structurally: phase 3 was `1,769.05 ms` over `180`
+  layer calls; SWA attention was `737.39 ms` over `144` calls and full attention
+  was `730.88 ms` over `36` calls. Split buckets sum to `1,769.06 ms`.
+- Conservative full-attention paid cost is
+  `(730.88-0.005)/(10,673.3+0.05) = 6.84766%` of static decode wall. Total paid
+  attention is `13.7565%`. These are attribution results, not attainable speedup
+  or evidence about DFlash versus no-spec.
+- Candidate 2 remains unrun. The witness authorizes one full-layer-only GQA-4
+  shared-K/V, fixed split-4 online-softmax main plus partial-reduction attempt.
+  A `>=3%` full-wall win requires reducing the full-attention bucket by at least
+  `43.81%`, including reduction overhead.
+
+Artifacts: `target/profiles/v0540-dflash-reva-static16-a1-valid-tok256.out`,
+`v0540-dflash-reva-static16-phase3-tok256.out`, and
+`v0540-dflash-reva-static16-a2-tok256.out`. Protocol/adjudication: `cx ask`
+sessions `019f49cb-5a54-74c0-8b66-a2e58935a525` and
+`019f49e9-42ea-76b0-be4d-9e935c1cce7d`.
+
 ## 2026-07-09 - v0.539 Q4_K MTP Draft-Head Falsifier
 
 Status: killed; no Q4_K override, streamed quantizer, or fixture micro retained.

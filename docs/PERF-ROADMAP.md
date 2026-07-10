@@ -149,13 +149,21 @@ Seven N1 heads improve to `0.72187x` Q6_K time, yet fixed body/orchestration cos
 limits paired tok16/tok128 draft wins to `10.05%/15.20%`, decode wins to
 `0.89%/2.28%`, and total wins to `0.85%/2.07%`. All semantic gates pass, but all
 wall gates miss and streamed setup takes `13.079 s`. No experiment code remains.
+v0.540 supplies the missing real DFlash witness. The canonical 7,986-token Reva
+replay holds exact 256-token equivalence and `220/36 = 6.111` accepted drafts per
+step across stable A1/P/A2 anchors. Post-scan full attention costs a conservative
+`6.84766%` of static decode; total paid attention is `13.7565%`. This passes a
+necessary attribution gate, not a speedup claim, and authorizes exactly one
+full-layer-only GQA-4 shared-K/V split-4 attempt. Candidate 2 remains unrun.
 
 Force-ranked implementation bets from this vantage:
 
-1. **Bounded DFlash attention/dataflow**: SWA scan pruning landed. Do not start a
-   larger DFlash attention rewrite from static synthetic rows alone. Reopen only
-   if a real long-context, high-acceptance workload shows full static decode
-   `>=3%` available after scan, with greedy equivalence and unchanged acceptance.
+1. **One bounded DFlash full-attention dataflow attempt is authorized**: add only
+   a fixed-shape GQA-4 shared-K/V, split-4 online-softmax main and exact partial
+   reduction for the full layer. Require combined primitive ratio `<=0.50` at
+   contexts `7986/8114/8241`, then an unprofiled Reva static-decode win `>=3%`
+   with exact tokens and all acceptance/call counts unchanged. Do not modify SWA,
+   verifier, policy, assets, or prompt geometry; any failed gate closes the work.
 2. **Compressed KV only with a new reader/layout**: same-layout Q8_0 remains
    closed. Reopen only for Q6/FP8-like or another body that beats tuned F16 in
    `attn-intra` at both 8K and 32K while preserving Q-head grid parallelism.

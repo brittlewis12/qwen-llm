@@ -135,16 +135,23 @@ affected. Any future resumable or end-of-request snapshot must record the pendin
 terminal token explicitly. Stop-set expansion beyond the current single EOS and
 CPU/GPU argmax tie semantics remain separate work.
 
+v0.547 adds the first bounded contract row. The production single-turn path now
+records one first-post-model-load request from prompt acquisition through first
+stdout flush and final newline flush. It separates tokenizer construction,
+tokenization, validation, request allocations, prefill, first-token selection,
+callback delivery, transitions, and total wall. Device allocation is sampled at
+named milestones; it is not a peak-memory measurement.
+
 Next contract work:
 
-1. Add a model-ready fresh-TTFT surface that times the production request path,
-   includes the final token-selection tail, and records first-token delivery.
-2. Record first post-load and warm loaded repetitions explicitly. Keep
-   process-cold load/residency and warm `pp<N>` throughput as separate rows.
-3. Include tokenization, request allocation, prompt staging, prefill tail, token
-   selection, detokenization, and first delivery in product TTFT.
-4. Report allocation, GPU, first-token, transition, total request, peak memory,
-   and exactness without turning the packet into a broad benchmark matrix.
+1. Add a same-process warm follow-up that retains only the loaded model and
+   tokenizer while recreating request state and replaying the identical request.
+2. Record request index, first versus warm epoch, tokenizer reuse, and exact
+   per-request output equivalence. Compare paired deltas across fresh processes.
+3. Add named request-archetype totals after the lifecycle discriminator is valid.
+   Keep process-cold load/residency and warm `pp<N>` throughput separate.
+4. Do not rank tokenizer construction, PSO compilation, or first touch as a
+   recurring optimization target until the paired row isolates it.
 
 This is a product correction plus a bounded objective measurement, not a return to
 provenance-first work. Build identity and correctness gates remain guardrails.
@@ -293,7 +300,8 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Add the bounded model-ready TTFT contract and named request-archetype totals.
+1. Complete the same-process warm-loaded discriminator and named archetype totals
+   on top of the v0.547 bounded first-post-model-load TTFT contract.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

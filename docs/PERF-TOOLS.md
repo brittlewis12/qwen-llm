@@ -551,6 +551,51 @@ Interpretation rules:
 - Treat 1K+ repeated prefixes as the first product-worthy regime unless fresh data
   overturns the v0.442/v0.445 small-prefix results.
 
+### First post-model-load streamed TTFT
+
+`qwen --request-timings PATH` appends one schema-1 JSONL row for a successful
+single-turn `--prompt` or `--prompt-file` request. It runs the production request
+once and does not support JSONL serving, model-info mode, or stdout as the timing
+destination.
+
+```sh
+target/release/qwen -m "$MODEL" -p "Hello" -n 4 \
+  --request-timings target/profiles/request-timings.jsonl
+```
+
+Contract:
+
+- The request epoch begins after runtime/model loading returns. It includes
+  prompt acquisition, tokenizer construction, tokenization, validation, request
+  allocations, prefill, greedy selection, and streamed stdout delivery.
+- `ttft_ms` ends after the first successful `stdout.flush()`. This is a CLI sink
+  boundary, not proof that a downstream reader consumed non-empty bytes.
+- `runtime_and_model_load_ms` is outside request wall. Schema 1 measures exactly
+  one first post-load request with lazy PSO compilation and first touch charged;
+  it is not warmed resident-request latency.
+- `first_token_selection_ms` and `first_token_callback_duration_ms` are exclusive
+  phase durations. `first_token_ready_ms`, `ttft_ms`,
+  `inference_complete_ms`, and `total_request_ms` are cumulative milestones.
+- `total_request_ms` includes the final newline flush. Request-state teardown and
+  sidecar serialization/flush are outside product request wall.
+- `metal_allocated` contains device-wide `currentAllocatedSize` samples and signed
+  deltas from model-ready. `current_allocated_sampled_max_bytes` is only the
+  maximum sampled value, not residency, RSS, request attribution, or a true peak.
+- Build revision/source state, runtime model/tokenizer compatibility identity,
+  and stdout sink class are part of every row. `runtime_model_id` covers model
+  metadata, tensor descriptors, and shard paths, sizes, and modification times;
+  `runtime_tokenizer_id` covers `tokenizer.*` metadata. Neither is a content
+  digest. Do not compare terminal and redirected sinks.
+- `terminal_token_target_transition_consumed=false` means the final selected
+  token is emitted but not passed through another target transition. Therefore a
+  non-EOS `N`-token output performs `N-1` transitions.
+- A telemetry write failure returns command failure after product output may have
+  been delivered. Failed inference requests do not emit successful timing rows.
+
+Use an untimed command with identical model, prompt, and output length as the
+stdout-equivalence control. A warm-loaded follow-up is required before ranking a
+first-request phase as a recurring optimization target.
+
 ### Headless Metal performance-limiter counters (v0.455+)
 
 `xctrace` cannot configure a counter profile from CLI flags, but it can

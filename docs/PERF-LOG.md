@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.547 First-Post-Load TTFT Contract
+
+Status: measurement infrastructure; no optimization or performance promotion.
+
+- `qwen --request-timings PATH` now emits one schema-1 JSONL row for the
+  production single-turn path. The request epoch begins after runtime/model load
+  and ends after the final newline flush; TTFT ends after the first successful
+  stdout flush. JSONL serving and model-info modes are deliberately excluded.
+- The row separates prompt acquisition, tokenizer construction, tokenization,
+  validation, scratch and sequence allocation, prefill, first-token selection,
+  callback delivery, target transitions, inference completion, and total wall.
+  It records stop reason, effective chunk, capacity, N-1 transition semantics,
+  build state, runtime compatibility IDs, sink class, and endpoint semantics.
+- Seven Metal `currentAllocatedSize` observations provide signed deltas from the
+  model-ready sample and a sampled maximum. They are device-wide observations,
+  not request attribution, residency, RSS, or a true peak-memory measurement.
+- A final redirected 0.8B Q4 `Hello`, four-token smoke preserved byte-identical
+  stdout. It measured `70.22 ms` tokenizer construction, `45.31 ms` prefill,
+  `116.25 ms` first-token readiness, `116.29 ms` first-flush TTFT, three target
+  transitions, and `128.36 ms` total request wall. This single dirty-build row is
+  directional decomposition only, not a speedup or recurring-cost estimate.
+- The runtime model ID covers metadata, tensor descriptors, and shard file
+  attributes; it is intentionally labeled a compatibility identity rather than a
+  content digest. Promotion or cross-host evidence may require stronger
+  provenance, but hashing model shards is not part of this bounded attack packet.
+- Ten CLI unit tests, `cargo check`, the release build, output equivalence, schema
+  invariants, and patch checks pass. The next packet is a same-process paired
+  first-versus-warm discriminator before any phase is ranked for optimization.
+
+Artifact: `target/profiles/v0547-final3-08b-timings.jsonl` with matching
+`v0547-final-08b-control.out` and `v0547-final3-08b-timed.out`.
+Design/result/adversarial reviews: `cx ask` sessions
+`019f4d74-bd45-7833-9743-84f76083bd0e`,
+`019f4d84-22e4-7813-9be8-bb9782973bbb`,
+`019f4d91-fd49-7e01-aeef-e024ce508239`, and
+`019f4d96-5214-7950-a4a0-93211dfed8ee`.
+
 ## 2026-07-10 - v0.546 Terminal Overdecode Removed
 
 Status: product responsiveness and total-work correction; source, tests, stats,

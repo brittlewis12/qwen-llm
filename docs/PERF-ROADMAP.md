@@ -168,28 +168,33 @@ anchor spread was `1.0635x`, although its direction was uniformly negative. All
 experiment source is removed. Exact Q8_0 at the unchanged 272-byte head-row is
 now closed in the two tested reader-layout families, not for every possible
 compressed-KV format or attention body.
+v0.543 executes and kills the next authorized lower-byte branch before timing.
+Direct interleaved canonical GGML Q4_0 at 144 bytes per head-row reconstructs
+bit-exactly in the standalone GPU format/indexing oracle and exercises both
+scale signs. The real A3B block-3 `ctx8192` attention output nevertheless reaches
+only `0.996111664` cosine with `0.1653642654` maximum absolute error, failing both
+fidelity gates. The required 32K correctness row and every performance sample
+remain unrun after the mandatory stop. All experiment source is removed.
 
 Force-ranked next gates from this vantage:
 
-1. **Materially lower-byte non-Q8 KV, primitive only**: exact Q8_0 is closed in
-   both tested reader-layout families. The only authorized code experiment is a
-   bounded A3B group8 `attn-intra` sidecar for a genuinely lower-byte format,
-   beginning with direct interleaved Q4_0 at 144 bytes per head-row. Preserve
-   the tuned F16 grids and unchanged F32 reducer. Require `cos > 0.9999`,
-   `max_abs < 0.01`, main `<=0.90x` the slower F16 anchor, and main+reduce
-   non-regression at both 8K and 32K. The primitive alone does not authorize
-   cache or runtime integration.
-2. **BF16 `mul_mm_id`/layout parity remains measurement-gated**: rerun
+1. **BF16 `mul_mm_id`/layout parity remains measurement-gated**: rerun
    current-HEAD matched qwen/llama A3B BF16 projection attribution before
    writing another kernel. Authorize a structural sidecar only if named
    categories explain `>=90%` of qwen wall, or one category is `>=40%` with a
    credible `>=1.5x` replacement. Do not retread vector loads, local SwiGLU
    tiles, reduce/finalizer work, or command-buffer splitting.
-3. **Structural routed-Q5 down remains mechanism-gated**: the real no-weight
+2. **Structural routed-Q5 down remains mechanism-gated**: the real no-weight
    ceiling is only `+2.2%/+2.4%` total decode and the local tile, staging, load,
    scatter, reducer, and monolith shelves are closed. Reopen only for a new
    byte/dequant/dataflow mechanism that first clears `>=10%` on
    production-faithful captured MoE compute for both A3B and A10B.
+3. **Compressed KV remains format/body-gated**: both exact-Q8 reader layouts and
+   direct canonical Q4_0 now have decisive falsifiers. Q6/FP8-like formats and
+   materially different attention/dequant bodies remain untested, but no next
+   code experiment is authorized without a concrete mechanism and new fidelity
+   contract. Do not infer that fewer stored bytes will improve this
+   latency/occupancy-limited attention body.
 
 S8 replay remains explicitly parked pending empirical arrival traces that clear
 blended `>=5-8%` net wall with p95 non-regression. No scheduler, runtime,
@@ -1029,6 +1034,13 @@ Recent measured negatives:
   anchor instability, though its direction is uniformly negative. Do not claim
   a comparison with current interleaved Q8, which was not timed. Layout
   rearrangement alone is no longer a sufficient Q8_0 reopen condition.
+- v0.543 falsifies direct interleaved canonical GGML Q4_0 KV for the
+  preregistered A3B group8 reader. Standalone GPU reconstruction is bit-exact
+  against canonical GGML with both scale signs, but real block-3 `ctx8192`
+  attention fails fidelity at cosine `0.996111664` and maximum absolute error
+  `0.1653642654`. The 32K correctness row and every performance sample are
+  unrun after the mandatory stop. This is not a performance result or closure
+  of all compressed-KV formats.
 - v0.341 kills the naive MoE FFN expert-pipeline proof. Splitting top-k routed
   experts into two groups and overlapping group-A down with group-B gate/up was
   exact on the A3B serial-vs-pipeline smoke, but regressed `tg128`: A3B
@@ -3554,7 +3566,7 @@ Acceptance gates:
 - Only pursue after double-buffered decode and structural cleanup are measured.
 - Require trace evidence of additional idle gap before escalating further.
 
-### 13. Compressed KV Cache - Exact Q8_0 Branch Closed
+### 13. Compressed KV Cache - Exact Q8_0 And Direct Q4_0 Closed
 
 Optimizes: long-context decode, DFlash usefulness at long context, memory.
 
@@ -3579,11 +3591,17 @@ Current read:
   the slower F16 anchor. The 8K row is protocol-invalid for anchor instability
   and only supplies a uniformly negative directional signal. No experiment code
   remains.
+- v0.543 tests the next allowed byte point, direct canonical Q4_0 at 144 bytes
+  per head-row. Canonical standalone reconstruction and both scale signs pass,
+  but real A3B block-3 attention fails the first 8K fidelity gate at cosine
+  `0.996111664` and maximum absolute error `0.1653642654`. The 32K correctness
+  row and all performance samples are unrun. No experiment code remains.
 
 Expected payoff: still potentially large for compressed KV in theory, but exact
 Q8_0 at 272 bytes per head-row is closed in the two tested reader-layout
-families. Q6/FP8-like and other materially lower-byte formats are untested, not
-disproved. Do not spend more blind sweep time on Q8_0 rearrangements.
+families, and direct canonical Q4_0 fails real-model fidelity before timing.
+Q6/FP8-like and other formats are untested, not disproved. Do not spend more
+blind sweep time on Q8_0 rearrangements or alternate four-bit readers.
 
 Risks and constraints:
 
@@ -3597,6 +3615,8 @@ Acceptance gates:
 - Revisit only with a concrete lower-byte or different-body structure and a fast
   `attn-intra` feedback plan that preserves Q-head grid parallelism and avoids
   large staged-KV TGM.
+- Require a preregistered real-model fidelity oracle before any performance
+  packet; v0.543 shows that byte savings alone can fail before timing.
 - Cut quickly if the reader does not beat tuned F16 at both 8K and 32K before
   end-to-end wiring.
 - Promote only after a no-spec long-context row improves and DFlash/verify phase

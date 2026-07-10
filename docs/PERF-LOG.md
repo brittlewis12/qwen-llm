@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.543 Canonical Q4_0 KV Fidelity Falsifier
+
+Status: killed at the first correctness gate; all experiment source removed.
+
+- Tested the authorized direct-interleaved canonical GGML Q4_0 KV reader at
+  144 bytes per 256-element head-row. Scope was fixed to Qwen3.6 A3B group8
+  attention with the tuned F16 launch grids and unchanged F32 reducer.
+- The real-model oracle used `Qwen3.6-35B-A3B-UD-Q4_K_M`, the first 32,768
+  `chaos.json` tokenizer tokens with `add_special_tokens=false`, block 3, and
+  attention-cache slot 0. It captured Q after norm+RoPE, K after norm+RoPE, and
+  V before F16 scatter.
+- Packing and reference dequantization used llama.cpp canonical
+  `from_float_ref`/`to_float`. The 8K prefix exercised both Q4_0 scale signs:
+  K had `67,447` positive and `63,625` negative scales; V had `71,239` positive
+  and `59,833` negative scales. A standalone GPU reconstruction check matched
+  canonical GGML bit-for-bit. This validates format/indexing, not every
+  arithmetic operation inside attention.
+- At `ctx8192`, the raw 4,096-element attention output versus production F16
+  measured cosine `0.996111664`, maximum absolute error `0.1653642654`, RMSE
+  `0.02358440772`, and relative L2 `0.08869401340`. F16/Q4 output norms were
+  `17.01808314/17.12635716`. The worst per-head cosine was `0.990763527` and
+  worst maximum absolute error was `0.1653642654`.
+- This decisively fails both preregistered gates: cosine had to be strictly
+  `> 0.9999` and maximum absolute error strictly `< 0.01`. The test stopped at
+  the mandatory first 8K assertion. The 32K correctness row and all A1/P/A2
+  performance samples were unrun; no performance packet exists.
+- Close direct interleaved canonical Q4_0 KV for this preregistered A3B group8
+  primitive and real-model oracle. This is a fidelity result, not a performance
+  result, and does not close every compressed-KV representation or attention
+  architecture.
+
+Artifact: `target/profiles/v0543-q4-kv-real-oracle.out`.
+Design/oracle/kill reviews: `cx ask` sessions
+`019f4c4c-0b12-7be0-8350-3a7cb92a0127`,
+`019f4c5a-3e98-7551-a990-5dc789bf946e`, and
+`019f4c67-adea-7d53-b221-ad3cc4c6f7a9`.
+
 ## 2026-07-10 - v0.542 Split-Plane Q8 KV Falsifier
 
 Status: killed; all experiment source removed.

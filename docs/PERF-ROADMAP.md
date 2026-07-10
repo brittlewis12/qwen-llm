@@ -165,13 +165,19 @@ alternating fresh-process eager/lazy pairs, 0.8B tokenizer construction improves
 removal, not readiness-boundary movement. Warm TTFT is neutral within `0.038 ms`,
 and first-callback p95 regresses only `0.0072 ms`.
 
+v0.551 removes transient copies of GGUF token and merge strings during tokenizer
+construction. Ten alternating fresh-process pairs improve construction
+`36.998 -> 25.492 ms`, first TTFT `72.212 -> 62.142 ms`, and total request wall
+`81.748 -> 71.897 ms`. Warm TTFT moves only `0.009 ms`. The tokenizer remains
+fully owned; borrowed metadata exists only while constructing validated maps.
+
 Next contract work:
 
-1. Price removal of transient tokenizer metadata cloning. Borrow token and merge
-   strings from loaded GGUF metadata while building owned runtime structures; do
-   not alter BPE ranks, duplicate validation, or final tokenizer ownership.
-2. If that exact candidate survives, use one realistic interactive prompt and one
-   dissimilar longer guardrail before leaving tokenizer construction.
+1. Run one isolated cheap merge-allocation probe: reuse a single `String` for
+   concatenated-token lookup instead of allocating once per merge. Require at
+   least `3 ms` first-TTFT movement; otherwise close tokenizer micro-construction.
+2. After that decision, use one realistic interactive prompt and one dissimilar
+   longer guardrail before leaving tokenizer construction.
 3. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
@@ -324,9 +330,9 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Remove transient GGUF token/merge string clones from the remaining `36.85 ms`
-   tokenizer construction path if an exact oracle saves at least `5 ms` TTFT.
-   Lazy decoded-piece caching is promoted; PSO warmup is closed in the 0.8B cell.
+1. Reuse merge lookup scratch if the isolated exact candidate saves at least
+   `3 ms` first TTFT. Borrowed GGUF metadata and lazy decoded-piece caching are
+   promoted; PSO warmup is closed in the measured 0.8B cell.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

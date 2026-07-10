@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.551 Borrowed Tokenizer Metadata Promoted
+
+Status: exact first-TTFT and process-cold work removal; default promoted.
+
+- `required_string_array` now eagerly validates but borrows GGUF token and merge
+  strings. The construction-local token map uses borrowed keys; `NativeTokenizer`
+  still owns every final runtime token string and retains no GGUF lifetime.
+- Duplicate token, byte-token completeness, merge split/reference/merged-token,
+  duplicate pair, and rank validation preserve their original order and errors.
+  All 17 active tokenizer tests and all 11 CLI tests pass.
+- Ten fresh-process owned/borrowed pairs ran in alternating order on redirected
+  0.8B Q4 `Hello`, four-token output. All 20 output files are identical, and every
+  first/warm pair passes exact prompt, token, and stop equality.
+- Median tokenizer construction improves `36.998 -> 25.492 ms`, saving
+  `11.506 ms` (`31.10%`). First TTFT improves `72.212 -> 62.142 ms`, saving
+  `10.070 ms` (`13.95%`), and total request wall improves
+  `81.748 -> 71.897 ms`, saving `9.851 ms` (`12.05%`).
+- Warm TTFT is neutral at `13.230 -> 13.239 ms`; first callback is also neutral
+  at `0.03573 -> 0.03560 ms`. Promote as exact construction work removal.
+- The remaining `~25.5 ms` still includes one `format!` allocation per merge for
+  concatenated-token lookup. One isolated reused-`String` probe is authorized at
+  a `>=3 ms` first-TTFT gate; a miss closes tokenizer micro-construction rather
+  than starting another allocation chain.
+
+Artifacts:
+`target/profiles/v0551-tokenizer-borrow-ab/{owned,borrowed}-{1..10}.{jsonl,out,err}`.
+Design and adjudication: `cx ask` sessions
+`019f4dc5-c6e9-7cf3-bfa4-6e438ffa9c9b` and
+`019f4dc9-57fb-7772-973f-65f389f91f05`.
+
 ## 2026-07-10 - v0.550 Lazy Decoded-Piece Cache Promoted
 
 Status: exact first-TTFT and process-cold work removal; default promoted.

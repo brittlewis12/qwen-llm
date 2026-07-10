@@ -505,11 +505,11 @@ impl NativeTokenizer {
         }
 
         let mut id_to_token = Vec::with_capacity(token_texts.len());
-        let mut token_to_id = HashMap::default();
+        let mut token_to_id: HashMap<&str, i32> = HashMap::default();
         token_to_id.reserve(token_texts.len());
         for (id, (text, ty)) in token_texts.into_iter().zip(token_types).enumerate() {
             if token_to_id
-                .insert(text.clone(), id_to_i32("tokenizer.ggml.tokens", id)?)
+                .insert(text, id_to_i32("tokenizer.ggml.tokens", id)?)
                 .is_some()
             {
                 return Err(TokError::BadMetadata(format!(
@@ -517,15 +517,16 @@ impl NativeTokenizer {
                 )));
             }
             id_to_token.push(NativeToken {
-                text,
+                text: text.to_owned(),
                 attr: TokenAttr::from_gguf(ty)?,
             });
         }
 
         let mut byte_token_ids = [0i32; 256];
         for byte in 0u8..=255 {
+            let byte_text = byte_to_unicode(byte).to_string();
             let token = token_to_id
-                .get(&byte_to_unicode(byte).to_string())
+                .get(byte_text.as_str())
                 .copied()
                 .ok_or_else(|| {
                     TokError::BadMetadata(format!("missing byte token for byte 0x{byte:02x}"))
@@ -536,7 +537,7 @@ impl NativeTokenizer {
         let merges = required_string_array(g, "tokenizer.ggml.merges")?;
         let mut pair_merges = HashMap::default();
         pair_merges.reserve(merges.len());
-        for (rank, merge) in merges.iter().enumerate() {
+        for (rank, &merge) in merges.iter().enumerate() {
             let (left, right) = split_merge(merge)?;
             let left_id = token_to_id.get(left).copied().ok_or_else(|| {
                 TokError::BadMetadata(format!(
@@ -549,11 +550,14 @@ impl NativeTokenizer {
                 ))
             })?;
             let merged_text = format!("{left}{right}");
-            let merged_id = token_to_id.get(&merged_text).copied().ok_or_else(|| {
-                TokError::BadMetadata(format!(
-                    "merge {merge:?} has no merged token {merged_text:?} in vocab"
-                ))
-            })?;
+            let merged_id = token_to_id
+                .get(merged_text.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    TokError::BadMetadata(format!(
+                        "merge {merge:?} has no merged token {merged_text:?} in vocab"
+                    ))
+                })?;
             let old = pair_merges.insert(
                 pair_key(left_id, right_id),
                 MergeInfo {
@@ -1237,7 +1241,7 @@ fn required_str<'a>(g: &'a GgufFile, key: &str) -> Result<&'a str, TokError> {
         .ok_or_else(|| TokError::BadMetadata(format!("missing string metadata key {key:?}")))
 }
 
-fn required_string_array(g: &GgufFile, key: &str) -> Result<Vec<String>, TokError> {
+fn required_string_array<'a>(g: &'a GgufFile, key: &str) -> Result<Vec<&'a str>, TokError> {
     let value = g
         .model
         .metadata()
@@ -1251,7 +1255,7 @@ fn required_string_array(g: &GgufFile, key: &str) -> Result<Vec<String>, TokErro
         let s = value.as_str().ok_or_else(|| {
             TokError::BadMetadata(format!("metadata key {key:?}[{idx}] is not a string"))
         })?;
-        out.push(s.to_string());
+        out.push(s);
     }
     Ok(out)
 }

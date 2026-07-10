@@ -537,6 +537,7 @@ impl NativeTokenizer {
         let merges = required_string_array(g, "tokenizer.ggml.merges")?;
         let mut pair_merges = HashMap::default();
         pair_merges.reserve(merges.len());
+        let mut merged_text = String::new();
         for (rank, &merge) in merges.iter().enumerate() {
             let (left, right) = split_merge(merge)?;
             let left_id = token_to_id.get(left).copied().ok_or_else(|| {
@@ -549,7 +550,10 @@ impl NativeTokenizer {
                     "merge {merge:?} references missing right token {right:?}"
                 ))
             })?;
-            let merged_text = format!("{left}{right}");
+            merged_text.clear();
+            merged_text.reserve(left.len() + right.len());
+            merged_text.push_str(left);
+            merged_text.push_str(right);
             let merged_id = token_to_id
                 .get(merged_text.as_str())
                 .copied()

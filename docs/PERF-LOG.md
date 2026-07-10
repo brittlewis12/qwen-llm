@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.552 Reused Merge Lookup Scratch Promoted
+
+Status: exact first-TTFT and process-cold work removal; default promoted;
+tokenizer micro-construction closed.
+
+- `NativeTokenizer::from_gguf` now clears and reuses one `String` for merged-token
+  lookup instead of allocating and freeing one concatenation per BPE merge.
+  Lookup, error formatting, reference validation, rank, and final maps are exact.
+- All 17 active tokenizer tests and all 11 CLI tests pass. Ten fresh-process
+  allocation/reuse pairs ran in alternating order; every output and first/warm
+  equality gate passes.
+- Median tokenizer construction improves `25.580 -> 17.078 ms`, saving
+  `8.502 ms` (`33.24%`). First TTFT improves `62.636 -> 52.478 ms`, saving
+  `10.159 ms` (`16.22%`), and total request improves
+  `72.203 -> 61.756 ms`, saving `10.447 ms` (`14.47%`).
+- The candidate wins construction, TTFT, and total wall in all 10 numbered pairs.
+  Median within-pair savings are `8.509/9.678/9.704 ms`. Warm TTFT moves only
+  `13.227 -> 13.254 ms`; first callback moves `0.03806 -> 0.03844 ms`.
+- Across v0.550-v0.552, approximate median movement versus the v0.549 eager
+  baseline is `69.017 -> 17.078 ms` tokenizer construction (`75.25%`),
+  `105.135 -> 52.478 ms` first TTFT (`50.09%`), and
+  `114.866 -> 61.756 ms` total request (`46.24%`). Warm TTFT remains about
+  `13.2 ms`.
+- Close tokenizer micro-construction after realistic prompt guardrails. A packed
+  owned vocabulary arena could remove many final token-string allocations, but it
+  is a representation redesign with broader memory/correctness tradeoffs and is
+  parked as an explicit reopen condition.
+
+Artifacts:
+`target/profiles/v0552-tokenizer-scratch-ab/{alloc,reuse}-{1..10}.{jsonl,out,err}`.
+Adjudication: `cx ask` session `019f4dcd-f9a4-7403-bd27-d1666ad55511`.
+
 ## 2026-07-10 - v0.551 Borrowed Tokenizer Metadata Promoted
 
 Status: exact first-TTFT and process-cold work removal; default promoted.

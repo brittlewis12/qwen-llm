@@ -171,13 +171,22 @@ construction. Ten alternating fresh-process pairs improve construction
 `81.748 -> 71.897 ms`. Warm TTFT moves only `0.009 ms`. The tokenizer remains
 fully owned; borrowed metadata exists only while constructing validated maps.
 
+v0.552 reuses one merged-token lookup `String` instead of allocating once per BPE
+merge. Ten alternating pairs improve construction `25.580 -> 17.078 ms`, first
+TTFT `62.636 -> 52.478 ms`, and total request `72.203 -> 61.756 ms`; warm TTFT
+moves only `0.028 ms`. Across the three exact tokenizer packets, approximate
+median movement is `69.017 -> 17.078 ms` construction, `105.135 -> 52.478 ms`
+first TTFT, and `114.866 -> 61.756 ms` total wall. Close cheap tokenizer
+micro-construction. A packed owned vocabulary arena remains a representation
+redesign, not authorization for another local allocation chain.
+
 Next contract work:
 
-1. Run one isolated cheap merge-allocation probe: reuse a single `String` for
-   concatenated-token lookup instead of allocating once per merge. Require at
-   least `3 ms` first-TTFT movement; otherwise close tokenizer micro-construction.
-2. After that decision, use one realistic interactive prompt and one dissimilar
-   longer guardrail before leaving tokenizer construction.
+1. Measure the promoted tokenizer stack on one realistic interactive prompt and
+   one dissimilar longer guardrail. Retain exact output and callback/total-wall
+   gates; do not require the tiny-prompt percentage to generalize.
+2. Then move to the current physical-N8 verifier oracle. Do not delay it for a
+   packed-vocabulary redesign unless the guardrails expose a tokenizer blocker.
 3. Separate work removal from boundary movement: constructing the tokenizer or
    warming pipelines before declaring model-ready improves TTFT but not process-
    cold first flush unless the underlying work also becomes cheaper.
@@ -330,9 +339,9 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Reuse merge lookup scratch if the isolated exact candidate saves at least
-   `3 ms` first TTFT. Borrowed GGUF metadata and lazy decoded-piece caching are
-   promoted; PSO warmup is closed in the measured 0.8B cell.
+1. Guardrail the promoted tokenizer stack on realistic interactive and longer
+   prompts, then close tokenizer micro-construction. The packed-vocabulary arena
+   is parked as a materially different reopen condition.
 2. Re-cost the current physical-N8 target verifier on A3B and 27B before any new
    proposer. If the verifier-only oracle cannot clear the product wall gate in a
    model/context regime, demote every proposal source in that regime.

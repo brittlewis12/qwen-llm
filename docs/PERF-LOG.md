@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-11 - v0.568 Wide-Prefill Scratch Topology Clears
+
+Status: exact A3B/A10B wide-prefill topology proven behind a default-off query cap;
+bounded memory admission remains before automatic promotion.
+
+- Production online matrix attention can cap query scratch independently of the outer
+  prefill chunk. K/V scatter and V-transpose remain once per outer chunk; KQ/KQV process
+  fixed query tiles with absolute causal positions and reuse one score/`(m,l)` region.
+- An active query cap also overlaps that attention region with nine phase-disjoint GDN
+  packs. Rollback `QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY=0` restores separate buffers.
+  Diagnostic, cap-absent, online-off, non-GDN, and verify/spec paths remain separate.
+  Online rollback also requires unsetting the query cap; cap plus online-off fails closed.
+- Isolated tiled/untiled online attention passes G4/G6/G8/G16, nonzero-prefix, and tail
+  geometry. Full A3B state and A10B 129/128 boundary gates pass with tiling and overlay;
+  final logits, GDN/conv state, KV contents/positions, and output remain within the
+  existing numerical contract.
+- A10B outer 4096/query 1024 removes `2,358,312,960` score bytes. The overlay removes
+  another `786,104,320`, leaving `876,920,832` bytes incremental versus chunk 1024.
+  Four warmed balanced pairs put query-tiling prefill overhead at `+0.109%`; the separate
+  first-post-load packet remains unresolved because model-load/VM state dominated order.
+- A3B outer 2048/query 1024 removes `393,052,160` score bytes. The overlay removes
+  `235,405,312`, leaving `90,079,232` bytes incremental versus chunk 1024. Five fresh
+  query-cap pairs show `+0.391%` median prefill overhead, range `+0.096-0.477%`.
+- Same-width overlay guards are effectively neutral: A3B median `+0.038%` prefill;
+  A10B warmed equal-order estimate `+0.250%`. Every pair records exact predicted memory,
+  byte-identical stdout, and active cap/overlay arms record explicit topology in schema 4;
+  control arms remain schema 3 unless another schema-4 mechanism is active.
+- Query-cap parsing fails closed. The default numeric chunk and no-cap execution remain
+  schema-3 compatible and allocation-identical. The next stage is dual-signal admission,
+  not another tile/cap sweep or broader scratch arena.
+
+Artifacts: `target/profiles/v0568-query-cap/`. Adversarial reviews: `cx ask` sessions
+`019f508b-e199-7ac1-9d1e-4340c60c75a9`,
+`019f50a1-e379-7793-a571-9debad61ef49`,
+`019f50cb-223e-76c1-9b1d-2c10fc5ce653`,
+`019f50fa-4d5b-7cc1-a98e-b6225b12b2ac`,
+`019f5126-b871-7aa2-84a8-1f4831c579c5`,
+`019f512e-7496-7053-81aa-bb5bf73fee54`, and
+`019f5167-4ddb-78e1-8083-4075a4214059`.
+
 ## 2026-07-10 - v0.567 Product MoE Chunk Policy Clears Fresh TTFT
 
 Status: material A3B/A10B long-prompt TTFT wins exposed through bounded,

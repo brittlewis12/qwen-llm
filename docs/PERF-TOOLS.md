@@ -566,6 +566,10 @@ Interpretation rules:
   transitions. `first_decode_ms` retains its field name for parser compatibility,
   but schema 3 defines it as the first actual transition and sets it to zero when
   no transition occurs.
+- Request-stats schema 4 adds optional topology objects when active:
+  `prefill_attention_query` records outer/query rows and executed layer/tile calls;
+  `prefill_scratch_overlay` records backing, attention, GDN, and aligned saved bytes.
+  Cap/overlay-off rows remain schema 3 unless another schema-4 mechanism is active.
 - `prefix_cache_stats.py` rejects mixed request-stats schemas and cross-schema
   comparisons. Do not append schema 3 rows to an existing schema 2 stats file.
 - The older `qwen-bench prefix-cache` TTFT label means prefill plus consumption
@@ -578,10 +582,11 @@ Interpretation rules:
 
 ### First post-model-load streamed TTFT
 
-`qwen --request-timings PATH` appends one schema-3 JSONL row for a successful
-single-turn `--prompt` or `--prompt-file` request. It runs the production request
-once and does not support JSONL serving, model-info mode, or stdout as the timing
-destination.
+`qwen --request-timings PATH` appends one JSONL row for a successful single-turn
+`--prompt` or `--prompt-file` request. The ordinary numeric-chunk path emits schema 3.
+Prompt lookup, automatic chunks, or active query/overlay topology emit schema 4 with
+their optional mechanism objects. It runs the production request once and does not
+support JSONL serving, model-info mode, or stdout as the timing destination.
 
 ```sh
 target/release/qwen -m "$MODEL" -p "Hello" -n 4 \
@@ -617,6 +622,11 @@ Contract:
 - `metal_allocated` contains device-wide `currentAllocatedSize` samples and signed
   deltas from process-model-ready and each request's own start. The sampled
   maximum is not residency, RSS, request attribution, or a true peak.
+- `prefill_attention_query` appears only after matrix query tiling actually executes.
+  `prefill_scratch_overlay` appears when the bounded attention/GDN backing is active.
+  A query cap implies the overlay unless
+  `QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY=0`; online rollback also requires unsetting
+  `QWEN_PREFILL_ATTN_MATRIX_QUERY_CAP`, because cap plus online-off fails closed.
 - Build revision/source state, runtime model/tokenizer compatibility identity,
   and stdout sink class are part of every row. `runtime_model_id` covers model
   metadata, tensor descriptors, and shard paths, sizes, and modification times;

@@ -3541,7 +3541,10 @@ fn prefill_tokens_matches_single_token_loop_35b_a3b_moe() {
 
 #[test]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
-    let model_path = "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf";
+    let model_path = concat!(
+        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
+        "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+    );
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[prefill-vs-single-a10b] skipped — target GGUF missing");
         return;
@@ -3658,7 +3661,10 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_smoke() {
 #[test]
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
-    let model_path = "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf";
+    let model_path = concat!(
+        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
+        "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+    );
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[prefill-vs-single-a10b-boundary] skipped — target GGUF missing");
         return;
@@ -3716,6 +3722,26 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
         None,
     )
     .expect("prefill");
+    if let Ok(raw_cap) = std::env::var("QWEN_PREFILL_ATTN_MATRIX_QUERY_CAP") {
+        let query_cap: usize = raw_cap.parse().expect("valid query cap");
+        assert_eq!(layer_scratch.attn_matrix_query_rows(), p.min(query_cap));
+        if p > query_cap {
+            assert!(
+                layer_scratch.attn_matrix_tiled_layer_calls() > 0,
+                "query-cap gate did not tile A10B matrix attention"
+            );
+        }
+        let overlay_disabled = std::env::var("QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY")
+            .as_deref()
+            .map(|value| matches!(value, "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(false);
+        if !overlay_disabled {
+            assert!(
+                layer_scratch.prefill_scratch_overlay_stats().is_some(),
+                "query-cap gate did not activate A10B scratch overlay"
+            );
+        }
+    }
     let exp_ms = exp_t.elapsed().as_secs_f64() * 1e3;
     eprintln!("[prefill-vs-single-a10b-boundary] prefill wall: {exp_ms:.1} ms");
     eprintln!(
@@ -3775,7 +3801,10 @@ fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_chunk128_boundary() {
 #[test]
 #[ignore]
 fn prefill_tokens_matches_single_token_loop_122b_a10b_moe_packed_attn_active_shapes() {
-    let model_path = "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf";
+    let model_path = concat!(
+        "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
+        "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+    );
     if !std::path::Path::new(model_path).exists() {
         eprintln!("[prefill-vs-single-a10b-packed] skipped — target GGUF missing");
         return;

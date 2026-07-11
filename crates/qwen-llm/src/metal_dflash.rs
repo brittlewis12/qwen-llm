@@ -62,6 +62,10 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_PACKED");
+crate::env_flag!(
+    default_on prefill_attn_gdn_scratch_overlay_enabled,
+    "QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY"
+);
 
 pub fn ensure_prompt_lookup_n8_supported(model: &MetalModel) -> Result<(), String> {
     if model.arch != crate::model::QWEN3_27B {
@@ -1400,6 +1404,64 @@ fn prefill_attn_matrix_online_enabled() -> bool {
     )
 }
 
+fn parse_prefill_attn_matrix_query_cap(value: Option<&str>) -> Result<Option<usize>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let cap = value.parse::<usize>().map_err(|_| {
+        format!("QWEN_PREFILL_ATTN_MATRIX_QUERY_CAP must be a positive integer, got {value:?}")
+    })?;
+    if cap == 0 {
+        return Err("QWEN_PREFILL_ATTN_MATRIX_QUERY_CAP must be greater than zero".into());
+    }
+    Ok(Some(cap))
+}
+
+fn prefill_attn_matrix_query_cap() -> Result<Option<usize>, String> {
+    static QUERY_CAP: OnceLock<Result<Option<usize>, String>> = OnceLock::new();
+    QUERY_CAP
+        .get_or_init(|| {
+            let value = std::env::var("QWEN_PREFILL_ATTN_MATRIX_QUERY_CAP");
+            match value {
+                Ok(value) => parse_prefill_attn_matrix_query_cap(Some(&value)),
+                Err(std::env::VarError::NotPresent) => parse_prefill_attn_matrix_query_cap(None),
+                Err(std::env::VarError::NotUnicode(value)) => Err(format!(
+                    "QWEN_PREFILL_ATTN_MATRIX_QUERY_CAP is not Unicode: {value:?}"
+                )),
+            }
+        })
+        .clone()
+}
+
+fn prefill_scratch_overlay_diagnostic_mode_present() -> bool {
+    const DIAGNOSTIC_ENV: &[&str] = &[
+        "QWEN_PREFILL_GDN_PROJ_ORACLE_LAYER",
+        "QWEN_PREFILL_GDN_MATVEC_PROJ",
+        "QWEN_PREFILL_GDN_MATVEC_LAYER",
+        "QWEN_PREFILL_GDN_SPLIT",
+        "QWEN_PREFILL_NOOP_GDN_BODY",
+        "QWEN_PREFILL_NOOP_ATTN_BODY",
+        "QWEN_PREFILL_NOOP_FFN",
+        "QWEN_PREFILL_NOOP_MOE_SHARED",
+        "QWEN_PREFILL_NOOP_MOE_ROUTED",
+        "QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU",
+        "QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN",
+        "QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE",
+        "QWEN_PREFILL_ATTN_PACKED_G8_ORACLE",
+        "QWEN_PREFILL_ATTN_PACKED_G16_ORACLE",
+    ];
+    DIAGNOSTIC_ENV
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+}
+
+fn attn_matrix_query_tiles(n_rows: usize, max_rows: usize) -> impl Iterator<Item = (usize, usize)> {
+    assert!(max_rows > 0, "matrix attention query tile must be nonzero");
+    (0..n_rows)
+        .step_by(max_rows)
+        .map(move |row_base| (row_base, (n_rows - row_base).min(max_rows)))
+}
+
 fn prefill_attn_matrix_g16_mode() -> PrefillEnvMode {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G16"))
@@ -2665,6 +2727,184 @@ impl MetalDFlashDebugScratch {
 //   ffn_out_pack      [N, H]            16·5120·4   =   320 KiB
 //                                                    ----------
 //                                                    ~ 7.0 MiB
+const PREFILL_SCRATCH_OVERLAY_ALIGNMENT: u64 = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OverlayRange {
+    offset: u64,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PrefillScratchOverlayLayout {
+    scores_h: OverlayRange,
+    ml: OverlayRange,
+    gdn_qkv: OverlayRange,
+    gdn_z: OverlayRange,
+    gdn_beta: OverlayRange,
+    gdn_alpha: OverlayRange,
+    gdn_q_norm: OverlayRange,
+    gdn_k_norm: OverlayRange,
+    gdn_v: OverlayRange,
+    gdn_out: OverlayRange,
+    gdn_normed: OverlayRange,
+    attention_bytes: u64,
+    gdn_bytes: u64,
+    backing_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrefillScratchOverlayStats {
+    pub backing_bytes: u64,
+    pub attention_bytes: u64,
+    pub gdn_bytes: u64,
+    /// Savings between the two 256-byte-aligned alternative layouts and
+    /// their shared backing. Product profile dimensions add no alignment pad.
+    pub saved_bytes: u64,
+}
+
+struct PrefillScratchOverlayViews {
+    scores_h: MetalTensor,
+    ml: MetalTensor,
+    gdn_qkv: MetalTensor,
+    gdn_z: MetalTensor,
+    gdn_beta: MetalTensor,
+    gdn_alpha: MetalTensor,
+    gdn_q_norm: MetalTensor,
+    gdn_k_norm: MetalTensor,
+    gdn_v: MetalTensor,
+    gdn_out: MetalTensor,
+    gdn_normed: MetalTensor,
+}
+
+fn checked_align_overlay(value: u64) -> Result<u64, MetalError> {
+    let mask = PREFILL_SCRATCH_OVERLAY_ALIGNMENT - 1;
+    value
+        .checked_add(mask)
+        .map(|v| v & !mask)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "prefill_scratch_overlay",
+            detail: format!("cannot align byte offset {value}"),
+        })
+}
+
+fn checked_overlay_range(cursor: &mut u64, bytes: u64) -> Result<OverlayRange, MetalError> {
+    let offset = checked_align_overlay(*cursor)?;
+    *cursor = offset
+        .checked_add(bytes)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "prefill_scratch_overlay",
+            detail: format!("byte range {offset}+{bytes} overflows"),
+        })?;
+    Ok(OverlayRange { offset, bytes })
+}
+
+fn prefill_scratch_overlay_layout(
+    scores_h_elems: u64,
+    ml_elems: u64,
+    gdn_shapes: [u64; 9],
+) -> Result<PrefillScratchOverlayLayout, MetalError> {
+    let score_bytes = checked_u64_mul(scores_h_elems, 2, "overlay score bytes overflow")?;
+    let ml_bytes = checked_u64_mul(ml_elems, 4, "overlay ml bytes overflow")?;
+    let mut attention_cursor = 0;
+    let scores_h = checked_overlay_range(&mut attention_cursor, score_bytes)?;
+    let ml = checked_overlay_range(&mut attention_cursor, ml_bytes)?;
+    let attention_bytes = checked_align_overlay(attention_cursor)?;
+
+    let mut gdn_cursor = 0;
+    let mut next_gdn = |elems: u64| {
+        let bytes = checked_u64_mul(elems, 4, "overlay GDN bytes overflow")?;
+        checked_overlay_range(&mut gdn_cursor, bytes)
+    };
+    let gdn_qkv = next_gdn(gdn_shapes[0])?;
+    let gdn_z = next_gdn(gdn_shapes[1])?;
+    let gdn_beta = next_gdn(gdn_shapes[2])?;
+    let gdn_alpha = next_gdn(gdn_shapes[3])?;
+    let gdn_q_norm = next_gdn(gdn_shapes[4])?;
+    let gdn_k_norm = next_gdn(gdn_shapes[5])?;
+    let gdn_v = next_gdn(gdn_shapes[6])?;
+    let gdn_out = next_gdn(gdn_shapes[7])?;
+    let gdn_normed = next_gdn(gdn_shapes[8])?;
+    let gdn_bytes = checked_align_overlay(gdn_cursor)?;
+
+    Ok(PrefillScratchOverlayLayout {
+        scores_h,
+        ml,
+        gdn_qkv,
+        gdn_z,
+        gdn_beta,
+        gdn_alpha,
+        gdn_q_norm,
+        gdn_k_norm,
+        gdn_v,
+        gdn_out,
+        gdn_normed,
+        attention_bytes,
+        gdn_bytes,
+        backing_bytes: attention_bytes.max(gdn_bytes),
+    })
+}
+
+fn checked_overlay_tensor(
+    backing: &MetalTensor,
+    range: OverlayRange,
+    shape: Vec<u64>,
+    dtype: GgmlType,
+) -> Result<MetalTensor, MetalError> {
+    let elem_bytes = match dtype {
+        GgmlType::F16 => 2u64,
+        GgmlType::F32 => 4u64,
+        other => {
+            return Err(MetalError::BadShape {
+                kernel: "prefill_scratch_overlay",
+                detail: format!("unsupported overlay dtype {other:?}"),
+            });
+        }
+    };
+    let elements = shape.iter().try_fold(1u64, |acc, &dim| {
+        acc.checked_mul(dim).ok_or_else(|| MetalError::BadShape {
+            kernel: "prefill_scratch_overlay",
+            detail: format!("shape {shape:?} overflows"),
+        })
+    })?;
+    let bytes = elements
+        .checked_mul(elem_bytes)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "prefill_scratch_overlay",
+            detail: format!("shape {shape:?} byte size overflows"),
+        })?;
+    let end = range
+        .offset
+        .checked_add(bytes)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "prefill_scratch_overlay",
+            detail: "view end overflows".into(),
+        })?;
+    let backing_bytes = backing.buffer.length() as u64;
+    if bytes != range.bytes
+        || range.offset % elem_bytes != 0
+        || range.offset % PREFILL_SCRATCH_OVERLAY_ALIGNMENT != 0
+        || end > backing_bytes
+    {
+        return Err(MetalError::BadShape {
+            kernel: "prefill_scratch_overlay",
+            detail: format!(
+                concat!(
+                    "invalid {:?} view offset={} bytes={} ",
+                    "range_bytes={} backing={}"
+                ),
+                dtype, range.offset, bytes, range.bytes, backing_bytes
+            ),
+        });
+    }
+    Ok(MetalTensor {
+        buffer: backing.buffer.clone(),
+        offset: range.offset,
+        shape,
+        dtype,
+    })
+}
+
 pub struct MetalDFlashLayerMajorScratch {
     /// `[N, H]` F32 — residual stream across N tokens.
     pub x_pack: MetalTensor,
@@ -2708,13 +2948,12 @@ pub struct MetalDFlashLayerMajorScratch {
     /// three-kernel matrix attention sidecar. Stubbed at 1 element when the
     /// two-pass online path is enabled (the default).
     pub attn_matrix_scores_pack: MetalTensor,
-    /// `[N * n_q_heads, matrix_max_pos]` F16 — `P~ = exp2(s*scale - m_tile)`
-    /// scratch for the two-pass online matrix attention path. Stubbed at
-    /// 1 element when `QWEN_PREFILL_ATTN_MATRIX_ONLINE=0`.
+    /// `[matrix_query_rows * n_q_heads, matrix_max_pos]` F16 —
+    /// `P~ = exp2(s*scale - m_tile)` scratch for the two-pass online matrix
+    /// attention path. Stubbed at 1 element when the online path is disabled.
     pub attn_matrix_scores_h_pack: MetalTensor,
-    /// `[N * n_q_heads, ceil(matrix_max_pos/64), 2]` F32 — per-(query, tile)
-    /// (m, l) sidecar for the two-pass online matrix attention path. Stubbed
-    /// at 1 element when `QWEN_PREFILL_ATTN_MATRIX_ONLINE=0`.
+    /// `[matrix_query_rows * n_q_heads, ceil(matrix_max_pos/64), 2]` F32 —
+    /// per-(query, tile) (m, l) sidecar for online matrix attention.
     pub attn_matrix_ml_pack: MetalTensor,
     /// `[n_attn_layers, n_kv_heads, head_dim, matrix_max_pos]` F16 — persistent
     /// transposed V-cache view used by both matrix attention variants.
@@ -2842,6 +3081,13 @@ pub struct MetalDFlashLayerMajorScratch {
 
     // Cached dims so callers don't have to re-derive.
     pub n: u32,
+    /// Maximum query rows backed by online matrix-attention score scratch.
+    /// This can be smaller than `n`; every other packed prefill buffer retains
+    /// the outer chunk width.
+    pub(crate) attn_matrix_query_rows: u32,
+    attn_matrix_tiled_layer_calls: u64,
+    attn_matrix_query_tile_calls: u64,
+    scratch_overlay: Option<PrefillScratchOverlayStats>,
     pub hidden_size: u64,
     pub intermediate_size: u64,
     pub q_dim: u64,
@@ -2981,6 +3227,25 @@ impl MetalDFlashLayerMajorScratch {
         // Whichever variant the process-level env selects is allocated in
         // full and the other is stubbed at 1 element.
         let attn_matrix_online = prefill_attn_matrix_online_enabled();
+        let attn_matrix_query_cap = if include_spec_packs {
+            None
+        } else {
+            prefill_attn_matrix_query_cap().map_err(|detail| MetalError::BadShape {
+                kernel: "prefill_attn_matrix_query_cap",
+                detail,
+            })?
+        };
+        if enable_attn_matrix && !attn_matrix_online && attn_matrix_query_cap.is_some() {
+            return Err(MetalError::BadShape {
+                kernel: "prefill_attn_matrix_query_cap",
+                detail: "QWEN_PREFILL_ATTN_MATRIX_QUERY_CAP requires online matrix attention"
+                    .into(),
+            });
+        }
+        let attn_matrix_query_rows = attn_matrix_query_cap
+            .map(|cap| n.min(cap as u64))
+            .unwrap_or(n)
+            .max(1);
         let attn_matrix_scores_elems = if enable_attn_matrix && !attn_matrix_online {
             checked_u64_mul3(
                 n,
@@ -2993,7 +3258,7 @@ impl MetalDFlashLayerMajorScratch {
         };
         let attn_matrix_scores_h_elems = if enable_attn_matrix && attn_matrix_online {
             checked_u64_mul3(
-                n,
+                attn_matrix_query_rows,
                 arch.n_q_heads as u64,
                 attn_matrix_max_pos,
                 "layer-major attn matrix online scores size overflow",
@@ -3003,7 +3268,7 @@ impl MetalDFlashLayerMajorScratch {
         };
         let attn_matrix_ml_elems = if enable_attn_matrix && attn_matrix_online {
             checked_u64_mul3(
-                n,
+                attn_matrix_query_rows,
                 arch.n_q_heads as u64,
                 checked_u64_double(
                     attn_matrix_max_pos.div_ceil(64),
@@ -3075,6 +3340,138 @@ impl MetalDFlashLayerMajorScratch {
         } else {
             vec![1]
         };
+        let gdn_shapes = [
+            checked_u64_mul(n, gdn_conv_dim, "overlay gdn qkv elements overflow")?,
+            checked_u64_mul(n, gdn_v_dim, "overlay gdn z elements overflow")?,
+            checked_u64_mul(n, gdn_n_v.max(1), "overlay gdn beta elements overflow")?,
+            checked_u64_mul(n, gdn_n_v.max(1), "overlay gdn alpha elements overflow")?,
+            checked_u64_mul(n, gdn_k_dim, "overlay gdn q norm elements overflow")?,
+            checked_u64_mul(n, gdn_k_dim, "overlay gdn k norm elements overflow")?,
+            checked_u64_mul(n, gdn_v_dim, "overlay gdn v elements overflow")?,
+            checked_u64_mul(n, gdn_v_dim, "overlay gdn out elements overflow")?,
+            checked_u64_mul(n, gdn_v_dim, "overlay gdn normed elements overflow")?,
+        ];
+        let overlay_eligible = prefill_attn_gdn_scratch_overlay_enabled()
+            && !include_spec_packs
+            && enable_attn_matrix
+            && attn_matrix_online
+            && attn_matrix_query_cap.is_some()
+            && target_model
+                .blocks
+                .iter()
+                .any(|block| matches!(block, MetalBlock::Gdn(_)))
+            && !prefill_scratch_overlay_diagnostic_mode_present();
+        let (overlay_views, scratch_overlay) = if overlay_eligible {
+            let layout = prefill_scratch_overlay_layout(
+                attn_matrix_scores_h_elems,
+                attn_matrix_ml_elems,
+                gdn_shapes,
+            )?;
+            let backing_elems = layout.backing_bytes / 4;
+            let backing = MetalTensor::zeros_f32(ctx, vec![backing_elems])?;
+            let views = PrefillScratchOverlayViews {
+                scores_h: checked_overlay_tensor(
+                    &backing,
+                    layout.scores_h,
+                    vec![attn_matrix_scores_h_elems],
+                    GgmlType::F16,
+                )?,
+                ml: checked_overlay_tensor(
+                    &backing,
+                    layout.ml,
+                    vec![attn_matrix_ml_elems],
+                    GgmlType::F32,
+                )?,
+                gdn_qkv: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_qkv,
+                    vec![n, gdn_conv_dim],
+                    GgmlType::F32,
+                )?,
+                gdn_z: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_z,
+                    vec![n, gdn_v_dim],
+                    GgmlType::F32,
+                )?,
+                gdn_beta: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_beta,
+                    vec![n, gdn_n_v.max(1)],
+                    GgmlType::F32,
+                )?,
+                gdn_alpha: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_alpha,
+                    vec![n, gdn_n_v.max(1)],
+                    GgmlType::F32,
+                )?,
+                gdn_q_norm: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_q_norm,
+                    vec![n, gdn_k_dim],
+                    GgmlType::F32,
+                )?,
+                gdn_k_norm: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_k_norm,
+                    vec![n, gdn_k_dim],
+                    GgmlType::F32,
+                )?,
+                gdn_v: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_v,
+                    vec![n, gdn_v_dim],
+                    GgmlType::F32,
+                )?,
+                gdn_out: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_out,
+                    vec![n, gdn_v_dim],
+                    GgmlType::F32,
+                )?,
+                gdn_normed: checked_overlay_tensor(
+                    &backing,
+                    layout.gdn_normed,
+                    vec![n, gdn_v_dim],
+                    GgmlType::F32,
+                )?,
+            };
+            let saved_bytes = layout
+                .attention_bytes
+                .checked_add(layout.gdn_bytes)
+                .and_then(|sum| sum.checked_sub(layout.backing_bytes))
+                .ok_or_else(|| MetalError::BadShape {
+                    kernel: "prefill_scratch_overlay",
+                    detail: "overlay saving arithmetic underflowed".into(),
+                })?;
+            (
+                views,
+                Some(PrefillScratchOverlayStats {
+                    backing_bytes: layout.backing_bytes,
+                    attention_bytes: layout.attention_bytes,
+                    gdn_bytes: layout.gdn_bytes,
+                    saved_bytes,
+                }),
+            )
+        } else {
+            (
+                PrefillScratchOverlayViews {
+                    scores_h: MetalTensor::zeros_f16(ctx, vec![attn_matrix_scores_h_elems])?,
+                    ml: MetalTensor::zeros_f32(ctx, vec![attn_matrix_ml_elems])?,
+                    gdn_qkv: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
+                    gdn_z: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+                    gdn_beta: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
+                    gdn_alpha: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
+                    gdn_q_norm: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
+                    gdn_k_norm: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
+                    gdn_v: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+                    gdn_out: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+                    gdn_normed: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+                },
+                None,
+            )
+        };
 
         Ok(Self {
             x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
@@ -3113,11 +3510,8 @@ impl MetalDFlashLayerMajorScratch {
                 },
             )?,
             attn_matrix_scores_pack: MetalTensor::zeros_f32(ctx, vec![attn_matrix_scores_elems])?,
-            attn_matrix_scores_h_pack: MetalTensor::zeros_f16(
-                ctx,
-                vec![attn_matrix_scores_h_elems],
-            )?,
-            attn_matrix_ml_pack: MetalTensor::zeros_f32(ctx, vec![attn_matrix_ml_elems])?,
+            attn_matrix_scores_h_pack: overlay_views.scores_h,
+            attn_matrix_ml_pack: overlay_views.ml,
             attn_matrix_vt_pack: MetalTensor::zeros_f16(ctx, vec![attn_matrix_vt_elems])?,
             ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
             ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
@@ -3149,16 +3543,25 @@ impl MetalDFlashLayerMajorScratch {
             moe_shared_ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, moe_f_shared])?,
             moe_shared_ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
             final_logits_pack: MetalTensor::zeros_f32(ctx, final_logits_shape)?,
-            gdn_qkv_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
-            gdn_z_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
-            gdn_beta_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
-            gdn_alpha_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
-            gdn_q_norm_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
-            gdn_k_norm_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
-            gdn_v_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
-            gdn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
-            gdn_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+            gdn_qkv_pack: overlay_views.gdn_qkv,
+            gdn_z_pack: overlay_views.gdn_z,
+            gdn_beta_pack: overlay_views.gdn_beta,
+            gdn_alpha_pack: overlay_views.gdn_alpha,
+            gdn_q_norm_pack: overlay_views.gdn_q_norm,
+            gdn_k_norm_pack: overlay_views.gdn_k_norm,
+            gdn_v_pack: overlay_views.gdn_v,
+            gdn_out_pack: overlay_views.gdn_out,
+            gdn_normed_pack: overlay_views.gdn_normed,
             n: block_size,
+            attn_matrix_query_rows: u32::try_from(attn_matrix_query_rows).map_err(|_| {
+                MetalError::BadShape {
+                    kernel: "prefill_attn_matrix_query_cap",
+                    detail: format!("matrix query rows {attn_matrix_query_rows} do not fit u32"),
+                }
+            })?,
+            attn_matrix_tiled_layer_calls: 0,
+            attn_matrix_query_tile_calls: 0,
+            scratch_overlay,
             hidden_size: h,
             intermediate_size: f,
             vocab_size: v,
@@ -3209,6 +3612,22 @@ impl MetalDFlashLayerMajorScratch {
             self.moe_expert_out_pack = MetalTensor::zeros_f32(ctx, vec![self.moe_out_full_elems])?;
         }
         Ok(())
+    }
+
+    pub fn attn_matrix_query_rows(&self) -> usize {
+        self.attn_matrix_query_rows as usize
+    }
+
+    pub fn attn_matrix_tiled_layer_calls(&self) -> u64 {
+        self.attn_matrix_tiled_layer_calls
+    }
+
+    pub fn attn_matrix_query_tile_calls(&self) -> u64 {
+        self.attn_matrix_query_tile_calls
+    }
+
+    pub fn prefill_scratch_overlay_stats(&self) -> Option<PrefillScratchOverlayStats> {
+        self.scratch_overlay
     }
 
     /// Zero-copy view of row n of `x_pack` ([H] elements).
@@ -7163,12 +7582,16 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 }
                                 if trace_attn_phases && use_matrix {
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
+                                    let matrix_query_rows =
+                                        chunk_p.min(layer_scratch.attn_matrix_query_rows as usize);
                                     // Online path stores F16 P~ plus the (m, l) sidecar;
                                     // the legacy sidecar stores F32 scores.
                                     let scores_bytes = if prefill_attn_matrix_online_enabled() {
-                                        chunk_p * n_q * n_pos * std::mem::size_of::<u16>()
+                                        matrix_query_rows * n_q * n_pos * std::mem::size_of::<u16>()
                                             + crate::metal::attn_matrix_ml_elems(
-                                                chunk_p, n_q, n_pos,
+                                                matrix_query_rows,
+                                                n_q,
+                                                n_pos,
                                             ) * std::mem::size_of::<f32>()
                                     } else {
                                         chunk_p * n_q * n_pos * std::mem::size_of::<f32>()
@@ -7183,11 +7606,19 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     let vt_update_bytes =
                                         n_kv * head_dim * vt_rows * std::mem::size_of::<u16>();
                                     eprintln!(
-                                        "[prefill-attn-matrix-g{}-shape] layer={} chunk_start={} chunk_p={} n_pos={} scores_mib={:.2} vt_stride={} vt_layer_mib={:.2} vt_update_base={} vt_update_rows={} vt_update_mib={:.2}",
+                                        concat!(
+                                            "[prefill-attn-matrix-g{}-shape] layer={} ",
+                                            "chunk_start={} chunk_p={} query_rows={} ",
+                                            "query_tiles={} n_pos={} score_tile_scratch_mib={:.2} ",
+                                            "vt_stride={} vt_layer_mib={:.2} vt_update_base={} ",
+                                            "vt_update_rows={} vt_update_mib={:.2}"
+                                        ),
                                         group,
                                         il,
                                         chunk_start,
                                         chunk_p,
+                                        matrix_query_rows,
+                                        chunk_p.div_ceil(matrix_query_rows),
                                         n_pos,
                                         scores_bytes as f64 / (1024.0 * 1024.0),
                                         vt_stride,
@@ -7197,8 +7628,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         vt_update_bytes as f64 / (1024.0 * 1024.0),
                                     );
                                 }
-                                let trace_matrix_subphases =
-                                    use_matrix && trace_attn_phases && !attn_packed_oracle;
+                                let matrix_query_tiled = prefill_attn_matrix_online_enabled()
+                                    && (layer_scratch.attn_matrix_query_rows as usize) < chunk_p;
+                                let trace_matrix_subphases = use_matrix
+                                    && trace_attn_phases
+                                    && !attn_packed_oracle
+                                    && !matrix_query_tiled;
                                 traced_matrix_subphases = trace_matrix_subphases;
                                 if trace_matrix_subphases {
                                     let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
@@ -7522,54 +7957,76 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         if prefill_attn_matrix_online_enabled() {
                                             // v0.439: two-pass online-softmax matrix attention.
                                             // Rollback: QWEN_PREFILL_ATTN_MATRIX_ONLINE=0.
-                                            let scores_h = layer_scratch
-                                                .attn_matrix_scores_h_pack
-                                                .view_subrange(
-                                                    0,
-                                                    vec![(chunk_p * n_q * n_pos) as u64],
+                                            let query_rows =
+                                                layer_scratch.attn_matrix_query_rows as usize;
+                                            let query_tiles = chunk_p.div_ceil(query_rows);
+                                            if query_tiles > 1 {
+                                                layer_scratch.attn_matrix_tiled_layer_calls += 1;
+                                                layer_scratch.attn_matrix_query_tile_calls +=
+                                                    query_tiles as u64;
+                                            }
+                                            for (row_base, rows_n) in
+                                                attn_matrix_query_tiles(chunk_p, query_rows)
+                                            {
+                                                let q_rows = q_normed_pack_p.view_subrange(
+                                                    (row_base * q_dim) as u64,
+                                                    vec![(rows_n * q_dim) as u64],
                                                 );
-                                            let ml =
-                                                layer_scratch.attn_matrix_ml_pack.view_subrange(
-                                                    0,
-                                                    vec![crate::metal::attn_matrix_ml_elems(
-                                                        chunk_p, n_q, n_pos,
-                                                    )
-                                                        as u64],
+                                                let attn_o_rows = attn_o_pack_p.view_subrange(
+                                                    (row_base * q_dim) as u64,
+                                                    vec![(rows_n * q_dim) as u64],
                                                 );
-                                            crate::metal::encode_attn_matrix_kq_online_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &q_normed_pack_p,
-                                                &target_session.kv_k[ai],
-                                                &scores_h,
-                                                &ml,
-                                                chunk_p,
-                                                chunk_start as usize,
-                                                n_pos,
-                                                n_kv * head_dim,
-                                                n_q,
-                                                n_kv,
-                                                group,
-                                                head_dim,
-                                                prefill_attn_matrix_causal_skip_enabled(),
-                                            )?;
-                                            crate::metal::encode_attn_matrix_kqv_norm_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &scores_h,
-                                                &ml,
-                                                &v_t,
-                                                &attn_o_pack_p,
-                                                chunk_p,
-                                                chunk_start as usize,
-                                                n_pos,
-                                                vt_stride,
-                                                n_q,
-                                                n_kv,
-                                                group,
-                                                head_dim,
-                                                prefill_attn_matrix_causal_skip_enabled(),
-                                            )?;
+                                                let scores_h = layer_scratch
+                                                    .attn_matrix_scores_h_pack
+                                                    .view_subrange(
+                                                        0,
+                                                        vec![(rows_n * n_q * n_pos) as u64],
+                                                    );
+                                                let ml = layer_scratch
+                                                    .attn_matrix_ml_pack
+                                                    .view_subrange(
+                                                        0,
+                                                        vec![crate::metal::attn_matrix_ml_elems(
+                                                            rows_n, n_q, n_pos,
+                                                        )
+                                                            as u64],
+                                                    );
+                                                let base_pos = chunk_start as usize + row_base;
+                                                crate::metal::encode_attn_matrix_kq_online_f32(
+                                                    base.ctx,
+                                                    &enc,
+                                                    &q_rows,
+                                                    &target_session.kv_k[ai],
+                                                    &scores_h,
+                                                    &ml,
+                                                    rows_n,
+                                                    base_pos,
+                                                    n_pos,
+                                                    n_kv * head_dim,
+                                                    n_q,
+                                                    n_kv,
+                                                    group,
+                                                    head_dim,
+                                                    prefill_attn_matrix_causal_skip_enabled(),
+                                                )?;
+                                                crate::metal::encode_attn_matrix_kqv_norm_f32(
+                                                    base.ctx,
+                                                    &enc,
+                                                    &scores_h,
+                                                    &ml,
+                                                    &v_t,
+                                                    &attn_o_rows,
+                                                    rows_n,
+                                                    base_pos,
+                                                    n_pos,
+                                                    vt_stride,
+                                                    n_q,
+                                                    n_kv,
+                                                    group,
+                                                    head_dim,
+                                                    prefill_attn_matrix_causal_skip_enabled(),
+                                                )?;
+                                            }
                                         } else {
                                             let scores = layer_scratch
                                                 .attn_matrix_scores_pack
@@ -11403,6 +11860,112 @@ mod tests {
     };
     use crate::metal_forward::{MetalModel, MetalSession};
     use std::time::Instant;
+
+    #[test]
+    fn matrix_query_tiles_cover_nonzero_prefix_and_tail() {
+        let chunk_start = 3072usize;
+        let tiles: Vec<_> = attn_matrix_query_tiles(2050, 1024)
+            .map(|(base, rows)| (base, rows, chunk_start + base))
+            .collect();
+        assert_eq!(
+            tiles,
+            vec![(0, 1024, 3072), (1024, 1024, 4096), (2048, 2, 5120)]
+        );
+    }
+
+    #[test]
+    fn matrix_query_tiles_preserve_uncapped_shape() {
+        assert_eq!(
+            attn_matrix_query_tiles(1024, 4096).collect::<Vec<_>>(),
+            vec![(0, 1024)]
+        );
+    }
+
+    #[test]
+    fn matrix_query_cap_parser_fails_closed() {
+        assert_eq!(parse_prefill_attn_matrix_query_cap(None), Ok(None));
+        assert_eq!(parse_prefill_attn_matrix_query_cap(Some("4")), Ok(Some(4)));
+        for invalid in ["0", "-1", "junk", " 4", "4 ", "184467440737095516160"] {
+            assert!(
+                parse_prefill_attn_matrix_query_cap(Some(invalid)).is_err(),
+                "accepted invalid query cap {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefill_scratch_overlay_layout_matches_product_profiles() {
+        let cases = [
+            (
+                1024u64 * 32 * 11287,
+                1024u64 * 32 * 177 * 2,
+                [
+                    4096u64 * 12288,
+                    4096u64 * 8192,
+                    4096u64 * 64,
+                    4096u64 * 64,
+                    4096u64 * 2048,
+                    4096u64 * 2048,
+                    4096u64 * 8192,
+                    4096u64 * 8192,
+                    4096u64 * 8192,
+                ],
+                (786_104_320, 807_403_520, 807_403_520),
+            ),
+            (
+                1024u64 * 16 * 11287,
+                1024u64 * 16 * 177 * 2,
+                [
+                    2048u64 * 8192,
+                    2048u64 * 4096,
+                    2048u64 * 32,
+                    2048u64 * 32,
+                    2048u64 * 2048,
+                    2048u64 * 2048,
+                    2048u64 * 4096,
+                    2048u64 * 4096,
+                    2048u64 * 4096,
+                ],
+                (393_052_160, 235_405_312, 393_052_160),
+            ),
+        ];
+        for (scores, ml, gdn, expected) in cases {
+            let layout = prefill_scratch_overlay_layout(scores, ml, gdn).unwrap();
+            assert_eq!(
+                (
+                    layout.attention_bytes,
+                    layout.gdn_bytes,
+                    layout.backing_bytes
+                ),
+                expected
+            );
+            assert_eq!(
+                layout.attention_bytes + layout.gdn_bytes - layout.backing_bytes,
+                layout.attention_bytes.min(layout.gdn_bytes)
+            );
+            let gdn_ranges = [
+                layout.gdn_qkv,
+                layout.gdn_z,
+                layout.gdn_beta,
+                layout.gdn_alpha,
+                layout.gdn_q_norm,
+                layout.gdn_k_norm,
+                layout.gdn_v,
+                layout.gdn_out,
+                layout.gdn_normed,
+            ];
+            for (index, range) in gdn_ranges.iter().enumerate() {
+                assert_eq!(range.offset % PREFILL_SCRATCH_OVERLAY_ALIGNMENT, 0);
+                assert!(range.offset + range.bytes <= layout.backing_bytes);
+                for other in &gdn_ranges[index + 1..] {
+                    assert!(range.offset + range.bytes <= other.offset);
+                }
+            }
+            assert_eq!(layout.scores_h.offset, 0);
+            assert!(layout.scores_h.offset + layout.scores_h.bytes <= layout.ml.offset);
+            assert!(layout.ml.offset + layout.ml.bytes <= layout.backing_bytes);
+        }
+    }
 
     fn write_tensor_f32(t: &MetalTensor, data: &[f32]) {
         assert_eq!(t.dtype, GgmlType::F32);
@@ -21887,7 +22450,6 @@ mod tests {
                 Some(&h_dst_b),
             )
             .expect("prefill");
-
             // ---- Compare final logits (cos ≥ 0.999). ----
             assert_eq!(last_a.len(), last_b.len(), "{label}: logits len mismatch");
             let cos_logits = cosine_f32(&last_a, &last_b);
@@ -22451,6 +23013,23 @@ mod tests {
                 None,
             )
             .expect("prefill");
+            if let Some(query_cap) = prefill_attn_matrix_query_cap().unwrap() {
+                assert_eq!(layer_scratch.attn_matrix_query_rows(), p.min(query_cap));
+                if token_ids.len().min(p) > query_cap {
+                    assert!(
+                        layer_scratch.attn_matrix_tiled_layer_calls() > 0,
+                        "{branch_label}: query-cap gate did not tile matrix attention"
+                    );
+                }
+                if prefill_attn_gdn_scratch_overlay_enabled()
+                    && !prefill_scratch_overlay_diagnostic_mode_present()
+                {
+                    assert!(
+                        layer_scratch.prefill_scratch_overlay_stats().is_some(),
+                        "{branch_label}: overlay gate constructed separate scratch"
+                    );
+                }
+            }
 
             // ---- Compare final logits (cos ≥ 0.999). ----
             assert_eq!(

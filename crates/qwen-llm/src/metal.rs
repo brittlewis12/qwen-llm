@@ -24354,6 +24354,91 @@ mod tests {
                     gpu_max_abs < 5e-3,
                     "online vs 3-kernel matrix attn diverged (group={group} n_rows={n_rows} base={base_pos}): {gpu_max_abs}"
                 );
+
+                if (n_rows, base_pos) == (100, 156) {
+                    let query_cap = 32usize;
+                    let tiled_scores =
+                        MetalTensor::zeros_f16(&ctx, vec![(query_cap * n_q * n_pos) as u64])
+                            .unwrap();
+                    let tiled_ml = MetalTensor::zeros_f32(
+                        &ctx,
+                        vec![attn_matrix_ml_elems(query_cap, n_q, n_pos) as u64],
+                    )
+                    .unwrap();
+                    let tiled_out =
+                        MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
+                    one_shot(&ctx, |enc| {
+                        for row_base in (0..n_rows).step_by(query_cap) {
+                            let rows_n = (n_rows - row_base).min(query_cap);
+                            let q_rows = q_t.view_subrange(
+                                (row_base * n_q * hd) as u64,
+                                vec![(rows_n * n_q * hd) as u64],
+                            );
+                            let out_rows = tiled_out.view_subrange(
+                                (row_base * n_q * hd) as u64,
+                                vec![(rows_n * n_q * hd) as u64],
+                            );
+                            let scores_rows =
+                                tiled_scores.view_subrange(0, vec![(rows_n * n_q * n_pos) as u64]);
+                            let ml_rows = tiled_ml.view_subrange(
+                                0,
+                                vec![attn_matrix_ml_elems(rows_n, n_q, n_pos) as u64],
+                            );
+                            let tile_base_pos = base_pos + row_base;
+                            encode_attn_matrix_kq_online_f32(
+                                &ctx,
+                                enc,
+                                &q_rows,
+                                &k_cache,
+                                &scores_rows,
+                                &ml_rows,
+                                rows_n,
+                                tile_base_pos,
+                                n_pos,
+                                kv_dim,
+                                n_q,
+                                n_kv,
+                                group,
+                                hd,
+                                true,
+                            )?;
+                            encode_attn_matrix_kqv_norm_f32(
+                                &ctx,
+                                enc,
+                                &scores_rows,
+                                &ml_rows,
+                                &v_t,
+                                &out_rows,
+                                rows_n,
+                                tile_base_pos,
+                                n_pos,
+                                vt_stride,
+                                n_q,
+                                n_kv,
+                                group,
+                                hd,
+                                true,
+                            )?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                    let y_tiled = read_back_f32(&tiled_out.buffer, n_rows * n_q * hd);
+                    let tiled_max_abs = y_tiled
+                        .iter()
+                        .zip(y_fused.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0f32, f32::max);
+                    assert!(
+                        tiled_max_abs < 5e-5,
+                        concat!(
+                            "tiled vs untiled online attention diverged ",
+                            "(group={}): {}"
+                        ),
+                        group,
+                        tiled_max_abs
+                    );
+                }
             }
         }
     }

@@ -231,6 +231,22 @@ struct MetalAllocationSamples {
 }
 
 #[derive(Debug, Serialize)]
+struct PrefillAttentionQueryStats {
+    outer_chunk_rows: usize,
+    query_rows: usize,
+    tiled_layer_calls: u64,
+    query_tile_calls: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct PrefillScratchOverlayTimingStats {
+    backing_bytes: u64,
+    attention_bytes: u64,
+    gdn_bytes: u64,
+    saved_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct RequestTimingRow {
     schema_version: u32,
     request_epoch: &'static str,
@@ -265,6 +281,10 @@ struct RequestTimingRow {
     prefill_chunk_effective: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     prefill_chunk_decision: Option<PrefillChunkDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill_attention_query: Option<PrefillAttentionQueryStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill_scratch_overlay: Option<PrefillScratchOverlayTimingStats>,
     max_context_tokens: usize,
     prompt_acquisition_ms: f64,
     tokenizer_init_ms: f64,
@@ -487,6 +507,10 @@ struct RequestStatsRow {
     prefill_chunk_effective: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prefill_chunk_decision: Option<PrefillChunkDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill_attention_query: Option<PrefillAttentionQueryStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill_scratch_overlay: Option<PrefillScratchOverlayTimingStats>,
     max_context_tokens: usize,
     no_special_tokens: bool,
     restore_ms: f64,
@@ -1016,6 +1040,22 @@ fn execute_single_turn_request(
         None,
     )
     .context("prefill prompt")?;
+    let prefill_attention_query =
+        (scratch.attn_matrix_tiled_layer_calls() > 0).then(|| PrefillAttentionQueryStats {
+            outer_chunk_rows: chunk,
+            query_rows: scratch.attn_matrix_query_rows(),
+            tiled_layer_calls: scratch.attn_matrix_tiled_layer_calls(),
+            query_tile_calls: scratch.attn_matrix_query_tile_calls(),
+        });
+    let prefill_scratch_overlay =
+        scratch
+            .prefill_scratch_overlay_stats()
+            .map(|stats| PrefillScratchOverlayTimingStats {
+                backing_bytes: stats.backing_bytes,
+                attention_bytes: stats.attention_bytes,
+                gdn_bytes: stats.gdn_bytes,
+                saved_bytes: stats.saved_bytes,
+            });
     sequence.advance_by(prompt_ids.len())?;
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_prefill_exit =
@@ -1146,7 +1186,11 @@ fn execute_single_turn_request(
                 .max(stats.scratch_peak_allocated_bytes);
         }
         RequestTimingRow {
-            schema_version: if args.prompt_lookup || args.prefill_chunk.is_auto() {
+            schema_version: if args.prompt_lookup
+                || args.prefill_chunk.is_auto()
+                || prefill_attention_query.is_some()
+                || prefill_scratch_overlay.is_some()
+            {
                 4
             } else {
                 3
@@ -1186,6 +1230,8 @@ fn execute_single_turn_request(
             prefill_chunk_requested: args.prefill_chunk,
             prefill_chunk_effective: chunk,
             prefill_chunk_decision,
+            prefill_attention_query,
+            prefill_scratch_overlay,
             max_context_tokens: capacity,
             prompt_acquisition_ms,
             tokenizer_init_ms,
@@ -1645,6 +1691,22 @@ fn run_jsonl_request(
             logits
         }
     };
+    let prefill_attention_query =
+        (scratch.attn_matrix_tiled_layer_calls() > 0).then(|| PrefillAttentionQueryStats {
+            outer_chunk_rows: chunk,
+            query_rows: scratch.attn_matrix_query_rows(),
+            tiled_layer_calls: scratch.attn_matrix_tiled_layer_calls(),
+            query_tile_calls: scratch.attn_matrix_query_tile_calls(),
+        });
+    let prefill_scratch_overlay =
+        scratch
+            .prefill_scratch_overlay_stats()
+            .map(|stats| PrefillScratchOverlayTimingStats {
+                backing_bytes: stats.backing_bytes,
+                attention_bytes: stats.attention_bytes,
+                gdn_bytes: stats.gdn_bytes,
+                saved_bytes: stats.saved_bytes,
+            });
 
     let (generation, generated_text, prompt_lookup_stats) = if args.prompt_lookup {
         let (result, generated_text) = decode_prompt_lookup(
@@ -1688,7 +1750,11 @@ fn run_jsonl_request(
     let total_ms = total_t0.elapsed().as_secs_f64() * 1e3;
     report_prefill_chunk_decision(prefill_chunk_decision.as_ref(), prompt_ids.len());
     let stats = RequestStatsRow {
-        schema_version: if args.prompt_lookup || args.prefill_chunk.is_auto() {
+        schema_version: if args.prompt_lookup
+            || args.prefill_chunk.is_auto()
+            || prefill_attention_query.is_some()
+            || prefill_scratch_overlay.is_some()
+        {
             4
         } else {
             3
@@ -1724,6 +1790,8 @@ fn run_jsonl_request(
         },
         prefill_chunk_effective: args.prefill_chunk.is_auto().then_some(chunk),
         prefill_chunk_decision,
+        prefill_attention_query,
+        prefill_scratch_overlay,
         max_context_tokens: capacity,
         no_special_tokens: args.no_special_tokens,
         restore_ms,

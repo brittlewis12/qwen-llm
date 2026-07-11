@@ -2938,6 +2938,673 @@ pub struct PrefillScratchConfig {
     pub matrix_query_cap: Option<usize>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrefillScratchAllocation {
+    name: &'static str,
+    logical_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrefillScratchPlan {
+    allocations: Vec<PrefillScratchAllocation>,
+    deferred_allocations: Vec<PrefillScratchAllocation>,
+    logical_bytes: u64,
+    deferred_logical_bytes: u64,
+    block_size: u32,
+    matrix_max_pos: u64,
+    matrix_query_rows: u32,
+    overlay: Option<PrefillScratchOverlayStats>,
+    modes: PrefillScratchPlanModes,
+}
+
+impl PrefillScratchPlan {
+    pub fn allocations(&self) -> &[PrefillScratchAllocation] {
+        &self.allocations
+    }
+
+    pub fn allocation_count(&self) -> usize {
+        self.allocations.len()
+    }
+
+    pub fn deferred_allocations(&self) -> &[PrefillScratchAllocation] {
+        &self.deferred_allocations
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
+
+    pub fn maximum_logical_bytes(&self) -> Result<u64, MetalError> {
+        self.logical_bytes
+            .checked_add(self.deferred_logical_bytes)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "prefill_scratch_plan",
+                detail: "maximum logical byte total overflow".into(),
+            })
+    }
+
+    pub fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    pub fn matrix_max_pos(&self) -> u64 {
+        self.matrix_max_pos
+    }
+
+    pub fn matrix_query_rows(&self) -> u32 {
+        self.matrix_query_rows
+    }
+
+    pub fn overlay(&self) -> Option<PrefillScratchOverlayStats> {
+        self.overlay
+    }
+
+    fn validate_deferred(&self, name: &'static str, logical_bytes: u64) -> Result<(), MetalError> {
+        if self
+            .deferred_allocations
+            .iter()
+            .any(|allocation| allocation.name == name && allocation.logical_bytes == logical_bytes)
+        {
+            return Ok(());
+        }
+        Err(MetalError::BadShape {
+            kernel: "prefill_scratch_plan",
+            detail: format!("unplanned deferred allocation {name}={logical_bytes}"),
+        })
+    }
+
+    pub fn priced_upper_bound(
+        &self,
+        mut price: impl FnMut(u64) -> Result<u64, MetalError>,
+    ) -> Result<u64, MetalError> {
+        self.allocations
+            .iter()
+            .chain(&self.deferred_allocations)
+            .try_fold(0u64, |total, allocation| {
+                total
+                    .checked_add(price(allocation.logical_bytes)?)
+                    .ok_or_else(|| MetalError::BadShape {
+                        kernel: "prefill_scratch_plan",
+                        detail: "priced allocation total overflow".into(),
+                    })
+            })
+    }
+}
+
+impl PrefillScratchAllocation {
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrefillScratchPlanModes {
+    enable_attn_packed: bool,
+    enable_attn_fused_qkv_g8: bool,
+    enable_attn_matrix: bool,
+    attn_matrix_max_pos: u64,
+    attn_matrix_online: bool,
+    attn_matrix_query_cap: Option<usize>,
+    overlay_allowed: bool,
+}
+
+struct PrefillScratchPlanBuilder {
+    allocations: Vec<PrefillScratchAllocation>,
+    logical_bytes: u64,
+}
+
+impl PrefillScratchPlanBuilder {
+    fn new() -> Self {
+        Self {
+            allocations: Vec::new(),
+            logical_bytes: 0,
+        }
+    }
+
+    fn add(
+        &mut self,
+        name: &'static str,
+        elements: u64,
+        element_bytes: u64,
+    ) -> Result<(), MetalError> {
+        let logical_bytes = checked_u64_mul(
+            elements,
+            element_bytes,
+            "prefill scratch allocation bytes overflow",
+        )?;
+        self.logical_bytes = checked_u64_add(
+            self.logical_bytes,
+            logical_bytes,
+            "prefill scratch total bytes overflow",
+        )?;
+        self.allocations.push(PrefillScratchAllocation {
+            name,
+            logical_bytes,
+        });
+        Ok(())
+    }
+
+    fn f32(&mut self, name: &'static str, elements: u64) -> Result<(), MetalError> {
+        self.add(name, elements, 4)
+    }
+
+    fn f16(&mut self, name: &'static str, elements: u64) -> Result<(), MetalError> {
+        self.add(name, elements, 2)
+    }
+}
+
+struct PrefillScratchAllocator<'a> {
+    plan: &'a PrefillScratchPlan,
+    next: usize,
+}
+
+impl<'a> PrefillScratchAllocator<'a> {
+    fn new(plan: &'a PrefillScratchPlan) -> Self {
+        Self { plan, next: 0 }
+    }
+
+    fn allocate(
+        &mut self,
+        ctx: &MetalContext,
+        name: &'static str,
+        shape: Vec<u64>,
+        dtype: GgmlType,
+    ) -> Result<MetalTensor, MetalError> {
+        let element_bytes = match dtype {
+            GgmlType::F16 => 2,
+            GgmlType::F32 => 4,
+            _ => {
+                return Err(MetalError::BadShape {
+                    kernel: "prefill_scratch_plan",
+                    detail: format!("unsupported planned dtype {dtype:?}"),
+                });
+            }
+        };
+        let elements = shape.iter().try_fold(1u64, |total, &dim| {
+            checked_u64_mul(total, dim, "prefill planned tensor shape overflow")
+        })?;
+        let logical_bytes = checked_u64_mul(
+            elements,
+            element_bytes,
+            "prefill planned tensor byte size overflow",
+        )?;
+        let expected =
+            self.plan
+                .allocations
+                .get(self.next)
+                .ok_or_else(|| MetalError::BadShape {
+                    kernel: "prefill_scratch_plan",
+                    detail: format!("unexpected allocation {name} after plan end"),
+                })?;
+        if expected.name != name || expected.logical_bytes != logical_bytes {
+            return Err(MetalError::BadShape {
+                kernel: "prefill_scratch_plan",
+                detail: format!(
+                    "allocation {name}={logical_bytes} does not match {}={}",
+                    expected.name, expected.logical_bytes
+                ),
+            });
+        }
+        self.next += 1;
+        match dtype {
+            GgmlType::F16 => MetalTensor::zeros_f16(ctx, shape),
+            GgmlType::F32 => MetalTensor::zeros_f32(ctx, shape),
+            _ => unreachable!(),
+        }
+    }
+
+    fn f32(
+        &mut self,
+        ctx: &MetalContext,
+        name: &'static str,
+        shape: Vec<u64>,
+    ) -> Result<MetalTensor, MetalError> {
+        self.allocate(ctx, name, shape, GgmlType::F32)
+    }
+
+    fn f16(
+        &mut self,
+        ctx: &MetalContext,
+        name: &'static str,
+        shape: Vec<u64>,
+    ) -> Result<MetalTensor, MetalError> {
+        self.allocate(ctx, name, shape, GgmlType::F16)
+    }
+
+    fn finish(self) -> Result<(), MetalError> {
+        if self.next != self.plan.allocations.len() {
+            return Err(MetalError::BadShape {
+                kernel: "prefill_scratch_plan",
+                detail: format!(
+                    "constructor used {} of {} planned allocations",
+                    self.next,
+                    self.plan.allocations.len()
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn build_prefill_scratch_plan_from_arch(
+    arch: &crate::model::Arch,
+    n_attn_layers: u64,
+    has_gdn: bool,
+    block_size: u32,
+    include_spec_packs: bool,
+    modes: PrefillScratchPlanModes,
+) -> Result<PrefillScratchPlan, MetalError> {
+    let n = u64::from(block_size);
+    let h = u64::from(arch.hidden_size);
+    let f = u64::from(arch.intermediate_size);
+    let head_dim = u64::from(arch.attn_head_dim);
+    let n_q = u64::from(arch.n_q_heads);
+    let n_kv = u64::from(arch.n_kv_heads);
+    let expert_count = u64::from(arch.expert_count).max(1);
+    let q_dim = checked_u64_mul(n_q, head_dim, "prefill plan q_dim overflow")?;
+    let kv_dim = checked_u64_mul(n_kv, head_dim, "prefill plan kv_dim overflow")?;
+    let attn_q_full_dim = checked_u64_double(q_dim, "prefill plan 2*q_dim overflow")?;
+    let attn_qkv_fused_dim = checked_u64_add(
+        attn_q_full_dim,
+        checked_u64_double(kv_dim, "prefill plan 2*kv_dim overflow")?,
+        "prefill plan fused qkv dim overflow",
+    )?;
+    let moe_topk = u64::from(arch.expert_used_count.min(arch.expert_count)).max(1);
+    let moe_f_exp = u64::from(arch.expert_feed_forward_length).max(1);
+    let moe_f_shared = u64::from(arch.expert_shared_feed_forward_length).max(1);
+    let moe_slot_elems = checked_u64_mul(n, moe_topk, "prefill plan moe slots overflow")?;
+    let moe_inner_elems =
+        checked_u64_mul(moe_slot_elems, moe_f_exp, "prefill plan moe inner overflow")?;
+    let moe_out_elems = checked_u64_mul(moe_slot_elems, h, "prefill plan moe output overflow")?;
+    let moe_group_ids_elems =
+        checked_u64_mul(expert_count, n, "prefill plan moe group ids overflow")?;
+    let attn_group = n_q.checked_div(n_kv.max(1)).unwrap_or(1).max(1);
+    let attn_partial_group = checked_u64_mul(
+        attn_group,
+        head_dim,
+        "prefill plan partial attention group overflow",
+    )?;
+    let attn_prefill_v4_o_partial_elems = checked_u64_mul4(
+        ATTN_PREFILL_V4_PACKED_ROWS as u64,
+        n_kv.max(1),
+        ATTN_V4_MAX_NWG as u64,
+        attn_partial_group,
+        "prefill plan attention partial overflow",
+    )?;
+    let attn_prefill_v4_ml_partial_elems = checked_u64_mul4(
+        ATTN_PREFILL_V4_PACKED_ROWS as u64,
+        n_kv.max(1),
+        ATTN_V4_MAX_NWG as u64,
+        checked_u64_double(attn_group, "prefill plan attention ml group overflow")?,
+        "prefill plan attention ml partial overflow",
+    )?;
+
+    let query_cap = if include_spec_packs {
+        None
+    } else {
+        modes.attn_matrix_query_cap
+    };
+    if query_cap == Some(0) {
+        return Err(MetalError::BadShape {
+            kernel: "prefill_scratch_plan",
+            detail: "matrix query cap must be greater than zero".into(),
+        });
+    }
+    if modes.enable_attn_matrix && !modes.attn_matrix_online && query_cap.is_some() {
+        return Err(MetalError::BadShape {
+            kernel: "prefill_scratch_plan",
+            detail: "matrix query cap requires online matrix attention".into(),
+        });
+    }
+    let matrix_max_pos = if modes.enable_attn_matrix {
+        modes.attn_matrix_max_pos.max(n)
+    } else {
+        0
+    };
+    let query_rows = query_cap.map(|cap| n.min(cap as u64)).unwrap_or(n).max(1);
+    let matrix_scores_elems = if modes.enable_attn_matrix && !modes.attn_matrix_online {
+        checked_u64_mul3(
+            n,
+            n_q,
+            matrix_max_pos,
+            "prefill plan matrix scores overflow",
+        )?
+    } else {
+        1
+    };
+    let matrix_scores_h_elems = if modes.enable_attn_matrix && modes.attn_matrix_online {
+        checked_u64_mul3(
+            query_rows,
+            n_q,
+            matrix_max_pos,
+            "prefill plan online matrix scores overflow",
+        )?
+    } else {
+        1
+    };
+    let matrix_ml_elems = if modes.enable_attn_matrix && modes.attn_matrix_online {
+        checked_u64_mul3(
+            query_rows,
+            n_q,
+            checked_u64_double(
+                matrix_max_pos.div_ceil(64),
+                "prefill plan matrix ml tiles overflow",
+            )?,
+            "prefill plan matrix ml overflow",
+        )?
+    } else {
+        1
+    };
+    let matrix_vt_elems = if modes.enable_attn_matrix {
+        checked_u64_mul4(
+            n_attn_layers.max(1),
+            n_kv,
+            head_dim,
+            matrix_max_pos,
+            "prefill plan matrix vt overflow",
+        )?
+    } else {
+        1
+    };
+
+    let gdn_head_dim = u64::from(arch.gdn_head_dim);
+    let gdn_n_v = u64::from(arch.gdn_n_v_heads);
+    let gdn_n_k = u64::from(arch.gdn_n_k_heads);
+    let gdn_v_dim = checked_u64_mul(
+        gdn_n_v.max(1),
+        gdn_head_dim.max(1),
+        "prefill plan gdn v dim overflow",
+    )?;
+    let gdn_conv_heads = checked_u64_add(
+        checked_u64_double(gdn_n_k.max(1), "prefill plan gdn 2*n_k overflow")?,
+        gdn_n_v.max(1),
+        "prefill plan gdn conv heads overflow",
+    )?;
+    let gdn_conv_dim = checked_u64_mul(
+        gdn_conv_heads,
+        gdn_head_dim.max(1),
+        "prefill plan gdn conv dim overflow",
+    )?;
+    let gdn_k_dim = checked_u64_mul(
+        gdn_n_k.max(1),
+        gdn_head_dim.max(1),
+        "prefill plan gdn k dim overflow",
+    )?;
+    let gdn_shapes = [
+        checked_u64_mul(n, gdn_conv_dim, "prefill plan gdn qkv overflow")?,
+        checked_u64_mul(n, gdn_v_dim, "prefill plan gdn z overflow")?,
+        checked_u64_mul(n, gdn_n_v.max(1), "prefill plan gdn beta overflow")?,
+        checked_u64_mul(n, gdn_n_v.max(1), "prefill plan gdn alpha overflow")?,
+        checked_u64_mul(n, gdn_k_dim, "prefill plan gdn q norm overflow")?,
+        checked_u64_mul(n, gdn_k_dim, "prefill plan gdn k norm overflow")?,
+        checked_u64_mul(n, gdn_v_dim, "prefill plan gdn v overflow")?,
+        checked_u64_mul(n, gdn_v_dim, "prefill plan gdn out overflow")?,
+        checked_u64_mul(n, gdn_v_dim, "prefill plan gdn normed overflow")?,
+    ];
+    let overlay_layout = (modes.overlay_allowed
+        && !include_spec_packs
+        && modes.enable_attn_matrix
+        && modes.attn_matrix_online
+        && query_cap.is_some()
+        && has_gdn)
+        .then(|| prefill_scratch_overlay_layout(matrix_scores_h_elems, matrix_ml_elems, gdn_shapes))
+        .transpose()?;
+    let overlay = if let Some(layout) = overlay_layout {
+        let saved_bytes = layout
+            .attention_bytes
+            .checked_add(layout.gdn_bytes)
+            .and_then(|sum| sum.checked_sub(layout.backing_bytes))
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "prefill_scratch_plan",
+                detail: "overlay savings arithmetic overflowed".into(),
+            })?;
+        Some(PrefillScratchOverlayStats {
+            backing_bytes: layout.backing_bytes,
+            attention_bytes: layout.attention_bytes,
+            gdn_bytes: layout.gdn_bytes,
+            saved_bytes,
+        })
+    } else {
+        None
+    };
+
+    let mut builder = PrefillScratchPlanBuilder::new();
+    if let Some(stats) = overlay {
+        builder.add("attn_gdn_overlay_backing", stats.backing_bytes, 1)?;
+    } else {
+        builder.f16("attn_matrix_scores_h_pack", matrix_scores_h_elems)?;
+        builder.f32("attn_matrix_ml_pack", matrix_ml_elems)?;
+        for (name, elements) in [
+            "gdn_qkv_pack",
+            "gdn_z_pack",
+            "gdn_beta_pack",
+            "gdn_alpha_pack",
+            "gdn_q_norm_pack",
+            "gdn_k_norm_pack",
+            "gdn_v_pack",
+            "gdn_out_pack",
+            "gdn_normed_pack",
+        ]
+        .into_iter()
+        .zip(gdn_shapes)
+        {
+            builder.f32(name, elements)?;
+        }
+    }
+
+    let nh = checked_u64_mul(n, h, "prefill plan n*h overflow")?;
+    let nf = checked_u64_mul(n, f, "prefill plan n*f overflow")?;
+    let nq = checked_u64_mul(n, q_dim, "prefill plan n*q overflow")?;
+    let nkv = checked_u64_mul(n, kv_dim, "prefill plan n*kv overflow")?;
+    let n_q_full = checked_u64_mul(n, attn_q_full_dim, "prefill plan n*q_full overflow")?;
+    let n_qkv_fused = checked_u64_mul(n, attn_qkv_fused_dim, "prefill plan n*qkv_fused overflow")?;
+    let n_experts = checked_u64_mul(n, expert_count, "prefill plan n*experts overflow")?;
+    let n_shared = checked_u64_mul(n, moe_f_shared, "prefill plan n*shared overflow")?;
+    for (name, elements) in [
+        ("x_pack", nh),
+        ("h_pack", nh),
+        ("mixer_out_pack", nh),
+        (
+            "attn_qkv_fused_pack",
+            if modes.enable_attn_fused_qkv_g8 {
+                n_qkv_fused
+            } else {
+                1
+            },
+        ),
+        ("attn_q_full_pack", n_q_full),
+        ("attn_q_pack", 1),
+        ("attn_gate_pack", 1),
+        ("attn_q_normed_pack", nq),
+        ("attn_k_now_pack", nkv),
+        ("attn_v_now_pack", nkv),
+        ("attn_k_normed_pack", nkv),
+        ("attn_o_pack", nq),
+        (
+            "attn_prefill_v4_o_partial_pack",
+            if modes.enable_attn_packed {
+                attn_prefill_v4_o_partial_elems
+            } else {
+                1
+            },
+        ),
+        (
+            "attn_prefill_v4_ml_partial_pack",
+            if modes.enable_attn_packed {
+                attn_prefill_v4_ml_partial_elems
+            } else {
+                1
+            },
+        ),
+        ("attn_matrix_scores_pack", matrix_scores_elems),
+    ] {
+        builder.f32(name, elements)?;
+    }
+    builder.f16("attn_matrix_vt_pack", matrix_vt_elems)?;
+    for (name, elements) in [
+        ("ffn_gate_pack", nf),
+        ("ffn_up_pack", nf),
+        ("ffn_inner_pack", nf),
+        ("ffn_out_pack", nh),
+        ("moe_topk_idx_pack", moe_slot_elems),
+        ("moe_router_probs_pack", n_experts),
+        ("moe_topk_weight_pack", moe_slot_elems),
+        ("moe_shared_gate_pack", n),
+        (
+            "moe_inner_pack",
+            if include_spec_packs {
+                moe_inner_elems
+            } else {
+                1
+            },
+        ),
+        (
+            "moe_expert_out_pack",
+            if include_spec_packs { moe_out_elems } else { 1 },
+        ),
+        ("moe_group_slot_idx_pack", moe_slot_elems),
+        ("moe_group_count_pack", expert_count),
+        ("moe_group_ids_pack", moe_group_ids_elems),
+        ("moe_group_token_idx_pack", moe_slot_elems),
+        ("moe_group_weight_pack", moe_slot_elems),
+        ("moe_group_inner_pack", moe_inner_elems),
+        ("moe_group_out_pack", moe_out_elems),
+        ("moe_shared_ffn_gate_pack", n_shared),
+        ("moe_shared_ffn_up_pack", n_shared),
+        ("moe_shared_ffn_inner_pack", n_shared),
+        ("moe_shared_ffn_out_pack", nh),
+        (
+            "final_logits_pack",
+            if include_spec_packs {
+                checked_u64_mul(
+                    n,
+                    u64::from(arch.vocab_size),
+                    "prefill plan final logits overflow",
+                )?
+            } else {
+                1
+            },
+        ),
+    ] {
+        builder.f32(name, elements)?;
+    }
+    let mut deferred = PrefillScratchPlanBuilder::new();
+    if !include_spec_packs {
+        deferred.f32("moe_inner_pack_fallback_growth", moe_inner_elems)?;
+        deferred.f32("moe_expert_out_pack_fallback_growth", moe_out_elems)?;
+    }
+    let matrix_query_rows = u32::try_from(query_rows).map_err(|_| MetalError::BadShape {
+        kernel: "prefill_scratch_plan",
+        detail: format!("matrix query rows {query_rows} do not fit u32"),
+    })?;
+    Ok(PrefillScratchPlan {
+        allocations: builder.allocations,
+        deferred_allocations: deferred.allocations,
+        logical_bytes: builder.logical_bytes,
+        deferred_logical_bytes: deferred.logical_bytes,
+        block_size,
+        matrix_max_pos,
+        matrix_query_rows,
+        overlay,
+        modes,
+    })
+}
+
+fn resolve_prefill_scratch_plan_modes(
+    arch: &crate::model::Arch,
+    block_size: u32,
+    include_spec_packs: bool,
+    matrix_max_pos_override: Option<usize>,
+    config: Option<PrefillScratchConfig>,
+) -> Result<PrefillScratchPlanModes, MetalError> {
+    let head_dim = arch.attn_head_dim as usize;
+    let n_kv = arch.n_kv_heads.max(1);
+    let attn_group = arch.n_q_heads.checked_div(n_kv).unwrap_or(1).max(1) as usize;
+    let enable_attn_packed = matches!(
+        std::env::var("QWEN_PREFILL_ATTN_PACKED_G8").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    ) || matches!(
+        std::env::var("QWEN_PREFILL_ATTN_PACKED_G16").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    ) || (head_dim == 256 && matches!(attn_group, 8 | 16));
+    let enable_attn_fused_qkv_g8 = matches!(
+        std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    );
+    let enable_attn_matrix = head_dim == 256
+        && ((prefill_attn_matrix_g4_may_use()
+            && arch.n_kv_heads.checked_mul(4) == Some(arch.n_q_heads))
+            || (prefill_attn_matrix_g8_may_use() && arch.n_q_heads == 16 && arch.n_kv_heads == 2)
+            || (prefill_attn_matrix_g6_may_use() && arch.n_q_heads == 24 && arch.n_kv_heads == 4)
+            || (prefill_attn_matrix_g16_may_use() && arch.n_q_heads == 32 && arch.n_kv_heads == 2));
+    let attn_matrix_max_pos = if enable_attn_matrix {
+        prefill_attn_matrix_max_pos()
+            .or(matrix_max_pos_override)
+            .unwrap_or(block_size as usize)
+            .max(block_size as usize) as u64
+    } else {
+        0
+    };
+    let attn_matrix_query_cap = resolve_prefill_attn_matrix_query_cap(include_spec_packs, config)
+        .map_err(|detail| MetalError::BadShape {
+        kernel: "prefill_attn_matrix_query_cap",
+        detail,
+    })?;
+    Ok(PrefillScratchPlanModes {
+        enable_attn_packed,
+        enable_attn_fused_qkv_g8,
+        enable_attn_matrix,
+        attn_matrix_max_pos,
+        attn_matrix_online: prefill_attn_matrix_online_enabled(),
+        attn_matrix_query_cap,
+        overlay_allowed: prefill_attn_gdn_scratch_overlay_enabled()
+            && !prefill_scratch_overlay_diagnostic_mode_present(),
+    })
+}
+
+pub fn plan_prefill_scratch_with_matrix_max_pos_configured(
+    target_model: &crate::metal_forward::MetalModel,
+    block_size: u32,
+    matrix_max_pos: usize,
+    config: PrefillScratchConfig,
+) -> Result<PrefillScratchPlan, MetalError> {
+    let n_attn_layers = u64::try_from(
+        target_model
+            .blocks
+            .iter()
+            .filter(|block| matches!(block, MetalBlock::Attn(_)))
+            .count()
+            .max(1),
+    )
+    .map_err(|_| MetalError::BadShape {
+        kernel: "prefill_scratch_plan",
+        detail: "attention layer count does not fit u64".into(),
+    })?;
+    let has_gdn = target_model
+        .blocks
+        .iter()
+        .any(|block| matches!(block, MetalBlock::Gdn(_)));
+    let modes = resolve_prefill_scratch_plan_modes(
+        &target_model.arch,
+        block_size,
+        false,
+        Some(matrix_max_pos),
+        Some(config),
+    )?;
+    build_prefill_scratch_plan_from_arch(
+        &target_model.arch,
+        n_attn_layers,
+        has_gdn,
+        block_size,
+        false,
+        modes,
+    )
+}
+
 pub struct MetalDFlashLayerMajorScratch {
     /// `[N, H]` F32 — residual stream across N tokens.
     pub x_pack: MetalTensor,
@@ -3121,6 +3788,7 @@ pub struct MetalDFlashLayerMajorScratch {
     attn_matrix_tiled_layer_calls: u64,
     attn_matrix_query_tile_calls: u64,
     scratch_overlay: Option<PrefillScratchOverlayStats>,
+    scratch_plan: PrefillScratchPlan,
     pub hidden_size: u64,
     pub intermediate_size: u64,
     pub q_dim: u64,
@@ -3154,6 +3822,7 @@ impl MetalDFlashLayerMajorScratch {
         include_spec_packs: bool,
         attn_matrix_max_pos_override: Option<usize>,
         config: Option<PrefillScratchConfig>,
+        plan_override: Option<PrefillScratchPlan>,
     ) -> Result<Self, MetalError> {
         let arch = &target_model.arch;
         let n = block_size as u64;
@@ -3225,49 +3894,60 @@ impl MetalDFlashLayerMajorScratch {
             )?,
             "layer-major attn prefill ml partial size overflow",
         )?;
-        let attn_group = attn_group as usize;
-        let enable_attn_packed = matches!(
-            std::env::var("QWEN_PREFILL_ATTN_PACKED_G8").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        ) || matches!(
-            std::env::var("QWEN_PREFILL_ATTN_PACKED_G16").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        ) || (head_dim as usize == 256 && matches!(attn_group, 8 | 16));
-        let enable_attn_fused_qkv_g8 = matches!(
-            std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        );
-        let enable_attn_matrix = head_dim as usize == 256
-            && ((prefill_attn_matrix_g4_may_use() && arch.n_q_heads == arch.n_kv_heads * 4)
-                || (prefill_attn_matrix_g8_may_use()
-                    && arch.n_q_heads == 16
-                    && arch.n_kv_heads == 2)
-                || (prefill_attn_matrix_g6_may_use()
-                    && arch.n_q_heads == 24
-                    && arch.n_kv_heads == 4)
-                || (prefill_attn_matrix_g16_may_use()
-                    && arch.n_q_heads == 32
-                    && arch.n_kv_heads == 2));
-        let attn_matrix_max_pos = if enable_attn_matrix {
-            prefill_attn_matrix_max_pos()
-                .or(attn_matrix_max_pos_override)
-                .unwrap_or(block_size as usize)
-                .max(block_size as usize) as u64
+        let has_gdn = target_model
+            .blocks
+            .iter()
+            .any(|block| matches!(block, MetalBlock::Gdn(_)));
+        let (modes, scratch_plan) = if let Some(plan) = plan_override {
+            if include_spec_packs || plan.block_size != block_size {
+                return Err(MetalError::BadShape {
+                    kernel: "prefill_scratch_plan",
+                    detail: "prefill scratch plan does not match constructor mode or width".into(),
+                });
+            }
+            let expected = build_prefill_scratch_plan_from_arch(
+                arch,
+                n_attn_layers,
+                has_gdn,
+                block_size,
+                false,
+                plan.modes,
+            )?;
+            if expected != plan {
+                return Err(MetalError::BadShape {
+                    kernel: "prefill_scratch_plan",
+                    detail: "prefill scratch plan does not match target model".into(),
+                });
+            }
+            (plan.modes, plan)
         } else {
-            0
+            let modes = resolve_prefill_scratch_plan_modes(
+                arch,
+                block_size,
+                include_spec_packs,
+                attn_matrix_max_pos_override,
+                config,
+            )?;
+            let plan = build_prefill_scratch_plan_from_arch(
+                arch,
+                n_attn_layers,
+                has_gdn,
+                block_size,
+                include_spec_packs,
+                modes,
+            )?;
+            (modes, plan)
         };
+        let enable_attn_packed = modes.enable_attn_packed;
+        let enable_attn_fused_qkv_g8 = modes.enable_attn_fused_qkv_g8;
+        let enable_attn_matrix = modes.enable_attn_matrix;
+        let attn_matrix_max_pos = modes.attn_matrix_max_pos;
         // The F32 scores buffer backs the three-kernel sidecar (rollback);
         // the F16 P~ + (m, l) pair backs the default two-pass online path.
         // Whichever variant the process-level env selects is allocated in
         // full and the other is stubbed at 1 element.
-        let attn_matrix_online = prefill_attn_matrix_online_enabled();
-        let attn_matrix_query_cap =
-            resolve_prefill_attn_matrix_query_cap(include_spec_packs, config).map_err(
-                |detail| MetalError::BadShape {
-                    kernel: "prefill_attn_matrix_query_cap",
-                    detail,
-                },
-            )?;
+        let attn_matrix_online = modes.attn_matrix_online;
+        let attn_matrix_query_cap = modes.attn_matrix_query_cap;
         if enable_attn_matrix && !attn_matrix_online && attn_matrix_query_cap.is_some() {
             return Err(MetalError::BadShape {
                 kernel: "prefill_attn_matrix_query_cap",
@@ -3384,16 +4064,8 @@ impl MetalDFlashLayerMajorScratch {
             checked_u64_mul(n, gdn_v_dim, "overlay gdn out elements overflow")?,
             checked_u64_mul(n, gdn_v_dim, "overlay gdn normed elements overflow")?,
         ];
-        let overlay_eligible = prefill_attn_gdn_scratch_overlay_enabled()
-            && !include_spec_packs
-            && enable_attn_matrix
-            && attn_matrix_online
-            && attn_matrix_query_cap.is_some()
-            && target_model
-                .blocks
-                .iter()
-                .any(|block| matches!(block, MetalBlock::Gdn(_)))
-            && !prefill_scratch_overlay_diagnostic_mode_present();
+        let mut allocator = PrefillScratchAllocator::new(&scratch_plan);
+        let overlay_eligible = scratch_plan.overlay.is_some();
         let (overlay_views, scratch_overlay) = if overlay_eligible {
             let layout = prefill_scratch_overlay_layout(
                 attn_matrix_scores_h_elems,
@@ -3401,7 +4073,7 @@ impl MetalDFlashLayerMajorScratch {
                 gdn_shapes,
             )?;
             let backing_elems = layout.backing_bytes / 4;
-            let backing = MetalTensor::zeros_f32(ctx, vec![backing_elems])?;
+            let backing = allocator.f32(ctx, "attn_gdn_overlay_backing", vec![backing_elems])?;
             let views = PrefillScratchOverlayViews {
                 scores_h: checked_overlay_tensor(
                     &backing,
@@ -3470,112 +4142,156 @@ impl MetalDFlashLayerMajorScratch {
                     GgmlType::F32,
                 )?,
             };
-            let saved_bytes = layout
-                .attention_bytes
-                .checked_add(layout.gdn_bytes)
-                .and_then(|sum| sum.checked_sub(layout.backing_bytes))
-                .ok_or_else(|| MetalError::BadShape {
-                    kernel: "prefill_scratch_overlay",
-                    detail: "overlay saving arithmetic underflowed".into(),
-                })?;
-            (
-                views,
-                Some(PrefillScratchOverlayStats {
-                    backing_bytes: layout.backing_bytes,
-                    attention_bytes: layout.attention_bytes,
-                    gdn_bytes: layout.gdn_bytes,
-                    saved_bytes,
-                }),
-            )
+            let stats = scratch_plan.overlay.ok_or_else(|| MetalError::BadShape {
+                kernel: "prefill_scratch_overlay",
+                detail: "overlay layout missing from scratch plan".into(),
+            })?;
+            debug_assert_eq!(stats.backing_bytes, layout.backing_bytes);
+            debug_assert_eq!(stats.attention_bytes, layout.attention_bytes);
+            debug_assert_eq!(stats.gdn_bytes, layout.gdn_bytes);
+            (views, Some(stats))
         } else {
             (
                 PrefillScratchOverlayViews {
-                    scores_h: MetalTensor::zeros_f16(ctx, vec![attn_matrix_scores_h_elems])?,
-                    ml: MetalTensor::zeros_f32(ctx, vec![attn_matrix_ml_elems])?,
-                    gdn_qkv: MetalTensor::zeros_f32(ctx, vec![n, gdn_conv_dim])?,
-                    gdn_z: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
-                    gdn_beta: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
-                    gdn_alpha: MetalTensor::zeros_f32(ctx, vec![n, gdn_n_v.max(1)])?,
-                    gdn_q_norm: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
-                    gdn_k_norm: MetalTensor::zeros_f32(ctx, vec![n, gdn_k_dim])?,
-                    gdn_v: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
-                    gdn_out: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
-                    gdn_normed: MetalTensor::zeros_f32(ctx, vec![n, gdn_v_dim])?,
+                    scores_h: allocator.f16(
+                        ctx,
+                        "attn_matrix_scores_h_pack",
+                        vec![attn_matrix_scores_h_elems],
+                    )?,
+                    ml: allocator.f32(ctx, "attn_matrix_ml_pack", vec![attn_matrix_ml_elems])?,
+                    gdn_qkv: allocator.f32(ctx, "gdn_qkv_pack", vec![n, gdn_conv_dim])?,
+                    gdn_z: allocator.f32(ctx, "gdn_z_pack", vec![n, gdn_v_dim])?,
+                    gdn_beta: allocator.f32(ctx, "gdn_beta_pack", vec![n, gdn_n_v.max(1)])?,
+                    gdn_alpha: allocator.f32(ctx, "gdn_alpha_pack", vec![n, gdn_n_v.max(1)])?,
+                    gdn_q_norm: allocator.f32(ctx, "gdn_q_norm_pack", vec![n, gdn_k_dim])?,
+                    gdn_k_norm: allocator.f32(ctx, "gdn_k_norm_pack", vec![n, gdn_k_dim])?,
+                    gdn_v: allocator.f32(ctx, "gdn_v_pack", vec![n, gdn_v_dim])?,
+                    gdn_out: allocator.f32(ctx, "gdn_out_pack", vec![n, gdn_v_dim])?,
+                    gdn_normed: allocator.f32(ctx, "gdn_normed_pack", vec![n, gdn_v_dim])?,
                 },
                 None,
             )
         };
 
-        Ok(Self {
-            x_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
-            h_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
-            mixer_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
-            attn_qkv_fused_pack: MetalTensor::zeros_f32(
+        let scratch = Self {
+            x_pack: allocator.f32(ctx, "x_pack", vec![n, h])?,
+            h_pack: allocator.f32(ctx, "h_pack", vec![n, h])?,
+            mixer_out_pack: allocator.f32(ctx, "mixer_out_pack", vec![n, h])?,
+            attn_qkv_fused_pack: allocator.f32(
                 ctx,
+                "attn_qkv_fused_pack",
                 if enable_attn_fused_qkv_g8 {
                     vec![n, attn_qkv_fused_dim]
                 } else {
                     vec![1]
                 },
             )?,
-            attn_q_full_pack: MetalTensor::zeros_f32(ctx, vec![n, attn_q_full_dim])?,
-            attn_q_pack: MetalTensor::zeros_f32(ctx, vec![1])?,
-            attn_gate_pack: MetalTensor::zeros_f32(ctx, vec![1])?,
-            attn_q_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
-            attn_k_now_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
-            attn_v_now_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
-            attn_k_normed_pack: MetalTensor::zeros_f32(ctx, vec![n, kv_dim])?,
-            attn_o_pack: MetalTensor::zeros_f32(ctx, vec![n, q_dim])?,
-            attn_prefill_v4_o_partial_pack: MetalTensor::zeros_f32(
+            attn_q_full_pack: allocator.f32(ctx, "attn_q_full_pack", vec![n, attn_q_full_dim])?,
+            attn_q_pack: allocator.f32(ctx, "attn_q_pack", vec![1])?,
+            attn_gate_pack: allocator.f32(ctx, "attn_gate_pack", vec![1])?,
+            attn_q_normed_pack: allocator.f32(ctx, "attn_q_normed_pack", vec![n, q_dim])?,
+            attn_k_now_pack: allocator.f32(ctx, "attn_k_now_pack", vec![n, kv_dim])?,
+            attn_v_now_pack: allocator.f32(ctx, "attn_v_now_pack", vec![n, kv_dim])?,
+            attn_k_normed_pack: allocator.f32(ctx, "attn_k_normed_pack", vec![n, kv_dim])?,
+            attn_o_pack: allocator.f32(ctx, "attn_o_pack", vec![n, q_dim])?,
+            attn_prefill_v4_o_partial_pack: allocator.f32(
                 ctx,
+                "attn_prefill_v4_o_partial_pack",
                 if enable_attn_packed {
                     vec![attn_prefill_v4_o_partial_elems]
                 } else {
                     vec![1]
                 },
             )?,
-            attn_prefill_v4_ml_partial_pack: MetalTensor::zeros_f32(
+            attn_prefill_v4_ml_partial_pack: allocator.f32(
                 ctx,
+                "attn_prefill_v4_ml_partial_pack",
                 if enable_attn_packed {
                     vec![attn_prefill_v4_ml_partial_elems]
                 } else {
                     vec![1]
                 },
             )?,
-            attn_matrix_scores_pack: MetalTensor::zeros_f32(ctx, vec![attn_matrix_scores_elems])?,
+            attn_matrix_scores_pack: allocator.f32(
+                ctx,
+                "attn_matrix_scores_pack",
+                vec![attn_matrix_scores_elems],
+            )?,
             attn_matrix_scores_h_pack: overlay_views.scores_h,
             attn_matrix_ml_pack: overlay_views.ml,
-            attn_matrix_vt_pack: MetalTensor::zeros_f16(ctx, vec![attn_matrix_vt_elems])?,
-            ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
-            ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
-            ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, f])?,
-            ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
-            moe_topk_idx_pack: MetalTensor::zeros_f32(ctx, vec![moe_slot_elems])?,
-            moe_router_probs_pack: MetalTensor::zeros_f32(
+            attn_matrix_vt_pack: allocator.f16(
                 ctx,
+                "attn_matrix_vt_pack",
+                vec![attn_matrix_vt_elems],
+            )?,
+            ffn_gate_pack: allocator.f32(ctx, "ffn_gate_pack", vec![n, f])?,
+            ffn_up_pack: allocator.f32(ctx, "ffn_up_pack", vec![n, f])?,
+            ffn_inner_pack: allocator.f32(ctx, "ffn_inner_pack", vec![n, f])?,
+            ffn_out_pack: allocator.f32(ctx, "ffn_out_pack", vec![n, h])?,
+            moe_topk_idx_pack: allocator.f32(ctx, "moe_topk_idx_pack", vec![moe_slot_elems])?,
+            moe_router_probs_pack: allocator.f32(
+                ctx,
+                "moe_router_probs_pack",
                 vec![n, (arch.expert_count as u64).max(1)],
             )?,
-            moe_topk_weight_pack: MetalTensor::zeros_f32(ctx, vec![moe_slot_elems])?,
-            moe_shared_gate_pack: MetalTensor::zeros_f32(ctx, vec![n])?,
-            moe_inner_pack: MetalTensor::zeros_f32(ctx, moe_inner_shape)?,
-            moe_expert_out_pack: MetalTensor::zeros_f32(ctx, moe_out_shape)?,
+            moe_topk_weight_pack: allocator.f32(
+                ctx,
+                "moe_topk_weight_pack",
+                vec![moe_slot_elems],
+            )?,
+            moe_shared_gate_pack: allocator.f32(ctx, "moe_shared_gate_pack", vec![n])?,
+            moe_inner_pack: allocator.f32(ctx, "moe_inner_pack", moe_inner_shape)?,
+            moe_expert_out_pack: allocator.f32(ctx, "moe_expert_out_pack", moe_out_shape)?,
             moe_inner_full_elems: moe_inner_elems,
             moe_out_full_elems: moe_out_elems,
-            moe_group_slot_idx_pack: MetalTensor::zeros_f32(ctx, vec![moe_slot_elems])?,
-            moe_group_count_pack: MetalTensor::zeros_f32(
+            moe_group_slot_idx_pack: allocator.f32(
                 ctx,
+                "moe_group_slot_idx_pack",
+                vec![moe_slot_elems],
+            )?,
+            moe_group_count_pack: allocator.f32(
+                ctx,
+                "moe_group_count_pack",
                 vec![(arch.expert_count as u64).max(1)],
             )?,
-            moe_group_ids_pack: MetalTensor::zeros_f32(ctx, vec![moe_group_ids_elems])?,
-            moe_group_token_idx_pack: MetalTensor::zeros_f32(ctx, vec![moe_slot_elems])?,
-            moe_group_weight_pack: MetalTensor::zeros_f32(ctx, vec![moe_slot_elems])?,
-            moe_group_inner_pack: MetalTensor::zeros_f32(ctx, vec![moe_inner_elems])?,
-            moe_group_out_pack: MetalTensor::zeros_f32(ctx, vec![moe_out_elems])?,
-            moe_shared_ffn_gate_pack: MetalTensor::zeros_f32(ctx, vec![n, moe_f_shared])?,
-            moe_shared_ffn_up_pack: MetalTensor::zeros_f32(ctx, vec![n, moe_f_shared])?,
-            moe_shared_ffn_inner_pack: MetalTensor::zeros_f32(ctx, vec![n, moe_f_shared])?,
-            moe_shared_ffn_out_pack: MetalTensor::zeros_f32(ctx, vec![n, h])?,
-            final_logits_pack: MetalTensor::zeros_f32(ctx, final_logits_shape)?,
+            moe_group_ids_pack: allocator.f32(
+                ctx,
+                "moe_group_ids_pack",
+                vec![moe_group_ids_elems],
+            )?,
+            moe_group_token_idx_pack: allocator.f32(
+                ctx,
+                "moe_group_token_idx_pack",
+                vec![moe_slot_elems],
+            )?,
+            moe_group_weight_pack: allocator.f32(
+                ctx,
+                "moe_group_weight_pack",
+                vec![moe_slot_elems],
+            )?,
+            moe_group_inner_pack: allocator.f32(
+                ctx,
+                "moe_group_inner_pack",
+                vec![moe_inner_elems],
+            )?,
+            moe_group_out_pack: allocator.f32(ctx, "moe_group_out_pack", vec![moe_out_elems])?,
+            moe_shared_ffn_gate_pack: allocator.f32(
+                ctx,
+                "moe_shared_ffn_gate_pack",
+                vec![n, moe_f_shared],
+            )?,
+            moe_shared_ffn_up_pack: allocator.f32(
+                ctx,
+                "moe_shared_ffn_up_pack",
+                vec![n, moe_f_shared],
+            )?,
+            moe_shared_ffn_inner_pack: allocator.f32(
+                ctx,
+                "moe_shared_ffn_inner_pack",
+                vec![n, moe_f_shared],
+            )?,
+            moe_shared_ffn_out_pack: allocator.f32(ctx, "moe_shared_ffn_out_pack", vec![n, h])?,
+            final_logits_pack: allocator.f32(ctx, "final_logits_pack", final_logits_shape)?,
             gdn_qkv_pack: overlay_views.gdn_qkv,
             gdn_z_pack: overlay_views.gdn_z,
             gdn_beta_pack: overlay_views.gdn_beta,
@@ -3595,6 +4311,7 @@ impl MetalDFlashLayerMajorScratch {
             attn_matrix_tiled_layer_calls: 0,
             attn_matrix_query_tile_calls: 0,
             scratch_overlay,
+            scratch_plan: scratch_plan.clone(),
             hidden_size: h,
             intermediate_size: f,
             vocab_size: v,
@@ -3604,7 +4321,9 @@ impl MetalDFlashLayerMajorScratch {
             gdn_conv_dim,
             gdn_v_dim,
             gdn_n_v,
-        })
+        };
+        allocator.finish()?;
+        Ok(scratch)
     }
 
     pub fn fresh(
@@ -3612,7 +4331,7 @@ impl MetalDFlashLayerMajorScratch {
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, true, None, None)
+        Self::fresh_inner(ctx, target_model, block_size, true, None, None, None)
     }
 
     pub fn fresh_prefill(
@@ -3620,7 +4339,7 @@ impl MetalDFlashLayerMajorScratch {
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, false, None, None)
+        Self::fresh_inner(ctx, target_model, block_size, false, None, None, None)
     }
 
     pub fn fresh_prefill_with_matrix_max_pos(
@@ -3636,6 +4355,7 @@ impl MetalDFlashLayerMajorScratch {
             false,
             Some(matrix_max_pos),
             None,
+            None,
         )
     }
 
@@ -3645,7 +4365,15 @@ impl MetalDFlashLayerMajorScratch {
         block_size: u32,
         config: PrefillScratchConfig,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, false, None, Some(config))
+        Self::fresh_inner(
+            ctx,
+            target_model,
+            block_size,
+            false,
+            None,
+            Some(config),
+            None,
+        )
     }
 
     pub fn fresh_prefill_with_matrix_max_pos_configured(
@@ -3662,7 +4390,17 @@ impl MetalDFlashLayerMajorScratch {
             false,
             Some(matrix_max_pos),
             Some(config),
+            None,
         )
+    }
+
+    pub fn fresh_prefill_from_plan(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        plan: PrefillScratchPlan,
+    ) -> Result<Self, MetalError> {
+        let block_size = plan.block_size;
+        Self::fresh_inner(ctx, target_model, block_size, false, None, None, Some(plan))
     }
 
     /// Grow the packed-slot MoE fallback packs to full size if this scratch
@@ -3672,9 +4410,23 @@ impl MetalDFlashLayerMajorScratch {
     /// never encoded into any command buffer, so replacing it is safe.
     pub fn ensure_moe_packed_fallback(&mut self, ctx: &MetalContext) -> Result<(), MetalError> {
         if self.moe_inner_pack.n_elements() < self.moe_inner_full_elems {
+            let bytes = checked_u64_mul(
+                self.moe_inner_full_elems,
+                4,
+                "moe inner fallback allocation bytes overflow",
+            )?;
+            self.scratch_plan
+                .validate_deferred("moe_inner_pack_fallback_growth", bytes)?;
             self.moe_inner_pack = MetalTensor::zeros_f32(ctx, vec![self.moe_inner_full_elems])?;
         }
         if self.moe_expert_out_pack.n_elements() < self.moe_out_full_elems {
+            let bytes = checked_u64_mul(
+                self.moe_out_full_elems,
+                4,
+                "moe output fallback allocation bytes overflow",
+            )?;
+            self.scratch_plan
+                .validate_deferred("moe_expert_out_pack_fallback_growth", bytes)?;
             self.moe_expert_out_pack = MetalTensor::zeros_f32(ctx, vec![self.moe_out_full_elems])?;
         }
         Ok(())
@@ -3694,6 +4446,10 @@ impl MetalDFlashLayerMajorScratch {
 
     pub fn prefill_scratch_overlay_stats(&self) -> Option<PrefillScratchOverlayStats> {
         self.scratch_overlay
+    }
+
+    pub fn prefill_scratch_plan(&self) -> &PrefillScratchPlan {
+        &self.scratch_plan
     }
 
     /// Zero-copy view of row n of `x_pack` ([H] elements).
@@ -7267,10 +8023,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                         let attn_o_pack_p = layer_scratch
                             .attn_o_pack
                             .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
-                        let use_fused_qkv = prefill_attn_fused_qkv_g8_enabled(
-                            chunk_start as usize + chunk_p,
-                            n_q / n_kv,
-                        ) && a.qkv_fused.is_some();
+                        let use_fused_qkv =
+                            layer_scratch.scratch_plan.modes.enable_attn_fused_qkv_g8
+                                && prefill_attn_fused_qkv_g8_enabled(
+                                    chunk_start as usize + chunk_p,
+                                    n_q / n_kv,
+                                )
+                                && a.qkv_fused.is_some();
                         let qkv_fused_dim = attn_q_full_dim + 2 * kv_dim;
 
                         // Step A: batched front-end Q gated / K / V projections + Q-norm + K-norm.
@@ -7478,35 +8237,42 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                             apply_mixer_residual = false;
                             target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
                         } else {
-                            let use_packed_g8 = prefill_attn_packed_g8_enabled(
-                                chunk_start as usize + chunk_p,
-                                n_q / n_kv,
-                            ) && target_session.kv_k[ai].dtype == GgmlType::F16
+                            let use_packed_g8 = layer_scratch.scratch_plan.modes.enable_attn_packed
+                                && prefill_attn_packed_g8_enabled(
+                                    chunk_start as usize + chunk_p,
+                                    n_q / n_kv,
+                                )
+                                && target_session.kv_k[ai].dtype == GgmlType::F16
                                 && target_session.kv_v[ai].dtype == GgmlType::F16
                                 && head_dim == 256
                                 && n_q == 16
                                 && n_kv == 2;
-                            let use_packed_g16 = prefill_attn_packed_g16_enabled(
-                                chunk_start as usize + chunk_p,
-                                n_q / n_kv,
-                            ) && target_session.kv_k[ai].dtype
-                                == GgmlType::F16
-                                && target_session.kv_v[ai].dtype == GgmlType::F16
-                                && head_dim == 256
-                                && n_q == 32
-                                && n_kv == 2;
+                            let use_packed_g16 =
+                                layer_scratch.scratch_plan.modes.enable_attn_packed
+                                    && prefill_attn_packed_g16_enabled(
+                                        chunk_start as usize + chunk_p,
+                                        n_q / n_kv,
+                                    )
+                                    && target_session.kv_k[ai].dtype == GgmlType::F16
+                                    && target_session.kv_v[ai].dtype == GgmlType::F16
+                                    && head_dim == 256
+                                    && n_q == 32
+                                    && n_kv == 2;
                             let matrix_scratch_covers_chunk = layer_scratch.attn_matrix_max_pos
                                 >= chunk_start as u64 + chunk_p as u64;
                             let use_matrix_g8 = use_packed_g8
+                                && layer_scratch.scratch_plan.modes.enable_attn_matrix
                                 && prefill_attn_matrix_g8_may_use()
                                 && matrix_scratch_covers_chunk;
-                            let use_matrix_g4 = prefill_attn_matrix_g4_may_use()
+                            let use_matrix_g4 = layer_scratch.scratch_plan.modes.enable_attn_matrix
+                                && prefill_attn_matrix_g4_may_use()
                                 && target_session.kv_k[ai].dtype == GgmlType::F16
                                 && target_session.kv_v[ai].dtype == GgmlType::F16
                                 && head_dim == 256
                                 && n_q == n_kv * 4
                                 && matrix_scratch_covers_chunk;
-                            let use_matrix_g6 = prefill_attn_matrix_g6_may_use()
+                            let use_matrix_g6 = layer_scratch.scratch_plan.modes.enable_attn_matrix
+                                && prefill_attn_matrix_g6_may_use()
                                 && target_session.kv_k[ai].dtype == GgmlType::F16
                                 && target_session.kv_v[ai].dtype == GgmlType::F16
                                 && head_dim == 256
@@ -7514,6 +8280,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                 && n_kv == 4
                                 && matrix_scratch_covers_chunk;
                             let use_matrix_g16 = use_packed_g16
+                                && layer_scratch.scratch_plan.modes.enable_attn_matrix
                                 && prefill_attn_matrix_g16_may_use()
                                 && matrix_scratch_covers_chunk;
                             let use_matrix =
@@ -7652,7 +8419,11 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         chunk_p.min(layer_scratch.attn_matrix_query_rows as usize);
                                     // Online path stores F16 P~ plus the (m, l) sidecar;
                                     // the legacy sidecar stores F32 scores.
-                                    let scores_bytes = if prefill_attn_matrix_online_enabled() {
+                                    let scores_bytes = if layer_scratch
+                                        .scratch_plan
+                                        .modes
+                                        .attn_matrix_online
+                                    {
                                         matrix_query_rows * n_q * n_pos * std::mem::size_of::<u16>()
                                             + crate::metal::attn_matrix_ml_elems(
                                                 matrix_query_rows,
@@ -7694,8 +8465,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                         vt_update_bytes as f64 / (1024.0 * 1024.0),
                                     );
                                 }
-                                let matrix_query_tiled = prefill_attn_matrix_online_enabled()
-                                    && (layer_scratch.attn_matrix_query_rows as usize) < chunk_p;
+                                let matrix_query_tiled =
+                                    layer_scratch.scratch_plan.modes.attn_matrix_online
+                                        && (layer_scratch.attn_matrix_query_rows as usize)
+                                            < chunk_p;
                                 let trace_matrix_subphases = use_matrix
                                     && trace_attn_phases
                                     && !attn_packed_oracle
@@ -7705,7 +8478,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
-                                    let matrix_online = prefill_attn_matrix_online_enabled();
+                                    let matrix_online =
+                                        layer_scratch.scratch_plan.modes.attn_matrix_online;
                                     let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
                                         (ai * per_attn_vt) as u64,
                                         vec![per_attn_vt as u64],
@@ -8020,7 +8794,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                                 head_dim,
                                             )?;
                                         }
-                                        if prefill_attn_matrix_online_enabled() {
+                                        if layer_scratch.scratch_plan.modes.attn_matrix_online {
                                             // v0.439: two-pass online-softmax matrix attention.
                                             // Rollback: QWEN_PREFILL_ATTN_MATRIX_ONLINE=0.
                                             let query_rows =
@@ -12054,6 +12828,101 @@ mod tests {
             assert_eq!(layout.scores_h.offset, 0);
             assert!(layout.scores_h.offset + layout.scores_h.bytes <= layout.ml.offset);
             assert!(layout.ml.offset + layout.ml.bytes <= layout.backing_bytes);
+        }
+    }
+
+    fn product_moe_plan_arch(a10b: bool) -> crate::model::Arch {
+        let mut arch = crate::model::QWEN3_27B;
+        arch.kind = crate::model::ArchKind::Moe;
+        arch.n_layer = if a10b { 48 } else { 40 };
+        arch.hidden_size = if a10b { 3072 } else { 2048 };
+        arch.intermediate_size = 0;
+        arch.n_q_heads = if a10b { 32 } else { 16 };
+        arch.n_kv_heads = 2;
+        arch.gdn_n_v_heads = if a10b { 64 } else { 32 };
+        arch.expert_count = 256;
+        arch.expert_used_count = 8;
+        arch.expert_feed_forward_length = if a10b { 1024 } else { 512 };
+        arch.expert_shared_feed_forward_length = if a10b { 1024 } else { 512 };
+        arch.mtp_n_hidden_layers = 0;
+        arch
+    }
+
+    fn product_moe_plan(
+        arch: &crate::model::Arch,
+        block_size: u32,
+        configured_topology: bool,
+    ) -> PrefillScratchPlan {
+        let modes = PrefillScratchPlanModes {
+            enable_attn_packed: true,
+            enable_attn_fused_qkv_g8: false,
+            enable_attn_matrix: true,
+            attn_matrix_max_pos: 11_287,
+            attn_matrix_online: true,
+            attn_matrix_query_cap: configured_topology.then_some(1024),
+            overlay_allowed: configured_topology,
+        };
+        build_prefill_scratch_plan_from_arch(
+            arch,
+            u64::from(arch.n_layer / arch.full_attention_interval),
+            true,
+            block_size,
+            false,
+            modes,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn prefill_scratch_plan_matches_product_residuals() {
+        for (a10b, wide_chunk, logical_residual, observed_residual) in [
+            (false, 2048, 90_083_328u64, 90_079_232u64),
+            (true, 4096, 876_916_736u64, 876_920_832u64),
+        ] {
+            let arch = product_moe_plan_arch(a10b);
+            let baseline = product_moe_plan(&arch, 1024, false);
+            let wide = product_moe_plan(&arch, wide_chunk, true);
+            assert_eq!(
+                wide.logical_bytes - baseline.logical_bytes,
+                logical_residual
+            );
+            assert_eq!(logical_residual.abs_diff(observed_residual), 4096);
+            assert_eq!(wide.matrix_query_rows, 1024);
+            assert!(wide.overlay.is_some());
+            let mut names = wide
+                .allocations
+                .iter()
+                .chain(&wide.deferred_allocations)
+                .map(|allocation| allocation.name)
+                .collect::<Vec<_>>();
+            let count = names.len();
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names.len(), count);
+            assert_eq!(
+                wide.logical_bytes,
+                wide.allocations
+                    .iter()
+                    .map(|allocation| allocation.logical_bytes)
+                    .sum::<u64>()
+            );
+            let mut priced_calls = 0usize;
+            let priced = wide
+                .priced_upper_bound(|bytes| {
+                    priced_calls += 1;
+                    bytes.checked_add(4096).ok_or_else(|| MetalError::BadShape {
+                        kernel: "prefill_scratch_plan_test",
+                        detail: "synthetic pricing overflow".into(),
+                    })
+                })
+                .unwrap();
+            let maximum_count = wide.allocation_count() + wide.deferred_allocations.len();
+            assert_eq!(priced_calls, maximum_count);
+            assert_eq!(
+                priced,
+                wide.maximum_logical_bytes().unwrap()
+                    + 4096 * u64::try_from(maximum_count).unwrap()
+            );
         }
     }
 
@@ -22520,14 +23389,26 @@ mod tests {
                 mf.single_token(tid, i as u32, &mut sess_b)
                     .expect("experimental prefix advance");
             }
+            let scratch_plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+                &mm,
+                p as u32,
+                n_total_with_prefix,
+                PrefillScratchConfig::default(),
+            )
+            .expect("scratch plan");
+            if label.starts_with("T<P") {
+                let mut invalid_plan = scratch_plan.clone();
+                invalid_plan.block_size += 1;
+                assert!(
+                    MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(&ctx, &mm, invalid_plan,)
+                        .is_err()
+                );
+            }
+            let expected_plan = scratch_plan.clone();
             let mut layer_scratch =
-                MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
-                    &ctx,
-                    &mm,
-                    p as u32,
-                    n_total_with_prefix,
-                )
-                .expect("layer scratch");
+                MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(&ctx, &mm, scratch_plan)
+                    .expect("layer scratch from plan");
+            assert_eq!(layer_scratch.prefill_scratch_plan(), &expected_plan);
             let h_dst_b =
                 MetalTensor::zeros_f32(&ctx, vec![(total_n * k * h) as u64]).expect("h_dst_b");
             let last_b = prefill_tokens_with_multi_hidden(
@@ -23085,14 +23966,33 @@ mod tests {
                 mf.single_token(tid, i as u32, &mut sess_b)
                     .expect("experimental prefix advance");
             }
+            let scratch_plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+                &mm,
+                p as u32,
+                n_total_with_prefix,
+                PrefillScratchConfig {
+                    matrix_query_cap: prefill_attn_matrix_query_cap().unwrap(),
+                },
+            )
+            .expect("scratch plan");
+            let expected_plan = scratch_plan.clone();
             let mut layer_scratch =
-                MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
-                    &ctx,
-                    &mm,
-                    p as u32,
-                    n_total_with_prefix,
-                )
-                .expect("layer scratch");
+                MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(&ctx, &mm, scratch_plan)
+                    .expect("layer scratch from plan");
+            assert_eq!(layer_scratch.prefill_scratch_plan(), &expected_plan);
+            if branch_label.starts_with("T=5") {
+                layer_scratch
+                    .ensure_moe_packed_fallback(&ctx)
+                    .expect("planned fallback growth");
+                assert_eq!(
+                    layer_scratch.moe_inner_pack.n_elements(),
+                    layer_scratch.moe_inner_full_elems
+                );
+                assert_eq!(
+                    layer_scratch.moe_expert_out_pack.n_elements(),
+                    layer_scratch.moe_out_full_elems
+                );
+            }
             let last_b = prefill_tokens_with_multi_hidden(
                 &mf,
                 token_ids,

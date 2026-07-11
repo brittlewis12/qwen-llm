@@ -438,6 +438,12 @@ pub struct MetalContext {
     pso_cache: Arc<Mutex<MetalPipelineCache>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetalBufferSizeAndAlign {
+    pub size: u64,
+    pub alignment: u64,
+}
+
 // SAFETY: `Retained<ProtocolObject<dyn MTL*>>` are thread-safe per Apple's
 // Metal docs (the protocol objects are themselves backed by thread-safe
 // Objective-C classes; method dispatch is internally synchronized).
@@ -445,6 +451,30 @@ unsafe impl Send for MetalContext {}
 unsafe impl Sync for MetalContext {}
 
 impl MetalContext {
+    pub fn shared_buffer_size_and_align(
+        &self,
+        logical_bytes: u64,
+    ) -> Result<MetalBufferSizeAndAlign, MetalError> {
+        let length = usize::try_from(logical_bytes.max(1)).map_err(|_| MetalError::BadShape {
+            kernel: "shared_buffer_size_and_align",
+            detail: format!("logical byte request {logical_bytes} does not fit usize"),
+        })?;
+        let priced = self.device.heapBufferSizeAndAlignWithLength_options(
+            length,
+            MTLResourceOptions::StorageModeShared,
+        );
+        Ok(MetalBufferSizeAndAlign {
+            size: u64::try_from(priced.size).map_err(|_| MetalError::BadShape {
+                kernel: "shared_buffer_size_and_align",
+                detail: "priced buffer size does not fit u64".into(),
+            })?,
+            alignment: u64::try_from(priced.align).map_err(|_| MetalError::BadShape {
+                kernel: "shared_buffer_size_and_align",
+                detail: "priced buffer alignment does not fit u64".into(),
+            })?,
+        })
+    }
+
     /// Initialize a Metal context backed by the embedded `kernels.metallib`.
     pub fn new() -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;

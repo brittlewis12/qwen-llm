@@ -8,6 +8,7 @@ use qwen_llm::metal_dflash::{
     prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::MetalForward;
+use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::runtime::{LoadedModel, LoadedModelConfig, Runtime, Sequence, SequenceConfig};
 use qwen_llm::tokenizer::Tokenizer;
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
@@ -48,9 +50,9 @@ struct Args {
     #[arg(long)]
     prompt_lookup: bool,
 
-    /// Prompt prefill chunk size. The safe default mirrors qwen-bench.
-    #[arg(long, default_value_t = 1024)]
-    prefill_chunk: usize,
+    /// Prompt prefill chunk size, or `auto` for the bounded MoE allowlist.
+    #[arg(long, default_value = "1024")]
+    prefill_chunk: PrefillChunkArg,
 
     /// Override sequence capacity. Defaults to prompt + generated tokens + slack.
     #[arg(long)]
@@ -93,6 +95,63 @@ struct Args {
     /// --request-trace`: `arrival_ms tokens id ...`.
     #[arg(long)]
     trace_request: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrefillChunkArg {
+    Fixed(usize),
+    Auto,
+}
+
+impl PrefillChunkArg {
+    fn is_auto(self) -> bool {
+        self == Self::Auto
+    }
+
+    fn validate(self) -> Result<()> {
+        ensure!(
+            !matches!(self, Self::Fixed(0)),
+            "--prefill-chunk must be >= 1 or auto"
+        );
+        Ok(())
+    }
+}
+
+impl FromStr for PrefillChunkArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value == "auto" {
+            return Ok(Self::Auto);
+        }
+        value
+            .parse::<usize>()
+            .map(Self::Fixed)
+            .map_err(|_| format!("expected a positive integer or auto, got {value:?}"))
+    }
+}
+
+impl Serialize for PrefillChunkArg {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Fixed(value) => serializer.serialize_u64(*value as u64),
+            Self::Auto => serializer.serialize_str("auto"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PrefillChunkDecision {
+    policy: &'static str,
+    profile: Option<&'static str>,
+    reason: &'static str,
+    selected: usize,
+    validated_prompt_range: Option<[usize; 2]>,
+    evidence_baseline_chunk: Option<usize>,
+    evidence_incremental_peak_bytes_vs_1024: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,8 +261,10 @@ struct RequestTimingRow {
     decode_policy: &'static str,
     terminal_token_target_transition_consumed: bool,
     no_special_tokens: bool,
-    prefill_chunk_requested: usize,
+    prefill_chunk_requested: PrefillChunkArg,
     prefill_chunk_effective: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill_chunk_decision: Option<PrefillChunkDecision>,
     max_context_tokens: usize,
     prompt_acquisition_ms: f64,
     tokenizer_init_ms: f64,
@@ -422,6 +483,10 @@ struct RequestStatsRow {
     matched_prefix_hash: Option<String>,
     exact_cache_hit: bool,
     prefill_chunk: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill_chunk_effective: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill_chunk_decision: Option<PrefillChunkDecision>,
     max_context_tokens: usize,
     no_special_tokens: bool,
     restore_ms: f64,
@@ -537,8 +602,127 @@ fn prompt_text(args: &Args) -> Result<(String, PromptSource)> {
     bail!("single-turn generation requires --prompt or --prompt-file")
 }
 
+const AUTO_CHUNK_PROMPT_MIN: usize = 8192;
+const AUTO_CHUNK_PROMPT_MAX: usize = 16384;
+
+fn auto_prefill_profile(
+    arch: Arch,
+    base_model_name: Option<&str>,
+    file_type: Option<u64>,
+) -> Option<(&'static str, usize, u64)> {
+    if arch.kind != ArchKind::Moe
+        || arch.expert_count != 256
+        || arch.expert_used_count != 8
+        || arch.full_attention_interval != 4
+        || arch.attn_head_dim != 256
+        || arch.partial_rotary_factor != 0.25
+        || arch.gdn_n_k_heads != 16
+        || arch.gdn_head_dim != 128
+        || arch.gdn_conv_kernel != 4
+        || arch.mtp_n_hidden_layers != 0
+        || file_type != Some(15)
+    {
+        return None;
+    }
+    match base_model_name {
+        Some("Qwen3.6 35B A3B")
+            if arch.n_layer == 40
+                && arch.hidden_size == 2048
+                && arch.n_q_heads == 16
+                && arch.n_kv_heads == 2
+                && arch.gdn_n_v_heads == 32
+                && arch.expert_feed_forward_length == 512
+                && arch.expert_shared_feed_forward_length == 512 =>
+        {
+            Some(("qwen3.6-35b-a3b-filetype15", 2048, 718_536_704))
+        }
+        Some("Qwen3.5 122B A10B")
+            if arch.n_layer == 48
+                && arch.hidden_size == 3072
+                && arch.n_q_heads == 32
+                && arch.n_kv_heads == 2
+                && arch.gdn_n_v_heads == 64
+                && arch.expert_feed_forward_length == 1024
+                && arch.expert_shared_feed_forward_length == 1024 =>
+        {
+            Some(("qwen3.5-122b-a10b-filetype15", 4096, 4_021_338_112))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_prefill_chunk(
+    requested: PrefillChunkArg,
+    loaded: &LoadedModel,
+    prompt_tokens: usize,
+) -> (usize, Option<PrefillChunkDecision>) {
+    if let PrefillChunkArg::Fixed(chunk) = requested {
+        return (chunk.min(prompt_tokens.max(1)), None);
+    }
+
+    let profile = auto_prefill_profile(
+        loaded.arch(),
+        loaded.gguf().get_str("general.base_model.0.name"),
+        loaded.gguf().get_u64("general.file_type"),
+    );
+    let decision = auto_prefill_chunk_decision(profile, prompt_tokens);
+    (decision.selected, Some(decision))
+}
+
+fn auto_prefill_chunk_decision(
+    profile: Option<(&'static str, usize, u64)>,
+    prompt_tokens: usize,
+) -> PrefillChunkDecision {
+    let (selected, reason, profile_name, evidence_incremental_peak_bytes) = match profile {
+        None => (1024, "profile_not_allowlisted", None, None),
+        Some((name, _, peak_delta)) if prompt_tokens < AUTO_CHUNK_PROMPT_MIN => (
+            1024,
+            "prompt_below_validated_range",
+            Some(name),
+            Some(peak_delta),
+        ),
+        Some((name, _, peak_delta)) if prompt_tokens > AUTO_CHUNK_PROMPT_MAX => (
+            1024,
+            "prompt_above_memory_bounded_range",
+            Some(name),
+            Some(peak_delta),
+        ),
+        Some((name, chunk, peak_delta)) => (
+            chunk,
+            "matched_validated_profile",
+            Some(name),
+            Some(peak_delta),
+        ),
+    };
+    let selected = selected.min(prompt_tokens.max(1));
+    PrefillChunkDecision {
+        policy: "moe_allowlist_v1",
+        profile: profile_name,
+        reason,
+        selected,
+        validated_prompt_range: profile_name
+            .map(|_| [AUTO_CHUNK_PROMPT_MIN, AUTO_CHUNK_PROMPT_MAX]),
+        evidence_baseline_chunk: profile_name.map(|_| 1024),
+        evidence_incremental_peak_bytes_vs_1024: evidence_incremental_peak_bytes,
+    }
+}
+
+fn report_prefill_chunk_decision(decision: Option<&PrefillChunkDecision>, prompt_tokens: usize) {
+    let Some(decision) = decision else {
+        return;
+    };
+    eprintln!(
+        "prefill_chunk: policy={} profile={} prompt_tokens={} selected={} reason={}",
+        decision.policy,
+        decision.profile.unwrap_or("none"),
+        prompt_tokens,
+        decision.selected,
+        decision.reason,
+    );
+}
+
 fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
-    ensure!(args.prefill_chunk > 0, "--prefill-chunk must be >= 1");
+    args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
 
     let mut timing_file = args
@@ -794,7 +978,8 @@ fn execute_single_turn_request(
         prompt_ids.len(),
         args.tokens
     );
-    let chunk = args.prefill_chunk.min(prompt_ids.len().max(1));
+    let (chunk, prefill_chunk_decision) =
+        resolve_prefill_chunk(args.prefill_chunk, loaded, prompt_ids.len());
     let block_size = u32::try_from(chunk).context("prefill chunk does not fit u32")?;
     let matrix_max_pos = prompt_ids.len().max(chunk);
     let capacity_validation_ms = validation_t0.elapsed().as_secs_f64() * 1e3;
@@ -908,6 +1093,7 @@ fn execute_single_turn_request(
         stdout.flush().context("flush final newline")?;
     }
     let total_request_ms = request_t0.elapsed().as_secs_f64() * 1e3;
+    report_prefill_chunk_decision(prefill_chunk_decision.as_ref(), prompt_ids.len());
     let request_end_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
     drop(stdout);
 
@@ -960,7 +1146,11 @@ fn execute_single_turn_request(
                 .max(stats.scratch_peak_allocated_bytes);
         }
         RequestTimingRow {
-            schema_version: if args.prompt_lookup { 4 } else { 3 },
+            schema_version: if args.prompt_lookup || args.prefill_chunk.is_auto() {
+                4
+            } else {
+                3
+            },
             request_epoch,
             request_index,
             tokenizer_reused,
@@ -995,6 +1185,7 @@ fn execute_single_turn_request(
             no_special_tokens: args.no_special_tokens,
             prefill_chunk_requested: args.prefill_chunk,
             prefill_chunk_effective: chunk,
+            prefill_chunk_decision,
             max_context_tokens: capacity,
             prompt_acquisition_ms,
             tokenizer_init_ms,
@@ -1050,7 +1241,7 @@ fn execute_single_turn_request(
 }
 
 fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> Result<()> {
-    ensure!(args.prefill_chunk > 0, "--prefill-chunk must be >= 1");
+    args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
 
     let load_t0 = Instant::now();
@@ -1336,7 +1527,8 @@ fn run_jsonl_request(
         id,
     );
 
-    let chunk = args.prefill_chunk.min(prompt_ids.len().max(1));
+    let (chunk, prefill_chunk_decision) =
+        resolve_prefill_chunk(args.prefill_chunk, loaded, prompt_ids.len());
     let block_size = u32::try_from(chunk).context("prefill chunk does not fit u32")?;
     let matrix_max_pos = prompt_ids.len().max(chunk);
     let mut scratch = MetalDFlashLayerMajorScratch::fresh_prefill_with_matrix_max_pos(
@@ -1493,8 +1685,14 @@ fn run_jsonl_request(
     };
     let stats_now = loaded.prefix_cache_stats();
     let finish_ms = unix_epoch_ms_u64()?;
+    let total_ms = total_t0.elapsed().as_secs_f64() * 1e3;
+    report_prefill_chunk_decision(prefill_chunk_decision.as_ref(), prompt_ids.len());
     let stats = RequestStatsRow {
-        schema_version: if args.prompt_lookup { 4 } else { 3 },
+        schema_version: if args.prompt_lookup || args.prefill_chunk.is_auto() {
+            4
+        } else {
+            3
+        },
         id: id.to_string(),
         line: prepared.line,
         model: loaded.path().display().to_string(),
@@ -1520,7 +1718,12 @@ fn run_jsonl_request(
             None
         },
         exact_cache_hit,
-        prefill_chunk: args.prefill_chunk,
+        prefill_chunk: match args.prefill_chunk {
+            PrefillChunkArg::Fixed(requested) => requested,
+            PrefillChunkArg::Auto => chunk,
+        },
+        prefill_chunk_effective: args.prefill_chunk.is_auto().then_some(chunk),
+        prefill_chunk_decision,
         max_context_tokens: capacity,
         no_special_tokens: args.no_special_tokens,
         restore_ms,
@@ -1539,7 +1742,7 @@ fn run_jsonl_request(
         decode_transitions: generation.transitions,
         transition_ms: generation.transition_ms,
         transition_tps,
-        total_ms: total_t0.elapsed().as_secs_f64() * 1e3,
+        total_ms,
         cache_entries: stats_now.entries,
         cache_bytes: stats_now.total_bytes,
         cache_max_bytes: stats_now.max_bytes,
@@ -2143,6 +2346,105 @@ mod tests {
             auto_cache_prefix_tokens: None,
             auto_cache_future_hits: 0,
         }
+    }
+
+    #[test]
+    fn prefill_chunk_argument_preserves_numeric_json_and_accepts_auto() {
+        let fixed = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--prefill-chunk",
+            "2048",
+        ])
+        .unwrap();
+        let auto = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--prefill-chunk",
+            "auto",
+        ])
+        .unwrap();
+
+        assert_eq!(fixed.prefill_chunk, PrefillChunkArg::Fixed(2048));
+        assert_eq!(auto.prefill_chunk, PrefillChunkArg::Auto);
+        assert_eq!(serde_json::to_string(&fixed.prefill_chunk).unwrap(), "2048");
+        assert_eq!(
+            serde_json::to_string(&auto.prefill_chunk).unwrap(),
+            "\"auto\""
+        );
+    }
+
+    #[test]
+    fn auto_prefill_profiles_require_complete_allowlisted_topology() {
+        let mut a3b = qwen_llm::model::QWEN3_27B;
+        a3b.kind = ArchKind::Moe;
+        a3b.n_layer = 40;
+        a3b.hidden_size = 2048;
+        a3b.n_q_heads = 16;
+        a3b.n_kv_heads = 2;
+        a3b.gdn_n_v_heads = 32;
+        a3b.expert_count = 256;
+        a3b.expert_used_count = 8;
+        a3b.expert_feed_forward_length = 512;
+        a3b.expert_shared_feed_forward_length = 512;
+        a3b.mtp_n_hidden_layers = 0;
+
+        assert_eq!(
+            auto_prefill_profile(a3b, Some("Qwen3.6 35B A3B"), Some(15)),
+            Some(("qwen3.6-35b-a3b-filetype15", 2048, 718_536_704))
+        );
+        a3b.mtp_n_hidden_layers = 1;
+        assert_eq!(
+            auto_prefill_profile(a3b, Some("Qwen3.6 35B A3B"), Some(15)),
+            None
+        );
+        a3b.mtp_n_hidden_layers = 0;
+        a3b.n_layer = 48;
+        assert_eq!(
+            auto_prefill_profile(a3b, Some("Qwen3.6 35B A3B"), Some(15)),
+            None
+        );
+
+        let mut a10b = a3b;
+        a10b.n_layer = 48;
+        a10b.hidden_size = 3072;
+        a10b.n_q_heads = 32;
+        a10b.gdn_n_v_heads = 64;
+        a10b.expert_feed_forward_length = 1024;
+        a10b.expert_shared_feed_forward_length = 1024;
+        assert_eq!(
+            auto_prefill_profile(a10b, Some("Qwen3.5 122B A10B"), Some(15)),
+            Some(("qwen3.5-122b-a10b-filetype15", 4096, 4_021_338_112))
+        );
+    }
+
+    #[test]
+    fn auto_prefill_chunk_decision_bounds_the_measured_prompt_range() {
+        let profile = Some(("test-profile", 2048, 123));
+        for (prompt_tokens, selected, reason) in [
+            (8191, 1024, "prompt_below_validated_range"),
+            (8192, 2048, "matched_validated_profile"),
+            (16384, 2048, "matched_validated_profile"),
+            (16385, 1024, "prompt_above_memory_bounded_range"),
+        ] {
+            let decision = auto_prefill_chunk_decision(profile, prompt_tokens);
+            assert_eq!(decision.selected, selected);
+            assert_eq!(decision.reason, reason);
+            assert_eq!(decision.validated_prompt_range, Some([8192, 16384]));
+            assert_eq!(decision.evidence_baseline_chunk, Some(1024));
+            assert_eq!(decision.evidence_incremental_peak_bytes_vs_1024, Some(123));
+        }
+
+        let unsupported = auto_prefill_chunk_decision(None, 10_000);
+        assert_eq!(unsupported.selected, 1024);
+        assert_eq!(unsupported.validated_prompt_range, None);
+        assert_eq!(unsupported.evidence_baseline_chunk, None);
     }
 
     #[test]

@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.567 Product MoE Chunk Policy Clears Fresh TTFT
+
+Status: material A3B/A10B long-prompt TTFT wins exposed through bounded,
+allowlisted, opt-in `--prefill-chunk auto`; numeric default 1024 remains unchanged.
+
+- Five fresh-process AB/BA pairs use the same tracked 11,287-token Mei-medium
+  prompt, one output token, clean commit `882353a`, normal production attention,
+  and stdout-flush TTFT. Every chunk pair emits identical stdout bytes.
+- A10B chunk `4096` versus `1024` improves median TTFT `1.2075x`, range
+  `1.1764-1.3095x`, and median prefill `1.2076x`. Median TTFT falls by `4.614 s`.
+  Sampled Metal allocation rises by `4,021,338,112` bytes (`3.75 GiB`) in every
+  pair; the selected run reaches about `79.6 GiB` sampled allocation.
+- A3B chunk `2048` versus `1024` improves median TTFT `1.0641x`, range
+  `1.0453-1.0751x`, and median prefill `1.0643x`. Median TTFT falls by `459.85 ms`.
+  Sampled Metal allocation rises by `718,536,704` bytes (`685 MiB`) in every pair.
+- One-token generation is the correct TTFT oracle: the terminal token remains
+  pending, TTFT tracks prefill, and no decode transition contaminates the result.
+  The packet establishes first-flush latency and first-token identity, not logits
+  or longer-stream equivalence.
+- `--prefill-chunk auto` is intentionally not the default. It selects only over
+  8K-16K prompts and exact allowlisted, non-MTP file-type-15 A3B/A10B topology;
+  shorter, longer, sibling, and unknown profiles fall back to 1024 with a reason.
+  Numeric overrides retain precedence and preserve schema-3 output.
+- Auto timing rows use schema 4 and record requested/effective chunk, profile,
+  bounded range, fallback reason, baseline chunk, and the measured incremental
+  sampled-allocation evidence. Diagnostics emit after timing endpoints.
+- Dirty release validation selects 4096 and 2048 on the measured assets with exact
+  output parity against numeric controls. An unsupported 0.8B row falls back; 14
+  CLI tests cover parsing, numeric JSON compatibility, topology/MTP rejection,
+  and both range boundaries.
+
+The gain is broad within the measured long-prompt MoE cells, but the memory cost is
+not free. `currentAllocatedSize` is not residency or pressure headroom, and matrix
+scratch grows with prompt length; that is why auto is capped and opt-in. Default
+promotion needs a real bounded admission contract, not another same-cell timing run.
+
+Artifacts: `target/profiles/v0567-product-chunk/`. Adversarial reviews: `cx ask`
+sessions `019f4f64-9982-7de1-b50b-b1368872293c`,
+`019f4f6c-e2a5-7b50-86c2-6d5ed447790f`, and
+`019f4f75-caf3-7220-a7a7-d75db60e5df1`.
+
 ## 2026-07-10 - v0.566 Natural Panel Demotes Broad Prompt Lookup
 
 Status: retain product prompt lookup as a default-off workload-routed

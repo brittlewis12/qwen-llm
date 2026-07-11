@@ -357,8 +357,12 @@ speedup is `(B + D) / B`.
 
 1. **Model/length chunk policy**: measured long-prefill gains are about 3% on
    selected A3B rows and 6% on selected A10B rows, with little dense benefit.
-   Numerical contract, high measured-cell confidence, and low cost. Product fresh
-   TTFT and memory are the remaining promotion gate.
+   Product fresh-TTFT evidence is stronger: at 11,287 tokens, A3B chunk 2048 gives
+   `1.064x` median TTFT for `685 MiB` incremental sampled allocation, while A10B
+   chunk 4096 gives `1.207x` for `3.75 GiB`. The bounded, profile-allowlisted
+   `--prefill-chunk auto` exposes these wins over 8K-16K prompts without changing
+   the numeric 1024 default. A default decision still requires honest memory
+   admission rather than treating sampled Metal allocation as residency headroom.
 2. **Dense-27B prompt lookup/ngram proposals**: target-verified decode for
    repetitive workloads, with no learned drafter or MTP state. The measured
    fixed-N8 decode-only ceiling is `2.60-2.63x` in the measured 12/418-token
@@ -412,18 +416,17 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Adjudicate model/length chunk policy on product fresh TTFT and memory. Use one
-   real 8K-16K A10B sentinel for chunk `1024` versus `4096`, plus the same-prompt
-   A3B guardrail for `1024` versus `2048`. Run fresh-process AB/BA through first
-   callback with one output token. Keep the duplicated-bank G8 fused-QKV sidecar
-   separate from the memory-light policy decision.
-2. Establish canonical quality-harness v0 before promoting model-changing work:
+1. Establish canonical quality-harness v0 before promoting model-changing work:
    code-edit exact match, Mei-class long-document QA, and narrative constraint
    following, with bounded per-candidate runtime and versioned fixtures.
-3. Capture real Q/K/V once at 32K/131K after the quality gate exists. Price both
+2. Capture real Q/K/V once at 32K/131K after the quality gate exists. Price both
    exact attention-body headroom and the retained-KV/error frontier for sparse or
    retrieval attention from the same artifact. Use current F16 KV for the exact
    lane and v0.541 split partitioning only as a prior pattern.
+3. Promote automatic MoE chunks from opt-in to default only after a bounded
+   in-process admission signal accounts for prompt-dependent matrix scratch and
+   allocation failure. Numeric overrides remain the immediate escape hatch; do
+   not infer residency headroom from `currentAllocatedSize`.
 4. Add one product partial-restore and one EOS witness when a natural or existing
    adversarial fixture reaches those branches. The charged bench and 16-step
    continuation audit already cover the state semantics; do not rerun broad timing

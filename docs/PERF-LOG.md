@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.565 Product Prompt Lookup Clears Paired Gate
+
+Status: experimental dense-27B Q4_K_M product path promoted behind a default-off
+flag; natural-workload coverage and scratch size now gate further promotion.
+
+- `qwen --prompt-lookup` runs the frozen both-source, most-recent, L8/D7 policy
+  with target-only physical-N8 verification. The serial drivers remain separate.
+  Unsupported architectures and layouts fail before sequence creation or prefill.
+- The enabled driver owns the request sequence across speculative mutation. It
+  restores and advances target state before exposing accepted drafts, preserves
+  N-1 semantic transitions and the pending terminal token, and drops the sequence
+  on any post-verify error.
+- Prompt indexing starts only after the first token callback. N8 scratch is
+  allocated only after a real proposal. A generic 128-token row makes zero
+  attempts and allocates no verifier scratch; a favorable row allocates
+  `1,268,301,824` bytes (`1.181 GiB`) with about `0.17 ms` allocation wall.
+- Five fresh-process AB/BA pairs on a 323-token copy-heavy product fixture preserve
+  exact stdout bytes. Median generation speedup is `2.5662x`, range
+  `2.5633-2.5723x`; median total-request speedup is `1.8617x`. Median TTFT delta
+  is `-0.06 ms`, with no systematic shift. Every enabled row has 15 verifies,
+  seven abstentions, and `105/105` accepted drafts.
+- Five generic AB/BA pairs also preserve exact stdout bytes. The policy makes zero
+  attempts in every row. Median generation ratio is `1.00043x`, range
+  `0.99819-1.00087x`; median total ratio is `1.00045x`.
+- The packet includes prompt-index, update, lookup, allocation, serial, verify,
+  restore, accepted-draft, and physical-position accounting. Enabled timing rows
+  use schema 4; flag-off rows remain schema 3 and omit the optional fields.
+- This establishes a high-value product fast path when literal continuation
+  matches occur and are accepted. It does not establish natural hit prevalence,
+  other quant/size support, distribution or bit exactness, or product evidence for
+  partial restore and EOS branches. Those semantics remain covered by the charged
+  adversarial row, terminal matrix, and clean 16-step continuation witness.
+
+Next: survey the frozen proposer over existing natural greedy traces. If trigger
+rate and accepted progress are material, attack the `1.181 GiB` checkpoint scratch;
+otherwise keep the path explicit/default-off and pivot to fresh-TTFT work removal.
+Do not widen quant/size support or retain scratch across requests before that fork.
+
+Artifacts: `target/profiles/v0565-product-pld/`. Adversarial reviews: `cx ask`
+sessions `019f4eec-53cd-7231-9d1d-8c8b8a91c328`,
+`019f4ef7-6ea9-7e62-8adb-33331f12f0a0`, and
+`019f4f07-639c-7321-8a31-6487e6b874ab`.
+
 ## 2026-07-10 - v0.562 Charged Target-Only PLD Clears Held-Out Gate
 
 Status: charged dense-27B mechanism promoted to correctness hardening, then

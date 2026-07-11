@@ -361,7 +361,11 @@ speedup is `(B + D) / B`.
    regimes. Held-out mechanism rows predict `2.09-2.42x` on exact-copy/periodic
    paths while a generic row fully abstains. Confidence is high enough for one
    charged target-only implementation, but natural-workload coverage remains low.
-   Charged held-out decode now measures `2.05-2.55x`, with generic at `0.99944x`.
+   Charged held-out decode measures `2.05-2.55x`, with generic at `0.99944x`.
+   The default-off product path now measures `2.566x` median generation and
+   `1.862x` total-request speedup on a copy-heavy fixture, with exact output bytes
+   and neutral generic fallback. It lazily allocates `1.181 GiB` on the first
+   proposal, so prevalence and accepted progress now determine promotion value.
 2. **Model/length chunk policy**: measured long-prefill gains are about 3% on
    selected A3B rows and 6% on selected A10B rows, with little dense benefit.
    Numerical contract, high measured-cell confidence, and low cost.
@@ -403,36 +407,40 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Emit optional semantic event traces from the charged path and compare them to
-   the frozen offline rows. Lock carry, source, proposal, accepted prefix,
-   terminal cause, effective N, keep count, restore decision, and final position.
-2. Extend terminal tests across remaining widths 1-7 and proposed stop positions
-   0-6. Extend the outside-timing continuation witness before product integration.
-3. Integrate default-off PLD into the product greedy decoder without changing the
-   flag-off path. Preserve per-token callbacks, stop/output limits, sequence state,
-   and prefix-cache semantics.
-4. Run counterbalanced product TTFT/decode packets before any default decision.
-5. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
+1. Measure the frozen prompt-lookup policy over existing natural greedy traces.
+   Report request trigger rate, attempts, accepted drafts per verify, restore rate,
+   and source class. Use the measured product costs: about `38 ms` per serial
+   transition and `109 ms` per N8 verify, so sustained progress below roughly
+   three transitions per packet is not useful before restore cost.
+2. If natural coverage is material, reduce the `1.181 GiB` N8 checkpoint scratch
+   before widening or retaining it across requests. If coverage is rare, keep the
+   path explicit and default-off and move directly to a fresh-TTFT work-reduction
+   frontier rather than polishing speculative infrastructure.
+3. Add one product partial-restore and one EOS witness when a natural or existing
+   adversarial fixture reaches those branches. The charged bench and 16-step
+   continuation audit already cover the state semantics; do not rerun broad timing
+   packets for branch provenance alone.
+4. Adjudicate model/length chunk policy on product TTFT and memory. Treat the
    default-off G8 fused-QKV path as a separate oracle because it duplicates the
    Q/K/V bank and is not yet a memory-light production layout.
-6. Survey bounded native-MTP attention history only if its recorded proposal
+5. Survey bounded native-MTP attention history only if its recorded proposal
    rows beat prompt lookup after charged economics. First vary
    read windows `32/64/128/256/full` while retaining full history construction.
    Price lazy first-engagement construction, hidden capture/storage, and suffix
    replay explicitly; only design suffix construction if proposal quality holds.
-7. Establish canonical quality-harness v0 before promoting model-changing work:
+6. Establish canonical quality-harness v0 before promoting model-changing work:
    code-edit exact match, Mei-class long-document QA, and narrative constraint
    following, with bounded per-candidate runtime and versioned fixtures.
-8. Capture real Q/K/V once at 32K/131K to price both exact body headroom and the
+7. Capture real Q/K/V once at 32K/131K to price both exact body headroom and the
    retained-KV/error frontier for sparse or retrieval attention. Use current F16
    KV for the exact lane; treat v0.541 split partitioning as a prior pattern, not
    a directly transferable N1 result.
-9. Select one structural prefill branch only after it names removed work:
+8. Select one structural prefill branch only after it names removed work:
    - a route-ledger-aware fused MoE tail beyond the current grouped path; or
    - an all-in one-dispatch/matmul-shaped GDN recurrence.
-10. Open a format-specific decode ABI branch only after one quant/tensor sentinel
+9. Open a format-specific decode ABI branch only after one quant/tensor sentinel
    shows enough phase and primitive headroom for `>=5%` full-token movement.
-11. Keep exact and approximate true-long attention work in the 32K-131K lane.
+10. Keep exact and approximate true-long attention work in the 32K-131K lane.
 
 ### Decisive gates
 
@@ -446,8 +454,10 @@ better than a decode win; each result must retain its objective-lane label.
   The current dense-27B denominator sets a zero-overhead, zero-abstention
   necessary floor of about `3.35` emitted tokens per charged N8 packet. Apply the
   promotion gate to a frozen policy on held-out rows, not its selection corpus.
-  The v0.562 charged bench clears the mechanism gate. Product promotion still
-  requires longer resume coverage and counterbalanced fresh TTFT/decode evidence.
+  The v0.562 charged bench clears the mechanism gate. The v0.565 product packet
+  clears the favorable, generic, exact-output, TTFT, and total-wall gates for the
+  validated dense-27B Q4_K_M layout. It does not estimate natural trigger rate,
+  qualify other layouts, or establish distribution/bit exactness.
   A failed proposer demotes prompt lookup; a failed verifier-only oracle demotes
   all proposal sources only in the measured model/context regime.
 - **Native MTP**: total request `>=1.10x` on at least two named archetypes at 128+

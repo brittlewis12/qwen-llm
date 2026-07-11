@@ -5,6 +5,44 @@ use rustc_hash::FxHashMap;
 pub const MATCH_TOKENS: usize = 8;
 pub const DRAFT_TOKENS: usize = 7;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptLookupTerminalCause {
+    StopToken,
+    OutputLimit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PromptLookupTerminalWindow {
+    pub count: usize,
+    pub cause: PromptLookupTerminalCause,
+}
+
+pub fn terminal_draft_window(
+    drafts: &[i32; DRAFT_TOKENS],
+    emitted: usize,
+    max_new_tokens: usize,
+    stop_tokens: &[i32],
+) -> Option<PromptLookupTerminalWindow> {
+    let remaining = max_new_tokens.saturating_sub(emitted);
+    if remaining == 0 {
+        return None;
+    }
+    let eligible = remaining.min(DRAFT_TOKENS);
+    if let Some(index) = drafts[..eligible]
+        .iter()
+        .position(|token| stop_tokens.contains(token))
+    {
+        return Some(PromptLookupTerminalWindow {
+            count: index + 1,
+            cause: PromptLookupTerminalCause::StopToken,
+        });
+    }
+    (remaining <= DRAFT_TOKENS).then_some(PromptLookupTerminalWindow {
+        count: remaining,
+        cause: PromptLookupTerminalCause::OutputLimit,
+    })
+}
+
 type MatchKey = [i32; MATCH_TOKENS];
 type RecentIndex = FxHashMap<MatchKey, usize>;
 
@@ -164,6 +202,37 @@ mod tests {
             proposer.self_index.values().copied().next(),
             Some(MATCH_TOKENS)
         );
+    }
+
+    #[test]
+    fn terminal_windows_cover_every_remaining_output_width() {
+        let drafts = [10, 11, 12, 13, 14, 15, 16];
+        for remaining in 1..=DRAFT_TOKENS {
+            assert_eq!(
+                terminal_draft_window(&drafts, 20 - remaining, 20, &[]),
+                Some(PromptLookupTerminalWindow {
+                    count: remaining,
+                    cause: PromptLookupTerminalCause::OutputLimit,
+                })
+            );
+        }
+        assert_eq!(terminal_draft_window(&drafts, 12, 20, &[]), None);
+        assert_eq!(terminal_draft_window(&drafts, 20, 20, &[]), None);
+    }
+
+    #[test]
+    fn terminal_windows_stop_at_every_draft_offset() {
+        for stop_index in 0..DRAFT_TOKENS {
+            let mut drafts = [10, 11, 12, 13, 14, 15, 16];
+            drafts[stop_index] = 99;
+            assert_eq!(
+                terminal_draft_window(&drafts, 1, 20, &[99]),
+                Some(PromptLookupTerminalWindow {
+                    count: stop_index + 1,
+                    cause: PromptLookupTerminalCause::StopToken,
+                })
+            );
+        }
     }
 
     #[test]

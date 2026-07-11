@@ -66,7 +66,10 @@ use qwen_llm::{
         SpeculativeDecoder, quantize_lm_head_to_affine_q4_gs64, quantize_lm_head_to_q4_0,
         quantize_lm_head_to_q4_1,
     },
-    prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, ProposalSource},
+    prompt_lookup::{
+        DRAFT_TOKENS, PromptLookupProposer, PromptLookupTerminalCause, ProposalSource,
+        terminal_draft_window,
+    },
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
     tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
@@ -10262,12 +10265,6 @@ enum PldTerminalCause {
     OutputLimit,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct PldTerminalWindow {
-    count: usize,
-    cause: PldTerminalCause,
-}
-
 #[derive(Debug, serde::Serialize)]
 struct PldEvent {
     event: usize,
@@ -10285,29 +10282,6 @@ struct PldEvent {
     restored: bool,
     resulting_position: usize,
     emitted_after: usize,
-}
-
-fn pld_terminal_draft_count(
-    drafts: &[i32; DRAFT_TOKENS],
-    emitted: usize,
-    max_new_tokens: usize,
-    stop_tokens: &[i32],
-) -> Option<PldTerminalWindow> {
-    let remaining = max_new_tokens.saturating_sub(emitted);
-    let eligible = remaining.min(DRAFT_TOKENS);
-    if let Some(index) = drafts[..eligible]
-        .iter()
-        .position(|token| stop_tokens.contains(token))
-    {
-        return Some(PldTerminalWindow {
-            count: index + 1,
-            cause: PldTerminalCause::StopToken,
-        });
-    }
-    (remaining <= DRAFT_TOKENS).then_some(PldTerminalWindow {
-        count: remaining,
-        cause: PldTerminalCause::OutputLimit,
-    })
 }
 
 fn run_pld(args: PldArgs) -> Result<()> {
@@ -10497,7 +10471,7 @@ fn run_pld(args: PldArgs) -> Result<()> {
             ProposalSource::Prompt => stats.prompt_attempts += 1,
             ProposalSource::SelfOutput => stats.self_attempts += 1,
         }
-        let terminal_window = pld_terminal_draft_count(
+        let terminal_window = terminal_draft_window(
             &candidate.proposal,
             candidate_generated.len(),
             tokens,
@@ -10589,7 +10563,10 @@ fn run_pld(args: PldArgs) -> Result<()> {
                 source_end: Some(candidate.source_end),
                 proposal: Some(candidate.proposal),
                 accepted_prefix: n_accepted,
-                terminal_cause: terminal_window.map(|window| window.cause),
+                terminal_cause: terminal_window.map(|window| match window.cause {
+                    PromptLookupTerminalCause::StopToken => PldTerminalCause::StopToken,
+                    PromptLookupTerminalCause::OutputLimit => PldTerminalCause::OutputLimit,
+                }),
                 effective_verify_n: Some(n_eff),
                 n_keep: Some(n_keep),
                 restored,

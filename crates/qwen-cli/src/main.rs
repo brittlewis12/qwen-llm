@@ -3,8 +3,12 @@
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use qwen_llm::metal::MetalPipelineCacheMetrics;
-use qwen_llm::metal_dflash::{MetalDFlashLayerMajorScratch, prefill_tokens_with_multi_hidden};
+use qwen_llm::metal_dflash::{
+    MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, ensure_prompt_lookup_n8_supported,
+    prefill_tokens_with_multi_hidden,
+};
 use qwen_llm::metal_forward::MetalForward;
+use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::runtime::{LoadedModel, LoadedModelConfig, Runtime, Sequence, SequenceConfig};
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
@@ -39,6 +43,10 @@ struct Args {
     /// Number of greedy tokens to generate.
     #[arg(short = 'n', long, default_value_t = 64)]
     tokens: usize,
+
+    /// Enable experimental dense-27B Q4_K_M prompt-lookup decode.
+    #[arg(long)]
+    prompt_lookup: bool,
 
     /// Prompt prefill chunk size. The safe default mirrors qwen-bench.
     #[arg(long, default_value_t = 1024)]
@@ -216,6 +224,8 @@ struct RequestTimingRow {
     total_request_ms: f64,
     pso_cache: PipelineCachePhaseMetrics,
     metal_allocated: MetalAllocationSamples,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_lookup: Option<PromptLookupDecodeStats>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -400,6 +410,8 @@ struct RequestStatsRow {
     prompt_hash: String,
     requested_tokens: usize,
     generated_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode_policy: Option<&'static str>,
     cache_prefix_tokens: Option<usize>,
     cache_prefix_source: String,
     cache_prefix_hash: Option<String>,
@@ -429,6 +441,28 @@ struct RequestStatsRow {
     cache_entries: usize,
     cache_bytes: u64,
     cache_max_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_lookup: Option<PromptLookupDecodeStats>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct PromptLookupDecodeStats {
+    index_build_ms: f64,
+    index_update_ms: f64,
+    lookup_ms: f64,
+    scratch_allocation_ms: f64,
+    scratch_allocated_bytes: u64,
+    scratch_peak_allocated_bytes: u64,
+    serial_ms: f64,
+    verify_ms: f64,
+    restore_ms: f64,
+    attempts: usize,
+    abstentions: usize,
+    verify_calls: usize,
+    restore_calls: usize,
+    accepted_drafts: usize,
+    drafts_scored: usize,
+    physical_target_positions: usize,
 }
 
 fn main() -> Result<()> {
@@ -524,6 +558,9 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             },
         )
         .with_context(|| format!("load model {}", model_path.display()))?;
+    if args.prompt_lookup {
+        ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
+    }
     let runtime_and_model_load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     if timing_enabled {
         loaded.context().set_pipeline_cache_metrics_enabled(true);
@@ -806,35 +843,62 @@ fn execute_single_turn_request(
     let mut first_delivery_ms = None;
     let mut first_callback_duration_ms = None;
     let mut first_delivery_allocated = None;
-    let generation = generate_greedy(
-        logits,
-        args.tokens,
-        tokenizer.eos(),
-        |token| {
-            let callback_t0 = Instant::now();
-            write!(stdout, "{}", tokenizer.decode_piece(token))?;
-            stdout.flush().context("flush generated token")?;
-            if first_delivery_ms.is_none() {
-                first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
-                first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
-                first_delivery_allocated =
-                    timing_enabled.then(|| loaded.context().current_allocated_size());
-            }
-            Ok(())
-        },
-        |token| {
-            let position = sequence.position();
-            let next = forward
-                .single_token(
-                    token,
-                    u32::try_from(position).context("position does not fit u32")?,
-                    sequence.metal_session_mut(),
-                )
-                .context("decode token")?;
-            sequence.advance_by(1)?;
-            Ok(next)
-        },
-    )?;
+    let (generation, prompt_lookup_stats) = if args.prompt_lookup {
+        let result = generate_prompt_lookup(
+            loaded,
+            &forward,
+            sequence,
+            &prompt_ids,
+            logits,
+            args.tokens,
+            tokenizer.eos(),
+            |token| {
+                let callback_t0 = Instant::now();
+                write!(stdout, "{}", tokenizer.decode_piece(token))?;
+                stdout.flush().context("flush generated token")?;
+                if first_delivery_ms.is_none() {
+                    first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
+                    first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
+                    first_delivery_allocated =
+                        timing_enabled.then(|| loaded.context().current_allocated_size());
+                }
+                Ok(())
+            },
+        )?;
+        sequence = result.sequence;
+        (result.generation, Some(result.stats))
+    } else {
+        let generation = generate_greedy(
+            logits,
+            args.tokens,
+            tokenizer.eos(),
+            |token| {
+                let callback_t0 = Instant::now();
+                write!(stdout, "{}", tokenizer.decode_piece(token))?;
+                stdout.flush().context("flush generated token")?;
+                if first_delivery_ms.is_none() {
+                    first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
+                    first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
+                    first_delivery_allocated =
+                        timing_enabled.then(|| loaded.context().current_allocated_size());
+                }
+                Ok(())
+            },
+            |token| {
+                let position = sequence.position();
+                let next = forward
+                    .single_token(
+                        token,
+                        u32::try_from(position).context("position does not fit u32")?,
+                        sequence.metal_session_mut(),
+                    )
+                    .context("decode token")?;
+                sequence.advance_by(1)?;
+                Ok(next)
+            },
+        )?;
+        (generation, None)
+    };
     let inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
@@ -880,8 +944,23 @@ fn execute_single_turn_request(
 
     let row = timing_values.map(|samples| {
         let model_identity = model_identity.expect("timing identity");
+        let mut metal_allocated = metal_allocation_samples(
+            samples.0,
+            samples.1,
+            samples.2,
+            samples.3,
+            samples.4,
+            samples.5,
+            samples.6,
+            after_state_drop_allocated.expect("timing sample"),
+        );
+        if let Some(stats) = prompt_lookup_stats.as_ref() {
+            metal_allocated.current_allocated_sampled_max_bytes = metal_allocated
+                .current_allocated_sampled_max_bytes
+                .max(stats.scratch_peak_allocated_bytes);
+        }
         RequestTimingRow {
-            schema_version: 3,
+            schema_version: if args.prompt_lookup { 4 } else { 3 },
             request_epoch,
             request_index,
             tokenizer_reused,
@@ -907,7 +986,11 @@ fn execute_single_turn_request(
             requested_tokens: args.tokens,
             generated_tokens: generated.len(),
             stop_reason: generation.stop_reason,
-            decode_policy: "greedy_argmax",
+            decode_policy: if args.prompt_lookup {
+                "prompt_lookup_l8_d7_target_n8"
+            } else {
+                "greedy_argmax"
+            },
             terminal_token_target_transition_consumed: false,
             no_special_tokens: args.no_special_tokens,
             prefill_chunk_requested: args.prefill_chunk,
@@ -937,16 +1020,8 @@ fn execute_single_turn_request(
                 pipeline_cache_prefill_exit.expect("timing PSO snapshot"),
                 pipeline_cache_generation_exit.expect("timing PSO snapshot"),
             ),
-            metal_allocated: metal_allocation_samples(
-                samples.0,
-                samples.1,
-                samples.2,
-                samples.3,
-                samples.4,
-                samples.5,
-                samples.6,
-                after_state_drop_allocated.expect("timing sample"),
-            ),
+            metal_allocated,
+            prompt_lookup: prompt_lookup_stats,
         }
     });
     if let Some(row) = row.as_ref() {
@@ -988,6 +1063,9 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
             },
         )
         .with_context(|| format!("load model {}", model_path.display()))?;
+    if args.prompt_lookup {
+        ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
+    }
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -1376,15 +1454,32 @@ fn run_jsonl_request(
         }
     };
 
-    let (generation, generated_text) = decode_greedy(
-        &forward,
-        tokenizer,
-        &mut sequence,
-        logits,
-        prompt_ids.len(),
-        n_generate,
-    )?;
+    let (generation, generated_text, prompt_lookup_stats) = if args.prompt_lookup {
+        let (result, generated_text) = decode_prompt_lookup(
+            loaded,
+            &forward,
+            tokenizer,
+            sequence,
+            prompt_ids,
+            logits,
+            prompt_ids.len(),
+            n_generate,
+        )?;
+        sequence = result.sequence;
+        (result.generation, generated_text, Some(result.stats))
+    } else {
+        let (generation, generated_text) = decode_greedy(
+            &forward,
+            tokenizer,
+            &mut sequence,
+            logits,
+            prompt_ids.len(),
+            n_generate,
+        )?;
+        (generation, generated_text, None)
+    };
     let generated = generation.tokens;
+    drop(sequence);
     let decode_ms = generation.wall_ms;
     let decode_tps = if decode_ms > 0.0 {
         generated.len() as f64 / (decode_ms / 1e3)
@@ -1399,7 +1494,7 @@ fn run_jsonl_request(
     let stats_now = loaded.prefix_cache_stats();
     let finish_ms = unix_epoch_ms_u64()?;
     let stats = RequestStatsRow {
-        schema_version: 3,
+        schema_version: if args.prompt_lookup { 4 } else { 3 },
         id: id.to_string(),
         line: prepared.line,
         model: loaded.path().display().to_string(),
@@ -1409,6 +1504,9 @@ fn run_jsonl_request(
         prompt_hash,
         requested_tokens: n_generate,
         generated_tokens: generated.len(),
+        decode_policy: args
+            .prompt_lookup
+            .then_some("prompt_lookup_l8_d7_target_n8"),
         cache_prefix_tokens,
         cache_prefix_source: cache_prefix_source.as_str().to_string(),
         cache_prefix_hash,
@@ -1445,6 +1543,7 @@ fn run_jsonl_request(
         cache_entries: stats_now.entries,
         cache_bytes: stats_now.total_bytes,
         cache_max_bytes: stats_now.max_bytes,
+        prompt_lookup: prompt_lookup_stats,
     };
     let output = RequestOutput {
         id: id.to_string(),
@@ -1563,6 +1662,240 @@ where
     })
 }
 
+struct PromptLookupGeneration {
+    generation: GreedyGeneration,
+    stats: PromptLookupDecodeStats,
+    sequence: Sequence,
+}
+
+struct PromptLookupScratch {
+    verify: MetalDFlashVerifyScratch,
+    layer: MetalDFlashLayerMajorScratch,
+}
+
+fn generate_prompt_lookup<OnToken>(
+    loaded: &LoadedModel,
+    forward: &MetalForward<'_>,
+    mut sequence: Sequence,
+    prompt_ids: &[i32],
+    logits: Vec<f32>,
+    max_tokens: usize,
+    eos: Option<i32>,
+    mut on_token: OnToken,
+) -> Result<PromptLookupGeneration>
+where
+    OnToken: FnMut(i32) -> Result<()>,
+{
+    ensure!(max_tokens > 0, "max_tokens must be >= 1");
+    let wall_t0 = Instant::now();
+    let selection_t0 = Instant::now();
+    let mut carry = argmax_i32(&logits);
+    let first_token_selection_ms = selection_t0.elapsed().as_secs_f64() * 1e3;
+    let first_token_ready_ms = Some(wall_t0.elapsed().as_secs_f64() * 1e3);
+    let mut first_token_callback_ms = None;
+    let mut first_transition_ms = None;
+    let mut tokens = Vec::with_capacity(max_tokens);
+    let mut transitions = 0usize;
+    let mut proposer = None;
+    let mut scratch = None;
+    let mut stats = PromptLookupDecodeStats::default();
+    let mut transition_wall_ms = 0.0;
+    let mut post_callback_policy_ms = 0.0;
+    let stop_tokens = eos.as_slice();
+
+    let stop_reason = 'outer: loop {
+        tokens.push(carry);
+        on_token(carry)?;
+        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
+
+        if Some(carry) == eos {
+            break StopReason::Eos;
+        }
+        if tokens.len() == max_tokens {
+            break StopReason::TokenLimit;
+        }
+
+        let transition_t0 = Instant::now();
+        if proposer.is_none() {
+            let index_t0 = Instant::now();
+            proposer = Some(PromptLookupProposer::new(prompt_ids));
+            stats.index_build_ms += index_t0.elapsed().as_secs_f64() * 1e3;
+        }
+        let proposer = proposer
+            .as_mut()
+            .expect("prompt lookup proposer initialized");
+        let update_t0 = Instant::now();
+        proposer.commit_verified(&[carry]);
+        stats.index_update_ms += update_t0.elapsed().as_secs_f64() * 1e3;
+
+        let lookup_t0 = Instant::now();
+        let candidate = proposer.propose();
+        stats.lookup_ms += lookup_t0.elapsed().as_secs_f64() * 1e3;
+        let Some(candidate) = candidate else {
+            stats.abstentions += 1;
+            sequence.ensure_can_append(1)?;
+            let position =
+                u32::try_from(sequence.position()).context("position does not fit u32")?;
+            let serial_t0 = Instant::now();
+            let next = forward
+                .single_token(carry, position, sequence.metal_session_mut())
+                .context("prompt-lookup serial decode")?;
+            stats.serial_ms += serial_t0.elapsed().as_secs_f64() * 1e3;
+            stats.physical_target_positions += 1;
+            sequence.advance_by(1)?;
+            transitions += 1;
+            carry = argmax_i32(&next);
+            let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
+            transition_wall_ms += elapsed_ms;
+            first_transition_ms.get_or_insert(elapsed_ms);
+            continue;
+        };
+
+        stats.attempts += 1;
+        let terminal_window =
+            terminal_draft_window(&candidate.proposal, tokens.len(), max_tokens, stop_tokens);
+        let mut verify_input = Vec::with_capacity(DRAFT_TOKENS + 1);
+        verify_input.push(carry);
+        let (n_eff, n_drafts_scored) = if let Some(window) = terminal_window {
+            verify_input.extend_from_slice(&candidate.proposal[..window.count.saturating_sub(1)]);
+            (window.count, window.count)
+        } else {
+            verify_input.extend_from_slice(&candidate.proposal);
+            (DRAFT_TOKENS + 1, DRAFT_TOKENS)
+        };
+        ensure!(n_eff > 0, "prompt-lookup verifier planned an empty chain");
+        sequence.ensure_can_append(n_eff)?;
+        let start_position =
+            u32::try_from(sequence.position()).context("position does not fit u32")?;
+
+        if scratch.is_none() {
+            let before = loaded.context().current_allocated_size();
+            let allocation_t0 = Instant::now();
+            let verify = MetalDFlashVerifyScratch::fresh(
+                loaded.context(),
+                loaded.metal_model(),
+                (DRAFT_TOKENS + 1) as u32,
+                0,
+            )
+            .context("allocate prompt-lookup verify scratch")?;
+            let layer = MetalDFlashLayerMajorScratch::fresh(
+                loaded.context(),
+                loaded.metal_model(),
+                (DRAFT_TOKENS + 1) as u32,
+            )
+            .context("allocate prompt-lookup layer scratch")?;
+            stats.scratch_allocation_ms += allocation_t0.elapsed().as_secs_f64() * 1e3;
+            let after = loaded.context().current_allocated_size();
+            stats.scratch_allocated_bytes = after.saturating_sub(before);
+            stats.scratch_peak_allocated_bytes = after;
+            scratch = Some(PromptLookupScratch { verify, layer });
+        }
+        let scratch = scratch.as_mut().expect("prompt lookup scratch initialized");
+        let verify_t0 = Instant::now();
+        let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
+            forward,
+            &[],
+            &verify_input,
+            start_position,
+            &mut scratch.verify,
+            &mut scratch.layer,
+            sequence.metal_session_mut(),
+            None,
+            Some(n_eff as u32),
+        )
+        .context("prompt-lookup packed verify")?;
+        stats.verify_ms += verify_t0.elapsed().as_secs_f64() * 1e3;
+        stats.verify_calls += 1;
+        stats.drafts_scored += n_drafts_scored;
+        stats.physical_target_positions += n_eff;
+
+        let mut accepted = Vec::with_capacity(n_drafts_scored);
+        let mut terminal = None;
+        for (&draft, &target) in candidate.proposal[..n_drafts_scored]
+            .iter()
+            .zip(&verify_argmax)
+        {
+            if draft != target {
+                break;
+            }
+            accepted.push(draft);
+            if Some(draft) == eos {
+                terminal = Some(StopReason::Eos);
+                break;
+            }
+            if tokens.len() + accepted.len() == max_tokens {
+                terminal = Some(StopReason::TokenLimit);
+                break;
+            }
+        }
+        let n_accepted = accepted.len();
+        let n_keep = if terminal.is_some() {
+            n_accepted
+        } else {
+            1 + n_accepted
+        };
+        ensure!(
+            n_keep > 0,
+            "prompt-lookup terminal plan retained no target state"
+        );
+        if n_keep < n_eff {
+            let restore_t0 = Instant::now();
+            qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
+                forward,
+                &scratch.verify,
+                n_keep as u32,
+                start_position,
+                sequence.metal_session_mut(),
+                Some(n_eff as u32),
+            )
+            .context("prompt-lookup restore after partial accept")?;
+            stats.restore_ms += restore_t0.elapsed().as_secs_f64() * 1e3;
+            stats.restore_calls += 1;
+        }
+        sequence.advance_by(n_keep)?;
+        transitions += n_keep;
+        stats.accepted_drafts += n_accepted;
+        let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
+        transition_wall_ms += elapsed_ms;
+        first_transition_ms.get_or_insert(elapsed_ms);
+
+        for token in accepted {
+            tokens.push(token);
+            on_token(token)?;
+            let update_t0 = Instant::now();
+            proposer.commit_verified(&[token]);
+            let update_ms = update_t0.elapsed().as_secs_f64() * 1e3;
+            stats.index_update_ms += update_ms;
+            post_callback_policy_ms += update_ms;
+        }
+        if let Some(reason) = terminal {
+            break 'outer reason;
+        }
+        carry = verify_argmax[n_accepted];
+    };
+
+    ensure!(
+        transitions.checked_add(1) == Some(tokens.len()),
+        "prompt-lookup generation violated N-1 transition semantics"
+    );
+    let transition_ms = transition_wall_ms + post_callback_policy_ms;
+    Ok(PromptLookupGeneration {
+        generation: GreedyGeneration {
+            tokens,
+            wall_ms: wall_t0.elapsed().as_secs_f64() * 1e3,
+            first_token_selection_ms,
+            first_token_ready_ms,
+            first_token_callback_ms,
+            transitions,
+            transition_ms,
+            first_transition_ms,
+            stop_reason,
+        },
+        stats,
+        sequence,
+    })
+}
+
 fn decode_greedy(
     forward: &MetalForward<'_>,
     tokenizer: &Tokenizer,
@@ -1595,6 +1928,34 @@ fn decode_greedy(
         },
     )?;
     Ok((generation, generated_text))
+}
+
+fn decode_prompt_lookup(
+    loaded: &LoadedModel,
+    forward: &MetalForward<'_>,
+    tokenizer: &Tokenizer,
+    sequence: Sequence,
+    prompt_ids: &[i32],
+    logits: Vec<f32>,
+    start_position: usize,
+    max_tokens: usize,
+) -> Result<(PromptLookupGeneration, String)> {
+    sequence.check_position(start_position)?;
+    let mut generated_text = String::new();
+    let result = generate_prompt_lookup(
+        loaded,
+        forward,
+        sequence,
+        prompt_ids,
+        logits,
+        max_tokens,
+        tokenizer.eos(),
+        |token| {
+            generated_text.push_str(&tokenizer.decode_piece(token));
+            Ok(())
+        },
+    )?;
+    Ok((result, generated_text))
 }
 
 fn prefix_cache_max_bytes(args: &Args) -> Result<u64> {

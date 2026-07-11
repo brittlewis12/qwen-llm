@@ -48,8 +48,8 @@ use crate::metal::{
     kernel_trace_take_delta,
 };
 use crate::metal_forward::{
-    ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalMoeFfn, MetalSession, RMS_EPS, checked_u64_add,
-    checked_u64_double, checked_u64_mul, checked_u64_mul3, checked_u64_mul4,
+    ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalModel, MetalMoeFfn, MetalSession, RMS_EPS,
+    checked_u64_add, checked_u64_double, checked_u64_mul, checked_u64_mul3, checked_u64_mul4,
     encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
     weight_dtype_kept_native,
 };
@@ -62,6 +62,52 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_PACKED");
+
+pub fn ensure_prompt_lookup_n8_supported(model: &MetalModel) -> Result<(), String> {
+    if model.arch != crate::model::QWEN3_27B {
+        return Err(format!(
+            "prompt lookup currently requires the dense 27B architecture; loaded {:?}",
+            model.arch.kind
+        ));
+    }
+    if model.lm_head.dtype != GgmlType::Q6_K {
+        return Err(format!(
+            "prompt lookup currently requires the validated Q4_K_M layout; lm_head is {:?}",
+            model.lm_head.dtype
+        ));
+    }
+    for (index, block) in model.blocks.iter().enumerate() {
+        let (gate, up, down, moe) = match block {
+            MetalBlock::Gdn(block) => (
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+                block.ffn_moe.as_ref(),
+            ),
+            MetalBlock::Attn(block) => (
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+                block.ffn_moe.as_ref(),
+            ),
+        };
+        if moe.is_some()
+            || gate.dtype != GgmlType::Q4_K
+            || up.dtype != GgmlType::Q4_K
+            || !matches!(down.dtype, GgmlType::Q4_K | GgmlType::Q6_K)
+        {
+            return Err(format!(
+                "prompt lookup requires dense-27B Q4_K_M gate/up=Q4_K and down=Q4_K/Q6_K; block \
+                 {index} has gate/up/down={:?}/{:?}/{:?}, moe={}",
+                gate.dtype,
+                up.dtype,
+                down.dtype,
+                moe.is_some()
+            ));
+        }
+    }
+    Ok(())
+}
 
 crate::env_flag!(default_on dflash_batched_proj_enabled, "QWEN_DFLASH_BATCHED_PROJ");
 

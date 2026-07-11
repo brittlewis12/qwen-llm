@@ -1433,6 +1433,32 @@ fn prefill_attn_matrix_query_cap() -> Result<Option<usize>, String> {
         .clone()
 }
 
+fn resolve_prefill_attn_matrix_query_cap(
+    include_spec_packs: bool,
+    config: Option<PrefillScratchConfig>,
+) -> Result<Option<usize>, String> {
+    resolve_prefill_attn_matrix_query_cap_with(
+        include_spec_packs,
+        config,
+        prefill_attn_matrix_query_cap,
+    )
+}
+
+fn resolve_prefill_attn_matrix_query_cap_with(
+    include_spec_packs: bool,
+    config: Option<PrefillScratchConfig>,
+    environment: impl FnOnce() -> Result<Option<usize>, String>,
+) -> Result<Option<usize>, String> {
+    if include_spec_packs {
+        return Ok(None);
+    }
+    match config.and_then(|value| value.matrix_query_cap) {
+        Some(0) => Err("matrix query cap must be greater than zero".into()),
+        Some(cap) => Ok(Some(cap)),
+        None => environment(),
+    }
+}
+
 fn prefill_scratch_overlay_diagnostic_mode_present() -> bool {
     const DIAGNOSTIC_ENV: &[&str] = &[
         "QWEN_PREFILL_GDN_PROJ_ORACLE_LAYER",
@@ -2905,6 +2931,13 @@ fn checked_overlay_tensor(
     })
 }
 
+/// Explicit production-prefill topology overrides. Absent fields retain the
+/// existing environment-selected behavior.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PrefillScratchConfig {
+    pub matrix_query_cap: Option<usize>,
+}
+
 pub struct MetalDFlashLayerMajorScratch {
     /// `[N, H]` F32 — residual stream across N tokens.
     pub x_pack: MetalTensor,
@@ -3120,6 +3153,7 @@ impl MetalDFlashLayerMajorScratch {
         // a fallback branch actually runs.
         include_spec_packs: bool,
         attn_matrix_max_pos_override: Option<usize>,
+        config: Option<PrefillScratchConfig>,
     ) -> Result<Self, MetalError> {
         let arch = &target_model.arch;
         let n = block_size as u64;
@@ -3227,14 +3261,13 @@ impl MetalDFlashLayerMajorScratch {
         // Whichever variant the process-level env selects is allocated in
         // full and the other is stubbed at 1 element.
         let attn_matrix_online = prefill_attn_matrix_online_enabled();
-        let attn_matrix_query_cap = if include_spec_packs {
-            None
-        } else {
-            prefill_attn_matrix_query_cap().map_err(|detail| MetalError::BadShape {
-                kernel: "prefill_attn_matrix_query_cap",
-                detail,
-            })?
-        };
+        let attn_matrix_query_cap =
+            resolve_prefill_attn_matrix_query_cap(include_spec_packs, config).map_err(
+                |detail| MetalError::BadShape {
+                    kernel: "prefill_attn_matrix_query_cap",
+                    detail,
+                },
+            )?;
         if enable_attn_matrix && !attn_matrix_online && attn_matrix_query_cap.is_some() {
             return Err(MetalError::BadShape {
                 kernel: "prefill_attn_matrix_query_cap",
@@ -3579,7 +3612,7 @@ impl MetalDFlashLayerMajorScratch {
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, true, None)
+        Self::fresh_inner(ctx, target_model, block_size, true, None, None)
     }
 
     pub fn fresh_prefill(
@@ -3587,7 +3620,7 @@ impl MetalDFlashLayerMajorScratch {
         target_model: &crate::metal_forward::MetalModel,
         block_size: u32,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, false, None)
+        Self::fresh_inner(ctx, target_model, block_size, false, None, None)
     }
 
     pub fn fresh_prefill_with_matrix_max_pos(
@@ -3596,7 +3629,40 @@ impl MetalDFlashLayerMajorScratch {
         block_size: u32,
         matrix_max_pos: usize,
     ) -> Result<Self, MetalError> {
-        Self::fresh_inner(ctx, target_model, block_size, false, Some(matrix_max_pos))
+        Self::fresh_inner(
+            ctx,
+            target_model,
+            block_size,
+            false,
+            Some(matrix_max_pos),
+            None,
+        )
+    }
+
+    pub fn fresh_prefill_configured(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+        config: PrefillScratchConfig,
+    ) -> Result<Self, MetalError> {
+        Self::fresh_inner(ctx, target_model, block_size, false, None, Some(config))
+    }
+
+    pub fn fresh_prefill_with_matrix_max_pos_configured(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+        matrix_max_pos: usize,
+        config: PrefillScratchConfig,
+    ) -> Result<Self, MetalError> {
+        Self::fresh_inner(
+            ctx,
+            target_model,
+            block_size,
+            false,
+            Some(matrix_max_pos),
+            Some(config),
+        )
     }
 
     /// Grow the packed-slot MoE fallback packs to full size if this scratch
@@ -11891,6 +11957,30 @@ mod tests {
                 "accepted invalid query cap {invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn configured_matrix_query_cap_is_explicit_and_bounded() {
+        let configured = Some(PrefillScratchConfig {
+            matrix_query_cap: Some(1024),
+        });
+        let unavailable = || Err("invalid environment fallback".into());
+        assert_eq!(
+            resolve_prefill_attn_matrix_query_cap_with(false, configured, unavailable),
+            Ok(Some(1024))
+        );
+        assert_eq!(
+            resolve_prefill_attn_matrix_query_cap_with(true, configured, unavailable),
+            Ok(None)
+        );
+        let zero = Some(PrefillScratchConfig {
+            matrix_query_cap: Some(0),
+        });
+        assert!(resolve_prefill_attn_matrix_query_cap_with(false, zero, unavailable).is_err());
+        assert_eq!(
+            resolve_prefill_attn_matrix_query_cap_with(false, None, || Ok(Some(256))),
+            Ok(Some(256))
+        );
     }
 
     #[test]

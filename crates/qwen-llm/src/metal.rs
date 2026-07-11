@@ -46,6 +46,66 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+const TASK_VM_INFO: i32 = 22;
+
+#[repr(C, packed(4))]
+struct TaskVmInfo {
+    virtual_size: u64,
+    region_count: i32,
+    page_size: i32,
+    resident_size: u64,
+    resident_size_peak: u64,
+    device: u64,
+    device_peak: u64,
+    internal: u64,
+    internal_peak: u64,
+    external: u64,
+    external_peak: u64,
+    reusable: u64,
+    reusable_peak: u64,
+    purgeable_volatile_pmap: u64,
+    purgeable_volatile_resident: u64,
+    purgeable_volatile_virtual: u64,
+    compressed: u64,
+    compressed_peak: u64,
+    compressed_lifetime: u64,
+    phys_footprint: u64,
+    min_address: u64,
+    max_address: u64,
+    ledger_phys_footprint_peak: i64,
+    ledger_purgeable_nonvolatile: i64,
+    ledger_purgeable_nonvolatile_compressed: i64,
+    ledger_purgeable_volatile: i64,
+    ledger_purgeable_volatile_compressed: i64,
+    ledger_tag_network_nonvolatile: i64,
+    ledger_tag_network_nonvolatile_compressed: i64,
+    ledger_tag_network_volatile: i64,
+    ledger_tag_network_volatile_compressed: i64,
+    ledger_tag_media_footprint: i64,
+    ledger_tag_media_footprint_compressed: i64,
+    ledger_tag_media_nofootprint: i64,
+    ledger_tag_media_nofootprint_compressed: i64,
+    ledger_tag_graphics_footprint: i64,
+    ledger_tag_graphics_footprint_compressed: i64,
+    ledger_tag_graphics_nofootprint: i64,
+    ledger_tag_graphics_nofootprint_compressed: i64,
+    ledger_tag_neural_footprint: i64,
+    ledger_tag_neural_footprint_compressed: i64,
+    ledger_tag_neural_nofootprint: i64,
+    ledger_tag_neural_nofootprint_compressed: i64,
+    limit_bytes_remaining: u64,
+}
+
+unsafe extern "C" {
+    static mach_task_self_: u32;
+    fn task_info(
+        target_task: u32,
+        flavor: i32,
+        task_info_out: *mut i32,
+        task_info_out_count: *mut u32,
+    ) -> i32;
+}
+
 static KERNEL_TRACE_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
 const ATTN_V4_SUBGROUP_MIN_POS_DEFAULT: usize = 256;
@@ -444,6 +504,102 @@ pub struct MetalBufferSizeAndAlign {
     pub alignment: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetalMemorySignals {
+    pub recommended_max_bytes: u64,
+    pub current_allocated_bytes: u64,
+    pub process_limit_remaining_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetalMemoryAdmissionReason {
+    AdmittedWithProcessBudget,
+    AdmittedProcessBudgetOmitted,
+    RequiredBytesOverflow,
+    InvalidWorkingSetSignal,
+    ProcessSignalUnavailable,
+    WorkingSetInsufficient,
+    ProcessInsufficient,
+    BothInsufficient,
+}
+
+impl MetalMemoryAdmissionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdmittedWithProcessBudget => "admitted_with_process_budget",
+            Self::AdmittedProcessBudgetOmitted => "admitted_process_budget_omitted",
+            Self::RequiredBytesOverflow => "required_bytes_overflow",
+            Self::InvalidWorkingSetSignal => "invalid_working_set_signal",
+            Self::ProcessSignalUnavailable => "process_signal_unavailable",
+            Self::WorkingSetInsufficient => "working_set_insufficient",
+            Self::ProcessInsufficient => "process_insufficient",
+            Self::BothInsufficient => "both_insufficient",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetalMemoryAdmission {
+    pub admitted: bool,
+    pub reason: MetalMemoryAdmissionReason,
+    pub scratch_upper_bytes: u64,
+    pub reserve_bytes: u64,
+    pub required_bytes: Option<u64>,
+    pub signals: MetalMemorySignals,
+    pub working_set_headroom_bytes: Option<u64>,
+}
+
+pub fn evaluate_metal_memory_admission(
+    scratch_upper_bytes: u64,
+    reserve_bytes: u64,
+    signals: MetalMemorySignals,
+    allow_zero_process_budget: bool,
+) -> MetalMemoryAdmission {
+    let required_bytes = scratch_upper_bytes.checked_add(reserve_bytes);
+    let working_set_headroom_bytes = signals
+        .recommended_max_bytes
+        .checked_sub(signals.current_allocated_bytes);
+    let reason = if required_bytes.is_none() {
+        MetalMemoryAdmissionReason::RequiredBytesOverflow
+    } else if signals.recommended_max_bytes == 0 || working_set_headroom_bytes.is_none() {
+        MetalMemoryAdmissionReason::InvalidWorkingSetSignal
+    } else {
+        let required = required_bytes.expect("checked above");
+        let working_set_headroom = working_set_headroom_bytes.expect("checked above");
+        let working_set_fits = working_set_headroom > 0 && required <= working_set_headroom;
+        match signals.process_limit_remaining_bytes {
+            None => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+            Some(0) => match (working_set_fits, allow_zero_process_budget) {
+                (true, true) => MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted,
+                (false, true) => MetalMemoryAdmissionReason::WorkingSetInsufficient,
+                (_, false) => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+            },
+            Some(process_available) => {
+                let process_fits = required <= process_available;
+                match (working_set_fits, process_fits) {
+                    (true, true) => MetalMemoryAdmissionReason::AdmittedWithProcessBudget,
+                    (false, true) => MetalMemoryAdmissionReason::WorkingSetInsufficient,
+                    (true, false) => MetalMemoryAdmissionReason::ProcessInsufficient,
+                    (false, false) => MetalMemoryAdmissionReason::BothInsufficient,
+                }
+            }
+        }
+    };
+    MetalMemoryAdmission {
+        admitted: matches!(
+            reason,
+            MetalMemoryAdmissionReason::AdmittedWithProcessBudget
+                | MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+        ),
+        reason,
+        scratch_upper_bytes,
+        reserve_bytes,
+        required_bytes,
+        signals,
+        working_set_headroom_bytes,
+    }
+}
+
 // SAFETY: `Retained<ProtocolObject<dyn MTL*>>` are thread-safe per Apple's
 // Metal docs (the protocol objects are themselves backed by thread-safe
 // Objective-C classes; method dispatch is internally synchronized).
@@ -451,6 +607,44 @@ unsafe impl Send for MetalContext {}
 unsafe impl Sync for MetalContext {}
 
 impl MetalContext {
+    pub fn recommended_max_working_set_size(&self) -> u64 {
+        self.device.recommendedMaxWorkingSetSize()
+    }
+
+    pub fn process_limit_bytes_remaining() -> Option<u64> {
+        let mut info = std::mem::MaybeUninit::<TaskVmInfo>::zeroed();
+        let mut count =
+            u32::try_from(std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<u32>()).ok()?;
+        // SAFETY: `info` is writable and large enough for `count` natural_t
+        // words. The Mach call initializes the returned revision on success.
+        let result = unsafe {
+            task_info(
+                mach_task_self_,
+                TASK_VM_INFO,
+                info.as_mut_ptr().cast::<i32>(),
+                &mut count,
+            )
+        };
+        let limit_count = u32::try_from(
+            (std::mem::offset_of!(TaskVmInfo, limit_bytes_remaining) + std::mem::size_of::<u64>())
+                / std::mem::size_of::<u32>(),
+        )
+        .ok()?;
+        if result != 0 || count < limit_count {
+            return None;
+        }
+        // SAFETY: A successful rev4 response initialized the packed field.
+        Some(unsafe { std::ptr::addr_of!((*info.as_ptr()).limit_bytes_remaining).read_unaligned() })
+    }
+
+    pub fn memory_signals(&self) -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes: self.recommended_max_working_set_size(),
+            current_allocated_bytes: self.current_allocated_size(),
+            process_limit_remaining_bytes: Self::process_limit_bytes_remaining(),
+        }
+    }
+
     pub fn shared_buffer_size_and_align(
         &self,
         logical_bytes: u64,
@@ -17699,6 +17893,131 @@ pub fn bench_q4_k_mat_mat_chained(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn memory_signals(
+        recommended_max_bytes: u64,
+        current_allocated_bytes: u64,
+        process_limit_remaining_bytes: Option<u64>,
+    ) -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes,
+            current_allocated_bytes,
+            process_limit_remaining_bytes,
+        }
+    }
+
+    #[test]
+    fn metal_memory_admission_requires_both_advisory_budgets() {
+        let exact =
+            evaluate_metal_memory_admission(400, 100, memory_signals(1500, 1000, Some(500)), false);
+        assert!(exact.admitted);
+        assert_eq!(
+            exact.reason,
+            MetalMemoryAdmissionReason::AdmittedWithProcessBudget
+        );
+        assert_eq!(exact.required_bytes, Some(500));
+        assert_eq!(exact.working_set_headroom_bytes, Some(500));
+
+        for (signals, reason) in [
+            (
+                memory_signals(1499, 1000, Some(500)),
+                MetalMemoryAdmissionReason::WorkingSetInsufficient,
+            ),
+            (
+                memory_signals(1500, 1000, Some(499)),
+                MetalMemoryAdmissionReason::ProcessInsufficient,
+            ),
+            (
+                memory_signals(1499, 1000, Some(499)),
+                MetalMemoryAdmissionReason::BothInsufficient,
+            ),
+            (
+                memory_signals(1000, 1000, Some(500)),
+                MetalMemoryAdmissionReason::WorkingSetInsufficient,
+            ),
+            (
+                memory_signals(999, 1000, Some(500)),
+                MetalMemoryAdmissionReason::InvalidWorkingSetSignal,
+            ),
+            (
+                memory_signals(1500, 1000, Some(0)),
+                MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+            ),
+            (
+                memory_signals(1500, 1000, None),
+                MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+            ),
+        ] {
+            let decision = evaluate_metal_memory_admission(400, 100, signals, false);
+            assert!(!decision.admitted);
+            assert_eq!(decision.reason, reason);
+        }
+    }
+
+    #[test]
+    fn metal_memory_admission_fails_closed_on_required_overflow() {
+        let decision = evaluate_metal_memory_admission(
+            u64::MAX,
+            1,
+            memory_signals(u64::MAX, 1, Some(u64::MAX)),
+            false,
+        );
+        assert!(!decision.admitted);
+        assert_eq!(decision.required_bytes, None);
+        assert_eq!(
+            decision.reason,
+            MetalMemoryAdmissionReason::RequiredBytesOverflow
+        );
+    }
+
+    #[test]
+    fn metal_memory_admission_omits_zero_process_budget_only_when_allowed() {
+        let signals = memory_signals(1500, 1000, Some(0));
+        let admitted = evaluate_metal_memory_admission(400, 100, signals, true);
+        assert!(admitted.admitted);
+        assert_eq!(
+            admitted.reason,
+            MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+        );
+        let denied = evaluate_metal_memory_admission(400, 100, signals, false);
+        assert!(!denied.admitted);
+        assert_eq!(
+            denied.reason,
+            MetalMemoryAdmissionReason::ProcessSignalUnavailable
+        );
+    }
+
+    #[test]
+    fn metal_memory_admission_rejects_zero_required_with_zero_headroom() {
+        let decision =
+            evaluate_metal_memory_admission(0, 0, memory_signals(1000, 1000, Some(1)), false);
+        assert!(!decision.admitted);
+        assert_eq!(
+            decision.reason,
+            MetalMemoryAdmissionReason::WorkingSetInsufficient
+        );
+    }
+
+    #[test]
+    fn metal_memory_probes_are_available_on_product_host() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::NoDevice | MetalError::EmptyLibrary) => return,
+            Err(error) => panic!("Metal context: {error}"),
+        };
+        let signals = ctx.memory_signals();
+        assert!(signals.recommended_max_bytes > 0);
+        eprintln!("[metal-memory-signals] {signals:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn metal_memory_probes_match_local_m4_max() {
+        let ctx = MetalContext::new().expect("Metal context");
+        let signals = ctx.memory_signals();
+        assert_eq!(signals.recommended_max_bytes, 103_079_215_104);
+        assert_eq!(signals.process_limit_remaining_bytes, Some(0));
+    }
 
     #[test]
     fn mat_mat_qk_threadgroup_memory_matches_full_tile_policy() {

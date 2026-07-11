@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-10 - v0.566 Natural Panel Demotes Broad Prompt Lookup
+
+Status: retain product prompt lookup as a default-off workload-routed
+specialization; stop broad speculative expansion and pivot to product fresh TTFT.
+
+- The frozen both-source, most-recent, L8/D7 policy was replayed over five named
+  natural/current or ordinary trajectories. This is opportunity reconnaissance,
+  not a population hit-rate estimate.
+- Reva-short strip (`7,344` prompt / 256 output), Fibonacci code (`12/128`), and
+  generic prose (`85/128`) make zero attempts. Reva-interactive (`418/128`) makes
+  one prompt attempt, accepts five drafts, and predicts only `1.0254x` optimistic
+  decode. Mei-medium strip (`11,287/256`) makes two prompt attempts, accepts zero
+  and seven drafts, and predicts `1.0131x` before proposer and restore costs.
+- Across 879 policy decisions and 891 serial target transitions, the panel makes
+  three attempts. Weighting these named trajectories by their transitions gives
+  only about `1.007x` optimistic aggregate decode. This is not a workload-mix
+  estimate, but it is enough to reject scratch reduction as the next broad lever.
+- The copy/repetition route remains strongly supported by the v0.565 product
+  result: `2.566x` median generation and `1.862x` total request with neutral
+  abstention. Large grounded transformations that intentionally reproduce prompt
+  text may belong on that route; they do not justify a broad default by analogy.
+- The existing MTP oracle is a poor capture-only path. Reva and Mei complete, but
+  candidate hidden-capture prefill takes minutes; Marcus-long did not finish before
+  the outer one-hour tool limit. No process remained. Do not build a larger capture
+  framework or resume Marcus unless a route-dominant workload could change policy.
+- The `1.181 GiB` N8 scratch costs only about `0.17 ms` to allocate and has no
+  measured serial-BS=1 residency or fit failure. Shrinking it now would optimize
+  memory hygiene for a rare natural trigger, not broad responsiveness.
+
+Next: run the bounded product fresh-TTFT/memory chunk oracle on A10B and A3B. Then
+establish quality-harness v0 before the shared 32K/131K Q/K/V retention capture.
+Prompt-lookup scratch returns only for a declared copy-heavy route or measured
+memory constraint.
+
+Artifacts: `target/profiles/v0566-natural-pld/`. Adversarial review: `cx ask`
+session `019f4f4c-1390-7041-baf9-50ddf8dd7c8b`.
+
 ## 2026-07-10 - v0.565 Product Prompt Lookup Clears Paired Gate
 
 Status: experimental dense-27B Q4_K_M product path promoted behind a default-off

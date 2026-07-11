@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-11 - v0.572 Wide-Prefill Frontier Closes Narrowly
+
+Status: one exact synthetic A10B 32K cell clears its gate; A3B and wider-chunk
+expansion fail, so chunk-width exploration closes without policy or source changes.
+
+- Clean `d2639d5` and release binary
+  `7d656975535a884b351f567eb5c58e6a99819c3e0de93f71a9e94a84b13cbfa6`
+  ran query-capped, overlay-active prompt prefill serially on AC/high-power mode.
+  All 32 benchmark rows have exact frozen environment/model/geometry, clean build
+  identity, complete samples, 96% free memory, and no recorded system warning.
+- A3B chunk 4096 versus 2048 at the real 11,287-token Mei prompt improves only
+  `0.284%` with `0.658%` anchor spread: validity-green kill. Both 16K brackets
+  exceed the 3% anchor-spread gate while putting 4096 at `-0.298%/+0.691%`;
+  the authorized rerun is exhausted, so that cell closes without formal promotion
+  or a validity-green performance claim.
+- A3B 32K chunks 1024/2048 had two stable-looking but invalid scout brackets.
+  The prospectively frozen balanced `AB/BA/AB/BA` adjudication then measures
+  paired gains `-0.223%/4.966%/5.119%/4.343%`, median `4.654%`. It fails both
+  median `>=5%` and no-pair-below-3% gates; no width or anchor rescue remains.
+- A10B 32K chunk 2048 versus 1024 clears the preregistered confirmation narrowly.
+  Process medians are `81.598626874/77.665087583/81.662149500 s`, anchor spread
+  is `0.0778%`, and protocol speedup against the faster anchor is `1.05065x`.
+  Chunk 4096 adds only `1.338%` over 2048 in the scout and is rejected for higher
+  scratch demand without material incremental gain.
+- The longest tracked real prompt is 25,610 tokens, not 32K. Its production guard
+  emits byte-identical one-token greedy output with zero decode transitions and
+  expected outer-2048/query-1024 telemetry. Warm prefill moves
+  `61.755709209 -> 59.775012583 s`, a directional `1.03314x`; fresh prefill is
+  order-confounded and not a claim. This is output parity, not logits equivalence.
+- Record only a narrow synthetic loaded-model A10B Q4_K_XL 32K prefill cell. Do
+  not claim fresh TTFT, real 32K, broad A3B, cross-asset generality, automatic
+  selection, or default promotion. Close further chunk, context, anchor, admission,
+  and policy work; the next optimization decision returns to structural/model work.
+
+Artifacts: `target/profiles/v0572-wide-prefill-frontier/`. Adversarial protocol,
+scout, and final reviews: `cx ask` sessions
+`019f5322-c745-7af1-b489-dde9af5a126c`,
+`019f5327-1224-7150-9f8f-7c627ee76a66`,
+`019f5357-39f1-7461-bb16-1ac90bf0f99c`, and
+`019f5388-a88e-7041-ab6f-8f7389ba99a1`.
+
 ## 2026-07-11 - v0.568 Wide-Prefill Scratch Topology Clears
 
 Status: exact A3B/A10B wide-prefill topology proven behind a default-off query cap;

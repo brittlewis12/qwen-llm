@@ -868,6 +868,9 @@ struct AttnIntraArgs {
     /// Measure a fixed Q/K/V state with packet-valid sampling.
     #[arg(long)]
     static_primitive_packet: bool,
+    /// Idle after variant-specific preparation and before packet warmups.
+    #[arg(long, default_value = "0")]
+    post_prepare_cooldown_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -14973,12 +14976,18 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         block,
         primitive,
         static_primitive_packet,
+        post_prepare_cooldown_secs,
     } = args;
     if runs == 0 {
         return Err(anyhow!("--runs must be > 0"));
     }
     if static_primitive_packet && runs < 3 {
         return Err(anyhow!("--runs must be >= 3 in static packet mode"));
+    }
+    if !static_primitive_packet && post_prepare_cooldown_secs != 0 {
+        return Err(anyhow!(
+            "--post-prepare-cooldown-secs requires --static-primitive-packet"
+        ));
     }
 
     let mctx = MetalContext::new()?;
@@ -15362,6 +15371,13 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             }
         }
         if static_primitive_packet {
+            if post_prepare_cooldown_secs != 0 {
+                eprintln!(
+                    "[attn-intra] post-prepare cooldown {}s",
+                    post_prepare_cooldown_secs
+                );
+                std::thread::sleep(Duration::from_secs(post_prepare_cooldown_secs));
+            }
             let loader = match primitive {
                 AttnIntraPrimitive::FixedF16 => Some(AttnLongFixedLoader::F16),
                 AttnIntraPrimitive::FixedG16Q8 => Some(AttnLongFixedLoader::G16Q8),

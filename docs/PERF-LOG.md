@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-12 - v0.573 Model/Quant Quality Funnel Stops Before Timing
+
+Status: none of seven tested local Q4 assets clears the frozen six-task direct-mode
+quality contract; stop before performance or lower-quant work, with no source change.
+
+- Clean `52dafa7` and release `qwen`
+  `143ab8d5f0b829beecbf4b67d60411c6f55b639e74ed7063dd4b7658b02f4e25`
+  ran one resident deterministic quality process per asset. Static fast-path audits
+  were observed but not packetized; quality packet memory/outer-wall fields are
+  non-decisive sidecars, not Stage-P timing or peak-memory evidence.
+- Six frozen mechanical tasks cover Rust repair with hidden cases, coupled logic,
+  null-versus-missing JSON, exact instruction formatting, 8K near-match retrieval,
+  and causal optimization choice. The runtime's `enable_thinking=false` prompt
+  prefix makes the final direct-mode prompts byte-identical across model families.
+  Scorers full-match one visible payload; no category averaging is allowed.
+- Exact scores are: Qwen3.6 27B `2/6`, Qwen3.5 9B `3/6`, Qwen3.5 4B
+  `3/6`, Qwen3.5 2B `1/6`, Qwen3.5 0.8B `1/6`, Qwen3.6 A3B `2/6`,
+  and Qwen3.5 A10B `2/6`. Every asset passes 8K retrieval; all but 2B/0.8B
+  pass exact instruction formatting; only 4B/9B pass structured extraction.
+- Every asset fails code repair and coupled logic under the frozen scorer. Four
+  code outputs fail Rust type inference, A10B fails hidden behavior, and 0.8B
+  omits the required markers. Logic failures mix wrong values and incomplete
+  payloads, so they do not establish a semantic `<=4B` family closure.
+- No asset passes all six categories. Per preregistration, do not run Stage-P
+  performance, Q3/Q6/IQ challengers, Pareto admission, prompt rescue, or a larger
+  harness. A10B's `warm_decode` causal label is a defensible alias for `decode`
+  but cannot rescue its independent code, logic, and JSON failures.
+- Record only: none of seven tested local Q4 assets qualifies under this frozen
+  six-task direct-mode contract. The model-choice `1.5x+` prior remains potentially
+  large but unpriced here. This makes no population-quality, universal-local-asset,
+  peak-memory, or model/quant performance-potential claim.
+
+Artifacts: `target/profiles/v0573-model-quant-pareto/`. Adversarial protocol,
+calibration, and final reviews: `cx ask` sessions
+`019f56d9-5ea5-7440-b677-7a8f47a249de`,
+`019f56dd-7bb7-7a81-af30-bce1f9579f08`,
+`019f56ee-3202-7fd2-a70f-54a119137195`,
+`019f5700-05a8-7e52-a292-a722d0e83234`, and
+`019f5705-9567-79c0-acc9-5ceff7ddf0ac`.
+
 ## 2026-07-11 - v0.572 Wide-Prefill Frontier Closes Narrowly
 
 Status: one exact synthetic A10B 32K cell clears its gate; A3B and wider-chunk

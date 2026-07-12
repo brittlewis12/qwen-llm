@@ -364,43 +364,45 @@ A3B 32K chunk 2048 reaches only `1.04654x` median and fails its pair floor. A10B
 output bytes and gives directional warmed prefill `1.03314x`. Do not broaden chunk
 widths, contexts, anchors, admission, or defaults. Product wiring is outside the queue.
 
-1. **Model/quant Pareto reconnaissance**: the only active `>=1.5x` prior band.
-   Compare the smallest quality-passing dense and MoE assets on a compact fixed
-   task set built as part of the experiment, not as shared infrastructure. Check
-   current IQ-format fast-path parity before pricing IQ candidates. Confidence in
-   a Pareto improvement is medium; semantic scope changes and asset cost are real.
-2. **Routed-tail work elimination**: the highest-ranked exact new prefill primitive.
+Blocked model-choice lane, not active queue: v0.573 screens seven local Q4 assets
+through a frozen six-task direct-mode contract. Scores range from `1/6` to `3/6`;
+none clears every category, so no performance or lower-quant row runs. The
+model-choice `1.5x+` prior remains potentially large but unpriced for this contract.
+Do not build a larger harness or rescue prompts now. Reopen only for a new declared
+capability contract or asset with a concrete reason to change all-category passage.
+
+1. **Routed-tail work elimination**: the highest-ranked exact new prefill primitive.
    It must remove named grouped-inner/output traffic, dispatches, or bank passes
    without rereading gate/up weights or collapsing output parallelism. A historical
    2026-05-23 dirty one-shot A3B Q4 pp4096/chunk1024 forced-matrix no-routed
    intervention moves `4.4068 -> 3.2250 s`, a derived optimistic 26.8% whole-prefill
    removal ceiling. That unsafe no-op changes hidden states/routing; it is neither a
    complete-tail share nor candidate evidence. Confidence is low and cost is high.
-3. **Joint 32K/131K Q/K/V capture**: one artifact prices a structurally new exact
+2. **Joint 32K/131K Q/K/V capture**: one artifact prices a structurally new exact
    attention body, a co-designed compressed reader, and sparse/retrieval retention.
    The exact F16 byte floor suggests 10-11% whole-token headroom at 131K, but is not
    a demonstrated candidate. Prior one-pass, partition, and Q8-reader failures keep
    confidence medium-low and engineering cost very high.
-4. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
+3. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
    classes whose measured 282-296 GB/s rates trail the 474 GB/s anchor. First
    separate representation/dequant loss from narrow-dispatch occupancy that a new
    layout cannot fix. Confidence is low; whole-token prior is about 5%.
-5. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
+4. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
    green field. Survey only `32/64/128/256/full` attention-history reads, charge
    proposal/history/replay costs, and stop unless current composed economics clear
    the existing gate. The verifier-only `2.6x` ceiling is not a product projection.
-6. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
+5. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
    mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2 `~0.62`). v0.403 A3B
    `ctx8192` attributes 9.9%+7.5%=17.4% of decode to routed gate/up+down; ideal
    linear k8-to-k6 removal therefore gives only a derived 4.35% whole-decode ceiling
    before overhead or quality cost. Do not start a kernel before static-k replay.
-7. **Sensitivity-aware mixed quant**: run only after the model/quant sweep fixes
-   the base asset. Current routed-Q5 evidence gives only 2.2-2.4% total-decode
-   headroom; require a class-specific oracle before generating assets.
-8. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
+6. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
+   contract until a base asset qualifies. Current routed-Q5 evidence gives only
+   2.2-2.4% total-decode headroom; do not generate assets from that ceiling.
+7. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
    decode, but explicitly input-changing. Prefix caching remains a separate exact
    reuse specialization and does not rank for fresh serial prompts.
-9. **MoE speculative verification re-adjudication**: authorize only a bounded
+8. **MoE speculative verification re-adjudication**: authorize only a bounded
    replay if the current charged trajectory projects at least 5% whole-decode gain.
    A looser numerical resume contract does not create proposal acceptance or net
    economics; no implementation follows from tolerance alone.
@@ -422,21 +424,18 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Run a sparse model/quant Pareto reconnaissance: verify candidate fast paths,
-   then time and score only a small dense/MoE sentinel set. Candidate-local quality
-   checks are part of this experiment; do not build a shared harness first.
-2. If exact engine work is selected instead, falsify one routed-tail work-elimination
-   primitive against its complete-tail gate before any production integration.
-3. Capture real 32K/131K Q/K/V once. Price exact-body headroom, compressed-reader
+1. Falsify one routed-tail work-elimination primitive against its complete-tail and
+   whole-prefill gates before any production integration.
+2. Capture real 32K/131K Q/K/V once. Price exact-body headroom, compressed-reader
    fidelity/economics, and sparse retention from the same immutable artifact.
-4. Run the two-class decode ABI oracle before generating a new weight asset. Stop
+3. Run the two-class decode ABI oracle before generating a new weight asset. Stop
    if narrow-dispatch occupancy, rather than representation, explains the deficit.
-5. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
+4. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
    implementation work until its charged whole-request gate clears.
-6. Run mixed quant only after model selection. Keep prompt reduction in its labeled
-   input-changing lane and MoE speculation behind a current `>=5%` economic replay.
-7. Do not resume wide-prefill admission/default work, broad prompt lookup, GDN
-   implementation, or local same-graph retuning as optimization attacks.
+5. Keep prompt reduction in its labeled input-changing lane and MoE speculation
+   behind a current `>=5%` economic replay.
+6. Do not resume model/quant quality work, mixed quant, wide-prefill admission,
+   broad prompt lookup, GDN implementation, or local retuning as optimization attacks.
 
 ### Decisive gates
 

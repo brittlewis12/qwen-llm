@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-12 - v0.574 Routed-Tail Ownership Preflight Closes
+
+Status: close exact routed-prefill work elimination before implementation; current
+Metal ownership constraints leave no new primitive with a credible path to both gates.
+
+- Production materializes grouped `inner[P,K,F]`, grouped down `out[P,K,H]`, then
+  token/output-owned weighted reduction. At product chunks, `inner` is
+  `33.6/134.2 MB` and `out` is `134.2/402.7 MB` for A3B/A10B. The bytes are real,
+  but materialization size alone does not establish removable wall time.
+- At chunk 512, complete routed tails are about `3.84/10.30 ms`; gate/up is
+  `2.31/6.81 ms`, down+reduce `1.55/4.25 ms`, and reduction alone only
+  `0.07/0.11 ms`. With gate/up unchanged, a `1.15x` complete-tail gate requires
+  down+reduce near `1.03 ms` A3B and `2.15 ms` A10B: about 34%/49% reductions.
+- Eliminating `inner` while reading gate/up once requires one producer to feed many
+  independent H-output owners. Metal has no grid-wide producer/consumer barrier.
+  One all-H owner collapses output parallelism into the measured monolith failure;
+  multiple H-tile owners duplicate the dominant gate/up work 32x/48x.
+- Eliminating `out` without atomics requires one owner for all K contributions to
+  each token/output cell. Token ownership loses expert-grouped down reuse and
+  previously collapsed A3B `775.67 -> 478.84 t/s`; expert ownership requires the
+  already-negative eight-way atomics. Ordered rank phases or bounded partials
+  recreate weight reads, mixer passes, contention, or the removed storage.
+- Standalone reducer/finalizer removal, route ordering, n16/n32 reshaping, F16
+  inner, duplicate fused banks, separate ID-aware projections, output scatter,
+  and routed/shared overlap are measured retreads below the strategic gate. A
+  down-weight repack may belong to decode/storage ABI work but is not work removal.
+- Reopen only if a premise changes: cooperative grid-wide synchronization, large
+  certified exact sparsity in both assets, or a replacement representation that
+  demonstrably removes a complete bank pass without gate/up rereads or output-owner
+  serialization. No GPU benchmark or source change is justified before that.
+
+Artifact: `target/profiles/v0574-routed-tail-preflight/`. Adversarial design and
+closure review: `cx ask` session `019f57c6-7373-7c53-83c3-31d42488a7a6`.
+
 ## 2026-07-12 - v0.573 Model/Quant Quality Funnel Stops Before Timing
 
 Status: none of seven tested local Q4 assets clears the frozen six-task direct-mode

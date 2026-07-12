@@ -371,38 +371,39 @@ model-choice `1.5x+` prior remains potentially large but unpriced for this contr
 Do not build a larger harness or rescue prompts now. Reopen only for a new declared
 capability contract or asset with a concrete reason to change all-category passage.
 
-1. **Routed-tail work elimination**: the highest-ranked exact new prefill primitive.
-   It must remove named grouped-inner/output traffic, dispatches, or bank passes
-   without rereading gate/up weights or collapsing output parallelism. A historical
-   2026-05-23 dirty one-shot A3B Q4 pp4096/chunk1024 forced-matrix no-routed
-   intervention moves `4.4068 -> 3.2250 s`, a derived optimistic 26.8% whole-prefill
-   removal ceiling. That unsafe no-op changes hidden states/routing; it is neither a
-   complete-tail share nor candidate evidence. Confidence is low and cost is high.
-2. **Joint 32K/131K Q/K/V capture**: one artifact prices a structurally new exact
+Closed routed-tail lane, not active queue: v0.574 shows that eliminating grouped
+`inner` requires unavailable cross-threadgroup producer/consumer synchronization or
+collapsed output parallelism, while eliminating grouped `out` requires token-owned
+down that loses expert reuse or the already-negative atomic path. Ordered phases and
+bounded partials interpolate between those failures. Reopen only for cooperative
+grid synchronization, certified large exact sparsity, or an ABI that removes a
+complete bank pass without rereads or serialization.
+
+1. **Joint 32K/131K Q/K/V capture**: one artifact prices a structurally new exact
    attention body, a co-designed compressed reader, and sparse/retrieval retention.
    The exact F16 byte floor suggests 10-11% whole-token headroom at 131K, but is not
    a demonstrated candidate. Prior one-pass, partition, and Q8-reader failures keep
    confidence medium-low and engineering cost very high.
-3. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
+2. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
    classes whose measured 282-296 GB/s rates trail the 474 GB/s anchor. First
    separate representation/dequant loss from narrow-dispatch occupancy that a new
    layout cannot fix. Confidence is low; whole-token prior is about 5%.
-4. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
+3. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
    green field. Survey only `32/64/128/256/full` attention-history reads, charge
    proposal/history/replay costs, and stop unless current composed economics clear
    the existing gate. The verifier-only `2.6x` ceiling is not a product projection.
-5. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
+4. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
    mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2 `~0.62`). v0.403 A3B
    `ctx8192` attributes 9.9%+7.5%=17.4% of decode to routed gate/up+down; ideal
    linear k8-to-k6 removal therefore gives only a derived 4.35% whole-decode ceiling
    before overhead or quality cost. Do not start a kernel before static-k replay.
-6. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
+5. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
    contract until a base asset qualifies. Current routed-Q5 evidence gives only
    2.2-2.4% total-decode headroom; do not generate assets from that ceiling.
-7. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
+6. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
    decode, but explicitly input-changing. Prefix caching remains a separate exact
    reuse specialization and does not rank for fresh serial prompts.
-8. **MoE speculative verification re-adjudication**: authorize only a bounded
+7. **MoE speculative verification re-adjudication**: authorize only a bounded
    replay if the current charged trajectory projects at least 5% whole-decode gain.
    A looser numerical resume contract does not create proposal acceptance or net
    economics; no implementation follows from tolerance alone.
@@ -424,18 +425,16 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Falsify one routed-tail work-elimination primitive against its complete-tail and
-   whole-prefill gates before any production integration.
-2. Capture real 32K/131K Q/K/V once. Price exact-body headroom, compressed-reader
+1. Capture real 32K/131K Q/K/V once. Price exact-body headroom, compressed-reader
    fidelity/economics, and sparse retention from the same immutable artifact.
-3. Run the two-class decode ABI oracle before generating a new weight asset. Stop
+2. Run the two-class decode ABI oracle before generating a new weight asset. Stop
    if narrow-dispatch occupancy, rather than representation, explains the deficit.
-4. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
+3. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
    implementation work until its charged whole-request gate clears.
-5. Keep prompt reduction in its labeled input-changing lane and MoE speculation
+4. Keep prompt reduction in its labeled input-changing lane and MoE speculation
    behind a current `>=5%` economic replay.
-6. Do not resume model/quant quality work, mixed quant, wide-prefill admission,
-   broad prompt lookup, GDN implementation, or local retuning as optimization attacks.
+5. Do not resume routed-tail work, model/quant quality work, mixed quant,
+   wide-prefill admission, broad prompt lookup, GDN implementation, or local retuning.
 
 ### Decisive gates
 
@@ -458,9 +457,9 @@ better than a decode win; each result must retain its objective-lane label.
 - **Native MTP**: total request `>=1.10x` on at least two named archetypes at 128+
   output tokens, TTFT regression `<=3%`, and greedy-equivalence green.
   Distribution exactness remains a separate rejection-sampling implementation.
-- **Routed-tail work elimination**: name the removed intermediate work, improve the
-  complete routed tail `>=15%` on A3B and A10B, and improve whole prefill `>=5%`
-  on A3B and `>=3%` on A10B.
+- **Routed-tail reopen**: first change an ownership premise; then name the removed
+  intermediate work, improve complete tail `>=15%` on both models, and improve
+  whole prefill `>=5%` A3B and `>=3%` A10B.
 - **Format-specific decode ABI**: actual-shape primitive gain `>=10%` on two
   important tensor classes and full-token movement `>=5%` before widening.
 - **GDN recurrence**: complete one-layer all-in gain `>=20%`, projected prefill

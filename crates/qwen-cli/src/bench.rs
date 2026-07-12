@@ -34,14 +34,13 @@ use qwen_llm::{
     gguf::GgufFile,
     loader::{Model, open_dflash_drafter},
     metal::{
-        AttnLongFixedLoader, BlitEncoder, KernelEncoder, KernelTraceCounters, MetalContext,
-        MetalTensor, attn_v4_choose_group_tile, attn_v4_choose_nwg, attn_v4_choose_tile_c,
+        BlitEncoder, KernelEncoder, KernelTraceCounters, MetalContext, MetalTensor,
+        attn_v4_choose_group_tile, attn_v4_choose_nwg, attn_v4_choose_tile_c,
         encode_add_inplace_f32, encode_attn_decode_v4_f32, encode_attn_decode_v4_main_only_f32,
-        encode_attn_decode_v4_reduce_only_f32, encode_attn_long_fixed_g8_c32_main_only_f32,
-        encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
-        encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
-        encode_copy_offset_f32, encode_fill_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
-        encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+        encode_attn_decode_v4_reduce_only_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
+        encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
+        encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
+        encode_get_rows_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
         encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_rms_norm_batched_f32,
@@ -862,23 +861,6 @@ struct AttnIntraArgs {
     /// Optional absolute block index. Defaults to the first full-attention block.
     #[arg(long)]
     block: Option<usize>,
-    /// Bench-only attention main primitive.
-    #[arg(long, value_enum, default_value = "v4")]
-    primitive: AttnIntraPrimitive,
-    /// Measure a fixed Q/K/V state with packet-valid sampling.
-    #[arg(long)]
-    static_primitive_packet: bool,
-    /// Idle after variant-specific preparation and before packet warmups.
-    #[arg(long, default_value = "0")]
-    post_prepare_cooldown_secs: u64,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum AttnIntraPrimitive {
-    V4,
-    FixedF16,
-    #[value(name = "fixed-g16-q8")]
-    FixedG16Q8,
 }
 
 #[derive(Parser, Debug)]
@@ -14917,77 +14899,15 @@ fn run_phase(args: PhaseArgs) -> Result<()> {
     Ok(())
 }
 
-fn attn_intra_g16q8(
-    ctx: &MetalContext,
-    src: &MetalTensor,
-    n_pos: usize,
-    n_kv: usize,
-) -> Result<MetalTensor> {
-    const HD: usize = 256;
-    const ROW_BYTES: usize = 288;
-    let src_bytes = n_pos * n_kv * HD * 2;
-    if src.dtype != GgmlType::F16 || src.n_bytes() < src_bytes as u64 {
-        return Err(anyhow!("g16-Q8 source must contain {src_bytes} F16 bytes"));
-    }
-    let raw = unsafe {
-        std::slice::from_raw_parts(
-            src.buffer.contents().as_ptr().add(src.offset as usize) as *const u8,
-            src_bytes,
-        )
-    };
-    let mut out = vec![0u8; n_pos * n_kv * ROW_BYTES];
-    for row in 0..n_pos * n_kv {
-        for group in 0..16 {
-            let src_base = (row * HD + group * 16) * 2;
-            let dst_base = row * ROW_BYTES + group * 18;
-            let mut values = [0.0f32; 16];
-            let mut max_abs = 0.0f32;
-            for (i, value) in values.iter_mut().enumerate() {
-                let at = src_base + i * 2;
-                *value = half::f16::from_bits(u16::from_le_bytes([raw[at], raw[at + 1]])).to_f32();
-                max_abs = max_abs.max(value.abs());
-            }
-            let scale_f32 = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
-            let scale_f16 = half::f16::from_f32(scale_f32);
-            let scale = scale_f16.to_f32();
-            out[dst_base..dst_base + 2].copy_from_slice(&scale_f16.to_bits().to_le_bytes());
-            for (i, value) in values.iter().enumerate() {
-                let q = (value / scale).round().clamp(-127.0, 127.0) as i8;
-                out[dst_base + 2 + i] = q as u8;
-            }
-        }
-    }
-    if out.len() != n_pos * n_kv * ROW_BYTES {
-        return Err(anyhow!("g16-Q8 byte length mismatch"));
-    }
-    Ok(MetalTensor::from_bytes(
-        ctx,
-        &out,
-        vec![(out.len() / 2) as u64],
-        GgmlType::F16,
-    )?)
-}
-
 fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
     let AttnIntraArgs {
         model,
         ctx: target,
         runs,
         block,
-        primitive,
-        static_primitive_packet,
-        post_prepare_cooldown_secs,
     } = args;
     if runs == 0 {
         return Err(anyhow!("--runs must be > 0"));
-    }
-    if static_primitive_packet && runs < 3 {
-        return Err(anyhow!("--runs must be >= 3 in static packet mode"));
-    }
-    if !static_primitive_packet && post_prepare_cooldown_secs != 0 {
-        return Err(anyhow!(
-            "--post-prepare-cooldown-secs requires --static-primitive-packet"
-        ));
     }
 
     let mctx = MetalContext::new()?;
@@ -15035,11 +14955,6 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             "attn-intra only supports attn_v4 shapes; got head_dim={head_dim} group={group}"
         ));
     }
-    if !matches!(primitive, AttnIntraPrimitive::V4) && group != 8 {
-        return Err(anyhow!(
-            "fixed primitive requires group=8, got group={group}"
-        ));
-    }
 
     {
         let mut s = MetalSession::fresh(&mctx, &mm, 32)?;
@@ -15081,20 +14996,6 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         Ok(())
     };
 
-    let oracle_scratch = if matches!(primitive, AttnIntraPrimitive::V4) {
-        None
-    } else {
-        let nwg = attn_v4_choose_nwg(target + 1, group);
-        Some((
-            MetalTensor::zeros_f32(&mctx, vec![(n_kv * nwg * group * head_dim) as u64])?,
-            MetalTensor::zeros_f32(&mctx, vec![(n_kv * nwg * group * 2) as u64])?,
-            MetalTensor::zeros_f32(&mctx, vec![(n_kv * nwg * group * head_dim) as u64])?,
-            MetalTensor::zeros_f32(&mctx, vec![(n_kv * nwg * group * 2) as u64])?,
-            MetalTensor::zeros_f32(&mctx, vec![q_dim as u64])?,
-            MetalTensor::zeros_f32(&mctx, vec![q_dim as u64])?,
-        ))
-    };
-    let mut oracle_done = false;
     let mut agg: Vec<(String, f64)> = Vec::new();
     for run in 0..runs {
         let position = target as u32 + run as u32;
@@ -15268,363 +15169,10 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
         let n_pos = s.kv_n_pos[attn_idx_in_session];
         let nwg = attn_v4_choose_nwg(n_pos, group);
         let tile_c = attn_v4_choose_tile_c(n_pos, group);
-        let kv_elems = n_pos * kv_dim;
-        let k_f16 = s.kv_k[attn_idx_in_session].view_subrange(0, vec![kv_elems as u64]);
-        let v_f16 = s.kv_v[attn_idx_in_session].view_subrange(0, vec![kv_elems as u64]);
-        let quantized = match primitive {
-            AttnIntraPrimitive::FixedG16Q8 => Some((
-                attn_intra_g16q8(&mctx, &k_f16, n_pos, n_kv)?,
-                attn_intra_g16q8(&mctx, &v_f16, n_pos, n_kv)?,
-            )),
-            _ => None,
-        };
-        let (main_k, main_v) = quantized.as_ref().map_or((&k_f16, &v_f16), |(k, v)| (k, v));
-        if !oracle_done {
-            if let Some((ref_o, ref_ml, fixed_o, fixed_ml, ref_out, fixed_out)) = &oracle_scratch {
-                let cmd = mctx
-                    .queue
-                    .commandBuffer()
-                    .context("attn-intra oracle cmd")?;
-                let enc = KernelEncoder::begin(&cmd);
-                encode_attn_decode_v4_main_only_f32(
-                    &mctx,
-                    &enc,
-                    &s.attn_q_normed,
-                    &k_f16,
-                    &v_f16,
-                    ref_o,
-                    ref_ml,
-                    n_q,
-                    n_kv,
-                    head_dim,
-                    n_pos,
-                    nwg,
-                    tile_c,
-                )?;
-                encode_attn_decode_v4_reduce_only_f32(
-                    &mctx, &enc, ref_o, ref_ml, ref_out, n_q, n_kv, head_dim, nwg,
-                )?;
-                let loader = if matches!(primitive, AttnIntraPrimitive::FixedF16) {
-                    AttnLongFixedLoader::F16
-                } else {
-                    AttnLongFixedLoader::G16Q8
-                };
-                encode_attn_long_fixed_g8_c32_main_only_f32(
-                    &mctx,
-                    &enc,
-                    &s.attn_q_normed,
-                    main_k,
-                    main_v,
-                    fixed_o,
-                    fixed_ml,
-                    n_q,
-                    n_kv,
-                    head_dim,
-                    n_pos,
-                    nwg,
-                    loader,
-                )?;
-                encode_attn_decode_v4_reduce_only_f32(
-                    &mctx, &enc, fixed_o, fixed_ml, fixed_out, n_q, n_kv, head_dim, nwg,
-                )?;
-                enc.end();
-                cmd.commit();
-                cmd.waitUntilCompleted();
-                if let Some(error) = cmd.error() {
-                    return Err(anyhow!("attn-intra oracle failed: {error:?}"));
-                }
-                let reference = read_f32_tensor(ref_out);
-                let candidate = read_f32_tensor(fixed_out);
-                let (cos, max_abs) = cosine_max_abs(&reference, &candidate);
-                let (diff2, ref2) = reference.iter().zip(&candidate).fold(
-                    (0.0f64, 0.0f64),
-                    |(diff2, ref2), (&a, &b)| {
-                        let d = f64::from(a) - f64::from(b);
-                        (diff2 + d * d, ref2 + f64::from(a) * f64::from(a))
-                    },
-                );
-                let rel_l2 = diff2.sqrt() / ref2.sqrt().max(f64::MIN_POSITIVE);
-                println!(
-                    "[attn-intra oracle] primitive={primitive:?} ctx={n_pos} nwg={nwg} \
-                     cos={cos:.8} max_abs={max_abs:.6e} rel_l2={rel_l2:.6e}"
-                );
-                let finite = cos.is_finite()
-                    && max_abs.is_finite()
-                    && rel_l2.is_finite()
-                    && reference.iter().chain(&candidate).all(|x| x.is_finite());
-                let pass = match primitive {
-                    AttnIntraPrimitive::FixedF16 => {
-                        cos > 0.999999 && rel_l2 < 1e-4 && max_abs < 2e-3
-                    }
-                    AttnIntraPrimitive::FixedG16Q8 => {
-                        cos > 0.9999 && rel_l2 < 0.015 && max_abs < 0.01
-                    }
-                    AttnIntraPrimitive::V4 => true,
-                };
-                if !finite || !pass {
-                    return Err(anyhow!(
-                        "fixed attention oracle failed: cos={cos} max_abs={max_abs} \
-                         rel_l2={rel_l2}"
-                    ));
-                }
-                oracle_done = true;
-            }
-        }
-        if static_primitive_packet {
-            if post_prepare_cooldown_secs != 0 {
-                eprintln!(
-                    "[attn-intra] post-prepare cooldown {}s",
-                    post_prepare_cooldown_secs
-                );
-                std::thread::sleep(Duration::from_secs(post_prepare_cooldown_secs));
-            }
-            let loader = match primitive {
-                AttnIntraPrimitive::FixedF16 => Some(AttnLongFixedLoader::F16),
-                AttnIntraPrimitive::FixedG16Q8 => Some(AttnLongFixedLoader::G16Q8),
-                AttnIntraPrimitive::V4 => None,
-            };
-            let encode_main =
-                |enc: &KernelEncoder, o: &MetalTensor, ml: &MetalTensor| -> Result<()> {
-                    if let Some(loader) = loader {
-                        encode_attn_long_fixed_g8_c32_main_only_f32(
-                            &mctx,
-                            enc,
-                            &s.attn_q_normed,
-                            main_k,
-                            main_v,
-                            o,
-                            ml,
-                            n_q,
-                            n_kv,
-                            head_dim,
-                            n_pos,
-                            nwg,
-                            loader,
-                        )?;
-                    } else {
-                        encode_attn_decode_v4_main_only_f32(
-                            &mctx,
-                            enc,
-                            &s.attn_q_normed,
-                            &s.kv_k[attn_idx_in_session],
-                            &s.kv_v[attn_idx_in_session],
-                            o,
-                            ml,
-                            n_q,
-                            n_kv,
-                            head_dim,
-                            n_pos,
-                            nwg,
-                            tile_c,
-                        )?;
-                    }
-                    Ok(())
-                };
-            let run_shape = |paired: bool| -> Result<f64> {
-                let cmd = mctx
-                    .queue
-                    .commandBuffer()
-                    .context("static packet command")?;
-                let enc = KernelEncoder::begin(&cmd);
-                encode_main(&enc, &s.attn_v4_o_partial, &s.attn_v4_ml_partial)?;
-                if paired {
-                    encode_attn_decode_v4_reduce_only_f32(
-                        &mctx,
-                        &enc,
-                        &s.attn_v4_o_partial,
-                        &s.attn_v4_ml_partial,
-                        &s.attn_o,
-                        n_q,
-                        n_kv,
-                        head_dim,
-                        nwg,
-                    )?;
-                }
-                enc.end();
-                cmd.commit();
-                cmd.waitUntilCompleted();
-                if let Some(error) = cmd.error() {
-                    return Err(anyhow!("static packet command failed: {error:?}"));
-                }
-                let start = cmd.GPUStartTime();
-                let end = cmd.GPUEndTime();
-                if !start.is_finite() || !end.is_finite() || start <= 0.0 || end <= start {
-                    return Err(anyhow!("invalid GPU timestamps: start={start} end={end}"));
-                }
-                Ok((end - start) * 1e3)
-            };
-            let scrub_src = MetalTensor::zeros_f32(&mctx, vec![32 * 1024 * 1024])?;
-            let scrub_dst = MetalTensor::zeros_f32(&mctx, vec![32 * 1024 * 1024])?;
-            let scrub = || -> Result<()> {
-                let cmd = mctx.queue.commandBuffer().context("static packet scrub")?;
-                let enc = KernelEncoder::begin(&cmd);
-                encode_copy_offset_f32(&mctx, &enc, &scrub_src, 0, &scrub_dst, 32 * 1024 * 1024)?;
-                enc.end();
-                cmd.commit();
-                cmd.waitUntilCompleted();
-                if let Some(error) = cmd.error() {
-                    return Err(anyhow!("static packet scrub failed: {error:?}"));
-                }
-                Ok(())
-            };
-
-            const RAMP_REPS: usize = 512;
-            let ramp_cmd = mctx
-                .queue
-                .commandBuffer()
-                .context("static packet clock ramp")?;
-            let ramp_enc = KernelEncoder::begin(&ramp_cmd);
-            for _ in 0..RAMP_REPS {
-                encode_attn_decode_v4_main_only_f32(
-                    &mctx,
-                    &ramp_enc,
-                    &s.attn_q_normed,
-                    &s.kv_k[attn_idx_in_session],
-                    &s.kv_v[attn_idx_in_session],
-                    &s.attn_v4_o_partial,
-                    &s.attn_v4_ml_partial,
-                    n_q,
-                    n_kv,
-                    head_dim,
-                    n_pos,
-                    nwg,
-                    tile_c,
-                )?;
-                encode_attn_decode_v4_reduce_only_f32(
-                    &mctx,
-                    &ramp_enc,
-                    &s.attn_v4_o_partial,
-                    &s.attn_v4_ml_partial,
-                    &s.attn_o,
-                    n_q,
-                    n_kv,
-                    head_dim,
-                    nwg,
-                )?;
-            }
-            ramp_enc.end();
-            ramp_cmd.commit();
-            ramp_cmd.waitUntilCompleted();
-            if let Some(error) = ramp_cmd.error() {
-                return Err(anyhow!("static packet clock ramp failed: {error:?}"));
-            }
-            eprintln!("[attn-intra] common clock ramp reps={RAMP_REPS}");
-
-            run_shape(false)?;
-            run_shape(true)?;
-            let check = read_f32_tensor(&s.attn_o);
-            if !check.iter().any(|x| *x != 0.0) || !check.iter().all(|x| x.is_finite()) {
-                return Err(anyhow!("static packet produced invalid reduced output"));
-            }
-            let output_max_abs = check.iter().fold(0.0f32, |m, x| m.max(x.abs()));
-            let output_l2 = check
-                .iter()
-                .map(|x| f64::from(*x) * f64::from(*x))
-                .sum::<f64>()
-                .sqrt();
-            println!(
-                "[attn-intra static validation] output_max_abs={output_max_abs:.6e} \
-                 output_l2={output_l2:.6e}"
-            );
-            let mut main_raw = Vec::with_capacity(runs);
-            let mut pair_raw = Vec::with_capacity(runs);
-            for sample in 0..runs {
-                if sample % 2 == 0 {
-                    scrub()?;
-                    main_raw.push(run_shape(false)?);
-                    scrub()?;
-                    pair_raw.push(run_shape(true)?);
-                } else {
-                    scrub()?;
-                    pair_raw.push(run_shape(true)?);
-                    scrub()?;
-                    main_raw.push(run_shape(false)?);
-                }
-            }
-            let mut main_sorted = main_raw.clone();
-            let mut pair_sorted = pair_raw.clone();
-            main_sorted.sort_by(f64::total_cmp);
-            pair_sorted.sort_by(f64::total_cmp);
-            let median = |values: &[f64]| -> f64 {
-                let mid = values.len() / 2;
-                if values.len() % 2 == 0 {
-                    (values[mid - 1] + values[mid]) * 0.5
-                } else {
-                    values[mid]
-                }
-            };
-            let group_tile = attn_v4_choose_group_tile(n_pos, group);
-            let pipeline = match primitive {
-                AttnIntraPrimitive::V4 => match (group_tile, tile_c) {
-                    (8, 16) => "kernel_attn_decode_v4_g8_c16_f32",
-                    (8, 32) => "kernel_attn_decode_v4_g8_f32",
-                    (8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
-                    (8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
-                    (4, 16) => "kernel_attn_decode_v4_g8_t4_c16_f32",
-                    (4, 32) => "kernel_attn_decode_v4_g8_t4_f32",
-                    (4, 64) => "kernel_attn_decode_v4_g8_t4_c64_f32",
-                    (4, 128) => "kernel_attn_decode_v4_g8_t4_c128_f32",
-                    (2, 16) => "kernel_attn_decode_v4_g8_t2_c16_f32",
-                    (2, 32) => "kernel_attn_decode_v4_g8_t2_f32",
-                    (2, 64) => "kernel_attn_decode_v4_g8_t2_c64_f32",
-                    (2, 128) => "kernel_attn_decode_v4_g8_t2_c128_f32",
-                    _ => return Err(anyhow!("unsupported static v4 pipeline shape")),
-                },
-                AttnIntraPrimitive::FixedF16 => "kernel_attn_long_fixed_g8_c32_f16_f32",
-                AttnIntraPrimitive::FixedG16Q8 => "kernel_attn_long_fixed_g8_c32_g16q8_f32",
-            };
-            let tgm_bytes = if matches!(primitive, AttnIntraPrimitive::V4) {
-                group_tile * head_dim * 2 + group_tile * tile_c * 4
-            } else {
-                8 * 8 * 32 * 4 + 8 * 32 * 4 + 8 * 3 * 4 + 8 * 256 * 2
-            };
-            let physical_kv_bytes = match primitive {
-                AttnIntraPrimitive::FixedG16Q8 => n_pos * n_kv * 288 * 2,
-                _ => n_pos * n_kv * head_dim * 2 * 2,
-            };
-            let grid = if matches!(primitive, AttnIntraPrimitive::V4) {
-                format!("{}x{}x{}", n_kv, group / group_tile, nwg)
-            } else {
-                format!("{}x1x{}", n_kv, nwg)
-            };
-            let threads = if matches!(primitive, AttnIntraPrimitive::V4) {
-                32
-            } else {
-                256
-            };
-            println!(
-                "[attn-intra static] n_pos={n_pos} primitive={primitive:?} \
-                 pipeline={pipeline} nwg={nwg} c={} grid={grid} \
-                 threads_tg={threads} tgm_bytes={tgm_bytes} \
-                 physical_kv_bytes={physical_kv_bytes}",
-                if matches!(primitive, AttnIntraPrimitive::V4) {
-                    tile_c
-                } else {
-                    32
-                }
-            );
-            println!("[attn-intra static] main_raw_ms={main_raw:?}");
-            println!("[attn-intra static] main_sorted_ms={main_sorted:?}");
-            println!(
-                "[attn-intra static] main_median_ms={:.6}",
-                median(&main_sorted)
-            );
-            println!("[attn-intra static] pair_raw_ms={pair_raw:?}");
-            println!("[attn-intra static] pair_sorted_ms={pair_sorted:?}");
-            println!(
-                "[attn-intra static] pair_median_ms={:.6}",
-                median(&pair_sorted)
-            );
-            return Ok(());
-        }
         timed(
-            match primitive {
-                AttnIntraPrimitive::V4 => "attn_decode_v4_main",
-                AttnIntraPrimitive::FixedF16 => "attn_long_fixed_f16_main",
-                AttnIntraPrimitive::FixedG16Q8 => "attn_long_fixed_g16q8_main",
-            },
-            &|enc| match primitive {
-                AttnIntraPrimitive::V4 => Ok(encode_attn_decode_v4_main_only_f32(
+            "attn_decode_v4_main",
+            &|enc| {
+                Ok(encode_attn_decode_v4_main_only_f32(
                     &mctx,
                     enc,
                     &s.attn_q_normed,
@@ -15638,26 +15186,7 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
                     n_pos,
                     nwg,
                     tile_c,
-                )?),
-                fixed => Ok(encode_attn_long_fixed_g8_c32_main_only_f32(
-                    &mctx,
-                    enc,
-                    &s.attn_q_normed,
-                    main_k,
-                    main_v,
-                    &s.attn_v4_o_partial,
-                    &s.attn_v4_ml_partial,
-                    n_q,
-                    n_kv,
-                    head_dim,
-                    n_pos,
-                    nwg,
-                    if matches!(fixed, AttnIntraPrimitive::FixedF16) {
-                        AttnLongFixedLoader::F16
-                    } else {
-                        AttnLongFixedLoader::G16Q8
-                    },
-                )?),
+                )?)
             },
             &mut phases,
         )?;
@@ -15742,10 +15271,6 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
     let subgroups = group / group_tile.max(1);
     let logical_kv_bytes = n_kv * n_pos_est * (head_dim + head_dim) * 2;
     let subgroup_kv_bytes = logical_kv_bytes * subgroups;
-    let fixed_kv_bytes = match primitive {
-        AttnIntraPrimitive::FixedG16Q8 => n_kv * n_pos_est * 288 * 2,
-        _ => logical_kv_bytes,
-    };
     let partial_bytes = n_kv * nwg * group * (head_dim * 4 + 2 * 4);
     let reduce_bytes = partial_bytes + n_q * head_dim * 4;
 
@@ -15757,17 +15282,12 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
     println!(
         "[attn-intra ctx={target}] block={block_idx} attn_idx={attn_idx_in_session} \
          attn_layers={total_attn} runs={runs} n_q={n_q} n_kv={n_kv} group={group} \
-         group_tile={group_tile} nwg={nwg} tile_c={tile_c} primitive={primitive:?}"
+         group_tile={group_tile} nwg={nwg} tile_c={tile_c}"
     );
     println!(
         "[attn-intra ctx={target}] bytes_est main_gb={:.4} reduce_gb={:.4} \
          logical_kv_gb={:.4} subgroup_kv_gb={:.4}",
-        (if matches!(primitive, AttnIntraPrimitive::V4) {
-            subgroup_kv_bytes
-        } else {
-            fixed_kv_bytes
-        } + partial_bytes) as f64
-            / 1e9,
+        (subgroup_kv_bytes + partial_bytes) as f64 / 1e9,
         reduce_bytes as f64 / 1e9,
         logical_kv_bytes as f64 / 1e9,
         subgroup_kv_bytes as f64 / 1e9,
@@ -15780,9 +15300,6 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
     for (name, ms) in &avgs {
         let est_bytes = match name.as_str() {
             "attn_decode_v4_main" => subgroup_kv_bytes + partial_bytes,
-            "attn_long_fixed_f16_main" | "attn_long_fixed_g16q8_main" => {
-                fixed_kv_bytes + partial_bytes
-            }
             "attn_decode_v4_reduce" => reduce_bytes,
             _ => 0,
         };

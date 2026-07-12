@@ -349,6 +349,13 @@ performance-closed. Sparse retention is killed for implementation on this fixtur
 the exact-score group-shared 50% oracle is already yellow, chunk64 is red, and the
 per-head ideal needs about 89-93% physical GQA union. Promote one materially
 different dual-format register-light body primitive, not another reader/layout.
+v0.577-v0.580 then execute and kill the first such body at 32K. The scalar
+cross-simdgroup design is exact with F16 and fidelity-green with group16-scale Q8,
+but loses `2.866x/3.537x` main versus the slower V4 anchor. Q8 is `1.234x` slower
+than the F16 control despite `0.5625x` bytes. This closes the concrete scalar QK
+reduction and loader pairing, not distributed output ownership. A matrix reopen
+must first clear a decode-and-stage floor below `0.15587 ms`; no 131K row or
+production integration is authorized.
 
 ## Force-Ranked BS=1 Opportunity Frontier
 
@@ -388,36 +395,31 @@ bounded partials interpolate between those failures. Reopen only for cooperative
 grid synchronization, certified large exact sparsity, or an ABI that removes a
 complete bank pass without rereads or serialization.
 
-1. **Dual-format register-light G8 attention primitive**: fixed A3B/head-dim-256
-   shape only, with one F16 control and one 16-value-group Q8 loader around the same
-   output-distributed body. Reuse production partition partials and H2 reduction;
-   do not add production dispatch or a cache writer. Belief is medium-low and cost
-   is medium-high, but the measured green compressed point is the only live
-   true-long mechanism with an optimistic whole-token ceiling above 15%.
-2. **True-decode-query capture for survivors**: capture the first generated query
-   plus a short consecutive generated window only after the primitive survives.
-   This prices query-distribution sensitivity and append cost; it must not delay the
-   fixed-shape topology falsifier or turn prefill-causal evidence into decode proof.
-3. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
+1. **Matrix attention stage floor, pending selection**: fixed G8/head-dim-256/C32
+   only. Dequantize captured group16-scale Q8 K/V into the intended matrix-friendly
+   half staging layout, execute required barriers and checksum stores, and stop if
+   the floor is `>=0.15587 ms` at 32K. Belief that an integrated body clears the
+   gate is only 15-25%; no broad implementation follows from a floor pass.
+2. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
    classes whose measured 282-296 GB/s rates trail the 474 GB/s anchor. First
    separate representation/dequant loss from narrow-dispatch occupancy that a new
    layout cannot fix. Confidence is low; whole-token prior is about 5%.
-4. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
-   green field. Survey only `32/64/128/256/full` attention-history reads, charge
-   proposal/history/replay costs, and stop unless current composed economics clear
-   the existing gate. The verifier-only `2.6x` ceiling is not a product projection.
-5. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
+3. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
    mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2 `~0.62`). v0.403 A3B
    `ctx8192` attributes 9.9%+7.5%=17.4% of decode to routed gate/up+down; ideal
    linear k8-to-k6 removal therefore gives only a derived 4.35% whole-decode ceiling
    before overhead or quality cost. Do not start a kernel before static-k replay.
-6. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
+4. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
+   green field. Survey only `32/64/128/256/full` attention-history reads, charge
+   proposal/history/replay costs, and stop unless current composed economics clear
+   the existing gate. The verifier-only `2.6x` ceiling is not a product projection.
+5. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
    contract until a base asset qualifies. Current routed-Q5 evidence gives only
    2.2-2.4% total-decode headroom; do not generate assets from that ceiling.
-7. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
+6. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
    decode, but explicitly input-changing. Prefix caching remains a separate exact
    reuse specialization and does not rank for fresh serial prompts.
-8. **MoE speculative verification re-adjudication**: authorize only a bounded
+7. **MoE speculative verification re-adjudication**: authorize only a bounded
    replay if the current charged trajectory projects at least 5% whole-decode gain.
    A looser numerical resume contract does not create proposal acceptance or net
    economics; no implementation follows from tolerance alone.
@@ -439,12 +441,11 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Build one fixed-shape dual F16/group16-scale-Q8 register-light attention
-   primitive. Keep production dispatch, cache writing, general shapes, and a new
-   reducer out. Kill unless output ownership materially raises occupancy and the
-   compressed main plus existing reduction projects inside the `5.06 ms` budget.
-2. If the primitive survives, capture true decode queries and charge cache append
-   before any production integration or broader quality claim.
+1. Pending owner selection, choose between the fixed-shape matrix stage floor and
+   the two-class decode ABI oracle. Do not begin both or treat a stage-floor pass as
+   authorization for an integrated attention body.
+2. If a matrix primitive later survives, capture true decode queries and charge
+   cache append before production integration or a broader quality claim.
 3. Run the two-class decode ABI oracle before generating a new weight asset. Stop
    if narrow-dispatch occupancy, rather than representation, explains the deficit.
 4. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens

@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-12 - v0.577-v0.580 Register-Light Attention Falsifier
+
+Status: killed at the valid 32K prerequisite; experiment source removed and no
+131K row run.
+
+- Tested one fixed A3B G8/head-dim-256/C32 body with 256-thread threadgroups.
+  Eight simdgroups own disjoint output dimensions and share each K/V row across
+  all eight query heads. The body retains the production partial ABI and H2
+  reducer. F16 and 16-value-group Q8 loaders share the same body.
+- The clean packet used commit `67bdc56`, one static block-3 state at
+  `n_pos=32769`, nine main and nine direct main-plus-reduce samples, 120-second
+  pre-invocation and post-preparation cooldowns, a common production-attention
+  clock ramp, and a 128 MiB compute read/write scrub before every sample.
+- V4 A1/A2 main medians are `0.178500/0.179250 ms`; pair medians are
+  `0.227334/0.226834 ms`. Anchor spreads are `1.00420x/1.00220x`. No thermal or
+  performance warnings occurred, and system memory remained 96% free.
+- The F16 control is numerically exact at the reduced output but reaches
+  `0.513667/0.567875 ms`: `2.86565x/2.49798x` the slower main/pair anchors.
+  Group16-scale Q8 passes fidelity at cosine `0.99999740`, maximum absolute error
+  `5.709e-3`, and relative L2 `0.2282%`, but reaches `0.634042/0.690750 ms`:
+  `3.53720x/3.03848x` the anchors.
+- Q8 is `1.23434x` slower than the F16 control main despite `0.5625x` physical
+  K+V bytes. Bytes are not controlling this body; scalar decode, eight partial
+  QK reductions, threadgroup exchange, barriers, and instruction issue dominate.
+- Kill this scalar cross-simdgroup body and loader pairing with no `C`, `NWG`,
+  launch, scale-layout, vector-load, or cache-layout rescue. Distributed output
+  ownership is not independently falsified because its benefit is confounded by
+  the QK reduction mechanism.
+- A matrix reopen first needs a decode-and-stage floor below `0.15587 ms`, the
+  32K main target required to beat the slower anchor by 15%. Tying production
+  would already require removing `71.7%` of measured Q8 main time; promotion
+  requires `75.4%`. No matrix implementation is authorized by this result alone.
+
+Artifacts: `target/profiles/v0580-attn-long-fixed/`. Adversarial design and
+adjudication: `cx ask` sessions `019f5879-7e73-7143-922e-8d100b9e64c2`,
+`019f5881-8ecc-7e52-a246-405e10e88aff`,
+`019f5888-a35b-7a91-a4cb-1c4ab5574081`, and
+`019f58a5-d827-70f2-b218-2812d4b82a39`.
+
 ## 2026-07-12 - v0.575-v0.576 True-Long Mechanism Frontier
 
 Status: immutable real-model capture passes at 32K/131K; compressed KV earns one

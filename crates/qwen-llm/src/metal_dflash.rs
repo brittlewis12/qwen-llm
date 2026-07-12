@@ -61,6 +61,139 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+#[derive(Clone, Debug)]
+pub struct AttentionCaptureProvenance {
+    pub position: usize,
+    pub causal_length: usize,
+    pub block: usize,
+    pub kv_slot: usize,
+    pub path: &'static str,
+    pub online_matrix: bool,
+    pub query_tiled: bool,
+    pub query_rows: Option<usize>,
+    pub packed_rows: Option<usize>,
+    pub packed_qt: Option<usize>,
+    pub nwg: Option<usize>,
+    pub tile_c: Option<usize>,
+    pub group_tile: Option<usize>,
+    pub matrix_causal_skip: bool,
+}
+
+pub struct AttentionCapture {
+    pub blocks: Vec<usize>,
+    pub positions: Vec<usize>,
+    pub q: Vec<MetalTensor>,
+    pub o: Vec<MetalTensor>,
+    pub provenance: Vec<AttentionCaptureProvenance>,
+    seen: Vec<bool>,
+    q_dim: usize,
+}
+
+impl AttentionCapture {
+    pub fn new(
+        ctx: &MetalContext,
+        blocks: Vec<usize>,
+        positions: Vec<usize>,
+        q_dim: usize,
+    ) -> Result<Self, MetalError> {
+        let elements = positions
+            .len()
+            .checked_mul(q_dim)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "attention_capture",
+                detail: "capture tensor size overflow".into(),
+            })?;
+        let mut q = Vec::with_capacity(blocks.len());
+        let mut o = Vec::with_capacity(blocks.len());
+        for _ in &blocks {
+            let q_tensor = MetalTensor::zeros_f32(ctx, vec![elements as u64])?;
+            let o_tensor = MetalTensor::zeros_f32(ctx, vec![elements as u64])?;
+            poison_capture_tensor(&q_tensor)?;
+            poison_capture_tensor(&o_tensor)?;
+            q.push(q_tensor);
+            o.push(o_tensor);
+        }
+        Ok(Self {
+            seen: vec![false; blocks.len() * positions.len()],
+            blocks,
+            positions,
+            q,
+            o,
+            provenance: Vec::new(),
+            q_dim,
+        })
+    }
+
+    pub fn validate_complete(&self) -> Result<(), MetalError> {
+        if let Some(index) = self.seen.iter().position(|seen| !seen) {
+            return Err(MetalError::BadShape {
+                kernel: "attention_capture",
+                detail: format!("capture row {index} was not produced"),
+            });
+        }
+        for (block_index, tensor) in self.q.iter().chain(&self.o).enumerate() {
+            let values = capture_tensor_f32(tensor)?;
+            if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+                return Err(MetalError::BadShape {
+                    kernel: "attention_capture",
+                    detail: format!("capture tensor {block_index} row data {index} is non-finite"),
+                });
+            }
+            if !values.iter().any(|&value| value != 0.0) {
+                return Err(MetalError::BadShape {
+                    kernel: "attention_capture",
+                    detail: format!("capture tensor {block_index} is all zero"),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+fn capture_tensor_parts(tensor: &MetalTensor) -> Result<(*mut f32, usize), MetalError> {
+    let offset = usize::try_from(tensor.offset).map_err(|_| MetalError::BadShape {
+        kernel: "attention_capture",
+        detail: "capture tensor offset does not fit usize".into(),
+    })?;
+    let elements = usize::try_from(tensor.n_elements()).map_err(|_| MetalError::BadShape {
+        kernel: "attention_capture",
+        detail: "capture tensor length does not fit usize".into(),
+    })?;
+    let byte_length = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attention_capture",
+            detail: "capture tensor byte length overflow".into(),
+        })?;
+    let end = offset
+        .checked_add(byte_length)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attention_capture",
+            detail: "capture tensor range overflow".into(),
+        })?;
+    if end > tensor.buffer.length() {
+        return Err(MetalError::BadShape {
+            kernel: "attention_capture",
+            detail: "capture tensor exceeds backing buffer".into(),
+        });
+    }
+    let base = unsafe { (tensor.buffer.contents().as_ptr() as *mut u8).add(offset) };
+    Ok((base.cast::<f32>(), elements))
+}
+
+fn capture_tensor_f32(tensor: &MetalTensor) -> Result<&[f32], MetalError> {
+    let (base, elements) = capture_tensor_parts(tensor)?;
+    Ok(unsafe { std::slice::from_raw_parts(base.cast_const(), elements) })
+}
+
+fn poison_capture_tensor(tensor: &MetalTensor) -> Result<(), MetalError> {
+    let (base, elements) = capture_tensor_parts(tensor)?;
+    unsafe {
+        std::ptr::write_bytes(base, 0xff, elements);
+    }
+    Ok(())
+}
+
 crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_PACKED");
 crate::env_flag!(
     default_on prefill_attn_gdn_scratch_overlay_enabled,
@@ -6930,6 +7063,7 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
         target_layer_ids,
         hidden_dst,
         PrefillTailMode::ReadLogits,
+        None,
     )?;
     let logits = logits.ok_or_else(|| {
         DFlashError::Metal(MetalError::BadShape {
@@ -6956,7 +7090,32 @@ pub fn prefill_tokens_prompt_only_profiled(
         &[],
         None,
         PrefillTailMode::SkipTail,
+        None,
     )?;
+    Ok(gpu_ms)
+}
+
+/// Bench-only prefill entry point. The ordinary prefill wrappers always pass no capture.
+pub fn prefill_tokens_attention_capture(
+    base: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    target_session: &mut MetalSession,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    capture: &mut AttentionCapture,
+) -> Result<f64, DFlashError> {
+    let (_, gpu_ms) = prefill_tokens_with_multi_hidden_profiled_inner(
+        base,
+        token_ids,
+        start_position,
+        target_session,
+        layer_scratch,
+        &[],
+        None,
+        PrefillTailMode::SkipTail,
+        Some(capture),
+    )?;
+    capture.validate_complete()?;
     Ok(gpu_ms)
 }
 
@@ -6969,6 +7128,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
     target_layer_ids: &[u32],
     hidden_dst: Option<&MetalTensor>,
     tail_mode: PrefillTailMode,
+    mut attention_capture: Option<&mut AttentionCapture>,
 ) -> Result<(Option<Vec<f32>>, f64), DFlashError> {
     let arch = &base.model.arch;
     let total_n = token_ids.len();
@@ -9225,6 +9385,148 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     il,
                                     "body",
                                 );
+                            }
+
+                            if let Some(capture) = attention_capture.as_deref_mut() {
+                                if let Some(block_index) =
+                                    capture.blocks.iter().position(|&block| block == il)
+                                {
+                                    let capture_packed =
+                                        (use_packed_g8 || use_packed_g16) && !use_matrix;
+                                    let capture_packed_rows = if use_packed_g8 {
+                                        prefill_attn_packed_g8_rows()
+                                    } else if use_packed_g16 {
+                                        prefill_attn_packed_g16_rows()
+                                    } else {
+                                        0
+                                    };
+                                    let capture_packed_qt = if use_packed_g8 {
+                                        prefill_attn_packed_g8_qt()
+                                    } else if use_packed_g16 {
+                                        prefill_attn_packed_g16_qt()
+                                    } else {
+                                        0
+                                    };
+                                    let capture_nwg = if use_packed_g8 {
+                                        prefill_attn_packed_g8_nwg()
+                                    } else if use_packed_g16 {
+                                        prefill_attn_packed_g16_nwg()
+                                    } else {
+                                        0
+                                    };
+                                    let capture_group = n_q / n_kv;
+                                    let rows: Vec<(usize, usize)> = capture
+                                        .positions
+                                        .iter()
+                                        .copied()
+                                        .enumerate()
+                                        .filter_map(|(capture_row, position)| {
+                                            let in_chunk = position >= chunk_start as usize
+                                                && position < chunk_start as usize + chunk_p;
+                                            in_chunk.then_some((capture_row, position))
+                                        })
+                                        .collect();
+                                    if !rows.is_empty() {
+                                        let enc = KernelEncoder::begin(&cmd_buf);
+                                        for (capture_row, position) in rows {
+                                            let seen_index =
+                                                block_index * capture.positions.len() + capture_row;
+                                            if capture.seen[seen_index] {
+                                                return Err(DFlashError::Metal(
+                                                    MetalError::BadShape {
+                                                        kernel: "attention_capture",
+                                                        detail: format!(
+                                                            "duplicate block={il} \
+                                                             position={position}"
+                                                        ),
+                                                    },
+                                                ));
+                                            }
+                                            let source_row = position - chunk_start as usize;
+                                            let q_dst = capture.q[block_index].view_subrange(
+                                                (capture_row * capture.q_dim) as u64,
+                                                vec![capture.q_dim as u64],
+                                            );
+                                            let o_dst = capture.o[block_index].view_subrange(
+                                                (capture_row * capture.q_dim) as u64,
+                                                vec![capture.q_dim as u64],
+                                            );
+                                            encode_copy_offset_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &q_normed_pack_p,
+                                                source_row * capture.q_dim,
+                                                &q_dst,
+                                                capture.q_dim,
+                                            )?;
+                                            encode_copy_offset_f32(
+                                                base.ctx,
+                                                &enc,
+                                                &attn_o_pack_p,
+                                                source_row * capture.q_dim,
+                                                &o_dst,
+                                                capture.q_dim,
+                                            )?;
+                                            let causal_length = position + 1;
+                                            let capture_fallback = !use_matrix && !capture_packed;
+                                            let fallback_nwg = capture_fallback.then(|| {
+                                                crate::metal::attn_v4_choose_nwg(
+                                                    causal_length,
+                                                    capture_group,
+                                                )
+                                            });
+                                            let fallback_tile_c = capture_fallback.then(|| {
+                                                crate::metal::attn_v4_choose_tile_c(
+                                                    causal_length,
+                                                    capture_group,
+                                                )
+                                            });
+                                            let fallback_group_tile = capture_fallback.then(|| {
+                                                crate::metal::attn_v4_choose_group_tile_prefill(
+                                                    causal_length,
+                                                    capture_group,
+                                                )
+                                            });
+                                            capture.provenance.push(AttentionCaptureProvenance {
+                                                position,
+                                                causal_length,
+                                                block: il,
+                                                kv_slot: ai,
+                                                path: if use_matrix {
+                                                    "matrix"
+                                                } else if capture_packed {
+                                                    "packed"
+                                                } else {
+                                                    "decode_fallback"
+                                                },
+                                                online_matrix: use_matrix
+                                                    && layer_scratch
+                                                        .scratch_plan
+                                                        .modes
+                                                        .attn_matrix_online,
+                                                query_tiled: use_matrix
+                                                    && layer_scratch.attn_matrix_query_rows
+                                                        < chunk_p as u32,
+                                                query_rows: use_matrix.then_some(
+                                                    layer_scratch.attn_matrix_query_rows as usize,
+                                                ),
+                                                packed_rows: capture_packed
+                                                    .then_some(capture_packed_rows),
+                                                packed_qt: capture_packed
+                                                    .then_some(capture_packed_qt),
+                                                nwg: capture_packed
+                                                    .then_some(capture_nwg)
+                                                    .or(fallback_nwg),
+                                                tile_c: fallback_tile_c,
+                                                group_tile: fallback_group_tile,
+                                                matrix_causal_skip: use_matrix
+                                                    && prefill_attn_matrix_causal_skip_enabled(),
+                                            });
+                                            capture.seen[seen_index] = true;
+                                        }
+                                        enc.end();
+                                    }
+                                }
                             }
 
                             let enc = KernelEncoder::begin(&cmd_buf);

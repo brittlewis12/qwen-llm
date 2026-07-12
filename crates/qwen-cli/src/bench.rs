@@ -16,6 +16,7 @@
 //! right ignored test by name". Per Jeff & Sanjay (and the v0.32
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
+mod attn_capture;
 #[path = "../source_identity.rs"]
 mod source_identity;
 
@@ -429,6 +430,8 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Capture sparse true-long prefill attention tensors; this is not a timing benchmark.
+    AttnCapture(attn_capture::AttnCaptureArgs),
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
@@ -2653,6 +2656,9 @@ fn main() -> Result<()> {
         validate_build_identity(qwen_build_identity_packet(), policy)?;
     }
     match args.cmd {
+        Cmd::AttnCapture(a) => {
+            attn_capture::run(a, serde_json::to_value(qwen_build_identity_packet())?)
+        }
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::VocabAudit(a) => run_vocab_audit(a),

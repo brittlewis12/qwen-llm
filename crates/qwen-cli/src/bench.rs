@@ -40,7 +40,7 @@ use qwen_llm::{
         encode_attn_decode_v4_reduce_only_f32, encode_attn_long_fixed_g8_c32_main_only_f32,
         encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
         encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
-        encode_fill_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
+        encode_copy_offset_f32, encode_fill_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
@@ -15457,15 +15457,9 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             let scrub_dst = MetalTensor::zeros_f32(&mctx, vec![32 * 1024 * 1024])?;
             let scrub = || -> Result<()> {
                 let cmd = mctx.queue.commandBuffer().context("static packet scrub")?;
-                let blit = BlitEncoder::begin(&cmd);
-                blit.copy_buffer(
-                    &scrub_src.buffer,
-                    0,
-                    &scrub_dst.buffer,
-                    0,
-                    128 * 1024 * 1024,
-                );
-                blit.end();
+                let enc = KernelEncoder::begin(&cmd);
+                encode_copy_offset_f32(&mctx, &enc, &scrub_src, 0, &scrub_dst, 32 * 1024 * 1024)?;
+                enc.end();
                 cmd.commit();
                 cmd.waitUntilCompleted();
                 if let Some(error) = cmd.error() {
@@ -15473,6 +15467,48 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
                 }
                 Ok(())
             };
+
+            const RAMP_REPS: usize = 512;
+            let ramp_cmd = mctx
+                .queue
+                .commandBuffer()
+                .context("static packet clock ramp")?;
+            let ramp_enc = KernelEncoder::begin(&ramp_cmd);
+            for _ in 0..RAMP_REPS {
+                encode_attn_decode_v4_main_only_f32(
+                    &mctx,
+                    &ramp_enc,
+                    &s.attn_q_normed,
+                    &s.kv_k[attn_idx_in_session],
+                    &s.kv_v[attn_idx_in_session],
+                    &s.attn_v4_o_partial,
+                    &s.attn_v4_ml_partial,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    n_pos,
+                    nwg,
+                    tile_c,
+                )?;
+                encode_attn_decode_v4_reduce_only_f32(
+                    &mctx,
+                    &ramp_enc,
+                    &s.attn_v4_o_partial,
+                    &s.attn_v4_ml_partial,
+                    &s.attn_o,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    nwg,
+                )?;
+            }
+            ramp_enc.end();
+            ramp_cmd.commit();
+            ramp_cmd.waitUntilCompleted();
+            if let Some(error) = ramp_cmd.error() {
+                return Err(anyhow!("static packet clock ramp failed: {error:?}"));
+            }
+            eprintln!("[attn-intra] common clock ramp reps={RAMP_REPS}");
 
             run_shape(false)?;
             run_shape(true)?;

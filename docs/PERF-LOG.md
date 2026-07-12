@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-12 - v0.575-v0.576 True-Long Mechanism Frontier
+
+Status: immutable real-model capture passes at 32K/131K; compressed KV earns one
+materially different body primitive, while sparse retention is killed on this fixture.
+
+- v0.575 adds a capture-only prefill seam with no ordinary-path dispatch, a strict
+  32K block-3 guard and 131K blocks-3/19/39 canonical contract, poisoned Q/O
+  buffers, frozen topology/provenance, full-file identities, and independent
+  Float64 mmap replay. The clean canonical artifact uses A3B Q4_K_M, F16 KV,
+  matrix-online causal attention, 64-query tiling, and no `QWEN_*` overrides.
+- The 32K guard replays six queries across all heads at minimum cosine
+  `0.9999999436`, maximum absolute error `3.936e-4`, and RMSE `2.608e-5`. The
+  131K artifact replays all 384 block/query rows and 6,144 heads at minimum cosine
+  `0.9999993066`, maximum absolute error `6.078e-3`, and RMSE `8.498e-5`.
+- Group-32 Q8_0 geometry at 272 bytes/head-row is only yellow for joint K/V, in
+  agreement with the prior same-body performance closures. A custom 16-value
+  symmetric group with F16 scales occupies 288 bytes/head-row and makes joint K/V
+  locally green at `0.5625x` aggregate F16 K+V bytes. Its limiting stratum has
+  p99 relative L2 `0.9986%`, worst-head relative L2 `1.532%`, p1 cosine
+  `0.9999544`, and p99 RMS-normalized maximum error `9.205%`.
+- The green compressed point is a fidelity promotion only. Byte-linear optimism
+  gives a `4.22 ms` body and about `20.2%` whole-token gain from the measured
+  `7.5/16.27 ms` body/token walls. The lossy 15% hurdle requires charged body plus
+  overhead `<=5.06 ms`; current ~26% occupancy makes byte scaling an upper bound.
+- Sparse retention fails its implementation gate on the limiting block-3 tail.
+  Exact-score group-shared top-50% is yellow at 131K p95 relative L2 `2.76%`;
+  chunk64 reaches `5.23%`. Per-head top-50% needs `88.7-92.7%` physical GQA union.
+  At 25%, even the per-head ideal reaches p95 relative L2 `5.59%` while retaining
+  `63.5-68.4%` physically. Recent and static tail-window retention fail widely.
+- Do not implement sparse retrieval for this fixture, same-body Q8, split-plane
+  Q8, DFlash split-4 duplication, or another `NWG/C/TGM` retune. Authorize one
+  fixed-shape dual F16/group16-scale-Q8 register-light primitive that changes
+  output ownership, reuses the current partial/reducer ABI, and has no production
+  cache writer or dispatch until the body clears its charged gate.
+
+Artifacts: `target/profiles/v0575-attn-capture/{guard32k-block3-clean,
+canonical131k-clean,quant-rowwise-full-v2.json,quant-group32-8-full.json,
+quant-group32-6-full.json,quant-group16-8-full.json,
+retention-block3-half-quarter.json}`. Adversarial reviews: `cx ask` sessions
+`019f5812-8bd8-7a40-a7d3-9291707a43c9`,
+`019f581a-bfee-7f12-b177-628a64c33e1d`,
+`019f5828-db5a-7ff1-af82-53283fc146ea`, and
+`019f5868-ead4-7190-a54f-38d3c9e6b9fc`.
+
 ## 2026-07-12 - v0.574 Routed-Tail Ownership Preflight Closes
 
 Status: close exact routed-prefill work elimination before implementation; current

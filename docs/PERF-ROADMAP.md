@@ -340,6 +340,15 @@ corroborating economics, not a formal non-regression gate. P/A2 remain unrun
 because paid-cost attribution cannot repair the prerequisite acceptance miss.
 Close this sequence with no policy, prompt, floor, split, profile, or anchor
 rescue. The narrow v0.541 Reva kernel result remains intact.
+v0.575 then lands the immutable true-long capture seam and clean 32K/131K
+artifacts. Independent Float64 replay clears every captured 131K query/head with
+minimum cosine `0.9999993066`. v0.576 uses the same artifact to separate mechanism
+classes. Joint K/V with symmetric 16-value Q8 groups is locally green at `0.5625x`
+F16 bytes, but this is fidelity evidence only; conventional same-body Q8 remains
+performance-closed. Sparse retention is killed for implementation on this fixture:
+the exact-score group-shared 50% oracle is already yellow, chunk64 is red, and the
+per-head ideal needs about 89-93% physical GQA union. Promote one materially
+different dual-format register-light body primitive, not another reader/layout.
 
 ## Force-Ranked BS=1 Opportunity Frontier
 
@@ -379,31 +388,36 @@ bounded partials interpolate between those failures. Reopen only for cooperative
 grid synchronization, certified large exact sparsity, or an ABI that removes a
 complete bank pass without rereads or serialization.
 
-1. **Joint 32K/131K Q/K/V capture**: one artifact prices a structurally new exact
-   attention body, a co-designed compressed reader, and sparse/retrieval retention.
-   The exact F16 byte floor suggests 10-11% whole-token headroom at 131K, but is not
-   a demonstrated candidate. Prior one-pass, partition, and Q8-reader failures keep
-   confidence medium-low and engineering cost very high.
-2. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
+1. **Dual-format register-light G8 attention primitive**: fixed A3B/head-dim-256
+   shape only, with one F16 control and one 16-value-group Q8 loader around the same
+   output-distributed body. Reuse production partition partials and H2 reduction;
+   do not add production dispatch or a cache writer. Belief is medium-low and cost
+   is medium-high, but the measured green compressed point is the only live
+   true-long mechanism with an optimistic whole-token ceiling above 15%.
+2. **True-decode-query capture for survivors**: capture the first generated query
+   plus a short consecutive generated window only after the primitive survives.
+   This prices query-distribution sensitivity and append cost; it must not delay the
+   fixed-shape topology falsifier or turn prefill-causal evidence into decode proof.
+3. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
    classes whose measured 282-296 GB/s rates trail the 474 GB/s anchor. First
    separate representation/dequant loss from narrow-dispatch occupancy that a new
    layout cannot fix. Confidence is low; whole-token prior is about 5%.
-3. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
+4. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
    green field. Survey only `32/64/128/256/full` attention-history reads, charge
    proposal/history/replay costs, and stop unless current composed economics clear
    the existing gate. The verifier-only `2.6x` ceiling is not a product projection.
-4. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
+5. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
    mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2 `~0.62`). v0.403 A3B
    `ctx8192` attributes 9.9%+7.5%=17.4% of decode to routed gate/up+down; ideal
    linear k8-to-k6 removal therefore gives only a derived 4.35% whole-decode ceiling
    before overhead or quality cost. Do not start a kernel before static-k replay.
-5. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
+6. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
    contract until a base asset qualifies. Current routed-Q5 evidence gives only
    2.2-2.4% total-decode headroom; do not generate assets from that ceiling.
-6. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
+7. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
    decode, but explicitly input-changing. Prefix caching remains a separate exact
    reuse specialization and does not rank for fresh serial prompts.
-7. **MoE speculative verification re-adjudication**: authorize only a bounded
+8. **MoE speculative verification re-adjudication**: authorize only a bounded
    replay if the current charged trajectory projects at least 5% whole-decode gain.
    A looser numerical resume contract does not create proposal acceptance or net
    economics; no implementation follows from tolerance alone.
@@ -425,16 +439,21 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Capture real 32K/131K Q/K/V once. Price exact-body headroom, compressed-reader
-   fidelity/economics, and sparse retention from the same immutable artifact.
-2. Run the two-class decode ABI oracle before generating a new weight asset. Stop
+1. Build one fixed-shape dual F16/group16-scale-Q8 register-light attention
+   primitive. Keep production dispatch, cache writing, general shapes, and a new
+   reducer out. Kill unless output ownership materially raises occupancy and the
+   compressed main plus existing reduction projects inside the `5.06 ms` budget.
+2. If the primitive survives, capture true decode queries and charge cache append
+   before any production integration or broader quality claim.
+3. Run the two-class decode ABI oracle before generating a new weight asset. Stop
    if narrow-dispatch occupancy, rather than representation, explains the deficit.
-3. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
+4. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
    implementation work until its charged whole-request gate clears.
-4. Keep prompt reduction in its labeled input-changing lane and MoE speculation
+5. Keep prompt reduction in its labeled input-changing lane and MoE speculation
    behind a current `>=5%` economic replay.
-5. Do not resume routed-tail work, model/quant quality work, mixed quant,
-   wide-prefill admission, broad prompt lookup, GDN implementation, or local retuning.
+6. Do not resume sparse retrieval for this fixture, same-body Q8, routed-tail work,
+   model/quant quality work, mixed quant, broad prompt lookup, GDN implementation,
+   or local retuning.
 
 ### Decisive gates
 
@@ -485,8 +504,11 @@ The bands are unvalidated priors until quality-harness v0 prices them.
    validation with a real quantized asset.
 4. **Adaptive MoE top-k**: `3-15%` MoE TTFT and `4-10%` short MoE decode;
    replay expert outputs offline before changing target execution.
-5. **Sparse/retrieval attention**: `10-35%` true-long TTFT and `15-35%`
-   decode near 131K; establish a captured Q/K/V retention frontier first.
+5. **Sparse/retrieval attention**: the canonical source fixture fails the captured
+   physical-retention frontier before implementation. Reopen only if a dissimilar
+   or true-decode artifact makes group-shared 50% locally green, sharply reduces
+   physical GQA union, or avoids full scoring without replacing byte savings with
+   random reads.
 
 Lossy branches need a quality corpus, hard-task guardrails, and a materially larger
 gain than exact local work. Apply approximate MoE or precision changes inside a

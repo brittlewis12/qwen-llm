@@ -7,10 +7,10 @@
 //!   name → pipeline-state cache (`Mutex<HashMap>`; contention is irrelevant
 //!   since pipeline creation only happens at first dispatch).
 //!
-//! * Persistent buffers via [`MetalTensor`]. One `MTLBuffer` per weight tensor;
-//!   loaded once at model setup, reused for every forward step. Allocation
-//!   uses `StorageModeShared` so reads/writes go straight to unified memory
-//!   with no host↔device copies.
+//! * Persistent buffers via [`MetalTensor`]. Weights use either one copied
+//!   `MTLBuffer` per tensor or an explicitly retained GGUF-backed buffer view.
+//!   Both use `StorageModeShared` so reads/writes go straight to unified memory
+//!   with no host↔device copies after setup.
 //!
 //! * **Encode-only kernel API**: every `encode_*` function takes a
 //!   `&KernelEncoder` (a thin wrapper around `MTLComputeCommandEncoder`) plus
@@ -28,6 +28,8 @@
 //!   `MTL4CommandBuffer` (already exposed in `objc2-metal` 0.3.2) for lower
 //!   per-step encoding overhead; design ICB.
 
+use block2::RcBlock;
+use memmap2::Mmap;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSRange, NSString, NSURL};
@@ -41,6 +43,8 @@ use objc2_metal::{
 use parking_lot::Mutex;
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -98,6 +102,7 @@ struct TaskVmInfo {
 
 unsafe extern "C" {
     static mach_task_self_: u32;
+    fn getpagesize() -> i32;
     fn task_info(
         target_task: u32,
         flavor: i32,
@@ -185,6 +190,8 @@ pub enum MetalError {
     TensorSizeOverflow { shape: Vec<u64>, elem_bytes: usize },
     #[error("tensor byte size overflow: shape={shape:?}, dtype={dtype:?} does not fit")]
     TensorByteSizeOverflow { shape: Vec<u64>, dtype: GgmlType },
+    #[error("GGUF no-copy backing: {0}")]
+    GgufNoCopy(String),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -805,6 +812,75 @@ impl MetalContext {
         Ok(buf)
     }
 
+    pub(crate) fn gguf_no_copy_backing(
+        &self,
+        mmap: Arc<Mmap>,
+        shard_idx: usize,
+        required_alignment: usize,
+    ) -> Result<MetalGgufBacking, MetalError> {
+        self.gguf_no_copy_backing_with_observer(
+            mmap,
+            shard_idx,
+            required_alignment,
+            |_pointer, _length| {},
+        )
+    }
+
+    fn gguf_no_copy_backing_with_observer<F>(
+        &self,
+        mmap: Arc<Mmap>,
+        shard_idx: usize,
+        required_alignment: usize,
+        observer: F,
+    ) -> Result<MetalGgufBacking, MetalError>
+    where
+        F: Fn(NonNull<c_void>, usize) + Send + Sync + 'static,
+    {
+        let page_size = host_page_size()?;
+        let mapped_len = mmap.len();
+        let geometry =
+            GgufBackingGeometry::new(shard_idx, mapped_len, page_size, required_alignment)?;
+        let ptr = NonNull::new(mmap.as_ptr() as *mut c_void)
+            .ok_or_else(|| MetalError::GgufNoCopy("mmap pointer is null".to_string()))?;
+        if ptr.as_ptr() as usize % page_size != 0 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "mmap pointer {:p} is not aligned to host page size {page_size}",
+                ptr.as_ptr()
+            )));
+        }
+        let max_len = self.device.maxBufferLength();
+        if geometry.exposed_len > max_len {
+            return Err(MetalError::GgufNoCopy(format!(
+                "page-aligned length {} exceeds Metal maxBufferLength {max_len}",
+                geometry.exposed_len
+            )));
+        }
+
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        assert_send_sync(&mmap);
+        let keepalive = Arc::clone(&mmap);
+        let deallocator: RcBlock<dyn Fn(NonNull<c_void>, usize)> =
+            RcBlock::new(move |pointer: NonNull<c_void>, length: usize| {
+                observer(pointer, length);
+                let _ = &keepalive;
+            });
+        // SAFETY: `ptr` starts a single read-only mmap VM region, both pointer
+        // and exposed length are host-page aligned, exposed_len is within the
+        // mapping and Metal's per-buffer limit, and the copied deallocator
+        // block retains the Arc<Mmap> until the MTLBuffer is destroyed.
+        let buffer = unsafe {
+            self.device
+                .newBufferWithBytesNoCopy_length_options_deallocator(
+                    ptr,
+                    geometry.exposed_len,
+                    MTLResourceOptions::StorageModeShared,
+                    Some(&deallocator),
+                )
+        }
+        .ok_or(MetalError::NoBuffer(geometry.exposed_len))?;
+        Ok(MetalGgufBacking { buffer, geometry })
+    }
+
     /// Allocate an uninitialized output buffer of `n_bytes`.
     pub fn buffer_uninit(&self, n_bytes: usize) -> Result<Buffer, MetalError> {
         let n = n_bytes.max(1);
@@ -1010,9 +1086,177 @@ fn load_library(device: &Device, bytes: &[u8]) -> Result<Library, MetalError> {
     Ok(lib)
 }
 
+fn host_page_size() -> Result<usize, MetalError> {
+    // SAFETY: getpagesize has no preconditions and returns a process constant.
+    let page_size = unsafe { getpagesize() };
+    usize::try_from(page_size)
+        .ok()
+        .filter(|size| size.is_power_of_two())
+        .ok_or_else(|| MetalError::GgufNoCopy(format!("invalid host page size {page_size}")))
+}
+
 // ===========================================================================
 // MetalTensor — typed buffer view
 // ===========================================================================
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GgufBackingEligibility {
+    Eligible,
+    FinalPartialPage,
+    WrongShard,
+    BindingMisalignment,
+    OutsideBacking,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GgufBackingGeometry {
+    shard_idx: usize,
+    mapped_len: usize,
+    exposed_len: usize,
+    page_size: usize,
+    required_alignment: usize,
+}
+
+impl GgufBackingGeometry {
+    pub(crate) fn new(
+        shard_idx: usize,
+        mapped_len: usize,
+        page_size: usize,
+        required_alignment: usize,
+    ) -> Result<Self, MetalError> {
+        if !page_size.is_power_of_two() {
+            return Err(MetalError::GgufNoCopy(format!(
+                "host page size {page_size} is not a power of two"
+            )));
+        }
+        if !required_alignment.is_power_of_two() {
+            return Err(MetalError::GgufNoCopy(format!(
+                "required binding alignment {required_alignment} is not a power of two"
+            )));
+        }
+        let exposed_len = mapped_len / page_size * page_size;
+        if exposed_len == 0 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "mapped length {mapped_len} exposes no complete {page_size}-byte page"
+            )));
+        }
+        Ok(Self {
+            shard_idx,
+            mapped_len,
+            exposed_len,
+            page_size,
+            required_alignment,
+        })
+    }
+
+    pub(crate) fn mapped_len(self) -> usize {
+        self.mapped_len
+    }
+
+    pub(crate) fn exposed_len(self) -> usize {
+        self.exposed_len
+    }
+
+    pub(crate) fn page_size(self) -> usize {
+        self.page_size
+    }
+
+    pub(crate) fn required_alignment(self) -> usize {
+        self.required_alignment
+    }
+
+    pub(crate) fn classify(self, desc: &TensorDesc) -> Result<GgufBackingEligibility, MetalError> {
+        classify_gguf_backing(desc, self)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct MetalGgufBacking {
+    buffer: Buffer,
+    geometry: GgufBackingGeometry,
+}
+
+impl MetalGgufBacking {
+    pub(crate) fn mapped_len(&self) -> usize {
+        self.geometry.mapped_len()
+    }
+
+    pub(crate) fn exposed_len(&self) -> usize {
+        self.geometry.exposed_len()
+    }
+
+    pub(crate) fn page_size(&self) -> usize {
+        self.geometry.page_size()
+    }
+
+    pub(crate) fn required_alignment(&self) -> usize {
+        self.geometry.required_alignment()
+    }
+
+    pub(crate) fn classify(&self, desc: &TensorDesc) -> Result<GgufBackingEligibility, MetalError> {
+        self.geometry.classify(desc)
+    }
+
+    pub(crate) fn tensor(
+        &self,
+        desc: &TensorDesc,
+    ) -> Result<(GgufBackingEligibility, Option<MetalTensor>), MetalError> {
+        let eligibility = self.classify(desc)?;
+        if eligibility != GgufBackingEligibility::Eligible {
+            return Ok((eligibility, None));
+        }
+        Ok((
+            eligibility,
+            Some(MetalTensor {
+                buffer: self.buffer.clone(),
+                offset: desc.data_offset,
+                shape: desc.shape.clone(),
+                dtype: desc.dtype,
+            }),
+        ))
+    }
+}
+
+fn classify_gguf_backing(
+    desc: &TensorDesc,
+    geometry: GgufBackingGeometry,
+) -> Result<GgufBackingEligibility, MetalError> {
+    let (_, expected) = checked_ggml_shape_bytes(&desc.shape, desc.dtype)?;
+    let declared = usize::try_from(desc.n_bytes).map_err(|_| {
+        MetalError::GgufNoCopy(format!(
+            "tensor {:?} n_bytes {} does not fit usize",
+            desc.name, desc.n_bytes
+        ))
+    })?;
+    if expected != declared {
+        return Err(MetalError::GgufNoCopy(format!(
+            "tensor {:?} shape/dtype expects {expected} bytes, descriptor declares {declared}",
+            desc.name
+        )));
+    }
+    if desc.shard_idx != geometry.shard_idx {
+        return Ok(GgufBackingEligibility::WrongShard);
+    }
+    let start = usize::try_from(desc.data_offset).map_err(|_| {
+        MetalError::GgufNoCopy(format!(
+            "tensor {:?} offset {} does not fit usize",
+            desc.name, desc.data_offset
+        ))
+    })?;
+    let end = start.checked_add(declared).ok_or_else(|| {
+        MetalError::GgufNoCopy(format!("tensor {:?} range overflows usize", desc.name))
+    })?;
+    if start % geometry.required_alignment != 0 {
+        return Ok(GgufBackingEligibility::BindingMisalignment);
+    }
+    if end > geometry.mapped_len {
+        return Ok(GgufBackingEligibility::OutsideBacking);
+    }
+    if end > geometry.exposed_len {
+        return Ok(GgufBackingEligibility::FinalPartialPage);
+    }
+    Ok(GgufBackingEligibility::Eligible)
+}
 
 /// A typed, shape-aware view into an `MTLBuffer`. The buffer is owned via
 /// `Retained` (cloned into multiple `MetalTensor`s if you want sub-views;
@@ -1021,9 +1265,8 @@ fn load_library(device: &Device, bytes: &[u8]) -> Result<Library, MetalError> {
 /// `dtype` is the on-disk ggml type for weight tensors (Q4_K, Q6_K, F32,
 /// etc.); for activation/scratch buffers it's typically `F32`.
 ///
-/// `offset` is in bytes from the buffer base. v1 always sets `offset=0`
-/// (one buffer per tensor); v2 may pack multiple tensors into one arena
-/// buffer with non-zero offsets.
+/// `offset` is in bytes from the buffer base. Copied tensors use zero; retained
+/// GGUF views and packed arenas use nonzero offsets.
 #[derive(Clone)]
 pub struct MetalTensor {
     pub buffer: Buffer,
@@ -17978,6 +18221,246 @@ pub fn bench_q4_k_mat_mat_chained(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn f32_desc(name: &str, shard_idx: usize, data_offset: u64, elements: u64) -> TensorDesc {
+        TensorDesc {
+            name: name.to_string(),
+            shape: vec![elements],
+            dtype: GgmlType::F32,
+            shard_idx,
+            data_offset,
+            n_bytes: elements * 4,
+        }
+    }
+
+    #[test]
+    fn gguf_backing_classification_is_typed_and_fail_closed() {
+        let geometry = GgufBackingGeometry::new(0, 160, 64, 32).unwrap();
+        assert_eq!(geometry.mapped_len(), 160);
+        assert_eq!(geometry.exposed_len(), 128);
+        assert_eq!(geometry.page_size(), 64);
+        assert_eq!(geometry.required_alignment(), 32);
+        assert_eq!(
+            geometry.classify(&f32_desc("ok", 0, 32, 8)).unwrap(),
+            GgufBackingEligibility::Eligible
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("tail", 0, 96, 9)).unwrap(),
+            GgufBackingEligibility::FinalPartialPage
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("shard", 1, 32, 8)).unwrap(),
+            GgufBackingEligibility::WrongShard
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("align", 0, 36, 8)).unwrap(),
+            GgufBackingEligibility::BindingMisalignment
+        );
+        assert_eq!(
+            geometry.classify(&f32_desc("outside", 0, 160, 8)).unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+
+        let mut malformed = f32_desc("malformed", 0, 32, 8);
+        malformed.n_bytes -= 1;
+        assert!(geometry.classify(&malformed).is_err());
+        assert!(GgufBackingGeometry::new(0, 160, 0, 32).is_err());
+        assert!(GgufBackingGeometry::new(0, 160, 64, 0).is_err());
+        assert!(GgufBackingGeometry::new(0, 32, 64, 32).is_err());
+    }
+
+    #[test]
+    fn read_only_mmap_backing_blits_and_outlives_rust_views() {
+        use std::io::Write;
+        use std::sync::atomic::AtomicUsize;
+
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        let page_size = host_page_size().expect("host page size");
+        let mut bytes = vec![0u8; page_size * 2];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = index.wrapping_mul(17) as u8;
+        }
+        let n_in = 32usize;
+        let n_out = 16usize;
+        let weights: Vec<f32> = (0..n_in * n_out)
+            .map(|index| ((index % 23) as f32 - 11.0) * 0.01)
+            .collect();
+        bytes[32..32 + weights.len() * 4].copy_from_slice(bytemuck::cast_slice(&weights));
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "qwen-metal-no-copy-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::File::create(&path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .expect("write mmap fixture");
+
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let callback_mismatches = Arc::new(AtomicUsize::new(0));
+        let weak = objc2::rc::autoreleasepool(|_| {
+            let file = std::fs::File::open(&path).expect("open mmap fixture");
+            // SAFETY: the test retains the immutable file and does not mutate
+            // or truncate it while the mapping exists.
+            let mmap = Arc::new(unsafe { Mmap::map(&file).expect("map fixture") });
+            let weak = Arc::downgrade(&mmap);
+            let expected_pointer = mmap.as_ptr() as usize;
+            let expected_length = bytes.len();
+            let calls = Arc::clone(&callback_calls);
+            let mismatches = Arc::clone(&callback_mismatches);
+            let backing = ctx
+                .gguf_no_copy_backing_with_observer(
+                    Arc::clone(&mmap),
+                    0,
+                    32,
+                    move |pointer, length| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        if pointer.as_ptr() as usize != expected_pointer
+                            || length != expected_length
+                        {
+                            mismatches.fetch_add(1, Ordering::Relaxed);
+                        }
+                    },
+                )
+                .expect("read-only no-copy backing");
+            assert_eq!(backing.page_size(), page_size);
+            assert_eq!(backing.mapped_len(), bytes.len());
+            assert_eq!(backing.exposed_len(), bytes.len());
+            assert_eq!(
+                backing.buffer.contents().as_ptr(),
+                mmap.as_ptr().cast_mut().cast::<c_void>()
+            );
+            drop(mmap);
+            assert!(weak.upgrade().is_some());
+
+            let desc = TensorDesc {
+                name: "view".to_string(),
+                shape: vec![n_in as u64, n_out as u64],
+                dtype: GgmlType::F32,
+                shard_idx: 0,
+                data_offset: 32,
+                n_bytes: (weights.len() * 4) as u64,
+            };
+            let (eligibility, tensor) = backing.tensor(&desc).expect("tensor view");
+            assert_eq!(eligibility, GgufBackingEligibility::Eligible);
+            let tensor = tensor.expect("eligible tensor");
+            assert_eq!(tensor.offset, 32);
+            drop(backing);
+            assert!(weak.upgrade().is_some());
+
+            let dst = MetalTensor::zeros_f32(&ctx, vec![16]).expect("destination");
+            let command = ctx.queue.commandBuffer().expect("command buffer");
+            let blit = BlitEncoder::begin(&command);
+            blit.copy_buffer(&tensor.buffer, tensor.offset, &dst.buffer, dst.offset, 64);
+            blit.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "no-copy blit command failed");
+            let got = unsafe {
+                std::slice::from_raw_parts(dst.buffer.contents().as_ptr().cast::<u8>(), 64)
+            };
+            assert_eq!(got, &bytes[32..96]);
+
+            let x: Vec<f32> = (0..n_in).map(|index| index as f32 * 0.02 - 0.3).collect();
+            let expected = crate::forward::mat_vec_pub(&weights, n_in, n_out, &x);
+            let x = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("input");
+            let y = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("output");
+            let command = ctx.queue.commandBuffer().expect("matvec command");
+            let encoder = KernelEncoder::begin(&command);
+            encode_mat_vec_f32(&ctx, &encoder, &tensor, &x, &y, n_in, n_out)
+                .expect("nonzero-offset matvec");
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "no-copy matvec command failed");
+            let got = unsafe {
+                std::slice::from_raw_parts(y.buffer.contents().as_ptr().cast::<f32>(), n_out)
+            };
+            let max_abs = got
+                .iter()
+                .zip(expected.iter())
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_abs < 1e-5, "nonzero-offset matvec max error {max_abs}");
+            weak
+        });
+        assert!(
+            weak.upgrade().is_none(),
+            "MTLBuffer deallocator must release its Arc<Mmap> capture"
+        );
+        assert_eq!(callback_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(callback_mismatches.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires QWEN_GGUF_NO_COPY_MODEL local single-shard fixture"]
+    fn gguf_no_copy_real_model_coverage_probe() {
+        let path = std::env::var("QWEN_GGUF_NO_COPY_MODEL")
+            .expect("set QWEN_GGUF_NO_COPY_MODEL to a local GGUF");
+        let gguf = crate::gguf::GgufFile::open(&path).expect("open GGUF");
+        assert_eq!(gguf.shard_count(), 1, "coverage probe requires one shard");
+        let page_size = host_page_size().expect("host page size");
+        let geometry = GgufBackingGeometry::new(0, gguf.total_mapped_len(), page_size, 32)
+            .expect("GGUF backing geometry");
+        let mut eligible_bytes = 0u64;
+        let mut crossing = Vec::new();
+        let mut dtype_geometry = std::collections::BTreeMap::new();
+        for desc in &gguf.tensors {
+            let alignment = desc.data_offset & desc.data_offset.wrapping_neg();
+            let entry = dtype_geometry
+                .entry(format!("{:?}", desc.dtype))
+                .or_insert((0usize, 0u64, u64::MAX));
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(desc.n_bytes);
+            entry.2 = entry.2.min(alignment);
+            match geometry.classify(desc).expect("classify tensor") {
+                GgufBackingEligibility::Eligible => {
+                    eligible_bytes = eligible_bytes.saturating_add(desc.n_bytes);
+                }
+                GgufBackingEligibility::FinalPartialPage => {
+                    crossing.push((desc.name.clone(), desc.n_bytes));
+                }
+                other => panic!("unexpected ineligibility for {}: {other:?}", desc.name),
+            }
+        }
+        let total_bytes: u64 = gguf.tensors.iter().map(|desc| desc.n_bytes).sum();
+        let coverage = eligible_bytes as f64 / total_bytes.max(1) as f64;
+        eprintln!(
+            concat!(
+                "[gguf-no-copy-coverage] model={} mapped={} exposed={} page={} ",
+                "suffix={} tensors={} total={} eligible={} coverage={:.8} crossing={:?}"
+            ),
+            path,
+            geometry.mapped_len(),
+            geometry.exposed_len(),
+            geometry.page_size(),
+            geometry.mapped_len() - geometry.exposed_len(),
+            gguf.tensors.len(),
+            total_bytes,
+            eligible_bytes,
+            coverage,
+            crossing,
+        );
+        eprintln!("[gguf-no-copy-dtypes] {dtype_geometry:?}");
+        assert!(
+            coverage >= 0.99,
+            "no-copy coverage {coverage:.6} is below 99%"
+        );
+    }
 
     fn memory_signals(
         recommended_max_bytes: u64,

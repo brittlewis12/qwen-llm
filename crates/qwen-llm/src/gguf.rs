@@ -27,6 +27,7 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// "GGUF" in little-endian (only LE is supported; see [`open`] preconditions).
 const GGUF_MAGIC: u32 = 0x46554747;
@@ -69,7 +70,7 @@ impl From<anyhow::Error> for GgufError {
 #[allow(dead_code)] // Debug is used by tests via expect_err
 pub struct GgufShard {
     pub path: PathBuf,
-    pub mmap: Mmap,
+    pub(crate) mmap: Arc<Mmap>,
     /// Absolute byte offset of the start of the tensor-data section.
     /// `TensorDesc.data_offset` values for this shard include this.
     pub tensor_data_start: u64,
@@ -198,6 +199,12 @@ impl GgufFile {
 
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    pub(crate) fn retained_shard_mmap(&self, shard_idx: usize) -> Option<Arc<Mmap>> {
+        self.shards
+            .get(shard_idx)
+            .map(|shard| Arc::clone(&shard.mmap))
     }
 
     /// Slice into the mmap for `desc`. Slice lifetime is tied to `&self`.
@@ -390,7 +397,7 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
     // concurrently truncated underneath us we'll SIGBUS on access — that is an
     // OS-level signal we cannot prevent in safe Rust without copying, and
     // would be the user racing themselves.
-    let mmap = unsafe { Mmap::map(&file)? };
+    let mmap = Arc::new(unsafe { Mmap::map(&file)? });
 
     // Validate magic against the mmap directly. The mmap is the *only* path
     // that the rest of this function trusts; the streaming parser is given a
@@ -1490,6 +1497,9 @@ mod tests {
         assert_eq!(g.tensors[0].name, "t");
         assert_eq!(g.tensors[0].shard_idx, 0);
         assert_eq!(g.shard_count(), 1);
+        let retained = g.retained_shard_mmap(0).expect("retained shard");
+        drop(g);
+        assert_eq!(&retained[..4], &GGUF_MAGIC.to_le_bytes());
         let _ = std::fs::remove_file(&path);
     }
 

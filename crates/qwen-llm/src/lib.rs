@@ -17,8 +17,8 @@
 //!                   GDN/attn dims, tensor name conventions.
 //! * [`tensor`]    — backend-agnostic tensor descriptor for GGUF-backed
 //!                   tensors (shard/offset/shape/type).
-//! * Metal weights are then copied once from the GGUF mmap into persistent
-//!   `StorageModeShared` `MTLBuffer`s at model load.
+//! * Metal weights use persistent `StorageModeShared` `MTLBuffer`s. Load policy
+//!   may copy a tensor or retain a read-only view over its GGUF mapping.
 //! * [`tokenizer`] — Qwen2 byte-level BPE, vocab 248,320, embedded tokens
 //!                   read from GGUF metadata.
 //!

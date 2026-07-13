@@ -12992,6 +12992,91 @@ pub fn encode_attn_stage_floor_g16(
     Ok(())
 }
 
+pub fn encode_attn_matrix_body_g16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+) -> Result<(), MetalError> {
+    const N_POS: usize = 32768;
+    const N_Q: usize = 16;
+    const N_KV: usize = 2;
+    const GROUP: usize = 8;
+    const HD: usize = 256;
+    const NWG: usize = 256;
+    const ROW_BYTES: usize = 288;
+    let kernel = "attn_matrix_body_g16";
+    let kv_bytes = N_POS * N_KV * ROW_BYTES;
+    let partial_o = N_KV * NWG * GROUP * HD;
+    let partial_ml = N_KV * NWG * GROUP * 2;
+    if q.dtype != GgmlType::F32
+        || q.n_elements() as usize != N_Q * HD
+        || k_cache.dtype != GgmlType::F16
+        || v_cache.dtype != GgmlType::F16
+        || k_cache.n_bytes() as usize != kv_bytes
+        || v_cache.n_bytes() as usize != kv_bytes
+        || o_partial.dtype != GgmlType::F32
+        || ml_partial.dtype != GgmlType::F32
+        || o_partial.n_elements() as usize != partial_o
+        || ml_partial.n_elements() as usize != partial_ml
+    {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "requires exact 32K G8/D256 buffers; got q={} k/v={}/{} o/ml={}/{}",
+                q.n_elements(),
+                k_cache.n_bytes(),
+                v_cache.n_bytes(),
+                o_partial.n_elements(),
+                ml_partial.n_elements()
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_pos: u32,
+        n_kv_heads: u32,
+        n_partitions: u32,
+        rows_per_partition: u32,
+        scale: f32,
+    }
+    enc.set_pipeline(&ctx.pipeline("kernel_attn_matrix_body_g16")?);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_pos: N_POS as u32,
+            n_kv_heads: N_KV as u32,
+            n_partitions: NWG as u32,
+            rows_per_partition: (N_POS / NWG) as u32,
+            scale: (1.0 / (HD as f32).sqrt()) * std::f32::consts::LOG2_E,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, o_partial);
+    enc.set_tensor(5, ml_partial);
+    enc.set_threadgroup_memory(0, GROUP * HD * std::mem::size_of::<u16>());
+    enc.set_threadgroup_memory(1, 12 * 1024);
+    enc.dispatch(
+        MTLSize {
+            width: N_KV,
+            height: 1,
+            depth: NWG,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Synthetic head-major F16 KV sidecar for v4 long-context attention proofing.
 ///
 /// This intentionally supports only the current long MoE subgroup shapes:

@@ -557,15 +557,18 @@ impl MetalMtpHead {
     }
 }
 
-/// Per-sequence MTP state: dedicated KV ring for the single MTP attn
+/// Per-sequence MTP state: dedicated KV storage for the single MTP attn
 /// layer + scratch buffers for the per-step forward. Independent of the
 /// base `MetalSession` so the MTP draft can run without disturbing base
 /// session arena.
 pub struct MetalMtpSession {
-    /// MTP attn KV ring. Single layer (the MTP block's own attn).
-    /// F16 storage matching the base attn KV convention.
+    /// MTP attn KV storage. Single layer (the MTP block's own attn).
+    /// F16 storage matching the base attn KV convention. Writes and
+    /// `kv_n_pos` use absolute positions; `kv_start_pos` is a logical read
+    /// offset frozen for the current draft chain.
     pub kv_k: MetalTensor,
     pub kv_v: MetalTensor,
+    pub kv_start_pos: usize,
     pub kv_n_pos: usize,
     pub kv_capacity: usize,
 
@@ -668,6 +671,7 @@ impl MetalMtpSession {
         Ok(Self {
             kv_k: MetalTensor::zeros_f16(ctx, vec![kv_cache_elems])?,
             kv_v: MetalTensor::zeros_f16(ctx, vec![kv_cache_elems])?,
+            kv_start_pos: 0,
             kv_n_pos: 0,
             kv_capacity,
             e: MetalTensor::zeros_f32(ctx, vec![h])?,
@@ -786,6 +790,10 @@ pub enum MtpHistoryMode {
     Cycle,
 }
 
+fn committed_history_start(frontier: usize, window: Option<usize>) -> usize {
+    window.map_or(0, |window| frontier.saturating_sub(window))
+}
+
 #[derive(Clone, Debug)]
 pub struct MtpRankRow {
     pub step: usize,
@@ -861,6 +869,7 @@ pub struct SpeculativeDecoder<'a> {
     recursive_hidden_variant: MtpRecursiveHiddenVariant,
     base_hidden_variant: MtpBaseHiddenVariant,
     history_mode: MtpHistoryMode,
+    committed_history_window: Option<usize>,
 }
 
 impl<'a> SpeculativeDecoder<'a> {
@@ -879,6 +888,7 @@ impl<'a> SpeculativeDecoder<'a> {
             recursive_hidden_variant: MtpRecursiveHiddenVariant::PreNorm,
             base_hidden_variant: MtpBaseHiddenVariant::PreNorm,
             history_mode: MtpHistoryMode::Committed,
+            committed_history_window: None,
         }
     }
 
@@ -957,6 +967,29 @@ impl<'a> SpeculativeDecoder<'a> {
 
     pub fn set_history_mode(&mut self, mode: MtpHistoryMode) {
         self.history_mode = mode;
+        if mode != MtpHistoryMode::Committed {
+            self.committed_history_window = None;
+            self.mtp_session.kv_start_pos = 0;
+        }
+    }
+
+    pub fn set_committed_history_window(&mut self, window: usize) {
+        assert!(window > 0, "MTP committed-history window must be nonzero");
+        assert_eq!(
+            self.history_mode,
+            MtpHistoryMode::Committed,
+            "MTP history window requires committed history"
+        );
+        self.committed_history_window = Some(window);
+        self.refresh_committed_history_start();
+    }
+
+    fn refresh_committed_history_start(&mut self) {
+        self.mtp_session.kv_start_pos = if self.history_mode == MtpHistoryMode::Committed {
+            committed_history_start(self.mtp_session.kv_n_pos, self.committed_history_window)
+        } else {
+            0
+        };
     }
 
     fn wants_base_post_norm(&self) -> bool {
@@ -1954,9 +1987,20 @@ impl<'a> SpeculativeDecoder<'a> {
         )?;
         // KV n_pos counter is bumped in draft_inner after waitUntilCompleted.
 
-        // (8) Fused attention decode against the prefix [0..=position].
-        // n_pos is `position + 1` because slot `position` was just appended.
-        let n_pos = position as usize + 1;
+        // (8) Fused attention decode against the frozen logical view. Writes and
+        // RoPE retain absolute positions; only the K/V read view is shifted.
+        let kv_start_pos = s.kv_start_pos;
+        let absolute_end = position as usize + 1;
+        debug_assert!(kv_start_pos <= position as usize);
+        let n_pos = absolute_end - kv_start_pos;
+        let kv_view_elems = n_pos * kv_dim;
+        let kv_elem_offset = kv_start_pos * kv_dim;
+        let kv_k = s
+            .kv_k
+            .view_subrange(kv_elem_offset as u64, vec![kv_view_elems as u64]);
+        let kv_v = s
+            .kv_v
+            .view_subrange(kv_elem_offset as u64, vec![kv_view_elems as u64]);
         const V4_HEAD_DIM: usize = 256;
         const V4_GROUP: usize = 6;
         let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
@@ -1967,8 +2011,8 @@ impl<'a> SpeculativeDecoder<'a> {
                 ctx,
                 enc,
                 &s.attn_q_normed,
-                &s.kv_k,
-                &s.kv_v,
+                &kv_k,
+                &kv_v,
                 &s.attn_v4_o_partial,
                 &s.attn_v4_ml_partial,
                 &s.attn_o,
@@ -1984,8 +2028,8 @@ impl<'a> SpeculativeDecoder<'a> {
                 ctx,
                 enc,
                 &s.attn_q_normed,
-                &s.kv_k,
-                &s.kv_v,
+                &kv_k,
+                &kv_v,
                 &s.attn_o,
                 n_q,
                 n_kv,
@@ -2355,6 +2399,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 "after prefill: mtp_kv should have n-1 entries"
             );
         }
+        self.refresh_committed_history_start();
 
         let last_layer = [(self.base.model.blocks.len() - 1) as u32];
         let mut emit_tok = next_bootstrap_tok;
@@ -2371,6 +2416,7 @@ impl<'a> SpeculativeDecoder<'a> {
             let carry_tok = emit_tok;
             let draft_start_position = if self.uses_cycle_mtp_history() {
                 self.mtp_session.kv_n_pos = 0;
+                self.mtp_session.kv_start_pos = 0;
                 0
             } else {
                 processed_pos
@@ -2533,8 +2579,13 @@ impl<'a> SpeculativeDecoder<'a> {
                     break;
                 }
             }
+            stats.record_accepted_prefix(n_accepted);
 
-            let n_keep = (1 + n_accepted) as u32;
+            // The final emitted token remains pending when this packet reaches
+            // EOS or the output limit. Do not retain its target transition or
+            // bridge it into canonical MTP state.
+            let canonical_accepted = n_accepted.saturating_sub(usize::from(stop_now));
+            let n_keep = (1 + canonical_accepted) as u32;
             if n_keep < physical_verify_n as u32 {
                 let t_restore = std::time::Instant::now();
                 encode_restore_after_partial_accept_inner(
@@ -2552,7 +2603,7 @@ impl<'a> SpeculativeDecoder<'a> {
             if self.uses_cycle_mtp_history() {
                 self.mtp_session.kv_n_pos = 0;
             } else if self.uses_draft_accepted_mtp_history() {
-                self.mtp_session.kv_n_pos = processed_pos as usize + 1 + n_accepted;
+                self.mtp_session.kv_n_pos = processed_pos as usize + 1 + canonical_accepted;
             } else {
                 // Recursive draft slots beyond the first are approximate. Rebuild
                 // the canonical MTP KV for the accepted prefix from captured base
@@ -2561,7 +2612,7 @@ impl<'a> SpeculativeDecoder<'a> {
                 // Co-indexed dispatch across two Metal scratch slots and the
                 // drafts[] array; `j` is the slot id, not just an index.
                 #[allow(clippy::needless_range_loop)]
-                for j in 0..n_accepted {
+                for j in 0..canonical_accepted {
                     let prev_hidden = verify_scratch.hidden_capture_n_slot(j as u32);
                     let bridge_position = processed_pos + 1 + j as u32;
                     if self.wants_base_post_norm() {
@@ -2573,12 +2624,21 @@ impl<'a> SpeculativeDecoder<'a> {
                     stats.mtp_calls += 1;
                 }
             }
+            self.refresh_committed_history_start();
+            debug_assert_eq!(
+                self.mtp_session.kv_n_pos,
+                if self.uses_cycle_mtp_history() {
+                    0
+                } else {
+                    processed_pos as usize + 1 + canonical_accepted
+                }
+            );
 
-            let next_hidden = verify_scratch.hidden_capture_n_slot(n_accepted as u32);
+            let next_hidden = verify_scratch.hidden_capture_n_slot(canonical_accepted as u32);
             self.write_base_hidden_variant(&next_hidden, &hidden_cur)?;
             stats.bridge_ms += t_bridge.elapsed().as_secs_f64() * 1e3;
 
-            processed_pos += 1 + n_accepted as u32;
+            processed_pos += 1 + canonical_accepted as u32;
             emit_tok = verify_argmax[n_accepted];
             stats.steps += 1;
 
@@ -2782,6 +2842,7 @@ impl<'a> SpeculativeDecoder<'a> {
                     break;
                 }
             }
+            stats.record_accepted_prefix(n_accepted);
 
             let n_keep = (1 + n_accepted) as u32;
             if n_keep < n_eff {
@@ -3044,6 +3105,7 @@ impl<'a> SpeculativeDecoder<'a> {
                     break;
                 }
             }
+            stats.record_accepted_prefix(n_accepted);
 
             let n_keep = if stop_now {
                 n_accepted as u32
@@ -3104,6 +3166,9 @@ pub struct SpecStats {
     /// `steps`; for experimental MTP-N it is `steps * N` minus any terminal
     /// short-circuit on the last outer step.
     pub drafts_attempted: u32,
+    /// Number of verifier steps by accepted-prefix length. Index `i` counts
+    /// steps that accepted exactly `i` drafts.
+    pub accepted_prefix_counts: [u32; 16],
     /// Total base forward calls (prompt prefill + decode loop).
     pub base_forward_calls: u32,
     /// Total MTP draft / draft_kv_only calls (prefill + decode + bridges).
@@ -3130,6 +3195,12 @@ pub struct SpecStats {
 }
 
 impl SpecStats {
+    fn record_accepted_prefix(&mut self, accepted: usize) {
+        debug_assert!(accepted < self.accepted_prefix_counts.len());
+        self.accepted_prefix_counts[accepted] =
+            self.accepted_prefix_counts[accepted].saturating_add(1);
+    }
+
     fn into_finalized(mut self, t_start: std::time::Instant) -> Self {
         self.wall_ms = t_start.elapsed().as_secs_f64() * 1e3;
         self.decode_ms = (self.wall_ms - self.prefill_ms).max(0.0);
@@ -3177,6 +3248,24 @@ mod tests {
         assert_eq!(terminal_draft_count(&drafts, 1, 8, &[]), Some(7));
         assert_eq!(terminal_draft_count(&drafts, 1, 99, &[12]), Some(3));
         assert_eq!(terminal_draft_count(&drafts, 1, 99, &[]), None);
+    }
+
+    #[test]
+    fn committed_history_window_keeps_exact_tail_and_full_chain() {
+        assert_eq!(committed_history_start(0, Some(32)), 0);
+        assert_eq!(committed_history_start(31, Some(32)), 0);
+        assert_eq!(committed_history_start(32, Some(32)), 0);
+        assert_eq!(committed_history_start(33, Some(32)), 1);
+        assert_eq!(committed_history_start(400, Some(128)), 272);
+        assert_eq!(committed_history_start(400, None), 0);
+
+        let frontier = 400usize;
+        let start = committed_history_start(frontier, Some(32));
+        for depth in 0..7 {
+            let absolute_end = frontier + depth + 1;
+            assert_eq!(start, 368);
+            assert_eq!(absolute_end - start, 32 + depth + 1);
+        }
     }
 
     #[test]

@@ -1383,6 +1383,11 @@ struct MtpArgs {
     /// MTP KV history policy for packed native-MTP decode.
     #[arg(long, value_enum, default_value_t = MtpHistoryArg::Committed)]
     mtp_history: MtpHistoryArg,
+    /// Acceptance-only oracle: expose only the newest K exact committed MTP KV
+    /// slots while retaining the full current draft chain. Prompt history is
+    /// still built in full, so this does not measure the prospective TTFT win.
+    #[arg(long)]
+    mtp_history_window: Option<usize>,
     /// Write MTP target-rank rows as JSONL. This forces full draft-logit
     /// readback and is diagnostic-only, not a timing path.
     #[arg(long)]
@@ -10248,6 +10253,38 @@ fn merge_target_state_audit(aggregate: &mut MtpTargetStateAudit, next: MtpTarget
         .min(next.continuation_logits_cosine);
 }
 
+const MTP_CONTINUATION_AUDIT_STEPS: usize = 16;
+
+fn audit_mtp_target_state_chain(
+    forward: &MetalForward<'_>,
+    reference: &mut MetalSession,
+    candidate: &mut MetalSession,
+    expected_position: usize,
+    pending_terminal_token: i32,
+) -> Result<MtpTargetStateAudit> {
+    let mut audit = audit_mtp_target_state(
+        forward,
+        reference,
+        candidate,
+        expected_position,
+        pending_terminal_token,
+    )?;
+    for offset in 1..MTP_CONTINUATION_AUDIT_STEPS {
+        let next_token = audit.continuation_token;
+        let next = audit_mtp_target_state(
+            forward,
+            reference,
+            candidate,
+            expected_position + offset,
+            next_token,
+        )?;
+        merge_target_state_audit(&mut audit, next);
+    }
+    audit.resume_audit_pass &= audit.gdn_state_max_abs <= 1e-2;
+    audit.resume_audit_pass &= audit.gdn_conv_max_abs <= 1e-1;
+    Ok(audit)
+}
+
 #[derive(Default)]
 struct PldStats {
     index_build_ms: f64,
@@ -10739,6 +10776,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_recursive_hidden,
         mtp_base_hidden,
         mtp_history,
+        mtp_history_window,
         mtp_rank_topk,
         output,
         include_token_ids,
@@ -10765,6 +10803,20 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         }
         if mtp_probe != MtpProbeMode::Normal {
             anyhow::bail!("--mtp-rank-topk is only supported with --mtp-probe normal");
+        }
+    }
+    if let Some(window) = mtp_history_window {
+        if window == 0 {
+            anyhow::bail!("--mtp-history-window must be greater than zero");
+        }
+        if spec_tokens < 2 {
+            anyhow::bail!("--mtp-history-window requires --spec-tokens 2 or higher");
+        }
+        if mtp_probe != MtpProbeMode::Normal {
+            anyhow::bail!("--mtp-history-window requires --mtp-probe normal");
+        }
+        if mtp_history != MtpHistoryArg::Committed {
+            anyhow::bail!("--mtp-history-window requires --mtp-history committed");
         }
     }
     let draft_lm_head_override_count = usize::from(mtp_draft_token_embd_head)
@@ -10816,7 +10868,14 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
     eprintln!(
-        "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} spec_tokens={} probe={:?} physical_n={} single_cb_draft={} draft_token_embd_head={} draft_lm_head_q4_1={} draft_lm_head_q4_0={} draft_lm_head_q4_affine64={} base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ({} tokens) gen={} stop_tokens={:?}",
+        concat!(
+            "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} ",
+            "spec_tokens={} probe={:?} physical_n={} single_cb_draft={} ",
+            "draft_token_embd_head={} draft_lm_head_q4_1={} ",
+            "draft_lm_head_q4_0={} draft_lm_head_q4_affine64={} ",
+            "base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ",
+            "history_window={:?} ({} tokens) gen={} stop_tokens={:?}"
+        ),
         model.display(),
         prompt,
         if qwen_chat { "qwen-chat" } else { "raw" },
@@ -10838,6 +10897,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_base_hidden,
         mtp_recursive_hidden,
         mtp_history,
+        mtp_history_window,
         prompt_ids.len(),
         tokens,
         stops,
@@ -10944,6 +11004,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     }
 
     let mut planned_state_audit: Option<MtpTargetStateAudit> = None;
+    let mut normal_state_audit: Option<MtpTargetStateAudit> = None;
     let mut run_planned = |plan: PackedDraftPlan<'_>, label: &str| -> Result<DecodeOutput> {
         let audit_target_state = matches!(plan, PackedDraftPlan::Oracle(_));
         let mtp_session =
@@ -10985,7 +11046,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 mf.single_token(token, position as u32, &mut serial_session)
                     .context("state-audit serial transition")?;
             }
-            planned_state_audit = Some(audit_mtp_target_state(
+            planned_state_audit = Some(audit_mtp_target_state_chain(
                 &mf,
                 &mut serial_session,
                 &mut spec_session,
@@ -11041,7 +11102,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
-            if spec_tokens == 1 {
+            if let Some(window) = mtp_history_window {
+                spec.set_committed_history_window(window);
+            }
+            let output = if spec_tokens == 1 {
                 spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
                     .context("spec decode")?
             } else {
@@ -11064,7 +11128,36 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     mtp_single_cb_draft,
                 )
                 .context("spec decode packed-n")?
+            };
+            if spec_tokens >= 2 {
+                let generated = &ref_generated_vec[..ref_generated_vec.len().saturating_sub(1)];
+                anyhow::ensure!(
+                    output.tokens[prompt_ids.len()..] == ref_generated_vec,
+                    "native MTP emitted tokens differ from serial target"
+                );
+                let pending_terminal_token = *ref_generated_vec
+                    .last()
+                    .context("native MTP produced no terminal token")?;
+                let mut serial_session =
+                    MetalSession::fresh(&ctx, &mm, cap).context("state-audit serial session")?;
+                for (position, &token) in prompt_ids.iter().chain(generated).enumerate() {
+                    mf.single_token(token, position as u32, &mut serial_session)
+                        .context("state-audit serial transition")?;
+                }
+                let audit = audit_mtp_target_state_chain(
+                    &mf,
+                    &mut serial_session,
+                    &mut spec_session,
+                    prompt_ids.len() + generated.len(),
+                    pending_terminal_token,
+                )?;
+                anyhow::ensure!(
+                    audit.resume_audit_pass,
+                    "native MTP terminal resume audit failed: {audit:?}"
+                );
+                normal_state_audit = Some(audit);
             }
+            output
         }
         MtpProbeMode::Oracle => run_planned(PackedDraftPlan::Oracle(&ref_generated_vec), "oracle")?,
         MtpProbeMode::ReplayCurrent | MtpProbeMode::BodyNoLmHead | MtpProbeMode::BridgeOnly => {
@@ -11197,14 +11290,26 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let spec_decode_ms = result.stats.decode_ms;
     let spec_prefill_ms = result.stats.prefill_ms;
     let spec_decode_tps = spec_emitted as f64 / (spec_decode_ms / 1000.0).max(f64::MIN_POSITIVE);
+    let transitions_per_verify = if result.stats.steps > 0 {
+        spec_emitted.saturating_sub(1) as f64 / result.stats.steps as f64
+    } else {
+        0.0
+    };
 
     // ----- Compare -----
     let ref_generated = &ref_tokens[prompt_ids.len()..];
     let spec_generated = &result.tokens[prompt_ids.len()..];
     let identical = ref_generated == spec_generated;
     let expected_target_transitions = ref_emitted.saturating_sub(1);
-    let oracle_state_audit = if mtp_probe == MtpProbeMode::Oracle {
-        let audit = planned_state_audit.context("oracle target-state audit missing")?;
+    let target_state_audit = if mtp_probe == MtpProbeMode::Oracle {
+        planned_state_audit
+    } else if mtp_probe == MtpProbeMode::Normal && spec_tokens >= 2 {
+        normal_state_audit
+    } else {
+        None
+    };
+    if mtp_probe == MtpProbeMode::Oracle {
+        let audit = target_state_audit.context("oracle target-state audit missing")?;
         anyhow::ensure!(identical, "oracle emitted tokens differ from serial target");
         anyhow::ensure!(
             result.stats.mtp_calls == 0,
@@ -11221,10 +11326,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             audit.resume_audit_pass,
             "oracle terminal resume audit failed: {audit:?}"
         );
-        Some(audit)
-    } else {
-        None
-    };
+    }
 
     // Apples-to-apples reporting. The earlier version mixed phases —
     // comparing MTP=off decode-only t/s (excludes prefill) with
@@ -11256,6 +11358,12 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         result.stats.acceptance_rate(),
         result.stats.steps,
         result.stats.accepted,
+    );
+    eprintln!(
+        "[mtp-bench]   target transitions / verifier = {:.3} ({}/{})",
+        transitions_per_verify,
+        spec_emitted.saturating_sub(1),
+        result.stats.steps,
     );
     eprintln!(
         "[mtp-bench]   base_calls={}  mtp_calls={} \
@@ -11297,14 +11405,13 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec_emitted,
         ref_emitted,
     );
-    if let Some(audit) = oracle_state_audit {
+    if let Some(audit) = target_state_audit {
         eprintln!(
-            "[mtp-bench] terminal resume: PASS target_transitions={} final_n={} \
+            "[mtp-bench] terminal resume: PASS continuation_steps={} \
              kv_pos={:?} kv_max_abs={:.3e} kv_cos={:.10} \
              gdn_state_max_abs={:.3e} gdn_conv_max_abs={:.3e} \
              continuation_max_abs={:.3e} continuation_cos={:.10}",
-            result.stats.target_transitions,
-            result.stats.final_effective_verify_n,
+            MTP_CONTINUATION_AUDIT_STEPS,
             audit.candidate_final_position,
             audit.kv_payload_max_abs,
             audit.kv_payload_cosine,
@@ -11346,6 +11453,14 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         } else {
             serde_json::Value::Null
         };
+        let accepted_prefix_histogram = result
+            .stats
+            .accepted_prefix_counts
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(accepted, count)| serde_json::json!({"accepted": accepted, "steps": count}))
+            .collect::<Vec<_>>();
         let speculative_phase_ms = serde_json::json!({
             "draft": result.stats.draft_ms,
             "verify": result.stats.verify_ms,
@@ -11363,8 +11478,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                     "bytes": bytes,
                 })
             });
-        let target_state = oracle_state_audit.map_or(serde_json::Value::Null, |audit| {
+        let target_state = target_state_audit.map_or(serde_json::Value::Null, |audit| {
             serde_json::json!({
+                "continuation_steps": MTP_CONTINUATION_AUDIT_STEPS,
                 "resume_audit_pass": audit.resume_audit_pass,
                 "kv_position_equal": audit.kv_position_equal,
                 "kv_payload_exact": audit.kv_payload_exact,
@@ -11383,7 +11499,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "verify_mode": if spec_tokens == 1 { "lazy_mtp1" } else { "packed_n" },
             "sampler": "greedy_argmax",
             "correction_accounting": "deferred_next_step_carry",
-            "equivalence": if mtp_probe == MtpProbeMode::Oracle {
+            "equivalence": if target_state_audit.is_some() {
                 "target_greedy_sequence_and_terminal_resume_audit"
             } else {
                 "target_greedy_sequence"
@@ -11414,8 +11530,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "drafts_attempted": result.stats.drafts_attempted,
             "acceptance_rate": result.stats.acceptance_rate(),
             "emitted_per_step": emitted_per_step,
+            "target_transitions_per_verify": transitions_per_verify,
             "accepted_per_step": accepted_per_step,
             "drafts_per_step": drafts_per_step,
+            "accepted_prefix_histogram": accepted_prefix_histogram,
             "base_forward_calls": result.stats.base_forward_calls,
             "mtp_calls": result.stats.mtp_calls,
             "target_transitions": planned_metrics.then_some(result.stats.target_transitions),
@@ -11442,7 +11560,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "spec_tokens": spec_tokens,
             "logical_verify_n": spec_tokens + 1,
             "physical_verify_n": planned_verify_n,
-            "terminal_token_target_transition_consumed": if mtp_probe == MtpProbeMode::Oracle {
+            "terminal_token_target_transition_consumed": if target_state_audit.is_some() {
                 Some(false)
             } else {
                 None
@@ -11456,6 +11574,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "base_hidden": format!("{:?}", mtp_base_hidden),
             "recursive_hidden": format!("{:?}", mtp_recursive_hidden),
             "mtp_history": format!("{:?}", mtp_history),
+            "mtp_history_window": mtp_history_window,
             "mtp_moe_banks": mtp_moe_banks,
             "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
             "no_warmup": no_warmup,

@@ -22879,6 +22879,140 @@ mod tests {
         run_attn_v4_q8_kv_compare("g8-t4", 16, 2, 16384, 128, 64, Some(4));
     }
 
+    #[test]
+    fn attn_v4_group6_honors_nonzero_f16_kv_view_offset() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let (head_dim, n_q, n_kv) = (256usize, 24usize, 4usize);
+        let (prefix, n_pos) = (3usize, 65usize);
+        let group = n_q / n_kv;
+        let kv_dim = n_kv * head_dim;
+        let q: Vec<f32> = (0..n_q * head_dim)
+            .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+            .collect();
+        let prefix_k: Vec<f32> = (0..prefix * kv_dim)
+            .map(|i| 1.0 + (i % 13) as f32 * 1e-2)
+            .collect();
+        let prefix_v: Vec<f32> = (0..prefix * kv_dim)
+            .map(|i| -1.0 - (i % 11) as f32 * 1e-2)
+            .collect();
+        let tail_k: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| ((i % 23) as f32 - 11.0) * 1.5e-2)
+            .collect();
+        let tail_v: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+            .collect();
+        let upload = |values: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(values),
+                vec![values.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let q_t = upload(&q);
+        let prefix_k_t = upload(&prefix_k);
+        let prefix_v_t = upload(&prefix_v);
+        let tail_k_t = upload(&tail_k);
+        let tail_v_t = upload(&tail_v);
+        let parent_elems = (prefix + n_pos) * kv_dim;
+        let parent_k = MetalTensor::zeros_f16(&ctx, vec![parent_elems as u64]).unwrap();
+        let parent_v = MetalTensor::zeros_f16(&ctx, vec![parent_elems as u64]).unwrap();
+        let compact_k = MetalTensor::zeros_f16(&ctx, vec![tail_k.len() as u64]).unwrap();
+        let compact_v = MetalTensor::zeros_f16(&ctx, vec![tail_v.len() as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_scatter_offset_f32_to_f16_kv(
+                &ctx,
+                enc,
+                &prefix_k_t,
+                &prefix_v_t,
+                &parent_k,
+                &parent_v,
+                0,
+                prefix_k.len(),
+            )?;
+            encode_scatter_offset_f32_to_f16_kv(
+                &ctx,
+                enc,
+                &tail_k_t,
+                &tail_v_t,
+                &parent_k,
+                &parent_v,
+                prefix * kv_dim,
+                tail_k.len(),
+            )?;
+            encode_scatter_offset_f32_to_f16_kv(
+                &ctx,
+                enc,
+                &tail_k_t,
+                &tail_v_t,
+                &compact_k,
+                &compact_v,
+                0,
+                tail_k.len(),
+            )
+        })
+        .unwrap();
+
+        let tail_shape = vec![tail_k.len() as u64];
+        let view_k = parent_k.view_subrange((prefix * kv_dim) as u64, tail_shape.clone());
+        let view_v = parent_v.view_subrange((prefix * kv_dim) as u64, tail_shape);
+        let nwg = attn_v4_choose_nwg(n_pos, group);
+        let tile_c = attn_v4_choose_tile_c(n_pos, group);
+        let partial_elems = n_kv * nwg * group;
+        let view_o_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(partial_elems * head_dim) as u64]).unwrap();
+        let view_ml_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(partial_elems * 2) as u64]).unwrap();
+        let view_out = MetalTensor::zeros_f32(&ctx, vec![(n_q * head_dim) as u64]).unwrap();
+        let compact_o_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(partial_elems * head_dim) as u64]).unwrap();
+        let compact_ml_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(partial_elems * 2) as u64]).unwrap();
+        let compact_out = MetalTensor::zeros_f32(&ctx, vec![(n_q * head_dim) as u64]).unwrap();
+
+        let run = |k: &MetalTensor,
+                   v: &MetalTensor,
+                   o_partial: &MetalTensor,
+                   ml_partial: &MetalTensor,
+                   out: &MetalTensor| {
+            one_shot(&ctx, |enc| {
+                encode_attn_decode_v4_f32(
+                    &ctx, enc, &q_t, k, v, o_partial, ml_partial, out, n_q, n_kv, head_dim, n_pos,
+                    nwg, tile_c,
+                )
+            })
+            .unwrap();
+        };
+        run(
+            &view_k,
+            &view_v,
+            &view_o_partial,
+            &view_ml_partial,
+            &view_out,
+        );
+        run(
+            &compact_k,
+            &compact_v,
+            &compact_o_partial,
+            &compact_ml_partial,
+            &compact_out,
+        );
+
+        let view = read_back_f32(&view_out.buffer, n_q * head_dim);
+        let compact = read_back_f32(&compact_out.buffer, n_q * head_dim);
+        let max_abs = view
+            .iter()
+            .zip(&compact)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_abs <= 1e-6, "nonzero-offset v4 max abs {max_abs}");
+    }
+
     /// GDN α-chain fusion vs the 3-dispatch reference (add_inplace +
     /// softplus + mul). Must match within fp32 rounding noise.
     #[test]

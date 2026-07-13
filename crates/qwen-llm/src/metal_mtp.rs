@@ -563,12 +563,9 @@ impl MetalMtpHead {
 /// session arena.
 pub struct MetalMtpSession {
     /// MTP attn KV storage. Single layer (the MTP block's own attn).
-    /// F16 storage matching the base attn KV convention. Writes and
-    /// `kv_n_pos` use absolute positions; `kv_start_pos` is a logical read
-    /// offset frozen for the current draft chain.
+    /// F16 storage matching the base attn KV convention.
     pub kv_k: MetalTensor,
     pub kv_v: MetalTensor,
-    pub kv_start_pos: usize,
     pub kv_n_pos: usize,
     pub kv_capacity: usize,
 
@@ -671,7 +668,6 @@ impl MetalMtpSession {
         Ok(Self {
             kv_k: MetalTensor::zeros_f16(ctx, vec![kv_cache_elems])?,
             kv_v: MetalTensor::zeros_f16(ctx, vec![kv_cache_elems])?,
-            kv_start_pos: 0,
             kv_n_pos: 0,
             kv_capacity,
             e: MetalTensor::zeros_f32(ctx, vec![h])?,
@@ -790,10 +786,6 @@ pub enum MtpHistoryMode {
     Cycle,
 }
 
-fn committed_history_start(frontier: usize, window: Option<usize>) -> usize {
-    window.map_or(0, |window| frontier.saturating_sub(window))
-}
-
 #[derive(Clone, Debug)]
 pub struct MtpRankRow {
     pub step: usize,
@@ -869,7 +861,6 @@ pub struct SpeculativeDecoder<'a> {
     recursive_hidden_variant: MtpRecursiveHiddenVariant,
     base_hidden_variant: MtpBaseHiddenVariant,
     history_mode: MtpHistoryMode,
-    committed_history_window: Option<usize>,
 }
 
 impl<'a> SpeculativeDecoder<'a> {
@@ -888,7 +879,6 @@ impl<'a> SpeculativeDecoder<'a> {
             recursive_hidden_variant: MtpRecursiveHiddenVariant::PreNorm,
             base_hidden_variant: MtpBaseHiddenVariant::PreNorm,
             history_mode: MtpHistoryMode::Committed,
-            committed_history_window: None,
         }
     }
 
@@ -967,29 +957,6 @@ impl<'a> SpeculativeDecoder<'a> {
 
     pub fn set_history_mode(&mut self, mode: MtpHistoryMode) {
         self.history_mode = mode;
-        if mode != MtpHistoryMode::Committed {
-            self.committed_history_window = None;
-            self.mtp_session.kv_start_pos = 0;
-        }
-    }
-
-    pub fn set_committed_history_window(&mut self, window: usize) {
-        assert!(window > 0, "MTP committed-history window must be nonzero");
-        assert_eq!(
-            self.history_mode,
-            MtpHistoryMode::Committed,
-            "MTP history window requires committed history"
-        );
-        self.committed_history_window = Some(window);
-        self.refresh_committed_history_start();
-    }
-
-    fn refresh_committed_history_start(&mut self) {
-        self.mtp_session.kv_start_pos = if self.history_mode == MtpHistoryMode::Committed {
-            committed_history_start(self.mtp_session.kv_n_pos, self.committed_history_window)
-        } else {
-            0
-        };
     }
 
     fn wants_base_post_norm(&self) -> bool {
@@ -1987,20 +1954,9 @@ impl<'a> SpeculativeDecoder<'a> {
         )?;
         // KV n_pos counter is bumped in draft_inner after waitUntilCompleted.
 
-        // (8) Fused attention decode against the frozen logical view. Writes and
-        // RoPE retain absolute positions; only the K/V read view is shifted.
-        let kv_start_pos = s.kv_start_pos;
-        let absolute_end = position as usize + 1;
-        debug_assert!(kv_start_pos <= position as usize);
-        let n_pos = absolute_end - kv_start_pos;
-        let kv_view_elems = n_pos * kv_dim;
-        let kv_elem_offset = kv_start_pos * kv_dim;
-        let kv_k = s
-            .kv_k
-            .view_subrange(kv_elem_offset as u64, vec![kv_view_elems as u64]);
-        let kv_v = s
-            .kv_v
-            .view_subrange(kv_elem_offset as u64, vec![kv_view_elems as u64]);
+        // (8) Fused attention decode against the prefix [0..=position].
+        // n_pos is `position + 1` because slot `position` was just appended.
+        let n_pos = position as usize + 1;
         const V4_HEAD_DIM: usize = 256;
         const V4_GROUP: usize = 6;
         let use_v4 = head_dim == V4_HEAD_DIM && n_q == n_kv * V4_GROUP;
@@ -2011,8 +1967,8 @@ impl<'a> SpeculativeDecoder<'a> {
                 ctx,
                 enc,
                 &s.attn_q_normed,
-                &kv_k,
-                &kv_v,
+                &s.kv_k,
+                &s.kv_v,
                 &s.attn_v4_o_partial,
                 &s.attn_v4_ml_partial,
                 &s.attn_o,
@@ -2028,8 +1984,8 @@ impl<'a> SpeculativeDecoder<'a> {
                 ctx,
                 enc,
                 &s.attn_q_normed,
-                &kv_k,
-                &kv_v,
+                &s.kv_k,
+                &s.kv_v,
                 &s.attn_o,
                 n_q,
                 n_kv,
@@ -2399,8 +2355,6 @@ impl<'a> SpeculativeDecoder<'a> {
                 "after prefill: mtp_kv should have n-1 entries"
             );
         }
-        self.refresh_committed_history_start();
-
         let last_layer = [(self.base.model.blocks.len() - 1) as u32];
         let mut emit_tok = next_bootstrap_tok;
         let mut processed_pos = (n_prompt - 1) as u32;
@@ -2416,7 +2370,6 @@ impl<'a> SpeculativeDecoder<'a> {
             let carry_tok = emit_tok;
             let draft_start_position = if self.uses_cycle_mtp_history() {
                 self.mtp_session.kv_n_pos = 0;
-                self.mtp_session.kv_start_pos = 0;
                 0
             } else {
                 processed_pos
@@ -2624,7 +2577,6 @@ impl<'a> SpeculativeDecoder<'a> {
                     stats.mtp_calls += 1;
                 }
             }
-            self.refresh_committed_history_start();
             debug_assert_eq!(
                 self.mtp_session.kv_n_pos,
                 if self.uses_cycle_mtp_history() {
@@ -3248,24 +3200,6 @@ mod tests {
         assert_eq!(terminal_draft_count(&drafts, 1, 8, &[]), Some(7));
         assert_eq!(terminal_draft_count(&drafts, 1, 99, &[12]), Some(3));
         assert_eq!(terminal_draft_count(&drafts, 1, 99, &[]), None);
-    }
-
-    #[test]
-    fn committed_history_window_keeps_exact_tail_and_full_chain() {
-        assert_eq!(committed_history_start(0, Some(32)), 0);
-        assert_eq!(committed_history_start(31, Some(32)), 0);
-        assert_eq!(committed_history_start(32, Some(32)), 0);
-        assert_eq!(committed_history_start(33, Some(32)), 1);
-        assert_eq!(committed_history_start(400, Some(128)), 272);
-        assert_eq!(committed_history_start(400, None), 0);
-
-        let frontier = 400usize;
-        let start = committed_history_start(frontier, Some(32));
-        for depth in 0..7 {
-            let absolute_end = frontier + depth + 1;
-            assert_eq!(start, 368);
-            assert_eq!(absolute_end - start, 32 + depth + 1);
-        }
     }
 
     #[test]

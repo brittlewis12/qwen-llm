@@ -1383,11 +1383,6 @@ struct MtpArgs {
     /// MTP KV history policy for packed native-MTP decode.
     #[arg(long, value_enum, default_value_t = MtpHistoryArg::Committed)]
     mtp_history: MtpHistoryArg,
-    /// Acceptance-only oracle: expose only the newest K exact committed MTP KV
-    /// slots while retaining the full current draft chain. Prompt history is
-    /// still built in full, so this does not measure the prospective TTFT win.
-    #[arg(long)]
-    mtp_history_window: Option<usize>,
     /// Write MTP target-rank rows as JSONL. This forces full draft-logit
     /// readback and is diagnostic-only, not a timing path.
     #[arg(long)]
@@ -10776,7 +10771,6 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_recursive_hidden,
         mtp_base_hidden,
         mtp_history,
-        mtp_history_window,
         mtp_rank_topk,
         output,
         include_token_ids,
@@ -10803,20 +10797,6 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         }
         if mtp_probe != MtpProbeMode::Normal {
             anyhow::bail!("--mtp-rank-topk is only supported with --mtp-probe normal");
-        }
-    }
-    if let Some(window) = mtp_history_window {
-        if window == 0 {
-            anyhow::bail!("--mtp-history-window must be greater than zero");
-        }
-        if spec_tokens < 2 {
-            anyhow::bail!("--mtp-history-window requires --spec-tokens 2 or higher");
-        }
-        if mtp_probe != MtpProbeMode::Normal {
-            anyhow::bail!("--mtp-history-window requires --mtp-probe normal");
-        }
-        if mtp_history != MtpHistoryArg::Committed {
-            anyhow::bail!("--mtp-history-window requires --mtp-history committed");
         }
     }
     let draft_lm_head_override_count = usize::from(mtp_draft_token_embd_head)
@@ -10874,7 +10854,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "draft_token_embd_head={} draft_lm_head_q4_1={} ",
             "draft_lm_head_q4_0={} draft_lm_head_q4_affine64={} ",
             "base_hidden={:?} recursive_hidden={:?} mtp_history={:?} ",
-            "history_window={:?} ({} tokens) gen={} stop_tokens={:?}"
+            "({} tokens) gen={} stop_tokens={:?}"
         ),
         model.display(),
         prompt,
@@ -10897,7 +10877,6 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_base_hidden,
         mtp_recursive_hidden,
         mtp_history,
-        mtp_history_window,
         prompt_ids.len(),
         tokens,
         stops,
@@ -11102,9 +11081,6 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
-            if let Some(window) = mtp_history_window {
-                spec.set_committed_history_window(window);
-            }
             let output = if spec_tokens == 1 {
                 spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
                     .context("spec decode")?
@@ -11574,7 +11550,6 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "base_hidden": format!("{:?}", mtp_base_hidden),
             "recursive_hidden": format!("{:?}", mtp_recursive_hidden),
             "mtp_history": format!("{:?}", mtp_history),
-            "mtp_history_window": mtp_history_window,
             "mtp_moe_banks": mtp_moe_banks,
             "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
             "no_warmup": no_warmup,

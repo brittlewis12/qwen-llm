@@ -378,6 +378,18 @@ K512 ownership, but no named current Q5 representation or attention body clears
 its charged breadth gate. Do not build decomposition diagnostics without a
 candidate whose implementation decision they can change.
 
+v0.587-v0.588 close fixed committed-tail MTP history on the first conjunctive
+fixture. Clean full-history controls repeat at 59 physical-N8 packets and
+`(G-1)/packets=4.322034`; K256/K128/K64/K32 need 74/77/76/79 packets and fall to
+`3.445946/3.311688/3.355263/3.227848`. The accepted-prefix histogram shows old
+committed context supports recursive-chain persistence rather than adding dead
+attention work. Stop before narrative, K interpolation, or packed tail-history
+construction. Preserve the terminal-state correction and acceptance diagnostics;
+remove the dead read-window source. Full-history decode is `1.24-1.28x`, but its
+serial MTP prompt construction makes the measured request only `0.310-0.315x`.
+Any renewed dense-MTP program therefore needs both a step-change asset and packed
+full-history prompt construction, priced together rather than as separate wins.
+
 ## Force-Ranked BS=1 Opportunity Frontier
 
 The active queue is not empty. The exhausted neighborhood is narrower: serial
@@ -392,14 +404,18 @@ Completed v0.546 removes the token-0 transition from TTFT and the unused termina
 transition from total request wall. For base TTFT `B` and removed transition `D`,
 speedup is `(B + D) / B`.
 
-Banked specialization, not active queue: v0.567-v0.568 retain exact query-capped
-wide-prefill wins at the real 11,287-token cell. v0.572 closes further width and
-window exploration. A3B 4096 is flat at 11K and does not advance at 16K; balanced
-A3B 32K chunk 2048 reaches only `1.04654x` median and fails its pair floor. A10B
-32K chunk 2048 narrowly clears at `1.05065x` with `0.0778%` anchor spread, while
-4096 adds only `1.01338x` over 2048. Its real 25,610-token guard preserves one-token
-output bytes and gives directional warmed prefill `1.03314x`. Do not broaden chunk
-widths, contexts, anchors, admission, or defaults. Product wiring is outside the queue.
+Active narrow product completion: v0.567 measures fresh 11,287-token TTFT gains
+of `1.0641x` A3B and `1.2075x` A10B behind opt-in `--prefill-chunk auto`.
+v0.568 caps matrix query scratch at 1024 and overlaps phase-disjoint packs,
+reducing incremental allocation to about 90 MB/877 MB with measured prefill
+overhead `0.391%/0.109%`. The product auto path still defaults to numeric 1024,
+uses uncapped scratch, records stale 685 MiB/3.75 GiB deltas, and never calls the
+existing dual-signal memory-admission evaluator. Finish only that 8K-16K
+allowlisted path, fail closed, and run one final fresh product confirmation before
+default promotion. v0.572 remains decisive against 32K expansion: A3B chunk 2048
+fails its pair floor at `1.04654x`; A10B narrowly reaches `1.05065x`, 4096 adds
+only `1.01338x`, and the real 25,610-token guard is only directional warmed
+`1.03314x`. Do not reopen 32K, new widths, sibling assets, or same-cell retuning.
 
 Blocked model-choice lane, not active queue: v0.573 screens seven local Q4 assets
 through a frozen six-task direct-mode contract. Scores range from `1/6` to `3/6`;
@@ -443,28 +459,50 @@ same-body compression, TGM K/V sharing, partition packing, tile1, and the killed
 matrix point. Require `>=10%` actual-shape primitive gain across medium/breadth
 guards before the existing true-long gate.
 
-1. **Dense native-MTP sliding-history oracle**: proposal economics are measured,
-   not a green field. Survey only `32/64/128/256/full` committed-history reads
-   while retaining within-chain causal state. Charge proposal, history, replay,
-   restore, acceptance, TTFT, and total request, and stop unless current composed
-   economics clear the existing gate. The verifier-only `2.6x` ceiling is not a
-   product projection.
-2. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
-   mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2 `~0.62`). v0.403 A3B
-   `ctx8192` attributes 9.9%+7.5%=17.4% of decode to routed gate/up+down; ideal
-   k8-to-k6 removal gives only a derived 4.35% decode-time ceiling, about 4.55%
-   throughput before overhead or quality cost. Replay `k7/k6/k5`; require a
-   quality-passing policy with `>=5%` charged projection before any kernel.
-3. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
-   contract until a base asset qualifies. Current routed-Q5 evidence gives only
-   2.2-2.4% total-decode headroom; do not generate assets from that ceiling.
-4. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
-   decode, but explicitly input-changing. Prefix caching remains a separate exact
-   reuse specialization and does not rank for fresh serial prompts.
-5. **MoE speculative verification re-adjudication**: authorize only a bounded
-   replay if the current charged trajectory projects at least 5% whole-decode gain.
-   A looser numerical resume contract does not create proposal acceptance or net
-   economics; no implementation follows from tolerance alone.
+Closed native-MTP history lane, not active queue: the v0.587 code fixture makes
+the decision before narrative. Full history needs 59 verifier packets; every
+fixed K<=256 tail needs 74-79 and shifts mass from full-depth accepts to zero/one
+accepts. Full itself remains below the acceptance continuation gate. Do not build
+tail-only prompt construction, interpolate K, or reinterpret cheaper per-packet
+attention as a product win.
+
+1. **Admitted query-capped auto-prefill**: highest confidence and lowest cost
+   primary move. Wire explicit query cap 1024 plus scratch overlay into the existing
+   8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
+   sequence/transient reserve, and require both working-set and process-headroom
+   signals. Missing or insufficient signals fall back to 1024. Expected fresh-TTFT
+   movement after measured cap overhead is about `1.060x` A3B and `1.206x` A10B;
+   one final fresh product packet decides default-on. Difficulty S-M, belief high.
+2. **MTPLX asset/contract decomposition**: highest information-value decode move,
+   not same-weight parity. Pin the local MTPLX runtime and published trunk, MTP
+   sidecar, draft-head, tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7
+   rows with phase and accepted-by-depth output. Published greedy D3 implies only
+   `Q~3.765`, so D3 cannot authorize qwen D7. A cross-trunk offline bridge must run
+   the candidate sidecar against qwen post-norm hidden/token traces and predict a
+   passing request before affine Metal work. Difficulty S for MTPLX packet, M for
+   bridge; belief medium, upside potentially material.
+3. **Packed full-history MTP prompt construction**: required for any dense-MTP
+   product, but conditional on item 2 or another asset clearing request arithmetic.
+   The v0.587 request has base packed prefill `17.066-17.141 s`, current MTP decode
+   `8.127-8.409 s`, and 59 packets. With no extra history cost, current acceptance
+   projects only `1.078-1.092x` total. At a one-second packed-history budget,
+   1.10x requires about 48-50 packets. Do not implement until acceptance and a
+   packed-history floor satisfy the same equation. Difficulty L, belief conditional.
+4. **A3B long-context N8 oracle**: approximate warm-continuation lane only. First
+   price a target-only physical-N8 ceiling from a trusted warmed snapshot and audit
+   multiple continuation transitions under a declared numerical contract. No A10B
+   MTP asset is local, the current A3B packed verifier fails the exact state contract,
+   and 131K TTFT dominates fresh requests. No replay-current or product work follows
+   without `>=5%` charged warm-decode projection. Difficulty M, belief low-medium.
+5. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
+   existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
+   `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
+   overhead or quality loss. Name an end-to-end quality replay first; k5 or average
+   below about 5.8 experts must pass quality and project `>=5%` charged movement.
+   Difficulty M, belief low.
+6. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+   true-long decode, but explicitly input-changing. Prefix caching is a separate
+   exact reuse specialization and does not rank for fresh serial prompts.
 
 Memory sidecar: native quantized embeddings already save `1.49-4.37 GB` across
 measured A3B/A10B/27B models with near-neutral throughput. Adjudicate product
@@ -483,16 +521,22 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Run the dense native-MTP sliding-history oracle. Stop unless a fixed window
-   clears the charged Native-MTP request gates; do not treat the sweep as a product.
-2. Then replay static/adaptive top-k over `k7/k6/k5`. Stop unless a quality-passing
-   policy projects `>=5%` after overhead; k6-only evidence cannot clear admission.
-3. Keep prompt reduction in its labeled input-changing lane and MoE speculation
-   behind a current `>=5%` economic replay.
-4. Do not resume generic decode-storage diagnostics, matrix attention, sparse
-   retrieval for this fixture, same-body Q8, routed-tail work,
-   model/quant quality work, mixed quant, broad prompt lookup, GDN implementation,
-   or local retuning.
+1. Finish the narrow query-capped auto-prefill product path. Reuse the existing
+   dual-signal admission evaluator, preserve numeric override precedence, fail
+   closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
+   reopen 32K.
+2. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
+   drafter or writing qwen affine kernels. If D7 is promising, run the cross-trunk
+   sidecar acceptance bridge and apply the total-request equation.
+3. Build packed full-history MTP prompt construction only if that bridge or another
+   asset predicts `>=1.10x` on a named request with the packed-history budget charged.
+4. Keep A3B long-context speculation in an explicitly approximate warm-continuation
+   lane and top-k behind a named quality replay. Keep prompt reduction labeled
+   input-changing.
+5. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
+   sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
+   GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
+   or local retuning without their explicit reopen conditions.
 
 ### Decisive gates
 
@@ -500,6 +544,12 @@ better than a decode win; each result must retain its objective-lane label.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;
   the current A3B packed-MoE/GDN implementation fails its state contract.
+- **Auto-prefill admission**: candidate scratch uses explicit query cap 1024 and
+  the proven overlay. Charge complete scratch plus sequence/transient reserve;
+  require valid working-set and process-headroom signals. Preserve the A3B/A10B
+  file-type-15 allowlist and `8192..=16384` range. Missing signals, MTP, disabled
+  online attention/overlay, or insufficient memory fall back to 1024. Require a
+  fresh TTFT confirmation on each admitted profile before default-on.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.
@@ -514,7 +564,12 @@ better than a decode win; each result must retain its objective-lane label.
   all proposal sources only in the measured model/context regime.
 - **Native MTP**: total request `>=1.10x` on at least two named archetypes at 128+
   output tokens, TTFT regression `<=3%`, and greedy-equivalence green.
-  Distribution exactness remains a separate rejection-sampling implementation.
+  Price acceptance, verifier packets, and packed-history cost in one equation.
+  For the v0.587 code request, 59 packets cannot clear 1.10x even with zero extra
+  history cost; a one-second packed-history budget permits only about 48-50.
+  MTPLX D3 evidence cannot authorize qwen D7. Require D7 plus a cross-trunk
+  sidecar acceptance bridge before import. Distribution exactness remains a
+  separate rejection-sampling implementation.
 - **Routed-tail reopen**: first change an ownership premise; then name the removed
   intermediate work, improve complete tail `>=15%` on both models, and improve
   whole prefill `>=5%` A3B and `>=3%` A10B.
@@ -544,8 +599,10 @@ The bands are unvalidated priors until quality-harness v0 prices them.
    search tensor classes rather than a per-tensor combinatorial grid. Calibrated
    class-level error injection may rank sensitivity cheaply, but does not replace
    validation with a real quantized asset.
-4. **Adaptive MoE top-k**: `3-15%` MoE TTFT and `4-10%` short MoE decode;
-   replay expert outputs offline before changing target execution.
+4. **Adaptive MoE top-k**: current phase arithmetic gives about `4.55%` ideal
+   short-decode throughput for k6 and roughly `7%` for k5 before overhead or
+   quality loss. There is no current end-to-end quality replay; build only a named
+   offline oracle before changing target execution.
 5. **Sparse/retrieval attention**: the canonical source fixture fails the captured
    physical-retention frontier before implementation. Reopen only if a dissimilar
    or true-decode artifact makes group-shared 50% locally green, sharply reduces

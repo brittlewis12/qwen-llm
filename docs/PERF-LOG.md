@@ -6,6 +6,79 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.587-v0.588 Dense MTP Committed-Tail Falsifier
+
+Status: fixed exact committed tails fail the code-side acceptance gate; stop the
+conjunctive survey, remove the dead history-window source, and retain the corrected
+terminal accounting and acceptance diagnostics.
+
+- v0.587 adds one acceptance-only read-mask oracle over full committed MTP KV and
+  fixed tails `K={256,128,64,32}`. K counts exact committed slots only; every
+  current-chain slot remains visible, writes and RoPE remain absolute, and the read
+  start is frozen through each D7 chain.
+- A group-6/head-dim-256 Metal test proves that the production V4 reader honors a
+  nonzero F16 KV view offset: an offset parent tail and identical compact tail agree
+  within `1e-6`. A 0.8B inactive-window smoke also repeats full-history tokens,
+  packet count, accepted count, histogram, and target transitions per verifier.
+- The canonical packet uses clean commit `b818986`, source identity
+  `git-source-sha256-v2:416b2adbf91ec776f469f308f21da0a452c90095f084cd00374fb1e60b0f27b8`,
+  dense 27B MTP Q4_K_M, physical N8/logical D7, post/post hidden feeds, committed
+  history, and a 1,926-token code-refactor prompt followed by exactly 256 greedy
+  outputs. The embedded module is `scripts/profile/test_proposal_economics.py`,
+  SHA-256 `7a7adad7872519e4d5c8967f57368fa83f6b3d897316e7f77fbbf90f5c4fd7ae`.
+
+| History | Verifier packets | `(G-1)/packets` | Accepted | Relative to full |
+| --- | ---: | ---: | ---: | ---: |
+| full A/B | `59/59` | `4.322034/4.322034` | `197/197` | `1.0000x` |
+| K256 | `74` | `3.445946` | `181` | `0.7973x` |
+| K128 | `77` | `3.311688` | `178` | `0.7662x` |
+| K64 | `76` | `3.355263` | `179` | `0.7763x` |
+| K32 | `79` | `3.227848` | `176` | `0.7468x` |
+
+- Full A/B repeat every discrete acceptance field exactly. Every row emits the same
+  target-greedy stream and passes a 16-transition terminal resume audit. This is
+  greedy-semantic plus numerical-state equivalence, not bitwise state identity;
+  `kv_payload_exact` remains false.
+- The prefix shape supplies the mechanism diagnosis. Full history has `12/59`
+  seven-draft accepts and `17/59` zero-or-one accepts. K256 shifts those to `4/74`
+  and `31/74`; K32 reaches `5/79` and `39/79`. Removing old committed context has
+  a positive causal effect on neither first-prefix nor recursive-chain acceptance
+  on this trajectory; the largest damage is long-chain persistence.
+- Finite windows reduce draft cost per packet from about `21.5-23.0 ms` to
+  `21.0-21.1 ms`, but multiply target verifier packets. Verifier cost remains about
+  `113.9-116.5 ms/packet`; total verifier wall rises from `6.73-6.87 s` full to
+  `8.43-9.15 s` finite. Cheaper MTP attention cannot repay lost acceptance.
+- Full history also misses the `>=5.2` continuation gate by `16.9%`. The registered
+  code and narrative gates are conjunctive, so no finite K can pass and the
+  narrative row cannot change the decision. Do not build packed tail-only history,
+  interpolate K512/K1024, or run a rescue topology.
+- v0.587 additionally fixes normal packed terminal state: an accepted stop/output
+  token remains target-transition pending, so restore, canonical bridge repair,
+  hidden capture, and processed position retain only preceding transitions. Normal
+  packed rows now run the existing numerical target-state audit for 16 serial
+  continuation transitions. Accepted-prefix histograms and `(G-1)/steps` make the
+  output-limit denominator explicit.
+- Request economics expose a separate prerequisite. Full MTP decode is
+  `8.409/8.127 s`, but serial target-plus-MTP prompt construction is
+  `80.574/79.280 s` versus target packed prefill `17.141/17.066 s`; total request is
+  only `0.310x/0.315x`. Even with zero extra packed-history cost, current 59-packet
+  acceptance projects only `1.078-1.092x` total. At a one-second packed-history
+  budget, a 1.10x request needs roughly `48-50` packets, not merely recovery to
+  current full history.
+- The useful external clue is asset-specific. Local MTPLX v2.0.1 uses a different
+  calibrated affine-INT4 group-32 MTP sidecar, separate low-bit draft head, D3, MLX
+  flat4 trunk, and M5 measurements. Its published greedy D3 acceptance implies
+  about `3.765` emitted transitions per packet, insufficient to authorize qwen D7
+  import by itself. Inspect D7 and bridge the sidecar against qwen post-norm hidden
+  and target-token traces before training or writing affine Metal kernels.
+
+Artifacts: `target/profiles/v0587-mtp-history/`. Adversarial design,
+implementation, result, and portfolio reviews: `cx ask` sessions
+`019f5c3a-5afd-71d3-861c-e6b500ebc81d`,
+`019f5c4b-b713-7bd3-8036-c33ba1f69da4`,
+`019f5c6c-c0c4-7070-a855-08b8b7aed2e0`, and
+`019f5c95-e24f-7ea0-99c7-9647c604cd1a`.
+
 ## 2026-07-13 - v0.586 Decode Storage/ABI Synthesis Preflight
 
 Status: closed without implementation; no engine or experiment source changed.

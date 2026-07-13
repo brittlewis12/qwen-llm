@@ -17,6 +17,7 @@
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
 mod attn_capture;
+mod attn_stage_floor;
 #[path = "../source_identity.rs"]
 mod source_identity;
 
@@ -432,6 +433,8 @@ struct Args {
 enum Cmd {
     /// Capture sparse true-long prefill attention tensors; this is not a timing benchmark.
     AttnCapture(attn_capture::AttnCaptureArgs),
+    /// Price the fixed 32K compressed-KV matrix staging floor.
+    AttnStageFloor(attn_stage_floor::AttnStageFloorArgs),
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
@@ -2658,6 +2661,9 @@ fn main() -> Result<()> {
     match args.cmd {
         Cmd::AttnCapture(a) => {
             attn_capture::run(a, serde_json::to_value(qwen_build_identity_packet())?)
+        }
+        Cmd::AttnStageFloor(a) => {
+            attn_stage_floor::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::PrefixCache(a) => run_prefix_cache(a),

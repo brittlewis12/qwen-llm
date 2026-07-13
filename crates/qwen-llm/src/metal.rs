@@ -12907,6 +12907,91 @@ pub fn encode_attn_decode_v4_main_only_f32(
     Ok(())
 }
 
+pub fn encode_attn_stage_floor_g16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    checksum: &MetalTensor,
+    n_pos: usize,
+    n_kv_heads: usize,
+    nwg: usize,
+) -> Result<(), MetalError> {
+    const HD: usize = 256;
+    const ROW_BYTES: usize = 288;
+    let kernel = "attn_stage_floor_g16";
+    let expected_bytes = n_pos
+        .checked_mul(n_kv_heads)
+        .and_then(|rows| rows.checked_mul(ROW_BYTES))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "compressed KV byte count overflow".into(),
+        })?;
+    let expected_output = n_kv_heads
+        .checked_mul(nwg)
+        .and_then(|groups| groups.checked_mul(HD))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "checksum element count overflow".into(),
+        })?;
+    if n_pos != 32768
+        || n_kv_heads != 2
+        || nwg != 256
+        || k_cache.dtype != GgmlType::F16
+        || v_cache.dtype != GgmlType::F16
+        || k_cache.n_bytes() as usize != expected_bytes
+        || v_cache.n_bytes() as usize != expected_bytes
+        || checksum.dtype != GgmlType::F32
+        || checksum.n_elements() as usize != expected_output
+    {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "requires n_pos=32768 n_kv=2 nwg=256 and exact buffers; got \
+                 n_pos={n_pos} n_kv={n_kv_heads} nwg={nwg} bytes={}/{} out={}",
+                k_cache.n_bytes(),
+                v_cache.n_bytes(),
+                checksum.n_elements()
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_pos: u32,
+        n_kv_heads: u32,
+        n_partitions: u32,
+        rows_per_partition: u32,
+    }
+    enc.set_pipeline(&ctx.pipeline("kernel_attn_stage_floor_g16")?);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_pos: n_pos as u32,
+            n_kv_heads: n_kv_heads as u32,
+            n_partitions: nwg as u32,
+            rows_per_partition: n_pos.div_ceil(nwg) as u32,
+        },
+    );
+    enc.set_tensor(1, k_cache);
+    enc.set_tensor(2, v_cache);
+    enc.set_tensor(3, checksum);
+    enc.set_threadgroup_memory(0, 32 * HD * std::mem::size_of::<u16>());
+    enc.dispatch(
+        MTLSize {
+            width: n_kv_heads,
+            height: 1,
+            depth: nwg,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Synthetic head-major F16 KV sidecar for v4 long-context attention proofing.
 ///
 /// This intentionally supports only the current long MoE subgroup shapes:

@@ -473,7 +473,17 @@ attention as a product win.
    signals. Missing or insufficient signals fall back to 1024. Expected fresh-TTFT
    movement after measured cap overhead is about `1.060x` A3B and `1.206x` A10B;
    one final fresh product packet decides default-on. Difficulty S-M, belief high.
-2. **MTPLX asset/contract decomposition**: highest information-value decode move,
+2. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
+   Under a declared grammar, an isolated forced token still requires a complete
+   target state transition. Only a maximal run of uniquely admissible token IDs can
+   be packed before reading an intermediate logit. Replay real structured traces
+   through the production tokenizer and record non-overlapping run counts `H_r`,
+   baseline target transitions, and admissible vocabulary rows at every terminal
+   branch. Use savings `sum(H_r * (r*C1-Cpack(r))) - overhead`; require at least
+   `T0/11` for a 1.10x request. With current N8 cost, runs below four are not even
+   locally positive. Grammar-restricted lm_head rows are contract-exact and should
+   be priced in the same artifact. Difficulty S oracle/M packet, belief medium.
+3. **MTPLX asset/contract decomposition**: highest information-value decode move,
    not same-weight parity. Pin the local MTPLX runtime and published trunk, MTP
    sidecar, draft-head, tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7
    rows with phase and accepted-by-depth output. Published greedy D3 implies only
@@ -481,26 +491,47 @@ attention as a product win.
    the candidate sidecar against qwen post-norm hidden/token traces and predict a
    passing request before affine Metal work. Difficulty S for MTPLX packet, M for
    bridge; belief medium, upside potentially material.
-3. **Packed full-history MTP prompt construction**: required for any dense-MTP
-   product, but conditional on item 2 or another asset clearing request arithmetic.
+4. **In-family external-drafter acceptance oracle**: use pinned llama.cpp
+   `--model-draft` for acceptance statistics, not wall time or DFlash tree-sim.
+   Fingerprint tokenizer tables and special IDs first; run greedy D7 with 128+
+   outputs over code, structured, and prose rows. At current qwen C1/N8 costs, the
+   no-prefill 1.10x mean-progress floors are `3.88/4.24/5.07/6.24` for
+   0.8B/2B/4B/9B. Test 0.8B first; test 2B only if 0.8B is promising, and do not
+   productize before charging drafter prefill, full-accept catch-up, rollback/replay,
+   second-model memory, and target correction. Difficulty S oracle/M integration,
+   belief low-medium.
+5. **Certified lm_head screening oracle**: exact selected-token work removal, not
+   bitwise full-logit equivalence. Before k-means, precompute outward-rounded
+   per-row/per-256-dimension Q6 block norms. Give the oracle the true production
+   winning logit, reveal blocks in query-global hidden-norm order, and prune only
+   when a conservative unseen-dot bound cannot win with tie handling. Kill unless
+   every primary capture safely prunes at least 80% of rows while touching at most
+   30% of baseline bytes after metadata. Only then add production accumulation
+   error and require about 70% charged head-wall removal. Difficulty S-M oracle,
+   belief low, but especially relevant to repeated draft heads.
+6. **Packed full-history MTP prompt construction**: required for any dense-MTP
+   product, but conditional on item 3 or another asset clearing request arithmetic.
    The v0.587 request has base packed prefill `17.066-17.141 s`, current MTP decode
    `8.127-8.409 s`, and 59 packets. With no extra history cost, current acceptance
    projects only `1.078-1.092x` total. At a one-second packed-history budget,
    1.10x requires about 48-50 packets. Do not implement until acceptance and a
    packed-history floor satisfy the same equation. Difficulty L, belief conditional.
-4. **A3B long-context N8 oracle**: approximate warm-continuation lane only. First
-   price a target-only physical-N8 ceiling from a trusted warmed snapshot and audit
+7. **A3B long-context N8 and WY state oracle**: approximate warm-continuation lane
+   only. Before Metal WY work, run a captured CPU state-locality comparison against
+   serial recurrence; the existing chunked carry/Gram family regressed badly, and
+   regrouped recurrence does not inherently repair conv/KV drift. Separately price
+   a target-only physical-N8 ceiling from a trusted warmed snapshot and audit
    multiple continuation transitions under a declared numerical contract. No A10B
    MTP asset is local, the current A3B packed verifier fails the exact state contract,
    and 131K TTFT dominates fresh requests. No replay-current or product work follows
    without `>=5%` charged warm-decode projection. Difficulty M, belief low-medium.
-5. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
+8. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
    existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
    `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
    overhead or quality loss. Name an end-to-end quality replay first; k5 or average
    below about 5.8 experts must pass quality and project `>=5%` charged movement.
    Difficulty M, belief low.
-6. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+9. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing. Prefix caching is a separate
    exact reuse specialization and does not rank for fresh serial prompts.
 
@@ -525,15 +556,21 @@ better than a decode win; each result must retain its objective-lane label.
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
    reopen 32K.
-2. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
+2. In parallel with no production code, run one structured-trace grammar artifact:
+   maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
+   unless savings-weighted request arithmetic clears 1.10x.
+3. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
    drafter or writing qwen affine kernels. If D7 is promising, run the cross-trunk
    sidecar acceptance bridge and apply the total-request equation.
-3. Build packed full-history MTP prompt construction only if that bridge or another
-   asset predicts `>=1.10x` on a named request with the packed-history budget charged.
-4. Keep A3B long-context speculation in an explicitly approximate warm-continuation
-   lane and top-k behind a named quality replay. Keep prompt reduction labeled
-   input-changing.
-5. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
+4. Price 0.8B external drafting through pinned llama.cpp acceptance statistics;
+   apply qwen packet costs and stop before a qwen dual-model harness unless charged
+   request economics clear. Run 2B only after a promising 0.8B result.
+5. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
+   artifact. Build packed full-history MTP prompt construction only if a sidecar or
+   another proposal asset predicts `>=1.10x` with its history budget charged.
+6. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
+   lane, top-k behind a named quality replay, and prompt reduction input-changing.
+7. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
    sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
    GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
    or local retuning without their explicit reopen conditions.
@@ -550,6 +587,24 @@ better than a decode win; each result must retain its objective-lane label.
   file-type-15 allowlist and `8192..=16384` range. Missing signals, MTP, disabled
   online attention/overlay, or insufficient memory fall back to 1024. Require a
   fresh TTFT confirmation on each admitted profile before default-on.
+- **Grammar fast-forward**: count uniquely admissible tokenizer-token runs, not
+  characters, grammar transitions, or isolated singleton positions. Charge grammar
+  scanning and use measured terminal-head-only packed state cost. Require
+  `sum(H_r * (r*C1-Cpack(r))) - overhead >= T0/11` independently on named request
+  archetypes before engine work. Grammar-row lm_head restriction may contribute to
+  the same savings but must preserve the declared constrained-output contract.
+- **External drafting**: use per-depth survival and `Q=1+sum(P(A>=j))`; never infer
+  economics from mean alpha alone or from llama.cpp wall time. Require exact
+  tokenizer/special-ID compatibility and charge draft prefill, D7 work, full-accept
+  catch-up, rollback/replay, correction consumption, and memory. Current no-prefill
+  Q floors for 1.10x are `3.88` 0.8B and `4.24` 2B; promotion still requires the
+  normal two-archetype request gate and target-greedy equivalence.
+- **Certified lm_head screening**: first use the production winner as an optimistic
+  bound and outward-rounded per-block norms. Kill unless every primary capture
+  safely prunes `>=80%` of rows with `<=30%` baseline bytes touched after metadata.
+  Then add production dequant/accumulation error and require about `70%` charged
+  head-wall removal plus `>=5%` whole-token projection. The claim is exact selected
+  argmax, not bitwise full-logit equivalence.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.
@@ -622,8 +677,9 @@ target-verified drafter first when that preserves target authority.
   proposal, policy, or approximate model change. Use separate development rows
   to select proposal policy, then gate on a frozen held-out triad plus a generic-
   narrative guardrail.
-- Require a costed oracle before a kernel for speculation, top-k, sparse
-  attention, mixed precision, and compressed KV.
+- Require a costed oracle before a kernel for grammar fast-forward, external
+  drafting, lm_head screening, speculation, top-k, sparse attention, mixed
+  precision, and compressed KV.
 - Constrain configuration dimensions from prior evidence: physical N8 for MTP,
   tensor classes for mixed quant, static per-layer top-k before adaptive policy,
   and retained-KV fraction before sparse-attention implementation.
@@ -678,9 +734,27 @@ for aggregate throughput.
   on both A3B/A10B and `>=5%` charged full-token movement.
 - Same-body exact Q8 KV and direct canonical Q4_0 remain closed. Reopen compressed
   KV only with a materially different format/body and a real-model fidelity gate.
+- Gamma-fold hybrid K plus row-Q8 V is not such a reopen as proposed: its aligned
+  K+V row is larger than the green group16 format, rotated gamma does not commute,
+  and rowwise V is fidelity-yellow. Planar Q4/Q6 repack also remains closed because
+  it removes no bytes and the cited 270 GB/s cap does not describe production GEMV
+  generally. Reopen either only with a new captured-fidelity or counter-isolated
+  premise that clears the existing whole-token gate.
 - Keep BF16 parity archaeology, F16 partial/reducer work, decode glue, generated
   MTP heads, local GDN reshuffles, generic persistence, and standalone argmax out
   of the active queue.
+- ANE/AMX drafting remains behind a replay-current request win and a standalone
+  latency test that charges state transfer and unified-memory contention. GPU token
+  graphs/deep queues remain closed under the current per-token callback and terminal
+  semantics; existing GPU argmax, single-CB, boundary, and pipeline evidence does
+  not support a 3-6% central estimate.
+- Distribution-exact rejection sampling is a future sampler capability, not a
+  current greedy speed lever. Start with offline captured-logit probability replay;
+  a proposer union must define one causal aggregate distribution rather than pack
+  alternative branches into linear N8.
+- RoPE-table and GDN-exp hygiene remain below the warm gate. Keep only a causal
+  process-cold residency control for the unexplained first-prefill gap; do not infer
+  a residency program from the aggregate gap alone.
 - Multi-request S8 replay, shared-prefix multi-query execution, independent
   streams, and paged attention remain in the secondary serving lane. Their
   serving evidence does not rank against serial BS=1.

@@ -370,6 +370,13 @@ integer/conditional demand. Close this fixed matrix point and all protocol-barre
 local rescues; skip the survival-conditional true-query/cache-append step and
 remove experiment source in v0.585. This is not a universal claim against matrix
 attention.
+v0.586 then closes the generic two-class decode-storage oracle at synthesis
+preflight. Routed Q5 and attention KV share no ABI or mechanism, and their
+`282-296 GB/s` logical-byte proxies do not identify one physical-storage limiter.
+The old no-weight result is not a formal current-R2 bound because v0.344 changed
+K512 ownership, but no named current Q5 representation or attention body clears
+its charged breadth gate. Do not build decomposition diagnostics without a
+candidate whose implementation decision they can change.
 
 ## Force-Ranked BS=1 Opportunity Frontier
 
@@ -416,26 +423,45 @@ failure at only `140.236 GB/s` external bandwidth. Do not sweep or rescue shape,
 split, barriers, staging ownership, launch, or format. Reopen only for a mechanism
 that changes the ownership/utilization premise and earns a new zero-cost ceiling.
 
-1. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
-   classes whose measured 282-296 GB/s rates trail the 474 GB/s anchor. First
-   separate representation/dequant loss from narrow-dispatch occupancy that a new
-   layout cannot fix. Confidence is low; whole-token prior is about 5%.
+Closed decode-storage synthesis, not active queue: routed Q5 and attention KV are
+unrelated representation/kernel projects. v0.311 bounds only its pre-R2 same-work
+weight/dequant family; it does not formally bound current R2 or ownership-changing
+work. Existing evidence nevertheless supplies no named candidate that clears the
+charged breadth gates. Do not implement a generic two-class oracle or matched-grid
+touch/no-dequant kernels.
+
+Q5 reopen: require a named representation/work unit against current production R2
+and A10B shapes that predicts `>=22%` down-wave improvement on both models and
+`>=5%` charged full-token movement. The full-token projection must use measured
+phase shares; 22% local movement alone is insufficient. Do not reopen NSG/R2
+reshaping, packed-ulong extraction, inner staging, or another current-layout
+dequant sidecar.
+
+Attention reopen: require a named body that changes ownership/utilization,
+preserves or improves effective residency, and avoids head-major-only layout,
+same-body compression, TGM K/V sharing, partition packing, tile1, and the killed
+matrix point. Require `>=10%` actual-shape primitive gain across medium/breadth
+guards before the existing true-long gate.
+
+1. **Dense native-MTP sliding-history oracle**: proposal economics are measured,
+   not a green field. Survey only `32/64/128/256/full` committed-history reads
+   while retaining within-chain causal state. Charge proposal, history, replay,
+   restore, acceptance, TTFT, and total request, and stop unless current composed
+   economics clear the existing gate. The verifier-only `2.6x` ceiling is not a
+   product projection.
 2. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
    mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2 `~0.62`). v0.403 A3B
    `ctx8192` attributes 9.9%+7.5%=17.4% of decode to routed gate/up+down; ideal
-   linear k8-to-k6 removal therefore gives only a derived 4.35% whole-decode ceiling
-   before overhead or quality cost. Do not start a kernel before static-k replay.
-3. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
-   green field. Survey only `32/64/128/256/full` attention-history reads, charge
-   proposal/history/replay costs, and stop unless current composed economics clear
-   the existing gate. The verifier-only `2.6x` ceiling is not a product projection.
-4. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
+   k8-to-k6 removal gives only a derived 4.35% decode-time ceiling, about 4.55%
+   throughput before overhead or quality cost. Replay `k7/k6/k5`; require a
+   quality-passing policy with `>=5%` charged projection before any kernel.
+3. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
    contract until a base asset qualifies. Current routed-Q5 evidence gives only
    2.2-2.4% total-decode headroom; do not generate assets from that ceiling.
-5. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
+4. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
    decode, but explicitly input-changing. Prefix caching remains a separate exact
    reuse specialization and does not rank for fresh serial prompts.
-6. **MoE speculative verification re-adjudication**: authorize only a bounded
+5. **MoE speculative verification re-adjudication**: authorize only a bounded
    replay if the current charged trajectory projects at least 5% whole-decode gain.
    A looser numerical resume contract does not create proposal acceptance or net
    economics; no implementation follows from tolerance alone.
@@ -457,14 +483,14 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Run the two-class decode ABI oracle before generating a new weight asset. Stop
-   if narrow-dispatch occupancy, rather than representation, explains the deficit.
-2. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
-   implementation work until its charged whole-request gate clears.
+1. Run the dense native-MTP sliding-history oracle. Stop unless a fixed window
+   clears the charged Native-MTP request gates; do not treat the sweep as a product.
+2. Then replay static/adaptive top-k over `k7/k6/k5`. Stop unless a quality-passing
+   policy projects `>=5%` after overhead; k6-only evidence cannot clear admission.
 3. Keep prompt reduction in its labeled input-changing lane and MoE speculation
    behind a current `>=5%` economic replay.
-4. Do not resume matrix attention, sparse retrieval for this fixture, same-body
-   Q8, routed-tail work,
+4. Do not resume generic decode-storage diagnostics, matrix attention, sparse
+   retrieval for this fixture, same-body Q8, routed-tail work,
    model/quant quality work, mixed quant, broad prompt lookup, GDN implementation,
    or local retuning.
 
@@ -492,8 +518,11 @@ better than a decode win; each result must retain its objective-lane label.
 - **Routed-tail reopen**: first change an ownership premise; then name the removed
   intermediate work, improve complete tail `>=15%` on both models, and improve
   whole prefill `>=5%` A3B and `>=3%` A10B.
-- **Format-specific decode ABI**: actual-shape primitive gain `>=10%` on two
-  important tensor classes and full-token movement `>=5%` before widening.
+- **Q5 representation/work-unit reopen**: name the current-R2 mechanism, improve
+  down wave `>=22%` on both A3B/A10B, and project `>=5%` charged full-token gain.
+  Local movement alone is insufficient.
+- **Attention format/body reopen**: first show `>=10%` actual-shape primitive gain
+  across medium/breadth guards, then retain the true-long gate below.
 - **GDN recurrence**: complete one-layer all-in gain `>=20%`, projected prefill
   gain `>=5%`, and exact state or an explicit numerical contract.
 - **True-long attention**: main-body gain `>=15%`, whole-token gain `>=6%` at
@@ -586,9 +615,10 @@ for aggregate throughput.
 
 ### Closed and deferred neighborhoods
 
-- Current-layout routed-Q5 work remains NO-GO. The no-weight oracle improves total
-  decode only `2.2-2.4%`; reopen only for a representation or work unit predicting
-  `>=22%` down-wave improvement on both A3B and A10B.
+- Current-layout routed-Q5 work remains NO-GO. The pre-R2 no-weight oracle improves
+  total decode only `2.2-2.4%`; it is not a formal current-R2 bound. Reopen only
+  for a named representation/work unit predicting `>=22%` down-wave improvement
+  on both A3B/A10B and `>=5%` charged full-token movement.
 - Same-body exact Q8 KV and direct canonical Q4_0 remain closed. Reopen compressed
   KV only with a materially different format/body and a real-model fidelity gate.
 - Keep BF16 parity archaeology, F16 partial/reducer work, decode glue, generated

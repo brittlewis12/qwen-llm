@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.586 Decode Storage/ABI Synthesis Preflight
+
+Status: closed without implementation; no engine or experiment source changed.
+
+- Remove the generic two-class decode ABI oracle from the active queue. Routed
+  Q5 weights and F16 attention KV have no shared ABI, storage format, consumer,
+  or implementation path. Their `282-296 GB/s` values are logical-byte proxies,
+  not evidence of one physical-storage limiter.
+- v0.311's pre-R2 no-weight oracle removes weight traffic/dequant while retaining
+  its ownership, inner replay, reductions, stores, and wave schedule. It measures
+  `19.35%/17.62%` down-wave latency reduction and `2.16%/2.39%` full-decode
+  throughput gain on A3B/A10B. v0.344 later changes K512 ownership, so these are
+  not formal bounds on current R2 or premise-changing work units.
+- The Q5 record still supplies no named current-R2 representation that predicts
+  both `>=22%` down-wave gain on A3B/A10B and `>=5%` charged full-token movement.
+  The full-token condition dominates: a local 22% gain is not sufficient.
+- Attention address order, same-body and split-plane Q8, direct Q4_0 fidelity,
+  TGM K/V read-once and V staging, tile1, partition packing, and the fixed
+  compressed-matrix point are already closed. The current counter record shows
+  low effective residency and instruction pressure rather than saturated external
+  bandwidth. No named replacement body clears the medium/breadth and true-long
+  gates.
+- Do not add matched-grid touch, no-dequant, or current-R2 no-weight diagnostics
+  without a named candidate whose implementation decision they can change. Reopen
+  Q5 and attention only under their separate roadmap conditions.
+- Rerank dense native-MTP sliding history ahead of approximate top-k. Ideal
+  k8-to-k6 removal has only a `4.35%` decode-time ceiling, about `4.55%` throughput
+  before overhead or quality loss; top-k must include k5 or an adaptive policy
+  averaging fewer than about 5.8 active experts to clear a 5% admission gate.
+
+Adversarial synthesis: `cx ask` session
+`019f5c07-9b85-7770-8e20-8a3e97729128`.
+
 ## 2026-07-13 - v0.583-v0.585 Integrated Compressed Matrix Attention
 
 Status: killed at the valid fixed 32K body; the local rescue neighborhood is

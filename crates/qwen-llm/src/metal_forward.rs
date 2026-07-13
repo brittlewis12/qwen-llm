@@ -31,9 +31,9 @@
 use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTimestampSampleBuffer,
-    attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32, encode_argmax_f32,
-    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
+    GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalTensor,
+    MetalTimestampSampleBuffer, attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
+    encode_argmax_f32, encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
     encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
     encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
     encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
@@ -59,7 +59,7 @@ use crate::metal::{
 use crate::model::ArchKind;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use std::{cell::Cell, sync::OnceLock};
+use std::{cell::Cell, collections::HashSet, sync::OnceLock};
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
@@ -343,6 +343,78 @@ fn resolve_native_quant_embedding(
     }
 }
 
+const GGUF_NO_COPY_ALIGNMENT: usize = 32;
+const GGUF_NO_COPY_27B_LAYOUT_DIGEST: u64 = 0xd116_405f_d99f_54d9;
+const GGUF_NO_COPY_27B_MAPPED_BYTES: usize = 16_817_244_384;
+const GGUF_NO_COPY_27B_DESCRIPTOR_COUNT: usize = 851;
+const GGUF_NO_COPY_27B_SOURCE_BYTES: u64 = 16_806_250_496;
+const GGUF_NO_COPY_27B_VIEW_COUNT: usize = 850;
+const GGUF_NO_COPY_27B_VIEW_BYTES: u64 = 16_806_230_016;
+const GGUF_NO_COPY_27B_TAIL_NAME: &str = "blk.63.post_attention_norm.weight";
+const GGUF_NO_COPY_27B_TAIL_BYTES: u64 = 20_480;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GgufNoCopyMode {
+    Disabled,
+    Forced,
+}
+
+fn parse_gguf_no_copy_mode(value: Option<&str>) -> Result<GgufNoCopyMode, MfError> {
+    match value {
+        None => Ok(GgufNoCopyMode::Disabled),
+        Some(value) if crate::env_flag::env_value_truthy(value) => Ok(GgufNoCopyMode::Forced),
+        Some(value) if crate::env_flag::env_value_falsy(value) => Ok(GgufNoCopyMode::Disabled),
+        Some(value) => Err(MfError::LoadPolicy(format!(
+            "invalid QWEN_GGUF_NO_COPY value {value:?}"
+        ))),
+    }
+}
+
+fn gguf_no_copy_mode() -> Result<GgufNoCopyMode, MfError> {
+    match std::env::var("QWEN_GGUF_NO_COPY") {
+        Ok(value) => parse_gguf_no_copy_mode(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_gguf_no_copy_mode(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
+            "QWEN_GGUF_NO_COPY is not valid Unicode".to_string(),
+        )),
+    }
+}
+
+fn hash_layout_bytes(hash: &mut u64, bytes: &[u8]) {
+    const PRIME: u64 = 0x100000001b3;
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(PRIME);
+    }
+}
+
+fn hash_layout_u64(hash: &mut u64, value: u64) {
+    hash_layout_bytes(hash, &value.to_le_bytes());
+}
+
+fn gguf_descriptor_layout_digest(gguf: &GgufFile) -> u64 {
+    let mut hash = 0xcbf29ce484222325;
+    hash_layout_bytes(&mut hash, b"qwen-gguf-layout-v1");
+    hash_layout_u64(&mut hash, gguf.shard_count() as u64);
+    for shard in &gguf.shards {
+        hash_layout_u64(&mut hash, shard.mmap.len() as u64);
+    }
+    hash_layout_u64(&mut hash, gguf.tensors.len() as u64);
+    for desc in &gguf.tensors {
+        hash_layout_u64(&mut hash, desc.name.len() as u64);
+        hash_layout_bytes(&mut hash, desc.name.as_bytes());
+        hash_layout_u64(&mut hash, desc.dtype as i32 as u32 as u64);
+        hash_layout_u64(&mut hash, desc.shard_idx as u64);
+        hash_layout_u64(&mut hash, desc.data_offset);
+        hash_layout_u64(&mut hash, desc.n_bytes);
+        hash_layout_u64(&mut hash, desc.shape.len() as u64);
+        for dim in &desc.shape {
+            hash_layout_u64(&mut hash, *dim);
+        }
+    }
+    hash
+}
+
 // Per-projection GDN no-op ablations: each is its own opt-in flag, OR'd
 // with the broad `..NOOP_FRONT` umbrella flag above.
 crate::env_flag!(default_off decode_gdn_noop_qkv_flag, "QWEN_DECODE_GDN_NOOP_QKV");
@@ -467,7 +539,9 @@ fn matmat_bf16_bfloat_act_enabled() -> bool {
 /// per-phase entries are `(phase_name, gpu_ms)`.
 pub type PhaseProfileOutput = (Vec<f32>, f64, Vec<(String, f64)>);
 
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState};
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MfError {
@@ -481,6 +555,8 @@ pub enum MfError {
     UnsupportedMoe,
     #[error("v1 driver requires F32 weights; tensor {name} is {dtype:?}")]
     UnsupportedDtype { name: String, dtype: GgmlType },
+    #[error("metal load policy: {0}")]
+    LoadPolicy(String),
 }
 
 /// All weight tensors, resident as `MetalTensor`s. Loaded once at session
@@ -569,6 +645,431 @@ pub struct MoeRouteReplayRow {
     pub hidden: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceMaterialization {
+    DirectCopy,
+    DirectView,
+    TailFallback,
+    Converted,
+}
+
+#[derive(Default)]
+struct WeightLoadLedger {
+    source_descriptors: usize,
+    source_bytes: u64,
+    direct_copy_descriptors: usize,
+    direct_copy_bytes: u64,
+    direct_view_descriptors: usize,
+    direct_view_bytes: u64,
+    tail_fallback_descriptors: usize,
+    tail_fallback_bytes: u64,
+    converted_descriptors: usize,
+    converted_source_bytes: u64,
+    converted_resident_bytes: u64,
+    derived_allocations: usize,
+    derived_bytes: u64,
+}
+
+impl WeightLoadLedger {
+    fn record_source(
+        &mut self,
+        desc: &TensorDesc,
+        materialization: SourceMaterialization,
+        resident_bytes: u64,
+    ) -> Result<(), MfError> {
+        self.source_descriptors = self
+            .source_descriptors
+            .checked_add(1)
+            .ok_or_else(|| MfError::LoadPolicy("source descriptor count overflow".to_string()))?;
+        self.source_bytes = self
+            .source_bytes
+            .checked_add(desc.n_bytes)
+            .ok_or_else(|| MfError::LoadPolicy("source byte ledger overflow".to_string()))?;
+        let (count, bytes) = match materialization {
+            SourceMaterialization::DirectCopy => (
+                &mut self.direct_copy_descriptors,
+                &mut self.direct_copy_bytes,
+            ),
+            SourceMaterialization::DirectView => (
+                &mut self.direct_view_descriptors,
+                &mut self.direct_view_bytes,
+            ),
+            SourceMaterialization::TailFallback => (
+                &mut self.tail_fallback_descriptors,
+                &mut self.tail_fallback_bytes,
+            ),
+            SourceMaterialization::Converted => {
+                self.converted_resident_bytes = self
+                    .converted_resident_bytes
+                    .checked_add(resident_bytes)
+                    .ok_or_else(|| {
+                        MfError::LoadPolicy("converted resident byte ledger overflow".to_string())
+                    })?;
+                (
+                    &mut self.converted_descriptors,
+                    &mut self.converted_source_bytes,
+                )
+            }
+        };
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| MfError::LoadPolicy("materialization count overflow".to_string()))?;
+        *bytes = bytes
+            .checked_add(desc.n_bytes)
+            .ok_or_else(|| MfError::LoadPolicy("materialization byte overflow".to_string()))?;
+        Ok(())
+    }
+
+    fn record_derived(&mut self, tensor: &MetalTensor) -> Result<(), MfError> {
+        self.derived_allocations = self
+            .derived_allocations
+            .checked_add(1)
+            .ok_or_else(|| MfError::LoadPolicy("derived allocation count overflow".to_string()))?;
+        self.derived_bytes = self
+            .derived_bytes
+            .checked_add(tensor.n_bytes())
+            .ok_or_else(|| MfError::LoadPolicy("derived allocation byte overflow".to_string()))?;
+        Ok(())
+    }
+}
+
+enum DirectStorage {
+    Copied,
+    ForcedRetained(MetalGgufBacking),
+}
+
+struct MetalWeightLoader<'a> {
+    ctx: &'a MetalContext,
+    gguf: &'a GgufFile,
+    direct_storage: DirectStorage,
+    seen_forced: HashSet<(usize, u64, u64)>,
+    ledger: WeightLoadLedger,
+}
+
+impl<'a> MetalWeightLoader<'a> {
+    fn new(ctx: &'a MetalContext, gguf: &'a GgufFile, direct_storage: DirectStorage) -> Self {
+        Self {
+            ctx,
+            gguf,
+            direct_storage,
+            seen_forced: HashSet::new(),
+            ledger: WeightLoadLedger::default(),
+        }
+    }
+
+    fn is_forced_retained(&self) -> bool {
+        matches!(self.direct_storage, DirectStorage::ForcedRetained(_))
+    }
+
+    fn record_source(
+        &mut self,
+        desc: &TensorDesc,
+        materialization: SourceMaterialization,
+        resident_bytes: u64,
+    ) -> Result<(), MfError> {
+        if self.is_forced_retained()
+            && !self
+                .seen_forced
+                .insert((desc.shard_idx, desc.data_offset, desc.n_bytes))
+        {
+            return Err(MfError::LoadPolicy(format!(
+                "forced no-copy materialized tensor {:?} more than once",
+                desc.name
+            )));
+        }
+        self.ledger
+            .record_source(desc, materialization, resident_bytes)
+    }
+
+    fn load_direct(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
+        match &self.direct_storage {
+            DirectStorage::Copied => {
+                let tensor = MetalTensor::from_gguf_tensor(self.ctx, desc, self.gguf.slice(desc))?;
+                self.record_source(desc, SourceMaterialization::DirectCopy, tensor.n_bytes())?;
+                Ok(tensor)
+            }
+            DirectStorage::ForcedRetained(backing) => {
+                let (eligibility, tensor) = backing.tensor(desc)?;
+                match (eligibility, tensor) {
+                    (GgufBackingEligibility::Eligible, Some(tensor)) => {
+                        self.record_source(
+                            desc,
+                            SourceMaterialization::DirectView,
+                            tensor.n_bytes(),
+                        )?;
+                        Ok(tensor)
+                    }
+                    (GgufBackingEligibility::FinalPartialPage, None)
+                        if desc.name == GGUF_NO_COPY_27B_TAIL_NAME
+                            && desc.n_bytes == GGUF_NO_COPY_27B_TAIL_BYTES =>
+                    {
+                        let tensor =
+                            MetalTensor::from_gguf_tensor(self.ctx, desc, self.gguf.slice(desc))?;
+                        self.record_source(
+                            desc,
+                            SourceMaterialization::TailFallback,
+                            tensor.n_bytes(),
+                        )?;
+                        Ok(tensor)
+                    }
+                    (reason, _) => Err(MfError::LoadPolicy(format!(
+                        "forced no-copy rejected direct tensor {:?}: {reason:?}",
+                        desc.name
+                    ))),
+                }
+            }
+        }
+    }
+
+    fn load_f32(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
+        if desc.dtype == GgmlType::F32 {
+            return self.load_direct(desc);
+        }
+        let f32 = crate::codec::dequant_to_f32(desc, self.gguf.slice(desc))?;
+        let tensor = MetalTensor::from_bytes(
+            self.ctx,
+            bytemuck::cast_slice(&f32),
+            desc.shape.clone(),
+            GgmlType::F32,
+        )?;
+        self.record_source(desc, SourceMaterialization::Converted, tensor.n_bytes())?;
+        Ok(tensor)
+    }
+
+    fn load_weight(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
+        if weight_dtype_kept_native(desc.dtype) {
+            return self.load_direct(desc);
+        }
+        eprintln!(
+            "[metal-load] {} is {:?}; dequanting to F32 (no active native path)",
+            desc.name, desc.dtype
+        );
+        self.load_f32(desc)
+    }
+
+    fn load_embedding(
+        &mut self,
+        desc: &TensorDesc,
+        native_quant: bool,
+    ) -> Result<MetalTensor, MfError> {
+        if matches!(desc.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) || native_quant {
+            self.load_direct(desc)
+        } else {
+            self.load_f32(desc)
+        }
+    }
+
+    fn load_router_weight(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
+        if !moe_router_f16_enabled() {
+            return self.load_f32(desc);
+        }
+        let f32 = crate::codec::dequant_to_f32(desc, self.gguf.slice(desc))?;
+        let f16: Vec<half::f16> = f32.iter().copied().map(half::f16::from_f32).collect();
+        let tensor = MetalTensor::from_bytes(
+            self.ctx,
+            bytemuck::cast_slice(&f16),
+            desc.shape.clone(),
+            GgmlType::F16,
+        )?;
+        self.record_source(desc, SourceMaterialization::Converted, tensor.n_bytes())?;
+        Ok(tensor)
+    }
+
+    fn load_moe_expert(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
+        if matches!(desc.dtype, GgmlType::IQ3_XXS | GgmlType::IQ3_S)
+            && moe_iq3_expert_native_enabled(desc)
+        {
+            self.load_direct(desc)
+        } else {
+            self.load_weight(desc)
+        }
+    }
+
+    fn load_moe(&mut self, moe: &MoeFfn<'_>) -> Result<MetalMoeFfn, MfError> {
+        Ok(MetalMoeFfn {
+            gate_inp: self.load_router_weight(moe.gate_inp)?,
+            gate_exps: self.load_moe_expert(moe.gate_exps)?,
+            up_exps: self.load_moe_expert(moe.up_exps)?,
+            down_exps: self.load_weight(moe.down_exps)?,
+            gate_inp_shexp: self.load_f32(moe.gate_inp_shexp)?,
+            gate_inp_cpu: crate::codec::dequant_to_f32(
+                moe.gate_inp,
+                self.gguf.slice(moe.gate_inp),
+            )?,
+            gate_inp_shexp_cpu: crate::codec::dequant_to_f32(
+                moe.gate_inp_shexp,
+                self.gguf.slice(moe.gate_inp_shexp),
+            )?,
+        })
+    }
+
+    fn record_derived(&mut self, tensor: Option<&MetalTensor>) -> Result<(), MfError> {
+        if let Some(tensor) = tensor {
+            self.ledger.record_derived(tensor)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self, exact_sentinel: bool) -> Result<(), MfError> {
+        let forced_retained = self.is_forced_retained();
+        let seen_forced = self.seen_forced.len();
+        let ledger = self.ledger;
+        let accounted_source_bytes = ledger
+            .direct_copy_bytes
+            .checked_add(ledger.direct_view_bytes)
+            .and_then(|bytes| bytes.checked_add(ledger.tail_fallback_bytes))
+            .and_then(|bytes| bytes.checked_add(ledger.converted_source_bytes))
+            .ok_or_else(|| MfError::LoadPolicy("source accounting overflow".to_string()))?;
+        if accounted_source_bytes != ledger.source_bytes {
+            return Err(MfError::LoadPolicy(format!(
+                "source accounting mismatch: categories={accounted_source_bytes} total={}",
+                ledger.source_bytes
+            )));
+        }
+        if exact_sentinel
+            && (ledger.source_descriptors != GGUF_NO_COPY_27B_DESCRIPTOR_COUNT
+                || ledger.source_bytes != GGUF_NO_COPY_27B_SOURCE_BYTES)
+        {
+            return Err(MfError::LoadPolicy(format!(
+                "exact 27B source ledger mismatch: descriptors={} bytes={}",
+                ledger.source_descriptors, ledger.source_bytes
+            )));
+        }
+        if forced_retained
+            && (seen_forced != GGUF_NO_COPY_27B_DESCRIPTOR_COUNT
+                || ledger.direct_view_descriptors != GGUF_NO_COPY_27B_VIEW_COUNT
+                || ledger.direct_view_bytes != GGUF_NO_COPY_27B_VIEW_BYTES
+                || ledger.tail_fallback_descriptors != 1
+                || ledger.tail_fallback_bytes != GGUF_NO_COPY_27B_TAIL_BYTES
+                || ledger.direct_copy_descriptors != 0
+                || ledger.converted_descriptors != 0
+                || ledger.derived_allocations != 0)
+        {
+            return Err(MfError::LoadPolicy(format!(
+                concat!(
+                    "forced no-copy ledger mismatch: seen={} view={}/{} tail={}/{} ",
+                    "copy={}/{} converted={}/{}/{} derived={}/{}"
+                ),
+                seen_forced,
+                ledger.direct_view_descriptors,
+                ledger.direct_view_bytes,
+                ledger.tail_fallback_descriptors,
+                ledger.tail_fallback_bytes,
+                ledger.direct_copy_descriptors,
+                ledger.direct_copy_bytes,
+                ledger.converted_descriptors,
+                ledger.converted_source_bytes,
+                ledger.converted_resident_bytes,
+                ledger.derived_allocations,
+                ledger.derived_bytes,
+            )));
+        }
+        eprintln!(
+            concat!(
+                "[metal-load-ledger] source={}/{} direct_copy={}/{} direct_view={}/{} ",
+                "tail_fallback={}/{} converted={}/{}/{} derived={}/{}"
+            ),
+            ledger.source_descriptors,
+            ledger.source_bytes,
+            ledger.direct_copy_descriptors,
+            ledger.direct_copy_bytes,
+            ledger.direct_view_descriptors,
+            ledger.direct_view_bytes,
+            ledger.tail_fallback_descriptors,
+            ledger.tail_fallback_bytes,
+            ledger.converted_descriptors,
+            ledger.converted_source_bytes,
+            ledger.converted_resident_bytes,
+            ledger.derived_allocations,
+            ledger.derived_bytes,
+        );
+        Ok(())
+    }
+}
+
+fn matches_no_copy_27b_sentinel(gguf: &GgufFile, model: &Model<'_>) -> bool {
+    gguf.shard_count() == 1
+        && gguf.total_mapped_len() == GGUF_NO_COPY_27B_MAPPED_BYTES
+        && gguf.tensors.len() == GGUF_NO_COPY_27B_DESCRIPTOR_COUNT
+        && gguf_descriptor_layout_digest(gguf) == GGUF_NO_COPY_27B_LAYOUT_DIGEST
+        && !model.tied_embeddings
+        && model.mtp.is_none()
+        && native_quant_embedding_default_promoted(
+            &model.arch,
+            model.tied_embeddings,
+            model.mtp.is_some(),
+            model.token_embd.dtype,
+            &model.token_embd.shape,
+        )
+}
+
+fn direct_storage_for_load(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    mode: GgufNoCopyMode,
+) -> Result<(DirectStorage, bool), MfError> {
+    let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
+    if mode == GgufNoCopyMode::Disabled {
+        return Ok((DirectStorage::Copied, exact_sentinel));
+    }
+    if !exact_sentinel {
+        return Err(MfError::LoadPolicy(format!(
+            concat!(
+                "forced no-copy requires exact 27B layout: shards={} mapped={} ",
+                "descriptors={} digest={:#018x}"
+            ),
+            gguf.shard_count(),
+            gguf.total_mapped_len(),
+            gguf.tensors.len(),
+            gguf_descriptor_layout_digest(gguf),
+        )));
+    }
+    if !ctx.device.hasUnifiedMemory() {
+        return Err(MfError::LoadPolicy(
+            "forced no-copy requires a unified-memory Metal device".to_string(),
+        ));
+    }
+    let mmap = gguf.retained_shard_mmap(0).ok_or_else(|| {
+        MfError::LoadPolicy("exact no-copy sentinel is missing shard 0".to_string())
+    })?;
+    let backing = ctx.gguf_no_copy_backing(mmap, 0, GGUF_NO_COPY_ALIGNMENT)?;
+    let prefault = backing.prefault_read();
+    let expected_pages = backing.exposed_len() / backing.page_size();
+    if prefault.page_count != expected_pages
+        || prefault.covered_bytes != backing.exposed_len()
+        || backing.required_alignment() != GGUF_NO_COPY_ALIGNMENT
+    {
+        return Err(MfError::LoadPolicy(format!(
+            concat!(
+                "forced no-copy prefault mismatch: pages={}/{} covered={}/{} ",
+                "alignment={}/{}"
+            ),
+            prefault.page_count,
+            expected_pages,
+            prefault.covered_bytes,
+            backing.exposed_len(),
+            backing.required_alignment(),
+            GGUF_NO_COPY_ALIGNMENT,
+        )));
+    }
+    eprintln!(
+        concat!(
+            "[metal-gguf-no-copy] mapped={} exposed={} suffix={} page={} pages={} ",
+            "alignment={} prefault_ms={:.3} checksum={:#018x}"
+        ),
+        backing.mapped_len(),
+        backing.exposed_len(),
+        backing.mapped_len() - backing.exposed_len(),
+        backing.page_size(),
+        prefault.page_count,
+        backing.required_alignment(),
+        prefault.wall_ms,
+        prefault.checksum,
+    );
+    Ok((DirectStorage::ForcedRetained(backing), true))
+}
+
 impl MetalModel {
     /// Load weights from an `loader::Model` view. Native-quant path:
     /// keeps weight tensors at their on-disk dtype (Q4_K, Q6_K, F32,
@@ -581,106 +1082,45 @@ impl MetalModel {
     /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q8_0
     /// embeddings can opt into native residency once their row kernels apply.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
-        // Helper: load a tensor that *must* be F32 in memory (used by
-        // elementwise kernels, norms, etc.). Dequants via codec if needed.
-        let load_f32 = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            if desc.dtype == GgmlType::F32 {
-                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
-            } else {
-                let f32 = crate::codec::dequant_to_f32(desc, gguf.slice(desc))?;
-                Ok(MetalTensor::from_bytes(
-                    ctx,
-                    bytemuck::cast_slice(&f32),
-                    desc.shape.clone(),
-                    GgmlType::F32,
-                )?)
-            }
-        };
-        // Helper: load a tensor that's a mat_vec/mat_mat weight. Keeps native
-        // dtype for dtypes covered by the primitive dispatchers; falls back to
-        // F32 conversion for types we don't have native kernels for yet.
-        let load_weight = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            if weight_dtype_kept_native(desc.dtype) {
-                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
-            } else {
-                eprintln!(
-                    "[metal-load] {} is {:?}; dequanting to F32 (no active native path)",
-                    desc.name, desc.dtype
-                );
-                load_f32(desc)
-            }
-        };
-        let load_embedding = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            let selection = resolve_native_quant_embedding(
-                native_quant_embedding_mode(),
-                native_quant_embedding_supported(desc.dtype, &desc.shape),
-                native_quant_embedding_default_promoted(
-                    &model.arch,
-                    model.tied_embeddings,
-                    model.mtp.is_some(),
-                    desc.dtype,
-                    &desc.shape,
-                ),
-            );
-            eprintln!(
-                "[metal-load] native quantized token embedding policy: {} ({:?} {:?})",
-                selection.label(),
-                desc.dtype,
-                desc.shape,
-            );
-            let native_quant = selection.uses_native();
-            if matches!(desc.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) || native_quant
-            {
-                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
-            } else {
-                load_f32(desc)
-            }
-        };
-        // Existing alias for the call sites below.
-        let load_tensor = load_f32;
-        let load_router_weight = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            if !moe_router_f16_enabled() {
-                return load_f32(desc);
-            }
-            let f32 = crate::codec::dequant_to_f32(desc, gguf.slice(desc))?;
-            let f16: Vec<half::f16> = f32.iter().copied().map(half::f16::from_f32).collect();
-            Ok(MetalTensor::from_bytes(
-                ctx,
-                bytemuck::cast_slice(&f16),
-                desc.shape.clone(),
-                GgmlType::F16,
-            )?)
-        };
+        Self::load_with_no_copy_mode(ctx, gguf, model, gguf_no_copy_mode()?)
+    }
 
-        // Native embedding residency defaults only on the promoted architecture
-        // fingerprints. The environment can still force or roll back the path.
-        let token_embd = load_embedding(model.token_embd)?;
-        let output_norm = load_f32(model.output_norm)?;
-        let lm_head = load_weight(model.lm_head)?;
+    fn load_with_no_copy_mode(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        model: &Model<'_>,
+        no_copy_mode: GgufNoCopyMode,
+    ) -> Result<Self, MfError> {
+        let embedding_selection = resolve_native_quant_embedding(
+            native_quant_embedding_mode(),
+            native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
+            native_quant_embedding_default_promoted(
+                &model.arch,
+                model.tied_embeddings,
+                model.mtp.is_some(),
+                model.token_embd.dtype,
+                &model.token_embd.shape,
+            ),
+        );
+        eprintln!(
+            "[metal-load] native quantized token embedding policy: {} ({:?} {:?})",
+            embedding_selection.label(),
+            model.token_embd.dtype,
+            model.token_embd.shape,
+        );
+        if no_copy_mode == GgufNoCopyMode::Forced && !embedding_selection.uses_native() {
+            return Err(MfError::LoadPolicy(
+                "forced no-copy requires native token embedding residency".to_string(),
+            ));
+        }
 
-        let load_moe_expert = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            if matches!(desc.dtype, GgmlType::IQ3_XXS | GgmlType::IQ3_S)
-                && moe_iq3_expert_native_enabled(desc)
-            {
-                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
-            } else {
-                load_weight(desc)
-            }
-        };
-        let load_moe = |moe: &MoeFfn<'_>| -> Result<MetalMoeFfn, MfError> {
-            Ok(MetalMoeFfn {
-                gate_inp: load_router_weight(moe.gate_inp)?,
-                gate_exps: load_moe_expert(moe.gate_exps)?,
-                up_exps: load_moe_expert(moe.up_exps)?,
-                down_exps: load_weight(moe.down_exps)?,
-                gate_inp_shexp: load_f32(moe.gate_inp_shexp)?,
-                gate_inp_cpu: crate::codec::dequant_to_f32(moe.gate_inp, gguf.slice(moe.gate_inp))?,
-                gate_inp_shexp_cpu: crate::codec::dequant_to_f32(
-                    moe.gate_inp_shexp,
-                    gguf.slice(moe.gate_inp_shexp),
-                )?,
-            })
-        };
+        let (direct_storage, exact_sentinel) =
+            direct_storage_for_load(ctx, gguf, model, no_copy_mode)?;
+        let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage);
+        let token_embd =
+            loader.load_embedding(model.token_embd, embedding_selection.uses_native())?;
+        let output_norm = loader.load_f32(model.output_norm)?;
+        let lm_head = loader.load_weight(model.lm_head)?;
 
         let load_attn_qkv_fused = |q: &MetalTensor,
                                    k: &MetalTensor,
@@ -737,47 +1177,79 @@ impl MetalModel {
         for b in &model.blocks {
             match b {
                 Block::Gdn(g) => {
+                    let attn_norm = loader.load_f32(g.attn_norm)?;
+                    let post_attn_norm = loader.load_f32(g.post_attention_norm)?;
+                    let ffn_gate = loader.load_weight(g.ffn_gate)?;
+                    let ffn_up = loader.load_weight(g.ffn_up)?;
+                    let ffn_down = loader.load_weight(g.ffn_down)?;
+                    let in_proj_qkv = loader.load_weight(g.in_proj_qkv)?;
+                    let in_proj_z = loader.load_weight(g.in_proj_z)?;
+                    let beta_proj = loader.load_weight(g.beta_proj)?;
+                    let alpha_proj = loader.load_weight(g.alpha_proj)?;
+                    let a_log = loader.load_f32(g.a_log)?;
+                    let dt_bias = loader.load_f32(g.dt_bias)?;
+                    let conv1d = loader.load_f32(g.conv1d)?;
+                    let norm = loader.load_f32(g.norm)?;
+                    let out_proj = loader.load_weight(g.out_proj)?;
+                    let ffn_moe = match g.ffn_moe.as_ref() {
+                        Some(moe) => Some(loader.load_moe(moe)?),
+                        None => None,
+                    };
                     blocks.push(MetalBlock::Gdn(MetalGdnBlock {
-                        attn_norm: load_f32(g.attn_norm)?,
-                        post_attn_norm: load_f32(g.post_attention_norm)?,
-                        ffn_gate: load_weight(g.ffn_gate)?,
-                        ffn_up: load_weight(g.ffn_up)?,
-                        ffn_down: load_weight(g.ffn_down)?,
-                        in_proj_qkv: load_weight(g.in_proj_qkv)?,
-                        in_proj_z: load_weight(g.in_proj_z)?,
-                        beta_proj: load_weight(g.beta_proj)?,
-                        alpha_proj: load_weight(g.alpha_proj)?,
-                        a_log: load_f32(g.a_log)?,
-                        dt_bias: load_f32(g.dt_bias)?,
-                        conv1d: load_f32(g.conv1d)?,
-                        norm: load_f32(g.norm)?,
-                        out_proj: load_weight(g.out_proj)?,
-                        ffn_moe: g.ffn_moe.as_ref().map(&load_moe).transpose()?,
+                        attn_norm,
+                        post_attn_norm,
+                        ffn_gate,
+                        ffn_up,
+                        ffn_down,
+                        in_proj_qkv,
+                        in_proj_z,
+                        beta_proj,
+                        alpha_proj,
+                        a_log,
+                        dt_bias,
+                        conv1d,
+                        norm,
+                        out_proj,
+                        ffn_moe,
                     }));
                 }
                 Block::Attn(a) => {
-                    let q = load_weight(a.q)?;
-                    let k = load_weight(a.k)?;
-                    let v = load_weight(a.v)?;
+                    let q = loader.load_weight(a.q)?;
+                    let k = loader.load_weight(a.k)?;
+                    let v = loader.load_weight(a.v)?;
+                    let attn_norm = loader.load_f32(a.attn_norm)?;
+                    let post_attn_norm = loader.load_f32(a.post_attention_norm)?;
+                    let ffn_gate = loader.load_weight(a.ffn_gate)?;
+                    let ffn_up = loader.load_weight(a.ffn_up)?;
+                    let ffn_down = loader.load_weight(a.ffn_down)?;
+                    let qkv_fused = load_attn_qkv_fused(&q, &k, &v)?;
+                    loader.record_derived(qkv_fused.as_ref())?;
+                    let o = loader.load_weight(a.o)?;
+                    let q_norm = loader.load_f32(a.q_norm)?;
+                    let k_norm = loader.load_f32(a.k_norm)?;
+                    let ffn_moe = match a.ffn_moe.as_ref() {
+                        Some(moe) => Some(loader.load_moe(moe)?),
+                        None => None,
+                    };
                     blocks.push(MetalBlock::Attn(MetalAttnBlock {
-                        attn_norm: load_f32(a.attn_norm)?,
-                        post_attn_norm: load_f32(a.post_attention_norm)?,
-                        ffn_gate: load_weight(a.ffn_gate)?,
-                        ffn_up: load_weight(a.ffn_up)?,
-                        ffn_down: load_weight(a.ffn_down)?,
-                        qkv_fused: load_attn_qkv_fused(&q, &k, &v)?,
+                        attn_norm,
+                        post_attn_norm,
+                        ffn_gate,
+                        ffn_up,
+                        ffn_down,
+                        qkv_fused,
                         q,
                         k,
                         v,
-                        o: load_weight(a.o)?,
-                        q_norm: load_f32(a.q_norm)?,
-                        k_norm: load_f32(a.k_norm)?,
-                        ffn_moe: a.ffn_moe.as_ref().map(&load_moe).transpose()?,
+                        o,
+                        q_norm,
+                        k_norm,
+                        ffn_moe,
                     }));
                 }
             }
         }
-        let _ = load_tensor; // suppress unused-warning if all sites switched
+        loader.finish(exact_sentinel)?;
 
         Ok(Self {
             arch: model.arch,
@@ -8424,6 +8896,198 @@ mod tests {
     use crate::loader::Model;
 
     #[test]
+    fn gguf_no_copy_mode_is_strict_and_default_off() {
+        assert_eq!(
+            parse_gguf_no_copy_mode(None).unwrap(),
+            GgufNoCopyMode::Disabled
+        );
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert_eq!(
+                parse_gguf_no_copy_mode(Some(value)).unwrap(),
+                GgufNoCopyMode::Forced
+            );
+        }
+        for value in ["0", "false", "FALSE", "no", "NO"] {
+            assert_eq!(
+                parse_gguf_no_copy_mode(Some(value)).unwrap(),
+                GgufNoCopyMode::Disabled
+            );
+        }
+        assert!(parse_gguf_no_copy_mode(Some("enabled")).is_err());
+        assert!(parse_gguf_no_copy_mode(Some("")).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires QWEN_GGUF_NO_COPY_MODEL local exact 27B fixture"]
+    fn gguf_no_copy_layout_digest_probe() {
+        let path = std::env::var("QWEN_GGUF_NO_COPY_MODEL")
+            .expect("set QWEN_GGUF_NO_COPY_MODEL to the exact 27B GGUF");
+        let gguf = GgufFile::open(&path).expect("open exact 27B GGUF");
+        eprintln!(
+            "[gguf-no-copy-layout] model={path} digest={:#018x}",
+            gguf_descriptor_layout_digest(&gguf)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local exact 27B model and frozen Reva prompt"]
+    fn gguf_no_copy_27b_prefill_and_continuation_are_bit_exact() {
+        use crate::metal_dflash::{
+            MetalDFlashLayerMajorScratch, PrefillScratchConfig,
+            plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
+        };
+
+        struct ArmResult {
+            prefill_logits: Vec<f32>,
+            prefill_snapshot: SessionSnapshot,
+            next_token: i32,
+            decode_logits: Vec<f32>,
+            decode_snapshot: SessionSnapshot,
+        }
+
+        fn run_arm(
+            ctx: &MetalContext,
+            gguf: &GgufFile,
+            model: &Model<'_>,
+            tokens: &[i32],
+            mode: GgufNoCopyMode,
+            forced_next: Option<i32>,
+        ) -> ArmResult {
+            let metal_model = MetalModel::load_with_no_copy_mode(ctx, gguf, model, mode)
+                .expect("load exactness arm");
+            let forward = MetalForward::new(ctx, &metal_model);
+            let capacity = 512;
+            let mut session =
+                MetalSession::fresh(ctx, &metal_model, capacity).expect("fresh session");
+            let chunk = tokens.len() as u32;
+            let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+                &metal_model,
+                chunk,
+                capacity,
+                PrefillScratchConfig::default(),
+            )
+            .expect("prefill scratch plan");
+            let mut scratch =
+                MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(ctx, &metal_model, plan)
+                    .expect("prefill scratch");
+            let prefill_logits = prefill_tokens_with_multi_hidden(
+                &forward,
+                tokens,
+                0,
+                &mut session,
+                &mut scratch,
+                &[],
+                None,
+            )
+            .expect("packed prefill");
+            let identity = session.snapshot_identity(0x591, 0x27b);
+            let prefill_snapshot = session.snapshot(
+                identity.clone(),
+                tokens.to_vec(),
+                Some(prefill_logits.clone()),
+            );
+            let next_token = forced_next.unwrap_or_else(|| {
+                prefill_logits
+                    .iter()
+                    .enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                        if value > best.1 { (index, value) } else { best }
+                    })
+                    .0 as i32
+            });
+            let decode_logits = forward
+                .single_token(next_token, tokens.len() as u32, &mut session)
+                .expect("forced decode transition");
+            let mut consumed = tokens.to_vec();
+            consumed.push(next_token);
+            let decode_snapshot = session.snapshot(identity, consumed, Some(decode_logits.clone()));
+            ArmResult {
+                prefill_logits,
+                prefill_snapshot,
+                next_token,
+                decode_logits,
+                decode_snapshot,
+            }
+        }
+
+        fn assert_f32_bits(label: &str, a: &[f32], b: &[f32]) {
+            assert_eq!(a.len(), b.len(), "{label} length");
+            for (index, (a, b)) in a.iter().zip(b).enumerate() {
+                assert_eq!(a.to_bits(), b.to_bits(), "{label} bit mismatch at {index}");
+            }
+        }
+
+        fn assert_snapshot(label: &str, a: &SessionSnapshot, b: &SessionSnapshot) {
+            assert_eq!(a.identity, b.identity, "{label} identity");
+            assert_eq!(a.prefix_tokens, b.prefix_tokens, "{label} tokens");
+            assert_eq!(a.kv_n_pos, b.kv_n_pos, "{label} KV positions");
+            assert_eq!(a.kv_k_arena, b.kv_k_arena, "{label} K arena");
+            assert_eq!(a.kv_v_arena, b.kv_v_arena, "{label} V arena");
+            assert_eq!(a.gdn_conv_arena, b.gdn_conv_arena, "{label} conv arena");
+            assert_eq!(a.gdn_state_arena, b.gdn_state_arena, "{label} state arena");
+            match (&a.final_logits, &b.final_logits) {
+                (Some(a), Some(b)) => assert_f32_bits(&format!("{label} logits"), a, b),
+                (None, None) => {}
+                _ => panic!("{label} final-logits presence mismatch"),
+            }
+        }
+
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        let prompt_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt");
+        assert!(
+            std::path::Path::new(model_path).is_file(),
+            "missing exact 27B fixture {model_path}"
+        );
+        assert!(
+            prompt_path.is_file(),
+            "missing frozen prompt {}",
+            prompt_path.display()
+        );
+        let ctx = MetalContext::new().expect("Metal context");
+        let gguf = GgufFile::open(model_path).expect("open exact 27B GGUF");
+        let model = Model::from_gguf(&gguf).expect("bind exact 27B model");
+        assert!(matches_no_copy_27b_sentinel(&gguf, &model));
+        let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
+        let prompt = std::fs::read_to_string(prompt_path).expect("read frozen prompt");
+        let tokens = tokenizer
+            .encode(&prompt, true)
+            .expect("tokenize frozen prompt");
+        assert_eq!(tokens.len(), 419, "frozen Reva token count drifted");
+
+        let copied = run_arm(&ctx, &gguf, &model, &tokens, GgufNoCopyMode::Disabled, None);
+        let retained = run_arm(
+            &ctx,
+            &gguf,
+            &model,
+            &tokens,
+            GgufNoCopyMode::Forced,
+            Some(copied.next_token),
+        );
+        assert_eq!(copied.next_token, retained.next_token);
+        assert_f32_bits(
+            "prefill logits",
+            &copied.prefill_logits,
+            &retained.prefill_logits,
+        );
+        assert_snapshot(
+            "prefill snapshot",
+            &copied.prefill_snapshot,
+            &retained.prefill_snapshot,
+        );
+        assert_f32_bits(
+            "decode logits",
+            &copied.decode_logits,
+            &retained.decode_logits,
+        );
+        assert_snapshot(
+            "decode snapshot",
+            &copied.decode_snapshot,
+            &retained.decode_snapshot,
+        );
+    }
+
+    #[test]
     fn native_quant_embedding_support_requires_an_aligned_matrix() {
         assert!(native_quant_embedding_supported(
             GgmlType::Q4_K,
@@ -8633,7 +9297,8 @@ mod tests {
         let load_ms = started.elapsed().as_secs_f64() * 1e3;
         let allocated_after = ctx.current_allocated_size();
         let allocated_delta = allocated_after.saturating_sub(allocated_before);
-        let resident_bytes = mm.token_embd.buffer.length() as u64;
+        let resident_bytes = mm.token_embd.n_bytes();
+        let backing_bytes = mm.token_embd.buffer.length() as u64;
         let selection = resolve_native_quant_embedding(
             native_quant_embedding_mode(),
             native_quant_embedding_supported(source.dtype, &source.shape),
@@ -8648,7 +9313,10 @@ mod tests {
         let expect_native = selection.uses_native();
 
         assert_eq!(mm.token_embd.dtype == source.dtype, expect_native);
-        assert_eq!(resident_bytes, mm.token_embd.n_bytes());
+        assert!(
+            mm.token_embd.offset + resident_bytes <= backing_bytes,
+            "logical embedding range must fit its backing buffer"
+        );
         if expect_native {
             assert_eq!(resident_bytes, source.n_bytes);
             let theoretical_savings = f32_bytes - source.n_bytes;
@@ -8661,7 +9329,7 @@ mod tests {
         eprintln!(
             concat!(
                 "[embed-residency] model={} source={:?} resident={:?} ",
-                "source_bytes={} resident_bytes={} f32_bytes={} device_delta={} ",
+                "source_bytes={} resident_bytes={} backing_bytes={} f32_bytes={} device_delta={} ",
                 "load_ms={:.3}"
             ),
             path,
@@ -8669,6 +9337,7 @@ mod tests {
             mm.token_embd.dtype,
             source.n_bytes,
             resident_bytes,
+            backing_bytes,
             f32_bytes,
             allocated_delta,
             load_ms,

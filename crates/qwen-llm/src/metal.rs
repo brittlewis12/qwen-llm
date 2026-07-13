@@ -1176,6 +1176,14 @@ pub(crate) struct MetalGgufBacking {
     geometry: GgufBackingGeometry,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GgufPrefaultReport {
+    pub page_count: usize,
+    pub covered_bytes: usize,
+    pub checksum: u64,
+    pub wall_ms: f64,
+}
+
 impl MetalGgufBacking {
     pub(crate) fn mapped_len(&self) -> usize {
         self.geometry.mapped_len()
@@ -1191,6 +1199,26 @@ impl MetalGgufBacking {
 
     pub(crate) fn required_alignment(&self) -> usize {
         self.geometry.required_alignment()
+    }
+
+    pub(crate) fn prefault_read(&self) -> GgufPrefaultReport {
+        let started = std::time::Instant::now();
+        let base = self.buffer.contents().as_ptr().cast::<u8>();
+        let mut checksum = 0u64;
+        let mut page_count = 0usize;
+        for offset in (0..self.exposed_len()).step_by(self.page_size()) {
+            // SAFETY: every offset is within the complete-page prefix owned by
+            // this read-only MTLBuffer. Volatile reads prevent elision.
+            let byte = unsafe { std::ptr::read_volatile(base.add(offset)) };
+            checksum = checksum.rotate_left(5) ^ u64::from(byte);
+            page_count += 1;
+        }
+        GgufPrefaultReport {
+            page_count,
+            covered_bytes: self.exposed_len(),
+            checksum,
+            wall_ms: started.elapsed().as_secs_f64() * 1e3,
+        }
     }
 
     pub(crate) fn classify(&self, desc: &TensorDesc) -> Result<GgufBackingEligibility, MetalError> {
@@ -18337,6 +18365,12 @@ mod tests {
                 backing.buffer.contents().as_ptr(),
                 mmap.as_ptr().cast_mut().cast::<c_void>()
             );
+            let prefault = backing.prefault_read();
+            assert_eq!(prefault.page_count, 2);
+            assert_eq!(prefault.covered_bytes, bytes.len());
+            let expected_checksum =
+                u64::from(bytes[0]).rotate_left(5) ^ u64::from(bytes[page_size]);
+            assert_eq!(prefault.checksum, expected_checksum);
             drop(mmap);
             assert!(weak.upgrade().is_some());
 

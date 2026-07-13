@@ -23,6 +23,9 @@ const NWG: usize = 256;
 const ROW_BYTES: usize = 288;
 const RAMP_REPS: usize = 512;
 const HISTORICAL_GATE_MS: f64 = 0.15587;
+const DIAGNOSTIC_BURST_REPS: usize = 16;
+const DIAGNOSTIC_BURSTS: usize = 1536;
+const DIAGNOSTIC_GAP_MS: u64 = 2;
 
 #[derive(Parser, Debug)]
 pub struct AttnMatrixBodyArgs {
@@ -38,6 +41,12 @@ pub struct AttnMatrixBodyArgs {
     /// Permit noncanonical runs/cooldowns without a decision.
     #[arg(long)]
     allow_noncanonical_smoke: bool,
+    /// Write readiness metadata, then wait for the paired diagnostic go file.
+    #[arg(long, requires = "diagnostic_go_file")]
+    diagnostic_ready_file: Option<PathBuf>,
+    /// Release a diagnostic hold after the profiler has attached.
+    #[arg(long, requires = "diagnostic_ready_file")]
+    diagnostic_go_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -485,17 +494,24 @@ fn median(sorted: &[f64]) -> f64 {
 }
 
 pub fn run(args: AttnMatrixBodyArgs, build_identity: Value) -> Result<()> {
-    let canonical_protocol = args.runs == 9 && args.cooldown_secs == 120;
-    if !canonical_protocol && !args.allow_noncanonical_smoke {
+    let diagnostic = args
+        .diagnostic_ready_file
+        .as_ref()
+        .zip(args.diagnostic_go_file.as_ref());
+    let canonical_protocol = diagnostic.is_none() && args.runs == 9 && args.cooldown_secs == 120;
+    if diagnostic.is_none() && !canonical_protocol && !args.allow_noncanonical_smoke {
         bail!("canonical packet requires --runs 9 and --cooldown-secs 120");
     }
     if canonical_protocol && args.allow_noncanonical_smoke {
         bail!("--allow-noncanonical-smoke is valid only for a noncanonical run");
     }
-    if args.runs < 3 {
+    if diagnostic.is_some() && args.allow_noncanonical_smoke {
+        bail!("diagnostic hold cannot be combined with a timing smoke");
+    }
+    if diagnostic.is_none() && args.runs < 3 {
         bail!("smoke runs must be at least 3");
     }
-    if canonical_protocol
+    if (canonical_protocol || diagnostic.is_some())
         && (build_identity["status"] != "match"
             || build_identity["build_dirty"] != false
             || build_identity["runtime_dirty"] != false
@@ -711,6 +727,66 @@ pub fn run(args: AttnMatrixBodyArgs, build_identity: Value) -> Result<()> {
         }
         Ok(())
     };
+    if let Some((ready_file, go_file)) = diagnostic {
+        if ready_file.exists() || go_file.exists() {
+            bail!("diagnostic ready/go files must not already exist");
+        }
+        ramp()?;
+        scrub()?;
+        let before = tensor_digest(&[&matrix_o, &matrix_ml])?;
+        let ready = json!({
+            "schema_version": 1,
+            "mode": "diagnostic_only",
+            "pid": std::process::id(),
+            "build": build_identity,
+            "candidate_pipeline": matrix_pipeline.name,
+            "burst_reps": DIAGNOSTIC_BURST_REPS,
+            "bursts": DIAGNOSTIC_BURSTS,
+            "gap_ms": DIAGNOSTIC_GAP_MS,
+            "checksum_before": before,
+        });
+        fs::write(ready_file, serde_json::to_vec_pretty(&ready)?)?;
+        while !go_file.exists() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for _ in 0..DIAGNOSTIC_BURSTS {
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .context("matrix-body diagnostic burst")?;
+            let enc = KernelEncoder::begin(&command);
+            for _ in 0..DIAGNOSTIC_BURST_REPS {
+                encode_main(Variant::Matrix, &enc, &matrix_o, &matrix_ml)?;
+            }
+            enc.end();
+            command.commit();
+            command.waitUntilCompleted();
+            if let Some(error) = command.error() {
+                bail!("matrix-body diagnostic burst failed: {error:?}");
+            }
+            std::thread::sleep(Duration::from_millis(DIAGNOSTIC_GAP_MS));
+        }
+        let after = tensor_digest(&[&matrix_o, &matrix_ml])?;
+        if before != after {
+            bail!("diagnostic output checksum changed");
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "mode": "diagnostic_only",
+                "pid": std::process::id(),
+                "checksum_before": before,
+                "checksum_after": after,
+                "burst_reps": DIAGNOSTIC_BURST_REPS,
+                "bursts": DIAGNOSTIC_BURSTS,
+                "gap_ms": DIAGNOSTIC_GAP_MS,
+                "timing_claim": false,
+                "disposition": null,
+            }))?
+        );
+        return Ok(());
+    }
     let measure_row = |label: &str, variant: Variant| -> Result<Value> {
         dispatch(variant, true)?;
         let (o, ml, out) = buffers(variant);

@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.581 Compressed Matrix Stage Floor
+
+Status: passes the fixed 32K floor; one low-confidence integrated matrix body is
+authorized under a corrected contemporaneous gate.
+
+- The clean packet uses commit `88ede05`, immutable full-file and 32K-prefix
+  capture hashes, nine GPU-timestamp samples, a 120-second cooldown, a 512-dispatch
+  floor ramp, and a 128 MiB compute read/write scrub before every sample. Build and
+  runtime source identities match. No thermal or performance warnings occurred.
+- The fixed G8/head-dim-256/C32 floor dequantizes every captured K/V element from
+  split-plane group16-scale Q8, stages each half tile through 16 KiB of threadgroup
+  memory, and consumes every staged value in an observable checksum. The before and
+  after checksums match exactly.
+- The median is `0.09958353 ms`; the nine samples span `0.09829178-0.10224991 ms`.
+  This is `0.638888x` the preregistered `0.15587 ms` historical ceiling and leaves
+  `0.05628647 ms` below that ceiling.
+- The historical ceiling is not a current 15% gate. Against the v0.580 V4 medians
+  of `0.178500/0.179250 ms`, the conservative 15% target is `0.15172507 ms`, leaving
+  only `0.05214154 ms` after the floor. The integrated packet must also use its own
+  same-packet A1/A2 anchors and clear `0.85 * min(A1, A2)`.
+- This result falsifies only the claim that compressed decode and full staging are
+  already too expensive. It does not price Q conversion, matrix QK, online softmax,
+  V accumulation, register residency, or the production partial writes. The floor
+  also contains checksum arithmetic that the integrated body will not retain, so
+  its time is not a strictly additive lower bound.
+- Authorize one fixed 32K body using matrix QK within a simdgroup and register-owned
+  V accumulation. No topology sweep, rescue retune, 131K row, cache writer, or
+  production path follows from the floor pass.
+
+Artifacts: `target/profiles/v0581-attn-stage-floor/`. Adversarial adjudication:
+`cx ask` session `019f5bb8-8bc1-7410-8e4c-d1d910fa3fcf`.
+
 ## 2026-07-12 - v0.577-v0.580 Register-Light Attention Falsifier
 
 Status: killed at the valid 32K prerequisite; experiment source removed and no
@@ -35,7 +67,8 @@ Status: killed at the valid 32K prerequisite; experiment source removed and no
   ownership is not independently falsified because its benefit is confounded by
   the QK reduction mechanism.
 - A matrix reopen first needs a decode-and-stage floor below `0.15587 ms`, the
-  32K main target required to beat the slower anchor by 15%. Tying production
+  historical 32K main target. The v0.581 entry corrects its interpretation against
+  the contemporaneous anchors. Tying production
   would already require removing `71.7%` of measured Q8 main time; promotion
   requires `75.4%`. No matrix implementation is authorized by this result alone.
 

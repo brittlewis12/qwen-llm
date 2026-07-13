@@ -356,6 +356,11 @@ than the F16 control despite `0.5625x` bytes. This closes the concrete scalar QK
 reduction and loader pairing, not distributed output ownership. A matrix reopen
 must first clear a decode-and-stage floor below `0.15587 ms`; no 131K row or
 production integration is authorized.
+v0.581 clears that fixed floor at `0.09958353 ms` with exact checksums and immutable
+capture hashes. This is `36.11%` below the historical ceiling, but the current 15%
+target against v0.580 anchors is tighter at `0.15172507 ms`. The floor omits QK,
+softmax, V accumulation, residency effects, and production partial writes. It
+therefore authorizes exactly one low-confidence integrated body, not a matrix win.
 
 ## Force-Ranked BS=1 Opportunity Frontier
 
@@ -395,11 +400,14 @@ bounded partials interpolate between those failures. Reopen only for cooperative
 grid synchronization, certified large exact sparsity, or an ABI that removes a
 complete bank pass without rereads or serialization.
 
-1. **Matrix attention stage floor, pending selection**: fixed G8/head-dim-256/C32
-   only. Dequantize captured group16-scale Q8 K/V into the intended matrix-friendly
-   half staging layout, execute required barriers and checksum stores, and stop if
-   the floor is `>=0.15587 ms` at 32K. Belief that an integrated body clears the
-   gate is only 15-25%; no broad implementation follows from a floor pass.
+1. **Integrated compressed matrix attention, one attempt**: the fixed
+   G8/head-dim-256/C32 stage floor passes at `0.09958353 ms`. Freeze 256 threads,
+   C32, 256 partitions, 16 KiB threadgroup memory, split-plane group16-scale Q8,
+   matrix QK within one simdgroup, register-owned V accumulation, and the existing
+   partial/reducer ABI. One clean packet must clear both the historical
+   `0.15587 ms` ceiling and `0.85 * min(A1, A2)` from same-packet V4 anchors. The
+   remaining budget is about `0.05214 ms` against the current anchors, so belief
+   remains only 15-25%. No topology sweep or rescue retune follows from a miss.
 2. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
    classes whose measured 282-296 GB/s rates trail the 474 GB/s anchor. First
    separate representation/dequant loss from narrow-dispatch occupancy that a new
@@ -441,12 +449,11 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Pending owner selection, choose between the fixed-shape matrix stage floor and
-   the two-class decode ABI oracle. Do not begin both or treat a stage-floor pass as
-   authorization for an integrated attention body.
-2. If a matrix primitive later survives, capture true decode queries and charge
-   cache append before production integration or a broader quality claim.
-3. Run the two-class decode ABI oracle before generating a new weight asset. Stop
+1. Execute the one authorized fixed-shape integrated matrix body. Stop the lane on
+   a clean miss; do not sweep shape, layout, partitioning, or launch parameters.
+2. If the matrix body survives, capture true decode queries and charge cache append
+   before production integration or a broader quality claim.
+3. Then run the two-class decode ABI oracle before generating a new weight asset. Stop
    if narrow-dispatch occupancy, rather than representation, explains the deficit.
 4. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
    implementation work until its charged whole-request gate clears.

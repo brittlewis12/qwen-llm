@@ -14,19 +14,22 @@ For append-only checkpoint history and exact current handoff state, see
 
 ## Current North Star
 
-Make one loaded model answer one fresh prompt as quickly, efficiently, lightly,
-and accurately as possible on the local M4 Max. The primary product contract is
-serial batch-size-one inference, not aggregate serving throughput.
+Make one fresh process and one loaded model answer one fresh prompt as quickly,
+efficiently, lightly, and accurately as possible on the local M4 Max. Repeated
+process-cold CLI invocation is the primary deployment shape today. The inference
+contract remains serial batch size one, not aggregate serving throughput.
 
-The two co-primary latency objectives are:
+The three co-primary latency objectives are:
 
-1. Model-ready fresh TTFT: prompt arrival through first token delivery.
-2. Warm serial inter-token latency: one live sequence with no request batching.
+1. Process-cold first byte: process launch through first token delivery with an
+   explicit filesystem-cache contract.
+2. Model-ready fresh TTFT: prompt arrival through first token delivery.
+3. Warm serial inter-token latency: one live sequence with no request batching.
 
-Track peak session memory and quality beside both latency objectives. Report a
-balanced comparison as `sqrt(TTFT speedup * decode speedup)`, but never hide the
-two phase results inside that scalar. Also report total request wall for named
-prompt/output lengths.
+Track peak session memory and quality beside all three objectives. Report
+process-cold first byte separately. For loaded-model balance, retain
+`sqrt(TTFT speedup * decode speedup)`, but never hide either phase in that
+scalar. Also report total request wall for named prompt/output lengths.
 
 Named request archetypes carry decision authority:
 
@@ -48,8 +51,9 @@ Scope rules:
   They remain important, but do not rank against fresh serial BS=1 work today.
 - Prefix caching is relevant only when a prefix is reused or reconstructed. It is
   not a fresh-prompt optimization.
-- Process-cold model loading and first residency are a separate product lane.
-  They must not displace loaded-model TTFT or warm decode work.
+- Process-cold model loading and first residency are a first-class product lane.
+  Keep their boundary separate from model-ready TTFT, but let broad exact cold
+  wins outrank narrower loaded-model work under the current deployment mix.
 
 Exactness labels:
 
@@ -466,14 +470,35 @@ accepts. Full itself remains below the acceptance continuation gate. Do not buil
 tail-only prompt construction, interpolate K, or reinterpret cheaper per-packet
 attention as a product win.
 
-1. **Admitted query-capped auto-prefill**: highest confidence and lowest cost
-   primary move. Wire explicit query cap 1024 plus scratch overlay into the existing
+Banked process-cold win: v0.590 defaults native token embeddings on only the
+measured untied 27B Q4_K and A3B Q8_0 architecture fingerprints. Ten balanced
+27B pairs improve process start to first byte `1.20283x` and process exit
+`1.14866x`, saving `720.61/732.48 ms` and `4,370,432,000` Metal bytes. Six A3B
+pairs improve the same endpoints `1.06057x/1.05267x`, saving `149.00/154.65 ms`
+and `1,493,893,120` bytes. Exact outputs and warm transition parity hold. A
+separate six-pair A3B TTFT confirmation improves median TTFT `2.50 ms`. A10B,
+MTP-bearing variants, tied embeddings, and lookalike architectures remain
+default-off; explicit `=1` retains the structurally supported opt-in path and
+`=0` is the rollback.
+
+1. **Whole-shard no-copy GGUF proof**: highest-upside exact process-cold move.
+   Current native tensors are still copied one-by-one from mmap into shared Metal
+   buffers. Prototype page-aligned no-copy ownership for one representative 27B
+   shard while retaining the mmap for the complete buffer lifetime. Measure
+   process spawn to first byte and exit, not model-ready wall, so deferred page
+   faults cannot masquerade as a win. The post-v0.590 remaining load walls are
+   about `1.6 s` 27B and `2.1 s` A3B, giving a material but bounded ceiling.
+   Require exact output, no warm regression, lower RSS/allocation pressure, and a
+   clean split-shard/alignment fallback before widening. Difficulty M, belief
+   medium.
+2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
+   Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
    sequence/transient reserve, and require both working-set and process-headroom
    signals. Missing or insufficient signals fall back to 1024. Expected fresh-TTFT
    movement after measured cap overhead is about `1.060x` A3B and `1.206x` A10B;
    one final fresh product packet decides default-on. Difficulty S-M, belief high.
-2. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
+3. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
    Under a declared grammar, an isolated forced token still requires a complete
    target state transition. Only a maximal run of uniquely admissible token IDs can
    be packed before reading an intermediate logit. Replay real structured traces
@@ -483,24 +508,7 @@ attention as a product win.
    `T0/11` for a 1.10x request. With current N8 cost, runs below four are not even
    locally positive. Grammar-restricted lm_head rows are contract-exact and should
    be priced in the same artifact. Difficulty S oracle/M packet, belief medium.
-3. **MTPLX asset/contract decomposition**: highest information-value decode move,
-   not same-weight parity. Pin the local MTPLX runtime and published trunk, MTP
-   sidecar, draft-head, tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7
-   rows with phase and accepted-by-depth output. Published greedy D3 implies only
-   `Q~3.765`, so D3 cannot authorize qwen D7. A cross-trunk offline bridge must run
-   the candidate sidecar against qwen post-norm hidden/token traces and predict a
-   passing request before affine Metal work. Difficulty S for MTPLX packet, M for
-   bridge; belief medium, upside potentially material.
-4. **In-family external-drafter acceptance oracle**: use pinned llama.cpp
-   `--model-draft` for acceptance statistics, not wall time or DFlash tree-sim.
-   Fingerprint tokenizer tables and special IDs first; run greedy D7 with 128+
-   outputs over code, structured, and prose rows. At current qwen C1/N8 costs, the
-   no-prefill 1.10x mean-progress floors are `3.88/4.24/5.07/6.24` for
-   0.8B/2B/4B/9B. Test 0.8B first; test 2B only if 0.8B is promising, and do not
-   productize before charging drafter prefill, full-accept catch-up, rollback/replay,
-   second-model memory, and target correction. Difficulty S oracle/M integration,
-   belief low-medium.
-5. **Certified lm_head screening oracle**: exact selected-token work removal, not
+4. **Certified lm_head screening oracle**: exact selected-token work removal, not
    bitwise full-logit equivalence. Before k-means, precompute outward-rounded
    per-row/per-256-dimension Q6 block norms. Give the oracle the true production
    winning logit, reveal blocks in query-global hidden-norm order, and prune only
@@ -509,14 +517,15 @@ attention as a product win.
    30% of baseline bytes after metadata. Only then add production accumulation
    error and require about 70% charged head-wall removal. Difficulty S-M oracle,
    belief low, but especially relevant to repeated draft heads.
-6. **Packed full-history MTP prompt construction**: required for any dense-MTP
-   product, but conditional on item 3 or another asset clearing request arithmetic.
-   The v0.587 request has base packed prefill `17.066-17.141 s`, current MTP decode
-   `8.127-8.409 s`, and 59 packets. With no extra history cost, current acceptance
-   projects only `1.078-1.092x` total. At a one-second packed-history budget,
-   1.10x requires about 48-50 packets. Do not implement until acceptance and a
-   packed-history floor satisfy the same equation. Difficulty L, belief conditional.
-7. **A3B long-context N8 and WY state oracle**: approximate warm-continuation lane
+5. **MTPLX asset/contract decomposition**: highest information-value decode move,
+   not same-weight parity. Pin the local MTPLX runtime and published trunk, MTP
+   sidecar, draft-head, tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7
+   rows with phase and accepted-by-depth output. Published greedy D3 implies only
+   `Q~3.765`, so D3 cannot authorize qwen D7. A cross-trunk offline bridge must run
+   the candidate sidecar against qwen post-norm hidden/token traces and predict a
+   passing request before affine Metal work. Difficulty S for MTPLX packet, M for
+   bridge; belief medium, upside potentially material.
+6. **A3B long-context N8 and WY state oracle**: approximate warm-continuation lane
    only. Before Metal WY work, run a captured CPU state-locality comparison against
    serial recurrence; the existing chunked carry/Gram family regressed badly, and
    regrouped recurrence does not inherently repair conv/KV drift. Separately price
@@ -525,20 +534,36 @@ attention as a product win.
    MTP asset is local, the current A3B packed verifier fails the exact state contract,
    and 131K TTFT dominates fresh requests. No replay-current or product work follows
    without `>=5%` charged warm-decode projection. Difficulty M, belief low-medium.
-8. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
+7. **In-family external-drafter acceptance oracle**: use pinned llama.cpp
+   `--model-draft` for acceptance statistics, not wall time or DFlash tree-sim.
+   Fingerprint tokenizer tables and special IDs first; run greedy D7 with 128+
+   outputs over code, structured, and prose rows. At current qwen C1/N8 costs, the
+   no-prefill 1.10x mean-progress floors are `3.88/4.24/5.07/6.24` for
+   0.8B/2B/4B/9B. Test 0.8B first; test 2B only if 0.8B is promising, and do not
+   productize before charging drafter prefill, full-accept catch-up, rollback/replay,
+   second-model memory, and target correction. Difficulty S oracle/M integration,
+   belief low-medium.
+8. **Packed full-history MTP prompt construction**: required for any dense-MTP
+   product, but conditional on item 5 or another asset clearing request arithmetic.
+   The v0.587 request has base packed prefill `17.066-17.141 s`, current MTP decode
+   `8.127-8.409 s`, and 59 packets. With no extra history cost, current acceptance
+   projects only `1.078-1.092x` total. At a one-second packed-history budget,
+   1.10x requires about 48-50 packets. Do not implement until acceptance and a
+   packed-history floor satisfy the same equation. Difficulty L, belief conditional.
+9. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
    existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
    `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
    overhead or quality loss. Name an end-to-end quality replay first; k5 or average
    below about 5.8 experts must pass quality and project `>=5%` charged movement.
    Difficulty M, belief low.
-9. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+10. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing. Prefix caching is a separate
    exact reuse specialization and does not rank for fresh serial prompts.
 
-Memory sidecar: native quantized embeddings already save `1.49-4.37 GB` across
-measured A3B/A10B/27B models with near-neutral throughput. Adjudicate product
-memory, TTFT, and the small 27B throughput risk without presenting it as a latency
-win.
+Memory follow-up: v0.590 promotes native embeddings for 27B and A3B. A10B retains
+older exactness and warm-parity evidence plus a `2,240,839,680`-byte allocation
+prize, but its process-cold contract remains unresolved and must not be inferred
+from A3B's shared Q8_0 dtype.
 
 Dense fresh-TTFT truth: no current exact branch has a credible material gain band
 for large dense prefill. Current packed compute is near the measured mat-mat
@@ -546,31 +571,35 @@ anchor. Material movement requires a new GDN work unit, fewer prompt/model bytes
 or a model/input/precision tradeoff; another ordinary projection retune is not an
 active expectation.
 
-The ranking reflects equal concern for TTFT and decode, breadth, probability, and
-engineering cost. It does not claim that a TTFT-only or long-only win is globally
-better than a decode win; each result must retain its objective-lane label.
+The ranking reflects the current process-cold deployment mix while retaining
+model-ready TTFT, warm decode, breadth, probability, and engineering cost. It does
+not merge objective lanes; every result must retain its boundary label.
 
 ### Active attack sequence
 
-1. Finish the narrow query-capped auto-prefill product path. Reuse the existing
+1. Prototype one whole-shard no-copy 27B Metal view and adjudicate complete
+   process-start-to-first-byte wall. Stop if alignment/lifetime handling merely
+   moves page faults beyond model-ready or if the one-shard ceiling is immaterial.
+2. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
    reopen 32K.
-2. In parallel with no production code, run one structured-trace grammar artifact:
+3. In parallel with no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-3. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
+4. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
+   artifact.
+5. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
    drafter or writing qwen affine kernels. If D7 is promising, run the cross-trunk
    sidecar acceptance bridge and apply the total-request equation.
-4. Price 0.8B external drafting through pinned llama.cpp acceptance statistics;
-   apply qwen packet costs and stop before a qwen dual-model harness unless charged
+6. Price 0.8B external drafting only after the work-removal and native-asset lanes.
+   Apply qwen packet costs and stop before a qwen dual-model harness unless charged
    request economics clear. Run 2B only after a promising 0.8B result.
-5. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
-   artifact. Build packed full-history MTP prompt construction only if a sidecar or
+7. Build packed full-history MTP prompt construction only if a sidecar or
    another proposal asset predicts `>=1.10x` with its history budget charged.
-6. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
+8. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
    lane, top-k behind a named quality replay, and prompt reduction input-changing.
-7. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
+9. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
    sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
    GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
    or local retuning without their explicit reopen conditions.

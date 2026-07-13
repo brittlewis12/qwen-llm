@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.590 Native-Embedding Process-Cold Promotion
+
+Status: exact native token embeddings default on for measured untied 27B Q4_K
+and A3B Q8_0 fingerprints; A10B and unmeasured variants remain force-only.
+
+- The packet defines process cold precisely as a fresh process with a fully read,
+  warm filesystem cache and empty runtime/model/session state. Every arm runs
+  serially under AC power, no recorded thermal/performance warning, at least 96%
+  reported free memory, zero block-input operations, and clean commit `77a7855`.
+  The frozen Reva request is 419 effective prompt tokens plus 32 greedy outputs.
+- Ten balanced 27B pairs improve spawn-to-first-byte `1.202826x`, saving
+  `720.609 ms`; the paired bootstrap interval is `1.197743-1.203545x`. Spawn to
+  exit improves `1.148665x`, saving `732.481 ms`. Internal model load improves
+  `1.426522x`, saving `702.156 ms` and explaining `97.44%` of the first-byte gain.
+- 27B model-ready allocation, median RSS, and median peak footprint fall by
+  `4,370,432,000`, `4,371,054,592`, and `4,371,713,024` bytes. Every output hash
+  matches; candidate TTFT improves `18.451 ms`; transition throughput is
+  `0.999088x` baseline.
+- The historical loaded-once warm guard initially reverses with process order:
+  candidate/baseline is `0.98073x` in AB and `1.02089x` in BA under 15-second
+  cooldowns. This diagnoses a first-process system-state advantage, not a native
+  embedding effect. Six prospectively frozen pairs with 120 seconds before every
+  process all clear the unchanged 0.99 floor. Ratios are
+  `1.006020/1.000375/0.998081/0.999737/0.999728/1.000094`; median is `0.999915x`,
+  AB `1.000094x`, and BA `0.999737x`.
+- Six balanced A3B pairs improve first byte `1.060574x` (`149.001 ms`) and exit
+  `1.052668x` (`154.654 ms`). Load improves `1.072357x` (`149.950 ms`), transition
+  throughput is `0.999207x`, allocation falls exactly `1,493,893,120` bytes, and
+  all outputs match. One original per-pair TTFT row is noisy, so it is not
+  retroactively waived.
+- A separately preregistered six-pair A3B confirmation passes: all six per-pair
+  TTFT allowances clear, median candidate/baseline TTFT is `0.993353x`, AB/BA are
+  `0.993672x/0.993035x`, first-byte median is `1.061238x`, and transition
+  throughput is `1.000541x`.
+- Production now uses a strict tri-state policy. Unset auto-promotes only exact
+  runtime structural, dtype, shape, untied, and MTP-absence fingerprints;
+  explicit false rolls back; explicit true preserves the structurally supported
+  opt-in path. Invalid values warn and fail closed. A10B, tied models, MTP-bearing
+  variants, and lookalikes do not inherit the default.
+- Post-change integration reports `auto-promoted` for 27B/A3B and
+  `rollback-disabled` for 27B `=0`. Default and rollback output bytes match, and
+  model-ready allocations retain the exact expected difference.
+
+Artifacts: `target/profiles/v0590-native-embed-cold/`. Adversarial reviews:
+`cx ask` sessions `019f5cc4-0f7f-7451-9068-a41d18bf5395`,
+`019f5cce-e593-7ab3-8db2-a6e5144ccf4f`,
+`019f5ce1-c65e-7da0-bc8c-cfed9ca1492b`,
+`019f5cf0-012a-75e3-9819-e047310f0b15`, and
+`019f5d1b-25b8-79c3-acc9-5149e2926632`.
+
 ## 2026-07-13 - v0.587-v0.588 Dense MTP Committed-Tail Falsifier
 
 Status: fixed exact committed tails fail the code-side acceptance gate; stop the

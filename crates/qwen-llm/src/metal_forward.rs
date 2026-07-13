@@ -205,9 +205,71 @@ crate::env_flag!(default_on decode_moe_q5_down_k512_r2_enabled, "QWEN_DECODE_MOE
 crate::env_flag!(default_on decode_moe_fused_finalizer_enabled, "QWEN_DECODE_MOE_FUSED_FINALIZER");
 crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
 crate::env_flag!(default_off moe_router_f16_enabled, "QWEN_MOE_ROUTER_F16");
-crate::env_flag!(default_off native_quant_embed_enabled, "QWEN_NATIVE_QUANT_EMBED");
 crate::env_flag!(default_off decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
 crate::env_flag!(default_off decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeQuantEmbeddingMode {
+    Auto,
+    Forced,
+    Disabled,
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeQuantEmbeddingSelection {
+    AutoPromoted,
+    Forced,
+    AutoUnpromoted,
+    RollbackDisabled,
+    InvalidDisabled,
+    Unsupported,
+}
+
+impl NativeQuantEmbeddingSelection {
+    fn uses_native(self) -> bool {
+        matches!(self, Self::AutoPromoted | Self::Forced)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::AutoPromoted => "auto-promoted",
+            Self::Forced => "forced",
+            Self::AutoUnpromoted => "auto-unpromoted",
+            Self::RollbackDisabled => "rollback-disabled",
+            Self::InvalidDisabled => "invalid-disabled",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+fn parse_native_quant_embedding_mode(value: Option<&str>) -> NativeQuantEmbeddingMode {
+    match value {
+        None => NativeQuantEmbeddingMode::Auto,
+        Some(value) if crate::env_flag::env_value_truthy(value) => NativeQuantEmbeddingMode::Forced,
+        Some(value) if crate::env_flag::env_value_falsy(value) => {
+            NativeQuantEmbeddingMode::Disabled
+        }
+        Some(_) => NativeQuantEmbeddingMode::Invalid,
+    }
+}
+
+fn native_quant_embedding_mode() -> NativeQuantEmbeddingMode {
+    static MODE: std::sync::OnceLock<NativeQuantEmbeddingMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let mode = match std::env::var("QWEN_NATIVE_QUANT_EMBED") {
+            Ok(value) => parse_native_quant_embedding_mode(Some(&value)),
+            Err(std::env::VarError::NotPresent) => NativeQuantEmbeddingMode::Auto,
+            Err(std::env::VarError::NotUnicode(_)) => NativeQuantEmbeddingMode::Invalid,
+        };
+        if mode == NativeQuantEmbeddingMode::Invalid {
+            eprintln!(
+                "[metal-load] invalid QWEN_NATIVE_QUANT_EMBED value; disabling native embeddings"
+            );
+        }
+        mode
+    })
+}
 
 fn native_quant_embedding_supported(dtype: GgmlType, shape: &[u64]) -> bool {
     shape.len() == 2
@@ -215,6 +277,70 @@ fn native_quant_embedding_supported(dtype: GgmlType, shape: &[u64]) -> bool {
         && shape[1] > 0
         && ((dtype == GgmlType::Q4_K && shape[0] % 256 == 0)
             || (dtype == GgmlType::Q8_0 && shape[0] % 32 == 0))
+}
+
+fn native_quant_embedding_default_promoted(
+    arch: &crate::model::Arch,
+    tied_embeddings: bool,
+    mtp_present: bool,
+    dtype: GgmlType,
+    shape: &[u64],
+) -> bool {
+    if tied_embeddings || mtp_present || shape != [arch.hidden_size as u64, arch.vocab_size as u64]
+    {
+        return false;
+    }
+    let common = arch.vocab_size == 248_320
+        && arch.full_attention_interval == 4
+        && arch.attn_head_dim == 256
+        && arch.rope_theta == 10_000_000.0
+        && arch.partial_rotary_factor == 0.25
+        && arch.gdn_n_k_heads == 16
+        && arch.gdn_head_dim == 128
+        && arch.gdn_conv_kernel == 4
+        && arch.mtp_n_hidden_layers == 0;
+    common
+        && ((dtype == GgmlType::Q4_K
+            && arch.kind == ArchKind::Dense
+            && arch.n_layer == 64
+            && arch.hidden_size == 5120
+            && arch.intermediate_size == 17408
+            && arch.n_q_heads == 24
+            && arch.n_kv_heads == 4
+            && arch.gdn_n_v_heads == 48
+            && arch.expert_count == 0
+            && arch.expert_used_count == 0
+            && arch.expert_feed_forward_length == 0
+            && arch.expert_shared_feed_forward_length == 0)
+            || (dtype == GgmlType::Q8_0
+                && arch.kind == ArchKind::Moe
+                && arch.n_layer == 40
+                && arch.hidden_size == 2048
+                && arch.intermediate_size == 0
+                && arch.n_q_heads == 16
+                && arch.n_kv_heads == 2
+                && arch.gdn_n_v_heads == 32
+                && arch.expert_count == 256
+                && arch.expert_used_count == 8
+                && arch.expert_feed_forward_length == 512
+                && arch.expert_shared_feed_forward_length == 512))
+}
+
+fn resolve_native_quant_embedding(
+    mode: NativeQuantEmbeddingMode,
+    supported: bool,
+    promoted: bool,
+) -> NativeQuantEmbeddingSelection {
+    if !supported {
+        return NativeQuantEmbeddingSelection::Unsupported;
+    }
+    match mode {
+        NativeQuantEmbeddingMode::Auto if promoted => NativeQuantEmbeddingSelection::AutoPromoted,
+        NativeQuantEmbeddingMode::Forced => NativeQuantEmbeddingSelection::Forced,
+        NativeQuantEmbeddingMode::Auto => NativeQuantEmbeddingSelection::AutoUnpromoted,
+        NativeQuantEmbeddingMode::Disabled => NativeQuantEmbeddingSelection::RollbackDisabled,
+        NativeQuantEmbeddingMode::Invalid => NativeQuantEmbeddingSelection::InvalidDisabled,
+    }
 }
 
 // Per-projection GDN no-op ablations: each is its own opt-in flag, OR'd
@@ -485,8 +611,24 @@ impl MetalModel {
             }
         };
         let load_embedding = |desc: &TensorDesc| -> Result<MetalTensor, MfError> {
-            let native_quant = native_quant_embed_enabled()
-                && native_quant_embedding_supported(desc.dtype, &desc.shape);
+            let selection = resolve_native_quant_embedding(
+                native_quant_embedding_mode(),
+                native_quant_embedding_supported(desc.dtype, &desc.shape),
+                native_quant_embedding_default_promoted(
+                    &model.arch,
+                    model.tied_embeddings,
+                    model.mtp.is_some(),
+                    desc.dtype,
+                    &desc.shape,
+                ),
+            );
+            eprintln!(
+                "[metal-load] native quantized token embedding policy: {} ({:?} {:?})",
+                selection.label(),
+                desc.dtype,
+                desc.shape,
+            );
+            let native_quant = selection.uses_native();
             if matches!(desc.dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) || native_quant
             {
                 Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
@@ -510,7 +652,8 @@ impl MetalModel {
             )?)
         };
 
-        // Quantized embedding residency is opt-in until family performance gates.
+        // Native embedding residency defaults only on the promoted architecture
+        // fingerprints. The environment can still force or roll back the path.
         let token_embd = load_embedding(model.token_embd)?;
         let output_norm = load_f32(model.output_norm)?;
         let lm_head = load_weight(model.lm_head)?;
@@ -8281,7 +8424,7 @@ mod tests {
     use crate::loader::Model;
 
     #[test]
-    fn native_quant_embedding_support_is_exact() {
+    fn native_quant_embedding_support_requires_an_aligned_matrix() {
         assert!(native_quant_embedding_supported(
             GgmlType::Q4_K,
             &[5120, 248_320]
@@ -8314,6 +8457,163 @@ mod tests {
     }
 
     #[test]
+    fn native_quant_embedding_mode_is_strict_and_tri_state() {
+        assert_eq!(
+            parse_native_quant_embedding_mode(None),
+            NativeQuantEmbeddingMode::Auto
+        );
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert_eq!(
+                parse_native_quant_embedding_mode(Some(value)),
+                NativeQuantEmbeddingMode::Forced
+            );
+        }
+        for value in ["0", "false", "FALSE", "no", "NO"] {
+            assert_eq!(
+                parse_native_quant_embedding_mode(Some(value)),
+                NativeQuantEmbeddingMode::Disabled
+            );
+        }
+        for value in ["", "on", "off", "ture", "2"] {
+            assert_eq!(
+                parse_native_quant_embedding_mode(Some(value)),
+                NativeQuantEmbeddingMode::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn native_quant_embedding_resolution_preserves_force_and_rollback() {
+        use NativeQuantEmbeddingMode::{Auto, Disabled, Forced, Invalid};
+        use NativeQuantEmbeddingSelection::Unsupported;
+        use NativeQuantEmbeddingSelection::{
+            AutoPromoted, AutoUnpromoted, Forced as On, InvalidDisabled, RollbackDisabled,
+        };
+
+        assert_eq!(
+            resolve_native_quant_embedding(Auto, true, true),
+            AutoPromoted
+        );
+        assert_eq!(
+            resolve_native_quant_embedding(Auto, true, false),
+            AutoUnpromoted
+        );
+        assert_eq!(resolve_native_quant_embedding(Forced, true, false), On);
+        assert_eq!(
+            resolve_native_quant_embedding(Disabled, true, true),
+            RollbackDisabled
+        );
+        assert_eq!(
+            resolve_native_quant_embedding(Invalid, true, true),
+            InvalidDisabled
+        );
+        assert_eq!(
+            resolve_native_quant_embedding(Forced, false, true),
+            Unsupported
+        );
+    }
+
+    #[test]
+    fn native_quant_embedding_defaults_only_on_promoted_fingerprints() {
+        let mut dense = crate::model::QWEN3_27B;
+        dense.mtp_n_hidden_layers = 0;
+        assert!(native_quant_embedding_default_promoted(
+            &dense,
+            false,
+            false,
+            GgmlType::Q4_K,
+            &[5120, 248_320],
+        ));
+        assert!(!native_quant_embedding_default_promoted(
+            &dense,
+            true,
+            false,
+            GgmlType::Q4_K,
+            &[5120, 248_320],
+        ));
+        assert!(!native_quant_embedding_default_promoted(
+            &dense,
+            false,
+            true,
+            GgmlType::Q4_K,
+            &[5120, 248_320],
+        ));
+        assert!(!native_quant_embedding_default_promoted(
+            &dense,
+            false,
+            false,
+            GgmlType::Q8_0,
+            &[5120, 248_320],
+        ));
+        dense.mtp_n_hidden_layers = 1;
+        assert!(!native_quant_embedding_default_promoted(
+            &dense,
+            false,
+            false,
+            GgmlType::Q4_K,
+            &[5120, 248_320],
+        ));
+
+        let a3b = crate::model::Arch {
+            kind: ArchKind::Moe,
+            n_layer: 40,
+            hidden_size: 2048,
+            intermediate_size: 0,
+            vocab_size: 248_320,
+            full_attention_interval: 4,
+            n_q_heads: 16,
+            n_kv_heads: 2,
+            attn_head_dim: 256,
+            rope_theta: 10_000_000.0,
+            partial_rotary_factor: 0.25,
+            gdn_n_v_heads: 32,
+            gdn_n_k_heads: 16,
+            gdn_head_dim: 128,
+            gdn_conv_kernel: 4,
+            expert_count: 256,
+            expert_used_count: 8,
+            expert_feed_forward_length: 512,
+            expert_shared_feed_forward_length: 512,
+            mtp_n_hidden_layers: 0,
+        };
+        assert!(native_quant_embedding_default_promoted(
+            &a3b,
+            false,
+            false,
+            GgmlType::Q8_0,
+            &[2048, 248_320],
+        ));
+        assert!(!native_quant_embedding_default_promoted(
+            &a3b,
+            true,
+            false,
+            GgmlType::Q8_0,
+            &[2048, 248_320],
+        ));
+        assert!(!native_quant_embedding_default_promoted(
+            &a3b,
+            false,
+            true,
+            GgmlType::Q8_0,
+            &[2048, 248_320],
+        ));
+        assert!(!native_quant_embedding_default_promoted(
+            &a3b,
+            false,
+            false,
+            GgmlType::Q4_K,
+            &[2048, 248_320],
+        ));
+        assert!(!native_quant_embedding_default_promoted(
+            &a3b,
+            false,
+            false,
+            GgmlType::Q8_0,
+            &[3072, 248_320],
+        ));
+    }
+
+    #[test]
     #[ignore = "requires QWEN_EMBED_RESIDENCY_MODEL local fixture"]
     fn quantized_embedding_residency_load_probe() {
         let path = std::env::var("QWEN_EMBED_RESIDENCY_MODEL")
@@ -8334,8 +8634,18 @@ mod tests {
         let allocated_after = ctx.current_allocated_size();
         let allocated_delta = allocated_after.saturating_sub(allocated_before);
         let resident_bytes = mm.token_embd.buffer.length() as u64;
-        let expect_native = native_quant_embed_enabled()
-            && native_quant_embedding_supported(source.dtype, &source.shape);
+        let selection = resolve_native_quant_embedding(
+            native_quant_embedding_mode(),
+            native_quant_embedding_supported(source.dtype, &source.shape),
+            native_quant_embedding_default_promoted(
+                &m.arch,
+                m.tied_embeddings,
+                m.mtp.is_some(),
+                source.dtype,
+                &source.shape,
+            ),
+        );
+        let expect_native = selection.uses_native();
 
         assert_eq!(mm.token_embd.dtype == source.dtype, expect_native);
         assert_eq!(resident_bytes, mm.token_embd.n_bytes());

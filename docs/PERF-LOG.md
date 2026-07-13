@@ -6,6 +6,63 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.583-v0.585 Integrated Compressed Matrix Attention
+
+Status: killed at the valid fixed 32K body; the local rescue neighborhood is
+closed, the diagnostic is complete, and experiment source is removed.
+
+- v0.583 tests one G8/head-dim-256/C32 body with 256 threads, 256 partitions,
+  16 KiB of threadgroup memory, a fixed 128+128 dimension split, split-plane
+  group16-scale Q8 K/V, simdgroup-matrix QK, online softmax, register-owned V
+  accumulation, and the unchanged V4 G8 H2 partial/reducer ABI.
+- Correctness is green across all 4,096 partition/head rows. Normalized partials
+  versus an independent decoded-Q8 CPU replay reach cosine `0.99999999999979`,
+  relative L2 `4.67e-7`, and maximum error `3.52e-6`. Final decoded-Q8 relative
+  L2 is `1.03e-6`; captured-F16 cosine is `0.99999078` with maximum error
+  `0.0078995`. Compression fidelity is not the performance failure.
+- The clean packet uses commit `bd4e014`, the captured tail query at position
+  32,767, immutable source and generated-format hashes, nine main and nine pair
+  samples per row, 120-second A1/P/A2 cooldowns, a common 512-dispatch V4 ramp,
+  and a 128 MiB compute scrub before every sample. No thermal or performance
+  warnings occurred, and every before/after output hash is invariant.
+- A1/P/A2 main medians are `0.163084/0.313416/0.162792 ms`; pair medians are
+  `0.210833/0.366333/0.211041 ms`. Main and pair anchor spreads are
+  `1.00179x/1.00099x`. The candidate is `1.92525x` the faster anchor,
+  `2.26500x` the same-packet `0.138374 ms` 15% gate, and `2.01075x` the
+  historical `0.15587 ms` ceiling.
+- The shared reducer adds `0.052917 ms` candidate versus `0.047749/0.048249 ms`
+  for the anchors. The miss is overwhelmingly in the main body. The
+  `0.213833 ms` difference from the v0.581 stage floor is descriptive only;
+  the floor's checksum work and different utilization pattern are not additive.
+- v0.584 adds only a fixed diagnostic hold around the unchanged kernel. One
+  limiter capture yields 878/878 accepted one-kick windows at a profiler-inflated
+  `4.888 ms`, with exact partial hashes before and after. It emits no timing
+  claim, gate, or disposition.
+- The trace shows `140.236 GB/s` external bandwidth and `5.529%` L1 limiting,
+  inconsistent with a saturated DRAM/L1-throughput ceiling. Occupancy is
+  `27.704%` against a `53.110%` manager target with `26.596` compute simdgroups
+  inflight. Integer/Conditional is the strongest execution-subblock signal at
+  `78.638/69.388%` limiter/utilization; F32 reaches only `17.235/12.605%`.
+- Bounded diagnosis: under-target occupancy and incomplete latency hiding coexist
+  with instruction-heavy integer/conditional demand at low external-memory
+  pressure. Scalar decode/address/predicate work and serialized half-simdgroup
+  phases are code-consistent contributors, not counter-isolated causes. Do not
+  infer a sole register, TGM, barrier, integer, launch, or source-line cause.
+- The measurement kills this exact point. Protocol closes shape, split, barrier,
+  staging, launch, and format rescues; that closure is a decision, not empirical
+  proof against every matrix-attention topology. No second capture or variant is
+  authorized. Future cooperative floors must cover the integrated utilization
+  pattern and live-resource envelope or leave their integration residual unclaimed.
+- v0.585 records the closure, advances the decode-ABI oracle, and removes the
+  candidate plus diagnostic source after preserving all artifacts.
+
+Artifacts: `target/profiles/v0583-attn-matrix-body/`. Adversarial design, audit,
+adjudication, and counter review: `cx ask` sessions
+`019f5bc7-ac87-7032-bfed-46addb34d45b`,
+`019f5bd9-cfc9-7bc1-8ff0-bb1868eabf18`,
+`019f5bea-9676-7ee1-8b87-4f0b82f010c4`, and
+`019f5bf9-acfb-7931-89ed-e9bce1c1165e`.
+
 ## 2026-07-13 - v0.581 Compressed Matrix Stage Floor
 
 Status: passes the fixed 32K floor; one low-confidence integrated matrix body is

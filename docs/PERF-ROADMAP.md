@@ -361,6 +361,15 @@ capture hashes. This is `36.11%` below the historical ceiling, but the current 1
 target against v0.580 anchors is tighter at `0.15172507 ms`. The floor omits QK,
 softmax, V accumulation, residency effects, and production partial writes. It
 therefore authorizes exactly one low-confidence integrated body, not a matrix win.
+v0.583 executes and kills that body on the exact captured 32K tail query. Main is
+`0.313416 ms` versus stable `0.163084/0.162792 ms` V4 anchors and a same-packet
+`0.138374 ms` gate. Decoded-Q8 partial and final correctness are effectively exact,
+and captured-F16 fidelity is green. v0.584's one diagnostic-only limiter capture
+shows low external-memory pressure, under-target occupancy, and strong
+integer/conditional demand. Close this fixed matrix point and all protocol-barred
+local rescues; skip the survival-conditional true-query/cache-append step and
+remove experiment source in v0.585. This is not a universal claim against matrix
+attention.
 
 ## Force-Ranked BS=1 Opportunity Frontier
 
@@ -400,34 +409,33 @@ bounded partials interpolate between those failures. Reopen only for cooperative
 grid synchronization, certified large exact sparsity, or an ABI that removes a
 complete bank pass without rereads or serialization.
 
-1. **Integrated compressed matrix attention, one attempt**: the fixed
-   G8/head-dim-256/C32 stage floor passes at `0.09958353 ms`. Freeze 256 threads,
-   C32, 256 partitions, 16 KiB threadgroup memory, split-plane group16-scale Q8,
-   matrix QK within one simdgroup, register-owned V accumulation, and the existing
-   partial/reducer ABI. One clean packet must clear both the historical
-   `0.15587 ms` ceiling and `0.85 * min(A1, A2)` from same-packet V4 anchors. The
-   remaining budget is about `0.05214 ms` against the current anchors, so belief
-   remains only 15-25%. No topology sweep or rescue retune follows from a miss.
-2. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
+Closed matrix-attention lane, not active queue: v0.583 is correct but reaches
+`0.313416 ms`, `1.92525x` the faster V4 anchor and `2.26500x` its current 15%
+gate. v0.584 classifies a mixed under-target-occupancy and instruction-heavy
+failure at only `140.236 GB/s` external bandwidth. Do not sweep or rescue shape,
+split, barriers, staging ownership, launch, or format. Reopen only for a mechanism
+that changes the ownership/utilization premise and earns a new zero-cost ceiling.
+
+1. **Format-specific decode storage/ABI**: test the routed-down and attention-KV
    classes whose measured 282-296 GB/s rates trail the 474 GB/s anchor. First
    separate representation/dequant loss from narrow-dispatch occupancy that a new
    layout cannot fix. Confidence is low; whole-token prior is about 5%.
-3. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
+2. **Adaptive MoE top-k replay**: cheap approximate idle-time oracle only. Router
    mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2 `~0.62`). v0.403 A3B
    `ctx8192` attributes 9.9%+7.5%=17.4% of decode to routed gate/up+down; ideal
    linear k8-to-k6 removal therefore gives only a derived 4.35% whole-decode ceiling
    before overhead or quality cost. Do not start a kernel before static-k replay.
-4. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
+3. **Dense native-MTP read-window oracle**: proposal economics are measured, not a
    green field. Survey only `32/64/128/256/full` attention-history reads, charge
    proposal/history/replay costs, and stop unless current composed economics clear
    the existing gate. The verifier-only `2.6x` ceiling is not a product projection.
-5. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
+4. **Sensitivity-aware mixed quant**: approximate and blocked by the same quality
    contract until a base asset qualifies. Current routed-Q5 evidence gives only
    2.2-2.4% total-decode headroom; do not generate assets from that ceiling.
-6. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
+5. **Fresh prompt/context reduction**: potentially material for TTFT and true-long
    decode, but explicitly input-changing. Prefix caching remains a separate exact
    reuse specialization and does not rank for fresh serial prompts.
-7. **MoE speculative verification re-adjudication**: authorize only a bounded
+6. **MoE speculative verification re-adjudication**: authorize only a bounded
    replay if the current charged trajectory projects at least 5% whole-decode gain.
    A looser numerical resume contract does not create proposal acceptance or net
    economics; no implementation follows from tolerance alone.
@@ -449,17 +457,14 @@ better than a decode win; each result must retain its objective-lane label.
 
 ### Active attack sequence
 
-1. Execute the one authorized fixed-shape integrated matrix body. Stop the lane on
-   a clean miss; do not sweep shape, layout, partitioning, or launch parameters.
-2. If the matrix body survives, capture true decode queries and charge cache append
-   before production integration or a broader quality claim.
-3. Then run the two-class decode ABI oracle before generating a new weight asset. Stop
+1. Run the two-class decode ABI oracle before generating a new weight asset. Stop
    if narrow-dispatch occupancy, rather than representation, explains the deficit.
-4. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
+2. Keep MTP read-window and static top-k replay as idle-time oracles. Neither opens
    implementation work until its charged whole-request gate clears.
-5. Keep prompt reduction in its labeled input-changing lane and MoE speculation
+3. Keep prompt reduction in its labeled input-changing lane and MoE speculation
    behind a current `>=5%` economic replay.
-6. Do not resume sparse retrieval for this fixture, same-body Q8, routed-tail work,
+4. Do not resume matrix attention, sparse retrieval for this fixture, same-body
+   Q8, routed-tail work,
    model/quant quality work, mixed quant, broad prompt lookup, GDN implementation,
    or local retuning.
 

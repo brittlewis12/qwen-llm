@@ -540,28 +540,22 @@ The leverage inversion is now sharper: current A3B retained views are a narrow
 disposable-process/private-footprint specialization and a diagnostic control, not
 the broad destination. Copied A3B spends about `1.99 s` materializing `22.12 GB`
 through 733 independent shared Metal buffers, only about `11 GB/s` effective.
-The next candidate for a broad cold target is faster anonymous owned
-materialization, with copied hot behavior, backing, and resource topology tested
-separately rather than assumed.
+v0.597 now proves that one four-worker anonymous arena materializes the same bytes
+in median `702.167 ms` versus `2062.791 ms` for the production copied primitive.
+It saves a paired median `1365.044 ms`, wins 6/6 blocks, and preserves the same
+RSS/footprint envelope. Serial arena copy loses at `3584.763 ms`; resource-count
+reduction alone is not the mechanism.
 
-1. **Planner-shaped owned arena floor and A3B pilot**: highest-leverage exact
-   process-cold move. Compare the current 733 exact `newBufferWithBytes` calls
-   against one planner-window anonymous Metal allocation with a serial contiguous
-   copy and the same allocation with a fixed four-way page-aligned copy. Measure
-   allocation, copy, ready-to-bind, teardown, RSS/footprint, VM pressure, and full
-   byte equality. Kill before loader work unless median ready wall saves at least
-   500 ms, every arena pair is at most `0.85x` current materialization wall, and
-   v0.595 arithmetic predicts at least `1.20x` first-byte speedup. Also require a
-   valid host, zero block input/pageout/swap growth, and maximum RSS/footprint no
-   more than `1.05x` current copied materialization. If green, bind owned typed
-   views through existing planner offsets. The same-build engine pilot must compare
-   733-buffer anonymous copied, one-window anonymous owned, and one-window
-   file-backed retained. Require bit-exact full state, `>=1.20x` process-cold first
-   byte, `>=0.99x` late decode and warm prefill, and no loaded output-128 request
-   regression. Arena parity with copied while retained stays slow implicates file
-   provenance; both one-window arms losing implicates topology/offsets. Other
-   outcomes remain mixed. Difficulty S oracle/M pilot, belief medium, prize very
-   high.
+1. **Force-only four-worker owned A3B arena pilot**: highest-leverage exact
+   process-cold move. The floor is green only for C: allocate one anonymous shared
+   planner window plus fallback, copy the complete window with the measured four
+   page-aligned workers, then bind owned typed views through planner offsets. Do
+   not implement serial B. The same-build pilot must compare 733-buffer copied,
+   four-worker owned, and file-backed retained storage. Require bit-exact full
+   state, `>=1.20x` process-cold first byte, `>=0.99x` late decode and warm prefill,
+   and no loaded output-128 request regression. Arena parity with copied while
+   retained stays slow implicates file provenance; arena loss implicates giant
+   resource topology or offsets. Difficulty M, belief medium-high, prize very high.
 2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
@@ -661,13 +655,12 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Preregister and run the A3B owned-materialization floor. Use exact planner
-   geometry, current per-tensor copy, one serial owned arena, and one fixed
-   four-way owned arena. This is the next optimization task; do not start loader
-   integration before its 500 ms, `0.85x`, and projected first-byte gates clear.
-2. If the floor clears, implement one force-only owned A3B arena. Reuse planner
-   views and aliases, keep conversions separate, preserve logical weight-only
-   provenance, and run full-state plus cold/late product gates before any breadth.
+1. v0.597 completes the owned-materialization floor. Four-worker C clears every
+   gate; serial B fails and remains unimplemented.
+2. Implement one force-only owned A3B arena using C's exact allocation and copy
+   shape. Reuse planner views, keep conversions and aliases out of this pilot,
+   preserve logical weight-only provenance, and run full-state plus cold/late
+   product gates before any breadth.
 3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not

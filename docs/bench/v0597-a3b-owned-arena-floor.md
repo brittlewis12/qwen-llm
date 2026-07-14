@@ -1,8 +1,7 @@
 # v0.597 A3B Anonymous Owned-Arena Floor
 
-Status: preregistered before implementation and timed work. This packet first
-prices backing materialization in an isolated command. It cannot authorize loader
-integration unless one arena arm clears every gate below.
+Status: completed at source `1b7a897`. Four-worker C clears every gate; serial B
+fails. The packet authorizes one force-only A3B loader pilot and nothing broader.
 
 ## Intent
 

@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-14 - v0.597 A3B Anonymous Owned-Arena Floor
+
+Status: four-worker C certified for one force-only A3B loader pilot. Serial B is
+rejected.
+
+- The frozen packet compares production `buffer_from` A against one anonymous
+  planner window copied serially in B and by four page-aligned scoped workers in
+  C. All six prospective `ABC/BCA/CAB/CBA/ACB/BAC` blocks pass on attempt one.
+- Median ready walls are `2062.791 ms` A, `3584.763 ms` B, and `702.167 ms` C.
+  B/A is `1.73227x` with zero wins. C/A is `0.33942x`, saves a paired median
+  `1365.044 ms`, wins 6/6, and ranges only `0.33440-0.34319x` across blocks.
+- C reaches `31.532 GB/s` over `22,123,552,768` bytes versus A's fused
+  `10.725 GB/s` and B's `6.172 GB/s`. B/C allocation itself is only
+  `0.559/0.545 ms`; first-touch plus copy explains nearly the entire contrast.
+- The result is not lazy allocation. All arms incur about 2.70 million
+  timer-local minor faults; every timer-local major-fault count is zero; maximum
+  RSS is about 44.31 GB and peak footprint about 22.19 GB in every arm. C verifies
+  the complete window, gaps, fallback, and all 733 bindings after its workers join.
+- C's frozen v0.595 first-byte projection is `2.24311x`. This is arithmetic, not
+  product authority. The next step is one default-off A3B loader pilot comparing
+  copied, four-worker owned, and file-backed retained storage in the same build.
+  It must independently clear exact state, cold first-byte, late decode, warm
+  prefill, and loaded-request gates.
+
+Artifacts: `target/profiles/v0597-a3b-owned-arena-floor-p1/`. Frozen source:
+`1b7a897`. Summary:
+`docs/bench/2026-07-14-v0597-a3b-owned-arena-floor/README.md`. Adversarial design
+and result review: `cx ask` session `019f61c6-cb2e-7cc3-8e34-5011e456fe6d`.
+
 ## 2026-07-14 - v0.596 A3B Retained Loaded-Tax Attribution
 
 Status: persistent retained transition tax. Repeated identical requests and full

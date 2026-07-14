@@ -1,5 +1,12 @@
 {"model": "d27b", "n_prompt": 1024, "w_wall_s": 4.1824, "w_gpu_s": 4.1622, "traced_baseline_s": 4.0529, "distortion": 0.9737, "note": "ceilings assume proportional scaling of serialized shares onto W"}
 subset                                                     cov     pess     opt
 OFF-SKINNY                                                 all   1.0055  1.0055
-OFF-SKINNY                                                 alt   1.0036  1.0036
-OFF-ATTN-E+OFF-SKINNY                                      alt   1.0036  1.0036
+OFF-SKINNY                                                 even  1.0036  1.0036
+OFF-ATTN-E+OFF-SKINNY                                      even  1.0036  1.0036
+OFF-ATTN-R+OFF-SKINNY                                      even  1.0036  1.0036
+OFF-ATTN-E+OFF-ATTN-R+OFF-SKINNY                           even  1.0036  1.0036
+OFF-SKINNY                                                 odd   1.0018  1.0018
+OFF-ATTN-E                                                 even  1.0000  1.0000
+OFF-ATTN-R                                                 even  1.0000  1.0000
+OFF-ATTN-E+OFF-ATTN-R                                      even  1.0000  1.0000
+OFF-ATTN-E+OFF-SKINNY                                      all   0.9491  0.9713

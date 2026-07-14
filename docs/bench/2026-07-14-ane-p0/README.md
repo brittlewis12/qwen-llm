@@ -41,8 +41,20 @@ recorded distortion factor (0.97-1.00 across cells).
 | 27B pp1024 | OFF-SKINNY | all | 1.0055 | 1.0055 | FAIL |
 | 27B pp4096 | OFF-SKINNY | all | 1.0054 | 1.0054 | FAIL |
 
-Full top-10 tables: oracle-*-pp*.txt. Margins are not within +/-2% of any
-gate threshold at spread bounds -> determinate, no re-run set triggered.
+Full top-10 tables: oracle-*-pp*.txt. Estimator spread (per-slot min /
+median / max across the 3 timed passes):
+
+| Cell | min | median | max |
+|---|---|---|---|
+| A3B pp1024 | 1.0550 | 1.0552 | 1.0552 |
+| A3B pp4096 | 1.0533 | 1.0533 | 1.0533 |
+| 27B pp1024 | 1.0055 | 1.0055 | 1.0055 |
+| 27B pp4096 | 1.0054 | 1.0054 | 1.0054 |
+
+Margins are not within +/-2% of any gate threshold at spread bounds ->
+determinate, no re-run set triggered. These ceilings are **modeled
+serialized-trace upper bounds**, not measured residual product wins (see
+mechanism note 2).
 
 ## Mechanism (why the lane dies)
 
@@ -62,10 +74,11 @@ gate threshold at spread bounds -> determinate, no re-run set triggered.
    win is already banked in W. The true residual is smaller than the number
    shown; the kill does not depend on this correction but is strengthened
    by it.
-3. **Wavefront cannot rescue it.** Latency-hiding across chunks does not
-   change ANE throughput on the big classes; moving X GPU-seconds costs
-   ~1.8-4x ANE-seconds at the rate ratios above. The exhaustive subset rows
-   already bound every all-offloaded composition at <= 1.055.
+3. **Wavefront was not tested.** The preregistered wavefront variant was
+   not implemented; nothing here bounds a restructured-execution-order
+   schedule. Wavefront remains open strictly as a reopen condition, and a
+   wavefront reopen must first implement that variant in the retained
+   oracle script.
 
 ## Decision
 
@@ -84,8 +97,23 @@ docs/ANE-ORACLE.md for reopen use.
 - NOT closed: drafter-on-ANE (separate lane, still gated behind speculative
   economics per PERF-ROADMAP.md); ANE for a *different work unit* (e.g.
   fp16 whole-block compute where GPU is not the comparator).
-- REOPEN conditions (verbatim from prereg): measured ANE rates materially
-  above priors from credible external evidence; a public stateful-ANE or
-  Metal<->IOSurface zero-copy API; a promoted wavefront/new-GDN work unit
-  changing the DAG — reopens P0b with this same script and gates, no new
-  preregistration required.
+- REOPEN conditions (amended from prereg after review 2): measured ANE
+  rates materially above priors from credible external evidence; a public
+  stateful-ANE API; or a promoted wavefront/new-GDN work unit changing the
+  DAG — which requires implementing the preregistered wavefront variant in
+  the retained oracle script before any hardware work. A Metal<->IOSurface
+  zero-copy API **alone is no longer a sufficient reopen**: the optimistic
+  row already prices staging and sync at zero and still fails both gates.
+
+## Instrument corrections after certification (review 2, cx 019f6218)
+
+Review 2 CERTIFIED the kill and identified safe-side instrument defects:
+double-charged sync, layer-join chunk-boundary leakage, inconsistent staging
+queue occupancy, two optimistic consumer mappings (beta_alpha ->
+gdn_alpha_beta; proj -> norm), and even-only "alt" coverage (odd parity
+unsearched). All were fixed in scripts/profile/ane_dag_oracle.py; outputs
+regenerated from the same raw logs are identical at 4 decimals (tables
+above). Review 2 independently verified singleton OFF-EXP at odd parity:
+0.912-0.983x (below 1.0) — attention-layer coverage cannot rescue the gate.
+The oracle script is retained as the reopen instrument; this amends the
+program's default "removes experiment source" contract.

@@ -10,12 +10,13 @@ ceilings against the untraced baseline wall.
 Timing model (current engine order; chunks sequential, layers sequential):
   - GPU: one serial resource executing every non-offloaded phase in traced
     order. ANE: one serial queue.
-  - Offloaded job j: release = finish(producer(j)); ANE start =
-    max(ane_free, release + in_stage + sync); consumer of j cannot start
-    before ANE finish + out_stage + sync.
+  - Offloaded job j: staging and compute occupy the serial ANE queue:
+    stage_start = max(ane_free, release(producer)); done = stage_start +
+    in_stage + compute + out_stage; consumer of j cannot start before
+    done + sync (sync charged once, at the consumer handoff).
   - Optimistic row: sync = 0, staging fully overlapped (compute time only).
-  - Pessimistic row: sync = 250 us/job, staging serial at 13.55 GB/s over
-    f32 byte counts, input staging deduped per (chunk, layer, producer).
+  - Pessimistic row: sync = 250 us/job (once), staging serial at 13.55 GB/s
+    over f32 byte counts, input staging deduped per (chunk, layer, producer).
   - ANE service time = FLOPs / A_class prior (docs/ANE-ORACLE.md table),
     replaced by P1 measurements when available via --rates-json.
 
@@ -70,17 +71,17 @@ MODELS = {
         "gdn_qkv": (2048, 8192, "OFF-EXP", "pre_norm", "gdn_prep_conv"),
         "gdn_z": (2048, 4096, "OFF-EXP", "pre_norm", "gdn_gated"),
         "gdn_back": (4096, 2048, "OFF-RED", "gdn_gated", "mixer_resid"),
-        "gdn_beta_alpha": (2048, 64, "OFF-SKINNY", "pre_norm", "gdn_step"),
+        "gdn_beta_alpha": (2048, 64, "OFF-SKINNY", "pre_norm", "gdn_alpha_beta"),
         "shared_packed": (2048, 2048, "OFF-SHARED", "post_norm", None),
-        "proj": (2048, 9216, "OFF-ATTN-E", "norm", "rope_scatter"),
+        "proj": (2048, 9216, "OFF-ATTN-E", "pre_norm", "norm"),
         "attn_back": (4096, 2048, "OFF-ATTN-R", "body_matrix_kqv", "mixer_resid"),
     },
     "d27b": {
         "gdn_qkv": (5120, 10240, "OFF-EXP", "pre_norm", "gdn_prep_conv"),
         "gdn_z": (5120, 6144, "OFF-EXP", "pre_norm", "gdn_gated"),
         "gdn_back": (6144, 5120, "OFF-RED", "gdn_gated", "mixer_resid"),
-        "gdn_beta_alpha": (5120, 96, "OFF-SKINNY", "pre_norm", "gdn_step"),
-        "proj": (5120, 14336, "OFF-ATTN-E", "norm", "rope_scatter"),
+        "gdn_beta_alpha": (5120, 96, "OFF-SKINNY", "pre_norm", "gdn_alpha_beta"),
+        "proj": (5120, 14336, "OFF-ATTN-E", "pre_norm", "norm"),
         "attn_back": (6144, 5120, "OFF-ATTN-R", "body_matrix_kqv", "mixer_resid"),
         "ffn_gate": (5120, 17408, "DENSE-FFN-E", "ffn_norm", "ffn_swiglu"),
         "ffn_up": (5120, 17408, "DENSE-FFN-E", "ffn_norm", "ffn_swiglu"),
@@ -125,8 +126,8 @@ def parse_trace(paths: list[Path]):
     return records
 
 
-def median_timeline(records, n_timed=3):
-    """Median per ordered slot across the last n_timed passes."""
+def median_timeline(records, n_timed=3, estimator="median"):
+    """Per-slot estimator across the last n_timed passes (keys must match)."""
     n_pass = max(r["p"] for r in records) + 1
     timed = [p for p in range(max(0, n_pass - n_timed), n_pass)]
     per_pass = defaultdict(list)  # pass -> ordered records
@@ -135,22 +136,23 @@ def median_timeline(records, n_timed=3):
             per_pass[r["p"]].append(r)
     lengths = {p: len(v) for p, v in per_pass.items()}
     if len(set(lengths.values())) != 1:
-        print(f"WARN: unequal pass lengths {lengths}; using min", file=sys.stderr)
-    n = min(lengths.values())
-    base = per_pass[timed[0]][:n]
+        raise SystemExit(f"FATAL: unequal pass lengths {lengths}")
+    base = per_pass[timed[0]]
+    est = {"median": statistics.median, "min": min, "max": max}[estimator]
     out = []
     for i, r in enumerate(base):
         vals = []
         for p in timed:
             rr = per_pass[p][i]
-            key_match = (rr["chunk"], rr["layer"], rr["source"], rr["phase"]) == (
+            if (rr["chunk"], rr["layer"], rr["source"], rr["phase"]) != (
                 r["chunk"],
                 r["layer"],
                 r["source"],
                 r["phase"],
-            )
-            vals.append(rr["ms"] if key_match else r["ms"])
-        out.append({**r, "ms": statistics.median(vals)})
+            ):
+                raise SystemExit(f"FATAL: pass key mismatch at slot {i}")
+            vals.append(rr["ms"])
+        out.append({**r, "ms": est(vals)})
     return out
 
 
@@ -198,7 +200,9 @@ def simulate(
         n_in, n_out, cls, prod, cons = shapes[r["phase"]]
         if cls not in offload_classes:
             return False
-        if layer_coverage == "alt" and r["layer"] % 2 == 1:
+        if layer_coverage == "even" and r["layer"] % 2 == 1:
+            return False
+        if layer_coverage == "odd" and r["layer"] % 2 == 0:
             return False
         return True
 
@@ -206,8 +210,16 @@ def simulate(
     # consumer slot so the walk can apply the wait when it reaches it.
     waiting = defaultdict(list)  # (chunk, layer, consumer_phase) -> jobs
 
+    layer_joins = []  # (chunk, layer, done): gates first record of any later layer
+
     for r in timeline:
         key = (r["chunk"], r["layer"], r["phase"])
+        # Layer-boundary joins (cross-chunk safe): gate the first record
+        # positioned after the join's (chunk, layer).
+        ready = [j for j in layer_joins if (j[0], j[1]) < (r["chunk"], r["layer"])]
+        for j in ready:
+            gpu = max(gpu, j[2])
+            layer_joins.remove(j)
         # Apply any ANE-result waits that gate this phase.
         for job in waiting.pop(key, []):
             gpu = max(gpu, job)
@@ -231,26 +243,21 @@ def simulate(
             else:
                 out_st = 0.0
             release = finish.get((r["chunk"], r["layer"], prod), gpu)
-            start = max(ane_free, release + in_st + sync)
-            done = start + a + out_st + sync
-            ane_free = start + a + out_st  # queue occupancy
+            stage_start = max(ane_free, release)
+            done = stage_start + in_st + a + out_st
+            ane_free = done  # staging + compute occupy the serial queue
             if cons is None:
-                # Join at layer boundary: gate the next layer's first phase.
-                ane_out[(r["chunk"], r["layer"], "__layer_end__")] = done
-                waiting[("__next_layer__", r["chunk"], r["layer"])].append(done)
+                layer_joins.append((r["chunk"], r["layer"], done + sync))
             else:
-                waiting[(r["chunk"], r["layer"], cons)].append(done)
+                waiting[(r["chunk"], r["layer"], cons)].append(done + sync)
             finish[key] = gpu  # phase itself consumed no GPU time
             continue
-        # Layer-boundary joins from shared_packed-style jobs.
-        prev = (r["chunk"], r["layer"] - 1)
-        for job in waiting.pop(("__next_layer__", prev[0], prev[1]), []):
-            gpu = max(gpu, job)
         gpu += r["ms"] / 1e3
         finish[key] = gpu
 
     # Drain any unconsumed ANE results (end of trace).
     tail = [t for jobs in waiting.values() for t in jobs]
+    tail += [j[2] for j in layer_joins]
     return max([gpu, ane_free] + tail)
 
 
@@ -262,6 +269,7 @@ def main():
     ap.add_argument("--n-prompt", type=int, required=True)
     ap.add_argument("--rates-json", type=Path, help="P1 measured rates override")
     ap.add_argument("--top", type=int, default=6)
+    ap.add_argument("--estimator", choices=["median", "min", "max"], default="median")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -270,7 +278,7 @@ def main():
         rates.update(json.loads(args.rates_json.read_text()))
 
     records = parse_trace([args.trace])
-    timeline = dedupe_attn(median_timeline(records))
+    timeline = dedupe_attn(median_timeline(records, estimator=args.estimator))
     base = json.loads(args.base_json.read_text())
     row = base[0] if isinstance(base, list) else base
     w_wall = statistics.median([args.n_prompt / ts for ts in row["samples_ts"]])
@@ -283,7 +291,7 @@ def main():
     results = []
     for rsz in range(1, len(classes) + 1):
         for subset in itertools.combinations(classes, rsz):
-            for cov in ("all", "alt"):
+            for cov in ("all", "even", "odd"):
                 mk_p = simulate(
                     timeline, args.model, set(subset), args.n_prompt, True, rates, cov
                 )

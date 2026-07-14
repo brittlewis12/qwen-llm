@@ -1,8 +1,12 @@
 # v0.598 A3B Force-Only Owned-Arena Loader Pilot
 
-Status: preregistered before implementation, correctness execution, and timed
-work. v0.597 authorizes only the exact-layout, four-worker A3B pilot described
-here.
+Status: p2 protocol repair before timed product work. P1 at source `701de50`
+completed and passed the full-state test, then stopped because its parser required
+the first `[metal-gguf-owned]` line to start at column zero even though the Rust
+test harness prefixes that line with its test name. P1 launched no fresh or loaded
+timed child. P2 changes only that parser to extract the marker from either line
+position, authenticates P1's manifest and correctness output, reruns correctness,
+and preserves every product arm, order, gate, retry, and authority rule below.
 
 ## Intent
 

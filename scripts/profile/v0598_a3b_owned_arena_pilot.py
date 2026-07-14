@@ -15,7 +15,10 @@ import v0596_a3b_retained_route_warm as warm
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT = ROOT / "target/profiles/v0598-a3b-owned-arena-pilot-p1"
+ARTIFACT = ROOT / "target/profiles/v0598-a3b-owned-arena-pilot-p2"
+P1_ROOT = ROOT / "target/profiles/v0598-a3b-owned-arena-pilot-p1"
+P1_MANIFEST = P1_ROOT / "manifest.json"
+P1_CORRECTNESS = P1_ROOT / "correctness.out"
 PREREG = ROOT / "docs/bench/v0598-a3b-owned-arena-pilot.md"
 MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
@@ -29,6 +32,13 @@ EXPECTED_MODEL_SHA256 = (
 )
 EXPECTED_PROMPT_SHA256 = (
     "e265de9742d1b22e566fc108ae26331ccf46166c6f071e73f211e0a1a7e8b474"
+)
+EXPECTED_P1_COMMIT = "701de5087f21da6376b444eb3f4f6369f0e8e04d"
+EXPECTED_P1_MANIFEST_SHA256 = (
+    "050e11395b7f6fdc14c233d2653810aafb546c11469b6a794e859033b3a2f4c1"
+)
+EXPECTED_P1_CORRECTNESS_SHA256 = (
+    "68ac2a83f2e2d3e6f0261475445035f43c73d8641fc4f7a9d03e3a47b8712cb0"
 )
 BLOCK_ORDERS = ("ABC", "ACB", "BAC", "BCA", "CAB", "CBA")
 LENGTHS = (1, 128)
@@ -61,6 +71,8 @@ def required_manifest_paths() -> tuple[Path, ...]:
         PROMPT,
         CLI_BINARY,
         BENCH_BINARY,
+        P1_MANIFEST,
+        P1_CORRECTNESS,
     )
 
 
@@ -98,6 +110,16 @@ def build_manifest(removed_environment: list[str]) -> dict[str, object]:
         raise RuntimeError("model SHA-256 drifted")
     if hashes[str(PROMPT)] != EXPECTED_PROMPT_SHA256:
         raise RuntimeError("prompt SHA-256 drifted")
+    if hashes[str(P1_MANIFEST)] != EXPECTED_P1_MANIFEST_SHA256:
+        raise RuntimeError("p1 manifest SHA-256 drifted")
+    if hashes[str(P1_CORRECTNESS)] != EXPECTED_P1_CORRECTNESS_SHA256:
+        raise RuntimeError("p1 correctness SHA-256 drifted")
+    p1_manifest = json.loads(P1_MANIFEST.read_text(encoding="utf-8"))
+    if p1_manifest.get("source_commit") != EXPECTED_P1_COMMIT:
+        raise RuntimeError("p1 source identity drifted")
+    p1_entries = sorted(path.name for path in P1_ROOT.iterdir() if path.is_file())
+    if p1_entries != ["correctness.out", "manifest.json"]:
+        raise RuntimeError(f"p1 stop boundary drifted: {p1_entries}")
     return {
         "schema": 1,
         "created_unix_ms": time.time_ns() // 1_000_000,
@@ -113,6 +135,9 @@ def build_manifest(removed_environment: list[str]) -> dict[str, object]:
         "loaded_decode_calls": TOKENS,
         "cooldown_s": COOLDOWN_S,
         "max_block_attempts": MAX_BLOCK_ATTEMPTS,
+        "p1_source_commit": EXPECTED_P1_COMMIT,
+        "p1_manifest_sha256": EXPECTED_P1_MANIFEST_SHA256,
+        "p1_correctness_sha256": EXPECTED_P1_CORRECTNESS_SHA256,
     }
 
 
@@ -248,7 +273,7 @@ def run_correctness(base_env: dict[str, str]) -> dict[str, object]:
     text = stdout_path.read_text(encoding="utf-8", errors="replace")
     if result.returncode != 0 or "test result: ok. 1 passed;" not in text:
         raise RuntimeError(f"owned full-state correctness failed; see {stdout_path}")
-    owned_lines = re.findall(r"^\[metal-gguf-owned\].*$", text, re.MULTILINE)
+    owned_lines = re.findall(r"\[metal-gguf-owned\].*$", text, re.MULTILINE)
     if len(owned_lines) != 2:
         raise RuntimeError("correctness expected two owned materializations")
     copied_ledger = (

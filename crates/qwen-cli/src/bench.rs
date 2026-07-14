@@ -28,7 +28,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};
 use objc2_metal::{
     MTLAllocation, MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState,
-    MTLDevice, MTLResidencySet, MTLResidencySetDescriptor, MTLSize,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLResidencySet, MTLResidencySetDescriptor, MTLSize,
 };
 use qwen_llm::{
     forward::mat_vec_pub,
@@ -36,12 +36,13 @@ use qwen_llm::{
     loader::{Model, open_dflash_drafter},
     metal::{
         BlitEncoder, KernelEncoder, KernelTraceCounters, MetalContext, MetalTensor,
-        attn_v4_choose_group_tile, attn_v4_choose_nwg, attn_v4_choose_tile_c,
-        encode_add_inplace_f32, encode_attn_decode_v4_f32, encode_attn_decode_v4_main_only_f32,
-        encode_attn_decode_v4_reduce_only_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
-        encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
-        encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
-        encode_get_rows_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+        RetainedStorageDisposition, attn_v4_choose_group_tile, attn_v4_choose_nwg,
+        attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_v4_f32,
+        encode_attn_decode_v4_main_only_f32, encode_attn_decode_v4_reduce_only_f32,
+        encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
+        encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
+        encode_fill_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
+        encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
         encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_rms_norm_batched_f32,
@@ -49,8 +50,8 @@ use qwen_llm::{
         encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
         encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv,
         encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32, encode_sigmoid_mul_f32,
-        encode_split_q_gate_f32, encode_touch_bytes_f32, kernel_trace_begin, kernel_trace_snapshot,
-        with_attn_v4_group_tile_override,
+        encode_split_q_gate_f32, encode_touch_bytes_f32, host_page_size_bytes, kernel_trace_begin,
+        kernel_trace_snapshot, plan_retained_storage, with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -59,7 +60,10 @@ use qwen_llm::{
         with_prefill_dense_ffn_fused_swiglu_q4_override,
     },
     metal_forward::{
-        MetalBlock, MetalForward, MetalModel, MetalMoeFfn, MetalSession, MoeRouteReplayRow, RMS_EPS,
+        MetalBlock, MetalForward, MetalModel, MetalMoeFfn, MetalSession, ModelWeightStorageKind,
+        MoeRouteReplayRow, RMS_EPS, gguf_descriptor_layout_digest, model_weight_storage_requests,
+        mtp_weight_source_descriptors, native_quant_embedding_storage_supported,
+        production_native_quant_embedding_storage_enabled,
     },
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{
@@ -438,6 +442,8 @@ enum Cmd {
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
+    /// Report model-agnostic retained-GGUF geometry and byte coverage without loading weights.
+    GgufStoragePlan(GgufStoragePlanArgs),
     /// Decode N tokens after a prompt using the plain no-spec path.
     ///
     /// Packed prefill is the default no-spec path. `--sequential-prefill`
@@ -566,6 +572,45 @@ enum Cmd {
 #[derive(Parser, Debug)]
 struct BuildInfoArgs {
     /// Output format. JSON emits one object rather than a benchmark-row array.
+    #[arg(short = 'o', long, value_enum, default_value = "json")]
+    output: OutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum GgufStorageEmbeddingPolicy {
+    ProductionAuto,
+    ForceNativeIfSupported,
+    Disabled,
+}
+
+impl GgufStorageEmbeddingPolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ProductionAuto => "production-auto",
+            Self::ForceNativeIfSupported => "force-native-if-supported",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Parser, Debug)]
+struct GgufStoragePlanArgs {
+    /// Path to the first GGUF shard.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Required Metal buffer binding alignment.
+    #[arg(long, default_value = "32")]
+    alignment: usize,
+    /// Override the device's maxBufferLength for geometry falsification.
+    #[arg(long)]
+    max_buffer_length: Option<usize>,
+    /// Token-embedding materialization policy used by the copied baseline.
+    #[arg(long, value_enum, default_value = "production-auto")]
+    embedding_policy: GgufStorageEmbeddingPolicy,
+    /// Price the opt-in F16 MoE router conversion.
+    #[arg(long)]
+    router_f16: bool,
+    /// `text` or `json`.
     #[arg(short = 'o', long, value_enum, default_value = "json")]
     output: OutputFormat,
 }
@@ -2666,6 +2711,7 @@ fn main() -> Result<()> {
             attn_stage_floor::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
         Cmd::BuildInfo(a) => run_build_info(a),
+        Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
         Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),
@@ -2741,6 +2787,207 @@ fn run_build_info(args: BuildInfoArgs) -> Result<()> {
             );
             println!("stamp_source\t{}", identity.stamp_source);
             println!("problems\t{}", identity.problems.join(","));
+        }
+    }
+    Ok(())
+}
+
+fn run_gguf_storage_plan(args: GgufStoragePlanArgs) -> Result<()> {
+    let gguf = GgufFile::open(&args.model).context("open GGUF")?;
+    let model = Model::from_gguf(&gguf).context("bind model")?;
+    let native_embedding = match args.embedding_policy {
+        GgufStorageEmbeddingPolicy::ProductionAuto => {
+            production_native_quant_embedding_storage_enabled(&model)
+        }
+        GgufStorageEmbeddingPolicy::ForceNativeIfSupported => {
+            native_quant_embedding_storage_supported(&model)
+        }
+        GgufStorageEmbeddingPolicy::Disabled => false,
+    };
+    let requests = model_weight_storage_requests(&model, native_embedding, args.router_f16)?;
+    let direct = requests
+        .iter()
+        .filter(|request| request.kind == ModelWeightStorageKind::Direct)
+        .map(|request| request.desc)
+        .collect::<Vec<_>>();
+    let page_size = host_page_size_bytes()?;
+    let device = MTLCreateSystemDefaultDevice().ok_or_else(|| anyhow!("no Metal device"))?;
+    let device_max_buffer_length = device.maxBufferLength();
+    let max_buffer_length = args.max_buffer_length.unwrap_or(device_max_buffer_length);
+    if max_buffer_length > device_max_buffer_length {
+        return Err(anyhow!(concat!(
+            "requested maxBufferLength {max_buffer_length} exceeds device limit ",
+            "{device_max_buffer_length}"
+        )));
+    }
+    let shard_mapped_lengths = gguf.shard_mapped_lengths();
+    let plan = plan_retained_storage(
+        &shard_mapped_lengths,
+        &direct,
+        page_size,
+        max_buffer_length,
+        args.alignment,
+    )?;
+
+    let mut direct_logical_bytes = 0u64;
+    let mut converted_source_bytes = 0u64;
+    let mut converted_resident_bytes = 0u64;
+    let mut converted_count = 0usize;
+    let mut current_base_weight_private_bytes = 0u64;
+    for request in &requests {
+        current_base_weight_private_bytes = current_base_weight_private_bytes
+            .checked_add(request.resident_bytes)
+            .ok_or_else(|| anyhow!("current resident byte accounting overflow"))?;
+        if request.kind == ModelWeightStorageKind::Direct {
+            direct_logical_bytes = direct_logical_bytes
+                .checked_add(request.desc.n_bytes)
+                .ok_or_else(|| anyhow!("direct byte accounting overflow"))?;
+        } else {
+            converted_count += 1;
+            converted_source_bytes = converted_source_bytes
+                .checked_add(request.desc.n_bytes)
+                .ok_or_else(|| anyhow!("converted source byte accounting overflow"))?;
+            converted_resident_bytes = converted_resident_bytes
+                .checked_add(request.resident_bytes)
+                .ok_or_else(|| anyhow!("converted resident byte accounting overflow"))?;
+        }
+    }
+    let planned_base_weight_private_bytes = converted_resident_bytes
+        .checked_add(plan.unique_fallback_bytes)
+        .ok_or_else(|| anyhow!("planned resident byte accounting overflow"))?;
+    let estimated_base_weight_private_bytes_removed = current_base_weight_private_bytes
+        .checked_sub(planned_base_weight_private_bytes)
+        .ok_or_else(|| anyhow!("planned residency exceeds copied residency"))?;
+    let mapped_window_bytes = plan.windows.iter().try_fold(0u64, |total, window| {
+        total
+            .checked_add(window.length as u64)
+            .ok_or_else(|| anyhow!("window byte accounting overflow"))
+    })?;
+    let alias_count = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::Alias { .. }))
+        .count();
+    let unique_view_count = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
+        .count();
+    let fallback_rows = plan
+        .entries
+        .iter()
+        .filter_map(|entry| match entry.disposition {
+            RetainedStorageDisposition::CopyFallback { reason } => Some(serde_json::json!({
+                "name": entry.name,
+                "shard_idx": entry.shard_idx,
+                "data_offset": entry.data_offset,
+                "n_bytes": entry.n_bytes,
+                "reason": format!("{reason:?}"),
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let windows = plan
+        .windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            serde_json::json!({
+                "index": index,
+                "shard_idx": window.shard_idx,
+                "mmap_offset": window.mmap_offset,
+                "length": window.length,
+            })
+        })
+        .collect::<Vec<_>>();
+    let bound_sources = requests
+        .iter()
+        .map(|request| {
+            (
+                request.desc.shard_idx,
+                request.desc.data_offset,
+                request.desc.n_bytes,
+            )
+        })
+        .collect::<HashSet<_>>();
+    let mtp_descriptors = mtp_weight_source_descriptors(&model);
+    let mtp_sources = mtp_descriptors
+        .iter()
+        .map(|desc| (desc.shard_idx, desc.data_offset, desc.n_bytes))
+        .collect::<HashSet<_>>();
+    let mtp_descriptor_bytes = mtp_descriptors.iter().try_fold(0u64, |total, desc| {
+        total
+            .checked_add(desc.n_bytes)
+            .ok_or_else(|| anyhow!("MTP descriptor byte accounting overflow"))
+    })?;
+    let unbound = gguf
+        .tensors
+        .iter()
+        .filter(|desc| {
+            let key = (desc.shard_idx, desc.data_offset, desc.n_bytes);
+            !bound_sources.contains(&key) && !mtp_sources.contains(&key)
+        })
+        .collect::<Vec<_>>();
+    let unbound_bytes = unbound.iter().try_fold(0u64, |total, desc| {
+        total
+            .checked_add(desc.n_bytes)
+            .ok_or_else(|| anyhow!("unbound byte accounting overflow"))
+    })?;
+    let row = serde_json::json!({
+        "schema_version": 1,
+        "model": args.model,
+        "architecture": gguf.architecture(),
+        "descriptor_layout_digest": format!("{:#018x}", gguf_descriptor_layout_digest(&gguf)),
+        "shard_mapped_lengths": shard_mapped_lengths,
+        "tensor_descriptors": gguf.tensors.len(),
+        "base_weight_requests": requests.len(),
+        "mtp_present": model.mtp.is_some(),
+        "mtp_descriptor_count": mtp_descriptors.len(),
+        "mtp_descriptor_bytes": mtp_descriptor_bytes,
+        "native_quant_embedding": native_embedding,
+        "embedding_policy": args.embedding_policy.label(),
+        "router_f16": args.router_f16,
+        "page_size": page_size,
+        "required_alignment": args.alignment,
+        "device_max_buffer_length": device_max_buffer_length,
+        "planned_max_buffer_length": max_buffer_length,
+        "usable_window_length": plan.usable_window_length,
+        "windows": windows,
+        "sum_window_lengths": mapped_window_bytes,
+        "direct_logical_count": direct.len(),
+        "direct_logical_bytes": direct_logical_bytes,
+        "direct_unique_view_count": unique_view_count,
+        "direct_unique_view_bytes": plan.unique_view_bytes,
+        "direct_logical_view_bytes": plan.logical_view_bytes,
+        "direct_alias_count": alias_count,
+        "direct_alias_bytes": plan.alias_bytes,
+        "fallback_unique_count": fallback_rows.len(),
+        "fallback_unique_bytes": plan.unique_fallback_bytes,
+        "fallbacks": fallback_rows,
+        "converted_count": converted_count,
+        "converted_source_bytes": converted_source_bytes,
+        "converted_resident_bytes": converted_resident_bytes,
+        "copied_base_weight_private_bytes_under_policy": current_base_weight_private_bytes,
+        "planned_base_weight_private_bytes_under_policy": planned_base_weight_private_bytes,
+        "estimated_base_weight_private_bytes_removed_under_policy":
+            estimated_base_weight_private_bytes_removed,
+        "unbound_descriptor_count": unbound.len(),
+        "unbound_descriptor_bytes": unbound_bytes,
+        "build_identity": qwen_build_identity_packet(),
+    });
+    match args.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&row)?),
+        OutputFormat::Text => {
+            println!("model\t{}", args.model.display());
+            println!("shards\t{}", gguf.shard_count());
+            println!("windows\t{}", plan.windows.len());
+            println!("direct_view_bytes\t{}", plan.logical_view_bytes);
+            println!("fallback_bytes\t{}", plan.unique_fallback_bytes);
+            println!("converted_resident_bytes\t{converted_resident_bytes}");
+            println!(concat!(
+                "estimated_base_weight_private_bytes_removed_under_policy\t",
+                "{estimated_base_weight_private_bytes_removed}"
+            ));
         }
     }
     Ok(())

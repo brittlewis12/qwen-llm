@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - Post-v0.592 No-Prefault Scope Correction
+
+Status: reopen only demand-paged one-shot no-copy; keep v0.591/v0.592 failures
+and defer the broader storage-control tree.
+
+- v0.591 rejects sparse CPU-prefaulted no-copy as a universal cold-plus-warm
+  candidate. v0.592 rejects exposed hazard tracking as the warm-loss recovery
+  mechanism. Neither experiment runs whole-shard no-copy without CPU prefault.
+- The prior roadmap incorrectly promoted candidate failure into design-space
+  closure. CPU prefault is an anti-deferral protocol device, not mandatory product
+  work. Spawn-to-first-byte and exit already charge any GPU demand mapping, so a
+  no-prefault candidate can be measured honestly without hiding work.
+- Residual candidate load after subtracting measured prefault is `80-95 ms` versus
+  `1.68-1.72 s` copied load. This is only sizing, not a latency result: prefault may
+  reduce downstream demand work. Direct measurement at 1/32/128/256 outputs is the
+  sole authorized continuation.
+- Preserve the measured warm cost at about `1.28-1.31 ms` per transition and fit
+  fixed plus `(N-1)` transition terms from the new rows. A win can authorize only a
+  fingerprinted, output-capped, fresh one-shot policy; persistent JSONL/server and
+  unbounded generation remain copied.
+- If output-1 does not improve, close cold latency and retain no-copy only as a
+  memory mode. Anonymous giant arenas, per-tensor page windows, residency sets, and
+  `MADV_WILLNEED` remain conditional on a direct cold win or a separately elevated
+  16.8 GB memory objective. They do not outrank admitted auto-prefill on their own.
+
+Adversarial sharpening: `cx ask` session
+`019f5e19-8db5-7642-94a0-17d5e2b1237d`.
+
 ## 2026-07-13 - v0.592 Hazard-Tracking Mechanism Stop
 
 Status: valid execution, malformed clearance rule, non-authorizing negative

@@ -6,6 +6,58 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-14 - v0.594 Generic Retained-Storage Coverage Promotion
+
+Status: broad dry geometry and byte accounting clear; promote to gated live
+multi-window realization without changing runtime storage behavior or defaults.
+
+- v0.594a adds a pure retained-storage planner over exact base-model
+  materialization requests. It assigns page-aligned, device-bounded windows
+  across arbitrary shards; classifies compatible aliases and typed copy
+  fallbacks; rejects overlapping source ranges; and keeps every endpoint and byte
+  total checked. Synthetic tests cover request permutations, page overlap,
+  multi-shard windows, aliases, partial pages, alignment, capacity, malformed
+  ranges, and aggregate-preserving request drift.
+- The same ordered request inventory now guards every real base-model load. Live
+  and dry sequences must match name, shard, offset, source bytes, dtype, shape,
+  direct/F32/F16 materialization kind, and resident bytes request-for-request.
+  A real 0.8B Q4_K load clears with 321 requests: 320 direct and one converted
+  embedding. The full library suite is 199 active passed and 124 ignored.
+- v0.594b runs the clean-source oracle over 54 local Qwen3.5/3.6 assets: 44 dense,
+  10 MoE, Q2/Q3/Q4/Q6/Q8/IQ/F16/BF16/F32, three MTP assets, and two-/three-file
+  models. All use the actual 16 KiB host page and 77,309,411,328-byte Metal buffer
+  limit. There are zero unbound, alignment, missing-shard, outside-range,
+  overlap, or capacity failures. All 74 fallbacks across 51 models are final
+  partial-page tensors only.
+- Corpus totals are 583.465 GB direct base-weight bytes, 582.844 GB planned views,
+  0.621 GB copied fallbacks, and 58.993 GB converted-F32 embedding residency.
+  Direct geometry therefore covers `99.8935%` byte-weighted; the median row is
+  `99.9995%` and the worst is `99.2260%` on split BF16 A3B.
+- Private-removal coverage is bimodal and must not be summarized by its
+  `99.3498%` row median alone. The 28 zero-conversion assets remove `99.8800%`
+  byte-weighted. The 26 converted-embedding assets remove `60.2706%`; every one
+  retains exactly one F32 token embedding. Corpus-wide removal is `90.7209%`,
+  descriptive only because the assets are alternatives, not a deployment mix.
+- The removable base-weight range under the frozen force-native-if-supported
+  policy is 0.384-77.016 GB. Anchors are 0.519 GB at 0.8B Q4_K, 2.730 GB at 4B
+  Q4_K, 5.670 GB at 9B Q4_K, 16.806 GB at 27B Q4_K, 22.124 GB at A3B Q4, 68.829
+  GB at split BF16 A3B, and 77.016 GB at split A10B Q4.
+- The 536,870,912-byte BF16 expert tail accounts for 86.4% of all fallback bytes
+  but only 0.774% of that model. Copy the complete tensor; do not add split-tensor
+  kernel storage to recover the final fraction. MTP rows' exact 100% base coverage
+  excludes their separately partitioned MTP descriptors and is not whole-model
+  coverage.
+- This is not a live no-copy, footprint, correctness, or latency promotion. Next
+  gates are: synthetic same-shard overlapping Metal windows with arbitrary
+  destruction order; tied 0.8B Q8_0 full-state correctness and physical alias;
+  non-MTP A3B Q4 full-state correctness and reconciled mirrors/derived bytes; then
+  split A10B resource creation and sampled GPU reads. Read-only provenance blocks
+  live realization, not this pure planner checkpoint.
+
+Artifacts: `target/profiles/v0594-retained-storage-coverage/`. Frozen commits:
+`a9fc4c5`, `2d115b0`, and `ed2966d`. Adversarial review: `cx ask` session
+`019f5ea3-a741-7e01-8288-c16c9acf8b4a`.
+
 ## 2026-07-13 - v0.593 Demand-Paged One-Shot Promotion
 
 Status: promote exact retained GGUF views only for the measured cache-warm,

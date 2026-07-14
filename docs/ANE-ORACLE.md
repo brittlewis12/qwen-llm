@@ -1,13 +1,15 @@
 # ANE Prefill Co-Processor Oracle (P0-P4)
 
-Status: **P0 preregistered** (this commit). Branch `ane-oracle`; integrate to
-main only through the gates below. Every rung is killable; a kill merges this
-doc + artifacts + a PERF-LOG entry and removes experiment source.
+Status: **P0/P0b preregistered, rev 2** (amended after adversarial review 1,
+cx session 019f61ea; review verdict NO-GO on rev 1's formula — this revision
+adopts its corrections in full). Branch `ane-oracle`; integrate to main only
+through the gates below. Every rung is killable; a kill merges this doc +
+artifacts + a PERF-LOG entry and removes experiment source.
 
 ## Objective lane and boundary
 
 Approximate/concurrency lane, prefill only, serial BS=1. The hypothesis is
-NOT "ANE matmul is faster than GPU" (it is not: ~3.2-7.3 TFLOP/s vs our 12.8
+NOT "ANE matmul is faster than GPU" (it is not: ~3-7 TFLOP/s vs our 12.8
 mat-mat anchor). It is:
 
 > Statically-shaped, stateless projection classes can execute on ANE
@@ -21,138 +23,198 @@ bucketed routed experts are out of scope (stateful or dynamic shapes).
 Drafter-on-ANE remains a separate lane behind speculative economics
 (PERF-ROADMAP.md "ANE/AMX drafting" boundary), untouched by this program.
 
-## Prior evidence (external, commit-pinned)
+**Product objective contract (fixed now, per review):** this lane's primary
+prize is a scoped **loaded-model prefill win** (auto-prefill-lane style,
+cf. the promoted 1.0641x A3B cell); process-cold TTFT must be a
+**non-regression**, not the prize. P4 promotes on warm prefill with cold
+parity; it does not require a 1.10x cold win.
 
-Source: rustane @ c422447 + ncdrone/ane @ 016b754 (fp16-only static graphs,
-conv1x1/matmul, NEON f32<->f16 staging, `_ANEInMemoryModel` direct dispatch).
+## Prior evidence (external, commit-pinned; reliability annotated)
 
-- ANE conv1x1 768->3072 w=512: 7.315 TFLOP/s; 3072->768: 3.238 TFLOP/s
-  (expansion vs reduction asymmetry) [rustane results/ane_tflops_m4max.md].
-- Dual-load: ANE -1.5% / GPU -2.6% mutual degradation [results/dual_load_m4max.md].
-- Staging: ~90 GB/s flat, ~10 GB/s interleaved; locks ~0.5-0.7 us
-  [results/iosurface_staging_m4max.md].
-- Compile ~50-90 ms/kernel; no cross-process plan cache (upstream: fixed-path
-  override "not viable").
-- Efficiency cliff reported at model dim 5120 (4.7x/layer) — measured on
-  model-forward, NOT on isolated matmul; P1 must decide which.
-- Perf-stats regression (`hwExecutionTime`=0) reported on macOS 26; this host
-  is macOS 15.6.1 — expected functional, verify in P1.
+Source: rustane @ c422447 + ncdrone/ane @ 016b754. Corrections from review:
+
+- ANE conv1x1 768->3072 w=512: 7.315 TFLOP/s; 3072->768: 3.238 TFLOP/s.
+  **Single shape family; possibly fp32-I/O era** (bench builds f32 tensors;
+  the fork's fp16 TensorData postdates parts of the results). Treat as
+  weak priors, replaced by P1 measurements on our shapes.
+- Dual-load ANE -1.5% / GPU -2.6%: **unpaired, interval-diluted** (5s solo vs
+  30s dual, ANE active only part of the window). Suggestive only; P3 replaces
+  it with paired, duty-cycle-matched measurement.
+- Staging: 90 GB/s is flat f32 memcpy. The relevant fused f32->fp16 path is
+  **13.55 GB/s** (rustane results/f16_convert_m4max.md); interleaved ~10 GB/s.
+  Charged staging uses 13.55 GB/s until P2 measures better.
+- Compile ~50-90 ms/kernel; no cross-process plan cache. **Charged as
+  aggregate critical-path compile for the full executable set**, not
+  per-kernel (see P1 gate).
+- Dim-5120 cliff (4.7x/layer): model-forward evidence only; P1 isolates.
+- macOS 15.6.1 here; the hwExecutionTime=0 regression was reported on 26.
 
 ## Environment
 
 M4 Max 128GB (zekrom), macOS 15.6.1, worktree @ 81481491c (clean stamp).
 Anchors: stream 474.0 GB/s, Q4_K mat-mat 12.80 TFLOP/s.
 Models: Qwen3.6-35B-A3B-UD-Q4_K_M (sentinel), Qwen3.6-27B-Q4_K_M (dense
-guardrail), Qwen3.5-122B-A10B-UD-Q4_K_XL (heavy, if P0 warrants).
+guardrail), Qwen3.5-122B-A10B-UD-Q4_K_XL (heavy, only if P0 warrants).
+Thermal protocol for every timed rung: AC power, high-power mode, quiet box,
+>=60s idle between model-scale runs, alternating A/B order where paired,
+`pmset -g thermlog` clean or the run is discarded and rerun.
 
-## Offloadable phase classes (fixed vocabulary for this program)
+## Offloadable job classes (fixed vocabulary)
 
-From `QWEN_PREFILL_TRACE_LAYER_PHASES` labels:
+Jobs are (phase, layer, chunk) instances from `QWEN_PREFILL_TRACE_LAYER_PHASES`
+/ `QWEN_PREFILL_TRACE_ATTN_PHASES`. Classes carry **absolute** ANE
+service-rate priors A_i (TFLOP/s), replaced by P1 measurements:
 
-| Class | Phases | ANE shape class | Rate prior r (vs 12.8) |
+| Class | Phases | Shape class | A_i prior |
 |---|---|---|---|
-| OFF-EXP | `gdn_qkv`, `gdn_z` | expansion | 0.57 (7.3/12.8) |
-| OFF-RED | `gdn_back` (= out_proj) | reduction | 0.25 (3.2/12.8) |
-| OFF-SMALL | `gdn_beta_alpha`, `shared_packed` | small/skinny | 0.25 (conservative) |
-| OFF-ATTN | attn qkv/o projections (decomposed via `QWEN_PREFILL_TRACE_ATTN_PHASES`) | mixed | 0.40 |
-| DENSE-FFN | 27B `ffn_*` gate/up (expansion), down (reduction) | mixed | 0.57 / 0.25, **contingent on P1 5120-cliff test** |
-| NOT-OFF | everything else (recurrence, conv, attention body, routed experts, norms, scatter, residuals) | — | — |
+| OFF-EXP | `gdn_qkv`, `gdn_z` | expansion | 7.3 |
+| OFF-RED | `gdn_back` (= out_proj) | reduction | 3.2 |
+| OFF-SHARED | `shared_packed` | small expansion+reduction pair | 3.2 |
+| OFF-SKINNY | `gdn_beta_alpha` | skinny | 3.2 |
+| OFF-ATTN-E | attn qkv (decomposed) | expansion | 7.3 |
+| OFF-ATTN-R | attn o_proj (decomposed) | reduction | 3.2 |
+| DENSE-FFN-E / -R | 27B gate/up | down | 7.3 / 3.2, **contingent on P1 cliff test** |
+| NOT-OFF | everything else | — | — |
 
-## P0 — Amdahl ceiling from measured phase shares (this rung)
+Per-job FLOPs F_j are exact from shapes; per-job ANE service time
+a_j = F_j / A_class + staging charge
+(bytes_in(f32->fp16 at 13.55 GB/s) + bytes_out(fp16->f32 at 13.55 GB/s),
+overlappable fraction 0 in the pessimistic row, 1 in the optimistic row).
+GPU time per job t_j is measured, not derived from any anchor.
 
-**Design.** For each model (A3B, 27B; A10B optional): `qwen-bench pp` at
-pp1024 and pp4096, `--runs 3`, layer+attn+ffn phase traces on, stderr logs to
-/tmp, summarized by `scripts/profile/prefill_phase_summary.py --last-pass`.
-Cross-check: untraced `pp` wall at the same shapes to record the serialized
-trace-mode distortion factor (traced GPU sum / untraced wall).
+## P0 — traces + P0b DAG makespan oracle
 
-**Known bias, declared:** serialized flush attribution removes existing
-concurrent-encoder overlap (e.g. v0.340 GDN front concurrency), so measured
-shares overstate the marginal win of removing that work from the GPU. P0's
-output is therefore an **upper bound**. The bound is:
+**P0 traces.** For A3B and 27B: `qwen-bench pp` at pp1024 and pp4096,
+`--runs 3`, layer+attn+ffn traces on, logs to /tmp, committed to the artifact
+dir. Untraced `pp --runs 5` wall at the same shapes = the **baseline W**
+(median). Serialized-trace distortion factor recorded and used only to scale
+shares onto W, with the scaling declared per row.
 
-- Per class i: serialized share x_i, ANE relative rate r_i (table above).
-- Choose offload set S maximizing sum(x_i) subject to ANE keep-up:
-  `sum_{i in S}(x_i / r_i) <= 1 - sum_{i in S}(x_i)`.
-- Ceiling = `1 / (1 - sum_{i in S} x_i)`, reported per model per shape.
-- Stress variant: same computation with every r_i halved (staging/contention
-  penalty proxy).
+**Estimator freeze:** per-job t_j = median across the 3 traced runs' matching
+(chunk, layer, phase) records; W = median of 5 untraced runs; report min/max
+spread; a gate decision within +/-2% of its threshold at either spread bound
+is INDETERMINATE and triggers one preregistered re-run set, not a redefinition.
 
-**Preregistered gates (decided before the runs below):**
+**P0b DAG oracle (document-only formula is retired; this is the decision
+instrument).** A script (`scripts/profile/ane_dag_oracle.py`, committed with
+the artifact) replays the traced execution order per chunk/layer/phase and
+computes makespans under an explicit dependency model:
 
-- PROCEED to P1 iff, on at least one model, ceiling(pp4096) >= **1.15x** with
-  prior rates AND >= **1.08x** under the halved-rate stress.
-- KILL the lane (record + merge) iff no model clears; reopen condition: new
-  measured ANE rates materially above priors, a new offloadable class, or a
-  fabric-level API change (public stateful ANE, Metal-IOSurface zero-copy).
-- Host-model selection: highest stressed ceiling wins P1's real-shape list.
+- GPU is one serial resource executing traced phases in traced order, minus
+  jobs moved to ANE; ANE is one serial queue.
+- Dependency edges (current engine order): within a layer,
+  `gdn_qkv -> gdn_prep_conv -> gdn_step -> gdn_gated -> gdn_back -> resid`;
+  `gdn_z -> gdn_gated`; `attn-proj -> attn-body -> o_proj`; MoE:
+  mixer output -> {`route_fused` -> routed chain} and -> `shared_packed`,
+  both joining at the layer output; layers sequential within a chunk;
+  chunks sequential (**current-order model**).
+- An ANE job's release = completion of its producer on either resource;
+  its consumer cannot start before the ANE job + its readback charge finish.
+- Sync cost per ANE job: two scenarios, 0 (optimistic) and 250 us
+  (pessimistic CPU rendezvous + encoder split proxy, revisited in P2).
+- Search: exhaustive over class subsets x {all layers, alternating layers}
+  x {optimistic, pessimistic} staging/sync rows; report
+  ceiling(S) = W / makespan(S) for the best S per row.
+- **Wavefront variant (documented, not authorizing):** same DAG with
+  chunk c+1 layer l released after (chunk c, layer l) state commit and
+  (chunk c+1, layer l-1) — the "new GDN work unit" premise. Reported to size
+  the prize behind engine restructuring; P1-P4 as scoped CANNOT claim it.
 
-**P0 does not authorize:** any qwen-llm production code, any ANE dependency
-in the workspace, any quality claim.
+**Preregistered gates (frozen before running):**
+
+- PROCEED to P1 iff, on at least one model at pp4096, **current-order**
+  ceiling >= **1.10x** in the pessimistic row (measured-t_j, staging charged,
+  250 us sync, A_i priors) AND >= **1.15x** in the optimistic row.
+- KILL the lane iff no model clears. Reopen conditions: measured ANE rates
+  materially above priors (P1 run anyway as a 1-day salvage is NOT permitted
+  — kill means kill), a public stateful-ANE or Metal-IOSurface zero-copy API,
+  or a promoted wavefront work unit changing the DAG (which reopens P0b with
+  the same script and gates, no new preregistration needed).
+- Host model = highest pessimistic-row ceiling.
+
+**P0 does not authorize:** production code, workspace ANE deps, quality claims.
 
 ## P1 — Shape truth (pinned sibling harness, no qwen-llm coupling)
 
-Standalone crate `spikes/ane-oracle` (worktree-only; NOT a workspace member;
-own lockfile; `ane` pinned by rev to 016b754). Random fp16 data.
-Shapes: the P0-selected model's real projection shapes, e.g. A3B
-qkv X[1024,2048]xW[2048,8192], z [1024,2048]x[2048,4096], out_proj
-[1024,4096]x[4096,2048], shared expert; 27B contingent shapes incl. isolated
-5120-dim matmuls (**cliff test**: model-forward artifact vs intrinsic).
-Measure: compute-only TFLOP/s (wall clock; `hwExecutionTime` if live;
-`powermetrics` ANE residency corroboration if sudo available), compile
-ms/kernel, dispatch overhead amortization at w in {512, 1024}.
-**Gates:** measured rate >= 0.8x of the class prior on >= half the target
-shapes AND compile <= 150 ms/kernel. Below-prior rates feed back into the P0
-formula; if the recomputed stressed ceiling < 1.08x, KILL.
+Standalone crate `spikes/ane-oracle` (not a workspace member; own lockfile;
+`ane` pinned by rev 016b754). Random fp16 data. Shapes: every job class the
+P0b-winning subset uses, at the host model's exact dims; plus isolated
+5120-dim matmuls (cliff test) if DENSE-FFN is in any winning subset.
+Measure per shape: compute-only TFLOP/s (wall clock; hwExecutionTime if
+live; powermetrics ANE-power corroboration if sudo available), compile wall
+per executable, executable count for the winning subset, dispatch overhead
+at w in {512, 1024}.
+**Gates:** every scheduled job class's measured rate feeds P0b re-run; the
+recomputed pessimistic ceiling must hold >= **1.10x** with **measured** rates
+(jobs whose class underperforms are dropped from S, not averaged over) AND
+aggregate critical-path compile + weight-blob creation for the winning
+executable set <= **50%** of one median model-load wall (so load-overlap can
+plausibly hide it; measured against the host model's load). Else KILL.
 
 ## P2 — Fully charged pipeline + numerics (real weights/activations)
 
-Weights: Q4_K -> fp16 offline via the existing codec seam (tooling lane, not
-GPU hot path). Activations: captured from the CPU reference forward at the
-probe layer (existing oracle infrastructure).
-Charge everything: f32->fp16 staging (flat AND the conv-layout interleave
-question decides which rate applies), ANE exec, readback fp16->f32, locks.
-Comparators: (a) production Q4_K Metal time for the same projection
-(`gdn-proj-micro` exact-shape bench), (b) Metal F16 same-weights control.
-Numerics: projection cosine vs f32 oracle; one offline logit-replay with the
-substituted projection on the prompt triad (favorable short / canonical
-real-long / adversarial witness + generic-narrative guardrail).
-**Gates:** charged ANE projection >= **1.20x** vs production Metal, OR
-staging demonstrated pipelineable with compute such that the P3 concurrency
-premise stands (staging_overlap_fraction >= 0.8). Fidelity: logit cosine
-within the lane's recorded bounds on all triad rows. Else KILL.
+Weights: Q4_K -> fp16 offline via the codec seam (tooling lane). Activations:
+captured from the CPU reference forward at probe layers. Charge everything:
+staging in/out at measured rates (flat vs interleaved resolved by the actual
+layout the conv path requires), ANE exec, locks, rendezvous latency with a
+GPU command stream actually running (same-process measurement of encoder
+starvation while a CPU thread blocks on ANE — two-thread probe, not
+two-process).
+Comparators: production Q4_K Metal (`gdn-proj-micro`), Metal F16 same-weights.
+**Gate (replaces rev 1's unsafe OR):** dependency-aware projected
+whole-prefill gain from the P0b DAG, re-run with all P2-measured charges
+(ANE service, non-overlapped staging measured not assumed, measured sync),
+>= **5%** on the host model at pp4096. Else KILL.
+**Numeric contract (frozen now):** per-projection cosine vs f32 oracle
+>= 0.9995 and max-abs within 4x the Q4_K-vs-f32 envelope on the same tensor;
+**full-depth replay before P3** — every proposed offloaded occurrence
+substituted simultaneously across all layers on the prompt triad (favorable
+short / canonical real-long / adversarial witness + generic-narrative
+guardrail): final-logit cosine >= 0.999, greedy argmax parity over 64
+continuation tokens, and (MoE) route-set stability >= 99.5% of tokens with
+all discrepancies enumerated. Any miss = KILL (approximate-lane rules).
 
 ## P3 — Interference oracle (zero integration)
 
-Two processes: real `qwen-bench pp` (P0 host model, pp4096, quiet box) vs the
-sibling harness hammering the real shapes in a loop. Both directions measured
-vs solo baselines, 5 paired repetitions.
-**Gates:** qwen prefill degradation <= **5%** AND ANE sustained >= **80%** of
-solo AND projected whole-phase (P0 formula with P1/P2-measured rates and
-P3-measured contention) >= **5%**. Else KILL with the contention numbers as
-the recorded boundary.
+Same-process two-thread probe from P2 extended to full duty cycle, plus the
+two-process hammer as a secondary check. The ANE load replays the winning
+subset's real burst pattern (duty cycle from the P0b schedule, not a steady
+loop). Paired A/B (ANE-active vs ANE-idle), 5 repetitions, alternating order.
+Also measured: **ANE-resident-but-inactive** engine throughput (fp16 mirrors
++ compiled models resident, no dispatch) vs clean baseline — the
+memory-topology charge (v0.591-0.596 lesson: provenance/topology alone can
+cost 3-13%); loaded prefill AND warm decode rows; peak RSS, Metal allocated
+bytes, pageins/pageouts.
+**Gate:** net projected whole-prefill gain — P0b DAG with P1/P2 rates, P2
+sync, and **both-direction measured interference applied** (GPU phases
+inflated by measured degradation while ANE active; ANE rates deflated
+likewise) — >= **5%** at pp4096, AND warm decode + ANE-resident-inactive
+rows are >= **0.99x** baseline. Else KILL.
 
 ## P4 — Conditional in-situ pilot (first production seam)
 
-One projection class (P0-selected; prior: A3B `gdn_qkv`), flag
-`QWEN_PREFILL_ANE_QKV` (default off, rollback documented), wavefront overlap
-across prefill chunks; ragged tails stay on GPU; ANE weights staged once at
-load; kernel compile overlapped with GGUF materialization (charge residual).
-**Gates:** whole-prefill >= **1.05x** product-measured at pp4096/pp8192 on
-the host model; process-cold TTFT >= **1.10x** including all charges; logit
-fidelity green on the triad; `Result`-based dispatch with silent GPU fallback
-verified by fault injection; no warm-decode or memory regression
-(peak RSS delta accounted; fp16 mirrors ~1-1.5 GB budgeted).
+One projection class (P0b-selected), flag `QWEN_PREFILL_ANE_*` default off,
+current-order overlap only (no wavefront restructuring in this program);
+ragged tails on GPU; ANE weights staged once at load; kernel compile
+overlapped with GGUF materialization.
+**Gates:** loaded-model whole-prefill >= **1.05x** at pp4096 and pp8192 on
+the host model (paired, 10 pairs, median); process-cold first-byte >=
+**0.99x** (non-regression, all compile/materialization charges in);
+warm decode >= 0.995x; full-depth numeric contract green (same thresholds as
+P2); fault-injection verified silent GPU fallback (kill ANE mid-run, output
+exactness preserved); peak-memory delta within the budgeted fp16 mirror set
++ compiled models, enumerated.
 Only a green P4 authorizes merging the seam to main (default-off).
 
 ## Review checkpoints (fresh cx sessions, read-only)
 
-1. This preregistration (before P0 runs). 2. P0 artifact + gate decision.
+1. Rev 1 preregistration — DONE (verdict NO-GO; this rev 2 is the response).
+2. Rev 2 + P0/P0b artifact + gate decision (before any P1 code).
 3. P1 harness design before first ANE dispatch. 4. P2 numerics artifact.
 5. P3 artifact + P4 go/no-go. 6. P4 diff review before merge.
 
 ## Artifacts
 
-`docs/bench/2026-07-14-ane-p0/` (committed at the P0 checkpoint): raw phase
-logs, summary JSON, ceiling table, gate decision. Later rungs follow the same
-dated pattern.
+`docs/bench/2026-07-14-ane-p0/`: raw phase logs, untraced baselines, DAG
+oracle script output (all subsets, all rows), ceiling table, gate decision,
+thermal log notes. Later rungs follow the same dated pattern.

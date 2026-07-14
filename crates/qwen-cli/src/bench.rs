@@ -14277,8 +14277,9 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     let mut prefill_gpus: Vec<f64> = Vec::with_capacity(runs);
     let mut decode_walls: Vec<f64> = Vec::with_capacity(runs);
     let mut decode_steady_walls: Vec<f64> = Vec::with_capacity(runs);
+    let mut request_walls: Vec<f64> = Vec::with_capacity(runs);
     // last-rep artifacts; set inside the loop and consumed below.
-    let mut s: MetalSession;
+    let mut last_session: Option<MetalSession> = None;
     let mut prefill_token_ms: Vec<f64> = Vec::with_capacity(ids.len());
     let mut decode_token_ms: Vec<f64> = Vec::with_capacity(tokens);
     let mut per_token_prof: Vec<qwen_llm::metal_forward::TokenProfile> =
@@ -14290,12 +14291,14 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     for rep in 0..runs {
         // Fresh session per rep so we measure a steady-state cold-cache
         // prefill+decode pair, not the cumulative state of the previous rep.
-        s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
+        drop(last_session.take());
         prefill_token_ms.clear();
         decode_token_ms.clear();
         per_token_prof.clear();
         gen_ids.clear();
         last_logits.clear();
+        let request_started = Instant::now();
+        let mut s = MetalSession::fresh(&ctx, &mm, cap).context("session run")?;
         let mut prefill_gpu_total_ms: Option<f64> = None;
 
         let t0 = Instant::now();
@@ -14372,6 +14375,8 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         }
         let decode_wall = t1.elapsed().as_secs_f64() * 1e3;
         decode_walls.push(decode_wall);
+        let request_wall = request_started.elapsed().as_secs_f64() * 1e3;
+        request_walls.push(request_wall);
         // Decode-only steady-state: skip the very first decode (cache-cold
         // for some downstream PSO + heavily warm-up sensitive).
         let steady_ms = if decode_token_ms.len() > 1 {
@@ -14396,8 +14401,13 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
                 0.0
             }
         );
+        text_log!(
+            "[bench] rep {:>2} request {:>8.1} ms",
+            rep + 1,
+            request_wall
+        );
+        last_session = Some(s);
     }
-
     let prefill_wall = sample_mean(&prefill_walls);
     let prefill_avg = prefill_wall / ids.len() as f64;
     let prefill_gpu_total_ms = if prefill_gpus.is_empty() {
@@ -14410,6 +14420,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     } else {
         sample_mean(&decode_walls)
     };
+    let request_wall = sample_mean(&request_walls);
     let total_wall = prefill_wall + decode_wall;
     let decode_avg_ms = if tokens > 0 {
         Some(decode_wall / tokens as f64)
@@ -14576,6 +14587,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     if use_packed_prefill {
         eprintln!("[bench] prefill chunk: {prefill_chunk}");
     }
+    eprintln!("[bench] request wall: {request_wall:.1} ms avg");
     let prefill_ts_mean = sample_mean(&prefill_ts_samples);
     let prefill_ts_sd = sample_stdev(&prefill_ts_samples);
     eprintln!(

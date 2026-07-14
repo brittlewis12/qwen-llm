@@ -1777,6 +1777,7 @@ fn classify_gguf_backing(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetalTensorProvenance {
     OwnedWritable,
+    OwnedWeightReadOnly,
     RetainedGgufReadOnly,
 }
 
@@ -1810,7 +1811,7 @@ impl MetalTensor {
     fn assert_writable(&self, operation: &str) {
         assert!(
             self.is_writable(),
-            "{operation} cannot write a retained read-only GGUF tensor"
+            "{operation} cannot write a read-only weight tensor"
         );
     }
 
@@ -1868,6 +1869,54 @@ impl MetalTensor {
         bytes: &[u8],
     ) -> Result<Self, MetalError> {
         Self::from_bytes(ctx, bytes, desc.shape.clone(), desc.dtype)
+    }
+
+    pub(crate) fn owned_weight_view(
+        buffer: Buffer,
+        offset: u64,
+        shape: Vec<u64>,
+        dtype: GgmlType,
+        required_alignment: usize,
+    ) -> Result<Self, MetalError> {
+        if !required_alignment.is_power_of_two() {
+            return Err(MetalError::BadShape {
+                kernel: "owned_weight_view",
+                detail: format!("alignment {required_alignment} is not a power of two"),
+            });
+        }
+        let offset_usize = usize::try_from(offset).map_err(|_| MetalError::BadShape {
+            kernel: "owned_weight_view",
+            detail: format!("offset {offset} does not fit usize"),
+        })?;
+        if offset_usize % required_alignment != 0 {
+            return Err(MetalError::BadShape {
+                kernel: "owned_weight_view",
+                detail: format!("offset {offset_usize} is not aligned to {required_alignment}"),
+            });
+        }
+        let (_, n_bytes) = checked_ggml_shape_bytes(&shape, dtype)?;
+        let end = offset_usize
+            .checked_add(n_bytes)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "owned_weight_view",
+                detail: "view endpoint overflow".to_string(),
+            })?;
+        if end > buffer.length() {
+            return Err(MetalError::BadShape {
+                kernel: "owned_weight_view",
+                detail: format!(
+                    "view [{offset_usize}..{end}) exceeds buffer length {}",
+                    buffer.length()
+                ),
+            });
+        }
+        Ok(Self {
+            buffer,
+            offset,
+            shape,
+            dtype,
+            provenance: MetalTensorProvenance::OwnedWeightReadOnly,
+        })
     }
 
     /// Allocate an F32 activation/scratch tensor of the given shape,
@@ -18769,6 +18818,33 @@ pub fn bench_q4_k_mat_mat_chained(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_weight_view_is_read_only_and_bounds_checked() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::NoDevice | MetalError::EmptyLibrary) => return,
+            Err(error) => panic!("Metal context: {error}"),
+        };
+        let buffer = ctx.buffer_uninit(96).expect("owned backing");
+        let view = MetalTensor::owned_weight_view(buffer.clone(), 32, vec![16], GgmlType::F32, 32)
+            .expect("valid owned weight view");
+        assert_eq!(
+            view.provenance(),
+            MetalTensorProvenance::OwnedWeightReadOnly
+        );
+        assert!(!view.is_writable());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                view.assert_writable("test write")
+            }))
+            .is_err()
+        );
+        assert!(
+            MetalTensor::owned_weight_view(buffer.clone(), 1, vec![1], GgmlType::F32, 32,).is_err()
+        );
+        assert!(MetalTensor::owned_weight_view(buffer, 64, vec![16], GgmlType::F32, 32).is_err());
+    }
 
     fn f32_desc(name: &str, shard_idx: usize, data_offset: u64, elements: u64) -> TensorDesc {
         TensorDesc {

@@ -26,6 +26,7 @@ gguf-rs.workspace = true
 serde_json.workspace = true
 unicode-general-category.workspace = true
 rustc-hash.workspace = true
+sha2.workspace = true
 
 llama-cpp-sys-2.workspace = true
 

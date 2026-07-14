@@ -31,16 +31,17 @@
 use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
 use crate::metal::{
-    GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalTensor,
-    MetalTimestampSampleBuffer, RetainedStorageDisposition, RetainedStorageFallback,
-    RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
-    encode_argmax_f32, encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
-    encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
-    encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
-    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
-    encode_moe_down_bf16_f32, encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32,
-    encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
+    Buffer, GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking,
+    MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer, RetainedStorageDisposition,
+    RetainedStorageFallback, RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c,
+    encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
+    encode_attn_decode_v4_f32, encode_axpy_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
+    encode_ffn_swiglu_q4_K_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
+    encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
+    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
+    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32,
+    encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
+    encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
@@ -61,7 +62,12 @@ use crate::metal::{
 use crate::model::ArchKind;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use std::{cell::Cell, collections::HashSet, sync::OnceLock};
+use sha2::{Digest, Sha256};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    sync::OnceLock,
+};
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
@@ -354,11 +360,53 @@ const GGUF_NO_COPY_27B_VIEW_COUNT: usize = 850;
 const GGUF_NO_COPY_27B_VIEW_BYTES: u64 = 16_806_230_016;
 const GGUF_NO_COPY_27B_TAIL_NAME: &str = "blk.63.post_attention_norm.weight";
 const GGUF_NO_COPY_27B_TAIL_BYTES: u64 = 20_480;
+const GGUF_OWNED_A3B_MAPPED_BYTES: usize = 22_134_528_992;
+const GGUF_OWNED_A3B_LAYOUT_DIGEST: u64 = 0x5ae6_45df_5cf7_d568;
+const GGUF_OWNED_A3B_INVENTORY_DIGEST: &str =
+    "f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5";
+const GGUF_OWNED_A3B_PLAN_DIGEST: &str =
+    "fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af";
+const GGUF_OWNED_A3B_REQUESTS: usize = 733;
+const GGUF_OWNED_A3B_SOURCE_BYTES: u64 = 22_123_538_944;
+const GGUF_OWNED_A3B_VIEWS: usize = 732;
+const GGUF_OWNED_A3B_VIEW_BYTES: u64 = 22_123_530_752;
+const GGUF_OWNED_A3B_WINDOW_BYTES: u64 = 22_123_544_576;
+const GGUF_OWNED_A3B_GAP_BYTES: u64 = 13_824;
+const GGUF_OWNED_A3B_FALLBACK_BYTES: u64 = 8_192;
+const GGUF_OWNED_A3B_PHYSICAL_BYTES: u64 = 22_123_552_768;
+const GGUF_OWNED_WORKERS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GgufNoCopyMode {
     Disabled,
     Forced,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GgufOwnedArenaMode {
+    Disabled,
+    Forced,
+}
+
+fn parse_gguf_owned_arena_mode(value: Option<&str>) -> Result<GgufOwnedArenaMode, MfError> {
+    match value {
+        None => Ok(GgufOwnedArenaMode::Disabled),
+        Some(value) if crate::env_flag::env_value_truthy(value) => Ok(GgufOwnedArenaMode::Forced),
+        Some(value) if crate::env_flag::env_value_falsy(value) => Ok(GgufOwnedArenaMode::Disabled),
+        Some(value) => Err(MfError::LoadPolicy(format!(
+            "invalid QWEN_GGUF_OWNED_ARENA value {value:?}"
+        ))),
+    }
+}
+
+fn gguf_owned_arena_mode() -> Result<GgufOwnedArenaMode, MfError> {
+    match std::env::var("QWEN_GGUF_OWNED_ARENA") {
+        Ok(value) => parse_gguf_owned_arena_mode(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_gguf_owned_arena_mode(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
+            "QWEN_GGUF_OWNED_ARENA is not valid Unicode".to_string(),
+        )),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -574,7 +622,8 @@ fn matmat_bf16_bfloat_act_enabled() -> bool {
 pub type PhaseProfileOutput = (Vec<f32>, f64, Vec<(String, f64)>);
 
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice,
+    MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLResource,
+    MTLStorageMode,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -701,6 +750,60 @@ pub struct ModelWeightStorageRequest<'a> {
     pub desc: &'a TensorDesc,
     pub kind: ModelWeightStorageKind,
     pub resident_bytes: u64,
+}
+
+fn storage_digest_records(records: impl IntoIterator<Item = String>) -> String {
+    let mut hasher = Sha256::new();
+    for record in records {
+        hasher.update((record.len() as u64).to_be_bytes());
+        hasher.update(record.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub fn model_weight_storage_inventory_digest(requests: &[ModelWeightStorageRequest<'_>]) -> String {
+    storage_digest_records(requests.iter().map(|request| {
+        format!(
+            "{}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{}",
+            request.desc.name,
+            request.desc.shard_idx,
+            request.desc.data_offset,
+            request.desc.n_bytes,
+            request.desc.dtype,
+            request.desc.shape,
+            request.kind,
+            request.resident_bytes
+        )
+    }))
+}
+
+pub fn retained_storage_plan_digest(plan: &RetainedStoragePlan) -> String {
+    let mut records = vec![format!(
+        "header\0{}\0{}\0{}\0{}",
+        plan.page_size, plan.max_buffer_length, plan.usable_window_length, plan.required_alignment
+    )];
+    records.extend(plan.windows.iter().enumerate().map(|(index, window)| {
+        format!(
+            "window\0{index}\0{}\0{}\0{}",
+            window.shard_idx, window.mmap_offset, window.length
+        )
+    }));
+    records.extend(plan.entries.iter().map(|entry| {
+        format!(
+            "entry\0{}\0{}\0{}\0{}\0{}\0{:?}",
+            entry.request_index,
+            entry.name,
+            entry.shard_idx,
+            entry.data_offset,
+            entry.n_bytes,
+            entry.disposition
+        )
+    }));
+    storage_digest_records(records)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1203,10 +1306,305 @@ impl PlannedRetainedStorage {
     }
 }
 
+struct PlannedOwnedStorage {
+    plan: RetainedStoragePlan,
+    resources: Vec<Buffer>,
+    fallback_resources: HashMap<usize, usize>,
+    realized: Vec<Option<MetalTensor>>,
+    cursor: usize,
+}
+
+fn owned_arena_four_worker_boundaries(
+    length: usize,
+    page_size: usize,
+) -> Result<[usize; 5], MfError> {
+    if page_size == 0 || length % page_size != 0 {
+        return Err(MfError::LoadPolicy(
+            "owned arena range is not page aligned".to_string(),
+        ));
+    }
+    let pages = length / page_size;
+    if pages < GGUF_OWNED_WORKERS {
+        return Err(MfError::LoadPolicy(
+            "owned arena range has fewer than four pages".to_string(),
+        ));
+    }
+    let boundaries =
+        std::array::from_fn(|worker| page_size * (worker * pages / GGUF_OWNED_WORKERS));
+    if boundaries[0] != 0 || boundaries[GGUF_OWNED_WORKERS] != length {
+        return Err(MfError::LoadPolicy(
+            "owned arena worker boundaries do not cover the range".to_string(),
+        ));
+    }
+    if boundaries.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(MfError::LoadPolicy(
+            "owned arena worker boundaries overlap or are empty".to_string(),
+        ));
+    }
+    Ok(boundaries)
+}
+
+fn copy_owned_arena_four_workers(
+    source: &[u8],
+    destination: &Buffer,
+    page_size: usize,
+) -> Result<(), MfError> {
+    if source.len() != destination.length() {
+        return Err(MfError::LoadPolicy(format!(
+            "owned arena source {} differs from destination {}",
+            source.len(),
+            destination.length()
+        )));
+    }
+    let boundaries = owned_arena_four_worker_boundaries(source.len(), page_size)?;
+    // SAFETY: the anonymous shared buffer is retained by the caller, has exactly
+    // source.len() bytes, and no typed views exist until all scoped workers join.
+    let destination = unsafe {
+        std::slice::from_raw_parts_mut(destination.contents().as_ptr().cast::<u8>(), source.len())
+    };
+    std::thread::scope(|scope| {
+        let mut source_tail = source;
+        let mut destination_tail = destination;
+        let mut previous = 0usize;
+        for &boundary in boundaries.iter().skip(1) {
+            let length = boundary - previous;
+            let (source_chunk, next_source) = source_tail.split_at(length);
+            let (destination_chunk, next_destination) = destination_tail.split_at_mut(length);
+            scope.spawn(move || destination_chunk.copy_from_slice(source_chunk));
+            source_tail = next_source;
+            destination_tail = next_destination;
+            previous = boundary;
+        }
+    });
+    Ok(())
+}
+
+fn copy_owned_arena_serial(source: &[u8], destination: &Buffer) -> Result<(), MfError> {
+    if source.len() != destination.length() {
+        return Err(MfError::LoadPolicy(format!(
+            "owned fallback source {} differs from destination {}",
+            source.len(),
+            destination.length()
+        )));
+    }
+    // SAFETY: the fallback buffer is retained, exact-sized, and has no live views.
+    let destination = unsafe {
+        std::slice::from_raw_parts_mut(destination.contents().as_ptr().cast::<u8>(), source.len())
+    };
+    destination.copy_from_slice(source);
+    Ok(())
+}
+
+impl PlannedOwnedStorage {
+    fn load_direct(
+        &mut self,
+        desc: &TensorDesc,
+    ) -> Result<(MetalTensor, SourceMaterialization), MfError> {
+        let entry = self.plan.entries.get(self.cursor).ok_or_else(|| {
+            MfError::LoadPolicy(format!(
+                "owned storage received unexpected tensor {:?} at index {}",
+                desc.name, self.cursor
+            ))
+        })?;
+        if entry.request_index != self.cursor
+            || entry.name != desc.name
+            || entry.shard_idx != desc.shard_idx
+            || entry.data_offset != desc.data_offset
+            || entry.n_bytes != desc.n_bytes
+        {
+            return Err(MfError::LoadPolicy(format!(
+                "owned storage request drift at index {}: entry={entry:?} desc={desc:?}",
+                self.cursor
+            )));
+        }
+        let (tensor, materialization) = match entry.disposition {
+            RetainedStorageDisposition::View {
+                window_index,
+                buffer_offset,
+            } => {
+                let buffer = self.resources.get(window_index).ok_or_else(|| {
+                    MfError::LoadPolicy(format!("owned storage window {window_index} is missing"))
+                })?;
+                let tensor = MetalTensor::owned_weight_view(
+                    buffer.clone(),
+                    buffer_offset,
+                    desc.shape.clone(),
+                    desc.dtype,
+                    GGUF_NO_COPY_ALIGNMENT,
+                )?;
+                (tensor, SourceMaterialization::DirectCopy)
+            }
+            RetainedStorageDisposition::Alias {
+                source_request_index,
+            } => {
+                if source_request_index >= self.cursor {
+                    return Err(MfError::LoadPolicy(format!(
+                        "owned alias {:?} has non-prior source {source_request_index}",
+                        desc.name
+                    )));
+                }
+                let tensor = self
+                    .realized
+                    .get(source_request_index)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        MfError::LoadPolicy(format!(
+                            "owned alias {:?} source {source_request_index} is unrealized",
+                            desc.name
+                        ))
+                    })?
+                    .clone();
+                (tensor, SourceMaterialization::DirectAlias)
+            }
+            RetainedStorageDisposition::CopyFallback { reason } => {
+                if reason != RetainedStorageFallback::FinalPartialPage {
+                    return Err(MfError::LoadPolicy(format!(
+                        "owned tensor {:?} has disallowed fallback {reason:?}",
+                        desc.name
+                    )));
+                }
+                let resource_index = *self
+                    .fallback_resources
+                    .get(&entry.request_index)
+                    .ok_or_else(|| {
+                        MfError::LoadPolicy(format!(
+                            "owned fallback resource for {:?} is missing",
+                            desc.name
+                        ))
+                    })?;
+                let tensor = MetalTensor::owned_weight_view(
+                    self.resources[resource_index].clone(),
+                    0,
+                    desc.shape.clone(),
+                    desc.dtype,
+                    GGUF_NO_COPY_ALIGNMENT,
+                )?;
+                (tensor, SourceMaterialization::TailFallback)
+            }
+        };
+        if tensor.provenance() != MetalTensorProvenance::OwnedWeightReadOnly {
+            return Err(MfError::LoadPolicy(format!(
+                "owned tensor {:?} has writable or retained provenance",
+                desc.name
+            )));
+        }
+        self.realized[self.cursor] = Some(tensor.clone());
+        self.cursor += 1;
+        Ok((tensor, materialization))
+    }
+
+    fn validate_complete(&self, ledger: &WeightLoadLedger) -> Result<(), MfError> {
+        if self.cursor != self.plan.entries.len() || self.realized.iter().any(Option::is_none) {
+            return Err(MfError::LoadPolicy(format!(
+                "owned storage consumption mismatch: consumed={} planned={} realized={}",
+                self.cursor,
+                self.plan.entries.len(),
+                self.realized
+                    .iter()
+                    .filter(|tensor| tensor.is_some())
+                    .count()
+            )));
+        }
+        if self.resources.len() != 2
+            || self.resources[0].length() as u64 != GGUF_OWNED_A3B_WINDOW_BYTES
+            || self.resources[1].length() as u64 != GGUF_OWNED_A3B_FALLBACK_BYTES
+            || self
+                .resources
+                .iter()
+                .any(|buffer| buffer.storageMode() != MTLStorageMode::Shared)
+        {
+            return Err(MfError::LoadPolicy(
+                "owned storage physical resource ledger drifted".to_string(),
+            ));
+        }
+        let fallback_entry = self
+            .plan
+            .entries
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry.disposition,
+                    RetainedStorageDisposition::CopyFallback { .. }
+                )
+            })
+            .ok_or_else(|| MfError::LoadPolicy("owned fallback entry is missing".to_string()))?;
+        if self.fallback_resources.len() != 1
+            || self.fallback_resources.get(&fallback_entry.request_index) != Some(&1)
+        {
+            return Err(MfError::LoadPolicy(
+                "owned fallback resource map drifted".to_string(),
+            ));
+        }
+        for (entry, tensor) in self.plan.entries.iter().zip(self.realized.iter().flatten()) {
+            let (resource_index, offset) = match entry.disposition {
+                RetainedStorageDisposition::View {
+                    window_index,
+                    buffer_offset,
+                } => (window_index, buffer_offset),
+                RetainedStorageDisposition::CopyFallback { .. } => (1, 0),
+                RetainedStorageDisposition::Alias { .. } => {
+                    return Err(MfError::LoadPolicy(
+                        "owned A3B sentinel unexpectedly contains an alias".to_string(),
+                    ));
+                }
+            };
+            if Retained::as_ptr(&tensor.buffer) != Retained::as_ptr(&self.resources[resource_index])
+                || tensor.offset != offset
+            {
+                return Err(MfError::LoadPolicy(format!(
+                    "owned tensor {:?} resource identity drifted",
+                    entry.name
+                )));
+            }
+        }
+        if ledger.source_descriptors != GGUF_OWNED_A3B_REQUESTS
+            || ledger.source_bytes != GGUF_OWNED_A3B_SOURCE_BYTES
+            || ledger.direct_copy_descriptors != GGUF_OWNED_A3B_VIEWS
+            || ledger.direct_copy_bytes != GGUF_OWNED_A3B_VIEW_BYTES
+            || ledger.tail_fallback_descriptors != 1
+            || ledger.tail_fallback_bytes != GGUF_OWNED_A3B_FALLBACK_BYTES
+            || ledger.direct_view_descriptors != 0
+            || ledger.direct_view_bytes != 0
+            || ledger.direct_alias_descriptors != 0
+            || ledger.direct_alias_bytes != 0
+            || ledger.converted_descriptors != 0
+            || ledger.converted_source_bytes != 0
+            || ledger.converted_resident_bytes != 0
+            || self
+                .realized
+                .iter()
+                .flatten()
+                .any(|tensor| tensor.provenance() != MetalTensorProvenance::OwnedWeightReadOnly)
+        {
+            return Err(MfError::LoadPolicy(format!(
+                concat!(
+                    "owned storage logical ledger drift: source={}/{} copy={}/{} ",
+                    "tail={}/{} view={}/{} alias={}/{} converted={}/{}/{}"
+                ),
+                ledger.source_descriptors,
+                ledger.source_bytes,
+                ledger.direct_copy_descriptors,
+                ledger.direct_copy_bytes,
+                ledger.tail_fallback_descriptors,
+                ledger.tail_fallback_bytes,
+                ledger.direct_view_descriptors,
+                ledger.direct_view_bytes,
+                ledger.direct_alias_descriptors,
+                ledger.direct_alias_bytes,
+                ledger.converted_descriptors,
+                ledger.converted_source_bytes,
+                ledger.converted_resident_bytes,
+            )));
+        }
+        Ok(())
+    }
+}
+
 enum DirectStorage {
     Copied,
     ForcedExact27B(MetalGgufBacking),
     ForcedPlanned(PlannedRetainedStorage),
+    ForcedOwned(PlannedOwnedStorage),
 }
 
 struct MetalWeightLoader<'a> {
@@ -1281,6 +1679,7 @@ impl<'a> MetalWeightLoader<'a> {
             DirectStorage::ForcedPlanned(storage) => {
                 storage.load_direct(self.ctx, self.gguf, desc)?
             }
+            DirectStorage::ForcedOwned(storage) => storage.load_direct(desc)?,
         };
         self.record_source(desc, materialization, tensor.n_bytes())?;
         Ok(tensor)
@@ -1382,6 +1781,9 @@ impl<'a> MetalWeightLoader<'a> {
     ) -> Result<(), MfError> {
         let forced_exact_27b = self.is_forced_exact_27b();
         if let DirectStorage::ForcedPlanned(storage) = &self.direct_storage {
+            storage.validate_complete(&self.ledger)?;
+        }
+        if let DirectStorage::ForcedOwned(storage) = &self.direct_storage {
             storage.validate_complete(&self.ledger)?;
         }
         let seen_forced = self.seen_forced.len();
@@ -1555,6 +1957,190 @@ fn matches_no_copy_27b_sentinel(gguf: &GgufFile, model: &Model<'_>) -> bool {
         )
 }
 
+fn matches_owned_a3b_arch(model: &Model<'_>) -> bool {
+    let arch = model.arch;
+    arch.kind == ArchKind::Moe
+        && arch.n_layer == 40
+        && arch.hidden_size == 2048
+        && arch.intermediate_size == 0
+        && arch.vocab_size == 248_320
+        && arch.full_attention_interval == 4
+        && arch.n_q_heads == 16
+        && arch.n_kv_heads == 2
+        && arch.attn_head_dim == 256
+        && arch.rope_theta == 10_000_000.0
+        && arch.partial_rotary_factor == 0.25
+        && arch.gdn_n_v_heads == 32
+        && arch.gdn_n_k_heads == 16
+        && arch.gdn_head_dim == 128
+        && arch.gdn_conv_kernel == 4
+        && arch.expert_count == 256
+        && arch.expert_used_count == 8
+        && arch.expert_feed_forward_length == 512
+        && arch.expert_shared_feed_forward_length == 512
+        && arch.mtp_n_hidden_layers == 0
+}
+
+fn planned_owned_storage_for_load(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    expected: &[ModelWeightStorageRequest<'_>],
+    embedding_selection: NativeQuantEmbeddingSelection,
+) -> Result<PlannedOwnedStorage, MfError> {
+    if !ctx.device.hasUnifiedMemory() {
+        return Err(MfError::LoadPolicy(
+            "forced owned arena requires unified memory".to_string(),
+        ));
+    }
+    let expected_source_bytes = expected.iter().try_fold(0u64, |total, request| {
+        total
+            .checked_add(request.desc.n_bytes)
+            .ok_or_else(|| MfError::LoadPolicy("owned source byte overflow".to_string()))
+    })?;
+    if gguf.shard_count() != 1
+        || gguf.total_mapped_len() != GGUF_OWNED_A3B_MAPPED_BYTES
+        || gguf_descriptor_layout_digest(gguf) != GGUF_OWNED_A3B_LAYOUT_DIGEST
+        || !matches_owned_a3b_arch(model)
+        || model.tied_embeddings
+        || model.mtp.is_some()
+        || embedding_selection != NativeQuantEmbeddingSelection::AutoPromoted
+        || expected.len() != GGUF_OWNED_A3B_REQUESTS
+        || expected_source_bytes != GGUF_OWNED_A3B_SOURCE_BYTES
+        || expected
+            .iter()
+            .any(|request| request.kind != ModelWeightStorageKind::Direct)
+        || model_weight_storage_inventory_digest(expected) != GGUF_OWNED_A3B_INVENTORY_DIGEST
+    {
+        return Err(MfError::LoadPolicy(
+            "forced owned arena rejects non-sentinel A3B layout".to_string(),
+        ));
+    }
+
+    let direct = expected
+        .iter()
+        .map(|request| request.desc)
+        .collect::<Vec<_>>();
+    let page_size = host_page_size_bytes()?;
+    let plan = plan_retained_storage(
+        &gguf.shard_mapped_lengths(),
+        &direct,
+        page_size,
+        ctx.max_buffer_length(),
+        GGUF_NO_COPY_ALIGNMENT,
+    )?;
+    let window_bytes = plan.windows.iter().try_fold(0u64, |total, window| {
+        total
+            .checked_add(window.length as u64)
+            .ok_or_else(|| MfError::LoadPolicy("owned window byte overflow".to_string()))
+    })?;
+    let view_count = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
+        .count();
+    let alias_count = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::Alias { .. }))
+        .count();
+    let fallback_entries = plan
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.disposition,
+                RetainedStorageDisposition::CopyFallback { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    if page_size != 16_384
+        || ctx.max_buffer_length() != 77_309_411_328
+        || retained_storage_plan_digest(&plan) != GGUF_OWNED_A3B_PLAN_DIGEST
+        || plan.windows.len() != 1
+        || window_bytes != GGUF_OWNED_A3B_WINDOW_BYTES
+        || view_count != GGUF_OWNED_A3B_VIEWS
+        || plan.unique_view_bytes != GGUF_OWNED_A3B_VIEW_BYTES
+        || plan.logical_view_bytes != GGUF_OWNED_A3B_VIEW_BYTES
+        || alias_count != 0
+        || plan.alias_bytes != 0
+        || fallback_entries.len() != 1
+        || plan.unique_fallback_bytes != GGUF_OWNED_A3B_FALLBACK_BYTES
+        || window_bytes - plan.unique_view_bytes != GGUF_OWNED_A3B_GAP_BYTES
+        || !matches!(
+            fallback_entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::FinalPartialPage
+            }
+        )
+    {
+        return Err(MfError::LoadPolicy(
+            "forced owned arena planner geometry drifted".to_string(),
+        ));
+    }
+
+    let ready_started = std::time::Instant::now();
+    let allocation_started = std::time::Instant::now();
+    let mut resources = Vec::with_capacity(2);
+    resources.push(ctx.buffer_uninit(plan.windows[0].length)?);
+    resources.push(ctx.buffer_uninit(GGUF_OWNED_A3B_FALLBACK_BYTES as usize)?);
+    let allocation_ms = allocation_started.elapsed().as_secs_f64() * 1e3;
+    let copy_started = std::time::Instant::now();
+    let window = &plan.windows[0];
+    let window_source = gguf
+        .try_shard_range(window.shard_idx, window.mmap_offset, window.length)
+        .map_err(|error| MfError::LoadPolicy(format!("owned window source: {error}")))?;
+    copy_owned_arena_four_workers(window_source, &resources[0], plan.page_size)?;
+    let fallback = fallback_entries[0];
+    let fallback_desc = direct.get(fallback.request_index).ok_or_else(|| {
+        MfError::LoadPolicy("owned fallback request index is out of bounds".to_string())
+    })?;
+    copy_owned_arena_serial(gguf.slice(fallback_desc), &resources[1])?;
+    let copy_ms = copy_started.elapsed().as_secs_f64() * 1e3;
+    let ready_ms = ready_started.elapsed().as_secs_f64() * 1e3;
+    let physical_bytes = resources.iter().try_fold(0u64, |total, buffer| {
+        total
+            .checked_add(buffer.length() as u64)
+            .ok_or_else(|| MfError::LoadPolicy("owned physical byte overflow".to_string()))
+    })?;
+    if resources.len() != 2
+        || physical_bytes != GGUF_OWNED_A3B_PHYSICAL_BYTES
+        || resources
+            .iter()
+            .any(|buffer| buffer.storageMode() != MTLStorageMode::Shared)
+    {
+        return Err(MfError::LoadPolicy(
+            "forced owned arena physical realization drifted".to_string(),
+        ));
+    }
+    eprintln!(
+        concat!(
+            "[metal-gguf-owned] windows=1 window_bytes={} gaps={} fallback=1/{} ",
+            "resources=2/{} workers={} page={} alignment={} allocation_ms={:.3} ",
+            "copy_ms={:.3} ready_ms={:.3}"
+        ),
+        window_bytes,
+        GGUF_OWNED_A3B_GAP_BYTES,
+        GGUF_OWNED_A3B_FALLBACK_BYTES,
+        physical_bytes,
+        GGUF_OWNED_WORKERS,
+        plan.page_size,
+        plan.required_alignment,
+        allocation_ms,
+        copy_ms,
+        ready_ms,
+    );
+    let mut fallback_resources = HashMap::new();
+    fallback_resources.insert(fallback.request_index, 1);
+    Ok(PlannedOwnedStorage {
+        realized: vec![None; plan.entries.len()],
+        plan,
+        resources,
+        fallback_resources,
+        cursor: 0,
+    })
+}
+
 fn planned_retained_storage_for_load(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -1721,8 +2307,20 @@ fn direct_storage_for_load(
     expected: &[ModelWeightStorageRequest<'_>],
     mode: GgufNoCopyMode,
     prefault_enabled: bool,
+    owned_mode: GgufOwnedArenaMode,
+    embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<(DirectStorage, bool), MfError> {
     let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
+    if owned_mode == GgufOwnedArenaMode::Forced {
+        if mode != GgufNoCopyMode::Disabled {
+            return Err(MfError::LoadPolicy(
+                "owned arena and retained no-copy are mutually exclusive".to_string(),
+            ));
+        }
+        let storage =
+            planned_owned_storage_for_load(ctx, gguf, model, expected, embedding_selection)?;
+        return Ok((DirectStorage::ForcedOwned(storage), false));
+    }
     if mode == GgufNoCopyMode::Disabled {
         return Ok((DirectStorage::Copied, exact_sentinel));
     }
@@ -1808,8 +2406,22 @@ impl MetalModel {
     /// embeddings can opt into native residency once their row kernels apply.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
         let no_copy_mode = gguf_no_copy_mode()?;
+        let owned_mode = gguf_owned_arena_mode()?;
         let prefault_mode = gguf_no_copy_prefault_mode()?;
-        if no_copy_mode == GgufNoCopyMode::Disabled
+        if owned_mode == GgufOwnedArenaMode::Forced && no_copy_mode == GgufNoCopyMode::Forced {
+            return Err(MfError::LoadPolicy(
+                "QWEN_GGUF_OWNED_ARENA and QWEN_GGUF_NO_COPY are mutually exclusive".to_string(),
+            ));
+        }
+        if owned_mode == GgufOwnedArenaMode::Forced
+            && prefault_mode != GgufNoCopyPrefaultMode::Default
+        {
+            return Err(MfError::LoadPolicy(
+                "QWEN_GGUF_NO_COPY_PREFAULT is invalid with owned arena".to_string(),
+            ));
+        }
+        if owned_mode == GgufOwnedArenaMode::Disabled
+            && no_copy_mode == GgufNoCopyMode::Disabled
             && prefault_mode != GgufNoCopyPrefaultMode::Default
         {
             return Err(MfError::LoadPolicy(
@@ -1817,9 +2429,10 @@ impl MetalModel {
             ));
         }
         let prefault_enabled = prefault_mode != GgufNoCopyPrefaultMode::Disabled;
-        Self::load_with_no_copy_policy(ctx, gguf, model, no_copy_mode, prefault_enabled)
+        Self::load_with_storage_policy(ctx, gguf, model, no_copy_mode, prefault_enabled, owned_mode)
     }
 
+    #[cfg(test)]
     fn load_with_no_copy_policy(
         ctx: &MetalContext,
         gguf: &GgufFile,
@@ -1827,8 +2440,34 @@ impl MetalModel {
         no_copy_mode: GgufNoCopyMode,
         prefault_enabled: bool,
     ) -> Result<Self, MfError> {
+        Self::load_with_storage_policy(
+            ctx,
+            gguf,
+            model,
+            no_copy_mode,
+            prefault_enabled,
+            GgufOwnedArenaMode::Disabled,
+        )
+    }
+
+    fn load_with_storage_policy(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        model: &Model<'_>,
+        no_copy_mode: GgufNoCopyMode,
+        prefault_enabled: bool,
+        owned_mode: GgufOwnedArenaMode,
+    ) -> Result<Self, MfError> {
+        let embedding_mode = native_quant_embedding_mode();
+        if owned_mode == GgufOwnedArenaMode::Forced
+            && embedding_mode != NativeQuantEmbeddingMode::Auto
+        {
+            return Err(MfError::LoadPolicy(
+                "owned arena requires production-auto native embedding selection".to_string(),
+            ));
+        }
         let embedding_selection = resolve_native_quant_embedding(
-            native_quant_embedding_mode(),
+            embedding_mode,
             native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
             native_quant_embedding_default_promoted(
                 &model.arch,
@@ -1856,6 +2495,8 @@ impl MetalModel {
             &expected_storage_requests,
             no_copy_mode,
             prefault_enabled,
+            owned_mode,
+            embedding_selection,
         )?;
         let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage);
         let token_embd =
@@ -9639,6 +10280,25 @@ mod tests {
     #[test]
     fn gguf_no_copy_mode_is_strict_and_default_off() {
         assert_eq!(
+            parse_gguf_owned_arena_mode(None).unwrap(),
+            GgufOwnedArenaMode::Disabled
+        );
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert_eq!(
+                parse_gguf_owned_arena_mode(Some(value)).unwrap(),
+                GgufOwnedArenaMode::Forced
+            );
+        }
+        for value in ["0", "false", "FALSE", "no", "NO"] {
+            assert_eq!(
+                parse_gguf_owned_arena_mode(Some(value)).unwrap(),
+                GgufOwnedArenaMode::Disabled
+            );
+        }
+        assert!(parse_gguf_owned_arena_mode(Some("enabled")).is_err());
+        assert!(parse_gguf_owned_arena_mode(Some("")).is_err());
+
+        assert_eq!(
             parse_gguf_no_copy_mode(None).unwrap(),
             GgufNoCopyMode::Disabled
         );
@@ -9675,6 +10335,16 @@ mod tests {
         }
         assert!(parse_gguf_no_copy_prefault(Some("enabled")).is_err());
         assert!(parse_gguf_no_copy_prefault(Some("")).is_err());
+    }
+
+    #[test]
+    fn owned_arena_worker_boundaries_cover_nondivisible_page_counts() {
+        let page = 16_384;
+        let boundaries =
+            owned_arena_four_worker_boundaries(11 * page, page).expect("valid boundaries");
+        assert_eq!(boundaries, [0, 2 * page, 5 * page, 8 * page, 11 * page]);
+        assert!(owned_arena_four_worker_boundaries(3 * page, page).is_err());
+        assert!(owned_arena_four_worker_boundaries(4 * page + 1, page).is_err());
     }
 
     #[test]
@@ -9841,6 +10511,7 @@ mod tests {
         model: &Model<'_>,
         tokens: &[i32],
         mode: GgufNoCopyMode,
+        owned_mode: GgufOwnedArenaMode,
         forced_next: Option<i32>,
     ) -> GenericRetainedArmResult {
         use crate::metal_dflash::{
@@ -9848,8 +10519,9 @@ mod tests {
             plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
         };
 
-        let metal_model = MetalModel::load_with_no_copy_policy(ctx, gguf, model, mode, false)
-            .expect("load generic retained arm");
+        let metal_model =
+            MetalModel::load_with_storage_policy(ctx, gguf, model, mode, false, owned_mode)
+                .expect("load generic storage arm");
         let forward = MetalForward::new(ctx, &metal_model);
         let capacity = 64;
         let mut session =
@@ -9956,14 +10628,22 @@ mod tests {
             .expect("tokenize generic retained prompt");
         assert!(tokens.len() < 64);
 
-        let copied =
-            run_generic_retained_arm(&ctx, &gguf, &model, &tokens, GgufNoCopyMode::Disabled, None);
+        let copied = run_generic_retained_arm(
+            &ctx,
+            &gguf,
+            &model,
+            &tokens,
+            GgufNoCopyMode::Disabled,
+            GgufOwnedArenaMode::Disabled,
+            None,
+        );
         let retained = run_generic_retained_arm(
             &ctx,
             &gguf,
             &model,
             &tokens,
             GgufNoCopyMode::Forced,
+            GgufOwnedArenaMode::Disabled,
             Some(copied.next_token),
         );
         let retained_argmax = retained
@@ -10061,6 +10741,127 @@ mod tests {
                 fallbacks: 1,
                 fallback_bytes: 8_192,
             },
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local Qwen3.6 A3B Q4 fixture"]
+    fn gguf_owned_arena_a3b_q4_is_bit_exact() {
+        let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        assert_eq!(
+            native_quant_embedding_mode(),
+            NativeQuantEmbeddingMode::Auto,
+            "owned fixture requires production-auto embedding selection"
+        );
+        let ctx = MetalContext::new().expect("Metal context");
+        let gguf = GgufFile::open(model_path).expect("open owned A3B fixture");
+        let model = Model::from_gguf(&gguf).expect("bind owned A3B fixture");
+        let expected =
+            model_weight_storage_requests(&model, true, false).expect("owned A3B storage requests");
+        let direct = expected
+            .iter()
+            .map(|request| request.desc)
+            .collect::<Vec<_>>();
+        let mut storage = planned_owned_storage_for_load(
+            &ctx,
+            &gguf,
+            &model,
+            &expected,
+            NativeQuantEmbeddingSelection::AutoPromoted,
+        )
+        .expect("realize owned A3B storage");
+        assert_eq!(storage.resources.len(), 2);
+        assert_ne!(
+            Retained::as_ptr(&storage.resources[0]),
+            Retained::as_ptr(&storage.resources[1])
+        );
+        let mut ledger = WeightLoadLedger::default();
+        for desc in &direct {
+            let (tensor, materialization) = storage
+                .load_direct(desc)
+                .expect("materialize owned A3B tensor");
+            assert_eq!(
+                tensor.provenance(),
+                MetalTensorProvenance::OwnedWeightReadOnly
+            );
+            assert!(!tensor.is_writable());
+            ledger
+                .record_source(desc, materialization, tensor.n_bytes())
+                .expect("record owned A3B tensor");
+        }
+        storage
+            .validate_complete(&ledger)
+            .expect("complete owned A3B realization");
+        for (index, entry) in storage.plan.entries.iter().enumerate() {
+            let tensor = storage.realized[index]
+                .as_ref()
+                .expect("realized owned tensor");
+            let resource_index = match entry.disposition {
+                RetainedStorageDisposition::View { window_index, .. } => window_index,
+                RetainedStorageDisposition::CopyFallback { .. } => 1,
+                RetainedStorageDisposition::Alias { .. } => {
+                    panic!("owned A3B sentinel must not contain aliases")
+                }
+            };
+            assert_eq!(
+                Retained::as_ptr(&tensor.buffer),
+                Retained::as_ptr(&storage.resources[resource_index])
+            );
+        }
+        drop(storage);
+
+        let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
+        let tokens = tokenizer
+            .encode("Owned storage must preserve this state.", true)
+            .expect("tokenize owned prompt");
+        assert!(tokens.len() < 64);
+        let copied = run_generic_retained_arm(
+            &ctx,
+            &gguf,
+            &model,
+            &tokens,
+            GgufNoCopyMode::Disabled,
+            GgufOwnedArenaMode::Disabled,
+            None,
+        );
+        let owned = run_generic_retained_arm(
+            &ctx,
+            &gguf,
+            &model,
+            &tokens,
+            GgufNoCopyMode::Disabled,
+            GgufOwnedArenaMode::Forced,
+            Some(copied.next_token),
+        );
+        let owned_argmax = owned
+            .prefill_logits
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                if value > best.1 { (index, value) } else { best }
+            })
+            .0 as i32;
+        assert_eq!(copied.next_token, owned_argmax);
+        assert_eq!(owned.next_token, owned_argmax);
+        assert_generic_retained_f32_bits(
+            "owned prefill logits",
+            &copied.prefill_logits,
+            &owned.prefill_logits,
+        );
+        assert_generic_retained_snapshot(
+            "owned prefill snapshot",
+            &copied.prefill_snapshot,
+            &owned.prefill_snapshot,
+        );
+        assert_generic_retained_f32_bits(
+            "owned decode logits",
+            &copied.decode_logits,
+            &owned.decode_logits,
+        );
+        assert_generic_retained_snapshot(
+            "owned decode snapshot",
+            &copied.decode_snapshot,
+            &owned.decode_snapshot,
         );
     }
 
@@ -10378,6 +11179,8 @@ mod tests {
             &converted_embedding_requests,
             GgufNoCopyMode::Forced,
             false,
+            GgufOwnedArenaMode::Disabled,
+            NativeQuantEmbeddingSelection::AutoUnpromoted,
         ) {
             Ok(_) => panic!("exact 27B rollback must fail before resource realization"),
             Err(error) => error,

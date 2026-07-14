@@ -1061,6 +1061,7 @@ dependencies = [
  "proptest",
  "rustc-hash",
  "serde_json",
+ "sha2",
  "thiserror",
  "tracing",
  "unicode-general-category",

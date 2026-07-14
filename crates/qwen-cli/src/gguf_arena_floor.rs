@@ -8,13 +8,13 @@ use qwen_llm::{
     loader::Model,
     metal::{Buffer, MetalContext, RetainedStorageDisposition, host_page_size_bytes},
     metal_forward::{
-        ModelWeightStorageKind, gguf_descriptor_layout_digest, model_weight_storage_requests,
-        production_native_quant_embedding_storage_enabled,
+        ModelWeightStorageKind, gguf_descriptor_layout_digest,
+        model_weight_storage_inventory_digest, model_weight_storage_requests,
+        production_native_quant_embedding_storage_enabled, retained_storage_plan_digest,
     },
     tensor::TensorDesc,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
@@ -117,60 +117,6 @@ fn capture_usage() -> Result<Usage> {
 
 fn duration_ms(value: Duration) -> f64 {
     value.as_secs_f64() * 1e3
-}
-
-fn digest_records(records: impl IntoIterator<Item = String>) -> String {
-    let mut hasher = Sha256::new();
-    for record in records {
-        hasher.update((record.len() as u64).to_be_bytes());
-        hasher.update(record.as_bytes());
-    }
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn inventory_digest(requests: &[qwen_llm::metal_forward::ModelWeightStorageRequest<'_>]) -> String {
-    digest_records(requests.iter().map(|request| {
-        format!(
-            "{}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{}",
-            request.desc.name,
-            request.desc.shard_idx,
-            request.desc.data_offset,
-            request.desc.n_bytes,
-            request.desc.dtype,
-            request.desc.shape,
-            request.kind,
-            request.resident_bytes
-        )
-    }))
-}
-
-fn planner_digest(plan: &qwen_llm::metal::RetainedStoragePlan) -> String {
-    let mut records = vec![format!(
-        "header\0{}\0{}\0{}\0{}",
-        plan.page_size, plan.max_buffer_length, plan.usable_window_length, plan.required_alignment
-    )];
-    records.extend(plan.windows.iter().enumerate().map(|(index, window)| {
-        format!(
-            "window\0{index}\0{}\0{}\0{}",
-            window.shard_idx, window.mmap_offset, window.length
-        )
-    }));
-    records.extend(plan.entries.iter().map(|entry| {
-        format!(
-            "entry\0{}\0{}\0{}\0{}\0{}\0{:?}",
-            entry.request_index,
-            entry.name,
-            entry.shard_idx,
-            entry.data_offset,
-            entry.n_bytes,
-            entry.disposition
-        )
-    }));
-    digest_records(records)
 }
 
 fn copy_into_buffer(buffer: &Buffer, offset: usize, source: &[u8]) -> Result<()> {
@@ -610,8 +556,8 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
         .count();
     let descriptor_digest = format!("{:#018x}", gguf_descriptor_layout_digest(&gguf));
-    let inventory_digest = inventory_digest(&requests);
-    let planner_digest = planner_digest(&plan);
+    let inventory_digest = model_weight_storage_inventory_digest(&requests);
+    let planner_digest = retained_storage_plan_digest(&plan);
 
     if args.describe {
         let row = json!({

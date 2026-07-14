@@ -505,22 +505,23 @@ caller ownership. Structural matching, automatic selection, arbitrary prompts,
 storage-cold use, persistent/server execution, and extrapolation from the fitted
 1,500-transition crossover remain unauthorized.
 
-v0.594 removes the model-layout special case from the next engineering step. A
-pure planner covers 54 local dense/MoE, precision/quant, tied, MTP, and split
-assets with `99.8935%` byte-weighted direct geometry coverage. There are no
-non-tail geometric failures or unbound descriptors. Base-weight private-removal
-potential is 0.384-77.016 GB under the frozen policy, but converted F32 embeddings
-remain resident on 26 assets. This is dry coverage, not live correctness,
-footprint, latency, or default-on authority.
+v0.594 first removes the model-layout special case geometrically across 54 local
+dense/MoE, precision/quant, tied, MTP, and split assets at `99.8935%`
+byte-weighted direct coverage. v0.594c/d then clear the live force-only gates:
+overlapping-window lifetime, physical aliasing, tied Q8 and A3B bit-exact full
+state, converted-embedding coexistence, split A10B resource creation and sampled
+GPU reads, plus the isolated exact-27B regression guard. This is broad live
+correctness and resource authority, not latency, storage-cold, persistent,
+automatic-policy, MTP, or universal-lifecycle authority.
 
-1. **Generic retained-storage realization**: highest-breadth process-cold move.
-   Realize planner windows as provenance-bearing read-only Metal resources while
-   preserving generic aliases, converted tensors, and exact tail copies. First
-   prove same-shard overlapping windows and arbitrary teardown synthetically;
-   then copied-versus-retained full state on tied 0.8B Q8_0 and non-MTP A3B Q4;
-   finally create and sample both active split A10B resources. No timing or policy
-   widening before exact state and physical byte ledgers clear. Difficulty M-L,
-   geometry belief high, live-behavior belief medium, prize model-size dependent.
+1. **Generic retained-storage timing and scoped policy**: highest-breadth
+   process-cold move. First price non-MTP Qwen3.6 A3B Q4 at outputs 1 and 128
+   under cache-warm fresh disposable processes, no CPU prefault, production native
+   embedding policy, and six balanced pairs after a two-pair kill screen. If it
+   clears, prove copied-versus-retained A10B packed-prefill plus one-transition
+   state before timing its output-1 multi-window cell. Dense 9B follows as the
+   production-policy breadth guard. Difficulty M, live-behavior belief
+   medium-high, prize model-size dependent.
 2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
@@ -593,10 +594,11 @@ footprint, latency, or default-on authority.
 Memory follow-up: v0.590 promotes native embeddings for 27B and A3B. v0.591 proves
 that CPU-prefaulted 27B views remove about 16.8 GB but lose latency; v0.593 proves
 that no-prefault views retain the same private-footprint prize and win the narrow
-one-shot envelope above. v0.594 geometrically prices 0.384-77.016 GB of removable
-base-weight private allocation across 54 local assets. Converted embeddings,
-derived buffers, CPU mirrors, MTP weights, and live file-backed residency remain
-separate. No A10B latency or full-forward claim follows from its dry 77.016 GB.
+one-shot envelope above. v0.594 prices 0.384-77.016 GB of removable base-weight
+private allocation across 54 local assets and realizes the force-only generic
+resources. Converted embeddings, derived buffers, CPU mirrors, MTP weights, and
+live file-backed residency remain separate. The A10B result is resource and
+sample-read authority, not full-forward, latency, or footprint authority.
 
 Dense fresh-TTFT truth: no current exact branch has a credible material gain band
 for large dense prefill. Current packed compute is near the measured mat-mat
@@ -610,39 +612,42 @@ not merge objective lanes; every result must retain its boundary label.
 
 ### Active attack sequence
 
-Treat v0.593 as a measured 27B optimization and v0.594 as a broad dry oracle, not
-as universal loader authority. Existing runtime behavior stays unchanged until
-the live gates below clear. Persistent and storage-cold use stay copied without
+Treat v0.593 as a measured 27B optimization and v0.594 as broad force-only live
+correctness, not universal loader authority. The generic timing packet must retain
+fresh-process, cache, prompt, context, output, and lifecycle boundaries.
+Persistent, server, MTP, storage-cold, and automatic use stay copied without
 separate evidence.
 
-1. Add immutable retained-window provenance and realize one synthetic same-shard
-   two-window overlap. Require exact GPU reads through both resources, one-page
-   overlap safety, alias identity, final-page copy fallback, arbitrary destruction
-   order, and exactly-once mmap release.
-2. Promote live correctness in order: tied 0.8B Q8_0 full state, non-MTP A3B Q4
-   full state with mirrors/derived allocations separated, then split A10B resource
-   creation plus sampled beginning/middle/end reads from both active shards. Do
-   not time before exact state and byte ledgers clear.
-3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
+1. Run the preregistered A3B process-cold packet: outputs 1 then 128, two-pair kill
+   screen then six-pair decision, exact output and load contracts, complete-file
+   cache conditioning, VM/swap guards, and no CPU prefault. Do not fit a crossover
+   from two output lengths.
+2. If A3B clears, add A10B copied-versus-retained packed-prefill and one forced
+   transition full-state equality. Only then run a separately preregistered A10B
+   output-1 packet that hashes and warms all three physical shards.
+3. Run dense 9B under production embedding policy only after A10B. It is the
+   breadth/default-policy guard, not a prerequisite for pricing the larger
+   multi-window prize.
+4. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
    reopen 32K.
-4. In parallel with no production code, run one structured-trace grammar artifact:
+5. In parallel with no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-5. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
+6. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
    artifact.
-6. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
+7. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
    drafter or writing qwen affine kernels. If D7 is promising, run the cross-trunk
    sidecar acceptance bridge and apply the total-request equation.
-7. Price 0.8B external drafting only after the work-removal and native-asset lanes.
+8. Price 0.8B external drafting only after the work-removal and native-asset lanes.
    Apply qwen packet costs and stop before a qwen dual-model harness unless charged
    request economics clear. Run 2B only after a promising 0.8B result.
-8. Build packed full-history MTP prompt construction only if a sidecar or
+9. Build packed full-history MTP prompt construction only if a sidecar or
    another proposal asset predicts `>=1.10x` with its history budget charged.
-9. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
+10. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
    lane, top-k behind a named quality replay, and prompt reduction input-changing.
-10. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
+11. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
    sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
    GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
    or local retuning without their explicit reopen conditions.

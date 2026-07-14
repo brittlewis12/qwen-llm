@@ -6,6 +6,53 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-14 - v0.594 Live Generic Retained-Storage Realization
+
+Status: force-only live realization and the preregistered correctness/resource
+gates clear; promote the generic path to process-cold timing without changing
+defaults or persistent-lifecycle policy.
+
+- v0.594c realizes arbitrary page-aligned planner windows as independent
+  `newBufferWithBytesNoCopy` Metal resources over retained read-only GGUF mmaps.
+  Absolute descriptor offsets become window-relative bindings. Constructor-path
+  provenance follows tensor subviews and rejects retained destinations in typed
+  blits and write notes; raw buffer paths remain convention-bound rather than
+  being misrepresented as a complete mutability capability.
+- The synthetic gate realizes two same-shard windows overlapping by one page,
+  reads disjoint and physically shared bytes through both resources in one GPU
+  command, preserves alias buffer identity, rejects typed writes, and proves one
+  deallocator callback per window plus last-window mmap release under both final
+  destruction orders.
+- v0.594d wires planner output into the default-off force path. The exact 27B
+  sentinel keeps its isolated whole-shard implementation. Every other model
+  consumes direct requests in exact loader order, clones the canonical tensor for
+  aliases, copies only final-partial-page fallbacks, and leaves F32/F16 conversions
+  on owned storage. Physical views, logical aliases, fallbacks, conversions, and
+  derived allocations have separate fail-closed ledgers.
+- Tied 0.8B Q8_0 is bit-exact for packed-prefill logits, full prefill state, one
+  forced transition, continuation logits, and full continuation state. Its live
+  contract is 319 unique views/800,877,824 bytes, one physical alias of
+  270,172,160 bytes, and one 4,096-byte fallback. Source and alias share the same
+  Metal buffer and offset.
+- The same tied model passes with its embedding converted to a 1,017,118,720-byte
+  owned F32 tensor while the remaining 319 views stay retained. This closes the
+  mixed converted/direct path opened by removing the old universal native-embed
+  requirement. The exact 27B special case still rejects that rollback before
+  resource realization.
+- Non-MTP Qwen3.6 A3B Q4 passes the same full-state comparison with 732 views over
+  22,123,530,752 bytes and one 8,192-byte fallback. Split A10B creates two active
+  resources totaling 77,015,662,592 bytes, consumes 877 views plus two final-page
+  copies totaling 3,354,624 bytes, survives GGUF/model/planner teardown, and
+  matches GPU samples from the beginning, middle, and end of both windows.
+- The exact 27B copied-versus-retained regression guard remains bitwise. The full
+  active library suite is 200 passed and 128 ignored. These are live correctness,
+  accounting, and lifetime results, not latency, storage-cold, automatic-policy,
+  A10B full-forward, persistent, or server authority.
+
+Frozen commits: `6c2342b`, `49aa7cd`. Adversarial reviews: `cx ask` sessions
+`019f5f0c-a91f-7b51-a6e4-1dd50a55f713` and
+`019f5f26-d21f-7132-adfd-cbc9c83c02e8`.
+
 ## 2026-07-14 - v0.594 Generic Retained-Storage Coverage Promotion
 
 Status: broad dry geometry and byte accounting clear; promote to gated live

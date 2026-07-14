@@ -424,7 +424,7 @@ fn hash_layout_u64(hash: &mut u64, value: u64) {
     hash_layout_bytes(hash, &value.to_le_bytes());
 }
 
-fn gguf_descriptor_layout_digest(gguf: &GgufFile) -> u64 {
+pub fn gguf_descriptor_layout_digest(gguf: &GgufFile) -> u64 {
     let mut hash = 0xcbf29ce484222325;
     hash_layout_bytes(&mut hash, b"qwen-gguf-layout-v1");
     hash_layout_u64(&mut hash, gguf.shard_count() as u64);
@@ -682,7 +682,251 @@ enum SourceMaterialization {
     DirectCopy,
     DirectView,
     TailFallback,
-    Converted,
+    ConvertedF32,
+    ConvertedF16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelWeightStorageKind {
+    Direct,
+    ConvertedF32,
+    ConvertedF16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ModelWeightStorageRequest<'a> {
+    pub desc: &'a TensorDesc,
+    pub kind: ModelWeightStorageKind,
+    pub resident_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelWeightStorageIdentity {
+    name: String,
+    shard_idx: usize,
+    data_offset: u64,
+    source_bytes: u64,
+    dtype: GgmlType,
+    shape: Vec<u64>,
+    kind: ModelWeightStorageKind,
+    resident_bytes: u64,
+}
+
+fn expected_model_weight_identity(
+    request: &ModelWeightStorageRequest<'_>,
+) -> ModelWeightStorageIdentity {
+    ModelWeightStorageIdentity {
+        name: request.desc.name.clone(),
+        shard_idx: request.desc.shard_idx,
+        data_offset: request.desc.data_offset,
+        source_bytes: request.desc.n_bytes,
+        dtype: request.desc.dtype,
+        shape: request.desc.shape.clone(),
+        kind: request.kind,
+        resident_bytes: request.resident_bytes,
+    }
+}
+
+fn validate_model_weight_request_sequence(
+    actual: &[ModelWeightStorageIdentity],
+    expected: &[ModelWeightStorageRequest<'_>],
+) -> Result<(), MfError> {
+    if actual.len() != expected.len() {
+        return Err(MfError::LoadPolicy(format!(
+            "model storage request count drift: actual={} expected={}",
+            actual.len(),
+            expected.len()
+        )));
+    }
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        let expected = expected_model_weight_identity(expected);
+        if *actual != expected {
+            return Err(MfError::LoadPolicy(format!(
+                "model storage request drift at index {index}: actual={actual:?} expected={expected:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn push_model_weight_request<'a>(
+    requests: &mut Vec<ModelWeightStorageRequest<'a>>,
+    desc: &'a TensorDesc,
+    kind: ModelWeightStorageKind,
+) -> Result<(), MfError> {
+    let elements = desc.checked_n_elements().ok_or_else(|| {
+        MfError::LoadPolicy(format!("tensor {:?} element count overflow", desc.name))
+    })?;
+    let resident_bytes = match kind {
+        ModelWeightStorageKind::Direct => desc.n_bytes,
+        ModelWeightStorageKind::ConvertedF32 => elements
+            .checked_mul(4)
+            .ok_or_else(|| MfError::LoadPolicy("F32 conversion size overflow".to_string()))?,
+        ModelWeightStorageKind::ConvertedF16 => elements
+            .checked_mul(2)
+            .ok_or_else(|| MfError::LoadPolicy("F16 conversion size overflow".to_string()))?,
+    };
+    requests.push(ModelWeightStorageRequest {
+        desc,
+        kind,
+        resident_bytes,
+    });
+    Ok(())
+}
+
+fn push_f32_weight_request<'a>(
+    requests: &mut Vec<ModelWeightStorageRequest<'a>>,
+    desc: &'a TensorDesc,
+) -> Result<(), MfError> {
+    let kind = if desc.dtype == GgmlType::F32 {
+        ModelWeightStorageKind::Direct
+    } else {
+        ModelWeightStorageKind::ConvertedF32
+    };
+    push_model_weight_request(requests, desc, kind)
+}
+
+fn push_native_weight_request<'a>(
+    requests: &mut Vec<ModelWeightStorageRequest<'a>>,
+    desc: &'a TensorDesc,
+) -> Result<(), MfError> {
+    if weight_dtype_kept_native(desc.dtype) {
+        push_model_weight_request(requests, desc, ModelWeightStorageKind::Direct)
+    } else {
+        push_f32_weight_request(requests, desc)
+    }
+}
+
+fn push_moe_weight_requests<'a>(
+    requests: &mut Vec<ModelWeightStorageRequest<'a>>,
+    moe: &MoeFfn<'a>,
+    router_f16: bool,
+) -> Result<(), MfError> {
+    if router_f16 {
+        push_model_weight_request(requests, moe.gate_inp, ModelWeightStorageKind::ConvertedF16)?;
+    } else {
+        push_f32_weight_request(requests, moe.gate_inp)?;
+    }
+    push_native_weight_request(requests, moe.gate_exps)?;
+    push_native_weight_request(requests, moe.up_exps)?;
+    push_native_weight_request(requests, moe.down_exps)?;
+    push_f32_weight_request(requests, moe.gate_inp_shexp)
+}
+
+pub fn native_quant_embedding_storage_supported(model: &Model<'_>) -> bool {
+    native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape)
+}
+
+pub fn production_native_quant_embedding_storage_enabled(model: &Model<'_>) -> bool {
+    native_quant_embedding_storage_supported(model)
+        && native_quant_embedding_default_promoted(
+            &model.arch,
+            model.tied_embeddings,
+            model.mtp.is_some(),
+            model.token_embd.dtype,
+            &model.token_embd.shape,
+        )
+}
+
+pub fn model_weight_storage_requests<'a>(
+    model: &Model<'a>,
+    native_quant_embedding: bool,
+    router_f16: bool,
+) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
+    if native_quant_embedding && !native_quant_embedding_storage_supported(model) {
+        return Err(MfError::LoadPolicy(format!(
+            "native token embedding is unsupported for {:?} {:?}",
+            model.token_embd.dtype, model.token_embd.shape
+        )));
+    }
+    let mut requests = Vec::new();
+    let embedding_direct = matches!(
+        model.token_embd.dtype,
+        GgmlType::F32 | GgmlType::F16 | GgmlType::BF16
+    ) || native_quant_embedding;
+    if embedding_direct {
+        push_model_weight_request(
+            &mut requests,
+            model.token_embd,
+            ModelWeightStorageKind::Direct,
+        )?;
+    } else {
+        push_f32_weight_request(&mut requests, model.token_embd)?;
+    }
+    push_f32_weight_request(&mut requests, model.output_norm)?;
+    push_native_weight_request(&mut requests, model.lm_head)?;
+
+    for block in &model.blocks {
+        match block {
+            Block::Gdn(gdn) => {
+                push_f32_weight_request(&mut requests, gdn.attn_norm)?;
+                push_f32_weight_request(&mut requests, gdn.post_attention_norm)?;
+                push_native_weight_request(&mut requests, gdn.ffn_gate)?;
+                push_native_weight_request(&mut requests, gdn.ffn_up)?;
+                push_native_weight_request(&mut requests, gdn.ffn_down)?;
+                push_native_weight_request(&mut requests, gdn.in_proj_qkv)?;
+                push_native_weight_request(&mut requests, gdn.in_proj_z)?;
+                push_native_weight_request(&mut requests, gdn.beta_proj)?;
+                push_native_weight_request(&mut requests, gdn.alpha_proj)?;
+                push_f32_weight_request(&mut requests, gdn.a_log)?;
+                push_f32_weight_request(&mut requests, gdn.dt_bias)?;
+                push_f32_weight_request(&mut requests, gdn.conv1d)?;
+                push_f32_weight_request(&mut requests, gdn.norm)?;
+                push_native_weight_request(&mut requests, gdn.out_proj)?;
+                if let Some(moe) = gdn.ffn_moe.as_ref() {
+                    push_moe_weight_requests(&mut requests, moe, router_f16)?;
+                }
+            }
+            Block::Attn(attn) => {
+                push_native_weight_request(&mut requests, attn.q)?;
+                push_native_weight_request(&mut requests, attn.k)?;
+                push_native_weight_request(&mut requests, attn.v)?;
+                push_f32_weight_request(&mut requests, attn.attn_norm)?;
+                push_f32_weight_request(&mut requests, attn.post_attention_norm)?;
+                push_native_weight_request(&mut requests, attn.ffn_gate)?;
+                push_native_weight_request(&mut requests, attn.ffn_up)?;
+                push_native_weight_request(&mut requests, attn.ffn_down)?;
+                push_native_weight_request(&mut requests, attn.o)?;
+                push_f32_weight_request(&mut requests, attn.q_norm)?;
+                push_f32_weight_request(&mut requests, attn.k_norm)?;
+                if let Some(moe) = attn.ffn_moe.as_ref() {
+                    push_moe_weight_requests(&mut requests, moe, router_f16)?;
+                }
+            }
+        }
+    }
+    Ok(requests)
+}
+
+pub fn mtp_weight_source_descriptors<'a>(model: &Model<'a>) -> Vec<&'a TensorDesc> {
+    let Some(mtp) = model.mtp.as_ref() else {
+        return Vec::new();
+    };
+    let attn = &mtp.attn;
+    let mut descriptors = vec![
+        attn.q,
+        attn.k,
+        attn.v,
+        attn.attn_norm,
+        attn.post_attention_norm,
+        attn.ffn_gate,
+        attn.ffn_up,
+        attn.ffn_down,
+        attn.o,
+        attn.q_norm,
+        attn.k_norm,
+    ];
+    if let Some(moe) = attn.ffn_moe.as_ref() {
+        descriptors.extend([
+            moe.gate_inp,
+            moe.gate_exps,
+            moe.up_exps,
+            moe.down_exps,
+            moe.gate_inp_shexp,
+        ]);
+    }
+    descriptors.extend([mtp.eh_proj, mtp.enorm, mtp.hnorm, mtp.shared_head_norm]);
+    descriptors
 }
 
 #[derive(Default)]
@@ -700,6 +944,7 @@ struct WeightLoadLedger {
     converted_resident_bytes: u64,
     derived_allocations: usize,
     derived_bytes: u64,
+    requests: Vec<ModelWeightStorageIdentity>,
 }
 
 impl WeightLoadLedger {
@@ -730,7 +975,7 @@ impl WeightLoadLedger {
                 &mut self.tail_fallback_descriptors,
                 &mut self.tail_fallback_bytes,
             ),
-            SourceMaterialization::Converted => {
+            SourceMaterialization::ConvertedF32 | SourceMaterialization::ConvertedF16 => {
                 self.converted_resident_bytes = self
                     .converted_resident_bytes
                     .checked_add(resident_bytes)
@@ -749,6 +994,23 @@ impl WeightLoadLedger {
         *bytes = bytes
             .checked_add(desc.n_bytes)
             .ok_or_else(|| MfError::LoadPolicy("materialization byte overflow".to_string()))?;
+        let kind = match materialization {
+            SourceMaterialization::DirectCopy
+            | SourceMaterialization::DirectView
+            | SourceMaterialization::TailFallback => ModelWeightStorageKind::Direct,
+            SourceMaterialization::ConvertedF32 => ModelWeightStorageKind::ConvertedF32,
+            SourceMaterialization::ConvertedF16 => ModelWeightStorageKind::ConvertedF16,
+        };
+        self.requests.push(ModelWeightStorageIdentity {
+            name: desc.name.clone(),
+            shard_idx: desc.shard_idx,
+            data_offset: desc.data_offset,
+            source_bytes: desc.n_bytes,
+            dtype: desc.dtype,
+            shape: desc.shape.clone(),
+            kind,
+            resident_bytes,
+        });
         Ok(())
     }
 
@@ -864,7 +1126,7 @@ impl<'a> MetalWeightLoader<'a> {
             desc.shape.clone(),
             GgmlType::F32,
         )?;
-        self.record_source(desc, SourceMaterialization::Converted, tensor.n_bytes())?;
+        self.record_source(desc, SourceMaterialization::ConvertedF32, tensor.n_bytes())?;
         Ok(tensor)
     }
 
@@ -903,7 +1165,7 @@ impl<'a> MetalWeightLoader<'a> {
             desc.shape.clone(),
             GgmlType::F16,
         )?;
-        self.record_source(desc, SourceMaterialization::Converted, tensor.n_bytes())?;
+        self.record_source(desc, SourceMaterialization::ConvertedF16, tensor.n_bytes())?;
         Ok(tensor)
     }
 
@@ -942,10 +1204,15 @@ impl<'a> MetalWeightLoader<'a> {
         Ok(())
     }
 
-    fn finish(self, exact_sentinel: bool) -> Result<(), MfError> {
+    fn finish(
+        self,
+        exact_sentinel: bool,
+        expected: &[ModelWeightStorageRequest<'_>],
+    ) -> Result<(), MfError> {
         let forced_retained = self.is_forced_retained();
         let seen_forced = self.seen_forced.len();
         let ledger = self.ledger;
+        validate_model_weight_request_sequence(&ledger.requests, expected)?;
         let accounted_source_bytes = ledger
             .direct_copy_bytes
             .checked_add(ledger.direct_view_bytes)
@@ -956,6 +1223,76 @@ impl<'a> MetalWeightLoader<'a> {
             return Err(MfError::LoadPolicy(format!(
                 "source accounting mismatch: categories={accounted_source_bytes} total={}",
                 ledger.source_bytes
+            )));
+        }
+        let expected_source_bytes = expected.iter().try_fold(0u64, |total, request| {
+            total
+                .checked_add(request.desc.n_bytes)
+                .ok_or_else(|| MfError::LoadPolicy("expected source byte overflow".to_string()))
+        })?;
+        let expected_direct = expected
+            .iter()
+            .filter(|request| request.kind == ModelWeightStorageKind::Direct)
+            .collect::<Vec<_>>();
+        let expected_direct_bytes = expected_direct.iter().try_fold(0u64, |total, request| {
+            total
+                .checked_add(request.desc.n_bytes)
+                .ok_or_else(|| MfError::LoadPolicy("expected direct byte overflow".to_string()))
+        })?;
+        let expected_converted = expected
+            .iter()
+            .filter(|request| request.kind != ModelWeightStorageKind::Direct)
+            .collect::<Vec<_>>();
+        let expected_converted_source_bytes =
+            expected_converted.iter().try_fold(0u64, |total, request| {
+                total.checked_add(request.desc.n_bytes).ok_or_else(|| {
+                    MfError::LoadPolicy("expected converted source byte overflow".to_string())
+                })
+            })?;
+        let expected_converted_resident_bytes =
+            expected_converted.iter().try_fold(0u64, |total, request| {
+                total.checked_add(request.resident_bytes).ok_or_else(|| {
+                    MfError::LoadPolicy("expected converted resident byte overflow".to_string())
+                })
+            })?;
+        let actual_direct_count = ledger
+            .direct_copy_descriptors
+            .checked_add(ledger.direct_view_descriptors)
+            .and_then(|count| count.checked_add(ledger.tail_fallback_descriptors))
+            .ok_or_else(|| MfError::LoadPolicy("direct descriptor overflow".to_string()))?;
+        let actual_direct_bytes = ledger
+            .direct_copy_bytes
+            .checked_add(ledger.direct_view_bytes)
+            .and_then(|bytes| bytes.checked_add(ledger.tail_fallback_bytes))
+            .ok_or_else(|| MfError::LoadPolicy("direct byte overflow".to_string()))?;
+        if ledger.source_descriptors != expected.len()
+            || ledger.source_bytes != expected_source_bytes
+            || actual_direct_count != expected_direct.len()
+            || actual_direct_bytes != expected_direct_bytes
+            || ledger.converted_descriptors != expected_converted.len()
+            || ledger.converted_source_bytes != expected_converted_source_bytes
+            || ledger.converted_resident_bytes != expected_converted_resident_bytes
+        {
+            return Err(MfError::LoadPolicy(format!(
+                concat!(
+                    "model storage request drift: source={}/{} bytes={}/{} ",
+                    "direct={}/{} bytes={}/{} converted={}/{} source_bytes={}/{} ",
+                    "resident_bytes={}/{}"
+                ),
+                ledger.source_descriptors,
+                expected.len(),
+                ledger.source_bytes,
+                expected_source_bytes,
+                actual_direct_count,
+                expected_direct.len(),
+                actual_direct_bytes,
+                expected_direct_bytes,
+                ledger.converted_descriptors,
+                expected_converted.len(),
+                ledger.converted_source_bytes,
+                expected_converted_source_bytes,
+                ledger.converted_resident_bytes,
+                expected_converted_resident_bytes,
             )));
         }
         if exact_sentinel
@@ -1171,6 +1508,11 @@ impl MetalModel {
 
         let (direct_storage, exact_sentinel) =
             direct_storage_for_load(ctx, gguf, model, no_copy_mode, prefault_enabled)?;
+        let expected_storage_requests = model_weight_storage_requests(
+            model,
+            embedding_selection.uses_native(),
+            moe_router_f16_enabled(),
+        )?;
         let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage);
         let token_embd =
             loader.load_embedding(model.token_embd, embedding_selection.uses_native())?;
@@ -1304,7 +1646,7 @@ impl MetalModel {
                 }
             }
         }
-        loader.finish(exact_sentinel)?;
+        loader.finish(exact_sentinel, &expected_storage_requests)?;
 
         Ok(Self {
             arch: model.arch,
@@ -8989,6 +9331,56 @@ mod tests {
         }
         assert!(parse_gguf_no_copy_prefault(Some("enabled")).is_err());
         assert!(parse_gguf_no_copy_prefault(Some("")).is_err());
+    }
+
+    #[test]
+    fn model_weight_request_sequence_rejects_equal_aggregate_drift() {
+        let direct_desc = TensorDesc {
+            name: "direct".to_string(),
+            shape: vec![8],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: 32,
+            n_bytes: 32,
+        };
+        let converted_desc = TensorDesc {
+            name: "converted".to_string(),
+            shape: vec![8],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: 64,
+            n_bytes: 32,
+        };
+        let expected = vec![
+            ModelWeightStorageRequest {
+                desc: &direct_desc,
+                kind: ModelWeightStorageKind::Direct,
+                resident_bytes: 32,
+            },
+            ModelWeightStorageRequest {
+                desc: &converted_desc,
+                kind: ModelWeightStorageKind::ConvertedF32,
+                resident_bytes: 32,
+            },
+        ];
+        let actual = expected
+            .iter()
+            .map(expected_model_weight_identity)
+            .collect::<Vec<_>>();
+        validate_model_weight_request_sequence(&actual, &expected).unwrap();
+
+        let mut reordered = actual.clone();
+        reordered.swap(0, 1);
+        assert!(validate_model_weight_request_sequence(&reordered, &expected).is_err());
+
+        let mut swapped_kinds = actual.clone();
+        swapped_kinds[0].kind = ModelWeightStorageKind::ConvertedF32;
+        swapped_kinds[1].kind = ModelWeightStorageKind::Direct;
+        assert!(validate_model_weight_request_sequence(&swapped_kinds, &expected).is_err());
+
+        let mut duplicated = actual;
+        duplicated[0] = duplicated[1].clone();
+        assert!(validate_model_weight_request_sequence(&duplicated, &expected).is_err());
     }
 
     #[test]

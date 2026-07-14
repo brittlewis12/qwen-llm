@@ -201,6 +201,10 @@ impl GgufFile {
         self.shards.len()
     }
 
+    pub fn shard_mapped_lengths(&self) -> Vec<usize> {
+        self.shards.iter().map(|shard| shard.mmap.len()).collect()
+    }
+
     pub(crate) fn retained_shard_mmap(&self, shard_idx: usize) -> Option<Arc<Mmap>> {
         self.shards
             .get(shard_idx)

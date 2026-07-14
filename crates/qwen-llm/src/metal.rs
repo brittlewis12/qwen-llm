@@ -1095,6 +1095,10 @@ fn host_page_size() -> Result<usize, MetalError> {
         .ok_or_else(|| MetalError::GgufNoCopy(format!("invalid host page size {page_size}")))
 }
 
+pub fn host_page_size_bytes() -> Result<usize, MetalError> {
+    host_page_size()
+}
+
 // ===========================================================================
 // MetalTensor — typed buffer view
 // ===========================================================================
@@ -1115,6 +1119,353 @@ pub(crate) struct GgufBackingGeometry {
     exposed_len: usize,
     page_size: usize,
     required_alignment: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetainedStorageFallback {
+    MissingShard,
+    BindingMisalignment,
+    OutsideShard,
+    FinalPartialPage,
+    TensorExceedsWindow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetainedStorageDisposition {
+    View {
+        window_index: usize,
+        buffer_offset: u64,
+    },
+    Alias {
+        source_request_index: usize,
+    },
+    CopyFallback {
+        reason: RetainedStorageFallback,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedStorageWindow {
+    pub shard_idx: usize,
+    pub mmap_offset: u64,
+    pub length: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedStorageEntry {
+    pub request_index: usize,
+    pub name: String,
+    pub shard_idx: usize,
+    pub data_offset: u64,
+    pub n_bytes: u64,
+    pub disposition: RetainedStorageDisposition,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedStoragePlan {
+    pub page_size: usize,
+    pub max_buffer_length: usize,
+    pub usable_window_length: usize,
+    pub required_alignment: usize,
+    pub windows: Vec<RetainedStorageWindow>,
+    pub entries: Vec<RetainedStorageEntry>,
+    pub unique_view_bytes: u64,
+    pub logical_view_bytes: u64,
+    pub unique_fallback_bytes: u64,
+    pub alias_bytes: u64,
+}
+
+#[derive(Clone)]
+struct CanonicalRetainedRequest<'a> {
+    desc: &'a TensorDesc,
+    source_request_index: usize,
+    disposition: Option<RetainedStorageDisposition>,
+}
+
+fn checked_page_floor(value: usize, page_size: usize) -> usize {
+    value / page_size * page_size
+}
+
+fn checked_page_ceil(value: usize, page_size: usize) -> Result<usize, MetalError> {
+    value
+        .checked_add(page_size - 1)
+        .map(|end| end / page_size * page_size)
+        .ok_or_else(|| MetalError::GgufNoCopy("page-rounded endpoint overflow".to_string()))
+}
+
+pub fn plan_retained_storage(
+    shard_mapped_lengths: &[usize],
+    requests: &[&TensorDesc],
+    page_size: usize,
+    max_buffer_length: usize,
+    required_alignment: usize,
+) -> Result<RetainedStoragePlan, MetalError> {
+    if !page_size.is_power_of_two() {
+        return Err(MetalError::GgufNoCopy(format!(
+            "host page size {page_size} is not a power of two"
+        )));
+    }
+    if !required_alignment.is_power_of_two() {
+        return Err(MetalError::GgufNoCopy(format!(
+            "required binding alignment {required_alignment} is not a power of two"
+        )));
+    }
+    if page_size % required_alignment != 0 {
+        return Err(MetalError::GgufNoCopy(format!(
+            "required binding alignment {required_alignment} does not divide page size {page_size}"
+        )));
+    }
+    let usable_window_length = max_buffer_length / page_size * page_size;
+    if usable_window_length == 0 {
+        return Err(MetalError::GgufNoCopy(format!(
+            "Metal maxBufferLength {max_buffer_length} exposes no complete {page_size}-byte page"
+        )));
+    }
+
+    let mut canonical = Vec::<CanonicalRetainedRequest<'_>>::new();
+    let mut by_source = HashMap::<(usize, u64, u64), usize>::new();
+    let mut request_to_canonical = Vec::with_capacity(requests.len());
+    for (request_index, desc) in requests.iter().copied().enumerate() {
+        let (_, expected) = checked_ggml_shape_bytes(&desc.shape, desc.dtype)?;
+        let declared = usize::try_from(desc.n_bytes).map_err(|_| {
+            MetalError::GgufNoCopy(format!(
+                "tensor {:?} n_bytes {} does not fit usize",
+                desc.name, desc.n_bytes
+            ))
+        })?;
+        if expected != declared {
+            return Err(MetalError::GgufNoCopy(format!(
+                "tensor {:?} shape/dtype expects {expected} bytes, descriptor declares {declared}",
+                desc.name
+            )));
+        }
+        if declared == 0 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "tensor {:?} has an empty storage range",
+                desc.name
+            )));
+        }
+        let key = (desc.shard_idx, desc.data_offset, desc.n_bytes);
+        if let Some(&canonical_index) = by_source.get(&key) {
+            let existing = &canonical[canonical_index];
+            if existing.desc.dtype != desc.dtype || existing.desc.shape != desc.shape {
+                return Err(MetalError::GgufNoCopy(format!(
+                    "aliased tensor {:?} is not representation-compatible with {:?}",
+                    desc.name, existing.desc.name
+                )));
+            }
+            request_to_canonical.push(canonical_index);
+            continue;
+        }
+        let canonical_index = canonical.len();
+        by_source.insert(key, canonical_index);
+        canonical.push(CanonicalRetainedRequest {
+            desc,
+            source_request_index: request_index,
+            disposition: None,
+        });
+        request_to_canonical.push(canonical_index);
+    }
+
+    let mut sorted = (0..canonical.len()).collect::<Vec<_>>();
+    sorted.sort_unstable_by_key(|&index| {
+        let desc = canonical[index].desc;
+        (desc.shard_idx, desc.data_offset, desc.n_bytes)
+    });
+
+    let mut windows = Vec::<RetainedStorageWindow>::new();
+    let mut last_window_by_shard = HashMap::<usize, usize>::new();
+    let mut previous_end_by_shard = HashMap::<usize, (usize, String)>::new();
+    for canonical_index in sorted {
+        let desc = canonical[canonical_index].desc;
+        let Some(&mapped_len) = shard_mapped_lengths.get(desc.shard_idx) else {
+            canonical[canonical_index].disposition =
+                Some(RetainedStorageDisposition::CopyFallback {
+                    reason: RetainedStorageFallback::MissingShard,
+                });
+            continue;
+        };
+        let start = usize::try_from(desc.data_offset).map_err(|_| {
+            MetalError::GgufNoCopy(format!(
+                "tensor {:?} offset {} does not fit usize",
+                desc.name, desc.data_offset
+            ))
+        })?;
+        let length = usize::try_from(desc.n_bytes).map_err(|_| {
+            MetalError::GgufNoCopy(format!(
+                "tensor {:?} n_bytes {} does not fit usize",
+                desc.name, desc.n_bytes
+            ))
+        })?;
+        let end = start.checked_add(length).ok_or_else(|| {
+            MetalError::GgufNoCopy(format!("tensor {:?} range overflows usize", desc.name))
+        })?;
+        if let Some((previous_end, previous_name)) = previous_end_by_shard.get(&desc.shard_idx)
+            && start < *previous_end
+        {
+            return Err(MetalError::GgufNoCopy(format!(
+                "tensor {:?} range starts at {start} before prior tensor {:?} ends at {previous_end}",
+                desc.name, previous_name
+            )));
+        }
+        previous_end_by_shard.insert(desc.shard_idx, (end, desc.name.clone()));
+        let candidate_window_start = checked_page_floor(start, page_size);
+        let candidate_buffer_offset = start - candidate_window_start;
+        if candidate_buffer_offset % required_alignment != 0 {
+            canonical[canonical_index].disposition =
+                Some(RetainedStorageDisposition::CopyFallback {
+                    reason: RetainedStorageFallback::BindingMisalignment,
+                });
+            continue;
+        }
+        if end > mapped_len {
+            canonical[canonical_index].disposition =
+                Some(RetainedStorageDisposition::CopyFallback {
+                    reason: RetainedStorageFallback::OutsideShard,
+                });
+            continue;
+        }
+        let rounded_end = checked_page_ceil(end, page_size)?;
+        let candidate_window_length = rounded_end
+            .checked_sub(candidate_window_start)
+            .ok_or_else(|| MetalError::GgufNoCopy("planned window range underflow".to_string()))?;
+        if candidate_window_length > usable_window_length {
+            canonical[canonical_index].disposition =
+                Some(RetainedStorageDisposition::CopyFallback {
+                    reason: RetainedStorageFallback::TensorExceedsWindow,
+                });
+            continue;
+        }
+        let exposed_len = mapped_len / page_size * page_size;
+        if end > exposed_len {
+            canonical[canonical_index].disposition =
+                Some(RetainedStorageDisposition::CopyFallback {
+                    reason: RetainedStorageFallback::FinalPartialPage,
+                });
+            continue;
+        }
+
+        let mut selected_window = None;
+        if let Some(&window_index) = last_window_by_shard.get(&desc.shard_idx) {
+            let window = &windows[window_index];
+            let window_start = usize::try_from(window.mmap_offset).map_err(|_| {
+                MetalError::GgufNoCopy("planned window offset does not fit usize".to_string())
+            })?;
+            let required_length = rounded_end.checked_sub(window_start);
+            if start >= window_start
+                && required_length.is_some_and(|bytes| bytes <= usable_window_length)
+            {
+                selected_window = Some(window_index);
+            }
+        }
+        let window_index = if let Some(window_index) = selected_window {
+            let window_start =
+                usize::try_from(windows[window_index].mmap_offset).map_err(|_| {
+                    MetalError::GgufNoCopy("planned window offset does not fit usize".to_string())
+                })?;
+            windows[window_index].length = rounded_end - window_start;
+            window_index
+        } else {
+            let window_index = windows.len();
+            windows.push(RetainedStorageWindow {
+                shard_idx: desc.shard_idx,
+                mmap_offset: candidate_window_start as u64,
+                length: candidate_window_length,
+            });
+            last_window_by_shard.insert(desc.shard_idx, window_index);
+            window_index
+        };
+        let window_start = windows[window_index].mmap_offset;
+        let buffer_offset = desc.data_offset.checked_sub(window_start).ok_or_else(|| {
+            MetalError::GgufNoCopy("tensor offset precedes planned window".to_string())
+        })?;
+        debug_assert_eq!(buffer_offset % required_alignment as u64, 0);
+        canonical[canonical_index].disposition = Some(RetainedStorageDisposition::View {
+            window_index,
+            buffer_offset,
+        });
+    }
+
+    let mut entries = Vec::with_capacity(requests.len());
+    let mut unique_view_bytes = 0u64;
+    let mut logical_view_bytes = 0u64;
+    let mut unique_fallback_bytes = 0u64;
+    let mut alias_bytes = 0u64;
+    for (request_index, desc) in requests.iter().copied().enumerate() {
+        let canonical_request = &canonical[request_to_canonical[request_index]];
+        let source_disposition = canonical_request
+            .disposition
+            .expect("every canonical retained request must be classified");
+        let disposition = if request_index == canonical_request.source_request_index {
+            match source_disposition {
+                RetainedStorageDisposition::View { .. } => {
+                    unique_view_bytes =
+                        unique_view_bytes.checked_add(desc.n_bytes).ok_or_else(|| {
+                            MetalError::GgufNoCopy(
+                                "unique view byte accounting overflow".to_string(),
+                            )
+                        })?;
+                    logical_view_bytes =
+                        logical_view_bytes
+                            .checked_add(desc.n_bytes)
+                            .ok_or_else(|| {
+                                MetalError::GgufNoCopy(
+                                    "logical view byte accounting overflow".to_string(),
+                                )
+                            })?;
+                }
+                RetainedStorageDisposition::CopyFallback { .. } => {
+                    unique_fallback_bytes = unique_fallback_bytes
+                        .checked_add(desc.n_bytes)
+                        .ok_or_else(|| {
+                            MetalError::GgufNoCopy(
+                                "unique fallback byte accounting overflow".to_string(),
+                            )
+                        })?;
+                }
+                RetainedStorageDisposition::Alias { .. } => unreachable!(),
+            }
+            source_disposition
+        } else {
+            alias_bytes = alias_bytes.checked_add(desc.n_bytes).ok_or_else(|| {
+                MetalError::GgufNoCopy("alias byte accounting overflow".to_string())
+            })?;
+            if matches!(source_disposition, RetainedStorageDisposition::View { .. }) {
+                logical_view_bytes =
+                    logical_view_bytes
+                        .checked_add(desc.n_bytes)
+                        .ok_or_else(|| {
+                            MetalError::GgufNoCopy(
+                                "logical view byte accounting overflow".to_string(),
+                            )
+                        })?;
+            }
+            RetainedStorageDisposition::Alias {
+                source_request_index: canonical_request.source_request_index,
+            }
+        };
+        entries.push(RetainedStorageEntry {
+            request_index,
+            name: desc.name.clone(),
+            shard_idx: desc.shard_idx,
+            data_offset: desc.data_offset,
+            n_bytes: desc.n_bytes,
+            disposition,
+        });
+    }
+
+    Ok(RetainedStoragePlan {
+        page_size,
+        max_buffer_length,
+        usable_window_length,
+        required_alignment,
+        windows,
+        entries,
+        unique_view_bytes,
+        logical_view_bytes,
+        unique_fallback_bytes,
+        alias_bytes,
+    })
 }
 
 impl GgufBackingGeometry {
@@ -18261,6 +18612,46 @@ mod tests {
         }
     }
 
+    fn assert_retained_plan_invariants(
+        plan: &RetainedStoragePlan,
+        requests: &[&TensorDesc],
+        shard_mapped_lengths: &[usize],
+    ) {
+        for window in &plan.windows {
+            assert_eq!(window.mmap_offset % plan.page_size as u64, 0);
+            assert!(window.length > 0);
+            assert_eq!(window.length % plan.page_size, 0);
+            assert!(window.length <= plan.usable_window_length);
+            let mapped_len = shard_mapped_lengths[window.shard_idx] as u64;
+            assert!(window.mmap_offset + window.length as u64 <= mapped_len);
+        }
+        for entry in &plan.entries {
+            assert_eq!(entry.n_bytes, requests[entry.request_index].n_bytes);
+            match entry.disposition {
+                RetainedStorageDisposition::View {
+                    window_index,
+                    buffer_offset,
+                } => {
+                    let window = &plan.windows[window_index];
+                    assert_eq!(entry.shard_idx, window.shard_idx);
+                    assert_eq!(entry.data_offset, window.mmap_offset + buffer_offset);
+                    assert_eq!(buffer_offset % plan.required_alignment as u64, 0);
+                    assert!(buffer_offset + entry.n_bytes <= window.length as u64);
+                }
+                RetainedStorageDisposition::Alias {
+                    source_request_index,
+                } => {
+                    assert!(source_request_index < entry.request_index);
+                    let source = &plan.entries[source_request_index];
+                    assert_eq!(entry.shard_idx, source.shard_idx);
+                    assert_eq!(entry.data_offset, source.data_offset);
+                    assert_eq!(entry.n_bytes, source.n_bytes);
+                }
+                RetainedStorageDisposition::CopyFallback { .. } => {}
+            }
+        }
+    }
+
     #[test]
     fn gguf_backing_classification_is_typed_and_fail_closed() {
         let geometry = GgufBackingGeometry::new(0, 160, 64, 32).unwrap();
@@ -18295,6 +18686,217 @@ mod tests {
         assert!(GgufBackingGeometry::new(0, 160, 0, 32).is_err());
         assert!(GgufBackingGeometry::new(0, 160, 64, 0).is_err());
         assert!(GgufBackingGeometry::new(0, 32, 64, 32).is_err());
+    }
+
+    #[test]
+    fn retained_storage_plan_is_order_independent_and_window_bounded() {
+        let a = f32_desc("a", 0, 32, 8);
+        let b = f32_desc("b", 0, 64, 16);
+        let c = f32_desc("c", 0, 128, 8);
+        let requests = [&c, &a, &b];
+        let plan = plan_retained_storage(&[192], &requests, 64, 130, 32).unwrap();
+        assert_retained_plan_invariants(&plan, &requests, &[192]);
+
+        assert_eq!(plan.usable_window_length, 128);
+        assert_eq!(plan.windows.len(), 2);
+        assert_eq!(
+            plan.windows,
+            vec![
+                RetainedStorageWindow {
+                    shard_idx: 0,
+                    mmap_offset: 0,
+                    length: 128,
+                },
+                RetainedStorageWindow {
+                    shard_idx: 0,
+                    mmap_offset: 128,
+                    length: 64,
+                },
+            ]
+        );
+        assert_eq!(
+            plan.entries[0].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 1,
+                buffer_offset: 0,
+            }
+        );
+        assert_eq!(
+            plan.entries[1].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 0,
+                buffer_offset: 32,
+            }
+        );
+        assert_eq!(
+            plan.entries[2].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 0,
+                buffer_offset: 64,
+            }
+        );
+        assert_eq!(plan.unique_view_bytes, 128);
+        assert_eq!(plan.logical_view_bytes, 128);
+        assert_eq!(plan.unique_fallback_bytes, 0);
+        assert_eq!(plan.alias_bytes, 0);
+
+        let permutation = [&b, &c, &a];
+        let permuted = plan_retained_storage(&[192], &permutation, 64, 130, 32).unwrap();
+        assert_retained_plan_invariants(&permuted, &permutation, &[192]);
+        assert_eq!(plan.windows, permuted.windows);
+        for name in ["a", "b", "c"] {
+            let original = plan
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap();
+            let permuted = permuted
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap();
+            assert_eq!(original.disposition, permuted.disposition);
+        }
+
+        let crossing_a = f32_desc("crossing-a", 0, 0, 24);
+        let crossing_b = f32_desc("crossing-b", 0, 96, 16);
+        let crossing =
+            plan_retained_storage(&[192], &[&crossing_a, &crossing_b], 64, 128, 32).unwrap();
+        assert_retained_plan_invariants(&crossing, &[&crossing_a, &crossing_b], &[192]);
+        assert_eq!(crossing.windows.len(), 2);
+        assert_eq!(crossing.windows[0].mmap_offset, 0);
+        assert_eq!(crossing.windows[0].length, 128);
+        assert_eq!(crossing.windows[1].mmap_offset, 64);
+        assert_eq!(crossing.windows[1].length, 128);
+        assert_eq!(
+            crossing.entries[1].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 1,
+                buffer_offset: 32,
+            }
+        );
+    }
+
+    #[test]
+    fn retained_storage_plan_classifies_fallbacks_and_aliases() {
+        let view = f32_desc("view", 1, 64, 8);
+        let missing = f32_desc("missing", 3, 0, 8);
+        let tail = f32_desc("tail", 0, 96, 16);
+        let outside = f32_desc("outside", 0, 160, 8);
+        let misaligned = f32_desc("misaligned", 0, 36, 8);
+        let too_large = f32_desc("too-large", 2, 32, 32);
+        let requests = [
+            &view,
+            &view,
+            &missing,
+            &tail,
+            &outside,
+            &misaligned,
+            &too_large,
+        ];
+        let plan = plan_retained_storage(&[160, 256, 256], &requests, 64, 128, 32).unwrap();
+        assert_retained_plan_invariants(&plan, &requests, &[160, 256, 256]);
+
+        assert_eq!(
+            plan.entries[0].disposition,
+            RetainedStorageDisposition::View {
+                window_index: 0,
+                buffer_offset: 0,
+            }
+        );
+        assert_eq!(
+            plan.entries[1].disposition,
+            RetainedStorageDisposition::Alias {
+                source_request_index: 0,
+            }
+        );
+        let reasons = plan
+            .entries
+            .iter()
+            .filter_map(|entry| match entry.disposition {
+                RetainedStorageDisposition::CopyFallback { reason } => Some(reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            vec![
+                RetainedStorageFallback::MissingShard,
+                RetainedStorageFallback::FinalPartialPage,
+                RetainedStorageFallback::OutsideShard,
+                RetainedStorageFallback::BindingMisalignment,
+                RetainedStorageFallback::TensorExceedsWindow,
+            ]
+        );
+        assert_eq!(plan.unique_view_bytes, 32);
+        assert_eq!(plan.logical_view_bytes, 64);
+        assert_eq!(plan.unique_fallback_bytes, 288);
+        assert_eq!(plan.alias_bytes, 32);
+
+        let tail_alias = plan_retained_storage(&[160], &[&tail, &tail], 64, 128, 32).unwrap();
+        assert_eq!(tail_alias.unique_fallback_bytes, 64);
+        assert_eq!(tail_alias.alias_bytes, 64);
+        assert_eq!(
+            tail_alias.entries[1].disposition,
+            RetainedStorageDisposition::Alias {
+                source_request_index: 0,
+            }
+        );
+
+        let shard_zero = f32_desc("shard-zero", 0, 32, 8);
+        let shard_one = f32_desc("shard-one", 1, 64, 8);
+        let multi_requests = [&shard_one, &shard_zero];
+        let multi = plan_retained_storage(&[128, 192], &multi_requests, 64, 128, 32).unwrap();
+        assert_retained_plan_invariants(&multi, &multi_requests, &[128, 192]);
+        assert_eq!(multi.windows.len(), 2);
+        assert_eq!(multi.windows[0].shard_idx, 0);
+        assert_eq!(multi.windows[1].shard_idx, 1);
+    }
+
+    #[test]
+    fn retained_storage_plan_rejects_malformed_inputs() {
+        let valid = f32_desc("valid", 0, 64, 16);
+        assert!(plan_retained_storage(&[128], &[&valid], 0, 128, 32).is_err());
+        assert!(plan_retained_storage(&[128], &[&valid], 64, 63, 32).is_err());
+        assert!(plan_retained_storage(&[128], &[&valid], 64, 128, 0).is_err());
+        assert!(plan_retained_storage(&[128], &[&valid], 64, 128, 128).is_err());
+
+        let mut malformed = valid.clone();
+        malformed.n_bytes -= 1;
+        assert!(plan_retained_storage(&[128], &[&malformed], 64, 128, 32).is_err());
+
+        let empty = f32_desc("empty", 0, 0, 0);
+        assert!(plan_retained_storage(&[128], &[&empty], 64, 128, 32).is_err());
+
+        let alias_a = f32_desc("alias-a", 0, 64, 8);
+        let mut alias_b = alias_a.clone();
+        alias_b.name = "alias-b".to_string();
+        alias_b.shape = vec![2, 4];
+        assert!(plan_retained_storage(&[128], &[&alias_a, &alias_b], 64, 128, 32).is_err());
+
+        let overlap_a = f32_desc("overlap-a", 0, 32, 16);
+        let overlap_b = f32_desc("overlap-b", 0, 64, 8);
+        assert!(plan_retained_storage(&[128], &[&overlap_a, &overlap_b], 64, 128, 32).is_err());
+
+        let tail_misaligned = f32_desc("tail-misaligned", 0, 100, 8);
+        let tail_misaligned_plan =
+            plan_retained_storage(&[160], &[&tail_misaligned], 64, 128, 32).unwrap();
+        assert_eq!(
+            tail_misaligned_plan.entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::BindingMisalignment,
+            }
+        );
+
+        let tail_oversized = f32_desc("tail-oversized", 0, 64, 24);
+        let tail_oversized_plan =
+            plan_retained_storage(&[160], &[&tail_oversized], 64, 64, 32).unwrap();
+        assert_eq!(
+            tail_oversized_plan.entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::TensorExceedsWindow,
+            }
+        );
     }
 
     #[test]

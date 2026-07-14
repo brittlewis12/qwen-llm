@@ -523,14 +523,45 @@ complete loaded output-128 request loses `248 ms`. The frozen result is
 promotion. Copied teardown contributes another `141 ms` of apparent exit gain,
 so exit wall must not stand in for persistent inference.
 
-1. **Retained A3B loaded-tax attribution**: highest-information process-cold move.
-   Determine whether the stable `1.430 ms`/transition tax comes from ongoing
-   file-backed GPU translation/residency, sparse changing-expert access, or the
-   generic window topology. Use one loaded copied/retained attribution packet with
-   an explicit GPU-residency control and phase concentration, not another broad
-   cold family sweep. If late retained tax remains above 5%, classify A3B retained
-   storage as a private-footprint mode plus disposable-process specialization.
-   Only a cleared mechanism may reopen A10B timing or policy integration.
+v0.596 resolves that warning against broad warm use. Across the prospective
+`ABC,BCA,CAB` blocks, repetition-1 retained/copied decode is `0.87158x`, late
+decode is `0.87058x`, and normalized retained recovery is `0.99885x`. Late
+spread is below 0.3%. CPU-prefault C costs `2.441 s`, touches every page in the
+`22,123,544,576`-byte planned window, raises maximum RSS to `22.360 GB`, and still
+lands at `0.87015x`. Repeated packed prefill recovers to `0.99519x`, but p2
+inserts an untimed prefill plus transition and uses a different harness from
+v0.595. This narrows the prefill delta to before p2's timed regime without
+localizing it; the transition tax persists. This closes
+same-request post-warmup convergence and the current CPU-prefault operation on
+the frozen A3B request, not GPU translation, one-resource topology, file-backed
+provenance, expert-bank phase attribution, or arbitrary routes.
+
+The leverage inversion is now sharper: current A3B retained views are a narrow
+disposable-process/private-footprint specialization and a diagnostic control, not
+the broad destination. Copied A3B spends about `1.99 s` materializing `22.12 GB`
+through 733 independent shared Metal buffers, only about `11 GB/s` effective.
+The next candidate for a broad cold target is faster anonymous owned
+materialization, with copied hot behavior, backing, and resource topology tested
+separately rather than assumed.
+
+1. **Planner-shaped owned arena floor and A3B pilot**: highest-leverage exact
+   process-cold move. Compare the current 733 exact `newBufferWithBytes` calls
+   against one planner-window anonymous Metal allocation with a serial contiguous
+   copy and the same allocation with a fixed four-way page-aligned copy. Measure
+   allocation, copy, ready-to-bind, teardown, RSS/footprint, VM pressure, and full
+   byte equality. Kill before loader work unless median ready wall saves at least
+   500 ms, every arena pair is at most `0.85x` current materialization wall, and
+   v0.595 arithmetic predicts at least `1.20x` first-byte speedup. Also require a
+   valid host, zero block input/pageout/swap growth, and maximum RSS/footprint no
+   more than `1.05x` current copied materialization. If green, bind owned typed
+   views through existing planner offsets. The same-build engine pilot must compare
+   733-buffer anonymous copied, one-window anonymous owned, and one-window
+   file-backed retained. Require bit-exact full state, `>=1.20x` process-cold first
+   byte, `>=0.99x` late decode and warm prefill, and no loaded output-128 request
+   regression. Arena parity with copied while retained stays slow implicates file
+   provenance; both one-window arms losing implicates topology/offsets. Other
+   outcomes remain mixed. Difficulty S oracle/M pilot, belief medium, prize very
+   high.
 2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
@@ -548,7 +579,22 @@ so exit wall must not stand in for persistent inference.
    `T0/11` for a 1.10x request. With current N8 cost, runs below four are not even
    locally positive. Grammar-restricted lm_head rows are contract-exact and should
    be priced in the same artifact. Difficulty S oracle/M packet, belief medium.
-4. **Certified lm_head screening oracle**: exact selected-token work removal, not
+4. **Async retained-to-owned promotion**: conditional cold-plus-warm composition,
+   not current implementation work. Consider it only if the synchronous owned
+   arena clears copied decode and cold gates. Begin on retained storage for first
+   response, populate owned windows without contending materially with prefill or
+   decode, then cut over only at a command-buffer-safe epoch. Kill if copy traffic
+   moves request wall or if cutover needs per-tensor synchronization. Difficulty
+   L, belief low-medium, upside approaches the retained first-byte floor plus
+   copied steady decode.
+5. **Tensor-class mixed-storage attribution**: conditional mechanism/localization
+   branch. Run only if an anonymous one-resource arena loses decode against copied.
+   Price expert-bank bytes first, then compare copied-expert/retained-rest and
+   retained-expert/copied-rest at tensor granularity. Do not build dynamic
+   per-expert promotion before this oracle; if expert banks dominate bytes, the
+   memory prize collapses back toward full copy. Difficulty M, belief medium on
+   attribution and low on broad product value.
+6. **Certified lm_head screening oracle**: exact selected-token work removal, not
    bitwise full-logit equivalence. Before k-means, precompute outward-rounded
    per-row/per-256-dimension Q6 block norms. Give the oracle the true production
    winning logit, reveal blocks in query-global hidden-norm order, and prune only
@@ -557,15 +603,16 @@ so exit wall must not stand in for persistent inference.
    30% of baseline bytes after metadata. Only then add production accumulation
    error and require about 70% charged head-wall removal. Difficulty S-M oracle,
    belief low, but especially relevant to repeated draft heads.
-5. **MTPLX asset/contract decomposition**: highest information-value decode move,
-   not same-weight parity. Pin the local MTPLX runtime and published trunk, MTP
-   sidecar, draft-head, tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7
-   rows with phase and accepted-by-depth output. Published greedy D3 implies only
-   `Q~3.765`, so D3 cannot authorize qwen D7. A cross-trunk offline bridge must run
-   the candidate sidecar against qwen post-norm hidden/token traces and predict a
-   passing request before affine Metal work. Difficulty S for MTPLX packet, M for
-   bridge; belief medium, upside potentially material.
-6. **A3B long-context N8 and WY state oracle**: approximate warm-continuation lane
+7. **MTPLX asset/contract decomposition**: highest information-value speculative
+   decode move, not same-weight parity or current process-cold priority.
+   Pin the local MTPLX runtime and published trunk, MTP sidecar, draft-head,
+   tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7 rows with phase and
+   accepted-by-depth output. Published greedy D3 implies only `Q~3.765`, so D3
+   cannot authorize qwen D7. A cross-trunk offline bridge must run the candidate
+   sidecar against qwen post-norm hidden/token traces and predict a passing request
+   before affine Metal work. Difficulty S for MTPLX packet, M for bridge; belief
+   medium, upside potentially material.
+8. **A3B long-context N8 and WY state oracle**: approximate warm-continuation lane
    only. Before Metal WY work, run a captured CPU state-locality comparison against
    serial recurrence; the existing chunked carry/Gram family regressed badly, and
    regrouped recurrence does not inherently repair conv/KV drift. Separately price
@@ -574,22 +621,6 @@ so exit wall must not stand in for persistent inference.
    MTP asset is local, the current A3B packed verifier fails the exact state contract,
    and 131K TTFT dominates fresh requests. No replay-current or product work follows
    without `>=5%` charged warm-decode projection. Difficulty M, belief low-medium.
-7. **In-family external-drafter acceptance oracle**: use pinned llama.cpp
-   `--model-draft` for acceptance statistics, not wall time or DFlash tree-sim.
-   Fingerprint tokenizer tables and special IDs first; run greedy D7 with 128+
-   outputs over code, structured, and prose rows. At current qwen C1/N8 costs, the
-   no-prefill 1.10x mean-progress floors are `3.88/4.24/5.07/6.24` for
-   0.8B/2B/4B/9B. Test 0.8B first; test 2B only if 0.8B is promising, and do not
-   productize before charging drafter prefill, full-accept catch-up, rollback/replay,
-   second-model memory, and target correction. Difficulty S oracle/M integration,
-   belief low-medium.
-8. **Packed full-history MTP prompt construction**: required for any dense-MTP
-   product, but conditional on item 5 or another asset clearing request arithmetic.
-   The v0.587 request has base packed prefill `17.066-17.141 s`, current MTP decode
-   `8.127-8.409 s`, and 59 packets. With no extra history cost, current acceptance
-   projects only `1.078-1.092x` total. At a one-second packed-history budget,
-   1.10x requires about 48-50 packets. Do not implement until acceptance and a
-   packed-history floor satisfy the same equation. Difficulty L, belief conditional.
 9. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
    existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
    `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
@@ -607,7 +638,11 @@ one-shot envelope above. v0.594 prices 0.384-77.016 GB of removable base-weight
 private allocation across 54 local assets and realizes the force-only generic
 resources. Converted embeddings, derived buffers, CPU mirrors, MTP weights, and
 live file-backed residency remain separate. The A10B result is resource and
-sample-read authority, not full-forward, latency, or footprint authority.
+sample-read authority, not full-forward, latency, or footprint authority. v0.596
+closes current retained A3B as a broad warm representation and shows CPU prefault
+raises maximum RSS by about 22 GB without restoring speed. Owned arenas deliberately
+retain anonymous private allocation; their hypothesized prize is cold
+materialization wall plus copied warm speed, not the retained footprint reduction.
 
 Dense fresh-TTFT truth: no current exact branch has a credible material gain band
 for large dense prefill. Current packed compute is near the measured mat-mat
@@ -621,44 +656,46 @@ not merge objective lanes; every result must retain its boundary label.
 
 ### Active attack sequence
 
-Treat v0.593 as a measured narrow 27B optimization, v0.594 as broad force-only
-live correctness, and v0.595 as a measured but nonauthorizing A3B objective split.
-Persistent, server, MTP, storage-cold, and automatic use stay copied without
-separate evidence.
+Treat v0.593 as a measured narrow 27B disposable-process optimization, v0.594 as
+broad force-only retained correctness, and v0.596 as the closure of current
+file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
+automatic retained use stay copied without separate evidence.
 
-1. Run one loaded A3B retained-tax attribution packet. Separate first-touch from
-   late repeated transitions, include an explicit GPU-residency control, and
-   localize movement to MoE versus broad phases. Stop if the late tax remains
-   above 5%; do not hide it behind process teardown.
-2. Keep A10B at full-state diagnostic scope until item 1 adjudicates the MoE tax.
-   If reopened, require copied-versus-retained packed-prefill and one forced
-   transition full-state equality before a separately preregistered output-1
-   packet that hashes and warms all three physical shards.
-3. Run dense 9B under production embedding policy only after the tax decision. It
-   is a generic-loader architecture guard, not a prerequisite for pricing A10B.
-4. Finish the narrow query-capped auto-prefill product path. Reuse the existing
+1. Preregister and run the A3B owned-materialization floor. Use exact planner
+   geometry, current per-tensor copy, one serial owned arena, and one fixed
+   four-way owned arena. This is the next optimization task; do not start loader
+   integration before its 500 ms, `0.85x`, and projected first-byte gates clear.
+2. If the floor clears, implement one force-only owned A3B arena. Reuse planner
+   views and aliases, keep conversions separate, preserve logical weight-only
+   provenance, and run full-state plus cold/late product gates before any breadth.
+3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
    reopen 32K.
-5. In parallel with no production code, run one structured-trace grammar artifact:
+4. In parallel with no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-6. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
+5. Extend owned arenas beyond A3B only after both cold and decode pass. Audit
+   arena/live/gap/converted-source bytes across the existing 54-asset corpus;
+   then use split A10B as the multi-window resource guard. Do not run A10B retained
+   timing merely to reproduce the A3B objective split.
+6. Consider async retained-to-owned promotion only after synchronous arena parity.
+   Stop at the first measured copy-contention or unsafe cutover requirement.
+7. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
    artifact.
-7. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
+8. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
    drafter or writing qwen affine kernels. If D7 is promising, run the cross-trunk
    sidecar acceptance bridge and apply the total-request equation.
-8. Price 0.8B external drafting only after the work-removal and native-asset lanes.
-   Apply qwen packet costs and stop before a qwen dual-model harness unless charged
-   request economics clear. Run 2B only after a promising 0.8B result.
-9. Build packed full-history MTP prompt construction only if a sidecar or
-   another proposal asset predicts `>=1.10x` with its history budget charged.
-10. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
+9. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
    lane, top-k behind a named quality replay, and prompt reduction input-changing.
-11. Do not resume generic decode-storage diagnostics, matrix/compressed attention,
-   sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
-   GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
-   or local retuning without their explicit reopen conditions.
+10. If an anonymous one-resource arena misses decode parity, use one tensor-class
+    mixed-storage oracle to distinguish expert banks from broad topology. Do not
+    build dynamic expert promotion first.
+11. Do not resume current retained-view retunes, broad external drafting, packed
+    MTP history, generic decode-storage diagnostics, matrix/compressed attention,
+    sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
+    GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
+    or local retuning without their explicit reopen conditions.
 
 ### Decisive gates
 
@@ -667,7 +704,16 @@ separate evidence.
   bytes and lifetime under either destruction order. Every live model must match
   the ordered dry request inventory and copied full state. Physical accounting
   separates views, aliases, tail copies, conversions, derived buffers, CPU
-  mirrors, and MTP. A10B resource creation is not a latency promotion.
+  mirrors, and MTP. v0.596 does not authorize broad warm A3B promotion under
+  current file-backed storage; A10B resource creation is not a latency promotion.
+- **Owned weight arenas**: use anonymous shared Metal storage with a logical
+  weight-only provenance, not retained read-only provenance or generic scratch.
+  Report arena, live direct, gap, alias, fallback, and crossed-conversion bytes.
+  A materialization floor authorizes only loader implementation. The engine pilot
+  must compare per-tensor copied, one-window anonymous owned, and one-window
+  file-backed retained in the same build. Product promotion additionally requires
+  copied full state, `>=1.20x` first byte, `>=0.99x` warm prefill/decode, and no
+  loaded output-128 request regression.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

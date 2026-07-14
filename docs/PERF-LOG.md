@@ -6,6 +6,61 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-14 - v0.596 A3B Retained Loaded-Tax Attribution
+
+Status: persistent retained transition tax. Repeated identical requests and full
+CPU prefault do not recover copied decode. Do not broadly promote the current
+file-backed path beyond the measured A3B disposable-process/private-footprint
+specializations.
+
+- P1 stopped exactly as preregistered after three rejected `ABC` blocks. Every
+  A/B/C process reported 92 child `ru_majflt` events despite zero block input,
+  pageout, and swap growth. Two `qwen-bench build-info` and two
+  `qwen-bench metal-counters` controls each report an 89-fault executable/runtime
+  floor. P1 remains noncanonical; a pinned 25-file inventory authenticates every
+  process artifact, block decision, and raw control.
+- P2 changes only that mismatched validity rule: process faults remain recorded
+  but unlocalized and nonauthorizing. All three prospective `ABC,BCA,CAB` blocks
+  pass on attempt 1. Commands, context 1024, full-logits 127-transition shape,
+  ledgers, output hash, C checksum, host/cache/VM controls, and all original
+  decision thresholds remain frozen.
+- The v0.595 tax reproduces immediately and does not converge. Median
+  repetition-1 retained/copied decode is `0.87158x`; late repetition 3-5 is
+  `0.87058x`. Retained recovery normalized by copied is `0.99885x`, and each
+  retained late range is only `0.13-0.28%`. Marginal late medians are about
+  `103.45 t/s` copied and `90.15 t/s` retained.
+- CPU-prefault C is indistinguishable from demand-paged B: median late `C/A` is
+  `0.87015x`, normalized recovery is `0.99885x`, and last-repetition GPU kernel
+  medians are `8.97 ms` copied versus `10.14/10.13 ms` for B/C. CPU encode also
+  rises from `0.20` to `0.49/0.50 ms`; these last-repetition profiles are
+  consistency diagnostics, not complete phase attribution.
+- C adds a median `2441.03 ms` prefault and raises process RSS from about
+  `0.323 GB` retained to `22.360 GB`, yet does not move decode. This closes the
+  implemented CPU page walk/residency operation as a remedy. It does not alone
+  isolate GPU translation, giant-resource topology, file provenance, or expert
+  bank kernels.
+- Repeated packed prefill is nearly equal: median late `B/A` is `0.99519x` and
+  normalized prefill recovery is `0.99940x`. Because an untimed full-prompt
+  prefill plus one transition precedes repetition 1, this narrows v0.595's 19%
+  prefill loss to before p2's timed regime without localizing it. P2 also uses
+  `qwen-bench`, not v0.595's CLI request-timing harness.
+- All nine p2 processes again report 92 faults with zero arm differentials. This
+  confirms the process counter is nondiscriminating here, not that GPU-side
+  mapping is fault-free.
+- The result closes same-request post-warmup convergence and CPU prefault as
+  remedies for the measured A3B tax. Together with v0.592's hazard closure, it
+  leaves current file-backed views below copied warm speed on this fixture. It
+  newly exposes the other side of the comparison: copied loading spends about
+  1.99 s materializing 22.12 GB through 733 independent shared Metal buffers,
+  only about 11 GB/s effective. The next broad cold oracle is planner-shaped
+  anonymous owned arenas, not another retained-view retune.
+
+Artifacts: `target/profiles/v0596-a3b-retained-route-warm-p1/` and
+`target/profiles/v0596-a3b-retained-route-warm-p2/`. Frozen sources: `8cdf44e`
+and `a393ed3`. Adversarial protocol/result review: `cx ask` session
+`019f614e-3891-7733-827c-33a6591eed7d`. Leverage review:
+`019f617b-c9de-7ec2-b5be-2a3c55ded7e5`.
+
 ## 2026-07-14 - v0.595 A3B Generic Retained-Storage Cold Result
 
 Status: massive cache-warm disposable-process win and private-allocation removal,

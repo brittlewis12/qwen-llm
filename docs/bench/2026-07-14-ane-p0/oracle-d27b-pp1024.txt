@@ -1,0 +1,5 @@
+{"model": "d27b", "n_prompt": 1024, "w_wall_s": 4.1824, "w_gpu_s": 4.1622, "traced_baseline_s": 4.0529, "distortion": 0.9737, "note": "ceilings assume proportional scaling of serialized shares onto W"}
+subset                                                     cov     pess     opt
+OFF-SKINNY                                                 all   1.0055  1.0055
+OFF-SKINNY                                                 alt   1.0036  1.0036
+OFF-ATTN-E+OFF-SKINNY                                      alt   1.0036  1.0036

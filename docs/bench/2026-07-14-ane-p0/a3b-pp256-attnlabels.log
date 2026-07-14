@@ -1,0 +1,1355 @@
+[pp] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[pp] power: source=AC Power battery=78% AC attached warning=none powermode_ac=2 powermode_battery=2 thermal_warning=false performance_warning=false
+[metal-load] native quantized token embedding policy: auto-promoted (Q8_0 [2048, 248320])
+[metal-load-ledger] source=733/22123538944 direct_copy=733/22123538944 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[pp] model=/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf source=synthetic token ids (seed=1) n_prompt=256 runs=1 chunk=256 tail=skip
+[pp] lowering: gdn_batched=30/30 attn_batched=10/10 dense_ffn_batched=0/0 moe_gpu_token_loop=40/40
+[pp] dtype sample gdn: qkv=Q8_0 z=Q8_0 out=Q8_0
+[pp] dtype sample attn: q=Q8_0 k=Q8_0 v=Q8_0 o=Q8_0
+[pp] dtype sample moe: gate=Q4_K up=Q4_K down=Q5_K
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=pre_norm gpu_ms=0.13
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_qkv gpu_ms=3.05
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_z gpu_ms=1.58
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_beta_alpha gpu_ms=0.67
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_alpha_beta gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_prep_conv gpu_ms=0.42
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_prep_l2 gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_step gpu_ms=1.69
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_gated gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_back gpu_ms=1.75
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=mixer_resid gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=post_norm gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=route_fused gpu_ms=0.48
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=routed_swiglu gpu_ms=8.62
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=routed_down gpu_ms=5.40
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=routed_reduce gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=shared_packed gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=pre_norm gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_qkv gpu_ms=3.04
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_z gpu_ms=1.57
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_beta_alpha gpu_ms=0.65
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_alpha_beta gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_prep_conv gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_prep_l2 gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_step gpu_ms=1.66
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_gated gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_back gpu_ms=1.75
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=mixer_resid gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=post_norm gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=route_fused gpu_ms=0.33
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=routed_swiglu gpu_ms=8.11
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=routed_down gpu_ms=4.79
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_qkv gpu_ms=3.04
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_z gpu_ms=1.57
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_beta_alpha gpu_ms=0.42
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_prep_conv gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_step gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_gated gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_back gpu_ms=1.27
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=mixer_resid gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=post_norm gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=route_fused gpu_ms=0.47
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=routed_swiglu gpu_ms=6.77
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=routed_down gpu_ms=3.51
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=attn phase=pre_norm gpu_ms=0.02
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=proj gpu_ms=3.48
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=norm gpu_ms=0.24
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=rope_scatter gpu_ms=0.04
+[prefill-attn-packed-shape] layer=3 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=3 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=body_matrix_kq gpu_ms=0.09
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=body_matrix_kqv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=attn phase=attn_back gpu_ms=1.00
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=attn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=route_fused gpu_ms=0.27
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=routed_swiglu gpu_ms=6.34
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=routed_down gpu_ms=4.39
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_qkv gpu_ms=1.67
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_z gpu_ms=0.86
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_beta_alpha gpu_ms=0.63
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_alpha_beta gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_prep_conv gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_prep_l2 gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_step gpu_ms=0.93
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_gated gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_back gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=route_fused gpu_ms=0.26
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=routed_swiglu gpu_ms=4.74
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=routed_down gpu_ms=2.74
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_qkv gpu_ms=1.83
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_z gpu_ms=0.86
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_beta_alpha gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_prep_conv gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_step gpu_ms=0.92
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_gated gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_back gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=route_fused gpu_ms=0.26
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=routed_swiglu gpu_ms=4.43
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=routed_down gpu_ms=2.84
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=shared_packed gpu_ms=0.54
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_qkv gpu_ms=1.68
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_z gpu_ms=0.87
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_beta_alpha gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_prep_conv gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_step gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_back gpu_ms=0.97
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=route_fused gpu_ms=0.26
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=routed_swiglu gpu_ms=4.09
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=routed_down gpu_ms=2.69
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=attn phase=pre_norm gpu_ms=0.02
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=proj gpu_ms=1.87
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=norm gpu_ms=0.12
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=rope_scatter gpu_ms=0.03
+[prefill-attn-packed-shape] layer=7 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=7 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=body_matrix_kq gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=body_matrix_kqv gpu_ms=0.07
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=attn phase=attn_back gpu_ms=0.81
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=route_fused gpu_ms=0.26
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=routed_swiglu gpu_ms=4.16
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=routed_down gpu_ms=2.72
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_qkv gpu_ms=1.48
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_z gpu_ms=0.67
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_beta_alpha gpu_ms=0.29
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_prep_conv gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_step gpu_ms=0.71
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_back gpu_ms=0.95
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=route_fused gpu_ms=0.26
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=routed_swiglu gpu_ms=3.42
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=routed_down gpu_ms=2.71
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=shared_packed gpu_ms=0.42
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_qkv gpu_ms=1.29
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_z gpu_ms=0.67
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_beta_alpha gpu_ms=0.29
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_prep_conv gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_step gpu_ms=0.73
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_back gpu_ms=0.95
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=route_fused gpu_ms=0.26
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=routed_swiglu gpu_ms=3.51
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=routed_down gpu_ms=2.55
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=shared_packed gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_qkv gpu_ms=1.29
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_z gpu_ms=0.67
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_beta_alpha gpu_ms=0.29
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_prep_conv gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_step gpu_ms=0.71
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_back gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=routed_swiglu gpu_ms=3.42
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=routed_down gpu_ms=2.51
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=shared_packed gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=proj gpu_ms=1.57
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=norm gpu_ms=0.12
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=rope_scatter gpu_ms=0.03
+[prefill-attn-packed-shape] layer=11 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=11 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=body_matrix_kq gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=body_matrix_kqv gpu_ms=0.07
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=attn phase=attn_back gpu_ms=0.78
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=routed_swiglu gpu_ms=3.31
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=routed_down gpu_ms=2.06
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_qkv gpu_ms=1.32
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_z gpu_ms=0.67
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_beta_alpha gpu_ms=0.30
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_prep_conv gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_step gpu_ms=0.71
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_back gpu_ms=0.74
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=routed_swiglu gpu_ms=3.20
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=routed_down gpu_ms=1.97
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=shared_packed gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_qkv gpu_ms=1.43
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_z gpu_ms=0.67
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_beta_alpha gpu_ms=0.29
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_prep_conv gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_step gpu_ms=0.70
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_back gpu_ms=0.74
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=mixer_resid gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=routed_swiglu gpu_ms=3.24
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=routed_down gpu_ms=2.03
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=shared_packed gpu_ms=0.42
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_qkv gpu_ms=1.39
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_z gpu_ms=0.68
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_beta_alpha gpu_ms=0.32
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_prep_conv gpu_ms=0.18
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_step gpu_ms=0.72
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_back gpu_ms=0.76
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=routed_swiglu gpu_ms=3.30
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=routed_down gpu_ms=1.99
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=shared_packed gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=proj gpu_ms=1.59
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=norm gpu_ms=0.11
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=rope_scatter gpu_ms=0.03
+[prefill-attn-packed-shape] layer=15 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=15 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=body_matrix_kq gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=body_matrix_kqv gpu_ms=0.07
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=attn phase=attn_back gpu_ms=0.78
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=attn phase=mixer_resid gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=routed_swiglu gpu_ms=2.94
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=routed_down gpu_ms=2.01
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=shared_packed gpu_ms=0.43
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_qkv gpu_ms=1.30
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_z gpu_ms=0.68
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_beta_alpha gpu_ms=0.32
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_prep_conv gpu_ms=0.18
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_step gpu_ms=0.71
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_gated gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_back gpu_ms=0.77
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=routed_swiglu gpu_ms=3.13
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=routed_down gpu_ms=2.19
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=shared_packed gpu_ms=0.43
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_qkv gpu_ms=1.30
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_z gpu_ms=0.68
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_beta_alpha gpu_ms=0.32
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_prep_conv gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_step gpu_ms=0.73
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_back gpu_ms=0.86
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=routed_swiglu gpu_ms=2.87
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=routed_down gpu_ms=2.30
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=shared_packed gpu_ms=0.42
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_qkv gpu_ms=1.30
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_z gpu_ms=0.68
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_beta_alpha gpu_ms=0.32
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_prep_conv gpu_ms=0.18
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_step gpu_ms=0.71
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_gated gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_back gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=route_fused gpu_ms=0.21
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=routed_swiglu gpu_ms=3.29
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=routed_down gpu_ms=2.49
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=shared_packed gpu_ms=0.43
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=attn phase=pre_norm gpu_ms=0.02
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=proj gpu_ms=1.59
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=norm gpu_ms=0.12
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=rope_scatter gpu_ms=0.03
+[prefill-attn-packed-shape] layer=19 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=19 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=body_matrix_kq gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=body_matrix_kqv gpu_ms=0.07
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=attn phase=attn_back gpu_ms=0.78
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=attn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=route_fused gpu_ms=0.26
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=routed_swiglu gpu_ms=3.33
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=routed_down gpu_ms=2.24
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=shared_packed gpu_ms=0.54
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_qkv gpu_ms=1.49
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_z gpu_ms=0.68
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_beta_alpha gpu_ms=0.32
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_prep_conv gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_step gpu_ms=0.72
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_back gpu_ms=0.82
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=route_fused gpu_ms=0.27
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=routed_swiglu gpu_ms=3.67
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=routed_down gpu_ms=2.79
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=shared_packed gpu_ms=0.55
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_qkv gpu_ms=1.36
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_z gpu_ms=0.68
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_beta_alpha gpu_ms=0.32
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_prep_conv gpu_ms=0.18
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_step gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_back gpu_ms=0.97
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=route_fused gpu_ms=0.27
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=routed_swiglu gpu_ms=3.66
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=routed_down gpu_ms=2.76
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=routed_reduce gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=shared_packed gpu_ms=0.52
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=pre_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_qkv gpu_ms=1.30
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_z gpu_ms=0.87
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_beta_alpha gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_prep_conv gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_prep_l2 gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_step gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_gated gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_back gpu_ms=0.97
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=post_norm gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=route_fused gpu_ms=0.27
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=routed_swiglu gpu_ms=4.22
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=routed_down gpu_ms=2.28
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=routed_reduce gpu_ms=0.05
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=shared_packed gpu_ms=0.44
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=attn phase=pre_norm gpu_ms=0.02
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=proj gpu_ms=1.59
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=norm gpu_ms=0.12
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=rope_scatter gpu_ms=0.03
+[prefill-attn-packed-shape] layer=23 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=23 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=body_matrix_kq gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=body_matrix_kqv gpu_ms=0.06
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=attn phase=attn_back gpu_ms=0.68
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=attn phase=mixer_resid gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=route_fused gpu_ms=0.19
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=routed_swiglu gpu_ms=3.07
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=routed_down gpu_ms=1.67
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=routed_reduce gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=shared_packed gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_qkv gpu_ms=1.12
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_z gpu_ms=0.51
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_beta_alpha gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_prep_conv gpu_ms=0.13
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_step gpu_ms=0.54
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_back gpu_ms=0.57
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=route_fused gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=routed_swiglu gpu_ms=2.07
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=routed_down gpu_ms=1.41
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=routed_reduce gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=shared_packed gpu_ms=0.33
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_qkv gpu_ms=0.98
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_z gpu_ms=0.50
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_beta_alpha gpu_ms=0.24
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_prep_conv gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_step gpu_ms=0.48
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_gated gpu_ms=0.02
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_back gpu_ms=0.50
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=route_fused gpu_ms=0.14
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=routed_swiglu gpu_ms=1.91
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=routed_down gpu_ms=1.17
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=shared_packed gpu_ms=0.27
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_qkv gpu_ms=0.83
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_z gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_beta_alpha gpu_ms=0.19
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_alpha_beta gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_prep_conv gpu_ms=0.10
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_step gpu_ms=0.43
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_back gpu_ms=0.45
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=route_fused gpu_ms=0.14
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=routed_swiglu gpu_ms=1.99
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=routed_down gpu_ms=1.09
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=shared_packed gpu_ms=0.24
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=proj gpu_ms=0.86
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=27 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=27 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=routed_swiglu gpu_ms=1.68
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=routed_down gpu_ms=1.07
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=shared_packed gpu_ms=0.24
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_qkv gpu_ms=0.67
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=routed_swiglu gpu_ms=1.55
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=routed_down gpu_ms=0.98
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=routed_swiglu gpu_ms=1.55
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=routed_down gpu_ms=0.99
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=routed_swiglu gpu_ms=1.62
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=routed_down gpu_ms=0.99
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=31 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=31 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=routed_swiglu gpu_ms=1.62
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=routed_down gpu_ms=0.98
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=routed_swiglu gpu_ms=1.56
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=routed_down gpu_ms=1.03
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=routed_swiglu gpu_ms=1.69
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=routed_down gpu_ms=1.10
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=routed_swiglu gpu_ms=1.62
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=routed_down gpu_ms=0.93
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=35 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=35 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=attn phase=attn_back gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=routed_swiglu gpu_ms=1.73
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=routed_down gpu_ms=1.05
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=routed_swiglu gpu_ms=1.67
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=routed_down gpu_ms=1.05
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=routed_swiglu gpu_ms=1.63
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=routed_down gpu_ms=0.97
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=routed_swiglu gpu_ms=1.56
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=routed_down gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=norm gpu_ms=0.08
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=39 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=39 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=routed_swiglu gpu_ms=1.62
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=routed_down gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=pre_norm gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=routed_swiglu gpu_ms=1.91
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=routed_down gpu_ms=1.20
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=0 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=routed_swiglu gpu_ms=2.00
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=routed_down gpu_ms=1.23
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=routed_reduce gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=1 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=routed_swiglu gpu_ms=2.14
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=routed_down gpu_ms=1.14
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=2 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=3 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=3 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=3 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=attn phase=attn_back gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=routed_swiglu gpu_ms=1.93
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=routed_down gpu_ms=1.16
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=3 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=routed_swiglu gpu_ms=1.70
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=routed_down gpu_ms=1.09
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=4 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=routed_swiglu gpu_ms=1.77
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=routed_down gpu_ms=1.15
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=5 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=routed_swiglu gpu_ms=1.76
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=routed_down gpu_ms=1.08
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=6 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=proj gpu_ms=0.80
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=norm gpu_ms=0.08
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=7 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=7 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=7 phase=body_matrix_kqv gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=routed_swiglu gpu_ms=1.83
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=routed_down gpu_ms=1.11
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=7 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=routed_swiglu gpu_ms=1.74
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=routed_down gpu_ms=1.08
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=8 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=routed_swiglu gpu_ms=1.77
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=routed_down gpu_ms=1.07
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=9 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=routed_swiglu gpu_ms=1.76
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=routed_down gpu_ms=1.08
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=10 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=11 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=11 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=11 phase=body_matrix_kqv gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=routed_swiglu gpu_ms=1.73
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=routed_down gpu_ms=1.06
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=11 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=routed_swiglu gpu_ms=1.69
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=routed_down gpu_ms=1.01
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=12 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=routed_swiglu gpu_ms=1.65
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=routed_down gpu_ms=1.00
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=13 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=routed_swiglu gpu_ms=1.63
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=routed_down gpu_ms=1.02
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=14 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=proj gpu_ms=0.80
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=15 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=15 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=15 phase=body_matrix_kqv gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=attn phase=attn_back gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=routed_swiglu gpu_ms=1.54
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=routed_down gpu_ms=0.99
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=15 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=routed_swiglu gpu_ms=1.59
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=routed_down gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=16 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=routed_swiglu gpu_ms=1.49
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=routed_down gpu_ms=0.97
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=17 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=routed_swiglu gpu_ms=1.69
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=routed_down gpu_ms=1.03
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=18 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=proj gpu_ms=0.80
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=19 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=19 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=19 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=attn phase=attn_back gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=routed_swiglu gpu_ms=1.67
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=routed_down gpu_ms=1.02
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=19 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=routed_swiglu gpu_ms=1.90
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=routed_down gpu_ms=1.10
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=20 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=routed_swiglu gpu_ms=1.84
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=routed_down gpu_ms=1.06
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=21 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=routed_swiglu gpu_ms=1.76
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=routed_down gpu_ms=1.00
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=22 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=23 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=23 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=23 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=routed_swiglu gpu_ms=1.58
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=routed_down gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=23 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=routed_swiglu gpu_ms=1.50
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=routed_down gpu_ms=0.94
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=24 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=routed_swiglu gpu_ms=1.56
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=routed_down gpu_ms=0.97
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=25 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=routed_swiglu gpu_ms=1.66
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=routed_down gpu_ms=1.02
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=26 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=27 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=27 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=27 phase=body_matrix_kqv gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=attn phase=attn_back gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=routed_swiglu gpu_ms=1.59
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=routed_down gpu_ms=0.99
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=27 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=routed_swiglu gpu_ms=1.56
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=routed_down gpu_ms=0.98
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=28 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=routed_swiglu gpu_ms=1.52
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=routed_down gpu_ms=0.99
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=29 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=routed_swiglu gpu_ms=1.59
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=routed_down gpu_ms=0.99
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=30 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=proj gpu_ms=0.81
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=31 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=31 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=31 phase=body_matrix_kqv gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=routed_swiglu gpu_ms=1.59
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=routed_down gpu_ms=0.97
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=31 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=routed_swiglu gpu_ms=1.56
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=routed_down gpu_ms=1.03
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=32 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=routed_swiglu gpu_ms=1.66
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=routed_down gpu_ms=1.09
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=33 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_step gpu_ms=0.36
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=routed_swiglu gpu_ms=1.59
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=routed_down gpu_ms=0.92
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=34 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=proj gpu_ms=0.80
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=norm gpu_ms=0.08
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=35 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=35 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=35 phase=body_matrix_kqv gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=attn phase=attn_back gpu_ms=0.40
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=routed_swiglu gpu_ms=1.69
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=routed_down gpu_ms=1.04
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=35 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=routed_swiglu gpu_ms=1.74
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=routed_down gpu_ms=1.04
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=36 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=routed_swiglu gpu_ms=1.64
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=routed_down gpu_ms=0.96
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=37 kind=moe phase=shared_packed gpu_ms=0.22
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=pre_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_qkv gpu_ms=0.66
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_z gpu_ms=0.34
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_beta_alpha gpu_ms=0.17
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_alpha_beta gpu_ms=0.00
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_prep_conv gpu_ms=0.09
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_prep_l2 gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_step gpu_ms=0.37
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_gated gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=gdn_back gpu_ms=0.38
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=gdn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=routed_swiglu gpu_ms=1.56
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=routed_down gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=38 kind=moe phase=shared_packed gpu_ms=0.23
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=attn phase=pre_norm gpu_ms=0.01
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=proj gpu_ms=0.80
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=norm gpu_ms=0.07
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=rope_scatter gpu_ms=0.02
+[prefill-attn-packed-shape] layer=39 chunk_start=0 chunk_p=256 group=8 packed_rows=4 qt=2 row_groups=64 dispatches=128 nwg=64 partial_rw_mib=516.00
+[prefill-attn-matrix-g8-shape] layer=39 chunk_start=0 chunk_p=256 query_rows=256 query_tiles=1 n_pos=256 score_tile_scratch_mib=2.12 vt_stride=256 vt_layer_mib=0.25 vt_update_base=0 vt_update_rows=256 vt_update_mib=0.25
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=body_matrix_kq gpu_ms=0.04
+[prefill-attn-phase] chunk=0 start=0 layer=39 phase=body_matrix_kqv gpu_ms=0.04
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=attn phase=attn_back gpu_ms=0.41
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=attn phase=mixer_resid gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=post_norm gpu_ms=0.01
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=route_fused gpu_ms=0.12
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=routed_swiglu gpu_ms=1.57
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=routed_down gpu_ms=0.91
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=routed_reduce gpu_ms=0.03
+[prefill-layer-phase] chunk=0 start=0 layer=39 kind=moe phase=shared_packed gpu_ms=0.23
+[pp] run  1: wall    306.7 ms  gpu    199.7 ms   834.60 t/s
+
+[pp] === results ===
+[pp] prompt: 256 tokens in 306.7 ms avg = 1.20 ms/token = 834.60 +/- 0.00 t/s
+[pp] gpu:    199.7 ms avg = 0.78 ms/token = 65.1% of wall
+[pp] note: session and scratch allocation are outside the timed interval; tail=skipped to match llama-bench pp logits policy.

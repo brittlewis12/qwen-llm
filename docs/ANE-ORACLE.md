@@ -1,10 +1,17 @@
 # ANE Prefill Co-Processor Oracle (P0-P4)
 
-Status: **P0/P0b preregistered, rev 2** (amended after adversarial review 1,
-cx session 019f61ea; review verdict NO-GO on rev 1's formula — this revision
-adopts its corrections in full). Branch `ane-oracle`; integrate to main only
-through the gates below. Every rung is killable; a kill merges this doc +
-artifacts + a PERF-LOG entry and removes experiment source.
+Status: **P0 executed — LANE KILLED** (2026-07-14, artifact
+`docs/bench/2026-07-14-ane-p0/`). Best schedulable ceiling: A3B 1.055x,
+27B 1.005x vs preregistered gates 1.10x pess / 1.15x opt. The binding
+constraint is the per-layer producer/consumer chain, not aggregate idle
+time; ANE rate priors (3.2-7.3 TFLOP/s) cannot keep up with the 13 TFLOP/s
+GPU on every class large enough to matter. P1-P4 never ran; no ANE
+dependency entered the workspace. Reopen conditions at the end of the
+artifact README.
+
+History: rev 2 preregistered at 18684c7 after adversarial review 1
+(cx session 019f61ea, verdict NO-GO on rev 1's formula; corrections adopted
+in full). P0 ran at 18684c7+ with gates frozen before data.
 
 ## Objective lane and boundary
 

@@ -1,0 +1,12 @@
+{"model": "a3b", "n_prompt": 4096, "w_wall_s": 2.489, "w_gpu_s": 2.4713, "traced_baseline_s": 2.4097, "distortion": 0.975, "note": "ceilings assume proportional scaling of serialized shares onto W"}
+subset                                                     cov     pess     opt
+OFF-SHARED+OFF-SKINNY                                      all   1.0533  1.0533
+OFF-SHARED                                                 all   1.0440  1.0440
+OFF-SHARED+OFF-SKINNY                                      alt   1.0274  1.0274
+OFF-ATTN-E+OFF-SHARED+OFF-SKINNY                           alt   1.0274  1.0274
+OFF-ATTN-R+OFF-SHARED+OFF-SKINNY                           alt   1.0274  1.0274
+OFF-ATTN-E+OFF-ATTN-R+OFF-SHARED+OFF-SKINNY                alt   1.0274  1.0274
+OFF-SHARED                                                 alt   1.0215  1.0215
+OFF-ATTN-E+OFF-SHARED                                      alt   1.0215  1.0215
+OFF-ATTN-R+OFF-SHARED                                      alt   1.0215  1.0215
+OFF-ATTN-E+OFF-ATTN-R+OFF-SHARED                           alt   1.0215  1.0215

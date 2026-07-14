@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.592 Hazard-Tracking Mechanism Stop
+
+Status: valid execution, malformed clearance rule, non-authorizing negative
+mechanism result; remove the experimental flag and return to auto-prefill.
+
+- v0.592 changes only the exact retained GGUF buffer from tracked to untracked
+  Metal hazard mode. Both arms retain the same file backing, one-large-buffer
+  topology, 1,026,443-page CPU prefault, exact load ledger, prompt, and request.
+  Resource telemetry confirms the requested mode. Full packed-prefill logits,
+  KV/GDN state, one forced transition, and continuation state remain bitwise;
+  196 active library tests pass and 124 are ignored.
+- The frozen `BA,AB` screen uses 120 seconds before every process and an identical
+  loaded-model follow-up. First-request transition B/A is
+  `1.0027977x/1.0005925x`; warm-followup B/A is
+  `0.9998928x/0.9994383x`. Warm-prefill B-A is `-0.769/+0.676 ms`, and prefault
+  differs by only `-1.117/-1.470 ms`. Outputs, ledgers, host state, hard faults,
+  and block I/O are green.
+- Every literal numeric gate mechanically clears: warm median is `0.9996656x`,
+  minimum is `0.9994383x`, and first-request median is `1.0016951x`. The gate is
+  nevertheless malformed for its stated purpose. A parity threshold between
+  untracked and tracked no-copy tests non-inferiority, not recovery toward copied
+  storage. It cannot authorize no-prefault work.
+- The defect was identified immediately after reading the four row summaries and
+  before computing aggregate ratios, requesting adversarial review, or recording
+  a pass/fail decision. Preserve the literal pass in the record; do not reinterpret
+  it as a valid recovery gate.
+- The direct treatment contrast remains useful. Full recovery of v0.591's copied
+  versus no-copy gap required about `1.0324-1.0332x`; reaching even 0.99 of copied
+  storage required about `1.0221-1.0229x`. Observed warm effect is about
+  `-0.033%`. Therefore exposed hazard mode produces no material warm-decode
+  improvement on this fixture and does not explain most of the prior gap. This is
+  not a formal equivalence claim from two pairs.
+- Do not run copied-versus-untracked merely to re-estimate the hazard treatment.
+  Anonymous-arena and per-tensor page-window controls retain diagnostic value but
+  do not themselves ship the memory win; defer them unless 16.8 GB residency
+  reduction becomes a separately prioritized product objective. The active
+  latency queue returns to admitted query-capped auto-prefill.
+
+Artifacts: `target/profiles/v0592-no-copy-untracked/`. Frozen source: `e740f65`.
+Adversarial review: `cx ask` session `019f5e04-0039-7800-8119-5ea2c942991e`.
+
 ## 2026-07-13 - v0.591 Retained-GGUF Memory Win, Latency Stop
 
 Status: the exact 27B read-only GGUF view clears correctness and memory gates but

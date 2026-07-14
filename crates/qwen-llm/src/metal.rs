@@ -826,6 +826,24 @@ impl MetalContext {
         )
     }
 
+    pub(crate) fn gguf_no_copy_window(
+        &self,
+        mmap: Arc<Mmap>,
+        shard_idx: usize,
+        mmap_offset: usize,
+        length: usize,
+        required_alignment: usize,
+    ) -> Result<MetalGgufBacking, MetalError> {
+        self.gguf_no_copy_window_with_observer(
+            mmap,
+            shard_idx,
+            mmap_offset,
+            length,
+            required_alignment,
+            |_pointer, _length| {},
+        )
+    }
+
     fn gguf_no_copy_backing_with_observer<F>(
         &self,
         mmap: Arc<Mmap>,
@@ -840,19 +858,59 @@ impl MetalContext {
         let mapped_len = mmap.len();
         let geometry =
             GgufBackingGeometry::new(shard_idx, mapped_len, page_size, required_alignment)?;
-        let ptr = NonNull::new(mmap.as_ptr() as *mut c_void)
-            .ok_or_else(|| MetalError::GgufNoCopy("mmap pointer is null".to_string()))?;
-        if ptr.as_ptr() as usize % page_size != 0 {
+        self.gguf_no_copy_geometry_with_observer(mmap, geometry, observer)
+    }
+
+    fn gguf_no_copy_window_with_observer<F>(
+        &self,
+        mmap: Arc<Mmap>,
+        shard_idx: usize,
+        mmap_offset: usize,
+        length: usize,
+        required_alignment: usize,
+        observer: F,
+    ) -> Result<MetalGgufBacking, MetalError>
+    where
+        F: Fn(NonNull<c_void>, usize) + Send + Sync + 'static,
+    {
+        let geometry = GgufBackingGeometry::new_window(
+            shard_idx,
+            mmap.len(),
+            mmap_offset,
+            length,
+            host_page_size()?,
+            required_alignment,
+        )?;
+        self.gguf_no_copy_geometry_with_observer(mmap, geometry, observer)
+    }
+
+    fn gguf_no_copy_geometry_with_observer<F>(
+        &self,
+        mmap: Arc<Mmap>,
+        geometry: GgufBackingGeometry,
+        observer: F,
+    ) -> Result<MetalGgufBacking, MetalError>
+    where
+        F: Fn(NonNull<c_void>, usize) + Send + Sync + 'static,
+    {
+        let ptr = NonNull::new(
+            // SAFETY: geometry construction proves mmap_offset is within the
+            // mapping and starts a non-empty window.
+            unsafe { mmap.as_ptr().add(geometry.mmap_offset()) } as *mut c_void,
+        )
+        .ok_or_else(|| MetalError::GgufNoCopy("mmap pointer is null".to_string()))?;
+        if ptr.as_ptr() as usize % geometry.page_size() != 0 {
             return Err(MetalError::GgufNoCopy(format!(
-                "mmap pointer {:p} is not aligned to host page size {page_size}",
-                ptr.as_ptr()
+                "window pointer {:p} is not aligned to host page size {}",
+                ptr.as_ptr(),
+                geometry.page_size(),
             )));
         }
         let max_len = self.device.maxBufferLength();
-        if geometry.exposed_len > max_len {
+        if geometry.exposed_len() > max_len {
             return Err(MetalError::GgufNoCopy(format!(
                 "page-aligned length {} exceeds Metal maxBufferLength {max_len}",
-                geometry.exposed_len
+                geometry.exposed_len()
             )));
         }
 
@@ -864,20 +922,21 @@ impl MetalContext {
                 observer(pointer, length);
                 let _ = &keepalive;
             });
-        // SAFETY: `ptr` starts a single read-only mmap VM region, both pointer
-        // and exposed length are host-page aligned, exposed_len is within the
-        // mapping and Metal's per-buffer limit, and the copied deallocator
-        // block retains the Arc<Mmap> until the MTLBuffer is destroyed.
+        // SAFETY: `ptr` starts a read-only, page-aligned window within one mmap
+        // VM region. Its length is page aligned and within both the mapping and
+        // Metal's per-buffer limit. The copied deallocator block retains the
+        // Arc<Mmap> until this MTLBuffer is destroyed. Other overlapping
+        // windows retain independent Arc clones and do not unmap this region.
         let buffer = unsafe {
             self.device
                 .newBufferWithBytesNoCopy_length_options_deallocator(
                     ptr,
-                    geometry.exposed_len,
+                    geometry.exposed_len(),
                     MTLResourceOptions::StorageModeShared,
                     Some(&deallocator),
                 )
         }
-        .ok_or(MetalError::NoBuffer(geometry.exposed_len))?;
+        .ok_or(MetalError::NoBuffer(geometry.exposed_len()))?;
         Ok(MetalGgufBacking { buffer, geometry })
     }
 
@@ -1116,6 +1175,7 @@ pub(crate) enum GgufBackingEligibility {
 pub(crate) struct GgufBackingGeometry {
     shard_idx: usize,
     mapped_len: usize,
+    mmap_offset: usize,
     exposed_len: usize,
     page_size: usize,
     required_alignment: usize,
@@ -1480,20 +1540,68 @@ impl GgufBackingGeometry {
                 "host page size {page_size} is not a power of two"
             )));
         }
+        let exposed_len = mapped_len / page_size * page_size;
+        Self::new_window(
+            shard_idx,
+            mapped_len,
+            0,
+            exposed_len,
+            page_size,
+            required_alignment,
+        )
+    }
+
+    pub(crate) fn new_window(
+        shard_idx: usize,
+        mapped_len: usize,
+        mmap_offset: usize,
+        exposed_len: usize,
+        page_size: usize,
+        required_alignment: usize,
+    ) -> Result<Self, MetalError> {
+        if !page_size.is_power_of_two() {
+            return Err(MetalError::GgufNoCopy(format!(
+                "host page size {page_size} is not a power of two"
+            )));
+        }
         if !required_alignment.is_power_of_two() {
             return Err(MetalError::GgufNoCopy(format!(
                 "required binding alignment {required_alignment} is not a power of two"
             )));
         }
-        let exposed_len = mapped_len / page_size * page_size;
+        if page_size % required_alignment != 0 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "required binding alignment {required_alignment} does not divide \
+                 page size {page_size}"
+            )));
+        }
+        if mmap_offset % page_size != 0 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "window offset {mmap_offset} is not page aligned to {page_size}"
+            )));
+        }
         if exposed_len == 0 {
             return Err(MetalError::GgufNoCopy(format!(
-                "mapped length {mapped_len} exposes no complete {page_size}-byte page"
+                "window length must contain at least one complete {page_size}-byte page"
+            )));
+        }
+        if exposed_len % page_size != 0 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "window length {exposed_len} is not page aligned to {page_size}"
+            )));
+        }
+        let window_end = mmap_offset.checked_add(exposed_len).ok_or_else(|| {
+            MetalError::GgufNoCopy("window offset and length overflow usize".to_string())
+        })?;
+        if window_end > mapped_len {
+            return Err(MetalError::GgufNoCopy(format!(
+                "window range {mmap_offset}..{window_end} exceeds mapped length {mapped_len}"
             )));
         }
         Ok(Self {
             shard_idx,
             mapped_len,
+            mmap_offset,
             exposed_len,
             page_size,
             required_alignment,
@@ -1502,6 +1610,10 @@ impl GgufBackingGeometry {
 
     pub(crate) fn mapped_len(self) -> usize {
         self.mapped_len
+    }
+
+    pub(crate) fn mmap_offset(self) -> usize {
+        self.mmap_offset
     }
 
     pub(crate) fn exposed_len(self) -> usize {
@@ -1542,6 +1654,10 @@ impl MetalGgufBacking {
 
     pub(crate) fn exposed_len(&self) -> usize {
         self.geometry.exposed_len()
+    }
+
+    pub(crate) fn mmap_offset(&self) -> usize {
+        self.geometry.mmap_offset()
     }
 
     pub(crate) fn page_size(&self) -> usize {
@@ -1588,9 +1704,10 @@ impl MetalGgufBacking {
             eligibility,
             Some(MetalTensor {
                 buffer: self.buffer.clone(),
-                offset: desc.data_offset,
+                offset: desc.data_offset - self.geometry.mmap_offset() as u64,
                 shape: desc.shape.clone(),
                 dtype: desc.dtype,
+                provenance: MetalTensorProvenance::RetainedGgufReadOnly,
             }),
         ))
     }
@@ -1625,16 +1742,38 @@ fn classify_gguf_backing(
     let end = start.checked_add(declared).ok_or_else(|| {
         MetalError::GgufNoCopy(format!("tensor {:?} range overflows usize", desc.name))
     })?;
-    if start % geometry.required_alignment != 0 {
-        return Ok(GgufBackingEligibility::BindingMisalignment);
-    }
     if end > geometry.mapped_len {
         return Ok(GgufBackingEligibility::OutsideBacking);
     }
-    if end > geometry.exposed_len {
-        return Ok(GgufBackingEligibility::FinalPartialPage);
+    let window_end = geometry
+        .mmap_offset
+        .checked_add(geometry.exposed_len)
+        .expect("validated GGUF window end must not overflow");
+    if start < geometry.mmap_offset || start >= window_end {
+        return Ok(GgufBackingEligibility::OutsideBacking);
+    }
+    if end > window_end {
+        let complete_page_end = geometry.mapped_len / geometry.page_size * geometry.page_size;
+        if window_end == complete_page_end {
+            return Ok(GgufBackingEligibility::FinalPartialPage);
+        }
+        return Ok(GgufBackingEligibility::OutsideBacking);
+    }
+    let buffer_offset = start - geometry.mmap_offset;
+    if buffer_offset % geometry.required_alignment != 0 {
+        return Ok(GgufBackingEligibility::BindingMisalignment);
     }
     Ok(GgufBackingEligibility::Eligible)
+}
+
+/// Constructor-path provenance used by typed write APIs as a fail-closed
+/// defense. This is not a complete mutability capability: `buffer` remains
+/// public for low-level encoders and host access, so those paths must preserve
+/// the model-weight read-only contract independently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetalTensorProvenance {
+    OwnedWritable,
+    RetainedGgufReadOnly,
 }
 
 /// A typed, shape-aware view into an `MTLBuffer`. The buffer is owned via
@@ -1652,9 +1791,25 @@ pub struct MetalTensor {
     pub offset: u64,
     pub shape: Vec<u64>,
     pub dtype: GgmlType,
+    pub(crate) provenance: MetalTensorProvenance,
 }
 
 impl MetalTensor {
+    pub fn provenance(&self) -> MetalTensorProvenance {
+        self.provenance
+    }
+
+    pub fn is_writable(&self) -> bool {
+        self.provenance == MetalTensorProvenance::OwnedWritable
+    }
+
+    fn assert_writable(&self, operation: &str) {
+        assert!(
+            self.is_writable(),
+            "{operation} cannot write a retained read-only GGUF tensor"
+        );
+    }
+
     /// Total element count.
     pub fn n_elements(&self) -> u64 {
         checked_shape_elements(&self.shape).expect("MetalTensor shape element count overflow")
@@ -1697,6 +1852,7 @@ impl MetalTensor {
             offset: 0,
             shape,
             dtype,
+            provenance: MetalTensorProvenance::OwnedWritable,
         })
     }
 
@@ -1720,6 +1876,7 @@ impl MetalTensor {
             offset: 0,
             shape,
             dtype: GgmlType::F32,
+            provenance: MetalTensorProvenance::OwnedWritable,
         })
     }
 
@@ -1735,6 +1892,7 @@ impl MetalTensor {
             offset: 0,
             shape,
             dtype: GgmlType::F16,
+            provenance: MetalTensorProvenance::OwnedWritable,
         })
     }
 
@@ -1749,6 +1907,7 @@ impl MetalTensor {
             offset: 0,
             shape,
             dtype: GgmlType::Q8_0,
+            provenance: MetalTensorProvenance::OwnedWritable,
         })
     }
 
@@ -1769,6 +1928,7 @@ impl MetalTensor {
             offset: 0,
             shape,
             dtype,
+            provenance: MetalTensorProvenance::OwnedWritable,
         })
     }
 
@@ -1819,6 +1979,7 @@ impl MetalTensor {
             offset,
             shape,
             dtype: self.dtype,
+            provenance: self.provenance,
         }
     }
 
@@ -1846,6 +2007,7 @@ impl MetalTensor {
             offset,
             shape,
             dtype: self.dtype,
+            provenance: self.provenance,
         }
     }
 }
@@ -1939,10 +2101,12 @@ impl KernelEncoder {
     /// Debug-only hazard note: declare that a dispatch in this encoder
     /// WRITES `tensor`'s byte range. On a concurrent encoder, panics if the
     /// range overlaps any previously noted write or read — either would be
-    /// an unsynchronized data race inside the concurrent pass. No-op in
-    /// release builds and on serial encoders.
+    /// an unsynchronized data race inside the concurrent pass. The access-mode
+    /// check is always active; range tracking is a no-op in release builds and
+    /// on serial encoders.
     #[inline]
     pub fn note_write(&self, tensor: &MetalTensor) {
+        tensor.assert_writable("KernelEncoder::note_write");
         #[cfg(debug_assertions)]
         {
             if !self.concurrent {
@@ -2182,6 +2346,7 @@ impl BlitEncoder {
     /// (callers writing per-token checkpoint slots typically already
     /// have this guarantee by construction).
     pub fn copy_tensor(&self, src: &MetalTensor, dst: &MetalTensor) {
+        dst.assert_writable("BlitEncoder::copy_tensor");
         // Always-on (was debug_assert): a release-build size mismatch
         // would silently short-copy or overrun the destination.
         assert_eq!(
@@ -18656,6 +18821,7 @@ mod tests {
     fn gguf_backing_classification_is_typed_and_fail_closed() {
         let geometry = GgufBackingGeometry::new(0, 160, 64, 32).unwrap();
         assert_eq!(geometry.mapped_len(), 160);
+        assert_eq!(geometry.mmap_offset(), 0);
         assert_eq!(geometry.exposed_len(), 128);
         assert_eq!(geometry.page_size(), 64);
         assert_eq!(geometry.required_alignment(), 32);
@@ -18686,6 +18852,46 @@ mod tests {
         assert!(GgufBackingGeometry::new(0, 160, 0, 32).is_err());
         assert!(GgufBackingGeometry::new(0, 160, 64, 0).is_err());
         assert!(GgufBackingGeometry::new(0, 32, 64, 32).is_err());
+
+        let window = GgufBackingGeometry::new_window(0, 256, 64, 128, 64, 32).unwrap();
+        assert_eq!(window.mapped_len(), 256);
+        assert_eq!(window.mmap_offset(), 64);
+        assert_eq!(window.exposed_len(), 128);
+        assert_eq!(
+            window.classify(&f32_desc("before", 0, 32, 8)).unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        assert_eq!(
+            window.classify(&f32_desc("inside", 0, 96, 8)).unwrap(),
+            GgufBackingEligibility::Eligible
+        );
+        assert_eq!(
+            window.classify(&f32_desc("after", 0, 192, 8)).unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        assert_eq!(
+            window
+                .classify(&f32_desc("after-misaligned", 0, 196, 8))
+                .unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        let earlier = GgufBackingGeometry::new_window(0, 160, 0, 64, 64, 32).unwrap();
+        assert_eq!(
+            earlier
+                .classify(&f32_desc("outside-earlier", 0, 96, 9))
+                .unwrap(),
+            GgufBackingEligibility::OutsideBacking
+        );
+        let terminal = GgufBackingGeometry::new_window(0, 160, 64, 64, 64, 32).unwrap();
+        assert_eq!(
+            terminal
+                .classify(&f32_desc("terminal-tail", 0, 96, 9))
+                .unwrap(),
+            GgufBackingEligibility::FinalPartialPage
+        );
+        assert!(GgufBackingGeometry::new_window(0, 256, 32, 64, 64, 32).is_err());
+        assert!(GgufBackingGeometry::new_window(0, 256, 64, 96, 64, 32).is_err());
+        assert!(GgufBackingGeometry::new_window(0, 256, 192, 128, 64, 32).is_err());
     }
 
     #[test]
@@ -19040,6 +19246,243 @@ mod tests {
         assert_eq!(callback_calls.load(Ordering::Relaxed), 1);
         assert_eq!(callback_mismatches.load(Ordering::Relaxed), 0);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn overlapping_mmap_windows_retain_storage_independently() {
+        use std::io::Write;
+        use std::sync::atomic::AtomicUsize;
+
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        let page_size = host_page_size().expect("host page size");
+
+        for reverse_drop_order in [false, true] {
+            let mut bytes = vec![0u8; page_size * 4];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = index.wrapping_mul(29).wrapping_add(7) as u8;
+            }
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "qwen-metal-window-{}-{}-{}.bin",
+                std::process::id(),
+                reverse_drop_order,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
+            std::fs::File::create(&path)
+                .and_then(|mut file| file.write_all(&bytes))
+                .expect("write window fixture");
+
+            let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+            let mismatches = Arc::new(AtomicUsize::new(0));
+            let weak = objc2::rc::autoreleasepool(|_| {
+                let file = std::fs::File::open(&path).expect("open window fixture");
+                // SAFETY: the fixture file remains immutable and untruncated
+                // while any mapping-backed Metal buffer exists.
+                let mmap = Arc::new(unsafe { Mmap::map(&file).expect("map window fixture") });
+                let weak = Arc::downgrade(&mmap);
+                let first = f32_desc("first", 0, 0, (page_size as u64 + 32) / 4);
+                let second = f32_desc("second", 0, page_size as u64 + 64, page_size as u64 / 4);
+                let requests = [&first, &second, &first];
+                let plan =
+                    plan_retained_storage(&[bytes.len()], &requests, page_size, page_size * 2, 32)
+                        .expect("overlapping-window plan");
+                assert_retained_plan_invariants(&plan, &requests, &[bytes.len()]);
+                assert_eq!(plan.windows.len(), 2);
+                assert_eq!(plan.windows[0].mmap_offset, 0);
+                assert_eq!(plan.windows[0].length, page_size * 2);
+                assert_eq!(plan.windows[1].mmap_offset, page_size as u64);
+                assert_eq!(plan.windows[1].length, page_size * 2);
+                assert_eq!(
+                    plan.entries[2].disposition,
+                    RetainedStorageDisposition::Alias {
+                        source_request_index: 0,
+                    }
+                );
+
+                let make_backing = |window_index: usize| {
+                    let window = &plan.windows[window_index];
+                    let expected_pointer =
+                        unsafe { mmap.as_ptr().add(window.mmap_offset as usize) as usize };
+                    let expected_length = window.length;
+                    let calls = Arc::clone(&calls);
+                    let mismatches = Arc::clone(&mismatches);
+                    ctx.gguf_no_copy_window_with_observer(
+                        Arc::clone(&mmap),
+                        window.shard_idx,
+                        window.mmap_offset as usize,
+                        window.length,
+                        32,
+                        move |pointer, length| {
+                            calls[window_index].fetch_add(1, Ordering::Relaxed);
+                            if pointer.as_ptr() as usize != expected_pointer
+                                || length != expected_length
+                            {
+                                mismatches.fetch_add(1, Ordering::Relaxed);
+                            }
+                        },
+                    )
+                    .expect("realize retained window")
+                };
+                let first_backing = make_backing(0);
+                let second_backing = make_backing(1);
+                assert_eq!(first_backing.mmap_offset(), 0);
+                assert_eq!(second_backing.mmap_offset(), page_size);
+
+                let (_, first_tensor) = first_backing.tensor(&first).expect("first view");
+                let first_tensor = first_tensor.expect("eligible first view");
+                let (_, first_alias) = first_backing.tensor(&first).expect("first alias view");
+                let first_alias = first_alias.expect("eligible first alias view");
+                let (_, second_tensor) = second_backing.tensor(&second).expect("second view");
+                let second_tensor = second_tensor.expect("eligible second view");
+                let shared = f32_desc("shared-page", 0, page_size as u64 + 128, 8);
+                let (_, shared_first) = first_backing.tensor(&shared).expect("shared first view");
+                let shared_first = shared_first.expect("eligible shared first view");
+                let (_, shared_second) =
+                    second_backing.tensor(&shared).expect("shared second view");
+                let shared_second = shared_second.expect("eligible shared second view");
+                assert_eq!(first_tensor.offset, 0);
+                assert_eq!(second_tensor.offset, 64);
+                assert_eq!(
+                    first_tensor.provenance(),
+                    MetalTensorProvenance::RetainedGgufReadOnly
+                );
+                assert!(!first_tensor.is_writable());
+                let element_subview = first_tensor.view_subrange(0, vec![8]);
+                let byte_subview = first_tensor.view_bytes(0, vec![8]);
+                assert_eq!(
+                    element_subview.provenance(),
+                    MetalTensorProvenance::RetainedGgufReadOnly
+                );
+                assert_eq!(
+                    byte_subview.provenance(),
+                    MetalTensorProvenance::RetainedGgufReadOnly
+                );
+                assert_eq!(first_alias.offset, first_tensor.offset);
+                assert_eq!(
+                    Retained::as_ptr(&first_alias.buffer),
+                    Retained::as_ptr(&first_tensor.buffer)
+                );
+
+                let first_out =
+                    MetalTensor::zeros_f32(&ctx, first.shape.clone()).expect("first destination");
+                let second_out =
+                    MetalTensor::zeros_f32(&ctx, second.shape.clone()).expect("second destination");
+                let shared_first_out =
+                    MetalTensor::zeros_f32(&ctx, shared.shape.clone()).expect("shared destination");
+                let shared_second_out =
+                    MetalTensor::zeros_f32(&ctx, shared.shape.clone()).expect("shared destination");
+                {
+                    let command = ctx.queue.commandBuffer().expect("window blit command");
+                    let blit = BlitEncoder::begin(&command);
+                    blit.copy_tensor(&first_tensor, &first_out);
+                    blit.copy_tensor(&second_tensor, &second_out);
+                    blit.copy_tensor(&shared_first, &shared_first_out);
+                    blit.copy_tensor(&shared_second, &shared_second_out);
+                    blit.end();
+                    command.commit();
+                    command.waitUntilCompleted();
+                    assert!(command.error().is_none(), "window blit command failed");
+                }
+                let first_got = unsafe {
+                    std::slice::from_raw_parts(
+                        first_out.buffer.contents().as_ptr().cast::<u8>(),
+                        first.n_bytes as usize,
+                    )
+                };
+                let second_got = unsafe {
+                    std::slice::from_raw_parts(
+                        second_out.buffer.contents().as_ptr().cast::<u8>(),
+                        second.n_bytes as usize,
+                    )
+                };
+                assert_eq!(first_got, &bytes[..first.n_bytes as usize]);
+                let second_start = second.data_offset as usize;
+                assert_eq!(
+                    second_got,
+                    &bytes[second_start..second_start + second.n_bytes as usize]
+                );
+                let shared_expected = &bytes
+                    [shared.data_offset as usize..(shared.data_offset + shared.n_bytes) as usize];
+                let shared_first_got = unsafe {
+                    std::slice::from_raw_parts(
+                        shared_first_out.buffer.contents().as_ptr().cast::<u8>(),
+                        shared.n_bytes as usize,
+                    )
+                };
+                let shared_second_got = unsafe {
+                    std::slice::from_raw_parts(
+                        shared_second_out.buffer.contents().as_ptr().cast::<u8>(),
+                        shared.n_bytes as usize,
+                    )
+                };
+                assert_eq!(shared_first_got, shared_expected);
+                assert_eq!(shared_second_got, shared_expected);
+
+                let command = ctx.queue.commandBuffer().expect("write guard command");
+                let blit = BlitEncoder::begin(&command);
+                let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    blit.copy_tensor(&first_out, &first_tensor);
+                }));
+                assert!(
+                    write_result.is_err(),
+                    "retained destination must fail closed"
+                );
+                blit.end();
+                let compute = KernelEncoder::begin(&command);
+                let note_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    compute.note_write(&first_tensor);
+                }));
+                assert!(note_result.is_err(), "retained write note must fail closed");
+                compute.end();
+
+                drop(mmap);
+                assert!(weak.upgrade().is_some());
+                if reverse_drop_order {
+                    drop(second_backing);
+                    drop(first_backing);
+                } else {
+                    drop(first_backing);
+                    drop(second_backing);
+                }
+                assert_eq!(calls[0].load(Ordering::Relaxed), 0);
+                assert_eq!(calls[1].load(Ordering::Relaxed), 0);
+                if reverse_drop_order {
+                    drop(second_tensor);
+                    drop(shared_second);
+                    assert!(weak.upgrade().is_some());
+                    drop(element_subview);
+                    drop(byte_subview);
+                    drop(first_alias);
+                    drop(shared_first);
+                    drop(first_tensor);
+                } else {
+                    drop(element_subview);
+                    drop(byte_subview);
+                    drop(first_alias);
+                    drop(shared_first);
+                    drop(first_tensor);
+                    assert!(weak.upgrade().is_some());
+                    drop(shared_second);
+                    drop(second_tensor);
+                }
+                weak
+            });
+            assert!(
+                weak.upgrade().is_none(),
+                "last window must release the mmap"
+            );
+            assert_eq!(calls[0].load(Ordering::Relaxed), 1);
+            assert_eq!(calls[1].load(Ordering::Relaxed), 1);
+            assert_eq!(mismatches.load(Ordering::Relaxed), 0);
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
@@ -27517,6 +27960,7 @@ mod tests {
                 offset: 0,
                 shape: vec![n_rows as u64, n as u64],
                 dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
             };
             let ob = ctx.buffer_uninit(n_rows * 4).expect("ob");
             let ot = MetalTensor {
@@ -27524,6 +27968,7 @@ mod tests {
                 offset: 0,
                 shape: vec![n_rows as u64],
                 dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
             };
             let cmd = ctx.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
@@ -27692,6 +28137,7 @@ mod tests {
             offset: 0,
             shape: vec![N as u64],
             dtype: crate::tensor::GgmlType::F32,
+            provenance: MetalTensorProvenance::OwnedWritable,
         };
 
         // Destination: zero-initialized.
@@ -27708,6 +28154,7 @@ mod tests {
             offset: 0,
             shape: vec![N as u64],
             dtype: crate::tensor::GgmlType::F32,
+            provenance: MetalTensorProvenance::OwnedWritable,
         };
 
         // One command buffer. Compute pass (no-op trampoline to validate

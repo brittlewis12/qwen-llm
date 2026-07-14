@@ -3061,6 +3061,7 @@ fn checked_overlay_tensor(
         offset: range.offset,
         shape,
         dtype,
+        provenance: backing.provenance,
     })
 }
 

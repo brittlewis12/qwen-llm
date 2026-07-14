@@ -32,7 +32,8 @@ use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
 use crate::metal::{
     GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalTensor,
-    MetalTimestampSampleBuffer, attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
+    MetalTimestampSampleBuffer, RetainedStorageDisposition, RetainedStorageFallback,
+    RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
     encode_argmax_f32, encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
     encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
     encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
@@ -54,7 +55,8 @@ use crate::metal::{
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
     encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
     encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32,
+    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32, host_page_size_bytes,
+    plan_retained_storage,
 };
 use crate::model::ArchKind;
 use objc2::rc::Retained;
@@ -681,6 +683,7 @@ pub struct MoeRouteReplayRow {
 enum SourceMaterialization {
     DirectCopy,
     DirectView,
+    DirectAlias,
     TailFallback,
     ConvertedF32,
     ConvertedF16,
@@ -937,6 +940,8 @@ struct WeightLoadLedger {
     direct_copy_bytes: u64,
     direct_view_descriptors: usize,
     direct_view_bytes: u64,
+    direct_alias_descriptors: usize,
+    direct_alias_bytes: u64,
     tail_fallback_descriptors: usize,
     tail_fallback_bytes: u64,
     converted_descriptors: usize,
@@ -971,6 +976,10 @@ impl WeightLoadLedger {
                 &mut self.direct_view_descriptors,
                 &mut self.direct_view_bytes,
             ),
+            SourceMaterialization::DirectAlias => (
+                &mut self.direct_alias_descriptors,
+                &mut self.direct_alias_bytes,
+            ),
             SourceMaterialization::TailFallback => (
                 &mut self.tail_fallback_descriptors,
                 &mut self.tail_fallback_bytes,
@@ -997,6 +1006,7 @@ impl WeightLoadLedger {
         let kind = match materialization {
             SourceMaterialization::DirectCopy
             | SourceMaterialization::DirectView
+            | SourceMaterialization::DirectAlias
             | SourceMaterialization::TailFallback => ModelWeightStorageKind::Direct,
             SourceMaterialization::ConvertedF32 => ModelWeightStorageKind::ConvertedF32,
             SourceMaterialization::ConvertedF16 => ModelWeightStorageKind::ConvertedF16,
@@ -1027,9 +1037,176 @@ impl WeightLoadLedger {
     }
 }
 
+struct PlannedRetainedStorage {
+    plan: RetainedStoragePlan,
+    windows: Vec<MetalGgufBacking>,
+    realized: Vec<Option<MetalTensor>>,
+    cursor: usize,
+}
+
+impl PlannedRetainedStorage {
+    fn load_direct(
+        &mut self,
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        desc: &TensorDesc,
+    ) -> Result<(MetalTensor, SourceMaterialization), MfError> {
+        let entry = self.plan.entries.get(self.cursor).ok_or_else(|| {
+            MfError::LoadPolicy(format!(
+                "retained storage received unexpected direct tensor {:?} at index {}",
+                desc.name, self.cursor
+            ))
+        })?;
+        if entry.request_index != self.cursor
+            || entry.name != desc.name
+            || entry.shard_idx != desc.shard_idx
+            || entry.data_offset != desc.data_offset
+            || entry.n_bytes != desc.n_bytes
+        {
+            return Err(MfError::LoadPolicy(format!(
+                "retained storage request drift at direct index {}: entry={entry:?} desc={desc:?}",
+                self.cursor
+            )));
+        }
+        let (tensor, materialization) = match entry.disposition {
+            RetainedStorageDisposition::View {
+                window_index,
+                buffer_offset,
+            } => {
+                let backing = self.windows.get(window_index).ok_or_else(|| {
+                    MfError::LoadPolicy(format!(
+                        "retained storage window index {window_index} is missing"
+                    ))
+                })?;
+                let (eligibility, tensor) = backing.tensor(desc)?;
+                let tensor = match (eligibility, tensor) {
+                    (GgufBackingEligibility::Eligible, Some(tensor)) => tensor,
+                    (reason, _) => {
+                        return Err(MfError::LoadPolicy(format!(
+                            "planned retained tensor {:?} failed realization: {reason:?}",
+                            desc.name
+                        )));
+                    }
+                };
+                if tensor.offset != buffer_offset {
+                    return Err(MfError::LoadPolicy(format!(
+                        "retained tensor {:?} offset drift: actual={} planned={buffer_offset}",
+                        desc.name, tensor.offset
+                    )));
+                }
+                (tensor, SourceMaterialization::DirectView)
+            }
+            RetainedStorageDisposition::Alias {
+                source_request_index,
+            } => {
+                if source_request_index >= self.cursor {
+                    return Err(MfError::LoadPolicy(format!(
+                        "retained alias {:?} has non-prior source {source_request_index}",
+                        desc.name
+                    )));
+                }
+                let tensor = self
+                    .realized
+                    .get(source_request_index)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        MfError::LoadPolicy(format!(
+                            "retained alias {:?} source {source_request_index} is unrealized",
+                            desc.name
+                        ))
+                    })?
+                    .clone();
+                (tensor, SourceMaterialization::DirectAlias)
+            }
+            RetainedStorageDisposition::CopyFallback { reason } => {
+                if reason != RetainedStorageFallback::FinalPartialPage {
+                    return Err(MfError::LoadPolicy(format!(
+                        "retained tensor {:?} has disallowed copy fallback {reason:?}",
+                        desc.name
+                    )));
+                }
+                let tensor = MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?;
+                (tensor, SourceMaterialization::TailFallback)
+            }
+        };
+        self.realized[self.cursor] = Some(tensor.clone());
+        self.cursor += 1;
+        Ok((tensor, materialization))
+    }
+
+    fn validate_complete(&self, ledger: &WeightLoadLedger) -> Result<(), MfError> {
+        if self.cursor != self.plan.entries.len() || self.realized.iter().any(Option::is_none) {
+            return Err(MfError::LoadPolicy(format!(
+                "retained storage consumption mismatch: consumed={} planned={} realized={}",
+                self.cursor,
+                self.plan.entries.len(),
+                self.realized
+                    .iter()
+                    .filter(|tensor| tensor.is_some())
+                    .count()
+            )));
+        }
+        let view_count = self
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
+            .count();
+        let alias_count = self
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::Alias { .. }))
+            .count();
+        let fallback_count = self
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.disposition,
+                    RetainedStorageDisposition::CopyFallback { .. }
+                )
+            })
+            .count();
+        if ledger.direct_copy_descriptors != 0
+            || ledger.direct_view_descriptors != view_count
+            || ledger.direct_view_bytes != self.plan.unique_view_bytes
+            || ledger.direct_alias_descriptors != alias_count
+            || ledger.direct_alias_bytes != self.plan.alias_bytes
+            || ledger.tail_fallback_descriptors != fallback_count
+            || ledger.tail_fallback_bytes != self.plan.unique_fallback_bytes
+        {
+            return Err(MfError::LoadPolicy(format!(
+                concat!(
+                    "retained storage ledger mismatch: copy={}/{} view={}/{} ",
+                    "alias={}/{} fallback={}/{} planned_view={}/{} ",
+                    "planned_alias={}/{} planned_fallback={}/{}"
+                ),
+                ledger.direct_copy_descriptors,
+                ledger.direct_copy_bytes,
+                ledger.direct_view_descriptors,
+                ledger.direct_view_bytes,
+                ledger.direct_alias_descriptors,
+                ledger.direct_alias_bytes,
+                ledger.tail_fallback_descriptors,
+                ledger.tail_fallback_bytes,
+                view_count,
+                self.plan.unique_view_bytes,
+                alias_count,
+                self.plan.alias_bytes,
+                fallback_count,
+                self.plan.unique_fallback_bytes,
+            )));
+        }
+        Ok(())
+    }
+}
+
 enum DirectStorage {
     Copied,
-    ForcedRetained(MetalGgufBacking),
+    ForcedExact27B(MetalGgufBacking),
+    ForcedPlanned(PlannedRetainedStorage),
 }
 
 struct MetalWeightLoader<'a> {
@@ -1051,8 +1228,8 @@ impl<'a> MetalWeightLoader<'a> {
         }
     }
 
-    fn is_forced_retained(&self) -> bool {
-        matches!(self.direct_storage, DirectStorage::ForcedRetained(_))
+    fn is_forced_exact_27b(&self) -> bool {
+        matches!(self.direct_storage, DirectStorage::ForcedExact27B(_))
     }
 
     fn record_source(
@@ -1061,7 +1238,7 @@ impl<'a> MetalWeightLoader<'a> {
         materialization: SourceMaterialization,
         resident_bytes: u64,
     ) -> Result<(), MfError> {
-        if self.is_forced_retained()
+        if self.is_forced_exact_27b()
             && !self
                 .seen_forced
                 .insert((desc.shard_idx, desc.data_offset, desc.n_bytes))
@@ -1076,22 +1253,16 @@ impl<'a> MetalWeightLoader<'a> {
     }
 
     fn load_direct(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
-        match &self.direct_storage {
+        let (tensor, materialization) = match &mut self.direct_storage {
             DirectStorage::Copied => {
                 let tensor = MetalTensor::from_gguf_tensor(self.ctx, desc, self.gguf.slice(desc))?;
-                self.record_source(desc, SourceMaterialization::DirectCopy, tensor.n_bytes())?;
-                Ok(tensor)
+                (tensor, SourceMaterialization::DirectCopy)
             }
-            DirectStorage::ForcedRetained(backing) => {
+            DirectStorage::ForcedExact27B(backing) => {
                 let (eligibility, tensor) = backing.tensor(desc)?;
                 match (eligibility, tensor) {
                     (GgufBackingEligibility::Eligible, Some(tensor)) => {
-                        self.record_source(
-                            desc,
-                            SourceMaterialization::DirectView,
-                            tensor.n_bytes(),
-                        )?;
-                        Ok(tensor)
+                        (tensor, SourceMaterialization::DirectView)
                     }
                     (GgufBackingEligibility::FinalPartialPage, None)
                         if desc.name == GGUF_NO_COPY_27B_TAIL_NAME
@@ -1099,20 +1270,20 @@ impl<'a> MetalWeightLoader<'a> {
                     {
                         let tensor =
                             MetalTensor::from_gguf_tensor(self.ctx, desc, self.gguf.slice(desc))?;
-                        self.record_source(
-                            desc,
-                            SourceMaterialization::TailFallback,
-                            tensor.n_bytes(),
-                        )?;
-                        Ok(tensor)
+                        (tensor, SourceMaterialization::TailFallback)
                     }
                     (reason, _) => Err(MfError::LoadPolicy(format!(
                         "forced no-copy rejected direct tensor {:?}: {reason:?}",
                         desc.name
-                    ))),
+                    )))?,
                 }
             }
-        }
+            DirectStorage::ForcedPlanned(storage) => {
+                storage.load_direct(self.ctx, self.gguf, desc)?
+            }
+        };
+        self.record_source(desc, materialization, tensor.n_bytes())?;
+        Ok(tensor)
     }
 
     fn load_f32(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
@@ -1209,13 +1380,17 @@ impl<'a> MetalWeightLoader<'a> {
         exact_sentinel: bool,
         expected: &[ModelWeightStorageRequest<'_>],
     ) -> Result<(), MfError> {
-        let forced_retained = self.is_forced_retained();
+        let forced_exact_27b = self.is_forced_exact_27b();
+        if let DirectStorage::ForcedPlanned(storage) = &self.direct_storage {
+            storage.validate_complete(&self.ledger)?;
+        }
         let seen_forced = self.seen_forced.len();
         let ledger = self.ledger;
         validate_model_weight_request_sequence(&ledger.requests, expected)?;
         let accounted_source_bytes = ledger
             .direct_copy_bytes
             .checked_add(ledger.direct_view_bytes)
+            .and_then(|bytes| bytes.checked_add(ledger.direct_alias_bytes))
             .and_then(|bytes| bytes.checked_add(ledger.tail_fallback_bytes))
             .and_then(|bytes| bytes.checked_add(ledger.converted_source_bytes))
             .ok_or_else(|| MfError::LoadPolicy("source accounting overflow".to_string()))?;
@@ -1258,11 +1433,13 @@ impl<'a> MetalWeightLoader<'a> {
         let actual_direct_count = ledger
             .direct_copy_descriptors
             .checked_add(ledger.direct_view_descriptors)
+            .and_then(|count| count.checked_add(ledger.direct_alias_descriptors))
             .and_then(|count| count.checked_add(ledger.tail_fallback_descriptors))
             .ok_or_else(|| MfError::LoadPolicy("direct descriptor overflow".to_string()))?;
         let actual_direct_bytes = ledger
             .direct_copy_bytes
             .checked_add(ledger.direct_view_bytes)
+            .and_then(|bytes| bytes.checked_add(ledger.direct_alias_bytes))
             .and_then(|bytes| bytes.checked_add(ledger.tail_fallback_bytes))
             .ok_or_else(|| MfError::LoadPolicy("direct byte overflow".to_string()))?;
         if ledger.source_descriptors != expected.len()
@@ -1304,10 +1481,12 @@ impl<'a> MetalWeightLoader<'a> {
                 ledger.source_descriptors, ledger.source_bytes
             )));
         }
-        if forced_retained
+        if forced_exact_27b
             && (seen_forced != GGUF_NO_COPY_27B_DESCRIPTOR_COUNT
                 || ledger.direct_view_descriptors != GGUF_NO_COPY_27B_VIEW_COUNT
                 || ledger.direct_view_bytes != GGUF_NO_COPY_27B_VIEW_BYTES
+                || ledger.direct_alias_descriptors != 0
+                || ledger.direct_alias_bytes != 0
                 || ledger.tail_fallback_descriptors != 1
                 || ledger.tail_fallback_bytes != GGUF_NO_COPY_27B_TAIL_BYTES
                 || ledger.direct_copy_descriptors != 0
@@ -1316,12 +1495,14 @@ impl<'a> MetalWeightLoader<'a> {
         {
             return Err(MfError::LoadPolicy(format!(
                 concat!(
-                    "forced no-copy ledger mismatch: seen={} view={}/{} tail={}/{} ",
-                    "copy={}/{} converted={}/{}/{} derived={}/{}"
+                    "forced no-copy ledger mismatch: seen={} view={}/{} alias={}/{} ",
+                    "tail={}/{} copy={}/{} converted={}/{}/{} derived={}/{}"
                 ),
                 seen_forced,
                 ledger.direct_view_descriptors,
                 ledger.direct_view_bytes,
+                ledger.direct_alias_descriptors,
+                ledger.direct_alias_bytes,
                 ledger.tail_fallback_descriptors,
                 ledger.tail_fallback_bytes,
                 ledger.direct_copy_descriptors,
@@ -1336,7 +1517,7 @@ impl<'a> MetalWeightLoader<'a> {
         eprintln!(
             concat!(
                 "[metal-load-ledger] source={}/{} direct_copy={}/{} direct_view={}/{} ",
-                "tail_fallback={}/{} converted={}/{}/{} derived={}/{}"
+                "direct_alias={}/{} tail_fallback={}/{} converted={}/{}/{} derived={}/{}"
             ),
             ledger.source_descriptors,
             ledger.source_bytes,
@@ -1344,6 +1525,8 @@ impl<'a> MetalWeightLoader<'a> {
             ledger.direct_copy_bytes,
             ledger.direct_view_descriptors,
             ledger.direct_view_bytes,
+            ledger.direct_alias_descriptors,
+            ledger.direct_alias_bytes,
             ledger.tail_fallback_descriptors,
             ledger.tail_fallback_bytes,
             ledger.converted_descriptors,
@@ -1372,10 +1555,170 @@ fn matches_no_copy_27b_sentinel(gguf: &GgufFile, model: &Model<'_>) -> bool {
         )
 }
 
+fn planned_retained_storage_for_load(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    expected: &[ModelWeightStorageRequest<'_>],
+    prefault_enabled: bool,
+) -> Result<PlannedRetainedStorage, MfError> {
+    let direct = expected
+        .iter()
+        .filter(|request| request.kind == ModelWeightStorageKind::Direct)
+        .map(|request| request.desc)
+        .collect::<Vec<_>>();
+    if direct.is_empty() {
+        return Err(MfError::LoadPolicy(
+            "forced retained storage requires at least one direct tensor".to_string(),
+        ));
+    }
+    let page_size = host_page_size_bytes()?;
+    let max_buffer_length = ctx.device.maxBufferLength();
+    let plan = plan_retained_storage(
+        &gguf.shard_mapped_lengths(),
+        &direct,
+        page_size,
+        max_buffer_length,
+        GGUF_NO_COPY_ALIGNMENT,
+    )?;
+    for entry in &plan.entries {
+        if let RetainedStorageDisposition::CopyFallback { reason } = entry.disposition
+            && reason != RetainedStorageFallback::FinalPartialPage
+        {
+            return Err(MfError::LoadPolicy(format!(
+                "forced retained storage rejects {:?} fallback for {:?}",
+                reason, entry.name
+            )));
+        }
+    }
+
+    let mut windows = Vec::with_capacity(plan.windows.len());
+    let mut window_bytes = 0u64;
+    let mut prefault_pages = 0usize;
+    let mut prefault_bytes = 0usize;
+    let mut prefault_ms = 0.0;
+    let mut prefault_checksum = 0u64;
+    for window in &plan.windows {
+        let mmap = gguf.retained_shard_mmap(window.shard_idx).ok_or_else(|| {
+            MfError::LoadPolicy(format!(
+                "retained storage window references missing shard {}",
+                window.shard_idx
+            ))
+        })?;
+        let mmap_offset = usize::try_from(window.mmap_offset).map_err(|_| {
+            MfError::LoadPolicy(format!(
+                "retained storage window offset {} does not fit usize",
+                window.mmap_offset
+            ))
+        })?;
+        let backing = ctx.gguf_no_copy_window(
+            mmap,
+            window.shard_idx,
+            mmap_offset,
+            window.length,
+            GGUF_NO_COPY_ALIGNMENT,
+        )?;
+        if backing.mmap_offset() != mmap_offset
+            || backing.exposed_len() != window.length
+            || backing.required_alignment() != GGUF_NO_COPY_ALIGNMENT
+        {
+            return Err(MfError::LoadPolicy(format!(
+                "retained storage window realization drift at shard {} offset {}",
+                window.shard_idx, window.mmap_offset
+            )));
+        }
+        window_bytes = window_bytes
+            .checked_add(window.length as u64)
+            .ok_or_else(|| MfError::LoadPolicy("retained window bytes overflow".to_string()))?;
+        if prefault_enabled {
+            let report = backing.prefault_read();
+            let expected_pages = backing.exposed_len() / backing.page_size();
+            if report.page_count != expected_pages || report.covered_bytes != backing.exposed_len()
+            {
+                return Err(MfError::LoadPolicy(format!(
+                    "retained prefault mismatch: pages={}/{} covered={}/{}",
+                    report.page_count,
+                    expected_pages,
+                    report.covered_bytes,
+                    backing.exposed_len(),
+                )));
+            }
+            prefault_pages = prefault_pages
+                .checked_add(report.page_count)
+                .ok_or_else(|| {
+                    MfError::LoadPolicy("retained prefault page count overflow".to_string())
+                })?;
+            prefault_bytes = prefault_bytes
+                .checked_add(report.covered_bytes)
+                .ok_or_else(|| {
+                    MfError::LoadPolicy("retained prefault byte count overflow".to_string())
+                })?;
+            prefault_ms += report.wall_ms;
+            prefault_checksum = prefault_checksum.rotate_left(7) ^ report.checksum;
+        }
+        windows.push(backing);
+    }
+    let view_count = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
+        .count();
+    let alias_count = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::Alias { .. }))
+        .count();
+    let fallback_count = plan
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.disposition,
+                RetainedStorageDisposition::CopyFallback { .. }
+            )
+        })
+        .count();
+    eprintln!(
+        concat!(
+            "[metal-gguf-retained] windows={} window_bytes={} direct={} view={}/{} ",
+            "alias={}/{} fallback={}/{} page={} max_buffer={} alignment={} ",
+            "prefault={} prefault_pages={} prefault_bytes={} prefault_ms={:.3} ",
+            "checksum={:#018x}"
+        ),
+        plan.windows.len(),
+        window_bytes,
+        plan.entries.len(),
+        view_count,
+        plan.unique_view_bytes,
+        alias_count,
+        plan.alias_bytes,
+        fallback_count,
+        plan.unique_fallback_bytes,
+        plan.page_size,
+        plan.max_buffer_length,
+        plan.required_alignment,
+        if prefault_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        prefault_pages,
+        prefault_bytes,
+        prefault_ms,
+        prefault_checksum,
+    );
+    Ok(PlannedRetainedStorage {
+        realized: vec![None; plan.entries.len()],
+        plan,
+        windows,
+        cursor: 0,
+    })
+}
+
 fn direct_storage_for_load(
     ctx: &MetalContext,
     gguf: &GgufFile,
     model: &Model<'_>,
+    expected: &[ModelWeightStorageRequest<'_>],
     mode: GgufNoCopyMode,
     prefault_enabled: bool,
 ) -> Result<(DirectStorage, bool), MfError> {
@@ -1383,22 +1726,23 @@ fn direct_storage_for_load(
     if mode == GgufNoCopyMode::Disabled {
         return Ok((DirectStorage::Copied, exact_sentinel));
     }
-    if !exact_sentinel {
-        return Err(MfError::LoadPolicy(format!(
-            concat!(
-                "forced no-copy requires exact 27B layout: shards={} mapped={} ",
-                "descriptors={} digest={:#018x}"
-            ),
-            gguf.shard_count(),
-            gguf.total_mapped_len(),
-            gguf.tensors.len(),
-            gguf_descriptor_layout_digest(gguf),
-        )));
-    }
     if !ctx.device.hasUnifiedMemory() {
         return Err(MfError::LoadPolicy(
             "forced no-copy requires a unified-memory Metal device".to_string(),
         ));
+    }
+    if exact_sentinel
+        && expected
+            .first()
+            .is_none_or(|request| request.kind != ModelWeightStorageKind::Direct)
+    {
+        return Err(MfError::LoadPolicy(
+            "exact 27B no-copy requires native token embedding residency".to_string(),
+        ));
+    }
+    if !exact_sentinel {
+        let storage = planned_retained_storage_for_load(ctx, gguf, expected, prefault_enabled)?;
+        return Ok((DirectStorage::ForcedPlanned(storage), false));
     }
     let mmap = gguf.retained_shard_mmap(0).ok_or_else(|| {
         MfError::LoadPolicy("exact no-copy sentinel is missing shard 0".to_string())
@@ -1448,7 +1792,7 @@ fn direct_storage_for_load(
         prefault.map_or(0.0, |report| report.wall_ms),
         prefault.map_or(0, |report| report.checksum),
     );
-    Ok((DirectStorage::ForcedRetained(backing), true))
+    Ok((DirectStorage::ForcedExact27B(backing), true))
 }
 
 impl MetalModel {
@@ -1500,18 +1844,18 @@ impl MetalModel {
             model.token_embd.dtype,
             model.token_embd.shape,
         );
-        if no_copy_mode == GgufNoCopyMode::Forced && !embedding_selection.uses_native() {
-            return Err(MfError::LoadPolicy(
-                "forced no-copy requires native token embedding residency".to_string(),
-            ));
-        }
-
-        let (direct_storage, exact_sentinel) =
-            direct_storage_for_load(ctx, gguf, model, no_copy_mode, prefault_enabled)?;
         let expected_storage_requests = model_weight_storage_requests(
             model,
             embedding_selection.uses_native(),
             moe_router_f16_enabled(),
+        )?;
+        let (direct_storage, exact_sentinel) = direct_storage_for_load(
+            ctx,
+            gguf,
+            model,
+            &expected_storage_requests,
+            no_copy_mode,
+            prefault_enabled,
         )?;
         let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage);
         let token_embd =
@@ -9383,6 +9727,515 @@ mod tests {
         assert!(validate_model_weight_request_sequence(&duplicated, &expected).is_err());
     }
 
+    struct GenericRetainedArmResult {
+        prefill_logits: Vec<f32>,
+        prefill_snapshot: SessionSnapshot,
+        next_token: i32,
+        decode_logits: Vec<f32>,
+        decode_snapshot: SessionSnapshot,
+    }
+
+    #[derive(Clone, Copy)]
+    struct GenericRetainedContract {
+        windows: usize,
+        window_bytes: u64,
+        direct: usize,
+        views: usize,
+        view_bytes: u64,
+        aliases: usize,
+        alias_bytes: u64,
+        fallbacks: usize,
+        fallback_bytes: u64,
+    }
+
+    fn assert_generic_retained_contract(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        model: &Model<'_>,
+        native_embedding: bool,
+        contract: GenericRetainedContract,
+    ) {
+        let expected = model_weight_storage_requests(model, native_embedding, false)
+            .expect("generic fixture storage requests");
+        let direct = expected
+            .iter()
+            .filter(|request| request.kind == ModelWeightStorageKind::Direct)
+            .map(|request| request.desc)
+            .collect::<Vec<_>>();
+        let mut storage = planned_retained_storage_for_load(ctx, gguf, &expected, false)
+            .expect("generic fixture retained storage");
+        let window_bytes = storage
+            .plan
+            .windows
+            .iter()
+            .map(|window| window.length as u64)
+            .sum::<u64>();
+        let views = storage
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
+            .count();
+        let aliases = storage
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::Alias { .. }))
+            .count();
+        let fallbacks = storage
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.disposition,
+                    RetainedStorageDisposition::CopyFallback { .. }
+                )
+            })
+            .count();
+        assert_eq!(storage.plan.windows.len(), contract.windows);
+        assert_eq!(window_bytes, contract.window_bytes);
+        assert_eq!(storage.plan.entries.len(), contract.direct);
+        assert_eq!(views, contract.views);
+        assert_eq!(storage.plan.unique_view_bytes, contract.view_bytes);
+        assert_eq!(aliases, contract.aliases);
+        assert_eq!(storage.plan.alias_bytes, contract.alias_bytes);
+        assert_eq!(fallbacks, contract.fallbacks);
+        assert_eq!(storage.plan.unique_fallback_bytes, contract.fallback_bytes);
+
+        let mut ledger = WeightLoadLedger::default();
+        for desc in &direct {
+            let (tensor, materialization) = storage
+                .load_direct(ctx, gguf, desc)
+                .expect("materialize generic fixture tensor");
+            ledger
+                .record_source(desc, materialization, tensor.n_bytes())
+                .expect("record generic fixture tensor");
+        }
+        storage
+            .validate_complete(&ledger)
+            .expect("complete generic fixture realization");
+        for (index, entry) in storage.plan.entries.iter().enumerate() {
+            if let RetainedStorageDisposition::Alias {
+                source_request_index,
+            } = entry.disposition
+            {
+                let source = storage.realized[source_request_index]
+                    .as_ref()
+                    .expect("realized alias source");
+                let alias = storage.realized[index]
+                    .as_ref()
+                    .expect("realized alias tensor");
+                assert_eq!(source.offset, alias.offset);
+                assert_eq!(
+                    Retained::as_ptr(&source.buffer),
+                    Retained::as_ptr(&alias.buffer)
+                );
+            }
+        }
+    }
+
+    fn run_generic_retained_arm(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        model: &Model<'_>,
+        tokens: &[i32],
+        mode: GgufNoCopyMode,
+        forced_next: Option<i32>,
+    ) -> GenericRetainedArmResult {
+        use crate::metal_dflash::{
+            MetalDFlashLayerMajorScratch, PrefillScratchConfig,
+            plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
+        };
+
+        let metal_model = MetalModel::load_with_no_copy_policy(ctx, gguf, model, mode, false)
+            .expect("load generic retained arm");
+        let forward = MetalForward::new(ctx, &metal_model);
+        let capacity = 64;
+        let mut session =
+            MetalSession::fresh(ctx, &metal_model, capacity).expect("fresh generic session");
+        let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+            &metal_model,
+            tokens.len() as u32,
+            capacity,
+            PrefillScratchConfig::default(),
+        )
+        .expect("generic prefill scratch plan");
+        let mut scratch =
+            MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(ctx, &metal_model, plan)
+                .expect("generic prefill scratch");
+        let prefill_logits = prefill_tokens_with_multi_hidden(
+            &forward,
+            tokens,
+            0,
+            &mut session,
+            &mut scratch,
+            &[],
+            None,
+        )
+        .expect("generic packed prefill");
+        let identity = session.snapshot_identity(0x594, 0x594);
+        let prefill_snapshot = session.snapshot(
+            identity.clone(),
+            tokens.to_vec(),
+            Some(prefill_logits.clone()),
+        );
+        let next_token = forced_next.unwrap_or_else(|| {
+            prefill_logits
+                .iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                    if value > best.1 { (index, value) } else { best }
+                })
+                .0 as i32
+        });
+        let decode_logits = forward
+            .single_token(next_token, tokens.len() as u32, &mut session)
+            .expect("generic forced decode transition");
+        let mut consumed = tokens.to_vec();
+        consumed.push(next_token);
+        let decode_snapshot = session.snapshot(identity, consumed, Some(decode_logits.clone()));
+        GenericRetainedArmResult {
+            prefill_logits,
+            prefill_snapshot,
+            next_token,
+            decode_logits,
+            decode_snapshot,
+        }
+    }
+
+    fn assert_generic_retained_f32_bits(label: &str, a: &[f32], b: &[f32]) {
+        assert_eq!(a.len(), b.len(), "{label} length");
+        for (index, (a, b)) in a.iter().zip(b).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "{label} bit mismatch at {index}");
+        }
+    }
+
+    fn assert_generic_retained_snapshot(label: &str, a: &SessionSnapshot, b: &SessionSnapshot) {
+        assert_eq!(a.identity, b.identity, "{label} identity");
+        assert_eq!(a.prefix_tokens, b.prefix_tokens, "{label} tokens");
+        assert_eq!(a.kv_n_pos, b.kv_n_pos, "{label} KV positions");
+        assert_eq!(a.kv_k_arena, b.kv_k_arena, "{label} K arena");
+        assert_eq!(a.kv_v_arena, b.kv_v_arena, "{label} V arena");
+        assert_eq!(a.gdn_conv_arena, b.gdn_conv_arena, "{label} conv arena");
+        assert_eq!(a.gdn_state_arena, b.gdn_state_arena, "{label} state arena");
+        match (&a.final_logits, &b.final_logits) {
+            (Some(a), Some(b)) => {
+                assert_generic_retained_f32_bits(&format!("{label} logits"), a, b)
+            }
+            (None, None) => {}
+            _ => panic!("{label} final-logits presence mismatch"),
+        }
+    }
+
+    fn assert_generic_retained_model_exact(
+        model_path: &str,
+        expect_tied: bool,
+        embedding_mode: NativeQuantEmbeddingMode,
+        native_embedding: bool,
+        contract: GenericRetainedContract,
+    ) {
+        assert_eq!(
+            native_quant_embedding_mode(),
+            embedding_mode,
+            "native embedding environment does not match the fixture contract"
+        );
+        assert!(
+            std::path::Path::new(model_path).is_file(),
+            "missing generic retained fixture {model_path}"
+        );
+        let ctx = MetalContext::new().expect("Metal context");
+        let gguf = GgufFile::open(model_path).expect("open generic retained fixture");
+        let model = Model::from_gguf(&gguf).expect("bind generic retained fixture");
+        assert_eq!(model.tied_embeddings, expect_tied);
+        assert!(!matches_no_copy_27b_sentinel(&gguf, &model));
+        assert_generic_retained_contract(&ctx, &gguf, &model, native_embedding, contract);
+        let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
+        let tokens = tokenizer
+            .encode("Retained storage must preserve this state.", true)
+            .expect("tokenize generic retained prompt");
+        assert!(tokens.len() < 64);
+
+        let copied =
+            run_generic_retained_arm(&ctx, &gguf, &model, &tokens, GgufNoCopyMode::Disabled, None);
+        let retained = run_generic_retained_arm(
+            &ctx,
+            &gguf,
+            &model,
+            &tokens,
+            GgufNoCopyMode::Forced,
+            Some(copied.next_token),
+        );
+        let retained_argmax = retained
+            .prefill_logits
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                if value > best.1 { (index, value) } else { best }
+            })
+            .0 as i32;
+        assert_eq!(copied.next_token, retained_argmax);
+        assert_eq!(retained.next_token, retained_argmax);
+        assert_generic_retained_f32_bits(
+            "generic prefill logits",
+            &copied.prefill_logits,
+            &retained.prefill_logits,
+        );
+        assert_generic_retained_snapshot(
+            "generic prefill snapshot",
+            &copied.prefill_snapshot,
+            &retained.prefill_snapshot,
+        );
+        assert_generic_retained_f32_bits(
+            "generic decode logits",
+            &copied.decode_logits,
+            &retained.decode_logits,
+        );
+        assert_generic_retained_snapshot(
+            "generic decode snapshot",
+            &copied.decode_snapshot,
+            &retained.decode_snapshot,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local tied 0.8B Q8_0 fixture and explicit native embedding"]
+    fn gguf_no_copy_generic_tied_q8_is_bit_exact() {
+        assert_generic_retained_model_exact(
+            "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+            true,
+            NativeQuantEmbeddingMode::Forced,
+            true,
+            GenericRetainedContract {
+                windows: 1,
+                window_bytes: 800_882_688,
+                direct: 321,
+                views: 319,
+                view_bytes: 800_877_824,
+                aliases: 1,
+                alias_bytes: 270_172_160,
+                fallbacks: 1,
+                fallback_bytes: 4_096,
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local tied 0.8B Q8_0 fixture and no native embedding override"]
+    fn gguf_no_copy_generic_tied_q8_converted_embedding_is_bit_exact() {
+        assert_generic_retained_model_exact(
+            "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+            true,
+            NativeQuantEmbeddingMode::Auto,
+            false,
+            GenericRetainedContract {
+                windows: 1,
+                window_bytes: 800_882_688,
+                direct: 320,
+                views: 319,
+                view_bytes: 800_877_824,
+                aliases: 0,
+                alias_bytes: 0,
+                fallbacks: 1,
+                fallback_bytes: 4_096,
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local Qwen3.6 A3B Q4 fixture and explicit native embedding"]
+    fn gguf_no_copy_generic_a3b_q4_is_bit_exact() {
+        assert_generic_retained_model_exact(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            false,
+            NativeQuantEmbeddingMode::Forced,
+            true,
+            GenericRetainedContract {
+                windows: 1,
+                window_bytes: 22_123_544_576,
+                direct: 733,
+                views: 732,
+                view_bytes: 22_123_530_752,
+                aliases: 0,
+                alias_bytes: 0,
+                fallbacks: 1,
+                fallback_bytes: 8_192,
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local split A10B fixture and substantial virtual Metal residency"]
+    fn gguf_no_copy_split_a10b_resources_outlive_loader() {
+        let model_path = concat!(
+            "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/",
+            "Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+        );
+        assert!(std::path::Path::new(model_path).is_file());
+        let ctx = MetalContext::new().expect("Metal context");
+        let weak_mmaps = objc2::rc::autoreleasepool(|_| {
+            let gguf = GgufFile::open(model_path).expect("open split A10B fixture");
+            let model = Model::from_gguf(&gguf).expect("bind split A10B fixture");
+            assert_eq!(gguf.shard_count(), 3);
+            assert!(native_quant_embedding_storage_supported(&model));
+            let expected = model_weight_storage_requests(&model, true, false)
+                .expect("split A10B storage requests");
+            let direct = expected
+                .iter()
+                .filter(|request| request.kind == ModelWeightStorageKind::Direct)
+                .map(|request| request.desc)
+                .collect::<Vec<_>>();
+            let mut storage = planned_retained_storage_for_load(&ctx, &gguf, &expected, false)
+                .expect("realize split A10B retained storage");
+            assert_eq!(storage.plan.windows.len(), 2);
+            assert_eq!(
+                storage
+                    .plan
+                    .windows
+                    .iter()
+                    .map(|window| window.length as u64)
+                    .sum::<u64>(),
+                77_015_662_592
+            );
+            assert_eq!(storage.plan.entries.len(), 879);
+            assert_eq!(storage.plan.unique_view_bytes, 77_015_642_112);
+            assert_eq!(storage.plan.alias_bytes, 0);
+            assert_eq!(storage.plan.unique_fallback_bytes, 3_354_624);
+            assert_eq!(
+                storage
+                    .plan
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(entry.disposition, RetainedStorageDisposition::View { .. })
+                    })
+                    .count(),
+                877
+            );
+            assert_eq!(
+                storage
+                    .plan
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry.disposition,
+                            RetainedStorageDisposition::CopyFallback { .. }
+                        )
+                    })
+                    .count(),
+                2
+            );
+            let active_shards = storage
+                .plan
+                .windows
+                .iter()
+                .map(|window| window.shard_idx)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(active_shards.len(), 2);
+
+            let mut ledger = WeightLoadLedger::default();
+            for desc in &direct {
+                let (tensor, materialization) = storage
+                    .load_direct(&ctx, &gguf, desc)
+                    .expect("materialize split A10B tensor");
+                ledger
+                    .record_source(desc, materialization, tensor.n_bytes())
+                    .expect("record split A10B tensor");
+            }
+            storage
+                .validate_complete(&ledger)
+                .expect("complete split A10B realization");
+
+            let mut sample_indices = std::collections::BTreeSet::new();
+            for window_index in 0..storage.plan.windows.len() {
+                let indices = storage
+                    .plan
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| match entry.disposition {
+                        RetainedStorageDisposition::View {
+                            window_index: entry_window,
+                            ..
+                        } if entry_window == window_index => Some(index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!indices.is_empty());
+                sample_indices.insert(indices[0]);
+                sample_indices.insert(indices[indices.len() / 2]);
+                sample_indices.insert(indices[indices.len() - 1]);
+            }
+            let mut samples = Vec::new();
+            for index in sample_indices {
+                let desc = direct[index];
+                let tensor = storage.realized[index]
+                    .as_ref()
+                    .expect("realized sample tensor")
+                    .clone();
+                let sample_len = usize::try_from(desc.n_bytes.min(256)).unwrap();
+                let tail_offset = desc.n_bytes - sample_len as u64;
+                for byte_offset in [0, tail_offset] {
+                    let start = byte_offset as usize;
+                    let expected_bytes = gguf.slice(desc)[start..start + sample_len].to_vec();
+                    samples.push((tensor.clone(), byte_offset, expected_bytes));
+                }
+            }
+            let weak_mmaps = active_shards
+                .iter()
+                .map(|&shard_idx| {
+                    let mmap = gguf
+                        .retained_shard_mmap(shard_idx)
+                        .expect("active split A10B shard mmap");
+                    std::sync::Arc::downgrade(&mmap)
+                })
+                .collect::<Vec<_>>();
+            drop(direct);
+            drop(expected);
+            drop(model);
+            drop(gguf);
+            assert!(weak_mmaps.iter().all(|weak| weak.upgrade().is_some()));
+            drop(storage);
+            assert!(weak_mmaps.iter().all(|weak| weak.upgrade().is_some()));
+
+            let outputs = samples
+                .iter()
+                .map(|(_, _, expected)| ctx.buffer_uninit(expected.len()))
+                .collect::<Result<Vec<_>, _>>()
+                .expect("sample output buffers");
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .expect("split A10B sample command");
+            let blit = crate::metal::BlitEncoder::begin(&command);
+            for ((tensor, byte_offset, expected_bytes), output) in samples.iter().zip(&outputs) {
+                blit.copy_buffer(
+                    &tensor.buffer,
+                    tensor.offset + byte_offset,
+                    output,
+                    0,
+                    expected_bytes.len() as u64,
+                );
+            }
+            blit.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "split A10B sample blit failed");
+            for ((_, _, expected), output) in samples.iter().zip(&outputs) {
+                let actual = unsafe {
+                    std::slice::from_raw_parts(
+                        output.contents().as_ptr().cast::<u8>(),
+                        expected.len(),
+                    )
+                };
+                assert_eq!(actual, expected);
+            }
+            weak_mmaps
+        });
+        assert!(weak_mmaps.iter().all(|weak| weak.upgrade().is_none()));
+    }
+
     #[test]
     #[ignore = "requires QWEN_GGUF_NO_COPY_MODEL local exact 27B fixture"]
     fn gguf_no_copy_layout_digest_probe() {
@@ -9516,6 +10369,24 @@ mod tests {
         let gguf = GgufFile::open(model_path).expect("open exact 27B GGUF");
         let model = Model::from_gguf(&gguf).expect("bind exact 27B model");
         assert!(matches_no_copy_27b_sentinel(&gguf, &model));
+        let converted_embedding_requests =
+            model_weight_storage_requests(&model, false, false).expect("converted request plan");
+        let rollback_error = match direct_storage_for_load(
+            &ctx,
+            &gguf,
+            &model,
+            &converted_embedding_requests,
+            GgufNoCopyMode::Forced,
+            false,
+        ) {
+            Ok(_) => panic!("exact 27B rollback must fail before resource realization"),
+            Err(error) => error,
+        };
+        assert!(
+            rollback_error
+                .to_string()
+                .contains("requires native token embedding residency")
+        );
         let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
         let prompt = std::fs::read_to_string(prompt_path).expect("read frozen prompt");
         let tokens = tokenizer

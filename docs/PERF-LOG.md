@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.593 Demand-Paged One-Shot Promotion
+
+Status: promote exact retained GGUF views only for the measured cache-warm,
+fresh-process, caller-owned one-shot envelope through 128 outputs.
+
+- The frozen packet compares copied storage with exact 27B retained views and no
+  CPU prefault. It runs 1/256/32/128 outputs in that order, with `BA,AB` at each
+  length and an output-1 kill gate before longer rows. All 16 rows are valid on
+  attempt 1; outputs match across all four processes per length, and host state,
+  child major faults, block input, timing schema, load ledgers, source, binaries,
+  model, and prompt are green.
+- Median spawn-to-first-byte improves `1.6543x` at output 1, `1.7205x` at 32,
+  `1.7185x` at 128, and `1.7252x` at 256. Savings are `1.392/1.477/1.477/1.488 s`.
+  The first process is a conservative B outlier with about 169 ms of external
+  initialization; report the output-1 pair effects `1.5829x/1.7256x` rather than
+  treating its two-pair median as a precise operating point.
+- Median spawn-to-exit improves `1.6979x` at output 1, `1.4626x` at 32,
+  `1.1972x` at 128, and `1.1016x` at 256. Savings are
+  `1.514/1.555/1.440/1.275 s`. The 256 row only narrowly clears its `1.10x` gate;
+  it is boundary evidence, not promotion authority.
+- The mechanism is causal and agrees with v0.591. Median internal model load falls
+  from about `1.61 s` to `82 ms`; first prefill pays about `50 ms`; transition
+  throughput is `0.9671x` copied storage. The measured fit estimates a
+  1,500-transition crossover but is descriptive only and cannot extend policy.
+- Peak private footprint falls from about `16.42 GiB` to `0.77 GiB`, removing
+  about `15.65 GiB`/`16.8 GB` of copied model allocation. The child's maximum RSS
+  falls from about `31.42 GiB` to `0.12 GiB`, but GPU-accessed file-backed pages
+  are not attributed there. Do not claim a 31 GiB physical-memory saving.
+  Likewise, B's roughly 8K versus A's 2.06M page reclaims prove removal of CPU
+  page touching, not absence of device faults or filesystem-cache residency.
+- The exact claim is cache-warm, fresh disposable process, 419-token fixed-chunk
+  prefill, 1024 context, greedy generation, exact asset fingerprint, and at most
+  128 outputs. It is explicit caller-owned opt-in only. Structural matching,
+  automatic default-on, arbitrary prompts, storage-cold use, persistent JSONL or
+  server execution, and unbounded generation remain unauthorized.
+
+Artifacts: `target/profiles/v0593-demand-paged-no-copy-p1/`. Frozen source:
+`d3b7953`. Adversarial review: `cx ask` session
+`019f5e70-f7f6-77e1-ade0-ae157b2e289a`.
+
 ## 2026-07-13 - Post-v0.592 No-Prefault Scope Correction
 
 Status: reopen only demand-paged one-shot no-copy; keep v0.591/v0.592 failures

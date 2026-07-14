@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-14 - v0.595 A3B Generic Retained-Storage Cold Result
+
+Status: massive cache-warm disposable-process win and private-allocation removal,
+but nonauthorizing `needs_review` because loaded prefill and decode regress
+materially.
+
+- The frozen packet runs non-MTP Qwen3.6 A3B Q4 at outputs 1 and 128. Each length
+  clears a two-pair kill screen and completes six scored pairs in the prospective
+  `BA,AB,AB,BA,BA,AB` order. Every canonical row has exact output, generic load
+  ledger, production auto-promoted Q8 embedding policy, PSO miss tuple, command,
+  environment, timing schema, host state, and cache/child VM guards.
+- At output 1, copied-to-retained median spawn-to-first-byte is
+  `2463.13 -> 536.05 ms`: `4.5968x` and `1927.60 ms` saved. Spawn-to-exit is
+  `2645.46 -> 579.09 ms`: `4.5654x` and `2065.07 ms` saved. Internal model load is
+  `2080.17 -> 86.46 ms`.
+- At output 128, first byte is `2457.07 -> 534.68 ms`: `4.6131x` and `1926.17 ms`
+  saved. Exit is `3869.16 -> 1987.85 ms`: `1.9488x` and `1883.57 ms` saved. The
+  fixed load saving reproduces at `2075.41 -> 85.79 ms`.
+- Median peak footprint falls from `22.735/22.755 GB` copied to `0.610/0.638 GB`
+  retained at outputs 1/128, removing about `22.125/22.117 GB`. Candidate RSS is
+  not physical-residency evidence: GPU-accessed file-backed pages remain outside
+  that attribution. Metal `currentAllocatedSize` reports about 22.124 GB in both
+  arms and is likewise not a physical-memory gate.
+- Loaded execution is slower. Prefill rises from about `359` to `426 ms`, roughly
+  19%. Across 127 transitions, copied is `106.58 t/s` or `9.3824 ms/token`; retained
+  is `92.48 t/s` or `10.8126 ms/token`. The paired retained/baseline ratio is
+  `0.86773x`, a `1.4302 ms`/transition tax and `13.23%` throughput loss.
+- Complete loaded output-128 request wall is therefore `1604.64 -> 1852.81 ms`, a
+  `248.17 ms` regression. Disposable-process exit still wins because copied model
+  teardown costs about `190.20 ms` versus `49.14 ms` retained, saving another
+  `141.06 ms`. Keep process-exit and persistent inference interpretations
+  separate.
+- The first candidate process at each length was rejected with 33/12
+  child-attributed major faults. Both still retained the broad endpoint win and
+  the output-128 transition rate matched canonical candidate rows. The complete
+  pairs were rerun under the frozen rule. This is useful first-stage conditioning
+  evidence, not canonical latency or proof of retained-specific steady-state
+  paging.
+- Authority is measurement-only: exact fingerprint, warm filesystem cache, frozen
+  419-token prompt, chunk/context 1024, greedy, no-prefault, fresh disposable
+  process, and outputs 1/128. There is no generic policy, persistent/server,
+  storage-cold, arbitrary-prompt, A10B timing, or physical-memory promotion.
+  First explain whether sparse MoE access plus file-backed GPU VM/residency causes
+  the loaded tax.
+
+Artifacts: `target/profiles/v0595-a3b-generic-retained-cold-p1/`. Frozen source:
+`cc91ab2`. Adversarial design/result reviews: `cx ask` sessions
+`019f5f37-ed36-7352-9877-d6a6f97ef7eb` and
+`019f5f68-f882-7e41-a14e-7959bf66632e`.
+
 ## 2026-07-14 - v0.594 Live Generic Retained-Storage Realization
 
 Status: force-only live realization and the preregistered correctness/resource

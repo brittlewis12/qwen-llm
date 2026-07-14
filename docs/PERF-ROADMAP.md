@@ -514,14 +514,23 @@ GPU reads, plus the isolated exact-27B regression guard. This is broad live
 correctness and resource authority, not latency, storage-cold, persistent,
 automatic-policy, MTP, or universal-lifecycle authority.
 
-1. **Generic retained-storage timing and scoped policy**: highest-breadth
-   process-cold move. First price non-MTP Qwen3.6 A3B Q4 at outputs 1 and 128
-   under cache-warm fresh disposable processes, no CPU prefault, production native
-   embedding policy, and six balanced pairs after a two-pair kill screen. If it
-   clears, prove copied-versus-retained A10B packed-prefill plus one-transition
-   state before timing its output-1 multi-window cell. Dense 9B follows as the
-   production-policy breadth guard. Difficulty M, live-behavior belief
-   medium-high, prize model-size dependent.
+v0.595 prices the first generic production cell and exposes a real objective
+split. A3B retained storage saves `1.928 s` to first byte and `1.884 s` through
+128 outputs while removing about `22.12 GB` of private footprint. But loaded
+prefill regresses about 19%, transition throughput is only `0.86773x`, and the
+complete loaded output-128 request loses `248 ms`. The frozen result is
+`needs_review`: strong cache-warm disposable-process evidence, not policy
+promotion. Copied teardown contributes another `141 ms` of apparent exit gain,
+so exit wall must not stand in for persistent inference.
+
+1. **Retained A3B loaded-tax attribution**: highest-information process-cold move.
+   Determine whether the stable `1.430 ms`/transition tax comes from ongoing
+   file-backed GPU translation/residency, sparse changing-expert access, or the
+   generic window topology. Use one loaded copied/retained attribution packet with
+   an explicit GPU-residency control and phase concentration, not another broad
+   cold family sweep. If late retained tax remains above 5%, classify A3B retained
+   storage as a private-footprint mode plus disposable-process specialization.
+   Only a cleared mechanism may reopen A10B timing or policy integration.
 2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
@@ -612,22 +621,21 @@ not merge objective lanes; every result must retain its boundary label.
 
 ### Active attack sequence
 
-Treat v0.593 as a measured 27B optimization and v0.594 as broad force-only live
-correctness, not universal loader authority. The generic timing packet must retain
-fresh-process, cache, prompt, context, output, and lifecycle boundaries.
+Treat v0.593 as a measured narrow 27B optimization, v0.594 as broad force-only
+live correctness, and v0.595 as a measured but nonauthorizing A3B objective split.
 Persistent, server, MTP, storage-cold, and automatic use stay copied without
 separate evidence.
 
-1. Run the preregistered A3B process-cold packet: outputs 1 then 128, two-pair kill
-   screen then six-pair decision, exact output and load contracts, complete-file
-   cache conditioning, VM/swap guards, and no CPU prefault. Do not fit a crossover
-   from two output lengths.
-2. If A3B clears, add A10B copied-versus-retained packed-prefill and one forced
-   transition full-state equality. Only then run a separately preregistered A10B
-   output-1 packet that hashes and warms all three physical shards.
-3. Run dense 9B under production embedding policy only after A10B. It is the
-   breadth/default-policy guard, not a prerequisite for pricing the larger
-   multi-window prize.
+1. Run one loaded A3B retained-tax attribution packet. Separate first-touch from
+   late repeated transitions, include an explicit GPU-residency control, and
+   localize movement to MoE versus broad phases. Stop if the late tax remains
+   above 5%; do not hide it behind process teardown.
+2. Keep A10B at full-state diagnostic scope until item 1 adjudicates the MoE tax.
+   If reopened, require copied-versus-retained packed-prefill and one forced
+   transition full-state equality before a separately preregistered output-1
+   packet that hashes and warms all three physical shards.
+3. Run dense 9B under production embedding policy only after the tax decision. It
+   is a generic-loader architecture guard, not a prerequisite for pricing A10B.
 4. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not

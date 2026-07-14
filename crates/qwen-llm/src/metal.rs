@@ -38,7 +38,8 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLComputePassDescriptor, MTLComputePipelineState, MTLCounter,
     MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor,
     MTLCounterSamplingPoint, MTLCounterSet, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLDispatchType, MTLFence, MTLLibrary, MTLResourceOptions, MTLSize, MTLStorageMode,
+    MTLDispatchType, MTLFence, MTLHazardTrackingMode, MTLLibrary, MTLResource, MTLResourceOptions,
+    MTLSize, MTLStorageMode,
 };
 use parking_lot::Mutex;
 use std::cell::Cell;
@@ -817,11 +818,13 @@ impl MetalContext {
         mmap: Arc<Mmap>,
         shard_idx: usize,
         required_alignment: usize,
+        hazard_untracked: bool,
     ) -> Result<MetalGgufBacking, MetalError> {
         self.gguf_no_copy_backing_with_observer(
             mmap,
             shard_idx,
             required_alignment,
+            hazard_untracked,
             |_pointer, _length| {},
         )
     }
@@ -831,6 +834,7 @@ impl MetalContext {
         mmap: Arc<Mmap>,
         shard_idx: usize,
         required_alignment: usize,
+        hazard_untracked: bool,
         observer: F,
     ) -> Result<MetalGgufBacking, MetalError>
     where
@@ -868,17 +872,37 @@ impl MetalContext {
         // and exposed length are host-page aligned, exposed_len is within the
         // mapping and Metal's per-buffer limit, and the copied deallocator
         // block retains the Arc<Mmap> until the MTLBuffer is destroyed.
+        let options = if hazard_untracked {
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::HazardTrackingModeUntracked
+        } else {
+            MTLResourceOptions::StorageModeShared
+        };
         let buffer = unsafe {
             self.device
                 .newBufferWithBytesNoCopy_length_options_deallocator(
                     ptr,
                     geometry.exposed_len,
-                    MTLResourceOptions::StorageModeShared,
+                    options,
                     Some(&deallocator),
                 )
         }
         .ok_or(MetalError::NoBuffer(geometry.exposed_len))?;
-        Ok(MetalGgufBacking { buffer, geometry })
+        let expected_hazard_mode = if hazard_untracked {
+            MTLHazardTrackingMode::Untracked
+        } else {
+            MTLHazardTrackingMode::Tracked
+        };
+        let actual_hazard_mode = buffer.hazardTrackingMode();
+        if actual_hazard_mode != expected_hazard_mode {
+            return Err(MetalError::GgufNoCopy(format!(
+                "Metal hazard mode {actual_hazard_mode:?} does not match {expected_hazard_mode:?}"
+            )));
+        }
+        Ok(MetalGgufBacking {
+            buffer,
+            geometry,
+            hazard_untracked,
+        })
     }
 
     /// Allocate an uninitialized output buffer of `n_bytes`.
@@ -1174,6 +1198,7 @@ impl GgufBackingGeometry {
 pub(crate) struct MetalGgufBacking {
     buffer: Buffer,
     geometry: GgufBackingGeometry,
+    hazard_untracked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1199,6 +1224,10 @@ impl MetalGgufBacking {
 
     pub(crate) fn required_alignment(&self) -> usize {
         self.geometry.required_alignment()
+    }
+
+    pub(crate) fn hazard_untracked(&self) -> bool {
+        self.hazard_untracked
     }
 
     pub(crate) fn prefault_read(&self) -> GgufPrefaultReport {
@@ -18348,6 +18377,7 @@ mod tests {
                     Arc::clone(&mmap),
                     0,
                     32,
+                    false,
                     move |pointer, length| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         if pointer.as_ptr() as usize != expected_pointer
@@ -18361,6 +18391,7 @@ mod tests {
             assert_eq!(backing.page_size(), page_size);
             assert_eq!(backing.mapped_len(), bytes.len());
             assert_eq!(backing.exposed_len(), bytes.len());
+            assert!(!backing.hazard_untracked());
             assert_eq!(
                 backing.buffer.contents().as_ptr(),
                 mmap.as_ptr().cast_mut().cast::<c_void>()
@@ -18437,6 +18468,40 @@ mod tests {
         );
         assert_eq!(callback_calls.load(Ordering::Relaxed), 1);
         assert_eq!(callback_mismatches.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_only_mmap_backing_accepts_untracked_hazards() {
+        use std::io::Write;
+
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        let page_size = host_page_size().expect("host page size");
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "qwen-metal-no-copy-untracked-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::File::create(&path)
+            .and_then(|mut file| file.write_all(&vec![0x5au8; page_size]))
+            .expect("write mmap fixture");
+        let file = std::fs::File::open(&path).expect("open mmap fixture");
+        // SAFETY: the immutable file is not modified or truncated while mapped.
+        let mmap = Arc::new(unsafe { Mmap::map(&file).expect("map fixture") });
+        let backing = ctx
+            .gguf_no_copy_backing(mmap, 0, 32, true)
+            .expect("untracked read-only backing");
+        assert!(backing.hazard_untracked());
+        assert_eq!(backing.prefault_read().page_count, 1);
+        drop(backing);
         let _ = std::fs::remove_file(path);
     }
 

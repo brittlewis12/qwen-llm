@@ -380,6 +380,27 @@ fn gguf_no_copy_mode() -> Result<GgufNoCopyMode, MfError> {
     }
 }
 
+fn parse_gguf_no_copy_untracked(value: Option<&str>) -> Result<bool, MfError> {
+    match value {
+        None => Ok(false),
+        Some(value) if crate::env_flag::env_value_truthy(value) => Ok(true),
+        Some(value) if crate::env_flag::env_value_falsy(value) => Ok(false),
+        Some(value) => Err(MfError::LoadPolicy(format!(
+            "invalid QWEN_GGUF_NO_COPY_UNTRACKED value {value:?}"
+        ))),
+    }
+}
+
+fn gguf_no_copy_untracked() -> Result<bool, MfError> {
+    match std::env::var("QWEN_GGUF_NO_COPY_UNTRACKED") {
+        Ok(value) => parse_gguf_no_copy_untracked(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_gguf_no_copy_untracked(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
+            "QWEN_GGUF_NO_COPY_UNTRACKED is not valid Unicode".to_string(),
+        )),
+    }
+}
+
 fn hash_layout_bytes(hash: &mut u64, bytes: &[u8]) {
     const PRIME: u64 = 0x100000001b3;
     for byte in bytes {
@@ -1008,6 +1029,7 @@ fn direct_storage_for_load(
     gguf: &GgufFile,
     model: &Model<'_>,
     mode: GgufNoCopyMode,
+    hazard_untracked: bool,
 ) -> Result<(DirectStorage, bool), MfError> {
     let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
     if mode == GgufNoCopyMode::Disabled {
@@ -1033,17 +1055,18 @@ fn direct_storage_for_load(
     let mmap = gguf.retained_shard_mmap(0).ok_or_else(|| {
         MfError::LoadPolicy("exact no-copy sentinel is missing shard 0".to_string())
     })?;
-    let backing = ctx.gguf_no_copy_backing(mmap, 0, GGUF_NO_COPY_ALIGNMENT)?;
+    let backing = ctx.gguf_no_copy_backing(mmap, 0, GGUF_NO_COPY_ALIGNMENT, hazard_untracked)?;
     let prefault = backing.prefault_read();
     let expected_pages = backing.exposed_len() / backing.page_size();
     if prefault.page_count != expected_pages
         || prefault.covered_bytes != backing.exposed_len()
         || backing.required_alignment() != GGUF_NO_COPY_ALIGNMENT
+        || backing.hazard_untracked() != hazard_untracked
     {
         return Err(MfError::LoadPolicy(format!(
             concat!(
                 "forced no-copy prefault mismatch: pages={}/{} covered={}/{} ",
-                "alignment={}/{}"
+                "alignment={}/{} hazard={}/{}"
             ),
             prefault.page_count,
             expected_pages,
@@ -1051,12 +1074,14 @@ fn direct_storage_for_load(
             backing.exposed_len(),
             backing.required_alignment(),
             GGUF_NO_COPY_ALIGNMENT,
+            backing.hazard_untracked(),
+            hazard_untracked,
         )));
     }
     eprintln!(
         concat!(
             "[metal-gguf-no-copy] mapped={} exposed={} suffix={} page={} pages={} ",
-            "alignment={} prefault_ms={:.3} checksum={:#018x}"
+            "alignment={} hazard={} prefault_ms={:.3} checksum={:#018x}"
         ),
         backing.mapped_len(),
         backing.exposed_len(),
@@ -1064,6 +1089,11 @@ fn direct_storage_for_load(
         backing.page_size(),
         prefault.page_count,
         backing.required_alignment(),
+        if backing.hazard_untracked() {
+            "untracked"
+        } else {
+            "tracked"
+        },
         prefault.wall_ms,
         prefault.checksum,
     );
@@ -1082,14 +1112,22 @@ impl MetalModel {
     /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q8_0
     /// embeddings can opt into native residency once their row kernels apply.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
-        Self::load_with_no_copy_mode(ctx, gguf, model, gguf_no_copy_mode()?)
+        let no_copy_mode = gguf_no_copy_mode()?;
+        let hazard_untracked = gguf_no_copy_untracked()?;
+        if no_copy_mode == GgufNoCopyMode::Disabled && hazard_untracked {
+            return Err(MfError::LoadPolicy(
+                "QWEN_GGUF_NO_COPY_UNTRACKED requires QWEN_GGUF_NO_COPY=1".to_string(),
+            ));
+        }
+        Self::load_with_no_copy_policy(ctx, gguf, model, no_copy_mode, hazard_untracked)
     }
 
-    fn load_with_no_copy_mode(
+    fn load_with_no_copy_policy(
         ctx: &MetalContext,
         gguf: &GgufFile,
         model: &Model<'_>,
         no_copy_mode: GgufNoCopyMode,
+        hazard_untracked: bool,
     ) -> Result<Self, MfError> {
         let embedding_selection = resolve_native_quant_embedding(
             native_quant_embedding_mode(),
@@ -1115,7 +1153,7 @@ impl MetalModel {
         }
 
         let (direct_storage, exact_sentinel) =
-            direct_storage_for_load(ctx, gguf, model, no_copy_mode)?;
+            direct_storage_for_load(ctx, gguf, model, no_copy_mode, hazard_untracked)?;
         let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage);
         let token_embd =
             loader.load_embedding(model.token_embd, embedding_selection.uses_native())?;
@@ -8915,6 +8953,16 @@ mod tests {
         }
         assert!(parse_gguf_no_copy_mode(Some("enabled")).is_err());
         assert!(parse_gguf_no_copy_mode(Some("")).is_err());
+
+        assert!(!parse_gguf_no_copy_untracked(None).unwrap());
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(parse_gguf_no_copy_untracked(Some(value)).unwrap());
+        }
+        for value in ["0", "false", "FALSE", "no", "NO"] {
+            assert!(!parse_gguf_no_copy_untracked(Some(value)).unwrap());
+        }
+        assert!(parse_gguf_no_copy_untracked(Some("enabled")).is_err());
+        assert!(parse_gguf_no_copy_untracked(Some("")).is_err());
     }
 
     #[test]
@@ -8951,10 +8999,12 @@ mod tests {
             model: &Model<'_>,
             tokens: &[i32],
             mode: GgufNoCopyMode,
+            hazard_untracked: bool,
             forced_next: Option<i32>,
         ) -> ArmResult {
-            let metal_model = MetalModel::load_with_no_copy_mode(ctx, gguf, model, mode)
-                .expect("load exactness arm");
+            let metal_model =
+                MetalModel::load_with_no_copy_policy(ctx, gguf, model, mode, hazard_untracked)
+                    .expect("load exactness arm");
             let forward = MetalForward::new(ctx, &metal_model);
             let capacity = 512;
             let mut session =
@@ -9055,13 +9105,22 @@ mod tests {
             .expect("tokenize frozen prompt");
         assert_eq!(tokens.len(), 419, "frozen Reva token count drifted");
 
-        let copied = run_arm(&ctx, &gguf, &model, &tokens, GgufNoCopyMode::Disabled, None);
+        let copied = run_arm(
+            &ctx,
+            &gguf,
+            &model,
+            &tokens,
+            GgufNoCopyMode::Disabled,
+            false,
+            None,
+        );
         let retained = run_arm(
             &ctx,
             &gguf,
             &model,
             &tokens,
             GgufNoCopyMode::Forced,
+            true,
             Some(copied.next_token),
         );
         assert_eq!(copied.next_token, retained.next_token);

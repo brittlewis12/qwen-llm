@@ -18,6 +18,7 @@
 
 mod attn_capture;
 mod attn_stage_floor;
+mod gguf_arena_floor;
 #[path = "../source_identity.rs"]
 mod source_identity;
 
@@ -444,6 +445,8 @@ enum Cmd {
     BuildInfo(BuildInfoArgs),
     /// Report model-agnostic retained-GGUF geometry and byte coverage without loading weights.
     GgufStoragePlan(GgufStoragePlanArgs),
+    /// Compare copied tensors with serial and four-worker anonymous arenas.
+    GgufArenaFloor(gguf_arena_floor::GgufArenaFloorArgs),
     /// Decode N tokens after a prompt using the plain no-spec path.
     ///
     /// Packed prefill is the default no-spec path. `--sequential-prefill`
@@ -2712,6 +2715,9 @@ fn main() -> Result<()> {
         }
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
+        Cmd::GgufArenaFloor(a) => {
+            gguf_arena_floor::run(a, serde_json::to_value(qwen_build_identity_packet())?)
+        }
         Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),

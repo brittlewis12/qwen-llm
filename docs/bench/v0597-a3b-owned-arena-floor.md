@@ -30,6 +30,11 @@ server, or broad-family result.
 - Planner gaps: 13,824 bytes.
 - Arena physical copy bytes: `22,123,552,768`, including the fallback.
 - Resource options: `MTLResourceStorageModeShared` for every arm.
+- Descriptor-layout digest: `0x5ae645df5cf7d568`.
+- Ordered inventory digest:
+  `f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5`.
+- Planner digest:
+  `fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af`.
 
 Use the production ordered request inventory and `plan_retained_storage`. Hash the
 ordered tensor name, shard, source offset, byte length, dtype, shape, and
@@ -38,6 +43,9 @@ alignment, windows, entries, dispositions, offsets, and fallback reasons. Freeze
 the GGUF descriptor-layout digest and executable/source identity in every packet.
 
 Any geometry, identity, policy, digest, count, or byte drift terminates the packet.
+The clean runner executes one metadata-only geometry control before timing. It
+hashes the complete model in the parent; the child never hashes or prefaults model
+payload before its authoritative interval.
 
 ## Arms
 

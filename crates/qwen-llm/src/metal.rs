@@ -786,6 +786,10 @@ impl MetalContext {
         self.device.currentAllocatedSize() as u64
     }
 
+    pub fn max_buffer_length(&self) -> usize {
+        self.device.maxBufferLength()
+    }
+
     /// Allocate a buffer populated from a `bytemuck::Pod` slice.
     /// Uses `StorageModeShared` (unified memory).
     pub fn buffer_from<T: bytemuck::Pod>(&self, data: &[T]) -> Result<Buffer, MetalError> {

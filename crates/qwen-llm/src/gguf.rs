@@ -250,6 +250,34 @@ impl GgufFile {
         Ok(&shard.mmap[start..end])
     }
 
+    /// Return a validated byte range from one mapped shard.
+    pub fn try_shard_range(
+        &self,
+        shard_idx: usize,
+        offset: u64,
+        length: usize,
+    ) -> Result<&[u8], GgufError> {
+        let Some(shard) = self.shards.get(shard_idx) else {
+            return Err(GgufError::Decode(format!(
+                "range references missing shard {shard_idx}"
+            )));
+        };
+        let start = usize::try_from(offset)
+            .map_err(|_| GgufError::Decode(format!("range offset {offset} does not fit usize")))?;
+        let end = start.checked_add(length).ok_or_else(|| {
+            GgufError::Decode(format!(
+                "range endpoint overflows: offset={offset} length={length}"
+            ))
+        })?;
+        if end > shard.mmap.len() {
+            return Err(GgufError::Decode(format!(
+                "range [{start}..{end}) exceeds shard {shard_idx} length {}",
+                shard.mmap.len()
+            )));
+        }
+        Ok(&shard.mmap[start..end])
+    }
+
     pub(crate) fn slice(&self, desc: &TensorDesc) -> &[u8] {
         self.try_slice(desc)
             .expect("tensor descriptor should have been validated against its GGUF shard")
@@ -1550,6 +1578,11 @@ mod tests {
         );
         assert_eq!(g.slice(a), &1.0f32.to_le_bytes());
         assert_eq!(g.slice(b), &2.0f32.to_le_bytes());
+        assert_eq!(
+            g.try_shard_range(a.shard_idx, a.data_offset, 4)
+                .expect("validated shard range"),
+            &1.0f32.to_le_bytes()
+        );
 
         let mut forged = a.clone();
         forged.shard_idx = 99;
@@ -1558,6 +1591,24 @@ mod tests {
         let mut forged = b.clone();
         forged.data_offset = u64::MAX;
         assert!(matches!(g.try_slice(&forged), Err(GgufError::Decode(_))));
+        assert!(matches!(
+            g.try_shard_range(99, 0, 4),
+            Err(GgufError::Decode(_))
+        ));
+        assert!(matches!(
+            g.try_shard_range(0, u64::MAX, 4),
+            Err(GgufError::Decode(_))
+        ));
+        let first_len = g.shard_mapped_lengths()[0];
+        assert_eq!(
+            g.try_shard_range(0, first_len as u64, 0)
+                .expect("exact-end empty range"),
+            &[] as &[u8]
+        );
+        assert!(matches!(
+            g.try_shard_range(0, (first_len - 1) as u64, 2),
+            Err(GgufError::Decode(_))
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

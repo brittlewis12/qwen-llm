@@ -2984,10 +2984,10 @@ fn run_gguf_storage_plan(args: GgufStoragePlanArgs) -> Result<()> {
             println!("direct_view_bytes\t{}", plan.logical_view_bytes);
             println!("fallback_bytes\t{}", plan.unique_fallback_bytes);
             println!("converted_resident_bytes\t{converted_resident_bytes}");
-            println!(concat!(
-                "estimated_base_weight_private_bytes_removed_under_policy\t",
-                "{estimated_base_weight_private_bytes_removed}"
-            ));
+            println!(
+                "estimated_base_weight_private_bytes_removed_under_policy\t{}",
+                estimated_base_weight_private_bytes_removed
+            );
         }
     }
     Ok(())

@@ -13,7 +13,7 @@ import v0595_a3b_generic_retained_cold as prior
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT = ROOT / "target/profiles/v0596-a3b-retained-route-warm-p1"
+ARTIFACT = ROOT / "target/profiles/v0596-a3b-retained-route-warm-p2"
 PREREG = ROOT / "docs/bench/v0596-a3b-retained-route-warm.md"
 MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
@@ -26,12 +26,18 @@ PRIOR_MANIFEST = (
 PRIOR_DECISION = (
     ROOT / "target/profiles/v0595-a3b-generic-retained-cold-p1/decision.json"
 )
+P1_ROOT = ROOT / "target/profiles/v0596-a3b-retained-route-warm-p1"
+P1_INVENTORY = P1_ROOT / "raw-inventory.sha256"
 EXPECTED_PRIOR_COMMIT = "cc91ab2b1a0e1f04e13c678506c0c47507c2d65a"
 EXPECTED_PRIOR_MANIFEST_SHA256 = (
     "eeca0499013aead772a0ff5c3333704f903c4100b74707a04ae2d663700a0fdb"
 )
 EXPECTED_PRIOR_DECISION_SHA256 = (
     "05ec19c433af94d170f296359e8006b58d7291060039c6045ff9fba2d7db6a73"
+)
+EXPECTED_P1_COMMIT = "8cdf44e02ea6f43f1014ec6ccba66de6c8f1af58"
+EXPECTED_P1_INVENTORY_SHA256 = (
+    "2683b07924f3110616806c0199e3fdf43d13d34ae20ecf1e3d6993c56c13929b"
 )
 EXPECTED_MODEL_SHA256 = (
     "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61"
@@ -96,7 +102,27 @@ def required_manifest_paths() -> tuple[Path, ...]:
         BENCH_BINARY,
         PRIOR_MANIFEST,
         PRIOR_DECISION,
+        P1_INVENTORY,
     )
+
+
+def verify_p1_inventory() -> dict[str, object]:
+    if prior.common.sha256_file(P1_INVENTORY) != EXPECTED_P1_INVENTORY_SHA256:
+        raise RuntimeError("v0.596 p1 inventory SHA-256 drifted")
+    entries = {}
+    for line in P1_INVENTORY.read_text(encoding="utf-8").splitlines():
+        parts = line.split("  ", 1)
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+            raise RuntimeError(f"invalid v0.596 p1 inventory line: {line!r}")
+        path = (ROOT / parts[1]).resolve()
+        if not path.is_relative_to(P1_ROOT.resolve()) or not path.is_file():
+            raise RuntimeError(f"invalid v0.596 p1 inventory path: {path}")
+        if prior.common.sha256_file(path) != parts[0]:
+            raise RuntimeError(f"v0.596 p1 artifact drifted: {path}")
+        entries[str(path)] = parts[0]
+    if len(entries) != 25:
+        raise RuntimeError(f"expected 25 v0.596 p1 artifacts, got {len(entries)}")
+    return entries
 
 
 def build_manifest(removed_environment: list[str]) -> dict[str, object]:
@@ -104,6 +130,7 @@ def build_manifest(removed_environment: list[str]) -> dict[str, object]:
     hashes = {
         str(path): prior.common.sha256_file(path) for path in required_manifest_paths()
     }
+    p1_inventory = verify_p1_inventory()
     if hashes[str(MODEL)] != EXPECTED_MODEL_SHA256:
         raise RuntimeError("model SHA-256 drifted")
     if hashes[str(PROMPT)] != EXPECTED_PROMPT_SHA256:
@@ -127,6 +154,46 @@ def build_manifest(removed_environment: list[str]) -> dict[str, object]:
     for helper in (COMMON_RUNNER, PRIOR_RUNNER):
         if hashes[str(helper)] != prior_manifest["sha256"].get(str(helper)):
             raise RuntimeError(f"v0.595 imported helper drifted: {helper}")
+    p1_manifest = json.loads((P1_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    if p1_manifest.get("source_commit") != EXPECTED_P1_COMMIT:
+        raise RuntimeError("v0.596 p1 source identity drifted")
+    p1_attempts = [
+        json.loads(line)
+        for line in (P1_ROOT / "attempts.jsonl").read_text().splitlines()
+        if line
+    ]
+    if len(p1_attempts) != 9:
+        raise RuntimeError("v0.596 p1 attempt count drifted")
+    for row in p1_attempts:
+        if (
+            row.get("page_faults") != 92
+            or row.get("block_input_operations") != 0
+            or row.get("process_pageout_delta") != 0
+            or row.get("process_swap_delta_bytes") != 0
+            or row.get("valid") is not False
+            or row.get("validity_reasons") != ["major_page_faults=92"]
+        ):
+            raise RuntimeError("v0.596 p1 failure fingerprint drifted")
+    p1_blocks = [
+        json.loads(line)
+        for line in (P1_ROOT / "block-attempts.jsonl").read_text().splitlines()
+        if line
+    ]
+    if len(p1_blocks) != 3 or any(row.get("accepted") for row in p1_blocks):
+        raise RuntimeError("v0.596 p1 block decision drifted")
+    controls = {}
+    for name in (
+        "build-info-1.txt",
+        "build-info-2.txt",
+        "metal-counters-1.txt",
+        "metal-counters-2.txt",
+    ):
+        text = (P1_ROOT / "harness-floor-controls" / name).read_text()
+        faults = prior.common.parse_resource(text, "page faults")
+        block_inputs = prior.common.parse_resource(text, "block input operations")
+        if faults != 89 or block_inputs != 0:
+            raise RuntimeError(f"v0.596 p1 harness-floor control drifted: {name}")
+        controls[name] = {"page_faults": faults, "block_input_operations": 0}
     return {
         "schema": 1,
         "created_unix_ms": time.time_ns() // 1_000_000,
@@ -143,6 +210,12 @@ def build_manifest(removed_environment: list[str]) -> dict[str, object]:
         "cooldown_s": COOLDOWN_S,
         "prior_source_commit": EXPECTED_PRIOR_COMMIT,
         "prior_transition_ratio": prior_transition,
+        "p1_source_commit": EXPECTED_P1_COMMIT,
+        "p1_inventory_sha256": EXPECTED_P1_INVENTORY_SHA256,
+        "p1_inventory_entries": len(p1_inventory),
+        "p1_attempt_page_faults": sorted({row["page_faults"] for row in p1_attempts}),
+        "p1_harness_floor_controls": controls,
+        "page_fault_policy": "record_unlocalized_do_not_gate",
     }
 
 
@@ -427,8 +500,6 @@ def run_one(
     validity_reasons = []
     if block_inputs != 0:
         validity_reasons.append(f"block_input_operations={block_inputs}")
-    if page_faults != 0:
-        validity_reasons.append(f"major_page_faults={page_faults}")
     if process_pageout_delta != 0:
         validity_reasons.append(f"process_pageout_delta={process_pageout_delta}")
     if process_swap_delta > 0:
@@ -598,6 +669,23 @@ def block_metrics(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                 "late_prefill_c_over_a": (
                     c["late_prefill_tps"] / a["late_prefill_tps"]
                 ),
+                "page_faults_a": next(
+                    row["page_faults"] for row in block if row["arm"] == "A"
+                ),
+                "page_faults_b": next(
+                    row["page_faults"] for row in block if row["arm"] == "B"
+                ),
+                "page_faults_c": next(
+                    row["page_faults"] for row in block if row["arm"] == "C"
+                ),
+                "page_faults_b_minus_a": next(
+                    row["page_faults"] for row in block if row["arm"] == "B"
+                )
+                - next(row["page_faults"] for row in block if row["arm"] == "A"),
+                "page_faults_c_minus_a": next(
+                    row["page_faults"] for row in block if row["arm"] == "C"
+                )
+                - next(row["page_faults"] for row in block if row["arm"] == "A"),
                 "b_prefill_recovery_normalized_by_a": (
                     b["rep1_to_late_prefill_recovery"]
                     / a["rep1_to_late_prefill_recovery"]
@@ -613,6 +701,7 @@ def block_metrics(rows: list[dict[str, object]]) -> list[dict[str, object]]:
 
 def summarize(rows: list[dict[str, object]]) -> dict[str, object]:
     effects = block_metrics(rows)
+    page_faults = [row["page_faults"] for row in rows]
     rep1_b_over_a = [effect["rep1_b_over_a"] for effect in effects]
     late_b_over_a = [effect["late_b_over_a"] for effect in effects]
     a_metrics = [effect["arms"]["A"] for effect in effects]
@@ -709,6 +798,11 @@ def summarize(rows: list[dict[str, object]]) -> dict[str, object]:
             effect["b_prefill_recovery_normalized_by_a"] for effect in effects
         )
         >= 1.05,
+        "process_page_faults": page_faults,
+        "process_page_fault_min": min(page_faults),
+        "process_page_fault_max": max(page_faults),
+        "process_page_fault_range": max(page_faults) - min(page_faults),
+        "process_page_fault_policy": "record_unlocalized_do_not_gate",
         "c_prefault_wall_ms": c_prefault_ms,
         "median_c_prefault_wall_ms": statistics.median(c_prefault_ms),
         "authority": "same_request_loaded_process_convergence_only",

@@ -1,7 +1,8 @@
 # v0.596 A3B Retained Loaded-Recovery Attribution
 
-Status: preregistered before timed work. This tracked contract and runner are
-part of the frozen source commit.
+Status: p2 preregistered before its timed work. P1 at source `8cdf44e` stopped
+after three rejected `ABC` blocks and remains noncanonical. This tracked p2
+contract and runner are part of the new frozen source commit.
 
 ## Intent
 
@@ -52,12 +53,34 @@ matching source/build identity for `qwen-bench` and the frozen v0.595 source and
 decision fingerprints. Normalize all QWEN/Metal environment controls before
 assigning the arm variables.
 
+Also authenticate p1's manifest, all nine rejected process artifacts, three
+block decisions, and the four raw harness-floor controls through its pinned
+25-file SHA-256 inventory. P1 observed exactly 92 process-level `ru_majflt`
+events in every A/B/C process. Two `qwen-bench build-info` and two
+`qwen-bench metal-counters` controls observed exactly 89 each with zero block
+input. This demonstrates an executable/runtime floor but cannot localize the
+three additional decode-process faults.
+
 Before every cache read require AC power, no thermal/performance warning, and at
 least 50% memory availability. Bracket cache conditioning and child execution
 with pageout/swap state. Cache-interval growth terminates before child launch;
-post-run host, pageout, swap, hard-fault, or block-input invalidation may rerun
-the complete three-arm block up to three times. Parser, identity, ledger,
-command, environment, token-count, or output mismatch terminates the packet.
+post-run host, pageout, swap, or block-input invalidation may rerun the complete
+three-arm block up to three times. Parser, identity, ledger, command,
+environment, token-count, or output mismatch terminates the packet.
+
+P2's sole validity change is to record process-level page faults without using
+them to accept, reject, retry, warn, or classify a row. Do not subtract the
+89-fault floor, require 92, or require equality across arms. Report every raw
+count plus per-block B-minus-A and C-minus-A differences. The decision endpoint
+starts after model load and an untimed full-prompt prefill plus one-transition
+warmup, while the process counter is unlocalized and may include the mapping
+behavior under study. Zero block input, zero pageout/swap growth, complete-file
+conditioning, and the cache-conditioned/non-storage-cold authority remain
+unchanged.
+
+P1 rows are descriptive failure evidence only. Do not pool them with p2, reduce
+p2's three-block design, or alter any arm, threshold, request, repetition,
+ordering, retry, correctness, or authority rule because of their outcome.
 
 Parse all five per-repetition prefill and decode walls, the last-repetition MoE
 GPU/CPU consistency profile, generated text, and C's prefault report. Require

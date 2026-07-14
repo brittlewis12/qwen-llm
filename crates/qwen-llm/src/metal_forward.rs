@@ -359,6 +359,13 @@ enum GgufNoCopyMode {
     Forced,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GgufNoCopyPrefaultMode {
+    Default,
+    Enabled,
+    Disabled,
+}
+
 fn parse_gguf_no_copy_mode(value: Option<&str>) -> Result<GgufNoCopyMode, MfError> {
     match value {
         None => Ok(GgufNoCopyMode::Disabled),
@@ -376,6 +383,31 @@ fn gguf_no_copy_mode() -> Result<GgufNoCopyMode, MfError> {
         Err(std::env::VarError::NotPresent) => parse_gguf_no_copy_mode(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
             "QWEN_GGUF_NO_COPY is not valid Unicode".to_string(),
+        )),
+    }
+}
+
+fn parse_gguf_no_copy_prefault(value: Option<&str>) -> Result<GgufNoCopyPrefaultMode, MfError> {
+    match value {
+        None => Ok(GgufNoCopyPrefaultMode::Default),
+        Some(value) if crate::env_flag::env_value_truthy(value) => {
+            Ok(GgufNoCopyPrefaultMode::Enabled)
+        }
+        Some(value) if crate::env_flag::env_value_falsy(value) => {
+            Ok(GgufNoCopyPrefaultMode::Disabled)
+        }
+        Some(value) => Err(MfError::LoadPolicy(format!(
+            "invalid QWEN_GGUF_NO_COPY_PREFAULT value {value:?}"
+        ))),
+    }
+}
+
+fn gguf_no_copy_prefault_mode() -> Result<GgufNoCopyPrefaultMode, MfError> {
+    match std::env::var("QWEN_GGUF_NO_COPY_PREFAULT") {
+        Ok(value) => parse_gguf_no_copy_prefault(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_gguf_no_copy_prefault(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(MfError::LoadPolicy(
+            "QWEN_GGUF_NO_COPY_PREFAULT is not valid Unicode".to_string(),
         )),
     }
 }
@@ -1008,6 +1040,7 @@ fn direct_storage_for_load(
     gguf: &GgufFile,
     model: &Model<'_>,
     mode: GgufNoCopyMode,
+    prefault_enabled: bool,
 ) -> Result<(DirectStorage, bool), MfError> {
     let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
     if mode == GgufNoCopyMode::Disabled {
@@ -1034,38 +1067,49 @@ fn direct_storage_for_load(
         MfError::LoadPolicy("exact no-copy sentinel is missing shard 0".to_string())
     })?;
     let backing = ctx.gguf_no_copy_backing(mmap, 0, GGUF_NO_COPY_ALIGNMENT)?;
-    let prefault = backing.prefault_read();
     let expected_pages = backing.exposed_len() / backing.page_size();
-    if prefault.page_count != expected_pages
-        || prefault.covered_bytes != backing.exposed_len()
-        || backing.required_alignment() != GGUF_NO_COPY_ALIGNMENT
-    {
+    if backing.required_alignment() != GGUF_NO_COPY_ALIGNMENT {
         return Err(MfError::LoadPolicy(format!(
-            concat!(
-                "forced no-copy prefault mismatch: pages={}/{} covered={}/{} ",
-                "alignment={}/{}"
-            ),
-            prefault.page_count,
-            expected_pages,
-            prefault.covered_bytes,
-            backing.exposed_len(),
+            "forced no-copy alignment mismatch: {}/{}",
             backing.required_alignment(),
             GGUF_NO_COPY_ALIGNMENT,
         )));
     }
+    let prefault = if prefault_enabled {
+        let report = backing.prefault_read();
+        if report.page_count != expected_pages || report.covered_bytes != backing.exposed_len() {
+            return Err(MfError::LoadPolicy(format!(
+                "forced no-copy prefault mismatch: pages={}/{} covered={}/{}",
+                report.page_count,
+                expected_pages,
+                report.covered_bytes,
+                backing.exposed_len(),
+            )));
+        }
+        Some(report)
+    } else {
+        None
+    };
     eprintln!(
         concat!(
             "[metal-gguf-no-copy] mapped={} exposed={} suffix={} page={} pages={} ",
-            "alignment={} prefault_ms={:.3} checksum={:#018x}"
+            "alignment={} prefault={} prefault_pages={} prefault_ms={:.3} ",
+            "checksum={:#018x}"
         ),
         backing.mapped_len(),
         backing.exposed_len(),
         backing.mapped_len() - backing.exposed_len(),
         backing.page_size(),
-        prefault.page_count,
+        expected_pages,
         backing.required_alignment(),
-        prefault.wall_ms,
-        prefault.checksum,
+        if prefault_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        prefault.map_or(0, |report| report.page_count),
+        prefault.map_or(0.0, |report| report.wall_ms),
+        prefault.map_or(0, |report| report.checksum),
     );
     Ok((DirectStorage::ForcedRetained(backing), true))
 }
@@ -1082,14 +1126,25 @@ impl MetalModel {
     /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q8_0
     /// embeddings can opt into native residency once their row kernels apply.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
-        Self::load_with_no_copy_mode(ctx, gguf, model, gguf_no_copy_mode()?)
+        let no_copy_mode = gguf_no_copy_mode()?;
+        let prefault_mode = gguf_no_copy_prefault_mode()?;
+        if no_copy_mode == GgufNoCopyMode::Disabled
+            && prefault_mode != GgufNoCopyPrefaultMode::Default
+        {
+            return Err(MfError::LoadPolicy(
+                "QWEN_GGUF_NO_COPY_PREFAULT requires QWEN_GGUF_NO_COPY=1".to_string(),
+            ));
+        }
+        let prefault_enabled = prefault_mode != GgufNoCopyPrefaultMode::Disabled;
+        Self::load_with_no_copy_policy(ctx, gguf, model, no_copy_mode, prefault_enabled)
     }
 
-    fn load_with_no_copy_mode(
+    fn load_with_no_copy_policy(
         ctx: &MetalContext,
         gguf: &GgufFile,
         model: &Model<'_>,
         no_copy_mode: GgufNoCopyMode,
+        prefault_enabled: bool,
     ) -> Result<Self, MfError> {
         let embedding_selection = resolve_native_quant_embedding(
             native_quant_embedding_mode(),
@@ -1115,7 +1170,7 @@ impl MetalModel {
         }
 
         let (direct_storage, exact_sentinel) =
-            direct_storage_for_load(ctx, gguf, model, no_copy_mode)?;
+            direct_storage_for_load(ctx, gguf, model, no_copy_mode, prefault_enabled)?;
         let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage);
         let token_embd =
             loader.load_embedding(model.token_embd, embedding_selection.uses_native())?;
@@ -8915,6 +8970,25 @@ mod tests {
         }
         assert!(parse_gguf_no_copy_mode(Some("enabled")).is_err());
         assert!(parse_gguf_no_copy_mode(Some("")).is_err());
+
+        assert_eq!(
+            parse_gguf_no_copy_prefault(None).unwrap(),
+            GgufNoCopyPrefaultMode::Default
+        );
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert_eq!(
+                parse_gguf_no_copy_prefault(Some(value)).unwrap(),
+                GgufNoCopyPrefaultMode::Enabled
+            );
+        }
+        for value in ["0", "false", "FALSE", "no", "NO"] {
+            assert_eq!(
+                parse_gguf_no_copy_prefault(Some(value)).unwrap(),
+                GgufNoCopyPrefaultMode::Disabled
+            );
+        }
+        assert!(parse_gguf_no_copy_prefault(Some("enabled")).is_err());
+        assert!(parse_gguf_no_copy_prefault(Some("")).is_err());
     }
 
     #[test]
@@ -8951,10 +9025,12 @@ mod tests {
             model: &Model<'_>,
             tokens: &[i32],
             mode: GgufNoCopyMode,
+            prefault_enabled: bool,
             forced_next: Option<i32>,
         ) -> ArmResult {
-            let metal_model = MetalModel::load_with_no_copy_mode(ctx, gguf, model, mode)
-                .expect("load exactness arm");
+            let metal_model =
+                MetalModel::load_with_no_copy_policy(ctx, gguf, model, mode, prefault_enabled)
+                    .expect("load exactness arm");
             let forward = MetalForward::new(ctx, &metal_model);
             let capacity = 512;
             let mut session =
@@ -9055,13 +9131,22 @@ mod tests {
             .expect("tokenize frozen prompt");
         assert_eq!(tokens.len(), 419, "frozen Reva token count drifted");
 
-        let copied = run_arm(&ctx, &gguf, &model, &tokens, GgufNoCopyMode::Disabled, None);
+        let copied = run_arm(
+            &ctx,
+            &gguf,
+            &model,
+            &tokens,
+            GgufNoCopyMode::Disabled,
+            true,
+            None,
+        );
         let retained = run_arm(
             &ctx,
             &gguf,
             &model,
             &tokens,
             GgufNoCopyMode::Forced,
+            false,
             Some(copied.next_token),
         );
         assert_eq!(copied.next_token, retained.next_token);

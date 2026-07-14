@@ -6,6 +6,58 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-13 - v0.591 Retained-GGUF Memory Win, Latency Stop
+
+Status: the exact 27B read-only GGUF view clears correctness and memory gates but
+fails the preregistered latency contract; stop before pilots or a scored packet.
+
+- v0.591a retains read-only shard mappings through Metal buffer lifetime and adds
+  a pure page/range classifier. v0.591b forces the candidate only for the exact
+  one-shard 27B descriptor layout `0xd116405fd99f54d9`, native untied embedding,
+  no MTP, and unified memory. Every other model or fallback fails closed.
+- The exact file has 851 descriptors and `16,806,250,496` logical tensor bytes.
+  Candidate accounting is exactly 850 retained views covering
+  `16,806,230,016` bytes plus one copied 20,480-byte final norm. There are zero
+  conversions, ordinary direct copies, or derived allocations.
+- Read-only lifetime tests prove nonzero-offset blit and matvec execution, one
+  deallocator callback with the expected pointer/length, and final `Arc<Mmap>`
+  release. The frozen 419-token packed-prefill path and one forced continuation
+  compare full F32 logits, KV arenas, GDN conv/state arenas, positions, and final
+  snapshots bit-for-bit against copied storage. The full active library suite is
+  195 passed, 124 ignored, and zero failed; product output also matches exactly.
+- A balanced off-packet `BA,AB` diagnostic runs a first request and identical
+  loaded-model follow-up in every process. Candidate CPU prefault costs
+  `1798.088/1943.192 ms` for 1,026,443 sparse page reads. Candidate internal load
+  loses by `209.8/303.4 ms`, spawn-to-first-byte by `434.5/368.2 ms`, and exit by
+  `414.8/355.7 ms`. The preregistered latency entry conditions are therefore
+  already false; no pilot, scored cold packet, or formal warm guard follows.
+- First-prefill candidate deltas are `+59.0/+65.0 ms`, then converge to
+  `+4.3/+6.3 ms` on the identical warm follow-up. Warm transition ratios remain
+  `0.96861x/0.96787x`, about `1.28-1.31 ms` slower per transition. This rules out
+  a first-touch-only explanation for the decode loss but does not yet separate
+  file backing from one-large-resource behavior.
+- The memory-only clause clears decisively. Maximum RSS falls by
+  `16,794,779,648/16,803,676,160` bytes and peak footprint by
+  `16,791,301,808/16,799,444,704` bytes. `currentAllocatedSize` rises slightly
+  because Metal represents the complete mapped shard; it is not physical
+  residency and is not used for the memory claim.
+- Do not subtract prefault wall and report a latency win. Residual candidate load
+  is `80-95 ms`, but no-prefault GPU demand behavior is unmeasured. Likewise, a
+  roughly 1,100-transition crossover is only linear sizing from one 32-output
+  fixture, not a measured break-even result.
+- One cheap continuation remains decision-relevant: exact read-only
+  `HazardTrackingModeUntracked` followed by a balanced warm screen. If it restores
+  both warm ratios to at least `0.99x`, preregister a distinct no-prefault cold
+  policy. If not, stop before anonymous-arena or per-tensor page-window work until
+  those controls are reranked against admitted auto-prefill.
+
+Artifacts: `target/profiles/v0591-gguf-no-copy/`. Frozen commits:
+`3042bcf`, `dde9128`. Adversarial reviews: `cx ask` sessions
+`019f5d93-8280-71c1-8d49-036948bf263e`,
+`019f5da7-c47d-7bf3-a8fa-28740df5d83c`,
+`019f5dd5-f109-7203-ba59-8c4d6ed76427`, and
+`019f5de7-3e8f-7741-aa07-71c08b701b2e`.
+
 ## 2026-07-13 - v0.590 Native-Embedding Process-Cold Promotion
 
 Status: exact native token embeddings default on for measured untied 27B Q4_K

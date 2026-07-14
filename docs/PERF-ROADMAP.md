@@ -481,16 +481,21 @@ MTP-bearing variants, tied embeddings, and lookalike architectures remain
 default-off; explicit `=1` retains the structurally supported opt-in path and
 `=0` is the rollback.
 
-1. **Whole-shard no-copy GGUF proof**: highest-upside exact process-cold move.
-   Current native tensors are still copied one-by-one from mmap into shared Metal
-   buffers. Prototype page-aligned no-copy ownership for one representative 27B
-   shard while retaining the mmap for the complete buffer lifetime. Measure
-   process spawn to first byte and exit, not model-ready wall, so deferred page
-   faults cannot masquerade as a win. The post-v0.590 remaining load walls are
-   about `1.6 s` 27B and `2.1 s` A3B, giving a material but bounded ceiling.
-   Require exact output, no warm regression, lower RSS/allocation pressure, and a
-   clean split-shard/alignment fallback before widening. Difficulty M, belief
-   medium.
+v0.591 closes the preregistered whole-shard no-copy candidate as a latency move.
+Its sparse CPU prefault costs `1.80-1.94 s`; candidate first byte loses
+`368-435 ms`, exit loses `356-415 ms`, and loaded warm transition throughput is
+only `0.96787-0.96861x`. Exact state and output are bitwise, while maximum RSS and
+peak footprint each fall by about 16.8 GB. Retain that memory result without
+calling residual load or a linear output-length crossover a measured latency win.
+
+1. **Read-only no-copy salvage screen**: one bounded mechanism check, not a new
+   program. Mark only the exact audited GGUF buffer hazard-untracked and run a
+   balanced loaded-model first/warm-followup screen. Continue only if both warm
+   ratios reach `>=0.99x` with no row below `0.985x`. A pass authorizes a separate
+   no-prefault, fresh-process/short-output preregistration with measured output
+   lengths and total-wall break-even. A fail returns this lane behind auto-prefill;
+   do not build anonymous arenas or per-tensor page windows without a new portfolio
+   decision. Difficulty S, belief low-medium, high information per hour.
 2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
@@ -560,10 +565,12 @@ default-off; explicit `=1` retains the structurally supported opt-in path and
    true-long decode, but explicitly input-changing. Prefix caching is a separate
    exact reuse specialization and does not rank for fresh serial prompts.
 
-Memory follow-up: v0.590 promotes native embeddings for 27B and A3B. A10B retains
-older exactness and warm-parity evidence plus a `2,240,839,680`-byte allocation
-prize, but its process-cold contract remains unresolved and must not be inferred
-from A3B's shared Q8_0 dtype.
+Memory follow-up: v0.590 promotes native embeddings for 27B and A3B. v0.591 proves
+that exact read-only 27B GGUF views can remove about 16.8 GB of RSS/footprint, but
+the measured implementation is not a latency promotion. A10B retains older
+exactness and warm-parity evidence plus a `2,240,839,680`-byte allocation prize,
+but its process-cold contract remains unresolved and must not be inferred from
+A3B's shared Q8_0 dtype.
 
 Dense fresh-TTFT truth: no current exact branch has a credible material gain band
 for large dense prefill. Current packed compute is near the measured mat-mat
@@ -577,9 +584,10 @@ not merge objective lanes; every result must retain its boundary label.
 
 ### Active attack sequence
 
-1. Prototype one whole-shard no-copy 27B Metal view and adjudicate complete
-   process-start-to-first-byte wall. Stop if alignment/lifetime handling merely
-   moves page faults beyond model-ready or if the one-shard ceiling is immaterial.
+1. Close v0.591 as memory-only. Run exactly one hazard-untracked warm screen on the
+   exact read-only buffer. If it fails, stop this lane and move to auto-prefill. If
+   it clears, freeze a distinct no-prefault cold/short-output packet; never infer
+   that packet by subtracting prefault from v0.591.
 2. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not

@@ -2,7 +2,7 @@ use crate::OutputFormat;
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
 use objc2::rc::Retained;
-use objc2_metal::{MTLBuffer, MTLResource, MTLStorageMode};
+use objc2_metal::{MTLBuffer, MTLCPUCacheMode, MTLHazardTrackingMode, MTLResource, MTLStorageMode};
 use qwen_llm::{
     gguf::GgufFile,
     loader::Model,
@@ -15,7 +15,7 @@ use qwen_llm::{
     tensor::TensorDesc,
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -37,10 +37,16 @@ const EXPECTED_INVENTORY_DIGEST: &str =
     "f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5";
 const EXPECTED_PLANNER_DIGEST: &str =
     "fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af";
+const PARALLEL_COPY_WORKERS: usize = 4;
+const EXPECTED_PARALLEL_CUTS: [usize; 3] = [155, 359, 539];
+const EXPECTED_PARALLEL_TASK_COUNTS: [usize; 4] = [155, 204, 180, 194];
+const EXPECTED_PARALLEL_BYTES: [u64; 4] =
+    [5_532_746_240, 5_462_315_776, 5_595_522_304, 5_532_954_624];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ArenaFloorArm {
     Copied,
+    ParallelCopied,
     ArenaSerial,
     ArenaFour,
 }
@@ -49,9 +55,18 @@ impl ArenaFloorArm {
     fn label(self) -> &'static str {
         match self {
             Self::Copied => "copied",
+            Self::ParallelCopied => "parallel-copied",
             Self::ArenaSerial => "arena-serial",
             Self::ArenaFour => "arena-four",
         }
+    }
+
+    fn has_copied_topology(self) -> bool {
+        matches!(self, Self::Copied | Self::ParallelCopied)
+    }
+
+    fn has_arena_topology(self) -> bool {
+        matches!(self, Self::ArenaSerial | Self::ArenaFour)
     }
 }
 
@@ -93,6 +108,7 @@ struct Materialized {
     copy_wall: Option<Duration>,
     binding_wall: Duration,
     worker_count: usize,
+    schedule: Option<ParallelCopySchedule>,
 }
 
 struct Correctness {
@@ -100,6 +116,29 @@ struct Correctness {
     fallback_bytes_checked: u64,
     entries_checked: usize,
     aliases_checked: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParallelCopyPartition {
+    start: usize,
+    end: usize,
+    bytes: u64,
+    first_shard: usize,
+    first_source_offset: u64,
+    last_shard: usize,
+    last_source_offset: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParallelCopySchedule {
+    sorted_request_indices: Vec<usize>,
+    cuts: [usize; PARALLEL_COPY_WORKERS - 1],
+    partitions: Vec<ParallelCopyPartition>,
+}
+
+struct ParallelCopyTask<'a> {
+    source: &'a [u8],
+    destination: &'a mut [u8],
 }
 
 fn capture_usage() -> Result<Usage> {
@@ -193,6 +232,169 @@ fn four_worker_boundaries(length: usize, page_size: usize) -> Result<[usize; 5]>
     Ok(boundaries)
 }
 
+fn minimum_contiguous_groups(lengths: &[u64], capacity: u64) -> Option<usize> {
+    let mut groups = 0usize;
+    let mut group_bytes = 0u64;
+    for &length in lengths {
+        if length == 0 || length > capacity {
+            return None;
+        }
+        if group_bytes > capacity - length {
+            groups = groups.checked_add(1)?;
+            group_bytes = length;
+        } else {
+            group_bytes += length;
+        }
+    }
+    groups.checked_add(usize::from(group_bytes > 0))
+}
+
+fn can_partition_exactly(lengths: &[u64], groups: usize, capacity: u64) -> bool {
+    groups > 0
+        && lengths.len() >= groups
+        && minimum_contiguous_groups(lengths, capacity).is_some_and(|minimum| minimum <= groups)
+}
+
+fn minimax_partition_cuts(lengths: &[u64]) -> Result<[usize; PARALLEL_COPY_WORKERS - 1]> {
+    if lengths.len() < PARALLEL_COPY_WORKERS || lengths.contains(&0) {
+        return Err(anyhow!(
+            "parallel copy requires at least four nonempty tasks"
+        ));
+    }
+    let mut total = 0u64;
+    let mut lower = 0u64;
+    for &length in lengths {
+        total = total
+            .checked_add(length)
+            .ok_or_else(|| anyhow!("parallel-copy byte total overflow"))?;
+        lower = lower.max(length);
+    }
+    let mut upper = total;
+    while lower < upper {
+        let midpoint = lower + (upper - lower) / 2;
+        if can_partition_exactly(lengths, PARALLEL_COPY_WORKERS, midpoint) {
+            upper = midpoint;
+        } else {
+            lower = midpoint + 1;
+        }
+    }
+
+    let capacity = lower;
+    let mut cuts = [0usize; PARALLEL_COPY_WORKERS - 1];
+    let mut start = 0usize;
+    for (cut_index, cut) in cuts.iter_mut().enumerate() {
+        let remaining_groups = PARALLEL_COPY_WORKERS - cut_index - 1;
+        let latest_cut = lengths.len() - remaining_groups;
+        let mut group_bytes = 0u64;
+        let mut selected = None;
+        for candidate in start + 1..=latest_cut {
+            let length = lengths[candidate - 1];
+            if group_bytes > capacity - length {
+                break;
+            }
+            group_bytes += length;
+            if can_partition_exactly(&lengths[candidate..], remaining_groups, capacity) {
+                selected = Some(candidate);
+                break;
+            }
+        }
+        *cut = selected.ok_or_else(|| anyhow!("parallel-copy cut is unavailable"))?;
+        start = *cut;
+    }
+    if !can_partition_exactly(&lengths[start..], 1, capacity) {
+        return Err(anyhow!("parallel-copy final partition exceeds optimum"));
+    }
+    Ok(cuts)
+}
+
+fn parallel_copy_schedule(direct: &[&TensorDesc]) -> Result<ParallelCopySchedule> {
+    let mut sorted_request_indices = (0..direct.len()).collect::<Vec<_>>();
+    sorted_request_indices.sort_by_key(|&request_index| {
+        let desc = direct[request_index];
+        (desc.shard_idx, desc.data_offset, request_index)
+    });
+    let lengths = sorted_request_indices
+        .iter()
+        .map(|&request_index| direct[request_index].n_bytes)
+        .collect::<Vec<_>>();
+    let cuts = minimax_partition_cuts(&lengths)?;
+    let boundaries = [0, cuts[0], cuts[1], cuts[2], direct.len()];
+    let mut partitions = Vec::with_capacity(PARALLEL_COPY_WORKERS);
+    for worker in 0..PARALLEL_COPY_WORKERS {
+        let start = boundaries[worker];
+        let end = boundaries[worker + 1];
+        let bytes = lengths[start..end]
+            .iter()
+            .try_fold(0u64, |total, &length| {
+                total
+                    .checked_add(length)
+                    .ok_or_else(|| anyhow!("parallel-copy partition byte overflow"))
+            })?;
+        let first = direct[sorted_request_indices[start]];
+        let last = direct[sorted_request_indices[end - 1]];
+        partitions.push(ParallelCopyPartition {
+            start,
+            end,
+            bytes,
+            first_shard: first.shard_idx,
+            first_source_offset: first.data_offset,
+            last_shard: last.shard_idx,
+            last_source_offset: last.data_offset,
+        });
+    }
+    Ok(ParallelCopySchedule {
+        sorted_request_indices,
+        cuts,
+        partitions,
+    })
+}
+
+fn parallel_copy_schedule_json(schedule: &ParallelCopySchedule) -> Result<Value> {
+    let total_bytes = schedule
+        .partitions
+        .iter()
+        .try_fold(0u64, |total, partition| {
+            total
+                .checked_add(partition.bytes)
+                .ok_or_else(|| anyhow!("parallel-copy schedule byte overflow"))
+        })?;
+    let min_bytes = schedule
+        .partitions
+        .iter()
+        .map(|partition| partition.bytes)
+        .min()
+        .expect("schedule has four partitions");
+    let max_bytes = schedule
+        .partitions
+        .iter()
+        .map(|partition| partition.bytes)
+        .max()
+        .expect("schedule has four partitions");
+    Ok(json!({
+        "workers": PARALLEL_COPY_WORKERS,
+        "cuts": schedule.cuts,
+        "task_counts": schedule.partitions.iter().map(|partition| {
+            partition.end - partition.start
+        }).collect::<Vec<_>>(),
+        "worker_bytes": schedule.partitions.iter().map(|partition| {
+            partition.bytes
+        }).collect::<Vec<_>>(),
+        "max_to_min": max_bytes as f64 / min_bytes as f64,
+        "max_to_ideal": max_bytes as f64
+            / (total_bytes as f64 / PARALLEL_COPY_WORKERS as f64),
+        "partitions": schedule.partitions.iter().map(|partition| json!({
+            "start": partition.start,
+            "end": partition.end,
+            "task_count": partition.end - partition.start,
+            "bytes": partition.bytes,
+            "first_shard": partition.first_shard,
+            "first_source_offset": partition.first_source_offset,
+            "last_shard": partition.last_shard,
+            "last_source_offset": partition.last_source_offset,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 fn materialize_copied(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -225,6 +427,121 @@ fn materialize_copied(
         copy_wall: None,
         binding_wall: binding_started.elapsed(),
         worker_count: 0,
+        schedule: None,
+    })
+}
+
+fn materialize_parallel_copied(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    direct: &[&TensorDesc],
+    schedule: &ParallelCopySchedule,
+) -> Result<Materialized> {
+    let allocation_started = Instant::now();
+    let resources = direct
+        .iter()
+        .map(|desc| {
+            usize::try_from(desc.n_bytes)
+                .map_err(|_| anyhow!("tensor byte length does not fit usize"))
+                .and_then(|length| ctx.buffer_uninit(length).map_err(anyhow::Error::from))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let allocation_wall = allocation_started.elapsed();
+
+    let mut resource_identities = HashSet::with_capacity(resources.len());
+    let mut destination_ranges = Vec::with_capacity(resources.len());
+    for (request_index, buffer) in resources.iter().enumerate() {
+        let identity = Retained::as_ptr(buffer) as *const () as usize;
+        if !resource_identities.insert(identity) {
+            return Err(anyhow!(
+                "parallel-copy resource {request_index} aliases a prior resource"
+            ));
+        }
+        let start = buffer.contents().as_ptr().cast::<u8>() as usize;
+        let end = start
+            .checked_add(buffer.length())
+            .ok_or_else(|| anyhow!("parallel-copy destination range overflow"))?;
+        destination_ranges.push((start, end));
+    }
+    let mut ranges_by_address = destination_ranges.clone();
+    ranges_by_address.sort_unstable();
+    if ranges_by_address
+        .windows(2)
+        .any(|pair| pair[0].1 > pair[1].0)
+    {
+        return Err(anyhow!("parallel-copy destination resources overlap"));
+    }
+
+    let source_started = Instant::now();
+    let mut tasks = Vec::with_capacity(direct.len());
+    for &request_index in &schedule.sorted_request_indices {
+        let desc = direct[request_index];
+        let source = gguf.try_slice(desc)?;
+        let (start, end) = destination_ranges[request_index];
+        if source.len() != end - start {
+            return Err(anyhow!(
+                "parallel-copy request {request_index} source/destination mismatch"
+            ));
+        }
+        let destination = unsafe {
+            // SAFETY: every exact-sized buffer has a unique Objective-C identity,
+            // the destination ranges were proven pairwise disjoint, and each range
+            // is assigned to exactly one task before any worker starts.
+            std::slice::from_raw_parts_mut(start as *mut u8, end - start)
+        };
+        tasks.push(ParallelCopyTask {
+            source,
+            destination,
+        });
+    }
+    let source_resolution_wall = source_started.elapsed();
+
+    let copy_started = Instant::now();
+    std::thread::scope(|scope| {
+        let mut task_tail = tasks.as_mut_slice();
+        let mut consumed = 0usize;
+        for partition in &schedule.partitions {
+            assert_eq!(partition.start, consumed);
+            let count = partition.end - partition.start;
+            let (worker_tasks, remaining) = task_tail.split_at_mut(count);
+            scope.spawn(move || {
+                for task in worker_tasks {
+                    task.destination.copy_from_slice(task.source);
+                }
+            });
+            task_tail = remaining;
+            consumed = partition.end;
+        }
+        assert_eq!(consumed, schedule.sorted_request_indices.len());
+        assert!(task_tail.is_empty());
+    });
+    let copy_wall = copy_started.elapsed();
+    drop(tasks);
+
+    let binding_started = Instant::now();
+    let bindings = resources
+        .iter()
+        .enumerate()
+        .zip(direct)
+        .map(|((resource_index, buffer), desc)| {
+            Ok(Binding {
+                buffer: buffer.clone(),
+                resource_index,
+                offset: 0,
+                length: usize::try_from(desc.n_bytes)
+                    .map_err(|_| anyhow!("tensor byte length does not fit usize"))?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Materialized {
+        resources,
+        bindings,
+        allocation_wall: Some(allocation_wall),
+        source_resolution_wall: Some(source_resolution_wall),
+        copy_wall: Some(copy_wall),
+        binding_wall: binding_started.elapsed(),
+        worker_count: PARALLEL_COPY_WORKERS,
+        schedule: Some(schedule.clone()),
     })
 }
 
@@ -334,6 +651,7 @@ fn materialize_arena(
         copy_wall: Some(copy_wall),
         binding_wall: binding_started.elapsed(),
         worker_count,
+        schedule: None,
     })
 }
 
@@ -383,33 +701,58 @@ fn verify_materialized(
         return Err(anyhow!("binding byte ledger drifted"));
     }
     for buffer in &materialized.resources {
-        if buffer.storageMode() != MTLStorageMode::Shared {
-            return Err(anyhow!("materialized resource is not shared storage"));
+        if buffer.storageMode() != MTLStorageMode::Shared
+            || buffer.cpuCacheMode() != MTLCPUCacheMode::DefaultCache
+            || buffer.hazardTrackingMode() != MTLHazardTrackingMode::Tracked
+        {
+            return Err(anyhow!("materialized resource mode drifted"));
         }
     }
 
-    match arm {
-        ArenaFloorArm::Copied => {
-            if materialized.resources.len() != EXPECTED_REQUEST_COUNT
-                || resource_bytes != EXPECTED_LOGICAL_COPY_BYTES
+    if arm.has_copied_topology() {
+        let resource_identities = materialized
+            .resources
+            .iter()
+            .map(|buffer| Retained::as_ptr(buffer) as *const () as usize)
+            .collect::<HashSet<_>>();
+        if materialized.resources.len() != EXPECTED_REQUEST_COUNT
+            || resource_identities.len() != EXPECTED_REQUEST_COUNT
+            || resource_bytes != EXPECTED_LOGICAL_COPY_BYTES
+        {
+            return Err(anyhow!("copied-topology resource ledger drifted"));
+        }
+        for (index, ((buffer, desc), binding)) in materialized
+            .resources
+            .iter()
+            .zip(direct)
+            .zip(&materialized.bindings)
+            .enumerate()
+        {
+            if buffer.length() as u64 != desc.n_bytes
+                || binding.resource_index != index
+                || binding.offset != 0
+                || binding.length != buffer.length()
+                || Retained::as_ptr(&binding.buffer) != Retained::as_ptr(buffer)
             {
-                return Err(anyhow!("copied resource ledger drifted"));
-            }
-            for (index, (buffer, desc)) in materialized.resources.iter().zip(direct).enumerate() {
-                if buffer.length() as u64 != desc.n_bytes {
-                    return Err(anyhow!("copied resource {index} length drifted"));
-                }
+                return Err(anyhow!(
+                    "copied-topology resource or binding {index} drifted"
+                ));
             }
         }
-        ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour => {
-            if materialized.resources.len() != 2 || resource_bytes != EXPECTED_ARENA_COPY_BYTES {
-                return Err(anyhow!("arena resource ledger drifted"));
+    } else {
+        match arm {
+            ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour => {
+                if materialized.resources.len() != 2 || resource_bytes != EXPECTED_ARENA_COPY_BYTES
+                {
+                    return Err(anyhow!("arena resource ledger drifted"));
+                }
             }
+            ArenaFloorArm::Copied | ArenaFloorArm::ParallelCopied => unreachable!(),
         }
     }
 
     let mut full_windows_checked = 0usize;
-    if arm != ArenaFloorArm::Copied {
+    if arm.has_arena_topology() {
         for (window_index, window) in plan.windows.iter().enumerate() {
             let source =
                 gguf.try_shard_range(window.shard_idx, window.mmap_offset, window.length)?;
@@ -508,6 +851,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         .iter()
         .map(|request| request.desc)
         .collect::<Vec<_>>();
+    let parallel_schedule = parallel_copy_schedule(&direct)?;
     let page_size = host_page_size_bytes()?;
     let ctx = MetalContext::new()?;
     let max_buffer_length = ctx.max_buffer_length();
@@ -592,6 +936,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
                     _ => None,
                 }
             }).collect::<Vec<_>>(),
+            "parallel_copy_schedule": parallel_copy_schedule_json(&parallel_schedule)?,
             "build_identity": build_identity,
         });
         match args.output {
@@ -622,6 +967,21 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         || window_bytes != EXPECTED_WINDOW_BYTES
         || planner_gap_bytes != EXPECTED_GAP_BYTES
         || arena_copy_bytes != EXPECTED_ARENA_COPY_BYTES
+        || parallel_schedule.cuts != EXPECTED_PARALLEL_CUTS
+        || parallel_schedule
+            .partitions
+            .iter()
+            .map(|partition| partition.end - partition.start)
+            .collect::<Vec<_>>()
+            .as_slice()
+            != EXPECTED_PARALLEL_TASK_COUNTS.as_slice()
+        || parallel_schedule
+            .partitions
+            .iter()
+            .map(|partition| partition.bytes)
+            .collect::<Vec<_>>()
+            .as_slice()
+            != EXPECTED_PARALLEL_BYTES.as_slice()
     {
         return Err(anyhow!("owned-arena frozen geometry drifted"));
     }
@@ -651,12 +1011,21 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     let ready_started = Instant::now();
     let materialized = match arm {
         ArenaFloorArm::Copied => materialize_copied(&ctx, &gguf, &direct)?,
+        ArenaFloorArm::ParallelCopied => {
+            materialize_parallel_copied(&ctx, &gguf, &direct, &parallel_schedule)?
+        }
         ArenaFloorArm::ArenaSerial => materialize_arena(&ctx, &gguf, &direct, &plan, false)?,
         ArenaFloorArm::ArenaFour => materialize_arena(&ctx, &gguf, &direct, &plan, true)?,
     };
     let ready_wall = ready_started.elapsed();
     let usage_after = capture_usage()?;
     let allocated_ready = ctx.current_allocated_size();
+    if (arm == ArenaFloorArm::ParallelCopied
+        && materialized.schedule.as_ref() != Some(&parallel_schedule))
+        || (arm != ArenaFloorArm::ParallelCopied && materialized.schedule.is_some())
+    {
+        return Err(anyhow!("materialized parallel-copy schedule drifted"));
+    }
 
     let correctness = verify_materialized(
         arm,
@@ -699,7 +1068,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     let allocated_after_drop = ctx.current_allocated_size();
 
     let physical_bytes = match arm {
-        ArenaFloorArm::Copied => logical_copy_bytes,
+        ArenaFloorArm::Copied | ArenaFloorArm::ParallelCopied => logical_copy_bytes,
         ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour => arena_copy_bytes,
     };
     let ready_gbps = physical_bytes as f64 / ready_wall.as_secs_f64() / 1e9;
@@ -739,6 +1108,15 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
                 _ => None,
             }
         }).collect::<Vec<_>>(),
+        "resource_modes": {
+            "creation_storage": "shared",
+            "creation_cpu_cache": "default_cache",
+            "creation_hazard_tracking": "default",
+            "observed_storage": "shared",
+            "observed_cpu_cache": "default_cache",
+            "observed_hazard_tracking": "tracked",
+        },
+        "parallel_copy_schedule": parallel_copy_schedule_json(&parallel_schedule)?,
         "timing": {
             "ready_wall_ms": duration_ms(ready_wall),
             "allocation_wall_ms": allocation_wall,
@@ -789,7 +1167,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::four_worker_boundaries;
+    use super::{four_worker_boundaries, minimax_partition_cuts};
 
     #[test]
     fn four_worker_boundaries_cover_nondivisible_page_counts() {
@@ -798,5 +1176,32 @@ mod tests {
         assert_eq!(boundaries, [0, 2 * page, 5 * page, 8 * page, 11 * page]);
         assert!(four_worker_boundaries(3 * page, page).is_err());
         assert!(four_worker_boundaries(4 * page + 1, page).is_err());
+    }
+
+    #[test]
+    fn minimax_partition_uses_lexicographically_first_equal_cuts() {
+        assert_eq!(
+            minimax_partition_cuts(&[1; 8]).expect("partition"),
+            [2, 4, 6]
+        );
+        assert_eq!(
+            minimax_partition_cuts(&[1, 1, 1, 2, 3]).expect("global tie partition"),
+            [1, 2, 4]
+        );
+    }
+
+    #[test]
+    fn minimax_partition_keeps_a_giant_task_whole() {
+        assert_eq!(
+            minimax_partition_cuts(&[10, 1, 1, 1, 1, 1]).expect("partition"),
+            [1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn minimax_partition_rejects_invalid_inputs() {
+        assert!(minimax_partition_cuts(&[1, 1, 1]).is_err());
+        assert!(minimax_partition_cuts(&[1, 1, 1, 0]).is_err());
+        assert!(minimax_partition_cuts(&[u64::MAX, 1, 1, 1]).is_err());
     }
 }

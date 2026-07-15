@@ -414,7 +414,7 @@ v0.568 caps matrix query scratch at 1024 and overlaps phase-disjoint packs,
 reducing incremental allocation to about 90 MB/877 MB with measured prefill
 overhead `0.391%/0.109%`. The product auto path still defaults to numeric 1024,
 uses uncapped scratch, records stale 685 MiB/3.75 GiB deltas, and never calls the
-existing dual-signal memory-admission evaluator. Finish only that 8K-16K
+existing memory-admission evaluator. Finish only that 8K-16K
 allowlisted path, fail closed, and run one final fresh product confirmation before
 default promotion. v0.572 remains decisive against 32K expansion: A3B chunk 2048
 fails its pair floor at `1.04654x`; A10B narrowly reaches `1.05065x`, 4096 adds
@@ -563,10 +563,12 @@ arithmetic first-byte projection is `2.06601x`; product transfer remains unprove
 1. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
-   sequence/transient reserve, and require both working-set and process-headroom
-   signals. Missing or insufficient signals fall back to 1024. Expected fresh-TTFT
-   movement after measured cap overhead is about `1.060x` A3B and `1.206x` A10B;
-   one final fresh product packet decides default-on. Difficulty S-M, belief high.
+   sequence/transient reserve. Require Metal working-set headroom; honor any finite
+   process limit, while explicitly labeling the target desktop's zero value as an
+   omitted limit rather than a second signal. Missing or insufficient usable
+   signals fall back to 1024. Expected fresh-TTFT movement after measured cap
+   overhead is about `1.060x` A3B and `1.206x` A10B; one final fresh product packet
+   decides default-on. Difficulty S-M, belief high.
 2. **Force-only parallel-copied A3B loader pilot**: highest-prize conditional cold
    product move, authorized by v0.599 but sequenced after auto-prefill. Use the
    exact 733-resource, offset-zero topology and frozen four-worker schedule. A
@@ -665,7 +667,7 @@ automatic retained use stay copied without separate evidence.
 2. v0.599 clears the exact-topology parallel-copy floor and authorizes one
    force-only A3B loader pilot. Do not implement it before auto-prefill.
 3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
-   dual-signal admission evaluator, preserve numeric override precedence, fail
+   admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
    reopen 32K.
 4. Only after auto-prefill, implement one force-only parallel-copied A3B loader if
@@ -718,10 +720,13 @@ automatic retained use stay copied without separate evidence.
   the current A3B packed-MoE/GDN implementation fails its state contract.
 - **Auto-prefill admission**: candidate scratch uses explicit query cap 1024 and
   the proven overlay. Charge complete scratch plus sequence/transient reserve;
-  require valid working-set and process-headroom signals. Preserve the A3B/A10B
-  file-type-15 allowlist and `8192..=16384` range. Missing signals, MTP, disabled
-  online attention/overlay, or insufficient memory fall back to 1024. Require a
-  fresh TTFT confirmation on each admitted profile before default-on.
+  require valid Metal working-set headroom and honor a finite process limit when
+  available. On the target desktop, zero means the process limit is explicitly
+  omitted, not a second valid headroom signal. Preserve the A3B/A10B file-type-15
+  allowlist and `8192..=16384` range. Missing usable signals, MTP, prefill
+  environment overrides, cache interaction, disabled online attention/overlay,
+  or insufficient memory fall back to 1024. Require fresh TTFT confirmation on
+  each admitted profile before default-on.
 - **Grammar fast-forward**: count uniquely admissible tokenizer-token runs, not
   characters, grammar transitions, or isolated singleton positions. Charge grammar
   scanning and use measured terminal-head-only packed state cost. Require

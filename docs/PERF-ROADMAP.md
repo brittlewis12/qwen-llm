@@ -554,23 +554,25 @@ owned when loaded. The tax therefore follows the shared giant-resource/nonzero-
 offset topology class rather than file provenance or unpopulated destination
 pages. One-window owned is closed; do not proceed to async or broad arenas.
 
-1. **Topology-preserving four-worker materialization floor**: highest-leverage
-   exact process-cold oracle, preregistered as v0.599. Preserve A's exact 733
-   offset-zero anonymous buffers, request-order allocation, resource options, and
-   bindings. Allocate first, resolve all pointers on the parent, then copy whole
-   tensors through four source-contiguous minimax worker ranges. Require exact
-   bytes and a materialized-wall saving `>=500 ms` that predicts `>=1.20x` first
-   byte. This tests the composite parallel-copy primitive without the topology
-   change that killed v0.598; it does not separately identify concurrency, batched
-   allocation, or manual copy. Difficulty S floor/M pilot, belief medium-high,
-   prize very high.
-2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
+v0.599 clears the topology-preserving floor decisively. It retains 733 exact
+offset-zero resources yet cuts materialization from median `2066.701` to
+`742.676 ms`, saves `1324.148 ms`, and wins 6/6. This retains about 97% of
+v0.597's one-window saving without adopting v0.598's loaded-tax topology. The
+arithmetic first-byte projection is `2.06601x`; product transfer remains unproved.
+
+1. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
    sequence/transient reserve, and require both working-set and process-headroom
    signals. Missing or insufficient signals fall back to 1024. Expected fresh-TTFT
    movement after measured cap overhead is about `1.060x` A3B and `1.206x` A10B;
    one final fresh product packet decides default-on. Difficulty S-M, belief high.
+2. **Force-only parallel-copied A3B loader pilot**: highest-prize conditional cold
+   product move, authorized by v0.599 but sequenced after auto-prefill. Use the
+   exact 733-resource, offset-zero topology and frozen four-worker schedule. A
+   separate preregistration must require bit-exact full state and loaded
+   prefill/decode/request noninferiority before fresh timing. Difficulty M, belief
+   high conditional on the floor, prize very high.
 3. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
    Under a declared grammar, an isolated forced token still requires a complete
    target state transition. Only a maximal run of uniquely admissible token IDs can
@@ -660,10 +662,9 @@ automatic retained use stay copied without separate evidence.
 
 1. v0.598 closes the one-window owned A3B pilot. Keep it default-off as a causal
    control; do not promote, broaden, or make it an async destination.
-2. Run the preregistered v0.599 topology-preserving parallel-copy floor. Stop at
-   the floor unless exact copied topology and the `>=500 ms` economic gate pass.
-3. Finish the narrow query-capped auto-prefill product path regardless of the
-   v0.599 result. Reuse the existing
+2. v0.599 clears the exact-topology parallel-copy floor and authorizes one
+   force-only A3B loader pilot. Do not implement it before auto-prefill.
+3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
    reopen 32K.
@@ -708,6 +709,9 @@ automatic retained use stay copied without separate evidence.
   that one-window owned shares retained's decode tax despite exact destination
   population; the premise is closed. Any reopen must preserve per-tensor
   offset-zero topology through the loaded gates before fresh product timing.
+  v0.599 clears the exact-topology materialization floor only. It authorizes a
+  separately preregistered force-only loader pilot after auto-prefill, not product
+  promotion or cross-asset breadth.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

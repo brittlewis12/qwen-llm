@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-14 - v0.599 A3B Topology-Preserving Parallel Copy
+
+Status: certified GO for one separately preregistered force-only A3B loader pilot,
+sequenced after query-capped auto-prefill.
+
+- Clean source/build/runtime `5548ea1` runs six fixed `AB/BA` pairs. Every pair
+  passes on attempt one with exact identity, valid host state, zero timer-local
+  major faults, zero block input, and zero pageout/swap growth.
+- Both arms retain 733 unique exact-sized shared resources, 733 offset-zero
+  bindings, and `22,123,538,944` physical bytes. All resources and bindings are
+  byte exact and resolve to Shared/DefaultCache/Tracked modes.
+- Production A median ready wall is `2066.701 ms` at `10.705 GB/s`. Four-worker B
+  is `742.676 ms` at `29.790 GB/s`, with median copy throughput `29.882 GB/s`.
+- Median saving is `1324.148 ms`, median B/A is `0.358177x`, and B wins 6/6.
+  AB/BA medians are `1319.864/1328.433 ms`, both 3/3 wins. Maximum paired
+  RSS/footprint ratios are `1.000014/1.000029`.
+- The frozen 0.96 transfer haircut projects `2.06601x` output-1 first byte. This is
+  arithmetic, not a model-load or product result.
+- v0.597 A reproduces within 0.19%. Exact copied topology costs only `40.509 ms`
+  versus its one-window four-worker floor and retains about 97% of the saving.
+  Resource coalescing is therefore not required for fast cold materialization.
+- Together with v0.598, the evidence separates the terms: four-worker composite
+  population supplies the cold saving, while one-window/nonzero-offset topology
+  supplies the stable loaded decode tax. The floor does not isolate concurrency
+  from batched allocation or manual copy.
+- Finish admitted query-capped auto-prefill next. Then separately preregister the
+  force-only loader pilot and require full-state exactness plus loaded parity before
+  any fresh first-byte packet.
+
+Artifact: `target/profiles/v0599-a3b-parallel-copied-floor-p1/`. Summary:
+`docs/bench/2026-07-14-v0599-a3b-parallel-copied-floor/README.md`. Adversarial
+certification: `cx ask` session `019f633c-62be-7820-9dfa-256d733a58ef`.
+
 ## 2026-07-14 - v0.598 A3B Owned-Arena Loader Pilot
 
 Status: one-window owned storage killed as a broad cold-plus-warm destination.

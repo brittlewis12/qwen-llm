@@ -1,6 +1,9 @@
 # v0.599 A3B Topology-Preserving Parallel-Copy Floor
 
-Status: preregistration. No implementation or timing result exists yet.
+Status: completed at source `5548ea1`; **GO**. All six pairs pass on attempt one.
+The candidate saves median `1324.148 ms`, reaches ratio `0.358177x`, wins 6/6,
+and preserves exact 733-resource copied topology. Authority remains one separately
+preregistered force-only A3B loader pilot after query-capped auto-prefill.
 
 ## Intent
 

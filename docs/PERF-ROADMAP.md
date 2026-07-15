@@ -554,15 +554,16 @@ owned when loaded. The tax therefore follows the shared giant-resource/nonzero-
 offset topology class rather than file provenance or unpopulated destination
 pages. One-window owned is closed; do not proceed to async or broad arenas.
 
-1. **Topology-preserving four-worker materialization oracle**: highest-leverage
-   exact process-cold hypothesis, not yet authorized implementation. Preserve A's
-   exact 733 offset-zero anonymous buffers and bindings. Replace each fused
-   `newBufferWithBytes` call with parent allocation, then populate disjoint buffers
-   through four byte-balanced workers. First require exact bytes and a materialized
-   wall that predicts `>=1.20x` first byte. If green, the loader pilot must clear
-   copied full state plus loaded prefill/decode/request parity before any fresh
-   product packet. This isolates parallel copy from the topology change that killed
-   v0.598. Difficulty S oracle/M pilot, belief medium-high, prize very high.
+1. **Topology-preserving four-worker materialization floor**: highest-leverage
+   exact process-cold oracle, preregistered as v0.599. Preserve A's exact 733
+   offset-zero anonymous buffers, request-order allocation, resource options, and
+   bindings. Allocate first, resolve all pointers on the parent, then copy whole
+   tensors through four source-contiguous minimax worker ranges. Require exact
+   bytes and a materialized-wall saving `>=500 ms` that predicts `>=1.20x` first
+   byte. This tests the composite parallel-copy primitive without the topology
+   change that killed v0.598; it does not separately identify concurrency, batched
+   allocation, or manual copy. Difficulty S floor/M pilot, belief medium-high,
+   prize very high.
 2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
@@ -659,30 +660,33 @@ automatic retained use stay copied without separate evidence.
 
 1. v0.598 closes the one-window owned A3B pilot. Keep it default-off as a causal
    control; do not promote, broaden, or make it an async destination.
-2. If greenlit, preregister a topology-preserving parallel-copy floor: exact 733
-   offset-zero buffers, parent allocation, and four disjoint worker queues. Do not
-   touch loader selection until its cold arithmetic clears.
-3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
+2. Run the preregistered v0.599 topology-preserving parallel-copy floor. Stop at
+   the floor unless exact copied topology and the `>=500 ms` economic gate pass.
+3. Finish the narrow query-capped auto-prefill product path regardless of the
+   v0.599 result. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
    reopen 32K.
-4. In parallel with no production code, run one structured-trace grammar artifact:
+4. Only after auto-prefill, implement one force-only parallel-copied A3B loader if
+   v0.599 passes. Require copied full-state and loaded 1% noninferiority before any
+   fresh first-byte packet.
+5. In parallel with no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-5. Do not extend owned arenas beyond A3B. Reopen breadth only if an exact-topology
+6. Do not extend owned arenas beyond A3B. Reopen breadth only if an exact-topology
    loader preserves copied warm behavior and cold gains first.
-6. Keep async promotion blocked behind that same result. Stop at the first measured
+7. Keep async promotion blocked behind that same result. Stop at the first measured
    copy-contention or unsafe cutover requirement.
-7. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
+8. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
    artifact.
-8. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
+9. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
    drafter or writing qwen affine kernels. If D7 is promising, run the cross-trunk
    sidecar acceptance bridge and apply the total-request equation.
-9. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
+10. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
    lane, top-k behind a named quality replay, and prompt reduction input-changing.
-10. Run tensor-class topology attribution only if same-topology parallel copy is
+11. Run tensor-class topology attribution only if same-topology parallel copy is
     unexpectedly slow or loses loaded parity. Do not build dynamic promotion first.
-11. Do not resume current retained-view retunes, broad external drafting, packed
+12. Do not resume current retained-view retunes, broad external drafting, packed
     MTP history, generic decode-storage diagnostics, matrix/compressed attention,
     sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
     GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,

@@ -546,16 +546,23 @@ It saves a paired median `1365.044 ms`, wins 6/6 blocks, and preserves the same
 RSS/footprint envelope. Serial arena copy loses at `3584.763 ms`; resource-count
 reduction alone is not the mechanism.
 
-1. **Force-only four-worker owned A3B arena pilot**: highest-leverage exact
-   process-cold move. The floor is green only for C: allocate one anonymous shared
-   planner window plus fallback, copy the complete window with the measured four
-   page-aligned workers, then bind owned typed views through planner offsets. Do
-   not implement serial B. The same-build pilot must compare 733-buffer copied,
-   four-worker owned, and file-backed retained storage. Require bit-exact full
-   state, `>=1.20x` process-cold first byte, `>=0.99x` late decode and warm prefill,
-   and no loaded output-128 request regression. Arena parity with copied while
-   retained stays slow implicates file provenance; arena loss implicates giant
-   resource topology or offsets. Difficulty M, belief medium-high, prize very high.
+v0.598 proves the missing product term. One-window owned storage is bit exact and
+improves fresh first byte `1.86694x/1.85162x` at outputs 1/128, but loaded decode
+falls from `1204.60` to `1390.20 ms` over 127 calls and complete loaded request
+wall regresses about 11-12%. File-backed retained is effectively identical to
+owned when loaded. The tax therefore follows the shared giant-resource/nonzero-
+offset topology class rather than file provenance or unpopulated destination
+pages. One-window owned is closed; do not proceed to async or broad arenas.
+
+1. **Topology-preserving four-worker materialization oracle**: highest-leverage
+   exact process-cold hypothesis, not yet authorized implementation. Preserve A's
+   exact 733 offset-zero anonymous buffers and bindings. Replace each fused
+   `newBufferWithBytes` call with parent allocation, then populate disjoint buffers
+   through four byte-balanced workers. First require exact bytes and a materialized
+   wall that predicts `>=1.20x` first byte. If green, the loader pilot must clear
+   copied full state plus loaded prefill/decode/request parity before any fresh
+   product packet. This isolates parallel copy from the topology change that killed
+   v0.598. Difficulty S oracle/M pilot, belief medium-high, prize very high.
 2. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
    Wire explicit query cap 1024 plus scratch overlay into the existing
    8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
@@ -573,21 +580,16 @@ reduction alone is not the mechanism.
    `T0/11` for a 1.10x request. With current N8 cost, runs below four are not even
    locally positive. Grammar-restricted lm_head rows are contract-exact and should
    be priced in the same artifact. Difficulty S oracle/M packet, belief medium.
-4. **Async retained-to-owned promotion**: conditional cold-plus-warm composition,
-   not current implementation work. Consider it only if the synchronous owned
-   arena clears copied decode and cold gates. Begin on retained storage for first
-   response, populate owned windows without contending materially with prefill or
-   decode, then cut over only at a command-buffer-safe epoch. Kill if copy traffic
-   moves request wall or if cutover needs per-tensor synchronization. Difficulty
-   L, belief low-medium, upside approaches the retained first-byte floor plus
-   copied steady decode.
-5. **Tensor-class mixed-storage attribution**: conditional mechanism/localization
-   branch. Run only if an anonymous one-resource arena loses decode against copied.
-   Price expert-bank bytes first, then compare copied-expert/retained-rest and
-   retained-expert/copied-rest at tensor granularity. Do not build dynamic
-   per-expert promotion before this oracle; if expert banks dominate bytes, the
-   memory prize collapses back toward full copy. Difficulty M, belief medium on
-   attribution and low on broad product value.
+4. **Async retained-to-copied promotion**: blocked, not current implementation
+   work. Reconsider only after topology-preserving parallel materialization clears
+   loaded parity. Begin on retained storage, populate exact per-tensor buffers
+   without request contention, and cut over only at a command-buffer-safe epoch.
+   v0.598 closes one-window owned as the destination. Difficulty L, belief low.
+5. **Tensor-class topology attribution**: defer behind the same-topology oracle.
+   v0.598 proves the broad one-window tax is provenance-independent but does not
+   separate resource count, size, offsets, translation, or cache behavior. Do not
+   start mixed storage or expert-specific promotion while exact copied topology is
+   the cheaper positive control. Difficulty M, belief medium on attribution.
 6. **Certified lm_head screening oracle**: exact selected-token work removal, not
    bitwise full-logit equivalence. Before k-means, precompute outward-rounded
    per-row/per-256-dimension Q6 block norms. Give the oracle the true production
@@ -655,12 +657,11 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. v0.597 completes the owned-materialization floor. Four-worker C clears every
-   gate; serial B fails and remains unimplemented.
-2. Implement one force-only owned A3B arena using C's exact allocation and copy
-   shape. Reuse planner views, keep conversions and aliases out of this pilot,
-   preserve logical weight-only provenance, and run full-state plus cold/late
-   product gates before any breadth.
+1. v0.598 closes the one-window owned A3B pilot. Keep it default-off as a causal
+   control; do not promote, broaden, or make it an async destination.
+2. If greenlit, preregister a topology-preserving parallel-copy floor: exact 733
+   offset-zero buffers, parent allocation, and four disjoint worker queues. Do not
+   touch loader selection until its cold arithmetic clears.
 3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
    dual-signal admission evaluator, preserve numeric override precedence, fail
    closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
@@ -668,12 +669,10 @@ automatic retained use stay copied without separate evidence.
 4. In parallel with no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-5. Extend owned arenas beyond A3B only after both cold and decode pass. Audit
-   arena/live/gap/converted-source bytes across the existing 54-asset corpus;
-   then use split A10B as the multi-window resource guard. Do not run A10B retained
-   timing merely to reproduce the A3B objective split.
-6. Consider async retained-to-owned promotion only after synchronous arena parity.
-   Stop at the first measured copy-contention or unsafe cutover requirement.
+5. Do not extend owned arenas beyond A3B. Reopen breadth only if an exact-topology
+   loader preserves copied warm behavior and cold gains first.
+6. Keep async promotion blocked behind that same result. Stop at the first measured
+   copy-contention or unsafe cutover requirement.
 7. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
    artifact.
 8. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
@@ -681,9 +680,8 @@ automatic retained use stay copied without separate evidence.
    sidecar acceptance bridge and apply the total-request equation.
 9. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
    lane, top-k behind a named quality replay, and prompt reduction input-changing.
-10. If an anonymous one-resource arena misses decode parity, use one tensor-class
-    mixed-storage oracle to distinguish expert banks from broad topology. Do not
-    build dynamic expert promotion first.
+10. Run tensor-class topology attribution only if same-topology parallel copy is
+    unexpectedly slow or loses loaded parity. Do not build dynamic promotion first.
 11. Do not resume current retained-view retunes, broad external drafting, packed
     MTP history, generic decode-storage diagnostics, matrix/compressed attention,
     sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
@@ -702,11 +700,10 @@ automatic retained use stay copied without separate evidence.
 - **Owned weight arenas**: use anonymous shared Metal storage with a logical
   weight-only provenance, not retained read-only provenance or generic scratch.
   Report arena, live direct, gap, alias, fallback, and crossed-conversion bytes.
-  A materialization floor authorizes only loader implementation. The engine pilot
-  must compare per-tensor copied, one-window anonymous owned, and one-window
-  file-backed retained in the same build. Product promotion additionally requires
-  copied full state, `>=1.20x` first byte, `>=0.99x` warm prefill/decode, and no
-  loaded output-128 request regression.
+  A materialization floor authorizes only loader implementation. v0.598 proves
+  that one-window owned shares retained's decode tax despite exact destination
+  population; the premise is closed. Any reopen must preserve per-tensor
+  offset-zero topology through the loaded gates before fresh product timing.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

@@ -1,12 +1,10 @@
 # v0.598 A3B Force-Only Owned-Arena Loader Pilot
 
-Status: p2 protocol repair before timed product work. P1 at source `701de50`
-completed and passed the full-state test, then stopped because its parser required
-the first `[metal-gguf-owned]` line to start at column zero even though the Rust
-test harness prefixes that line with its test name. P1 launched no fresh or loaded
-timed child. P2 changes only that parser to extract the marker from either line
-position, authenticates P1's manifest and correctness output, reruns correctness,
-and preserves every product arm, order, gate, retry, and authority rule below.
+Status: completed at p2 source `41ef09c`; **KILL**. Correctness and both fresh
+first-byte packets pass, but stable loaded decode and request-wall gates fail in
+every block. The exact one-window owned premise receives no product authority.
+P1 at source `701de50` stopped before product timing on the bounded correctness
+marker defect recorded below; p2 repaired only that parser and reran all gates.
 
 ## Intent
 

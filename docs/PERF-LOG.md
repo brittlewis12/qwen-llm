@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-14 - v0.598 A3B Owned-Arena Loader Pilot
+
+Status: one-window owned storage killed as a broad cold-plus-warm destination.
+Correctness and fresh first-byte gates pass; stable loaded decode and complete
+request gates fail in every block.
+
+- P1 at source `701de50` passes the full-state test, then stops before product
+  timing because its parser misses a test-name-prefixed physical-ledger marker.
+  P2 at `41ef09c` authenticates both P1 files, repairs only marker extraction,
+  reruns correctness, and completes the frozen staged packet.
+- Full state is bit exact: packed-prefill logits, KV/GDN state, greedy argmax,
+  forced transition, continuation logits/state, logical and physical ledgers,
+  resource identity, and `OwnedWeightReadOnly` provenance all pass.
+- Fresh output-1 first byte is `2463.65/1322.05/539.05 ms` for copied/owned/
+  retained. Owned median speedup is `1.86694x`, wins 6/6, and clears both order
+  strata and paired memory gates.
+- Fresh output-128 first byte is `2463.67/1332.40/537.95 ms`; exit is
+  `3864.63/2890.26/1975.59 ms`; transition rate is `108.18/93.50/93.63 t/s`.
+  Owned again wins first byte 6/6 at median `1.85162x` and saves about 974 ms to
+  process exit, but it already exposes the same transition tax as retained.
+- Loaded late prefill is near parity at `309.05/310.80/310.35 ms`. Loaded decode
+  is not: `1204.60/1390.20/1390.25 ms`. Owned A/B time ratios are
+  `0.8655-0.8812`, and complete request wall is `1.107-1.125x` slower in every
+  block. All stability gates pass, making this a decisive kill.
+- B owned and C retained are effectively identical when loaded despite different
+  backing provenance and full destination population. This implicates their
+  common one-window/nonzero-offset resource topology, not file provenance or lazy
+  paging, as the primary steady-decode tax class.
+- v0.597 correctly predicts model load: owned falls to about `765-769 ms` from
+  copied `2079-2082 ms`. Its ready-to-bind floor could not price the downstream
+  repeated-GPU-access penalty. Within the measured cache-warm contract, owned is
+  strictly dominated by retained because it pays copy cost and inherits the tax.
+- The narrowest changed premise is topology-preserving parallel copy: retain A's
+  exact 733 offset-zero buffers but allocate first and populate them with four
+  workers. Gate loaded parity before another fresh product packet.
+
+Artifacts: `target/profiles/v0598-a3b-owned-arena-pilot-p1/` and
+`target/profiles/v0598-a3b-owned-arena-pilot-p2/`. Summary:
+`docs/bench/2026-07-14-v0598-a3b-owned-arena-pilot/README.md`. Adversarial review:
+`cx ask` session `019f61c6-cb2e-7cc3-8e34-5011e456fe6d`.
+
 ## 2026-07-14 - v0.597 A3B Anonymous Owned-Arena Floor
 
 Status: four-worker C certified for one force-only A3B loader pilot. Serial B is

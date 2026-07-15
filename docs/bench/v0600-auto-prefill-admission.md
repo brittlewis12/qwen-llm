@@ -80,7 +80,8 @@ Build with `PrefillScratchConfig { matrix_query_cap: Some(1024) }`. Require:
 - no `QWEN_PREFILL_*` control;
 - every eager and deferred allocation represented in the plan;
 - every priced shared-buffer size nonzero, at least its logical size, and returned
-  with nonzero power-of-two alignment dividing the priced size;
+  with nonzero power-of-two placement alignment. Alignment constrains a heap
+  offset, not divisibility of the returned resource size;
 - `fresh_prefill_from_plan` to revalidate plan/model identity before allocation.
 
 Record eager/deferred allocation counts, logical totals, maximum logical bytes,

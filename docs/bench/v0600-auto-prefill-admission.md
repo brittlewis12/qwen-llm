@@ -1,6 +1,6 @@
 # v0.600 Query-Capped Auto-Prefill Admission
 
-Status: preregistration. No v0.600 implementation or timing result exists yet.
+Status: implementation under review. No canonical v0.600 timing result exists yet.
 
 ## Intent
 
@@ -131,6 +131,10 @@ computed headroom, evaluator reason, and admission result. Keep observed Metal
 allocation samples in single-turn timing rows; JSONL has none. Pre-planning
 fallback rows include classification/selection/baseline reason and omit the nested
 plan/admission record. Numeric rows retain their current schema.
+
+If `priced scratch + reserve` overflows, retain both the plan and admission records,
+serialize `required_bytes` as null, sample the raw memory signals, and record
+`required_bytes_overflow` as the evaluator reason. The candidate remains denied.
 
 The nested plan record includes one row per eager and deferred allocation with
 name, logical bytes, priced bytes, and returned alignment. Record

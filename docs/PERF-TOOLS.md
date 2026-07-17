@@ -570,6 +570,12 @@ Interpretation rules:
   `prefill_attention_query` records outer/query rows and executed layer/tile calls;
   `prefill_scratch_overlay` records backing, attention, GDN, and aligned saved bytes.
   Cap/overlay-off rows remain schema 3 unless another schema-4 mechanism is active.
+- Request-stats schema 5 is reserved for `--prefill-chunk auto`. It adds the
+  classification and selection record even when policy falls back to the
+  numeric-1024 baseline. Ineligible and pre-planning fallbacks omit plan and
+  admission records. Post-plan denial retains those records; a checked
+  required-byte overflow keeps the raw terms while serializing `required_bytes`
+  as null.
 - `prefix_cache_stats.py` rejects mixed request-stats schemas and cross-schema
   comparisons. Do not append schema 3 rows to an existing schema 2 stats file.
 - The older `qwen-bench prefix-cache` TTFT label means prefill plus consumption
@@ -584,9 +590,10 @@ Interpretation rules:
 
 `qwen --request-timings PATH` appends one JSONL row for a successful single-turn
 `--prompt` or `--prompt-file` request. The ordinary numeric-chunk path emits schema 3.
-Prompt lookup, automatic chunks, or active query/overlay topology emit schema 4 with
-their optional mechanism objects. It runs the production request once and does not
-support JSONL serving, model-info mode, or stdout as the timing destination.
+Prompt lookup or active query/overlay topology emits schema 4 with optional mechanism
+objects. Automatic chunks emit schema 5 with their policy, plan, and admission
+telemetry. It runs the production request once and does not support JSONL serving,
+model-info mode, or stdout as the timing destination.
 
 ```sh
 target/release/qwen -m "$MODEL" -p "Hello" -n 4 \

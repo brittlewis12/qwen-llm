@@ -1,6 +1,7 @@
 # v0.601 Pressure-Neutral Auto-Prefill Confirmation
 
-Status: preregistration. No v0.601 runner or result exists yet.
+Status: closed inconclusive with no authority. The completed A3B subset is retained
+as informative evidence only; A10B stopped before its first child.
 
 ## Intent
 
@@ -121,3 +122,31 @@ sibling assets, server concurrency, or numeric overrides.
 
 After the resulting go, mixed, kill, or inconclusive decision, do not run another
 auto-prefill confirmation. Return to the force-ranked optimization queue.
+
+## Result
+
+Source `bfa3902bdf2a9debb8f1b94443b1d1bacbef1fab` completes all eight
+A3B children and four fixed pairs with valid identity, host/VM state, zero block
+input, exact output/runtime identity, and exact schema/topology/admission records.
+The completed subset mechanically clears every A3B speed gate:
+
+- pair speedups `1.052868/1.052415/1.052678/1.053172x`;
+- median `1.052773x` and paired median saving `373.859 ms`;
+- AB/BA medians `1.053020/1.052547x`;
+- 4/4 wins;
+- median A/B TTFT `7457.786/7082.920 ms`.
+
+These are post hoc subset calculations, not a formal v0.601 profile evaluation or
+authority. The contract permits performance evaluation only after all 16 children.
+The one-token output equality does not claim exact logits or complete-state parity.
+
+A10B pair 1 arm A never launches. Its 77.03 GB cache-conditioning interval records
+Pageouts `+985`, Compressions `+76`, and zero growth in swap occupancy and
+Swapouts, with 96% memory availability and valid AC/thermal state. The 76 events
+equal 1.1875 MiB of page-sized compression work, not net compressor growth or
+causal attribution: compressor storage and occupied pages both decrease over the
+interval.
+
+The packet therefore stops inconclusive with completion identity verified and no
+authority. Per preregistration, no successor confirmation follows. Both auto
+profiles remain exact and opt-in; the roadmap returns to cold loader work.

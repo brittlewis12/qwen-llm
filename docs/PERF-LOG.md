@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-16 - v0.601 Pressure-Neutral Auto-Prefill Confirmation
+
+Status: closed inconclusive with no authority; auto-prefill confirmation work ends.
+
+- Clean source/build/runtime `bfa3902` completes all eight A3B children and four
+  fixed `AB/BA/BA/AB` pairs with valid host/VM state, zero block input, exact
+  output/runtime identity, and exact schema/topology/admission records.
+- The completed A3B subset mechanically clears every A3B gate: pair speedups are
+  `1.052868/1.052415/1.052678/1.053172x`, median `1.052773x`, AB/BA medians
+  `1.053020/1.052547x`, and 4/4 wins. Median A/B TTFT is
+  `7457.786/7082.920 ms`, saving a paired median `373.859 ms`.
+- This is informative non-authority evidence. The preregistration evaluates
+  performance only after all 16 children; one output token proves byte equality,
+  not exact logits or complete state.
+- A10B pair 1 arm A never launches. Its 77.03 GB cache read plus 120.010-second
+  cooldown records Pageouts `+985`, Compressions `+76`, and zero growth in
+  Swapouts or swap occupancy, with 96% memory availability and valid host state.
+- The 76 events are page-equivalent compression work, not net compressor growth or
+  causal attribution. Stored compressor pages fall by 235 and occupied compressor
+  pages fall by 130 during the system-wide interval.
+- The sole packet correctly stops inconclusive with completion identity verified.
+  No successor confirmation follows. Both exact auto profiles remain opt-in, and
+  the queue advances to the topology-preserving parallel-copied A3B loader pilot.
+
+Artifact: `target/profiles/v0601-auto-prefill-pressure-neutral-p1/`. Summary:
+`docs/bench/2026-07-16-v0601-auto-prefill-pressure-neutral/README.md`.
+
 ## 2026-07-16 - v0.600 Query-Capped Auto-Prefill Admission
 
 Status: implementation complete and opt-in; canonical confirmation protocol closed

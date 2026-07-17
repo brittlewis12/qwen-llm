@@ -425,6 +425,14 @@ A3B chunk 2048 fails its pair floor at `1.04654x`; A10B narrowly reaches
 directional warmed `1.03314x`. Do not reopen 32K, new widths, sibling assets, or
 same-cell retuning.
 
+v0.601 is the terminal confirmation. Its complete A3B subset clears every speed
+gate at median `1.052773x`, AB/BA `1.053020/1.052547x`, and 4/4 wins, but this is
+informative non-authority evidence because A10B stops before its first child. The
+77.03 GB conditioning interval records 76 system-wide Compressions with zero
+Swapouts/swap-occupancy growth and 96% memory availability. Per the frozen rule,
+the packet is inconclusive and no successor follows. Both exact profiles remain
+opt-in. Stop confirmation work and advance the cold-first queue.
+
 Blocked model-choice lane, not active queue: v0.573 screens seven local Q4 assets
 through a frozen six-task direct-mode contract. Scores range from `1/6` to `3/6`;
 none clears every category, so no performance or lower-quant row runs. The
@@ -564,21 +572,13 @@ offset-zero resources yet cuts materialization from median `2066.701` to
 v0.597's one-window saving without adopting v0.598's loaded-tax topology. The
 arithmetic first-byte projection is `2.06601x`; product transfer remains unproved.
 
-1. **Pressure-neutral auto-prefill confirmation**: implementation is complete;
-   only default adjudication remains. Preregister one new whole packet with the
-   same A3B/A10B cells, fixed orders, and gates. Record global Pageouts but replace
-   their noncausal zero veto with zero growth in swap occupancy, cumulative
-   Swapouts, and Compressions, while retaining memory `>=50%`, AC/thermal, zero
-   block input, and child VM brackets. This is the last confirmation pass: no
-   harness chain follows. Expected fresh-TTFT movement remains about `1.060x` A3B
-   and `1.206x` A10B. Difficulty S, belief high.
-2. **Force-only parallel-copied A3B loader pilot**: highest-prize conditional cold
-   product move, authorized by v0.599 but sequenced after auto-prefill. Use the
-   exact 733-resource, offset-zero topology and frozen four-worker schedule. A
+1. **Force-only parallel-copied A3B loader pilot**: highest-prize current cold
+   product move, authorized by v0.599 after terminal auto-prefill adjudication. Use
+   the exact 733-resource, offset-zero topology and frozen four-worker schedule. A
    separate preregistration must require bit-exact full state and loaded
    prefill/decode/request noninferiority before fresh timing. Difficulty M, belief
    high conditional on the floor, prize very high.
-3. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
+2. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
    Under a declared grammar, an isolated forced token still requires a complete
    target state transition. Only a maximal run of uniquely admissible token IDs can
    be packed before reading an intermediate logit. Replay real structured traces
@@ -588,17 +588,17 @@ arithmetic first-byte projection is `2.06601x`; product transfer remains unprove
    `T0/11` for a 1.10x request. With current N8 cost, runs below four are not even
    locally positive. Grammar-restricted lm_head rows are contract-exact and should
    be priced in the same artifact. Difficulty S oracle/M packet, belief medium.
-4. **Async retained-to-copied promotion**: blocked, not current implementation
+3. **Async retained-to-copied promotion**: blocked, not current implementation
    work. Reconsider only after topology-preserving parallel materialization clears
    loaded parity. Begin on retained storage, populate exact per-tensor buffers
    without request contention, and cut over only at a command-buffer-safe epoch.
    v0.598 closes one-window owned as the destination. Difficulty L, belief low.
-5. **Tensor-class topology attribution**: defer behind the same-topology oracle.
+4. **Tensor-class topology attribution**: defer behind the same-topology oracle.
    v0.598 proves the broad one-window tax is provenance-independent but does not
    separate resource count, size, offsets, translation, or cache behavior. Do not
    start mixed storage or expert-specific promotion while exact copied topology is
    the cheaper positive control. Difficulty M, belief medium on attribution.
-6. **Certified lm_head screening oracle**: exact selected-token work removal, not
+5. **Certified lm_head screening oracle**: exact selected-token work removal, not
    bitwise full-logit equivalence. Before k-means, precompute outward-rounded
    per-row/per-256-dimension Q6 block norms. Give the oracle the true production
    winning logit, reveal blocks in query-global hidden-norm order, and prune only
@@ -607,7 +607,7 @@ arithmetic first-byte projection is `2.06601x`; product transfer remains unprove
    30% of baseline bytes after metadata. Only then add production accumulation
    error and require about 70% charged head-wall removal. Difficulty S-M oracle,
    belief low, but especially relevant to repeated draft heads.
-7. **MTPLX asset/contract decomposition**: highest information-value speculative
+6. **MTPLX asset/contract decomposition**: highest information-value speculative
    decode move, not same-weight parity or current process-cold priority.
    Pin the local MTPLX runtime and published trunk, MTP sidecar, draft-head,
    tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7 rows with phase and
@@ -616,7 +616,7 @@ arithmetic first-byte projection is `2.06601x`; product transfer remains unprove
    sidecar against qwen post-norm hidden/token traces and predict a passing request
    before affine Metal work. Difficulty S for MTPLX packet, M for bridge; belief
    medium, upside potentially material.
-8. **A3B long-context N8 and WY state oracle**: approximate warm-continuation lane
+7. **A3B long-context N8 and WY state oracle**: approximate warm-continuation lane
    only. Before Metal WY work, run a captured CPU state-locality comparison against
    serial recurrence; the existing chunked carry/Gram family regressed badly, and
    regrouped recurrence does not inherently repair conv/KV drift. Separately price
@@ -625,13 +625,13 @@ arithmetic first-byte projection is `2.06601x`; product transfer remains unprove
    MTP asset is local, the current A3B packed verifier fails the exact state contract,
    and 131K TTFT dominates fresh requests. No replay-current or product work follows
    without `>=5%` charged warm-decode projection. Difficulty M, belief low-medium.
-9. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
+8. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
    existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
    `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
    overhead or quality loss. Name an end-to-end quality replay first; k5 or average
    below about 5.8 experts must pass quality and project `>=5%` charged movement.
    Difficulty M, belief low.
-10. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+9. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing. Prefix caching is a separate
    exact reuse specialization and does not rank for fresh serial prompts.
 
@@ -667,32 +667,29 @@ automatic retained use stay copied without separate evidence.
 
 1. v0.598 closes the one-window owned A3B pilot. Keep it default-off as a causal
    control; do not promote, broaden, or make it an async destination.
-2. v0.599 clears the exact-topology parallel-copy floor and authorizes one
-   force-only A3B loader pilot. Do not implement it before auto-prefill.
-3. v0.600 completes the narrow query-capped auto-prefill product path but its
-   zero-global-Pageouts packet is closed inconclusive. Run one newly preregistered
-   pressure-neutral confirmation of only the validated 8K-16K cells. Do not reopen
-   32K or extend the harness after it.
-4. Only after that adjudication, implement one force-only parallel-copied A3B
-   loader if v0.599 passes. Require copied full-state and loaded 1%
+2. v0.600/v0.601 complete implementation and terminal adjudication. Keep both
+   profiles opt-in, preserve the valid A3B subset as non-authority evidence, and do
+   not run another confirmation or reopen 32K.
+3. v0.599 clears the exact-topology parallel-copy floor. Preregister and implement
+   its one force-only A3B loader pilot now. Require copied full-state and loaded 1%
    noninferiority before any fresh first-byte packet.
-5. In parallel with no production code, run one structured-trace grammar artifact:
+4. In parallel with no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-6. Do not extend owned arenas beyond A3B. Reopen breadth only if an exact-topology
+5. Do not extend owned arenas beyond A3B. Reopen breadth only if an exact-topology
    loader preserves copied warm behavior and cold gains first.
-7. Keep async promotion blocked behind that same result. Stop at the first measured
+6. Keep async promotion blocked behind that same result. Stop at the first measured
    copy-contention or unsafe cutover requirement.
-8. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
+7. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
    artifact.
-9. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
+8. Then run the MTPLX M4 AR/D3/D7 decomposition before downloading/training another
    drafter or writing qwen affine kernels. If D7 is promising, run the cross-trunk
    sidecar acceptance bridge and apply the total-request equation.
-10. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
+9. Keep A3B long-context/WY work in an explicitly approximate warm-continuation
    lane, top-k behind a named quality replay, and prompt reduction input-changing.
-11. Run tensor-class topology attribution only if same-topology parallel copy is
+10. Run tensor-class topology attribution only if same-topology parallel copy is
     unexpectedly slow or loses loaded parity. Do not build dynamic promotion first.
-12. Do not resume current retained-view retunes, broad external drafting, packed
+11. Do not resume current retained-view retunes, broad external drafting, packed
     MTP history, generic decode-storage diagnostics, matrix/compressed attention,
     sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
     GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,

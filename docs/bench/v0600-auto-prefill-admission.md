@@ -1,6 +1,29 @@
 # v0.600 Query-Capped Auto-Prefill Admission
 
-Status: implementation under review. No canonical v0.600 timing result exists yet.
+Status: implementation committed. P1 was infrastructure-inconclusive before its
+first child; one observability-only P2 is authorized below. No canonical v0.600
+timing result exists yet.
+
+## P1 Infrastructure Adjudication
+
+P1 at source `0ae7f693070b58f8deae782ae35a00f5c169f0db` stopped before
+A3B pair 1 arm A launched because the cache-conditioning interval changed an
+OS-global pageout or swap signal. It produced no child execution, timing row,
+accepted arm, pair, or performance observation. Its immutable decision is
+`target/profiles/v0600-auto-prefill-admission-p1/decision.json`: inconclusive,
+no authority, with completion identity verified.
+
+Authorize exactly one separately versioned P2 as a protocol-observability repair:
+
+- restart the complete fixed packet at A3B pair 1 and pool nothing from P1;
+- preserve all models, hashes, environment rules, conditioning, cooldowns,
+  ordering, gates, thresholds, and zero-growth VM predicates unchanged;
+- on a cache-interval failure only, persist both raw VM/host endpoints, parsed
+  deltas, cache-read wall/bytes, cooldown wall, and exact reason before stopping;
+- do not retry a child or pair, relax a predicate, add a probe, or authorize P3.
+
+This addendum repairs missing failure evidence only. It supplies no performance
+authority and does not reinterpret P1 as an unfavorable result.
 
 ## Intent
 

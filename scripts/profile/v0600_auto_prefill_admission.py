@@ -14,7 +14,7 @@ import v0593_demand_paged_no_copy as common
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT = ROOT / "target/profiles/v0600-auto-prefill-admission-p1"
+ARTIFACT = ROOT / "target/profiles/v0600-auto-prefill-admission-p2"
 PREREG = ROOT / "docs/bench/v0600-auto-prefill-admission.md"
 PERF_TOOLS = ROOT / "docs/PERF-TOOLS.md"
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-mei-medium-qwen36-strip.txt"
@@ -816,11 +816,47 @@ def run_one(
     cache_swap_delta = (
         vm_before_spawn["swap_used_bytes"] - vm_before_cache["swap_used_bytes"]
     )
-    if cache_pageout_delta != 0 or cache_swap_delta > 0:
+    cache_interval_reasons = []
+    if cache_pageout_delta > 0:
+        cache_interval_reasons.append("pageout_growth")
+    elif cache_pageout_delta < 0:
+        cache_interval_reasons.append("pageout_counter_regressed")
+    if cache_swap_delta > 0:
+        cache_interval_reasons.append("swap_growth")
+    if cache_interval_reasons:
+        cache_interval_path = ARTIFACT / f"{stem}.cache-interval.json"
+        cache_interval_path.write_text(
+            json_text(
+                {
+                    "schema": 1,
+                    "artifact_stem": stem,
+                    "profile": profile_name,
+                    "pair_index": pair_index,
+                    "pair_order": order,
+                    "run_index": run_index,
+                    "arm": arm,
+                    "cache_precondition_ms": cache_ms,
+                    "cache_precondition_bytes": cache_bytes,
+                    "cooldown_started_unix_ms": cooldown_started_unix_ms,
+                    "cooldown_requested_ms": cooldown_s * 1e3,
+                    "cooldown_elapsed_ms": cooldown_elapsed_ms,
+                    "host_before_cache": host_before_cache,
+                    "host_before_spawn": host_before_spawn,
+                    "vm_before_cache": vm_before_cache,
+                    "vm_before_spawn": vm_before_spawn,
+                    "cache_pageout_delta": cache_pageout_delta,
+                    "cache_swap_delta_bytes": cache_swap_delta,
+                    "failure_reasons": cache_interval_reasons,
+                },
+                pretty=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         raise InconclusivePacket(
             profile_name,
             pair_index,
-            f"{stem} cache interval changed VM pressure",
+            f"{stem} cache interval invalid: {','.join(cache_interval_reasons)}",
         )
 
     command = [

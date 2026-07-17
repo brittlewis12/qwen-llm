@@ -16,7 +16,13 @@ import v0593_demand_paged_no_copy as common
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT = ROOT / "target/profiles/v0602-a3b-parallel-copied-loader-p1"
+ARTIFACT = ROOT / "target/profiles/v0602-a3b-parallel-copied-loader-p2"
+P1_ROOT = ROOT / "target/profiles/v0602-a3b-parallel-copied-loader-p1"
+P1_MANIFEST = P1_ROOT / "manifest.json"
+P1_CORRECTNESS = P1_ROOT / "correctness.out"
+P1_DECISION = P1_ROOT / "decision.json"
+P1_INVENTORY = P1_ROOT / "artifact-inventory.sha256"
+P1_COMPLETE = P1_ROOT / "packet-complete.json"
 PREREG = ROOT / "docs/bench/v0602-a3b-parallel-copied-loader.md"
 COMMON_RUNNER = ROOT / "scripts/profile/v0593_demand_paged_no_copy.py"
 MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
@@ -32,6 +38,18 @@ EXPECTED_PROMPT_SHA256 = (
 )
 EXPECTED_RUNTIME_MODEL_ID = "e6024ce53109fdf7"
 EXPECTED_RUNTIME_TOKENIZER_ID = "a4b0b26f8a8c9917"
+EXPECTED_P1_SOURCE_COMMIT = "74f5a1faa1000f3489a8fdfbc1e6f502968c8e25"
+EXPECTED_P1_HASHES = {
+    "manifest.json": "af65007e7b8dd3f997d12c04cf5cd571fd97a0166fafd12a08f0019c76a23271",
+    "correctness.out": "7219398f46ec85b25e2a0036a9e0070da67d9c095c44c5602ea8e98db1c2b631",
+    "decision.json": "6f396e563f98cd441b43f80b630bb87bbdeb5ca7e22043c63ec58caecc113730",
+    "artifact-inventory.sha256": (
+        "889e63176873246432ac6e74d822dcd5ea36deb7228013d6290891b7f3df131a"
+    ),
+    "packet-complete.json": (
+        "837df01e434c15751fe8c60937556eee7307ccadaced0aaff497bbc15f9b889e"
+    ),
+}
 EXPECTED_DEVICE = (
     "device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes"
 )
@@ -68,6 +86,9 @@ MARKER_PREFIX = (
     "layout=0x5ae645df5cf7d568 "
     "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 "
     "plan=fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af "
+)
+CORRECTNESS_HARNESS_PREFIX = (
+    "test metal_forward::tests::gguf_parallel_copied_a3b_q4_is_bit_exact ... "
 )
 
 common.MODEL = MODEL
@@ -152,6 +173,11 @@ def required_manifest_paths() -> tuple[Path, ...]:
         PROMPT,
         CLI_BINARY,
         BENCH_BINARY,
+        P1_MANIFEST,
+        P1_CORRECTNESS,
+        P1_DECISION,
+        P1_INVENTORY,
+        P1_COMPLETE,
     )
 
 
@@ -231,6 +257,40 @@ def build_manifest(
         raise RuntimeError("model SHA-256 drifted")
     if hashes[str(PROMPT)] != EXPECTED_PROMPT_SHA256:
         raise RuntimeError("prompt SHA-256 drifted")
+    p1_entries = sorted(path.name for path in P1_ROOT.iterdir() if path.is_file())
+    if p1_entries != sorted(EXPECTED_P1_HASHES):
+        raise RuntimeError(f"p1 stop-boundary inventory drifted: {p1_entries}")
+    for name, expected_hash in EXPECTED_P1_HASHES.items():
+        if hashes[str(P1_ROOT / name)] != expected_hash:
+            raise RuntimeError(f"p1 {name} SHA-256 drifted")
+    p1_manifest = parse_json(P1_MANIFEST.read_text(encoding="utf-8"))
+    p1_decision = parse_json(P1_DECISION.read_text(encoding="utf-8"))
+    p1_complete = parse_json(P1_COMPLETE.read_text(encoding="utf-8"))
+    if not all(
+        isinstance(value, dict) for value in (p1_manifest, p1_decision, p1_complete)
+    ):
+        raise RuntimeError("p1 sealed metadata is malformed")
+    if p1_manifest.get("source_commit") != EXPECTED_P1_SOURCE_COMMIT:
+        raise RuntimeError("p1 source commit drifted")
+    if (
+        p1_decision.get("source_commit") != EXPECTED_P1_SOURCE_COMMIT
+        or p1_decision.get("status") != "implementation_or_contract_defect"
+        or p1_decision.get("stopped_after") != "none"
+        or p1_decision.get("correctness") is not None
+        or p1_decision.get("stages") != {}
+        or "correctness load-line count drifted" not in p1_decision.get("error", "")
+    ):
+        raise RuntimeError("p1 parser-defect decision drifted")
+    if (
+        p1_complete.get("decision_sha256") != EXPECTED_P1_HASHES["decision.json"]
+        or p1_complete.get("inventory_sha256")
+        != EXPECTED_P1_HASHES["artifact-inventory.sha256"]
+    ):
+        raise RuntimeError("p1 completion seal drifted")
+    p1_correctness = P1_CORRECTNESS.read_text(encoding="utf-8")
+    if "test result: ok. 1 passed;" not in p1_correctness:
+        raise RuntimeError("p1 release correctness did not pass")
+    validate_correctness_load_text(p1_correctness)
     device = command_text([str(CLI_BINARY), "--info"], env=base_env).strip()
     macos = command_text(["sw_vers", "-productVersion"], env=base_env).strip()
     hw_memsize = int(command_text(["sysctl", "-n", "hw.memsize"], env=base_env))
@@ -264,6 +324,10 @@ def build_manifest(
         "host_sample_limit": HOST_SAMPLE_LIMIT,
         "host_sample_interval_s": HOST_SAMPLE_INTERVAL_S,
         "child_retry_count": 0,
+        "p1_source_commit": EXPECTED_P1_SOURCE_COMMIT,
+        "p1_hashes": EXPECTED_P1_HASHES,
+        "p1_product_children_launched": 0,
+        "repair_scope": "correctness-test-harness-prefix extraction only",
     }
 
 
@@ -983,6 +1047,44 @@ def record_post_exit_state(
         os.fsync(output.fileno())
 
 
+def extract_correctness_load_lines(text: str) -> list[str]:
+    tokens = (
+        "[metal-load] native quantized token embedding policy:",
+        "[metal-gguf-parallel-copied]",
+        "[metal-load-ledger]",
+    )
+    recognized = []
+    for line in text.splitlines():
+        if not recognized and line == CORRECTNESS_HARNESS_PREFIX + POLICY_LINE:
+            recognized.append(POLICY_LINE)
+            continue
+        matching = [token for token in tokens if line.startswith(token)]
+        if len(matching) == 1:
+            recognized.append(line)
+            continue
+        if "[metal-load" in line or "[metal-gguf-parallel-copied" in line:
+            raise RuntimeError(f"malformed correctness load line: {line!r}")
+    return recognized
+
+
+def validate_correctness_load_text(text: str) -> tuple[list[str], dict[str, int]]:
+    if text.count("[metal-gguf-parallel-copied]") != 1:
+        raise RuntimeError("correctness candidate marker occurrence count drifted")
+    if text.count("[metal-load] native quantized token embedding policy:") != 2:
+        raise RuntimeError("correctness native-policy occurrence count drifted")
+    if text.count("[metal-load-ledger]") != 2:
+        raise RuntimeError("correctness ledger occurrence count drifted")
+    recognized = extract_correctness_load_lines(text)
+    if len(recognized) != 5:
+        raise RuntimeError(f"correctness load-line count drifted: {recognized!r}")
+    if recognized[:3] != [POLICY_LINE, LEDGER_LINE, POLICY_LINE]:
+        raise RuntimeError("correctness A/B policy or A ledger ordering drifted")
+    if recognized[4] != LEDGER_LINE:
+        raise RuntimeError("correctness B ledger drifted")
+    marker = parse_marker(recognized[3])
+    return recognized, marker
+
+
 def run_correctness(base_env: dict[str, str]) -> dict[str, object]:
     output_path = ARTIFACT / "correctness.out"
     command = [
@@ -1013,30 +1115,7 @@ def run_correctness(base_env: dict[str, str]) -> dict[str, object]:
     text = output_path.read_text(encoding="utf-8")
     if result.returncode != 0 or "test result: ok. 1 passed;" not in text:
         raise RuntimeError("release full-state correctness gate failed")
-    if text.count("[metal-gguf-parallel-copied]") != 1:
-        raise RuntimeError("correctness candidate marker occurrence count drifted")
-    if text.count("[metal-load] native quantized token embedding policy:") != 2:
-        raise RuntimeError("correctness native-policy occurrence count drifted")
-    if text.count("[metal-load-ledger]") != 2:
-        raise RuntimeError("correctness ledger occurrence count drifted")
-    recognized = [
-        line
-        for line in text.splitlines()
-        if line.startswith(
-            (
-                "[metal-load] native quantized token embedding policy:",
-                "[metal-gguf-parallel-copied]",
-                "[metal-load-ledger]",
-            )
-        )
-    ]
-    if len(recognized) != 5:
-        raise RuntimeError(f"correctness load-line count drifted: {recognized!r}")
-    if recognized[:3] != [POLICY_LINE, LEDGER_LINE, POLICY_LINE]:
-        raise RuntimeError("correctness A/B policy or A ledger ordering drifted")
-    if recognized[4] != LEDGER_LINE:
-        raise RuntimeError("correctness B ledger drifted")
-    marker = parse_marker(recognized[3])
+    recognized, marker = validate_correctness_load_text(text)
     return {
         "command": command,
         "wall_ms": wall_ms,

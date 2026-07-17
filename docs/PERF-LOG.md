@@ -97,6 +97,47 @@ Artifact: `target/profiles/v0599-a3b-parallel-copied-floor-p1/`. Summary:
 `docs/bench/2026-07-14-v0599-a3b-parallel-copied-floor/README.md`. Adversarial
 certification: `cx ask` session `019f633c-62be-7820-9dfa-256d733a58ef`.
 
+## ANE prefill co-processor oracle — P0 KILL (2026-07-14, ane-oracle branch)
+
+Preregistered ladder (docs/ANE-ORACLE.md rev 2, frozen at 18684c7 before any
+run) asking whether stateless static projections (GDN qkv/z/out, shared
+expert, attn projections, dense FFN) can run on ANE concurrently with GPU
+prefill for a net whole-phase win. Priors from rustane @ c422447 /
+ncdrone/ane @ 016b754: ANE conv1x1 matmul 3.2-7.3 TFLOP/s, fused f32<->f16
+staging 13.55 GB/s, ~50-90 ms compile/kernel, no cross-process plan cache.
+
+P0b trace-driven DAG makespan oracle (scripts/profile/ane_dag_oracle.py) over
+serialized phase traces at A3B/27B x pp1024/pp4096, exhaustive class-subset x
+layer-coverage search, staging+sync charged pessimistic and zero-cost
+optimistic rows:
+
+- Best A3B: `1.0552x`/`1.0533x` (pp1024/pp4096), subset shared_packed +
+  beta_alpha only — jobs fully hidden under the routed-expert block.
+- Best 27B: `1.0055x`/`1.0054x` (beta_alpha only).
+- Gates were `>=1.10x` pessimistic AND `>=1.15x` optimistic: FAIL, all cells.
+- Estimator spread (min/median/max per-slot across passes) `<=0.0002`;
+  determinate under the preregistered +/-2% indeterminacy rule.
+
+Mechanism: the per-layer producer/consumer chain is binding. Every class
+large enough to matter (gdn_qkv/z at ~13 TFLOP/s GPU, dense FFN) stalls its
+own consumer longer on ANE than the GPU takes to just execute it; the only
+schedulable slack (shared expert under routed experts) is small and already
+partially banked by production concurrent encoders (v0.340 lineage). The
+zero-staging zero-sync optimistic row also fails, so a Metal<->IOSurface
+zero-copy API alone is NOT a sufficient reopen.
+
+Closed: ANE offload of static prefill projections under current
+chunk-sequential execution at graph-matmul ANE rates. Not closed:
+drafter-on-ANE (separate lane, unchanged boundary), ANE for a different work
+unit. Reopen: credible ANE rates materially above 7.3 TFLOP/s expansion, a
+public stateful-ANE API, or a promoted wavefront/new-GDN work unit — the
+wavefront variant was preregistered but never implemented; a wavefront reopen
+must implement it in the retained oracle script first. Adversarial reviews:
+cx 019f61ea (rev 1 NO-GO, corrections adopted), cx 019f6218 (kill CERTIFIED;
+instrument defects fixed post-certification, regenerated ceilings identical
+to 4 decimals). The oracle script is retained as the reopen instrument —
+this amends the "removes experiment source" default for this program.
+
 ## 2026-07-14 - v0.598 A3B Owned-Arena Loader Pilot
 
 Status: one-window owned storage killed as a broad cold-plus-warm destination.
@@ -17366,44 +17407,3 @@ Interpretation:
   contributes little by 16K.
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
-
-## ANE prefill co-processor oracle — P0 KILL (2026-07-14, ane-oracle branch)
-
-Preregistered ladder (docs/ANE-ORACLE.md rev 2, frozen at 18684c7 before any
-run) asking whether stateless static projections (GDN qkv/z/out, shared
-expert, attn projections, dense FFN) can run on ANE concurrently with GPU
-prefill for a net whole-phase win. Priors from rustane @ c422447 /
-ncdrone/ane @ 016b754: ANE conv1x1 matmul 3.2-7.3 TFLOP/s, fused f32<->f16
-staging 13.55 GB/s, ~50-90 ms compile/kernel, no cross-process plan cache.
-
-P0b trace-driven DAG makespan oracle (scripts/profile/ane_dag_oracle.py) over
-serialized phase traces at A3B/27B x pp1024/pp4096, exhaustive class-subset x
-layer-coverage search, staging+sync charged pessimistic and zero-cost
-optimistic rows:
-
-- Best A3B: `1.0552x`/`1.0533x` (pp1024/pp4096), subset shared_packed +
-  beta_alpha only — jobs fully hidden under the routed-expert block.
-- Best 27B: `1.0055x`/`1.0054x` (beta_alpha only).
-- Gates were `>=1.10x` pessimistic AND `>=1.15x` optimistic: FAIL, all cells.
-- Estimator spread (min/median/max per-slot across passes) `<=0.0002`;
-  determinate under the preregistered +/-2% indeterminacy rule.
-
-Mechanism: the per-layer producer/consumer chain is binding. Every class
-large enough to matter (gdn_qkv/z at ~13 TFLOP/s GPU, dense FFN) stalls its
-own consumer longer on ANE than the GPU takes to just execute it; the only
-schedulable slack (shared expert under routed experts) is small and already
-partially banked by production concurrent encoders (v0.340 lineage). The
-zero-staging zero-sync optimistic row also fails, so a Metal<->IOSurface
-zero-copy API alone is NOT a sufficient reopen.
-
-Closed: ANE offload of static prefill projections under current
-chunk-sequential execution at graph-matmul ANE rates. Not closed:
-drafter-on-ANE (separate lane, unchanged boundary), ANE for a different work
-unit. Reopen: credible ANE rates materially above 7.3 TFLOP/s expansion, a
-public stateful-ANE API, or a promoted wavefront/new-GDN work unit — the
-wavefront variant was preregistered but never implemented; a wavefront reopen
-must implement it in the retained oracle script first. Adversarial reviews:
-cx 019f61ea (rev 1 NO-GO, corrections adopted), cx 019f6218 (kill CERTIFIED;
-instrument defects fixed post-certification, regenerated ceilings identical
-to 4 decimals). The oracle script is retained as the reopen instrument —
-this amends the "removes experiment source" default for this program.

@@ -1,8 +1,8 @@
 # v0.600 Query-Capped Auto-Prefill Admission
 
-Status: implementation committed. P1 was infrastructure-inconclusive before its
-first child; one observability-only P2 is authorized below. No canonical v0.600
-timing result exists yet.
+Status: implementation committed; confirmation protocol closed inconclusive. P1
+and the sole authorized P2 both stopped before their first child. No canonical
+v0.600 timing result or default-on authority exists.
 
 ## P1 Infrastructure Adjudication
 
@@ -24,6 +24,14 @@ Authorize exactly one separately versioned P2 as a protocol-observability repair
 
 This addendum repairs missing failure evidence only. It supplies no performance
 authority and does not reinterpret P1 as an unfavorable result.
+
+P2 at source `d2756dc03f3db02da613bba4df3554dd6743c035` again stopped
+before A3B pair 1 arm A. During the 22.13 GB cache read plus exact 30-second
+cooldown, global Pageouts increased by 354 pages (`5.53 MiB`). Swap occupancy,
+Swapouts, and Compressions did not increase; memory availability remained 96%, AC
+and thermal state remained valid, and the complete source/build identity passed.
+This isolates the zero-global-Pageouts predicate as the repeated blocker, not the
+candidate or a measured performance result. Per the addendum, no P3 follows.
 
 ## Intent
 

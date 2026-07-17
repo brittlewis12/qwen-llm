@@ -412,14 +412,18 @@ Active narrow product completion: v0.567 measures fresh 11,287-token TTFT gains
 of `1.0641x` A3B and `1.2075x` A10B behind opt-in `--prefill-chunk auto`.
 v0.568 caps matrix query scratch at 1024 and overlaps phase-disjoint packs,
 reducing incremental allocation to about 90 MB/877 MB with measured prefill
-overhead `0.391%/0.109%`. The product auto path still defaults to numeric 1024,
-uses uncapped scratch, records stale 685 MiB/3.75 GiB deltas, and never calls the
-existing memory-admission evaluator. Finish only that 8K-16K
-allowlisted path, fail closed, and run one final fresh product confirmation before
-default promotion. v0.572 remains decisive against 32K expansion: A3B chunk 2048
-fails its pair floor at `1.04654x`; A10B narrowly reaches `1.05065x`, 4096 adds
-only `1.01338x`, and the real 25,610-token guard is only directional warmed
-`1.03314x`. Do not reopen 32K, new widths, sibling assets, or same-cell retuning.
+overhead `0.391%/0.109%`. v0.600 completes the exact product path: complete
+eager/deferred Metal pricing, query cap and overlay, sequence-plus-transient
+reserve, cache-safe/numeric fallback, schema-5 telemetry, and no post-admission
+retry. It remains opt-in because both canonical attempts stop before their first
+child on the same zero-global-Pageouts validity predicate. P2 observes only 354
+pages (`5.53 MiB`) while swap occupancy, Swapouts, and Compressions are unchanged
+and memory remains 96% available. This is a protocol closure, not candidate
+evidence. No v0.600 P3 follows. v0.572 remains decisive against 32K expansion:
+A3B chunk 2048 fails its pair floor at `1.04654x`; A10B narrowly reaches
+`1.05065x`, 4096 adds only `1.01338x`, and the real 25,610-token guard is only
+directional warmed `1.03314x`. Do not reopen 32K, new widths, sibling assets, or
+same-cell retuning.
 
 Blocked model-choice lane, not active queue: v0.573 screens seven local Q4 assets
 through a frozen six-task direct-mode contract. Scores range from `1/6` to `3/6`;
@@ -560,15 +564,14 @@ offset-zero resources yet cuts materialization from median `2066.701` to
 v0.597's one-window saving without adopting v0.598's loaded-tax topology. The
 arithmetic first-byte projection is `2.06601x`; product transfer remains unproved.
 
-1. **Admitted query-capped auto-prefill**: highest-confidence loaded-model move.
-   Wire explicit query cap 1024 plus scratch overlay into the existing
-   8K-16K A3B/A10B allowlist, price complete candidate scratch plus a conservative
-   sequence/transient reserve. Require Metal working-set headroom; honor any finite
-   process limit, while explicitly labeling the target desktop's zero value as an
-   omitted limit rather than a second signal. Missing or insufficient usable
-   signals fall back to 1024. Expected fresh-TTFT movement after measured cap
-   overhead is about `1.060x` A3B and `1.206x` A10B; one final fresh product packet
-   decides default-on. Difficulty S-M, belief high.
+1. **Pressure-neutral auto-prefill confirmation**: implementation is complete;
+   only default adjudication remains. Preregister one new whole packet with the
+   same A3B/A10B cells, fixed orders, and gates. Record global Pageouts but replace
+   their noncausal zero veto with zero growth in swap occupancy, cumulative
+   Swapouts, and Compressions, while retaining memory `>=50%`, AC/thermal, zero
+   block input, and child VM brackets. This is the last confirmation pass: no
+   harness chain follows. Expected fresh-TTFT movement remains about `1.060x` A3B
+   and `1.206x` A10B. Difficulty S, belief high.
 2. **Force-only parallel-copied A3B loader pilot**: highest-prize conditional cold
    product move, authorized by v0.599 but sequenced after auto-prefill. Use the
    exact 733-resource, offset-zero topology and frozen four-worker schedule. A
@@ -666,13 +669,13 @@ automatic retained use stay copied without separate evidence.
    control; do not promote, broaden, or make it an async destination.
 2. v0.599 clears the exact-topology parallel-copy floor and authorizes one
    force-only A3B loader pilot. Do not implement it before auto-prefill.
-3. Finish the narrow query-capped auto-prefill product path. Reuse the existing
-   admission evaluator, preserve numeric override precedence, fail
-   closed, and confirm only the already-validated 8K-16K A3B/A10B cells. Do not
-   reopen 32K.
-4. Only after auto-prefill, implement one force-only parallel-copied A3B loader if
-   v0.599 passes. Require copied full-state and loaded 1% noninferiority before any
-   fresh first-byte packet.
+3. v0.600 completes the narrow query-capped auto-prefill product path but its
+   zero-global-Pageouts packet is closed inconclusive. Run one newly preregistered
+   pressure-neutral confirmation of only the validated 8K-16K cells. Do not reopen
+   32K or extend the harness after it.
+4. Only after that adjudication, implement one force-only parallel-copied A3B
+   loader if v0.599 passes. Require copied full-state and loaded 1%
+   noninferiority before any fresh first-byte packet.
 5. In parallel with no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.

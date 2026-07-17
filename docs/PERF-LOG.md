@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-16 - v0.600 Query-Capped Auto-Prefill Admission
+
+Status: implementation complete and opt-in; canonical confirmation protocol closed
+inconclusive before any child or performance observation.
+
+- Source `c4e4c4a` wires exact A3B `2048/1024` and A10B `4096/1024`
+  outer/query profiles behind complete Metal plan pricing and a conservative
+  sequence-plus-512 MiB reserve. Numeric overrides, unsupported profiles, and
+  cache-bearing JSONL remain on the untouched outer-1024 constructor.
+- Auto rows use schema 5. The 31-test CLI suite covers profile topology, exact
+  overlay geometry, eager/deferred pricing, overflow, constructor order, memory
+  boundaries, environment, schema, and cache gates. Admitted allocation failure is
+  a hard error with no baseline retry.
+- Latest-source A3B smoke admits 41 allocations totaling `1,227,242,527` priced
+  bytes plus `852,656,128` reserve, then executes outer/query `2048/1024` with
+  `60/120` layer/tile calls and zero transitions.
+- P1 at `0ae7f69` stops before A3B pair 1 arm A because the cache interval changes
+  an unpersisted global VM term. It has no child, timing row, arm, or pair.
+- An observability-only addendum authorizes one full P2 without changing protocol.
+  P2 at `d2756dc` stops at the same boundary and records Pageouts +354 pages
+  (`5.53 MiB`) while swap occupancy, Swapouts, and Compressions remain unchanged;
+  memory availability stays 96% with valid AC/thermal state.
+- P1/P2 therefore provide no speed result and authorize no default. They falsify
+  zero global Pageouts as a feasible causal pressure predicate for this packet. No
+  P3 follows. A new experiment may record Pageouts but gate actual anonymous-memory
+  pressure with swap occupancy, Swapouts, Compressions, and host validity.
+
+Artifacts: `target/profiles/v0600-auto-prefill-admission-p1/` and
+`target/profiles/v0600-auto-prefill-admission-p2/`. Summary:
+`docs/bench/2026-07-16-v0600-auto-prefill-admission/README.md`.
+
 ## 2026-07-14 - v0.599 A3B Topology-Preserving Parallel Copy
 
 Status: certified GO for one separately preregistered force-only A3B loader pilot,

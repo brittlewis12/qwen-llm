@@ -6,6 +6,63 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-17 - v0.602 A3B Parallel-Copied Loader
+
+Status: GO with force-only exact-A3B authority; largest banked process-cold A3B
+responsiveness gain.
+
+- Source `282b13a` completes bit-exact full-state correctness and all 24 sole-
+  attempt product children. P1 at `74f5a1f` launched no product child: release
+  correctness passed, but the outer parser omitted the harness-prefixed first
+  policy line. P2 authenticates all five sealed P1 artifacts and repairs only that
+  extraction boundary.
+- B preserves 733 independent exact-sized offset-zero Shared/DefaultCache/Tracked
+  resources and the ordinary copied ledger while using the frozen four-worker
+  schedule. Every source byte, resource identity, checked-write guard, prefill
+  logit, KV/GDN/conv byte, argmax, forced transition, continuation logit, and
+  continuation state passes.
+- Loaded repetitions 3-5 remain stable and noninferior in all six pairs. Medians
+  of the six child-level late medians are prefill `309.05/307.75 ms`, decode
+  `1197.0/1198.6 ms`, and request `1506.5/1507.8 ms` for A/B. Pair ranges are
+  `0.99418-1.00815x` prefill A/B, `0.99684-1.00234x` decode A/B, and
+  `0.99668-1.00266x` request B/A.
+- Fresh output-128 first byte improves `2477.32 -> 1199.75 ms`, a paired median
+  `2.06292x`, with 6/6 wins and AB/BA medians `2.06078/2.06478x`. Exit improves
+  `3880.71 -> 2625.87 ms`, median `1.47929x`, also 6/6 wins.
+- Runtime plus model load falls `2094.00 -> 811.78 ms`. Paired saving is
+  `1283.493 ms` median and B/A is `0.38742x`. Candidate ready wall is
+  `747.527 ms` median, almost exactly transferring v0.599's `742.676 ms` floor
+  and `2.06601x` first-byte projection.
+- The separate product-objective tradeoff is explicit: first fresh prefill is
+  slower in all six pairs by `2.212-8.852 ms`, paired median `+4.768 ms`; TTFT
+  B/A is `1.01225x`, or `+4.659 ms`. Model-ready complete request is slower in
+  5/6 pairs by paired median `+5.481 ms`, and final-output-to-exit wall is slower
+  6/6 by `+22.159 ms`. This systematic first-request regression is not observed
+  in late post-warmup loaded measurements. Generation B/A is `1.00068x` paired
+  median.
+- Maximum fresh paired RSS/footprint B/A is `1.000035/1.000322x`. Every cache and
+  child interval has zero Pageouts, Compressions, Swapouts, swap growth, and block
+  input; fresh major faults are zero. Every output and timing identity matches.
+- The causal result is now product-grade: the frozen topology-preserving
+  parallel-copy implementation removes about 1.28 seconds while independent
+  offset-zero topology preserves loaded speed. The giant-resource/nonzero-offset
+  class is the observed discriminator for the v0.598 tax; anonymous copying alone
+  is not sufficient. Resource count, offset topology, and the coupled population
+  changes are not individually isolated. No further topology diagnostic is a
+  prerequisite for exact A3B use.
+- Authority remains explicit `QWEN_GGUF_PARALLEL_COPY=1` on the frozen single-
+  shard A3B asset. Default admission must explicitly accept the measured
+  first-request tradeoff or retain force-only behavior. Serving and concurrent
+  loading remain unauthorized because CPU contention and energy were not measured.
+  Re-rank dense-27B breadth ahead of split-A10B breadth; infer neither from A3B.
+
+Artifacts: `target/profiles/v0602-a3b-parallel-copied-loader-p1/` and
+`target/profiles/v0602-a3b-parallel-copied-loader-p2/`. Summary:
+`docs/bench/2026-07-17-v0602-a3b-parallel-copied-loader/README.md`. Adversarial
+review: `cx ask` sessions `019f7131-3b49-7773-a867-341b2c66dd2f` and
+`019f7196-d46b-71e1-9ae4-7804347f44a2`; sealed-result review:
+`019f71e6-4700-7132-af49-fe7bc55cc84d`.
+
 ## 2026-07-16 - v0.601 Pressure-Neutral Auto-Prefill Confirmation
 
 Status: closed inconclusive with no authority; auto-prefill confirmation work ends.

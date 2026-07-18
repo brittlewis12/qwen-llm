@@ -572,6 +572,20 @@ offset-zero resources yet cuts materialization from median `2066.701` to
 v0.597's one-window saving without adopting v0.598's loaded-tax topology. The
 arithmetic first-byte projection is `2.06601x`; product transfer remains unproved.
 
+v0.602 proves product transfer almost exactly. The force-only candidate preserves
+bit-exact full state and every loaded 1% gate, then improves fresh output-128 first
+byte `2477.32 -> 1199.75 ms` at paired median `2.06292x` and process exit at
+`1.47929x`, both 6/6 wins. Runtime plus model load falls `2094.00 -> 811.78 ms`,
+saving `1283.493 ms` paired median. Candidate ready wall is `747.527 ms`, within
+0.7% of the v0.599 floor. RSS/footprint are unchanged. One tradeoff remains
+separate: first fresh prefill is slower in all six pairs by paired median
+`4.768 ms`, making TTFT B/A `1.01225x`; model-ready complete request is slower
+in 5/6 pairs by paired median `5.481 ms`, and final-output-to-exit wall is slower
+6/6 by `22.159 ms`. The systematic first-request regression is not observed in
+late post-warmup loaded measurements. The packet does not localize its cause, and
+the `2.063x` cold endpoint is not permission to hide the separate model-ready
+tradeoff.
+
 The post-v0.601 portfolio review preserves the cold-first inversion while
 correcting several stale external frames. PLD is already a product path behind
 `--prompt-lookup`; v0.565 clears its copy-heavy packet and v0.566 demotes only
@@ -582,15 +596,32 @@ The `12.5-12.8` nominal-TFLOP/s Q4_K anchor remains a current-dispatcher ceiling
 not an independent silicon peak. One causal actual-shape decomposition can test
 that premise, but a derived peak is not itself an optimization result.
 
-1. **Force-only parallel-copied A3B loader pilot**: highest-prize current cold
-   product move, authorized by v0.599 after terminal auto-prefill adjudication. Use
-   the exact 733-resource, offset-zero topology and frozen four-worker schedule. A
-   separate preregistration must require bit-exact full state and loaded
-   prefill/decode/request noninferiority before fresh timing. Difficulty M, belief
-   medium-high conditional on the floor, prize very high. If it clears product
-   transfer, price exact-topology breadth on 27B and A10B before inventing another
-   cold representation.
-2. **A10B native-embedding cold packet**: omitted cold-path adjudication for an
+1. **A3B default admission decision**: highest realized product leverage, not a
+   new performance search. v0.602 already proves the exact force path at
+   `2.06292x` first byte, `1.47929x` exit, and loaded parity. Decide whether absent
+   policy may select it only for the authenticated single-shard asset while
+   preserving explicit `=0` rollback and strict unsupported fallback. Do not rerun
+   the 24-child packet. Require policy/parser tests, the existing full-state gate,
+   and one unscored default-vs-force path-identity smoke. The decision must name the
+   separate first-prefill tradeoff: paired median `+4.768 ms`, TTFT B/A
+   `1.01225x`, model-ready complete-request delta `+5.481 ms`, and
+   final-output-to-exit delta `+22.159 ms`, despite a paired median
+   `1276.264 ms` first-byte saving. Either preserve force-only behavior for
+   serving and concurrent loading or explicitly accept their unmeasured CPU-
+   contention and energy surface. Difficulty S, mechanism certainty high; the
+   unresolved question is product preference, not speed.
+2. **Dense-27B exact-topology parallel-copy breadth**: highest new cold
+   optimization candidate. Native embedding is already default and the copied
+   path retains independent offset-zero resources, so v0.602 supplies a strong
+   transfer prior without authorizing inference. First freeze the 27B all-direct
+   inventory and a balanced whole-tensor schedule; require a materialization floor
+   saving of at least 750 ms and no resource/memory drift. Only then implement one
+   exact force path with full-state, loaded 1%, first-prefill, first-byte, and exit
+   gates. Scale arithmetic suggests roughly 0.9-1.1 seconds is available, but it is
+   a prior, not evidence. Record CPU utilization and energy, and do not infer
+   concurrent-loader behavior from the serial packet. Difficulty M, belief
+   medium-high, broad dense prize high.
+3. **A10B native-embedding cold packet**: omitted cold-path adjudication for an
    implemented bit-exact row representation. v0.538 preserves the exact 128-token
    greedy stream, records loaded median `pp512/tg128` ratios of
    `1.00004/1.00106x`, and removes `2,240,839,680` device-allocation bytes. It also
@@ -600,7 +631,18 @@ that premise, but a derived peak is not itself an optimization result.
    loaded 1% prefill/decode guard, and a cold gain above both packet MDE and the
    cheap-exact 2-3% threshold. Byte removal alone predicts no latency. Difficulty S,
    implementation belief high, latency belief low-medium, cold prize unknown.
-3. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
+4. **Split-A10B exact-topology parallel-copy floor**: potentially the largest
+   remaining process-cold byte-population prize if the heavy anchor remains a real
+   deployment target. Prefer to adjudicate native embedding first because it fixes
+   the intended token-table residency, but this is sequencing rather than a logical
+   dependency: a floor may force native embedding and freeze that inventory. Run a
+   topology-preserving materialization floor before product code; require at least
+   1.5 seconds saved, exact per-shard source coverage, no positive swap-occupancy or
+   compressor stored/occupied gauge growth, and record cumulative Pageouts and
+   Compressions as advisory. Product work remains conditional on that floor and
+   loaded parity. Difficulty M-L, belief medium, prize very high but deployment
+   relevance lower than A3B/27B.
+5. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
    Under a declared grammar, an isolated forced token still requires a complete
    target state transition. Only a maximal run of uniquely admissible token IDs can
    be packed before reading an intermediate logit. Replay real structured traces
@@ -612,7 +654,7 @@ that premise, but a derived peak is not itself an optimization result.
    constrained-output semantics and target state; this is not equivalence to
    unconstrained generation. Price both effects in one artifact. Difficulty S
    oracle/M packet, opportunity belief medium-low until traces exist.
-4. **27B Q4_K FFN-gate pipelining preflight**: candidate-tied prefill calibration,
+6. **27B Q4_K FFN-gate pipelining preflight**: candidate-tied prefill calibration,
    not a generic decomposition or promised kernel. Freeze the production 27B Q4_K
    `ffn_gate` shape `[5120,17408]` at `P=1024`, with `P=4096` as the guard. The sole
    candidate is a two-slab threadgroup schedule that prepares K slab `i+1` before
@@ -628,7 +670,7 @@ that premise, but a derived peak is not itself an optimization result.
    neighborhoods closed.
    Exactness is numerical relative to the current mat-mat path. Difficulty M,
    information belief medium, gain belief low-medium.
-5. **MTPLX asset/contract decomposition**: highest information-value speculative
+7. **MTPLX asset/contract decomposition**: highest information-value speculative
    decode move, not same-weight parity or current process-cold priority.
    Pin the local MTPLX runtime and published trunk, MTP sidecar, draft-head,
    tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7 rows with phase and
@@ -637,7 +679,7 @@ that premise, but a derived peak is not itself an optimization result.
    sidecar against qwen post-norm hidden/token traces and predict a passing request
    before affine Metal work. Difficulty S for MTPLX packet, M for bridge; belief
    medium, upside potentially material.
-6. **Materially different A3B state-preserving verifier oracle**: strategic
+8. **Materially different A3B state-preserving verifier oracle**: strategic
    speculative unlock, not a rerun or generic packed-kernel wiring task. Retain the
    current physical-N8 implementation only as the known-negative state control.
    Any new candidate must name a state organization that reproduces serial
@@ -648,7 +690,7 @@ that premise, but a derived peak is not itself an optimization result.
    Approximate verification stays in the approximate lane. No charged product work
    follows without state passage and at least 5% projected warm-decode movement.
    Difficulty M-L, belief low-medium, conditional prize high.
-7. **Certified lm_head screening oracle**: exact selected-token work removal, not
+9. **Certified lm_head screening oracle**: exact selected-token work removal, not
    bitwise full-logit equivalence. Before k-means, precompute outward-rounded
    per-row/per-256-dimension Q6 block norms. Give the oracle the true production
    winning logit, reveal blocks in query-global hidden-norm order, and prune only
@@ -657,23 +699,24 @@ that premise, but a derived peak is not itself an optimization result.
    30% of baseline bytes after metadata. Only then add production accumulation
    error and require about 70% charged head-wall removal. Difficulty S-M oracle,
    belief low, but especially relevant to repeated draft heads.
-8. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
+10. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
    existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
    `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
    overhead or quality loss. Name an end-to-end quality replay first; k5 or average
    below about 5.8 experts must pass quality and project `>=5%` charged movement.
    Difficulty M, belief low.
-9. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+11. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing. Prefix caching is a separate
    exact reuse specialization and does not rank for fresh serial prompts.
 
-Blocked cold follow-ons remain conditional. Async retained-to-copied promotion
-requires a successful same-topology loader, a command-buffer-safe cutover, and no
-measured copy contention. Resource-count/size/offset topology attribution runs only
-if the same-topology pilot unexpectedly loses loaded parity or cold transfer. Metal
-does not expose physical GPU page placement or TLB policy; do not call these
-resource-shape A/Bs MMU control. Durable session snapshots and a resident daemon
-remain useful reuse/deployment lanes, but neither is fresh-prompt,
+Blocked cold follow-ons remain conditional. v0.602 satisfies the first prerequisite
+for async retained-to-copied promotion, but command-buffer-safe cutover, copy
+contention, and secondary serving scope still keep it below serial cold breadth.
+Resource-count/size/offset attribution is no longer needed for the A3B decision:
+the same-topology pilot preserves loaded parity and transfers the cold floor. Metal
+does not expose physical GPU page placement or TLB policy; do not reopen
+resource-shape A/Bs as purported MMU control. Durable session snapshots and a
+resident daemon remain useful reuse/deployment lanes, but neither is fresh-prompt,
 model-process-cold acceleration.
 
 Memory follow-up: v0.590 promotes native embeddings for 27B and A3B. v0.591 proves
@@ -686,9 +729,9 @@ live file-backed residency remain separate. The v0.594 A10B retained-storage res
 is resource and sample-read authority, not full-forward, latency, or footprint
 authority. v0.596 closes current retained A3B as a broad warm representation and
 shows CPU prefault raises maximum RSS by about 22 GB without restoring speed. Owned
-arenas deliberately retain anonymous private allocation; their hypothesized prize
-is cold materialization wall plus copied warm speed, not the retained footprint
-reduction.
+arenas deliberately retain anonymous private allocation. v0.602 now proves their
+same-topology prize is cold materialization wall plus copied warm speed, not the
+retained footprint reduction; the force-only A3B result leaves RSS/footprint flat.
 
 Dense fresh-TTFT truth: no current exact branch has a credible material gain band
 for large dense prefill. Current packed compute is near the measured mat-mat
@@ -711,18 +754,25 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. v0.598 closes the one-window owned A3B pilot. Keep it default-off as a causal
-   control; do not promote, broaden, or make it an async destination.
-2. v0.600/v0.601 complete implementation and terminal adjudication. Keep both
-   profiles opt-in, preserve the valid A3B subset as non-authority evidence, and do
-   not run another confirmation or reopen 32K.
-3. v0.599 clears the exact-topology parallel-copy floor. Preregister and implement
-   its one force-only A3B loader pilot now. Require copied full-state and loaded 1%
-   noninferiority before any fresh first-byte packet.
-4. Run one A10B native-embedding process-cold packet if the heavy anchor remains a
+1. v0.602 completes the exact-topology A3B pilot at `2.06292x` first byte and
+   loaded parity. Decide default admission next without repeating performance.
+   Preserve `=0` rollback and explicitly accept the `+4.768 ms` first-prefill,
+   `+5.481 ms` model-ready-request, and `+22.159 ms` post-output exit tradeoffs.
+   Keep serving/concurrent loading force-only unless their unmeasured CPU-
+   contention and energy surface is consciously accepted.
+2. Price dense-27B breadth with one frozen same-topology materialization floor.
+   Implement a force path only if it saves at least 750 ms; then require full state,
+   loaded 1%, first-prefill, first-byte, and exit gates.
+3. Run one A10B native-embedding process-cold packet if the heavy anchor remains a
    deployment target. Stop after one valid adjudication; do not infer latency from
    the already measured 2.24 GB allocation reduction. Apply the ranked entry's
    exact-output, loaded-noninferiority, and MDE gates.
+4. If A10B deployment relevance justifies it, prefer item 3 before one three-shard
+   exact-topology parallel-copy floor; alternatively force native embedding in the
+   floor and freeze that inventory. Stop before loader code unless it saves at
+   least 1.5 seconds without topology drift, positive swap-occupancy growth, or
+   positive compressor stored/occupied gauge growth. Keep cumulative Pageouts and
+   Compressions advisory.
 5. With no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
@@ -737,16 +787,14 @@ automatic retained use stay copied without separate evidence.
    The current implementation remains a negative control, not a rerun target.
 9. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
    artifact.
-10. Do not extend owned arenas beyond A3B. Reopen breadth only if an exact-topology
-    loader preserves copied warm behavior and cold gains first, then re-rank one
-    27B and one A10B inventory rather than inferring breadth from A3B.
-11. Keep async promotion blocked behind that same result. Stop at the first measured
-    copy-contention or unsafe cutover requirement.
-12. Keep top-k behind a named quality replay and prompt reduction explicitly
+10. Keep async promotion secondary despite v0.602 satisfying same-topology product
+    transfer. Stop at the first measured copy-contention or unsafe cutover
+    requirement.
+11. Keep top-k behind a named quality replay and prompt reduction explicitly
     input-changing.
-13. Run tensor-class topology attribution only if same-topology parallel copy is
-    unexpectedly slow or loses loaded parity. Do not build dynamic promotion first.
-14. Do not resume current retained-view retunes, broad external drafting, packed
+12. Do not run tensor-class topology attribution for this result. Same-topology
+    parallel copy is fast and loaded-neutral; the discriminator already answered.
+13. Do not resume current retained-view retunes, broad external drafting, packed
     MTP history, generic decode-storage diagnostics, matrix/compressed attention,
     sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
     GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
@@ -768,9 +816,11 @@ automatic retained use stay copied without separate evidence.
   that one-window owned shares retained's decode tax despite exact destination
   population; the premise is closed. Any reopen must preserve per-tensor
   offset-zero topology through the loaded gates before fresh product timing.
-  v0.599 clears the exact-topology materialization floor only. It authorizes a
-  separately preregistered force-only loader pilot after auto-prefill, not product
-  promotion or cross-asset breadth.
+  v0.599 clears the materialization floor and v0.602 clears exact A3B full state,
+  loaded parity, and cold product endpoints. Authority remains force-only for the
+  frozen asset. Default admission must preserve rollback and acknowledge the
+  measured first-prefill tax; 27B/A10B breadth requires independent inventory,
+  floor, correctness, and product evidence.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

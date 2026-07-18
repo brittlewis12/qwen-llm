@@ -375,18 +375,120 @@ const GGUF_OWNED_A3B_GAP_BYTES: u64 = 13_824;
 const GGUF_OWNED_A3B_FALLBACK_BYTES: u64 = 8_192;
 const GGUF_OWNED_A3B_PHYSICAL_BYTES: u64 = 22_123_552_768;
 const GGUF_OWNED_WORKERS: usize = 4;
-const GGUF_PARALLEL_COPY_CUTS: [usize; 3] = [155, 359, 539];
-const GGUF_PARALLEL_COPY_TASK_COUNTS: [usize; 4] = [155, 204, 180, 194];
-const GGUF_PARALLEL_COPY_WORKER_BYTES: [u64; 4] =
-    [5_532_746_240, 5_462_315_776, 5_595_522_304, 5_532_954_624];
-const GGUF_PARALLEL_COPY_FIRST_OFFSETS: [u64; 4] =
-    [10_990_048, 5_543_736_288, 11_006_052_064, 16_601_574_368];
-const GGUF_PARALLEL_COPY_LAST_OFFSETS: [u64; 4] = [
-    5_392_741_344,
-    11_004_937_952,
-    16_450_579_424,
-    22_134_520_800,
-];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParallelCopyProfileId {
+    A3bQ4kmV1,
+}
+
+impl ParallelCopyProfileId {
+    fn label(self) -> &'static str {
+        match self {
+            Self::A3bQ4kmV1 => "a3b-q4km-v1",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParallelCopyScheduleIdentity {
+    request_index: usize,
+    name: &'static str,
+    shard_idx: usize,
+    source_offset: u64,
+    source_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParallelCopyScheduleBoundary {
+    first: ParallelCopyScheduleIdentity,
+    last: ParallelCopyScheduleIdentity,
+}
+
+#[derive(Debug)]
+struct ParallelCopyProfile {
+    id: ParallelCopyProfileId,
+    request_count: usize,
+    source_bytes: u64,
+    cuts: [usize; GGUF_OWNED_WORKERS - 1],
+    task_counts: [usize; GGUF_OWNED_WORKERS],
+    worker_bytes: [u64; GGUF_OWNED_WORKERS],
+    boundaries: [ParallelCopyScheduleBoundary; GGUF_OWNED_WORKERS],
+}
+
+const A3B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
+    id: ParallelCopyProfileId::A3bQ4kmV1,
+    request_count: GGUF_OWNED_A3B_REQUESTS,
+    source_bytes: GGUF_OWNED_A3B_SOURCE_BYTES,
+    cuts: [155, 359, 539],
+    task_counts: [155, 204, 180, 194],
+    worker_bytes: [5_532_746_240, 5_462_315_776, 5_595_522_304, 5_532_954_624],
+    boundaries: [
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 2,
+                name: "output.weight",
+                shard_idx: 0,
+                source_offset: 10_990_048,
+                source_bytes: 417_177_600,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 164,
+                name: "blk.8.ffn_gate_exps.weight",
+                shard_idx: 0,
+                source_offset: 5_392_741_344,
+                source_bytes: 150_994_944,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 163,
+                name: "blk.8.ffn_gate_inp.weight",
+                shard_idx: 0,
+                source_offset: 5_543_736_288,
+                source_bytes: 2_097_152,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 354,
+                name: "blk.19.attn_v.weight",
+                shard_idx: 0,
+                source_offset: 11_004_937_952,
+                source_bytes: 1_114_112,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 366,
+                name: "blk.19.ffn_down_exps.weight",
+                shard_idx: 0,
+                source_offset: 11_006_052_064,
+                source_bytes: 184_549_376,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 548,
+                name: "blk.29.ffn_gate_exps.weight",
+                shard_idx: 0,
+                source_offset: 16_450_579_424,
+                source_bytes: 150_994_944,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 547,
+                name: "blk.29.ffn_gate_inp.weight",
+                shard_idx: 0,
+                source_offset: 16_601_574_368,
+                source_bytes: 2_097_152,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 721,
+                name: "blk.39.post_attention_norm.weight",
+                shard_idx: 0,
+                source_offset: 22_134_520_800,
+                source_bytes: 8_192,
+            },
+        },
+    ],
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GgufNoCopyMode {
@@ -1466,6 +1568,7 @@ struct ParallelCopyTask<'a> {
 }
 
 struct PlannedParallelCopiedStorage {
+    profile: &'static ParallelCopyProfile,
     expected: Vec<ModelWeightStorageIdentity>,
     sorted_request_indices: Vec<usize>,
     resources: Vec<Buffer>,
@@ -1474,18 +1577,20 @@ struct PlannedParallelCopiedStorage {
 }
 
 fn frozen_parallel_copy_order(
+    profile: &ParallelCopyProfile,
     expected: &[ModelWeightStorageIdentity],
 ) -> Result<Vec<usize>, MfError> {
-    if expected.len() != GGUF_OWNED_A3B_REQUESTS
+    if expected.len() != profile.request_count
         || expected.iter().any(|identity| {
             identity.kind != ModelWeightStorageKind::Direct
                 || identity.source_bytes == 0
                 || identity.resident_bytes != identity.source_bytes
         })
     {
-        return Err(MfError::LoadPolicy(
-            "parallel-copy request inventory is not all-direct and nonempty".to_string(),
-        ));
+        return Err(MfError::LoadPolicy(format!(
+            "parallel-copy {} request inventory is not all-direct and nonempty",
+            profile.id.label()
+        )));
     }
 
     let mut sorted_request_indices = (0..expected.len()).collect::<Vec<_>>();
@@ -1503,9 +1608,9 @@ fn frozen_parallel_copy_order(
 
     let boundaries = [
         0,
-        GGUF_PARALLEL_COPY_CUTS[0],
-        GGUF_PARALLEL_COPY_CUTS[1],
-        GGUF_PARALLEL_COPY_CUTS[2],
+        profile.cuts[0],
+        profile.cuts[1],
+        profile.cuts[2],
         expected.len(),
     ];
     if boundaries[0] != 0
@@ -1514,8 +1619,8 @@ fn frozen_parallel_copy_order(
         || boundaries
             .windows(2)
             .map(|pair| pair[1] - pair[0])
-            .ne(GGUF_PARALLEL_COPY_TASK_COUNTS)
-        || GGUF_PARALLEL_COPY_TASK_COUNTS.iter().sum::<usize>() != expected.len()
+            .ne(profile.task_counts)
+        || profile.task_counts.iter().sum::<usize>() != expected.len()
     {
         return Err(MfError::LoadPolicy(
             "parallel-copy frozen boundaries drifted".to_string(),
@@ -1532,13 +1637,24 @@ fn frozen_parallel_copy_order(
                 })
         })?;
         let first = &expected[partition[0]];
-        let last = &expected[*partition.last().expect("partition is nonempty")];
-        if partition.len() != GGUF_PARALLEL_COPY_TASK_COUNTS[worker]
-            || worker_bytes != GGUF_PARALLEL_COPY_WORKER_BYTES[worker]
-            || first.shard_idx != 0
-            || first.data_offset != GGUF_PARALLEL_COPY_FIRST_OFFSETS[worker]
-            || last.shard_idx != 0
-            || last.data_offset != GGUF_PARALLEL_COPY_LAST_OFFSETS[worker]
+        let first_index = partition[0];
+        let last_index = *partition.last().expect("partition is nonempty");
+        let last = &expected[last_index];
+        let frozen = profile.boundaries[worker];
+        let first_matches = first_index == frozen.first.request_index
+            && first.name == frozen.first.name
+            && first.shard_idx == frozen.first.shard_idx
+            && first.data_offset == frozen.first.source_offset
+            && first.source_bytes == frozen.first.source_bytes;
+        let last_matches = last_index == frozen.last.request_index
+            && last.name == frozen.last.name
+            && last.shard_idx == frozen.last.shard_idx
+            && last.data_offset == frozen.last.source_offset
+            && last.source_bytes == frozen.last.source_bytes;
+        if partition.len() != profile.task_counts[worker]
+            || worker_bytes != profile.worker_bytes[worker]
+            || !first_matches
+            || !last_matches
         {
             return Err(MfError::LoadPolicy(format!(
                 "parallel-copy frozen partition {worker} drifted"
@@ -1548,7 +1664,7 @@ fn frozen_parallel_copy_order(
             MfError::LoadPolicy("parallel-copy schedule byte overflow".to_string())
         })?;
     }
-    if total_bytes != GGUF_OWNED_A3B_SOURCE_BYTES {
+    if total_bytes != profile.source_bytes {
         return Err(MfError::LoadPolicy(format!(
             "parallel-copy schedule bytes drifted: {total_bytes}"
         )));
@@ -1566,11 +1682,12 @@ unsafe fn exclusive_buffer_bytes_mut(buffer: &mut Buffer) -> &mut [u8] {
 }
 
 fn validate_parallel_copied_topology(
+    profile: &ParallelCopyProfile,
     expected: &[ModelWeightStorageIdentity],
     resources: &[Buffer],
     tensors: &[MetalTensor],
 ) -> Result<(), MfError> {
-    if expected.len() != GGUF_OWNED_A3B_REQUESTS
+    if expected.len() != profile.request_count
         || resources.len() != expected.len()
         || tensors.len() != expected.len()
     {
@@ -1604,7 +1721,7 @@ fn validate_parallel_copied_topology(
             )));
         }
     }
-    if resource_bytes != GGUF_OWNED_A3B_SOURCE_BYTES {
+    if resource_bytes != profile.source_bytes {
         return Err(MfError::LoadPolicy(format!(
             "parallel-copy resource bytes drifted: {resource_bytes}"
         )));
@@ -1952,17 +2069,22 @@ impl PlannedParallelCopiedStorage {
                 self.expected.len()
             )));
         }
-        let schedule = frozen_parallel_copy_order(&self.expected)?;
+        let schedule = frozen_parallel_copy_order(self.profile, &self.expected)?;
         if schedule != self.sorted_request_indices {
             return Err(MfError::LoadPolicy(
                 "parallel-copy schedule attestation drifted".to_string(),
             ));
         }
-        validate_parallel_copied_topology(&self.expected, &self.resources, &self.tensors)?;
-        if ledger.source_descriptors != GGUF_OWNED_A3B_REQUESTS
-            || ledger.source_bytes != GGUF_OWNED_A3B_SOURCE_BYTES
-            || ledger.direct_copy_descriptors != GGUF_OWNED_A3B_REQUESTS
-            || ledger.direct_copy_bytes != GGUF_OWNED_A3B_SOURCE_BYTES
+        validate_parallel_copied_topology(
+            self.profile,
+            &self.expected,
+            &self.resources,
+            &self.tensors,
+        )?;
+        if ledger.source_descriptors != self.profile.request_count
+            || ledger.source_bytes != self.profile.source_bytes
+            || ledger.direct_copy_descriptors != self.profile.request_count
+            || ledger.direct_copy_bytes != self.profile.source_bytes
             || ledger.direct_view_descriptors != 0
             || ledger.direct_view_bytes != 0
             || ledger.direct_alias_descriptors != 0
@@ -2621,11 +2743,12 @@ fn planned_parallel_copied_storage_for_load(
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<PlannedParallelCopiedStorage, MfError> {
     let _plan = authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection)?;
+    let profile = &A3B_PARALLEL_COPY_PROFILE;
     let expected_identities = expected
         .iter()
         .map(expected_model_weight_identity)
         .collect::<Vec<_>>();
-    let sorted_request_indices = frozen_parallel_copy_order(&expected_identities)?;
+    let sorted_request_indices = frozen_parallel_copy_order(profile, &expected_identities)?;
 
     let ready_started = std::time::Instant::now();
     let resources_result = expected
@@ -2640,7 +2763,7 @@ fn planned_parallel_copied_storage_for_load(
     let mut resources = resources_result?;
     let allocation_finished = std::time::Instant::now();
 
-    let schedule_check = frozen_parallel_copy_order(&expected_identities)?;
+    let schedule_check = frozen_parallel_copy_order(profile, &expected_identities)?;
     if schedule_check != sorted_request_indices {
         return Err(MfError::LoadPolicy(
             "parallel-copy schedule changed during materialization".to_string(),
@@ -2686,7 +2809,7 @@ fn planned_parallel_copied_storage_for_load(
         }
         destination_ranges.push((start, end));
     }
-    if destination_bytes != GGUF_OWNED_A3B_SOURCE_BYTES {
+    if destination_bytes != profile.source_bytes {
         return Err(MfError::LoadPolicy(format!(
             "parallel-copy destination bytes drifted: {destination_bytes}"
         )));
@@ -2753,7 +2876,7 @@ fn planned_parallel_copied_storage_for_load(
         let mut partition_error = None;
         let mut assigned_tasks = 0usize;
         for worker in 0..GGUF_OWNED_WORKERS {
-            let count = GGUF_PARALLEL_COPY_TASK_COUNTS[worker];
+            let count = profile.task_counts[worker];
             if count == 0 || count > task_tail.len() {
                 partition_error = Some(worker);
                 break;
@@ -2795,7 +2918,7 @@ fn planned_parallel_copied_storage_for_load(
                 "parallel-copy worker {worker} panicked"
             )));
         }
-        if assigned_tasks != GGUF_OWNED_A3B_REQUESTS {
+        if assigned_tasks != profile.request_count {
             return Err(MfError::LoadPolicy(
                 "parallel-copy workers did not consume every task".to_string(),
             ));
@@ -2822,7 +2945,7 @@ fn planned_parallel_copied_storage_for_load(
             .map_err(MfError::from)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    validate_parallel_copied_topology(&expected_identities, &resources, &tensors)?;
+    validate_parallel_copied_topology(profile, &expected_identities, &resources, &tensors)?;
     let binding_finished = std::time::Instant::now();
 
     let allocation_us = allocation_finished
@@ -2863,6 +2986,7 @@ fn planned_parallel_copied_storage_for_load(
     ));
 
     Ok(PlannedParallelCopiedStorage {
+        profile,
         expected: expected_identities,
         sorted_request_indices,
         resources,
@@ -11811,13 +11935,15 @@ mod tests {
                 .validate_source_bytes(&gguf, &expected)
                 .expect("audit every parallel-copy resource byte");
             validate_parallel_copied_topology(
+                storage.profile,
                 &storage.expected,
                 &storage.resources,
                 &storage.tensors,
             )
             .expect("validate parallel-copy topology before model construction");
             assert_eq!(
-                frozen_parallel_copy_order(&storage.expected).expect("frozen schedule"),
+                frozen_parallel_copy_order(storage.profile, &storage.expected)
+                    .expect("frozen schedule"),
                 storage.sorted_request_indices
             );
 

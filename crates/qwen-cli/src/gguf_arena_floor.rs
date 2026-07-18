@@ -1264,44 +1264,78 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         let usage_capability = capture_usage()?;
         let proc_capability = capture_proc_usage()?;
         let computed_schedule = parallel_copy_schedule(&direct)?;
-        let plan = qwen_llm::metal::plan_retained_storage(
-            &gguf.shard_mapped_lengths(),
-            &direct,
-            page_size,
-            max_buffer_length,
-            REQUIRED_ALIGNMENT,
-        )?;
-        let window_bytes = plan.windows.iter().try_fold(0u64, |total, window| {
-            total
-                .checked_add(window.length as u64)
-                .ok_or_else(|| anyhow!("window byte accounting overflow"))
-        })?;
-        let arena_copy_bytes = window_bytes
-            .checked_add(plan.unique_fallback_bytes)
-            .ok_or_else(|| anyhow!("arena copy byte accounting overflow"))?;
-        let planner_gap_bytes = window_bytes
-            .checked_sub(plan.unique_view_bytes)
-            .ok_or_else(|| anyhow!("planned view bytes exceed window bytes"))?;
-        let alias_count = plan
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::Alias { .. }))
-            .count();
-        let fallback_count = plan
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.disposition,
-                    RetainedStorageDisposition::CopyFallback { .. }
-                )
+        let planner_descriptive = (|| -> Result<Value> {
+            let plan = qwen_llm::metal::plan_retained_storage(
+                &gguf.shard_mapped_lengths(),
+                &direct,
+                page_size,
+                max_buffer_length,
+                REQUIRED_ALIGNMENT,
+            )?;
+            let window_bytes = plan.windows.iter().try_fold(0u64, |total, window| {
+                total
+                    .checked_add(window.length as u64)
+                    .ok_or_else(|| anyhow!("window byte accounting overflow"))
+            })?;
+            let arena_copy_bytes = window_bytes
+                .checked_add(plan.unique_fallback_bytes)
+                .ok_or_else(|| anyhow!("arena copy byte accounting overflow"))?;
+            let planner_gap_bytes = window_bytes
+                .checked_sub(plan.unique_view_bytes)
+                .ok_or_else(|| anyhow!("planned view bytes exceed window bytes"))?;
+            let alias_count = plan
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(entry.disposition, RetainedStorageDisposition::Alias { .. })
+                })
+                .count();
+            let fallback_count = plan
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.disposition,
+                        RetainedStorageDisposition::CopyFallback { .. }
+                    )
+                })
+                .count();
+            let view_count = plan
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(entry.disposition, RetainedStorageDisposition::View { .. })
+                })
+                .count();
+            Ok(json!({
+                "status": "ok",
+                "planner_digest": retained_storage_plan_digest(&plan),
+                "view_count": view_count,
+                "window_count": plan.windows.len(),
+                "fallback_count": fallback_count,
+                "alias_count": alias_count,
+                "unique_view_bytes": plan.unique_view_bytes,
+                "logical_view_bytes": plan.logical_view_bytes,
+                "fallback_bytes": plan.unique_fallback_bytes,
+                "window_bytes": window_bytes,
+                "planner_gap_bytes": planner_gap_bytes,
+                "arena_copy_bytes": arena_copy_bytes,
+                "fallback_reasons": plan.entries.iter().filter_map(|entry| {
+                    match entry.disposition {
+                        RetainedStorageDisposition::CopyFallback { reason } => {
+                            Some(format!("{reason:?}"))
+                        }
+                        _ => None,
+                    }
+                }).collect::<Vec<_>>(),
+            }))
+        })()
+        .unwrap_or_else(|error| {
+            json!({
+                "status": "error",
+                "error": error.to_string(),
             })
-            .count();
-        let view_count = plan
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
-            .count();
+        });
         let matching = authenticated_profile_matches(&facts, &direct)?;
         if matching.len() > 1 {
             return Err(anyhow!("GGUF floor geometry matches multiple profiles"));
@@ -1330,7 +1364,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "architecture": gguf.architecture(),
             "descriptor_layout_digest": descriptor_digest,
             "inventory_digest": inventory_digest,
-            "planner_digest": retained_storage_plan_digest(&plan),
+            "retained_planner": planner_descriptive,
             "native_quant_embedding": native_embedding,
             "native_quant_embedding_supported": native_embedding_supported,
             "native_quant_embedding_selection": if embedding_environment_absent {
@@ -1342,25 +1376,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "required_alignment": REQUIRED_ALIGNMENT,
             "max_buffer_length": max_buffer_length,
             "request_count": direct.len(),
-            "view_count": view_count,
-            "window_count": plan.windows.len(),
-            "fallback_count": fallback_count,
-            "alias_count": alias_count,
             "logical_copy_bytes": logical_copy_bytes,
-            "unique_view_bytes": plan.unique_view_bytes,
-            "logical_view_bytes": plan.logical_view_bytes,
-            "fallback_bytes": plan.unique_fallback_bytes,
-            "window_bytes": window_bytes,
-            "planner_gap_bytes": planner_gap_bytes,
-            "arena_copy_bytes": arena_copy_bytes,
-            "fallback_reasons": plan.entries.iter().filter_map(|entry| {
-                match entry.disposition {
-                    RetainedStorageDisposition::CopyFallback { reason } => {
-                        Some(format!("{reason:?}"))
-                    }
-                    _ => None,
-                }
-            }).collect::<Vec<_>>(),
             "shard_mapped_lengths": gguf.shard_mapped_lengths(),
             "architecture_tuple": architecture_tuple,
             "tied_embeddings": model.tied_embeddings,

@@ -59,13 +59,14 @@ use crate::metal::{
     encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32, host_page_size_bytes,
     plan_retained_storage,
 };
-use crate::model::ArchKind;
+use crate::model::{Arch, ArchKind};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
+    mem::MaybeUninit,
     sync::OnceLock,
 };
 
@@ -376,17 +377,37 @@ const GGUF_OWNED_A3B_FALLBACK_BYTES: u64 = 8_192;
 const GGUF_OWNED_A3B_PHYSICAL_BYTES: u64 = 22_123_552_768;
 const GGUF_OWNED_WORKERS: usize = 4;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ParallelCopyProfileId {
     A3bQ4kmV1,
+    Dense27bQ4kmV1,
 }
 
 impl ParallelCopyProfileId {
     fn label(self) -> &'static str {
         match self {
             Self::A3bQ4kmV1 => "a3b-q4km-v1",
+            Self::Dense27bQ4kmV1 => "dense27b-q4km-v1",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParallelCopyDeviceConstraint {
+    UnifiedAnyName,
+    ExactUnified(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParallelCopyAuthentication {
+    A3bRetainedPlan,
+    DensePlannerFree,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParallelCopyMarkerContract {
+    A3bSchema1,
+    DenseSchema2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -407,6 +428,18 @@ struct ParallelCopyScheduleBoundary {
 #[derive(Debug)]
 struct ParallelCopyProfile {
     id: ParallelCopyProfileId,
+    architecture_label: Option<&'static str>,
+    arch: Arch,
+    tied_embeddings: bool,
+    mtp_present: bool,
+    shard_mapped_lengths: &'static [usize],
+    descriptor_layout_digest: u64,
+    inventory_digest: &'static str,
+    embedding_dtype: GgmlType,
+    embedding_shape: &'static [u64],
+    device_constraint: ParallelCopyDeviceConstraint,
+    authentication: ParallelCopyAuthentication,
+    marker_contract: ParallelCopyMarkerContract,
     request_count: usize,
     source_bytes: u64,
     cuts: [usize; GGUF_OWNED_WORKERS - 1],
@@ -415,8 +448,66 @@ struct ParallelCopyProfile {
     boundaries: [ParallelCopyScheduleBoundary; GGUF_OWNED_WORKERS],
 }
 
+const A3B_PARALLEL_COPY_ARCH: Arch = Arch {
+    kind: ArchKind::Moe,
+    n_layer: 40,
+    hidden_size: 2048,
+    intermediate_size: 0,
+    vocab_size: 248_320,
+    full_attention_interval: 4,
+    n_q_heads: 16,
+    n_kv_heads: 2,
+    attn_head_dim: 256,
+    rope_theta: 10_000_000.0,
+    partial_rotary_factor: 0.25,
+    gdn_n_v_heads: 32,
+    gdn_n_k_heads: 16,
+    gdn_head_dim: 128,
+    gdn_conv_kernel: 4,
+    expert_count: 256,
+    expert_used_count: 8,
+    expert_feed_forward_length: 512,
+    expert_shared_feed_forward_length: 512,
+    mtp_n_hidden_layers: 0,
+};
+
+const DENSE27B_PARALLEL_COPY_ARCH: Arch = Arch {
+    kind: ArchKind::Dense,
+    n_layer: 64,
+    hidden_size: 5120,
+    intermediate_size: 17_408,
+    vocab_size: 248_320,
+    full_attention_interval: 4,
+    n_q_heads: 24,
+    n_kv_heads: 4,
+    attn_head_dim: 256,
+    rope_theta: 10_000_000.0,
+    partial_rotary_factor: 0.25,
+    gdn_n_v_heads: 48,
+    gdn_n_k_heads: 16,
+    gdn_head_dim: 128,
+    gdn_conv_kernel: 4,
+    expert_count: 0,
+    expert_used_count: 0,
+    expert_feed_forward_length: 0,
+    expert_shared_feed_forward_length: 0,
+    mtp_n_hidden_layers: 0,
+};
+
 const A3B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
     id: ParallelCopyProfileId::A3bQ4kmV1,
+    architecture_label: None,
+    arch: A3B_PARALLEL_COPY_ARCH,
+    tied_embeddings: false,
+    mtp_present: false,
+    shard_mapped_lengths: &[GGUF_OWNED_A3B_MAPPED_BYTES],
+    descriptor_layout_digest: GGUF_OWNED_A3B_LAYOUT_DIGEST,
+    inventory_digest: GGUF_OWNED_A3B_INVENTORY_DIGEST,
+    embedding_dtype: GgmlType::Q8_0,
+    embedding_shape: &[2048, 248_320],
+    device_constraint: ParallelCopyDeviceConstraint::UnifiedAnyName,
+    authentication: ParallelCopyAuthentication::A3bRetainedPlan,
+    marker_contract: ParallelCopyMarkerContract::A3bSchema1,
     request_count: GGUF_OWNED_A3B_REQUESTS,
     source_bytes: GGUF_OWNED_A3B_SOURCE_BYTES,
     cuts: [155, 359, 539],
@@ -489,6 +580,96 @@ const A3B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
         },
     ],
 };
+
+const DENSE27B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
+    id: ParallelCopyProfileId::Dense27bQ4kmV1,
+    architecture_label: Some("qwen35"),
+    arch: DENSE27B_PARALLEL_COPY_ARCH,
+    tied_embeddings: false,
+    mtp_present: false,
+    shard_mapped_lengths: &[GGUF_NO_COPY_27B_MAPPED_BYTES],
+    descriptor_layout_digest: GGUF_NO_COPY_27B_LAYOUT_DIGEST,
+    inventory_digest: "50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07",
+    embedding_dtype: GgmlType::Q4_K,
+    embedding_shape: &[5120, 248_320],
+    device_constraint: ParallelCopyDeviceConstraint::ExactUnified("Apple M4 Max"),
+    authentication: ParallelCopyAuthentication::DensePlannerFree,
+    marker_contract: ParallelCopyMarkerContract::DenseSchema2,
+    request_count: GGUF_NO_COPY_27B_DESCRIPTOR_COUNT,
+    source_bytes: GGUF_NO_COPY_27B_SOURCE_BYTES,
+    cuts: [136, 377, 618],
+    task_counts: [136, 241, 241, 233],
+    worker_bytes: [4_194_110_464, 4_214_375_808, 4_204_933_376, 4_192_830_848],
+    boundaries: [
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 2,
+                name: "output.weight",
+                shard_idx: 0,
+                source_offset: 10_993_888,
+                source_bytes: 1_042_944_000,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 135,
+                name: "blk.9.ssm_norm.weight",
+                shard_idx: 0,
+                source_offset: 4_205_103_840,
+                source_bytes: 512,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 136,
+                name: "blk.9.ssm_out.weight",
+                shard_idx: 0,
+                source_offset: 4_205_104_352,
+                source_bytes: 21_626_880,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 379,
+                name: "blk.28.attn_qkv.weight",
+                shard_idx: 0,
+                source_offset: 8_376_472_160,
+                source_bytes: 43_008_000,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 378,
+                name: "blk.28.ffn_down.weight",
+                shard_idx: 0,
+                source_offset: 8_419_480_160,
+                source_bytes: 73_113_600,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 618,
+                name: "blk.46.ffn_down.weight",
+                shard_idx: 0,
+                source_offset: 12_551_299_936,
+                source_bytes: 73_113_600,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 616,
+                name: "blk.46.ffn_gate.weight",
+                shard_idx: 0,
+                source_offset: 12_624_413_536,
+                source_bytes: 50_135_040,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 844,
+                name: "blk.63.post_attention_norm.weight",
+                shard_idx: 0,
+                source_offset: 16_817_223_904,
+                source_bytes: 20_480,
+            },
+        },
+    ],
+};
+
+static PARALLEL_COPY_PROFILES: [&ParallelCopyProfile; 2] =
+    [&A3B_PARALLEL_COPY_PROFILE, &DENSE27B_PARALLEL_COPY_PROFILE];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GgufNoCopyMode {
@@ -1567,6 +1748,268 @@ struct ParallelCopyTask<'a> {
     destination: &'a mut [u8],
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ParallelCopyUsage {
+    minor_faults: i64,
+    major_faults: i64,
+    user_time_us: i64,
+    system_time_us: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ParallelCopyProcUsage {
+    instructions: u64,
+    cycles: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ParallelCopyEndpointAccounting {
+    user_cpu_us: u64,
+    system_cpu_us: u64,
+    total_cpu_us: u64,
+    timer_minor_faults: u64,
+    timer_major_faults: u64,
+    instructions_delta_raw: u64,
+    cycles_delta_raw: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ParallelCopyTiming {
+    allocation_us: u64,
+    source_us: u64,
+    copy_us: u64,
+    binding_us: u64,
+    ready_us: u64,
+}
+
+fn parallel_copy_timeval_us(value: libc::timeval) -> Result<i64, MfError> {
+    value
+        .tv_sec
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(i64::from(value.tv_usec)))
+        .ok_or_else(|| MfError::LoadPolicy("parallel-copy CPU time overflow".to_string()))
+}
+
+fn capture_parallel_copy_usage() -> Result<ParallelCopyUsage, MfError> {
+    let mut usage = MaybeUninit::<libc::rusage>::zeroed();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(MfError::LoadPolicy(format!(
+            "parallel-copy getrusage failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let usage = unsafe { usage.assume_init() };
+    Ok(ParallelCopyUsage {
+        minor_faults: usage.ru_minflt,
+        major_faults: usage.ru_majflt,
+        user_time_us: parallel_copy_timeval_us(usage.ru_utime)?,
+        system_time_us: parallel_copy_timeval_us(usage.ru_stime)?,
+    })
+}
+
+fn capture_parallel_copy_proc_usage() -> Result<ParallelCopyProcUsage, MfError> {
+    let mut usage = MaybeUninit::<libc::rusage_info_v4>::zeroed();
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            usage.as_mut_ptr().cast::<libc::rusage_info_t>(),
+        )
+    };
+    if rc != 0 {
+        return Err(MfError::LoadPolicy(format!(
+            "parallel-copy proc_pid_rusage v4 failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let usage = unsafe { usage.assume_init() };
+    Ok(ParallelCopyProcUsage {
+        instructions: usage.ri_instructions,
+        cycles: usage.ri_cycles,
+    })
+}
+
+fn parallel_copy_i64_delta(after: i64, before: i64, label: &str) -> Result<u64, MfError> {
+    let delta = after
+        .checked_sub(before)
+        .ok_or_else(|| MfError::LoadPolicy(format!("parallel-copy {label} counter underflow")))?;
+    u64::try_from(delta)
+        .map_err(|_| MfError::LoadPolicy(format!("parallel-copy {label} counter regressed")))
+}
+
+fn parallel_copy_u64_delta(after: u64, before: u64, label: &str) -> Result<u64, MfError> {
+    after
+        .checked_sub(before)
+        .ok_or_else(|| MfError::LoadPolicy(format!("parallel-copy {label} counter regressed")))
+}
+
+fn finish_parallel_copy_accounting(
+    before: ParallelCopyUsage,
+    after: ParallelCopyUsage,
+    proc_before: ParallelCopyProcUsage,
+    proc_after: ParallelCopyProcUsage,
+) -> Result<ParallelCopyEndpointAccounting, MfError> {
+    let user_cpu_us = parallel_copy_i64_delta(after.user_time_us, before.user_time_us, "user CPU")?;
+    let system_cpu_us =
+        parallel_copy_i64_delta(after.system_time_us, before.system_time_us, "system CPU")?;
+    let total_cpu_us = user_cpu_us
+        .checked_add(system_cpu_us)
+        .ok_or_else(|| MfError::LoadPolicy("parallel-copy total CPU overflow".to_string()))?;
+    Ok(ParallelCopyEndpointAccounting {
+        user_cpu_us,
+        system_cpu_us,
+        total_cpu_us,
+        timer_minor_faults: parallel_copy_i64_delta(
+            after.minor_faults,
+            before.minor_faults,
+            "minor fault",
+        )?,
+        timer_major_faults: parallel_copy_i64_delta(
+            after.major_faults,
+            before.major_faults,
+            "major fault",
+        )?,
+        instructions_delta_raw: parallel_copy_u64_delta(
+            proc_after.instructions,
+            proc_before.instructions,
+            "instruction",
+        )?,
+        cycles_delta_raw: parallel_copy_u64_delta(proc_after.cycles, proc_before.cycles, "cycle")?,
+    })
+}
+
+fn emit_parallel_copy_marker(
+    profile: &ParallelCopyProfile,
+    timing: ParallelCopyTiming,
+    accounting: Option<ParallelCopyEndpointAccounting>,
+) -> Result<(), MfError> {
+    match profile.marker_contract {
+        ParallelCopyMarkerContract::A3bSchema1 => {
+            if accounting.is_some() {
+                return Err(MfError::LoadPolicy(
+                    "A3B parallel-copy marker received dense accounting".to_string(),
+                ));
+            }
+            emit_metal_load_line(format_args!(
+                concat!(
+                    "[metal-gguf-parallel-copied] schema=1 resources=733 bytes=22123538944 ",
+                    "workers=4 cuts=155,359,539 tasks=155,204,180,194 ",
+                    "worker_bytes=5532746240,5462315776,5595522304,5532954624 ",
+                    "first_offsets=10990048,5543736288,11006052064,16601574368 ",
+                    "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
+                    "create=shared,default_cache,default observed=shared,default_cache,tracked ",
+                    "page=16384 alignment=32 max_buffer=77309411328 mapped=22134528992 ",
+                    "layout=0x5ae645df5cf7d568 ",
+                    "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
+                    "plan=fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af ",
+                    "allocation_us={} source_us={} copy_us={} binding_us={} ready_us={}"
+                ),
+                timing.allocation_us,
+                timing.source_us,
+                timing.copy_us,
+                timing.binding_us,
+                timing.ready_us,
+            ));
+        }
+        ParallelCopyMarkerContract::DenseSchema2 => {
+            let accounting = accounting.ok_or_else(|| {
+                MfError::LoadPolicy(
+                    "dense parallel-copy marker is missing endpoint accounting".to_string(),
+                )
+            })?;
+            let boundary = profile.boundaries;
+            emit_metal_load_line(format_args!(
+                concat!(
+                    "[metal-gguf-parallel-copied] schema=2 profile={} ",
+                    "resources={} bytes={} workers=4 cuts={},{},{} ",
+                    "tasks={},{},{},{} worker_bytes={},{},{},{} ",
+                    "w0_first={},{},{},{},{} w0_last={},{},{},{},{} ",
+                    "w1_first={},{},{},{},{} w1_last={},{},{},{},{} ",
+                    "w2_first={},{},{},{},{} w2_last={},{},{},{},{} ",
+                    "w3_first={},{},{},{},{} w3_last={},{},{},{},{} ",
+                    "create=shared,default_cache,default ",
+                    "observed=shared,default_cache,tracked ",
+                    "page=16384 alignment=32 max_buffer=77309411328 ",
+                    "mapped=16817244384 layout=0xd116405fd99f54d9 ",
+                    "inventory={} allocation_us={} source_us={} copy_us={} ",
+                    "binding_us={} ready_us={} user_cpu_us={} system_cpu_us={} ",
+                    "total_cpu_us={} timer_minor_faults={} timer_major_faults={} ",
+                    "instructions_delta_raw={} cycles_delta_raw={}"
+                ),
+                profile.id.label(),
+                profile.request_count,
+                profile.source_bytes,
+                profile.cuts[0],
+                profile.cuts[1],
+                profile.cuts[2],
+                profile.task_counts[0],
+                profile.task_counts[1],
+                profile.task_counts[2],
+                profile.task_counts[3],
+                profile.worker_bytes[0],
+                profile.worker_bytes[1],
+                profile.worker_bytes[2],
+                profile.worker_bytes[3],
+                boundary[0].first.request_index,
+                boundary[0].first.name,
+                boundary[0].first.shard_idx,
+                boundary[0].first.source_offset,
+                boundary[0].first.source_bytes,
+                boundary[0].last.request_index,
+                boundary[0].last.name,
+                boundary[0].last.shard_idx,
+                boundary[0].last.source_offset,
+                boundary[0].last.source_bytes,
+                boundary[1].first.request_index,
+                boundary[1].first.name,
+                boundary[1].first.shard_idx,
+                boundary[1].first.source_offset,
+                boundary[1].first.source_bytes,
+                boundary[1].last.request_index,
+                boundary[1].last.name,
+                boundary[1].last.shard_idx,
+                boundary[1].last.source_offset,
+                boundary[1].last.source_bytes,
+                boundary[2].first.request_index,
+                boundary[2].first.name,
+                boundary[2].first.shard_idx,
+                boundary[2].first.source_offset,
+                boundary[2].first.source_bytes,
+                boundary[2].last.request_index,
+                boundary[2].last.name,
+                boundary[2].last.shard_idx,
+                boundary[2].last.source_offset,
+                boundary[2].last.source_bytes,
+                boundary[3].first.request_index,
+                boundary[3].first.name,
+                boundary[3].first.shard_idx,
+                boundary[3].first.source_offset,
+                boundary[3].first.source_bytes,
+                boundary[3].last.request_index,
+                boundary[3].last.name,
+                boundary[3].last.shard_idx,
+                boundary[3].last.source_offset,
+                boundary[3].last.source_bytes,
+                profile.inventory_digest,
+                timing.allocation_us,
+                timing.source_us,
+                timing.copy_us,
+                timing.binding_us,
+                timing.ready_us,
+                accounting.user_cpu_us,
+                accounting.system_cpu_us,
+                accounting.total_cpu_us,
+                accounting.timer_minor_faults,
+                accounting.timer_major_faults,
+                accounting.instructions_delta_raw,
+                accounting.cycles_delta_raw,
+            ));
+        }
+    }
+    Ok(())
+}
+
 struct PlannedParallelCopiedStorage {
     profile: &'static ParallelCopyProfile,
     expected: Vec<ModelWeightStorageIdentity>,
@@ -2549,6 +2992,123 @@ fn matches_owned_a3b_arch(model: &Model<'_>) -> bool {
         && arch.mtp_n_hidden_layers == 0
 }
 
+fn select_unique_parallel_copy_profile<F>(
+    profiles: &[&'static ParallelCopyProfile],
+    mut matches: F,
+) -> Result<&'static ParallelCopyProfile, MfError>
+where
+    F: FnMut(&ParallelCopyProfile) -> Result<bool, MfError>,
+{
+    let mut ids = HashSet::with_capacity(profiles.len());
+    for profile in profiles {
+        if !ids.insert(profile.id) {
+            return Err(MfError::LoadPolicy(format!(
+                "duplicate parallel-copy profile id {}",
+                profile.id.label()
+            )));
+        }
+    }
+    let mut selected = None;
+    for profile in profiles {
+        if !matches(profile)? {
+            continue;
+        }
+        if selected.is_some() {
+            return Err(MfError::LoadPolicy(
+                "parallel-copy profile match is ambiguous".to_string(),
+            ));
+        }
+        selected = Some(*profile);
+    }
+    selected.ok_or_else(|| {
+        MfError::LoadPolicy("forced parallel copy rejects unsupported geometry".to_string())
+    })
+}
+
+fn parallel_copy_profile_matches(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    expected: &[ModelWeightStorageRequest<'_>],
+    embedding_selection: NativeQuantEmbeddingSelection,
+    profile: &ParallelCopyProfile,
+) -> Result<bool, MfError> {
+    if !ctx.device.hasUnifiedMemory() {
+        return Ok(false);
+    }
+    if let ParallelCopyDeviceConstraint::ExactUnified(name) = profile.device_constraint
+        && ctx.device.name().to_string() != name
+    {
+        return Ok(false);
+    }
+    let architecture = gguf.architecture();
+    if profile
+        .architecture_label
+        .is_some_and(|expected| architecture.as_deref() != Some(expected))
+    {
+        return Ok(false);
+    }
+    let shard_lengths = gguf.shard_mapped_lengths();
+    if shard_lengths.as_slice() != profile.shard_mapped_lengths
+        || gguf_descriptor_layout_digest(gguf) != profile.descriptor_layout_digest
+        || model.arch != profile.arch
+        || model.tied_embeddings != profile.tied_embeddings
+        || model.mtp.is_some() != profile.mtp_present
+        || model.token_embd.dtype != profile.embedding_dtype
+        || model.token_embd.shape.as_slice() != profile.embedding_shape
+        || embedding_selection != NativeQuantEmbeddingSelection::AutoPromoted
+        || !native_quant_embedding_default_promoted(
+            &model.arch,
+            model.tied_embeddings,
+            model.mtp.is_some(),
+            model.token_embd.dtype,
+            &model.token_embd.shape,
+        )
+        || host_page_size_bytes()? != 16_384
+        || ctx.max_buffer_length() != 77_309_411_328
+        || expected.len() != profile.request_count
+        || model_weight_storage_inventory_digest(expected) != profile.inventory_digest
+    {
+        return Ok(false);
+    }
+    let mut source_bytes = 0u64;
+    for request in expected {
+        let Some(shard_len) = profile.shard_mapped_lengths.get(request.desc.shard_idx) else {
+            return Ok(false);
+        };
+        let Some(source_end) = request.desc.data_offset.checked_add(request.desc.n_bytes) else {
+            return Ok(false);
+        };
+        if request.kind != ModelWeightStorageKind::Direct
+            || request.desc.n_bytes == 0
+            || request.resident_bytes != request.desc.n_bytes
+            || source_end > *shard_len as u64
+            || request.desc.n_bytes > ctx.max_buffer_length() as u64
+            || usize::try_from(request.desc.n_bytes).is_err()
+        {
+            return Ok(false);
+        }
+        source_bytes = source_bytes
+            .checked_add(request.desc.n_bytes)
+            .ok_or_else(|| {
+                MfError::LoadPolicy("parallel-copy profile source byte overflow".to_string())
+            })?;
+    }
+    Ok(source_bytes == profile.source_bytes)
+}
+
+fn select_parallel_copy_profile(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    expected: &[ModelWeightStorageRequest<'_>],
+    embedding_selection: NativeQuantEmbeddingSelection,
+) -> Result<&'static ParallelCopyProfile, MfError> {
+    select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |profile| {
+        parallel_copy_profile_matches(ctx, gguf, model, expected, embedding_selection, profile)
+    })
+}
+
 fn authenticated_a3b_storage_plan(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -2742,14 +3302,28 @@ fn planned_parallel_copied_storage_for_load(
     expected: &[ModelWeightStorageRequest<'_>],
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<PlannedParallelCopiedStorage, MfError> {
-    let _plan = authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection)?;
-    let profile = &A3B_PARALLEL_COPY_PROFILE;
+    let profile = select_parallel_copy_profile(ctx, gguf, model, expected, embedding_selection)?;
+    match profile.authentication {
+        ParallelCopyAuthentication::A3bRetainedPlan => {
+            let _plan =
+                authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection)?;
+        }
+        ParallelCopyAuthentication::DensePlannerFree => {}
+    }
     let expected_identities = expected
         .iter()
         .map(expected_model_weight_identity)
         .collect::<Vec<_>>();
     let sorted_request_indices = frozen_parallel_copy_order(profile, &expected_identities)?;
 
+    let usage_before = match profile.marker_contract {
+        ParallelCopyMarkerContract::A3bSchema1 => None,
+        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_usage()?),
+    };
+    let proc_before = match profile.marker_contract {
+        ParallelCopyMarkerContract::A3bSchema1 => None,
+        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_proc_usage()?),
+    };
     let ready_started = std::time::Instant::now();
     let resources_result = expected
         .iter()
@@ -2926,10 +3500,10 @@ fn planned_parallel_copied_storage_for_load(
         Ok(())
     });
     copy_result?;
+    let copy_finished = std::time::Instant::now();
     drop(tasks);
     drop(tasks_by_request);
     drop(sources);
-    let copy_finished = std::time::Instant::now();
 
     let tensors = resources
         .iter()
@@ -2947,6 +3521,14 @@ fn planned_parallel_copied_storage_for_load(
         .collect::<Result<Vec<_>, _>>()?;
     validate_parallel_copied_topology(profile, &expected_identities, &resources, &tensors)?;
     let binding_finished = std::time::Instant::now();
+    let usage_after = match profile.marker_contract {
+        ParallelCopyMarkerContract::A3bSchema1 => None,
+        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_usage()?),
+    };
+    let proc_after = match profile.marker_contract {
+        ParallelCopyMarkerContract::A3bSchema1 => None,
+        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_proc_usage()?),
+    };
 
     let allocation_us = allocation_finished
         .duration_since(ready_started)
@@ -2962,28 +3544,34 @@ fn planned_parallel_copied_storage_for_load(
         .and_then(|total| total.checked_add(copy_us))
         .and_then(|total| total.checked_add(binding_us))
         .ok_or_else(|| MfError::LoadPolicy("parallel-copy phase time overflow".to_string()))?;
-    if ready_us.abs_diff(phase_us) > 4 {
+    if ready_us == 0 || ready_us.abs_diff(phase_us) > 4 {
         return Err(MfError::LoadPolicy(format!(
             "parallel-copy timing reconciliation drifted: ready={ready_us} phases={phase_us}"
         )));
     }
 
-    emit_metal_load_line(format_args!(
-        concat!(
-            "[metal-gguf-parallel-copied] schema=1 resources=733 bytes=22123538944 ",
-            "workers=4 cuts=155,359,539 tasks=155,204,180,194 ",
-            "worker_bytes=5532746240,5462315776,5595522304,5532954624 ",
-            "first_offsets=10990048,5543736288,11006052064,16601574368 ",
-            "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
-            "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-            "page=16384 alignment=32 max_buffer=77309411328 mapped=22134528992 ",
-            "layout=0x5ae645df5cf7d568 ",
-            "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-            "plan=fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af ",
-            "allocation_us={} source_us={} copy_us={} binding_us={} ready_us={}"
+    let accounting = match (usage_before, usage_after, proc_before, proc_after) {
+        (None, None, None, None) => None,
+        (Some(before), Some(after), Some(proc_before), Some(proc_after)) => Some(
+            finish_parallel_copy_accounting(before, after, proc_before, proc_after)?,
         ),
-        allocation_us, source_us, copy_us, binding_us, ready_us,
-    ));
+        _ => {
+            return Err(MfError::LoadPolicy(
+                "parallel-copy endpoint accounting capture is incomplete".to_string(),
+            ));
+        }
+    };
+    emit_parallel_copy_marker(
+        profile,
+        ParallelCopyTiming {
+            allocation_us,
+            source_us,
+            copy_us,
+            binding_us,
+            ready_us,
+        },
+        accounting,
+    )?;
 
     Ok(PlannedParallelCopiedStorage {
         profile,
@@ -11348,6 +11936,29 @@ mod tests {
     }
 
     #[test]
+    fn parallel_copy_profile_selection_is_exactly_one() {
+        let selected = select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |profile| {
+            Ok(profile.id == ParallelCopyProfileId::Dense27bQ4kmV1)
+        })
+        .unwrap();
+        assert_eq!(selected.id, ParallelCopyProfileId::Dense27bQ4kmV1);
+
+        assert!(
+            select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |_| Ok(false)).is_err()
+        );
+        assert!(
+            select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |_| Ok(true)).is_err()
+        );
+        assert!(
+            select_unique_parallel_copy_profile(
+                &[&A3B_PARALLEL_COPY_PROFILE, &A3B_PARALLEL_COPY_PROFILE],
+                |_| Ok(true),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn owned_arena_worker_boundaries_cover_nondivisible_page_counts() {
         let page = 16_384;
         let boundaries =
@@ -12091,6 +12702,277 @@ mod tests {
         assert!(
             ready_us.abs_diff(phase_us) <= 4,
             "candidate timing reconciliation"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local Qwen3.6 dense 27B Q4 fixture"]
+    fn gguf_parallel_copied_dense27b_q4_is_bit_exact() {
+        let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
+        assert_eq!(
+            native_quant_embedding_mode(),
+            NativeQuantEmbeddingMode::Auto,
+            "parallel-copy fixture requires production-auto embedding selection"
+        );
+        assert!(!moe_router_f16_enabled());
+        let ctx = MetalContext::new().expect("Metal context");
+        let gguf = GgufFile::open(model_path).expect("open parallel-copy dense fixture");
+        let model = Model::from_gguf(&gguf).expect("bind parallel-copy dense fixture");
+        let profile = &DENSE27B_PARALLEL_COPY_PROFILE;
+        assert_eq!(gguf.architecture().as_deref(), profile.architecture_label);
+        assert_eq!(gguf.shard_mapped_lengths(), profile.shard_mapped_lengths);
+        assert_eq!(
+            gguf_descriptor_layout_digest(&gguf),
+            profile.descriptor_layout_digest
+        );
+        assert_eq!(model.arch, profile.arch);
+        assert_eq!(model.tied_embeddings, profile.tied_embeddings);
+        assert_eq!(model.mtp.is_some(), profile.mtp_present);
+        assert_eq!(model.token_embd.dtype, profile.embedding_dtype);
+        assert_eq!(model.token_embd.shape, profile.embedding_shape);
+        assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
+        assert_eq!(host_page_size_bytes().unwrap(), 16_384);
+        assert_eq!(ctx.max_buffer_length(), 77_309_411_328);
+        let expected_probe =
+            model_weight_storage_requests(&model, true, false).expect("dense profile requests");
+        assert_eq!(expected_probe.len(), profile.request_count);
+        assert_eq!(
+            model_weight_storage_inventory_digest(&expected_probe),
+            profile.inventory_digest
+        );
+        assert!(
+            parallel_copy_profile_matches(
+                &ctx,
+                &gguf,
+                &model,
+                &expected_probe,
+                NativeQuantEmbeddingSelection::AutoPromoted,
+                profile,
+            )
+            .expect("dense profile match")
+        );
+        drop(expected_probe);
+        let tokens = [
+            7734, 264, 12654, 709, 310, 12204, 279, 76938, 8240, 5199, 7638, 13,
+        ];
+
+        let ((copied, parallel), load_lines) = capture_metal_load_lines(|| {
+            let copied = run_generic_retained_arm(
+                &ctx,
+                &gguf,
+                &model,
+                &tokens,
+                GgufNoCopyMode::Disabled,
+                GgufOwnedArenaMode::Disabled,
+                None,
+            );
+
+            let embedding_selection = NativeQuantEmbeddingSelection::AutoPromoted;
+            emit_native_quant_embedding_policy(&model, embedding_selection);
+            let expected = model_weight_storage_requests(&model, true, false)
+                .expect("parallel-copy dense storage requests");
+            let storage = planned_parallel_copied_storage_for_load(
+                &ctx,
+                &gguf,
+                &model,
+                &expected,
+                embedding_selection,
+            )
+            .expect("realize parallel-copy dense storage");
+            assert_eq!(storage.profile.id, ParallelCopyProfileId::Dense27bQ4kmV1);
+            storage
+                .validate_source_bytes(&gguf, &expected)
+                .expect("audit every parallel-copy resource byte");
+            validate_parallel_copied_topology(
+                storage.profile,
+                &storage.expected,
+                &storage.resources,
+                &storage.tensors,
+            )
+            .expect("validate parallel-copy topology before model construction");
+            assert_eq!(
+                frozen_parallel_copy_order(storage.profile, &storage.expected)
+                    .expect("frozen schedule"),
+                storage.sorted_request_indices
+            );
+
+            let command = ctx.queue.commandBuffer().expect("write guard command");
+            let encoder = crate::metal::KernelEncoder::begin(&command);
+            let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                encoder.note_write(&storage.tensors[0]);
+            }));
+            assert!(
+                write_result.is_err(),
+                "parallel-copy weights must reject compute writes"
+            );
+            encoder.end();
+
+            let command = ctx.queue.commandBuffer().expect("blit guard command");
+            let blit = crate::metal::BlitEncoder::begin(&command);
+            let blit_destination = storage
+                .tensors
+                .iter()
+                .find(|tensor| tensor.dtype == GgmlType::F32 && tensor.n_bytes() <= 1_048_576)
+                .expect("small direct F32 candidate weight");
+            let writable_source = MetalTensor::zeros_f32(&ctx, blit_destination.shape.clone())
+                .expect("equal-sized blit source");
+            assert_eq!(writable_source.n_bytes(), blit_destination.n_bytes());
+            let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                blit.copy_tensor(&writable_source, blit_destination);
+            }));
+            assert!(
+                write_result.is_err(),
+                "parallel-copy weights must reject blit writes"
+            );
+            blit.end();
+
+            let parallel_model = MetalModel::load_with_direct_storage(
+                &ctx,
+                &gguf,
+                &model,
+                embedding_selection,
+                &expected,
+                DirectStorage::ForcedParallelCopied(storage),
+                false,
+            )
+            .expect("construct model from audited parallel-copy storage");
+            let parallel =
+                run_loaded_model_arm(&ctx, parallel_model, &tokens, Some(copied.next_token));
+            (copied, parallel)
+        });
+        let parallel_argmax = parallel
+            .prefill_logits
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                if value > best.1 { (index, value) } else { best }
+            })
+            .0 as i32;
+        assert_eq!(copied.next_token, parallel_argmax);
+        assert_eq!(parallel.next_token, parallel_argmax);
+        assert_generic_retained_f32_bits(
+            "parallel-copy prefill logits",
+            &copied.prefill_logits,
+            &parallel.prefill_logits,
+        );
+        assert_generic_retained_snapshot(
+            "parallel-copy prefill snapshot",
+            &copied.prefill_snapshot,
+            &parallel.prefill_snapshot,
+        );
+        assert_generic_retained_f32_bits(
+            "parallel-copy decode logits",
+            &copied.decode_logits,
+            &parallel.decode_logits,
+        );
+        assert_generic_retained_snapshot(
+            "parallel-copy decode snapshot",
+            &copied.decode_snapshot,
+            &parallel.decode_snapshot,
+        );
+
+        let native_line = format!(
+            "[metal-load] native quantized token embedding policy: auto-promoted ({:?} {:?})",
+            model.token_embd.dtype, model.token_embd.shape
+        );
+        let ledger_line = concat!(
+            "[metal-load-ledger] source=851/16806250496 ",
+            "direct_copy=851/16806250496 direct_view=0/0 direct_alias=0/0 ",
+            "tail_fallback=0/0 converted=0/0/0 derived=0/0"
+        );
+        assert_eq!(load_lines.len(), 5, "recognized load-line count");
+        assert_eq!(load_lines[0], native_line, "A native policy line");
+        assert_eq!(load_lines[1], ledger_line, "A copied ledger line");
+        assert_eq!(load_lines[2], native_line, "B native policy line");
+        assert_eq!(load_lines[4], ledger_line, "B copied ledger line");
+        assert_eq!(
+            load_lines
+                .iter()
+                .filter(|line| line.starts_with("[metal-gguf-parallel-copied]"))
+                .count(),
+            1,
+            "candidate marker count"
+        );
+        assert_eq!(
+            load_lines
+                .iter()
+                .filter(|line| *line == ledger_line)
+                .count(),
+            2,
+            "copied ledger count"
+        );
+
+        let marker_prefix = concat!(
+            "[metal-gguf-parallel-copied] schema=2 profile=dense27b-q4km-v1 ",
+            "resources=851 bytes=16806250496 workers=4 cuts=136,377,618 ",
+            "tasks=136,241,241,233 ",
+            "worker_bytes=4194110464,4214375808,4204933376,4192830848 ",
+            "w0_first=2,output.weight,0,10993888,1042944000 ",
+            "w0_last=135,blk.9.ssm_norm.weight,0,4205103840,512 ",
+            "w1_first=136,blk.9.ssm_out.weight,0,4205104352,21626880 ",
+            "w1_last=379,blk.28.attn_qkv.weight,0,8376472160,43008000 ",
+            "w2_first=378,blk.28.ffn_down.weight,0,8419480160,73113600 ",
+            "w2_last=618,blk.46.ffn_down.weight,0,12551299936,73113600 ",
+            "w3_first=616,blk.46.ffn_gate.weight,0,12624413536,50135040 ",
+            "w3_last=844,blk.63.post_attention_norm.weight,0,16817223904,20480 ",
+            "create=shared,default_cache,default observed=shared,default_cache,tracked ",
+            "page=16384 alignment=32 max_buffer=77309411328 ",
+            "mapped=16817244384 layout=0xd116405fd99f54d9 ",
+            "inventory=50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07 "
+        );
+        assert!(!load_lines[3].contains(" plan="));
+        let timing_suffix = load_lines[3]
+            .strip_prefix(marker_prefix)
+            .expect("exact dense candidate marker prefix and field order");
+        let timing_fields = timing_suffix.split(' ').collect::<Vec<_>>();
+        let timing_names = [
+            "allocation_us",
+            "source_us",
+            "copy_us",
+            "binding_us",
+            "ready_us",
+            "user_cpu_us",
+            "system_cpu_us",
+            "total_cpu_us",
+            "timer_minor_faults",
+            "timer_major_faults",
+            "instructions_delta_raw",
+            "cycles_delta_raw",
+        ];
+        assert_eq!(
+            timing_fields.len(),
+            timing_names.len(),
+            "candidate dynamic field count"
+        );
+        let mut timing_values = Vec::with_capacity(timing_names.len());
+        for (field, name) in timing_fields.iter().zip(timing_names) {
+            let value = field
+                .strip_prefix(&format!("{name}="))
+                .expect("candidate dynamic field name");
+            assert!(
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+                "candidate dynamic field must be unsigned decimal"
+            );
+            let parsed = value.parse::<u64>().expect("candidate dynamic value");
+            assert_eq!(
+                parsed.to_string(),
+                value,
+                "candidate dynamic canonical form"
+            );
+            timing_values.push(parsed);
+        }
+        assert!(
+            timing_values[4] > 0,
+            "candidate ready time must be positive"
+        );
+        assert!(
+            timing_values[4].abs_diff(timing_values[..4].iter().sum()) <= 4,
+            "candidate timing reconciliation"
+        );
+        assert_eq!(
+            timing_values[7],
+            timing_values[5] + timing_values[6],
+            "candidate CPU reconciliation"
         );
     }
 

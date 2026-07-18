@@ -1052,6 +1052,7 @@ dependencies = [
  "crossbeam",
  "gguf-rs",
  "half",
+ "libc",
  "llama-cpp-sys-2",
  "memmap2",
  "objc2",

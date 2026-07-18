@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-18 - v0.604 Dense-27B Parallel-Copied Loader
+
+Status: sealed prelaunch inconclusive; exact correctness passes, zero product
+children launch, and no product authority follows.
+
+- Clean source/build/runtime `040e4d7` passes the frozen full-state release
+  gate. All `16,806,250,496` candidate bytes, 851 independent exact-sized
+  offset-zero Shared/DefaultCache/Tracked resources, modes, bindings, schedule,
+  marker, ledger, checked-write guards, logits, KV/GDN/conv state, argmax,
+  transition, continuation logits, and continuation state authenticate.
+- The correctness candidate records `619.408 ms` ready wall and
+  `2369.549 ms` endpoint CPU. The CPU observation is only `80.451 ms` below the
+  product median cap but is not a product sample and supplies no gate authority.
+- Before loaded child 1 launches, the 16.817 GB cache-read/hash interval changes
+  compressor occupied pages `89,274 -> 89,276` (`+2`, or 32 KiB), while stored
+  pages fall by 14 and Decompressions rise by 14. Compressions, Pageouts,
+  Swapouts, and swap occupancy remain exactly flat; memory remains 95% available
+  with valid AC and thermal/performance state.
+- The frozen any-positive stored-or-occupied gauge rule therefore mechanically
+  stops `inconclusive`. The decision, artifact inventory, final model identity,
+  and completion seal verify; `attempts_sha256` is null and no launch seal exists.
+- This falsifies the unilateral compressor-gauge veto's specificity, not the
+  packet as a whole. The two-page host-wide twitch is uncorroborated by actual
+  pressure activity and cannot be localized to the cache read. Do not relabel it
+  as product evidence or rescue v0.604 after the fact.
+- Dense product transfer remains wholly unobserved: no loaded, first-byte, exit,
+  model-ready, memory, pressure, or complete-process CPU row exists. Run at most
+  one v0.605 successor with a prospectively revised pressure classifier and all
+  implementation, correctness, performance, CPU, order, and authority gates
+  unchanged.
+
+Artifact: `target/profiles/v0604-dense27b-parallel-copied-loader-p1/`. Summary:
+`docs/bench/2026-07-18-v0604-dense27b-parallel-copied-loader/README.md`.
+Adversarial runner review: `cx ask` session
+`019f773a-69f3-7ee1-8c4d-d2e084467eb3`; sealed-result interpretation:
+`019f7760-bfb6-7310-bec5-a393609ec6c3`.
+
 ## 2026-07-18 - v0.603 Dense-27B Parallel-Copied Floor
 
 Status: GO for one separately preregistered force-only dense-27B loader pilot.

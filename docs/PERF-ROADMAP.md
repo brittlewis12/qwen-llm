@@ -608,19 +608,23 @@ The `12.5-12.8` nominal-TFLOP/s Q4_K anchor remains a current-dispatcher ceiling
 not an independent silicon peak. One causal actual-shape decomposition can test
 that premise, but a derived peak is not itself an optimization result.
 
-1. **Dense-27B force-only parallel-copied loader pilot**: highest authorized new
-   cold optimization. v0.603 clears the exact same-topology floor with a paired
-   `965.0405 ms` saving, `0.365706589x` B/A, 6/6 wins, and unchanged memory. Port
-   only the authenticated profile behind explicit force policy. Before product
-   timing, require every source byte and all 851 resources, modes, bindings,
-   schedule, provenance, checked-write rejection, bit-exact packed-prefill logits,
-   complete KV/GDN/conv state, argmax, forced transition, continuation logits, and
-   continuation state. Then require loaded 1% prefill/decode/request noninferiority
-   and fresh output-128 first-prefill, first-byte, request, exit, endpoint plus
-   complete-process CPU, RSS/footprint, pressure, and exact-output evidence. The
+1. **Dense-27B force-only parallel-copied loader successor**: highest authorized
+   new cold optimization. v0.603 clears the exact same-topology floor with a
+   paired `965.0405 ms` saving, `0.365706589x` B/A, 6/6 wins, and unchanged memory.
+   v0.604 passes every full-state implementation gate but launches no product
+   child: a `+2`-page compressor-occupied twitch trips the frozen unilateral
+   gauge veto despite falling stored pages, zero Compressions/Pageouts/Swapouts,
+   flat swap occupancy, and 95% available memory. Preserve v0.604 as a sealed
+   prelaunch inconclusive. Run at most one v0.605 successor that changes only the
+   pressure classifier: hard-gate capture/counter regression, Compressions,
+   Swapouts, swap-occupancy growth, block input, fresh major faults, and invalid
+   host state; retain Pageouts and compressor gauges as complete diagnostics.
+   Freeze the implementation, correctness scope, pair order, sole-attempt rule,
+   loaded 1% prefill/decode/request noninferiority, all fresh output-128 cold and
+   model-ready gates, memory gates, and the `2.45/2.55 s` endpoint-CPU caps. The
    floor predicts roughly a 965 ms materialization transfer, not a product ratio.
-   Preserve force-only authority even on pass. Difficulty M, mechanism certainty
-   high, product-transfer belief medium-high.
+   Preserve force-only authority even on pass. Difficulty S protocol/M packet,
+   mechanism certainty high, product-transfer belief medium-high.
 2. **A3B default admission decision**: highest realized product leverage, not a
    new performance search. v0.602 already proves the exact force path at
    `2.06292x` first byte, `1.47929x` exit, and loaded parity. Decide whether absent
@@ -651,11 +655,11 @@ that premise, but a derived peak is not itself an optimization result.
    the intended token-table residency, but this is sequencing rather than a logical
    dependency: a floor may force native embedding and freeze that inventory. Run a
    topology-preserving materialization floor before product code; require at least
-   1.5 seconds saved, exact per-shard source coverage, no positive swap-occupancy or
-   compressor stored/occupied gauge growth, and record cumulative Pageouts and
-   Compressions as advisory. Product work remains conditional on that floor and
-   loaded parity. Difficulty M-L, belief medium, prize very high but deployment
-   relevance lower than A3B/27B.
+   1.5 seconds saved, exact per-shard source coverage, no positive Compressions,
+   Swapouts, or swap-occupancy growth, and complete Pageout and compressor-gauge
+   diagnostics. Product work remains conditional on that floor and loaded parity.
+   Difficulty M-L, belief medium, prize very high but deployment relevance lower
+   than A3B/27B.
 5. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
    Under a declared grammar, an isolated forced token still requires a complete
    target state transition. Only a maximal run of uniquely admissible token IDs can
@@ -768,13 +772,12 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. v0.603 clears the dense-27B exact-topology floor with a paired `965.0405 ms`
-   saving, `0.365706589x` B/A, and 6/6 wins. Run one separately preregistered
-   force-only product pilot. Require full state before timing, then loaded 1%
-   noninferiority and fresh output-128 first-prefill, first-byte, request, exit,
-   memory, pressure, endpoint CPU, and complete-process CPU evidence. Preserve
-   force-only authority even on pass and infer nothing about serving or concurrent
-   loading.
+1. v0.604 passes exact dense full-state correctness but stops before product child
+   1 when a `+2`-page compressor-occupied twitch trips the frozen unilateral gauge
+   veto without corroborating pressure. Preserve the sealed inconclusive and run
+   one v0.605 successor under the revised activity-based pressure classifier. Do
+   not change or reuse the implementation, pair order, sole-attempt semantics,
+   loaded/fresh gates, `2.45/2.55 s` endpoint-CPU caps, or force-only authority.
 2. v0.602 completes the exact-topology A3B pilot at `2.06292x` first byte and
    loaded parity. Decide default admission next without repeating performance.
    Preserve `=0` rollback and explicitly accept the `+4.768 ms` first-prefill,
@@ -788,9 +791,9 @@ automatic retained use stay copied without separate evidence.
 4. If A10B deployment relevance justifies it, prefer item 3 before one three-shard
    exact-topology parallel-copy floor; alternatively force native embedding in the
    floor and freeze that inventory. Stop before loader code unless it saves at
-   least 1.5 seconds without topology drift, positive swap-occupancy growth, or
-   positive compressor stored/occupied gauge growth. Keep cumulative Pageouts and
-   Compressions advisory.
+   least 1.5 seconds without topology drift or positive Compressions, Swapouts, or
+   swap-occupancy growth. Record cumulative Pageouts and compressor gauges as
+   diagnostics rather than unilateral vetoes.
 5. With no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.

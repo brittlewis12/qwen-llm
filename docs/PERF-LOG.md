@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-18 - v0.603 Dense-27B Parallel-Copied Floor
+
+Status: GO for one separately preregistered force-only dense-27B loader pilot.
+
+- Clean source/build/runtime `e6e964f` completes all 12 unique sole attempts in
+  the frozen `AB/BA/BA/AB/AB/BA` order. Every launch, completion, attempt, raw
+  output, scored row, decision, and completion seal verifies without retry,
+  overlap, interruption, or parse failure.
+- Both arms preserve 851 independent exact-sized offset-zero
+  Shared/DefaultCache/Tracked resources over all `16,806,250,496` source bytes.
+  Every byte, resource, binding, mode, request association, profile field, and
+  schedule field passes.
+- Production copied A has median ready wall `1519.5535 ms` at
+  `11.05999 GB/s`. The frozen topology-preserving parallel-copy B is
+  `557.7565 ms` at `30.13187 GB/s`.
+- Authoritative paired saving is `965.0405 ms` median; paired B/A is
+  `0.365706589x`, or about `2.7344x` A/B. B wins 6/6, with AB/BA median savings
+  `966.018/964.063 ms` and 3/3 wins in both strata. Do not substitute the
+  difference or ratio of arm medians for these paired statistics.
+- Maximum paired RSS/footprint B/A is `1.000027/1.000056x`. Every cache and child
+  interval records zero Pageouts, Compressions, Swapouts, swap-occupancy growth,
+  compressor stored/occupied growth, and block input. Timer-local major faults
+  are zero.
+- B's copy phase is `554.609 ms` median, about 99.4% of its endpoint. Median
+  allocation, source/safety/schedule, and binding phases are only
+  `2.7705/0.240/0.0295 ms`.
+- The wall win uses more aggregate CPU rather than removing work. Median endpoint
+  CPU rises `1519.376 -> 2210.4965 ms`, about 45.5%, while core-equivalents rise
+  `0.999888 -> 3.965857`. Instructions fall about 10.8% and cycles rise about
+  27.7%. Raw energy counters are zero; no energy or concurrent-loader claim
+  follows.
+- The result certifies the complete frozen bundle, not four workers in isolation:
+  allocate-first behavior, parent-resolved slices, manual copy, the literal
+  four-worker schedule, and exact topology remain coupled. It authorizes only one
+  exact force-only dense loader pilot with full-state, loaded, fresh, memory,
+  pressure, and CPU gates.
+
+Artifact: `target/profiles/v0603-dense27b-parallel-copied-floor-p1/`. Summary:
+`docs/bench/2026-07-18-v0603-dense27b-parallel-copied-floor/README.md`.
+Adversarial sealed-result review: `cx ask` session
+`019f73c8-b5c7-7ba0-bd80-aee69a2abdc2`.
+
 ## 2026-07-17 - v0.602 A3B Parallel-Copied Loader
 
 Status: GO with force-only exact-A3B authority; largest banked process-cold A3B

@@ -586,6 +586,18 @@ late post-warmup loaded measurements. The packet does not localize its cause, an
 the `2.063x` cold endpoint is not permission to hide the separate model-ready
 tradeoff.
 
+v0.603 transfers the same-topology materialization floor to the exact dense-27B
+Q4_K_M inventory. Across six frozen pairs, parallel copied materialization falls
+from arm median `1519.5535` to `557.7565 ms`; authoritative paired saving is
+`965.0405 ms`, paired B/A is `0.365706589x`, and B wins 6/6 with AB/BA medians
+`966.018/964.063 ms`. All `16,806,250,496` bytes, 851 independent exact-sized
+offset-zero resources, memory, and pressure gates pass. The win uses CPU
+parallelism: median endpoint CPU rises about 45.5% and core-equivalents rise from
+about one to four. The complete frozen implementation bundle clears the floor;
+worker count, allocation behavior, manual copy, and page/cache effects remain
+coupled. Authority is one separately preregistered force-only dense loader pilot,
+not product or default admission.
+
 The post-v0.601 portfolio review preserves the cold-first inversion while
 correcting several stale external frames. PLD is already a product path behind
 `--prompt-lookup`; v0.565 clears its copy-heavy packet and v0.566 demotes only
@@ -596,7 +608,20 @@ The `12.5-12.8` nominal-TFLOP/s Q4_K anchor remains a current-dispatcher ceiling
 not an independent silicon peak. One causal actual-shape decomposition can test
 that premise, but a derived peak is not itself an optimization result.
 
-1. **A3B default admission decision**: highest realized product leverage, not a
+1. **Dense-27B force-only parallel-copied loader pilot**: highest authorized new
+   cold optimization. v0.603 clears the exact same-topology floor with a paired
+   `965.0405 ms` saving, `0.365706589x` B/A, 6/6 wins, and unchanged memory. Port
+   only the authenticated profile behind explicit force policy. Before product
+   timing, require every source byte and all 851 resources, modes, bindings,
+   schedule, provenance, checked-write rejection, bit-exact packed-prefill logits,
+   complete KV/GDN/conv state, argmax, forced transition, continuation logits, and
+   continuation state. Then require loaded 1% prefill/decode/request noninferiority
+   and fresh output-128 first-prefill, first-byte, request, exit, endpoint plus
+   complete-process CPU, RSS/footprint, pressure, and exact-output evidence. The
+   floor predicts roughly a 965 ms materialization transfer, not a product ratio.
+   Preserve force-only authority even on pass. Difficulty M, mechanism certainty
+   high, product-transfer belief medium-high.
+2. **A3B default admission decision**: highest realized product leverage, not a
    new performance search. v0.602 already proves the exact force path at
    `2.06292x` first byte, `1.47929x` exit, and loaded parity. Decide whether absent
    policy may select it only for the authenticated single-shard asset while
@@ -610,17 +635,6 @@ that premise, but a derived peak is not itself an optimization result.
    serving and concurrent loading or explicitly accept their unmeasured CPU-
    contention and energy surface. Difficulty S, mechanism certainty high; the
    unresolved question is product preference, not speed.
-2. **Dense-27B exact-topology parallel-copy breadth**: highest new cold
-   optimization candidate. Native embedding is already default and the copied
-   path retains independent offset-zero resources, so v0.602 supplies a strong
-   transfer prior without authorizing inference. First freeze the 27B all-direct
-   inventory and a balanced whole-tensor schedule; require a materialization floor
-   saving of at least 750 ms and no resource/memory drift. Only then implement one
-   exact force path with full-state, loaded 1%, first-prefill, first-byte, and exit
-   gates. Scale arithmetic suggests roughly 0.9-1.1 seconds is available, but it is
-   a prior, not evidence. Record CPU utilization and energy, and do not infer
-   concurrent-loader behavior from the serial packet. Difficulty M, belief
-   medium-high, broad dense prize high.
 3. **A10B native-embedding cold packet**: omitted cold-path adjudication for an
    implemented bit-exact row representation. v0.538 preserves the exact 128-token
    greedy stream, records loaded median `pp512/tg128` ratios of
@@ -754,15 +768,19 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. v0.602 completes the exact-topology A3B pilot at `2.06292x` first byte and
+1. v0.603 clears the dense-27B exact-topology floor with a paired `965.0405 ms`
+   saving, `0.365706589x` B/A, and 6/6 wins. Run one separately preregistered
+   force-only product pilot. Require full state before timing, then loaded 1%
+   noninferiority and fresh output-128 first-prefill, first-byte, request, exit,
+   memory, pressure, endpoint CPU, and complete-process CPU evidence. Preserve
+   force-only authority even on pass and infer nothing about serving or concurrent
+   loading.
+2. v0.602 completes the exact-topology A3B pilot at `2.06292x` first byte and
    loaded parity. Decide default admission next without repeating performance.
    Preserve `=0` rollback and explicitly accept the `+4.768 ms` first-prefill,
    `+5.481 ms` model-ready-request, and `+22.159 ms` post-output exit tradeoffs.
    Keep serving/concurrent loading force-only unless their unmeasured CPU-
    contention and energy surface is consciously accepted.
-2. Price dense-27B breadth with one frozen same-topology materialization floor.
-   Implement a force path only if it saves at least 750 ms; then require full state,
-   loaded 1%, first-prefill, first-byte, and exit gates.
 3. Run one A10B native-embedding process-cold packet if the heavy anchor remains a
    deployment target. Stop after one valid adjudication; do not infer latency from
    the already measured 2.24 GB allocation reduction. Apply the ranked entry's
@@ -816,11 +834,14 @@ automatic retained use stay copied without separate evidence.
   that one-window owned shares retained's decode tax despite exact destination
   population; the premise is closed. Any reopen must preserve per-tensor
   offset-zero topology through the loaded gates before fresh product timing.
-  v0.599 clears the materialization floor and v0.602 clears exact A3B full state,
-  loaded parity, and cold product endpoints. Authority remains force-only for the
-  frozen asset. Default admission must preserve rollback and acknowledge the
-  measured first-prefill tax; 27B/A10B breadth requires independent inventory,
-  floor, correctness, and product evidence.
+  v0.599 clears the A3B materialization floor and v0.602 clears exact A3B full
+  state, loaded parity, and cold product endpoints. v0.603 independently clears
+  the dense-27B same-topology floor but not product transfer. Authority remains
+  force-only for the frozen A3B asset and one separately preregistered dense pilot.
+  A3B default admission must preserve rollback and acknowledge the measured
+  first-prefill tax; dense product authority still requires exact full-state,
+  loaded, and fresh evidence. A10B breadth requires its own inventory, floor,
+  correctness, and product evidence.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

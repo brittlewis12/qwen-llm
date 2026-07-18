@@ -2,7 +2,9 @@ use crate::OutputFormat;
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
 use objc2::rc::Retained;
-use objc2_metal::{MTLBuffer, MTLCPUCacheMode, MTLHazardTrackingMode, MTLResource, MTLStorageMode};
+use objc2_metal::{
+    MTLBuffer, MTLCPUCacheMode, MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
+};
 use qwen_llm::{
     gguf::GgufFile,
     loader::Model,
@@ -349,7 +351,20 @@ fn parallel_copy_schedule(direct: &[&TensorDesc]) -> Result<ParallelCopySchedule
     })
 }
 
-fn parallel_copy_schedule_json(schedule: &ParallelCopySchedule) -> Result<Value> {
+fn schedule_boundary_json(request_index: usize, desc: &TensorDesc) -> Value {
+    json!({
+        "request_index": request_index,
+        "name": desc.name,
+        "shard_idx": desc.shard_idx,
+        "source_offset": desc.data_offset,
+        "n_bytes": desc.n_bytes,
+    })
+}
+
+fn parallel_copy_schedule_json(
+    schedule: &ParallelCopySchedule,
+    direct: &[&TensorDesc],
+) -> Result<Value> {
     let total_bytes = schedule
         .partitions
         .iter()
@@ -370,6 +385,43 @@ fn parallel_copy_schedule_json(schedule: &ParallelCopySchedule) -> Result<Value>
         .map(|partition| partition.bytes)
         .max()
         .expect("schedule has four partitions");
+    let partitions = schedule
+        .partitions
+        .iter()
+        .map(|partition| {
+            let first_request_index = *schedule
+                .sorted_request_indices
+                .get(partition.start)
+                .ok_or_else(|| anyhow!("parallel-copy first boundary is unavailable"))?;
+            let last_request_index = *schedule
+                .sorted_request_indices
+                .get(
+                    partition
+                        .end
+                        .checked_sub(1)
+                        .ok_or_else(|| anyhow!("parallel-copy partition is empty"))?,
+                )
+                .ok_or_else(|| anyhow!("parallel-copy last boundary is unavailable"))?;
+            let first = direct
+                .get(first_request_index)
+                .ok_or_else(|| anyhow!("parallel-copy first request is unavailable"))?;
+            let last = direct
+                .get(last_request_index)
+                .ok_or_else(|| anyhow!("parallel-copy last request is unavailable"))?;
+            Ok(json!({
+                "start": partition.start,
+                "end": partition.end,
+                "task_count": partition.end - partition.start,
+                "bytes": partition.bytes,
+                "first_shard": partition.first_shard,
+                "first_source_offset": partition.first_source_offset,
+                "last_shard": partition.last_shard,
+                "last_source_offset": partition.last_source_offset,
+                "first": schedule_boundary_json(first_request_index, first),
+                "last": schedule_boundary_json(last_request_index, last),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "workers": PARALLEL_COPY_WORKERS,
         "cuts": schedule.cuts,
@@ -382,16 +434,7 @@ fn parallel_copy_schedule_json(schedule: &ParallelCopySchedule) -> Result<Value>
         "max_to_min": max_bytes as f64 / min_bytes as f64,
         "max_to_ideal": max_bytes as f64
             / (total_bytes as f64 / PARALLEL_COPY_WORKERS as f64),
-        "partitions": schedule.partitions.iter().map(|partition| json!({
-            "start": partition.start,
-            "end": partition.end,
-            "task_count": partition.end - partition.start,
-            "bytes": partition.bytes,
-            "first_shard": partition.first_shard,
-            "first_source_offset": partition.first_source_offset,
-            "last_shard": partition.last_shard,
-            "last_source_offset": partition.last_source_offset,
-        })).collect::<Vec<_>>(),
+        "partitions": partitions,
     }))
 }
 
@@ -902,6 +945,28 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     let descriptor_digest = format!("{:#018x}", gguf_descriptor_layout_digest(&gguf));
     let inventory_digest = model_weight_storage_inventory_digest(&requests);
     let planner_digest = retained_storage_plan_digest(&plan);
+    let architecture_tuple = json!({
+        "kind": format!("{:?}", model.arch.kind).to_lowercase(),
+        "n_layer": model.arch.n_layer,
+        "hidden_size": model.arch.hidden_size,
+        "intermediate_size": model.arch.intermediate_size,
+        "vocab_size": model.arch.vocab_size,
+        "full_attention_interval": model.arch.full_attention_interval,
+        "n_q_heads": model.arch.n_q_heads,
+        "n_kv_heads": model.arch.n_kv_heads,
+        "attn_head_dim": model.arch.attn_head_dim,
+        "rope_theta": model.arch.rope_theta,
+        "partial_rotary_factor": model.arch.partial_rotary_factor,
+        "gdn_n_v_heads": model.arch.gdn_n_v_heads,
+        "gdn_n_k_heads": model.arch.gdn_n_k_heads,
+        "gdn_head_dim": model.arch.gdn_head_dim,
+        "gdn_conv_kernel": model.arch.gdn_conv_kernel,
+        "expert_count": model.arch.expert_count,
+        "expert_used_count": model.arch.expert_used_count,
+        "expert_feed_forward_length": model.arch.expert_feed_forward_length,
+        "expert_shared_feed_forward_length": model.arch.expert_shared_feed_forward_length,
+        "mtp_n_hidden_layers": model.arch.mtp_n_hidden_layers,
+    });
 
     if args.describe {
         let row = json!({
@@ -936,7 +1001,16 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
                     _ => None,
                 }
             }).collect::<Vec<_>>(),
-            "parallel_copy_schedule": parallel_copy_schedule_json(&parallel_schedule)?,
+            "shard_mapped_lengths": gguf.shard_mapped_lengths(),
+            "architecture_tuple": architecture_tuple,
+            "tied_embeddings": model.tied_embeddings,
+            "mtp_present": model.mtp.is_some(),
+            "device_name": ctx.device.name().to_string(),
+            "unified_memory": ctx.device.hasUnifiedMemory(),
+            "parallel_copy_schedule": parallel_copy_schedule_json(
+                &parallel_schedule,
+                &direct,
+            )?,
             "build_identity": build_identity,
         });
         match args.output {
@@ -1116,7 +1190,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "observed_cpu_cache": "default_cache",
             "observed_hazard_tracking": "tracked",
         },
-        "parallel_copy_schedule": parallel_copy_schedule_json(&parallel_schedule)?,
+        "parallel_copy_schedule": parallel_copy_schedule_json(&parallel_schedule, &direct)?,
         "timing": {
             "ready_wall_ms": duration_ms(ready_wall),
             "allocation_wall_ms": allocation_wall,

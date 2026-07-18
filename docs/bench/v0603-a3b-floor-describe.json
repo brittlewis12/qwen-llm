@@ -1,0 +1,192 @@
+{
+  "alias_count": 0,
+  "architecture": "qwen35moe",
+  "architecture_tuple": {
+    "attn_head_dim": 256,
+    "expert_count": 256,
+    "expert_feed_forward_length": 512,
+    "expert_shared_feed_forward_length": 512,
+    "expert_used_count": 8,
+    "full_attention_interval": 4,
+    "gdn_conv_kernel": 4,
+    "gdn_head_dim": 128,
+    "gdn_n_k_heads": 16,
+    "gdn_n_v_heads": 32,
+    "hidden_size": 2048,
+    "intermediate_size": 0,
+    "kind": "moe",
+    "mtp_n_hidden_layers": 0,
+    "n_kv_heads": 2,
+    "n_layer": 40,
+    "n_q_heads": 16,
+    "partial_rotary_factor": 0.25,
+    "rope_theta": 10000000.0,
+    "vocab_size": 248320
+  },
+  "arena_copy_bytes": 22123552768,
+  "build_identity": {
+    "build_commit": "c05c2a185ff4e7879ecbbf2b3ad1deb071b1c69e",
+    "build_commit_short": "c05c2a185",
+    "build_dirty": false,
+    "build_source_state": "git-source-sha256-v2:491423dd56f2cfb9a8b2b88ea1eb86e06773662923942cac726f7bd002306f68",
+    "overrides": [],
+    "problems": [],
+    "runtime_commit": "c05c2a185ff4e7879ecbbf2b3ad1deb071b1c69e",
+    "runtime_dirty": false,
+    "runtime_source_state": "git-source-sha256-v2:491423dd56f2cfb9a8b2b88ea1eb86e06773662923942cac726f7bd002306f68",
+    "schema_version": 2,
+    "stamp_error": null,
+    "stamp_source": "git",
+    "status": "match"
+  },
+  "descriptor_layout_digest": "0x5ae645df5cf7d568",
+  "device_name": "Apple M4 Max",
+  "fallback_bytes": 8192,
+  "fallback_count": 1,
+  "fallback_reasons": [
+    "FinalPartialPage"
+  ],
+  "inventory_digest": "f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5",
+  "logical_copy_bytes": 22123538944,
+  "logical_view_bytes": 22123530752,
+  "max_buffer_length": 77309411328,
+  "mode": "describe",
+  "model": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+  "mtp_present": false,
+  "native_quant_embedding": true,
+  "page_size": 16384,
+  "parallel_copy_schedule": {
+    "cuts": [
+      155,
+      359,
+      539
+    ],
+    "max_to_ideal": 1.011686659745281,
+    "max_to_min": 1.0243864568550347,
+    "partitions": [
+      {
+        "bytes": 5532746240,
+        "end": 155,
+        "first": {
+          "n_bytes": 417177600,
+          "name": "output.weight",
+          "request_index": 2,
+          "shard_idx": 0,
+          "source_offset": 10990048
+        },
+        "first_shard": 0,
+        "first_source_offset": 10990048,
+        "last": {
+          "n_bytes": 150994944,
+          "name": "blk.8.ffn_gate_exps.weight",
+          "request_index": 164,
+          "shard_idx": 0,
+          "source_offset": 5392741344
+        },
+        "last_shard": 0,
+        "last_source_offset": 5392741344,
+        "start": 0,
+        "task_count": 155
+      },
+      {
+        "bytes": 5462315776,
+        "end": 359,
+        "first": {
+          "n_bytes": 2097152,
+          "name": "blk.8.ffn_gate_inp.weight",
+          "request_index": 163,
+          "shard_idx": 0,
+          "source_offset": 5543736288
+        },
+        "first_shard": 0,
+        "first_source_offset": 5543736288,
+        "last": {
+          "n_bytes": 1114112,
+          "name": "blk.19.attn_v.weight",
+          "request_index": 354,
+          "shard_idx": 0,
+          "source_offset": 11004937952
+        },
+        "last_shard": 0,
+        "last_source_offset": 11004937952,
+        "start": 155,
+        "task_count": 204
+      },
+      {
+        "bytes": 5595522304,
+        "end": 539,
+        "first": {
+          "n_bytes": 184549376,
+          "name": "blk.19.ffn_down_exps.weight",
+          "request_index": 366,
+          "shard_idx": 0,
+          "source_offset": 11006052064
+        },
+        "first_shard": 0,
+        "first_source_offset": 11006052064,
+        "last": {
+          "n_bytes": 150994944,
+          "name": "blk.29.ffn_gate_exps.weight",
+          "request_index": 548,
+          "shard_idx": 0,
+          "source_offset": 16450579424
+        },
+        "last_shard": 0,
+        "last_source_offset": 16450579424,
+        "start": 359,
+        "task_count": 180
+      },
+      {
+        "bytes": 5532954624,
+        "end": 733,
+        "first": {
+          "n_bytes": 2097152,
+          "name": "blk.29.ffn_gate_inp.weight",
+          "request_index": 547,
+          "shard_idx": 0,
+          "source_offset": 16601574368
+        },
+        "first_shard": 0,
+        "first_source_offset": 16601574368,
+        "last": {
+          "n_bytes": 8192,
+          "name": "blk.39.post_attention_norm.weight",
+          "request_index": 721,
+          "shard_idx": 0,
+          "source_offset": 22134520800
+        },
+        "last_shard": 0,
+        "last_source_offset": 22134520800,
+        "start": 539,
+        "task_count": 194
+      }
+    ],
+    "task_counts": [
+      155,
+      204,
+      180,
+      194
+    ],
+    "worker_bytes": [
+      5532746240,
+      5462315776,
+      5595522304,
+      5532954624
+    ],
+    "workers": 4
+  },
+  "planner_digest": "fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af",
+  "planner_gap_bytes": 13824,
+  "request_count": 733,
+  "required_alignment": 32,
+  "schema_version": 1,
+  "shard_mapped_lengths": [
+    22134528992
+  ],
+  "tied_embeddings": false,
+  "unified_memory": true,
+  "unique_view_bytes": 22123530752,
+  "view_count": 732,
+  "window_bytes": 22123544576,
+  "window_count": 1
+}

@@ -608,24 +608,13 @@ The `12.5-12.8` nominal-TFLOP/s Q4_K anchor remains a current-dispatcher ceiling
 not an independent silicon peak. One causal actual-shape decomposition can test
 that premise, but a derived peak is not itself an optimization result.
 
-1. **Dense-27B force-only parallel-copied loader successor**: highest authorized
-   new cold optimization. v0.603 clears the exact same-topology floor with a
-   paired `965.0405 ms` saving, `0.365706589x` B/A, 6/6 wins, and unchanged memory.
-   v0.604 passes every full-state implementation gate but launches no product
-   child: a `+2`-page compressor-occupied twitch trips the frozen unilateral
-   gauge veto despite falling stored pages, zero Compressions/Pageouts/Swapouts,
-   flat swap occupancy, and 95% available memory. Preserve v0.604 as a sealed
-   prelaunch inconclusive. Run at most one v0.605 successor that changes only the
-   pressure classifier: hard-gate capture/counter regression, Compressions,
-   Swapouts, swap-occupancy growth, block input, fresh major faults, and invalid
-   host state; retain Pageouts and compressor gauges as complete diagnostics.
-   Freeze the implementation, correctness scope, pair order, sole-attempt rule,
-   loaded 1% prefill/decode/request noninferiority, all fresh output-128 cold and
-   model-ready gates, memory gates, and the `2.45/2.55 s` endpoint-CPU caps. The
-   floor predicts roughly a 965 ms materialization transfer, not a product ratio.
-   Preserve force-only authority even on pass. Difficulty S protocol/M packet,
-   mechanism certainty high, product-transfer belief medium-high.
-2. **A3B default admission decision**: highest realized product leverage, not a
+Dense-27B exact-topology validation is closed without product authority. v0.603
+proves a `965.0405 ms` materialization-floor saving; v0.605 transfers that endpoint
+at `559.370 ms` median but stops on loaded instability after 12 valid children.
+Fresh-process behavior is unobserved, and the protocol forbids another successor.
+Keep the force path non-authoritative and do not extend this harness chain.
+
+1. **A3B default admission decision**: highest realized product leverage, not a
    new performance search. v0.602 already proves the exact force path at
    `2.06292x` first byte, `1.47929x` exit, and loaded parity. Decide whether absent
    policy may select it only for the authenticated single-shard asset while
@@ -639,7 +628,7 @@ that premise, but a derived peak is not itself an optimization result.
    serving and concurrent loading or explicitly accept their unmeasured CPU-
    contention and energy surface. Difficulty S, mechanism certainty high; the
    unresolved question is product preference, not speed.
-3. **A10B native-embedding cold packet**: omitted cold-path adjudication for an
+2. **A10B native-embedding cold packet**: omitted cold-path adjudication for an
    implemented bit-exact row representation. v0.538 preserves the exact 128-token
    greedy stream, records loaded median `pp512/tg128` ratios of
    `1.00004/1.00106x`, and removes `2,240,839,680` device-allocation bytes. It also
@@ -649,7 +638,7 @@ that premise, but a derived peak is not itself an optimization result.
    loaded 1% prefill/decode guard, and a cold gain above both packet MDE and the
    cheap-exact 2-3% threshold. Byte removal alone predicts no latency. Difficulty S,
    implementation belief high, latency belief low-medium, cold prize unknown.
-4. **Split-A10B exact-topology parallel-copy floor**: potentially the largest
+3. **Split-A10B exact-topology parallel-copy floor**: potentially the largest
    remaining process-cold byte-population prize if the heavy anchor remains a real
    deployment target. Prefer to adjudicate native embedding first because it fixes
    the intended token-table residency, but this is sequencing rather than a logical
@@ -660,7 +649,7 @@ that premise, but a derived peak is not itself an optimization result.
    diagnostics. Product work remains conditional on that floor and loaded parity.
    Difficulty M-L, belief medium, prize very high but deployment relevance lower
    than A3B/27B.
-5. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
+4. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
    Under a declared grammar, an isolated forced token still requires a complete
    target state transition. Only a maximal run of uniquely admissible token IDs can
    be packed before reading an intermediate logit. Replay real structured traces
@@ -672,7 +661,7 @@ that premise, but a derived peak is not itself an optimization result.
    constrained-output semantics and target state; this is not equivalence to
    unconstrained generation. Price both effects in one artifact. Difficulty S
    oracle/M packet, opportunity belief medium-low until traces exist.
-6. **27B Q4_K FFN-gate pipelining preflight**: candidate-tied prefill calibration,
+5. **27B Q4_K FFN-gate pipelining preflight**: candidate-tied prefill calibration,
    not a generic decomposition or promised kernel. Freeze the production 27B Q4_K
    `ffn_gate` shape `[5120,17408]` at `P=1024`, with `P=4096` as the guard. The sole
    candidate is a two-slab threadgroup schedule that prepares K slab `i+1` before
@@ -688,7 +677,7 @@ that premise, but a derived peak is not itself an optimization result.
    neighborhoods closed.
    Exactness is numerical relative to the current mat-mat path. Difficulty M,
    information belief medium, gain belief low-medium.
-7. **MTPLX asset/contract decomposition**: highest information-value speculative
+6. **MTPLX asset/contract decomposition**: highest information-value speculative
    decode move, not same-weight parity or current process-cold priority.
    Pin the local MTPLX runtime and published trunk, MTP sidecar, draft-head,
    tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7 rows with phase and
@@ -697,7 +686,7 @@ that premise, but a derived peak is not itself an optimization result.
    sidecar against qwen post-norm hidden/token traces and predict a passing request
    before affine Metal work. Difficulty S for MTPLX packet, M for bridge; belief
    medium, upside potentially material.
-8. **Materially different A3B state-preserving verifier oracle**: strategic
+7. **Materially different A3B state-preserving verifier oracle**: strategic
    speculative unlock, not a rerun or generic packed-kernel wiring task. Retain the
    current physical-N8 implementation only as the known-negative state control.
    Any new candidate must name a state organization that reproduces serial
@@ -708,7 +697,7 @@ that premise, but a derived peak is not itself an optimization result.
    Approximate verification stays in the approximate lane. No charged product work
    follows without state passage and at least 5% projected warm-decode movement.
    Difficulty M-L, belief low-medium, conditional prize high.
-9. **Certified lm_head screening oracle**: exact selected-token work removal, not
+8. **Certified lm_head screening oracle**: exact selected-token work removal, not
    bitwise full-logit equivalence. Before k-means, precompute outward-rounded
    per-row/per-256-dimension Q6 block norms. Give the oracle the true production
    winning logit, reveal blocks in query-global hidden-norm order, and prune only
@@ -717,13 +706,13 @@ that premise, but a derived peak is not itself an optimization result.
    30% of baseline bytes after metadata. Only then add production accumulation
    error and require about 70% charged head-wall removal. Difficulty S-M oracle,
    belief low, but especially relevant to repeated draft heads.
-10. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
+9. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
    existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
    `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
    overhead or quality loss. Name an end-to-end quality replay first; k5 or average
    below about 5.8 experts must pass quality and project `>=5%` charged movement.
    Difficulty M, belief low.
-11. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+10. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing. Prefix caching is a separate
    exact reuse specialization and does not rank for fresh serial prompts.
 
@@ -772,50 +761,44 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. v0.604 passes exact dense full-state correctness but stops before product child
-   1 when a `+2`-page compressor-occupied twitch trips the frozen unilateral gauge
-   veto without corroborating pressure. Preserve the sealed inconclusive and run
-   one v0.605 successor under the revised activity-based pressure classifier. Do
-   not change or reuse the implementation, pair order, sole-attempt semantics,
-   loaded/fresh gates, `2.45/2.55 s` endpoint-CPU caps, or force-only authority.
-2. v0.602 completes the exact-topology A3B pilot at `2.06292x` first byte and
+1. v0.602 completes the exact-topology A3B pilot at `2.06292x` first byte and
    loaded parity. Decide default admission next without repeating performance.
    Preserve `=0` rollback and explicitly accept the `+4.768 ms` first-prefill,
    `+5.481 ms` model-ready-request, and `+22.159 ms` post-output exit tradeoffs.
    Keep serving/concurrent loading force-only unless their unmeasured CPU-
    contention and energy surface is consciously accepted.
-3. Run one A10B native-embedding process-cold packet if the heavy anchor remains a
+2. Run one A10B native-embedding process-cold packet if the heavy anchor remains a
    deployment target. Stop after one valid adjudication; do not infer latency from
    the already measured 2.24 GB allocation reduction. Apply the ranked entry's
    exact-output, loaded-noninferiority, and MDE gates.
-4. If A10B deployment relevance justifies it, prefer item 3 before one three-shard
+3. If A10B deployment relevance justifies it, prefer item 2 before one three-shard
    exact-topology parallel-copy floor; alternatively force native embedding in the
    floor and freeze that inventory. Stop before loader code unless it saves at
    least 1.5 seconds without topology drift or positive Compressions, Swapouts, or
    swap-occupancy growth. Record cumulative Pageouts and compressor gauges as
    diagnostics rather than unilateral vetoes.
-5. With no production code, run one structured-trace grammar artifact:
+4. With no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-6. Run only the candidate-tied 27B FFN-gate pipelining preflight above. Stop before
+5. Run only the candidate-tied 27B FFN-gate pipelining preflight above. Stop before
    kernels unless its occupancy, 1.10x primitive-ceiling, and 5% charged
    whole-prefill gates all clear.
-7. Run the MTPLX M4 AR/D3/D7 decomposition from v0.587 before downloading or
+6. Run the MTPLX M4 AR/D3/D7 decomposition from v0.587 before downloading or
    training another drafter or writing qwen affine kernels. If D7 is promising,
    run the cross-trunk sidecar acceptance bridge and apply the total-request
    equation.
-8. Keep A3B physical-N8 work behind one materially different full-state candidate.
+7. Keep A3B physical-N8 work behind one materially different full-state candidate.
    The current implementation remains a negative control, not a rerun target.
-9. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
+8. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
    artifact.
-10. Keep async promotion secondary despite v0.602 satisfying same-topology product
+9. Keep async promotion secondary despite v0.602 satisfying same-topology product
     transfer. Stop at the first measured copy-contention or unsafe cutover
     requirement.
-11. Keep top-k behind a named quality replay and prompt reduction explicitly
+10. Keep top-k behind a named quality replay and prompt reduction explicitly
     input-changing.
-12. Do not run tensor-class topology attribution for this result. Same-topology
+11. Do not run tensor-class topology attribution for this result. Same-topology
     parallel copy is fast and loaded-neutral; the discriminator already answered.
-13. Do not resume current retained-view retunes, broad external drafting, packed
+12. Do not resume current retained-view retunes, broad external drafting, packed
     MTP history, generic decode-storage diagnostics, matrix/compressed attention,
     sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
     GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,

@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-18 - v0.605 Dense-27B Parallel-Copied Loader Successor
+
+Status: sealed loaded-stage inconclusive; all 12 loaded children complete, fresh
+never runs, and the dense product-validation lane closes without authority.
+
+- Clean source/build/runtime `6114ea4` passes exact full-state correctness and
+  all 12 unique sole-attempt loaded children. All 55 inventory members, 24
+  launch/completion rows, attempts, identities, decision, and completion seal
+  verify.
+- Candidate ready wall is `559.370 ms` median, range `555.951-563.556 ms`, closely
+  transferring v0.603's `557.7565 ms` materialization floor. Endpoint total CPU
+  is `2212.887 ms` median; overall and AB/BA `2.45/2.55 s` caps pass.
+- Three preregistered decode-stability checks miss: B pair 2 `0.978522868x`, B
+  pair 4 `0.975774593x`, and A pair 6 `0.974869414x` repetition-5/repetition-3
+  TPS. Instability has precedence, so pair 1-2 B prefill/request misses cannot
+  support a performance kill or causal regression claim.
+- Both arms show strong upward within-process nonstationarity. Prefill repetition
+  medians A/B move `1836.20/1836.65 -> 2089.65/2087.25 ms`; every child ends
+  11.9-25.8% above repetition 1. Decode medians also rise
+  `5014.35/4993.30 -> 5107.30/5141.60 ms`. This is heat-consistent but not proven
+  thermal throttling; the packet lacks clocks, temperature, and power evidence.
+- Aggregate B/A prefill by repetition stays `1.00025, 1.00008, 1.00050,
+  1.00375, 0.99885x`. Pairs 3-6 pass all loaded performance gates. There is no
+  evidence of a stable systematic B warm tax, but the first-two-pair interaction
+  remains unresolved.
+- Maximum paired RSS/footprint B/A is `1.000303/1.000712x`. Every cache/child
+  interval has zero Pageouts, Compressions, and Swapouts, no positive swap growth,
+  and zero block input. One uncorroborated `+5` occupied-page diagnostic
+  independently confirms the v0.604 gauge veto was nonspecific.
+- B complete-process CPU remains higher by `+610-700 ms` (`1.245-1.297x`), a
+  descriptive aggregate-CPU cost rather than a demonstrated warm latency tax.
+- Fresh-process first byte, exit, runtime/load, model-ready, and CPU gates are
+  wholly unobserved. v0.603 remains mechanism-floor evidence only. The frozen
+  contract forbids another successor after valid v0.605 children; do not rerun,
+  pool, or rescore this lane.
+
+Artifact: `target/profiles/v0605-dense27b-parallel-copied-loader-p1/`. Summary:
+`docs/bench/2026-07-18-v0605-dense27b-parallel-copied-loader/README.md`.
+Adversarial sealed-result review: `cx ask` session
+`019f7790-a6ad-7601-8a4b-1b9b3e3e13fc`.
+
 ## 2026-07-18 - v0.604 Dense-27B Parallel-Copied Loader
 
 Status: sealed prelaunch inconclusive; exact correctness passes, zero product

@@ -605,6 +605,16 @@ telemetry computes it after the recorded request endpoints. The fixed arm order
 limits protocol breadth, but direct phase timing supports the causal scoped
 promotion.
 
+v0.610 closes JSON numeric allocation removal as a material latency lever.
+Removing `serde_json/arbitrary_precision` from both manifests improves eight-row
+release `GgufFile::open` median only `25.094 -> 22.940 ms`, a `2.154 ms`
+observed saving. That misses the 10 ms fixed-wall gate and projects to only
+0.80% of v0.609's measured 0.8B process-load-plus-TTFT boundary. The fixed
+baseline-then-candidate order limits causal strength but cannot rescue the gate.
+Do not escalate to identity-version work from this result. Typed metadata and
+tokenizer arenas require independent memory or latency cases. Both manifests and
+the temporary CPU test are restored.
+
 v0.603 transfers the same-topology materialization floor to the exact dense-27B
 Q4_K_M inventory. Across six frozen pairs, parallel copied materialization falls
 from arm median `1519.5535` to `557.7565 ms`; authoritative paired saving is
@@ -689,24 +699,14 @@ reuse/serving work rather than fresh-prompt acceleration.
    write-combined as a separate CPU-copy arm; use `pread` after blit. `MTLIO`
    remains complexity-deferred.
    Belief medium, difficulty M, possible prize hundreds of milliseconds on A3B.
-2. **Remove JSON numeric allocation amplification**: v0.609 banks lazy identity
-   and measures warm 0.8B GGUF decode at `19.7-21.2 ms`, the full remaining
-   parser ceiling. Both workspace and sibling GGUF manifests enable
-   `serde_json/arbitrary_precision`, so 248,320 token-type integers become
-   string-backed `Value`s`. Remove the feature from both manifests in one
-   CPU-only A/B. Preserve semantic metadata and tokenizer output; explicitly
-   version, preserve, or canonicalize compatibility identity if number text
-   changes. Require at least 10 ms broad fixed wall or 2% short-model first
-   byte. Only then consider typed packed metadata. Belief medium-high on work
-   removal, medium on wall, difficulty S-M across two repos.
-3. **A10B cold residency plus split-copy floor**: only if the heavy anchor
+2. **A10B cold residency plus split-copy floor**: only if the heavy anchor
    remains deployment-relevant. First adjudicate the already bit-exact native
    embedding, which removes 2.24 GB. Then freeze that inventory and require at
    least 1.5 seconds from a three-shard topology-preserving parallel-copy floor
    before product code. Belief high on memory, medium on copy wall, difficulty
    M-L; deployment relevance is below A3B and dense 27B. If relevant, this moves
    ahead of GPU argmax and reuses the winning A3B population primitive.
-4. **Production GPU argmax contract**: three product paths still copy 993,280
+3. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes, about 970 KiB, and scan 248,320 values on CPU despite the measured GPU
    path. CPU product semantics choose the highest equal index and order NaNs;
    current GPU semantics choose the lowest finite tie and ignore NaNs. Preserve
@@ -714,40 +714,45 @@ reuse/serving work rather than fresh-prompt acceleration.
    Existing MoE gain is only `1.0-1.5%` and dense is neutral, so authorize an
    explicit low-complexity 1% gate rather than invoking the normal 2-3% bar.
    Belief high on small work removal, difficulty S-M.
-5. **Grammar run and admissible-row oracle**: replay real structured traces and
+4. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal uniquely forced tokenizer-token runs plus branch vocabulary
    rows. Use `sum(H_r*(r*C1-Cpack(r))) - overhead`; require `T0/11` for a 1.10x
    request. Runs below four are not locally positive at current N8 cost.
    Contract-exact, belief medium-low until traces exist, difficulty S oracle/M
    product.
-6. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+5. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing and quality-gated. Prefix
    caching is a separate reuse specialization and does not rank here.
-7. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
+6. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
    131K token, but v0.607 closes the current cooperative read-once organization.
    Do no GPU work until a source-free design changes ownership, scheduling,
    residency, or physical bytes and clears the existing medium, breadth, 131K,
    and whole-token ceilings. Prize high, implementation belief low.
-8. **MTPLX asset/contract decomposition**: pin the external runtime and compare
+7. **MTPLX asset/contract decomposition**: pin the external runtime and compare
    matched M4 AR/D3/D7 acceptance by depth. A cross-trunk sidecar bridge must
    predict a passing qwen request before affine Metal work. This is high
    information value for speculative decode, but below fresh-process work now.
    Belief medium, difficulty S packet/M bridge.
-9. **Materially different A3B state-preserving verifier**: preserve serial
+8. **Materially different A3B state-preserving verifier**: preserve serial
    recurrence, convolution, KV, logits, and continuation state before timing.
    Keep the failed physical-N8 implementation only as a negative control.
    Require state passage and at least 5% projected decode movement. Conditional
    prize high, belief low-medium, difficulty M-L.
-10. **Certified lm_head screening oracle**: exact selected-token work removal.
-    Kill unless an optimistic bound prunes 80% of rows while touching at most
-    30% of bytes, then require about 70% charged head-wall removal. Run only
-    after the cheaper grammar-row artifact. Belief low, difficulty S-M oracle.
+9. **Certified lm_head screening oracle**: exact selected-token work removal.
+   Kill unless an optimistic bound prunes 80% of rows while touching at most
+   30% of bytes, then require about 70% charged head-wall removal. Run only
+   after the cheaper grammar-row artifact. Belief low, difficulty S-M oracle.
+10. **Adaptive MoE top-k quality preflight**: approximate and low ceiling.
+    Router mass is diffuse and ideal k8-to-k6 removal is only about `4.55%`
+    before overhead or quality loss. Require a named quality replay and average
+    below about 5.8 experts before any engine work. Belief low, difficulty M.
 
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
-temp-metallib I/O under the 10 ms gate. Adaptive top-k stays quality-blocked
-with only a `4.55%` ideal k8-to-k6 ceiling. Repack-on-load needs a named
-current-kernel instruction attribution; global allocators and tokenizer
-automata come only after deleting known metadata allocation work.
+temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
+allocation removal under the same latency gate; typed metadata retains only an
+independent memory or changed-representation case. Repack-on-load needs a named
+current-kernel instruction attribution; global allocators and tokenizer automata
+need new independent cases.
 
 Blocked cold follow-ons remain conditional. v0.602 satisfies the first prerequisite
 for async retained-to-copied promotion, but command-buffer-safe cutover, copy
@@ -794,15 +799,15 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. v0.609 banks lazy identity at `18.55 ms` paired median load saving. Preserve
-   load-time file-stat capture and post-endpoint timing telemetry. Do not claim
-   a reusable-JSONL request win.
-2. Remove `arbitrary_precision` from both manifests in one CPU A/B against the
-   measured `19.7-21.2 ms` parser ceiling. Resolve identity compatibility before
-   promotion. Do not begin typed metadata work unless the primitive clears.
-3. When the GPU is free, sweep CPU worker/chunk shape, then run one transient
-   mmap-source to independent-destination blit floor. Stop below `112 ms` ready
-   saving. Keep write-combined separate and `pread` after blit.
+1. v0.610 closes JSON numeric allocation removal at only `2.154 ms` parser-open
+   saving. Keep both manifests unchanged; typed metadata requires an independent
+   memory or changed-representation case.
+2. While GPU work is paused, limit execution to CPU-only structured-trace
+   grammar reconnaissance or semantic design for the argmax contract. Do not
+   launch Metal inference or benchmark work.
+3. When GPU work is explicitly resumed, sweep CPU worker/chunk shape, then run
+   one transient mmap-source to independent-destination blit floor. Stop below
+   `112 ms` ready saving. Keep write-combined separate and `pread` after blit.
 4. Decide whether A10B is a current target. If yes, run native embedding and its
    split-copy floor before argmax; stop below the 2-3% and 1.5-second gates.
 5. Reconcile CPU/GPU argmax tie and NaN semantics, then wire all three product

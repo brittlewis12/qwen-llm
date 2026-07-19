@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-19 - v0.610 JSON Numeric Allocation Falsifier
+
+Status: killed under the fixed-wall latency gate; both manifests remain
+unchanged and the temporary CPU-only test is removed.
+
+- Eight release `GgufFile::open` baseline rows with
+  `serde_json/arbitrary_precision` are
+  `24.966/25.181/25.140/25.002/25.139/25.048/25.287/24.790 ms`; median is
+  `25.094 ms`.
+- Removing the feature from both qwen-llm and the sibling GGUF crate yields
+  `23.074/22.731/22.778/23.018/22.795/22.933/22.985/22.947 ms`; median is
+  `22.940 ms`.
+- The complete warm `GgufFile::open` boundary improves `2.154 ms` (`1.0939x`),
+  far below the preregistered 10 ms fixed-wall gate. Against v0.609's measured
+  `270.676 ms` 0.8B process-load-plus-TTFT boundary, it projects to only 0.80%.
+  Numeric-string allocation is real but accounts for only 8.6% of complete-open
+  wall in this packet.
+- Stop before identity-version or product validation. Typed metadata arrays and
+  tokenizer arenas need a new independent memory or latency case; this manifest
+  toggle does not falsify those broader representations.
+- No GPU or Metal inference work ran. The candidate manifests were restored,
+  the temporary test was removed, the sibling repository is clean, and only
+  qwen-llm performance documentation remains modified.
+- Arms are fixed baseline-then-candidate across separate release builds, not
+  counterbalanced. Treat `2.154 ms` as the observed candidate delta. The kill is
+  robust because every candidate row is below every baseline row while the
+  entire separation remains far short of 10 ms.
+
 ## 2026-07-19 - v0.609 Lazy Snapshot Identity
 
 Status: promoted for disposable single-turn cold load; compatibility identity

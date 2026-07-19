@@ -41,6 +41,7 @@ pub mod prompt_lookup;
 pub mod runtime;
 pub mod tensor;
 pub mod tokenizer;
+pub mod trellis_offline;
 
 /// Bytes of the compiled `.metallib` produced by `build.rs` from
 /// `../../kernels/*.metal`. Empty until the first kernel is added.

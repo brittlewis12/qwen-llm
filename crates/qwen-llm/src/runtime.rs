@@ -19,7 +19,7 @@ use crate::tokenizer::{TokError, Tokenizer};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -130,7 +130,7 @@ impl Runtime {
         let path = path.as_ref();
         let gguf = GgufFile::open(path)?;
         let bound = Model::from_gguf(&gguf)?;
-        let (model_id, tokenizer_id) = snapshot_identity_parts(&gguf, bound.arch);
+        let identity_shards = snapshot_shard_identity_inputs(&gguf);
         let metal_model =
             MetalModel::load_with_options(self.context(), &gguf, &bound, intent.metal_options())?;
         Ok(LoadedModel {
@@ -138,8 +138,8 @@ impl Runtime {
             path: path.to_path_buf(),
             gguf,
             metal_model,
-            model_id,
-            tokenizer_id,
+            identity_shards,
+            identity_parts: OnceLock::new(),
             prefix_cache: Mutex::new(PrefixCache::with_max_bytes(config.prefix_cache_max_bytes)),
         })
     }
@@ -215,8 +215,8 @@ pub struct LoadedModel {
     path: PathBuf,
     gguf: GgufFile,
     metal_model: MetalModel,
-    model_id: u64,
-    tokenizer_id: u64,
+    identity_shards: Vec<SnapshotShardIdentityInput>,
+    identity_parts: OnceLock<(u64, u64)>,
     prefix_cache: Mutex<PrefixCache>,
 }
 
@@ -279,9 +279,12 @@ impl LoadedModel {
     }
 
     pub fn snapshot_identity(&self, sequence: &Sequence) -> SnapshotIdentity {
+        let &(model_id, tokenizer_id) = self.identity_parts.get_or_init(|| {
+            snapshot_identity_parts(&self.gguf, self.metal_model.arch, &self.identity_shards)
+        });
         sequence
             .metal_session()
-            .snapshot_identity(self.model_id, self.tokenizer_id)
+            .snapshot_identity(model_id, tokenizer_id)
     }
 
     pub fn prefix_cache_stats(&self) -> PrefixCacheStats {
@@ -476,6 +479,13 @@ impl Sequence {
 const HASH_OFFSET: u64 = 0xcbf29ce484222325;
 const HASH_PRIME: u64 = 0x100000001b3;
 
+struct SnapshotShardIdentityInput {
+    path: String,
+    mapped_len: u64,
+    file_len: Option<u64>,
+    modified_nanos: Option<u64>,
+}
+
 fn hash_u64(h: &mut u64, value: u64) {
     for byte in value.to_le_bytes() {
         *h ^= byte as u64;
@@ -525,7 +535,29 @@ fn hash_value(h: &mut u64, value: &Value) {
     }
 }
 
-fn snapshot_identity_parts(gguf: &GgufFile, arch: Arch) -> (u64, u64) {
+fn snapshot_shard_identity_inputs(gguf: &GgufFile) -> Vec<SnapshotShardIdentityInput> {
+    gguf.shards
+        .iter()
+        .map(|shard| {
+            let metadata = std::fs::metadata(&shard.path).ok();
+            SnapshotShardIdentityInput {
+                path: shard.path.display().to_string(),
+                mapped_len: shard.mmap.len() as u64,
+                file_len: metadata.as_ref().map(std::fs::Metadata::len),
+                modified_nanos: metadata
+                    .and_then(|value| value.modified().ok())
+                    .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|value| value.as_nanos() as u64),
+            }
+        })
+        .collect()
+}
+
+fn snapshot_identity_parts(
+    gguf: &GgufFile,
+    arch: Arch,
+    shards: &[SnapshotShardIdentityInput],
+) -> (u64, u64) {
     let mut model_hash = HASH_OFFSET;
     let mut tokenizer_hash = HASH_OFFSET;
 
@@ -533,16 +565,14 @@ fn snapshot_identity_parts(gguf: &GgufFile, arch: Arch) -> (u64, u64) {
     hash_str(&mut model_hash, &format!("{arch:?}"));
     hash_u64(&mut model_hash, gguf.shard_count() as u64);
     hash_u64(&mut model_hash, gguf.total_mapped_len() as u64);
-    for shard in &gguf.shards {
-        hash_str(&mut model_hash, &shard.path.display().to_string());
-        hash_u64(&mut model_hash, shard.mmap.len() as u64);
-        if let Ok(meta) = std::fs::metadata(&shard.path) {
-            hash_u64(&mut model_hash, meta.len());
-            if let Ok(modified) = meta.modified()
-                && let Ok(elapsed) = modified.duration_since(std::time::UNIX_EPOCH)
-            {
-                hash_u64(&mut model_hash, elapsed.as_nanos() as u64);
-            }
+    for shard in shards {
+        hash_str(&mut model_hash, &shard.path);
+        hash_u64(&mut model_hash, shard.mapped_len);
+        if let Some(file_len) = shard.file_len {
+            hash_u64(&mut model_hash, file_len);
+        }
+        if let Some(modified_nanos) = shard.modified_nanos {
+            hash_u64(&mut model_hash, modified_nanos);
         }
     }
     for tensor in &gguf.tensors {

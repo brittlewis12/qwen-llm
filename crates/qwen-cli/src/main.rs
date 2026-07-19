@@ -1668,7 +1668,6 @@ fn execute_single_turn_request(
     let sequence_allocation_ms = allocated.sequence_allocation_ms;
     let after_scratch_allocated = timing_enabled.then_some(allocated.after_scratch_allocated);
     let after_sequence_allocated = timing_enabled.then_some(allocated.after_sequence_allocated);
-    let model_identity = timing_enabled.then(|| loaded.snapshot_identity(&sequence));
     let forward = loaded.forward();
 
     let pipeline_cache_prefill_entry =
@@ -1796,6 +1795,7 @@ fn execute_single_turn_request(
     } else {
         0.0
     };
+    let model_identity = timing_enabled.then(|| loaded.snapshot_identity(&sequence));
     let timing_values = timing_enabled.then(|| {
         (
             process_model_ready_allocated.expect("timing sample"),

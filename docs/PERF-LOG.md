@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-19 - v0.609 Lazy Snapshot Identity
+
+Status: promoted for disposable single-turn cold load; compatibility identity
+is computed on first snapshot/cache use instead of every model load.
+
+- Temporary load-phase instrumentation measures identity hashing at
+  `17.432-20.269 ms` across six 0.8B eager arms and `18.882 ms` on one A3B arm.
+  The instrumentation and eager test knob are removed from the final diff.
+- Six same-release eager/lazy 0.8B pairs save
+  `38.1/19.6/17.5/22.7/12.4/13.3 ms` of load wall. Paired median saving is
+  `18.55 ms`; every pair clears the preregistered 10 ms fixed-wall gate. Order
+  is fixed eager-then-lazy, so this is mechanism-backed scoped evidence rather
+  than a counterbalanced universal request claim.
+- Normal disposable single-turn requests avoid the hash. Snapshot and prefix
+  cache users defer it behind `OnceLock`. Request-timing mode computes it after
+  recorded inference/request endpoints, so telemetry does not move the work
+  into TTFT; reusable JSONL may still pay it on first cache lookup.
+- Path, mapped length, file length, and mtime inputs are captured at load. Lazy
+  hashing therefore cannot combine the loaded mapping with later path metadata
+  after an atomic replacement.
+- Eager, lazy, and final captured-stat timing smokes preserve model identity
+  `563d32f3e4b3f259`, tokenizer identity `28335e4658c28625`, and output.
+- The same census prices warm 0.8B GGUF decode at about `19.7-21.2 ms`, the two
+  independent safety walks at only about `3.8-4.3 ms` together, and metallib
+  temp-file plus library load at about `1.1-1.5 ms`. Close standalone header
+  walk consolidation and temp-metallib I/O under the 10 ms gate; keep one
+  coupled `arbitrary_precision` parser experiment.
+
+Checks: workspace check, runtime test, eight prefix-cache tests, release build,
+and request-timing smoke. Adversarial review: `cx ask` session
+`019f7ca6-25bf-7fb0-a732-4461cd905db2`.
+
 ## 2026-07-19 - v0.608 A3B Parallel-Copy Admission
 
 Status: admitted by default only for authenticated disposable single-turn CLI

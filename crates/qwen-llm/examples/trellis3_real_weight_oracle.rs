@@ -101,9 +101,15 @@ fn ggml_sq_err(rows: &[f32], dtype: u32, n_per_row: usize) -> f64 {
 }
 
 fn trellis_sq_err(rot_rows: &[f32], code: &TrellisCode) -> f64 {
-    let n_threads = std::thread::available_parallelism()
-        .map(|v| v.get())
-        .unwrap_or(8);
+    // QWEN_T7_THREADS caps worker threads (co-tenant politeness).
+    let n_threads = std::env::var("QWEN_T7_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|v| v.get())
+                .unwrap_or(8)
+        });
     let groups: Vec<&[f32]> = rot_rows.chunks(256).collect();
     std::thread::scope(|scope| {
         let chunk = groups.len().div_ceil(n_threads);

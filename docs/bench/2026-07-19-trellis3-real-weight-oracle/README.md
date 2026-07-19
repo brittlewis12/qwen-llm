@@ -62,6 +62,68 @@ one GDN block and one full-attn block, shape[0] % 256 == 0):
   upgrades, each expected to favor or refine trellis, none blocking
   this verdict.
 
-## Results
+## Results — 2026-07-19
 
-(appended after the run)
+Part 1 (V2G rested A/B/A, ran pre-worktree-migration): ratios
+1.063 / 1.039 / 0.985 across three invocations; median >= 1.00, spread
+0.078 > 0.05 -> cell MEASUREMENT-UNSTABLE per the frozen rule. A live
+co-tenant agent session in the main checkout was subsequently
+identified as the probable confound; all same-invocation pairs remain
+internally valid. No promotion-grade V2G claim; parity-band evidence
+retained.
+
+Part 2 (real-weight fidelity, 9B BF16 source, niced 8 threads,
+~190 s/class): class selection note — the 6 largest qualifying classes
+were ALL FFN tensors (gate/up/down x blk.0/blk.3); attention/GDN
+classes are unexamined in this packet. Implementation note: prereg
+said "per-row sign"; implemented as per-COLUMN signs (EXL3 su-style),
+corrected before running.
+
+| method | bpw | rel-Frobenius (range over 6 classes) |
+| --- | ---: | --- |
+| Q4_K (anchor, no gate) | 4.5 | 0.0717-0.0721 |
+| trellis V1 mask/or | 3.0625 | 0.1402-0.1405 |
+| Q3_K | 3.4375 | 0.1515-0.1520 |
+| trellis V2 split | 3.0625 | 0.1557-0.1566 |
+| LM8+RHT (TQ-class) | 3.5 | 0.1700-0.1711 |
+| IQ3_XXS (no imatrix) | 3.0625 | 0.2132-0.2143 |
+
+Gate outcome: V2 <= Q3_K on 0/6 -> preregistered KILL fires for the
+V2 code at the 3.06-bpw tier. V2 <= IQ3_XXS on 6/6 (by ~27%).
+
+### Findings
+
+1. The V=2 split code's tax is EXACTLY as the synthetic oracle
+   predicted: real-weight V2/V1 rel-err ratio 1.109-1.117 (mean 1.112)
+   vs T5's Gaussian prediction 1.113. The T5 oracle is hereby
+   validated as a quantitative predictor for code-design iteration —
+   future decode-code searches can run CPU-only with confidence.
+2. V1 (canonical-class code) WINS on real weights: beats Q3_K on 6/6
+   by ~7.5% rel-err at 11% fewer bits, and byte-matched IQ3_XXS by
+   ~34%. Paired with T6's measured V1G kernel band (0.82-0.84 of Q4_K
+   BW -> 1.20-1.23x time-speedup on quantized streams), this is the
+   surviving product point of the 3-bpw tier.
+3. This pipeline is the documented LOWER BOUND for trellis quality:
+   no Hessian/LDLQ, input-side-only rotation, one fp16 scale per 256.
+   The Q4_K anchor (2x better rel-err at 1.47x bytes) shows how much
+   the K-quant sub-block affine structure buys on real weights —
+   LM8+RHT at 3.5 bpw losing to unrotated Q3_K at 3.44 bpw isolates
+   the same lesson. LDLQ + two-sided RHT + finer scale structure are
+   the named upgrades that carry published EXL3 to dPPL +0.015 at
+   4.15 bpw on this exact model family.
+
+### Verdict
+
+- V2@3.06 as a "beat Q3_K" tier: KILLED (preregistered gate). Remains
+  the fastest measured decode (parity-band with Q4_K BW) and better
+  than byte-matched IQ3_XXS; usable only where that tradeoff is named.
+- V1@3.06: quality-passes the same test 6/6 (recorded; V1 was gated
+  out of prereg by its T6 kernel kill — that kill's reopen condition,
+  >= 2 ops/weight removed, now carries the whole tier's upside).
+- The decisive next experiments, in order of information value:
+  (a) V=2 code-design search ON THE VALIDATED SYNTHETIC ORACLE for a
+  code with <= 1.03x V1 error at V2 kernel cost (the tax is the only
+  thing between the fast kernel and the quality pass);
+  (b) LDLQ/Hessian phase (the EXL3 recipe) — lifts every trellis row;
+  (c) attention/GDN class coverage;
+  (d) K=4 tier probe vs Q4_K.

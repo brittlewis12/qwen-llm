@@ -634,94 +634,113 @@ eight-simdgroup cooperative QK/softmax/PV shape, while V4's sibling rereads are
 predominantly cache-served. Close direct-F16 C/NWG/thread-count, barrier,
 staging, format, and score-ledger rescues; no 131K row follows.
 
-1. **A3B default admission — completed v0.608**: the authenticated disposable
-   single-turn CLI path now selects the v0.602 candidate by default. Reusable
-   runtime loads and JSONL remain force-only. Explicit `=0` rolls back, every
-   storage or representation override wins over Auto, and unsupported hosts or
-   assets fall back before allocation. The accepted product trade is
-   `1276.264 ms` paired first-byte saving for `+4.768 ms` first prefill,
-   `+5.481 ms` model-ready complete request, and `+22.159 ms` post-output exit.
-   Do not rerun the performance packet.
-2. **A10B native-embedding cold packet**: omitted cold-path adjudication for an
-   implemented bit-exact row representation. v0.538 preserves the exact 128-token
-   greedy stream, records loaded median `pp512/tg128` ratios of
-   `1.00004/1.00106x`, and removes `2,240,839,680` device-allocation bytes. It also
-   retains prefill run-order/first-run variance and makes no full-state, TTFT,
-   warm-throughput win, or total-memory claim. Run one bounded balanced packet only
-   if the local heavy anchor remains deployment-relevant. Require exact output, a
-   loaded 1% prefill/decode guard, and a cold gain above both packet MDE and the
-   cheap-exact 2-3% threshold. Byte removal alone predicts no latency. Difficulty S,
-   implementation belief high, latency belief low-medium, cold prize unknown.
-3. **Split-A10B exact-topology parallel-copy floor**: potentially the largest
-   remaining process-cold byte-population prize if the heavy anchor remains a real
-   deployment target. Prefer to adjudicate native embedding first because it fixes
-   the intended token-table residency, but this is sequencing rather than a logical
-   dependency: a floor may force native embedding and freeze that inventory. Run a
-   topology-preserving materialization floor before product code; require at least
-   1.5 seconds saved, exact per-shard source coverage, no positive Compressions,
-   Swapouts, or swap-occupancy growth, and complete Pageout and compressor-gauge
-   diagnostics. Product work remains conditional on that floor and loaded parity.
-   Difficulty M-L, belief medium, prize very high but deployment relevance lower
-   than A3B/27B.
-4. **Grammar run and admissible-row oracle**: cheapest new work-substitution test.
-   Under a declared grammar, an isolated forced token still requires a complete
-   target state transition. Only a maximal run of uniquely admissible token IDs can
-   be packed before reading an intermediate logit. Replay real structured traces
-   through the production tokenizer and record non-overlapping run counts `H_r`,
-   baseline target transitions, and admissible vocabulary rows at every terminal
-   branch. Use savings `sum(H_r * (r*C1-Cpack(r))) - overhead`; require at least
-   `T0/11` for a 1.10x request. With current N8 cost, runs below four are not even
-   locally positive. Grammar-restricted lm_head rows must preserve the declared
-   constrained-output semantics and target state; this is not equivalence to
-   unconstrained generation. Price both effects in one artifact. Difficulty S
-   oracle/M packet, opportunity belief medium-low until traces exist.
-5. **True-long attention new-premise gate**: inactive after v0.607. Attention
-   remains the only context-scaling term and reaches 46.2% of A3B's 131K token,
-   but no current named exact body has charged margin. Logical read-once,
-   compressed/split-plane KV, scalar or direct-F16 matrix QK, TGM staging,
-   partition packing, C/NWG/thread-count rescues, and score-ledger splitting are
-   closed. Do not spend GPU time until a source-free design changes ownership,
-   scheduling, residency, or physical bytes and places its zero-cost ceiling
-   inside `>=10%` medium/breadth, `>=15%` 131K main, and `>=6%` whole-token
-   gates. Prize remains high; current implementation belief is low.
-6. **MTPLX asset/contract decomposition**: highest information-value speculative
-   decode move, not same-weight parity or current process-cold priority.
-   Pin the local MTPLX runtime and published trunk, MTP sidecar, draft-head,
-   tokenizer, and manifest; run matched M4 raw-prompt AR/D3/D7 rows with phase and
-   accepted-by-depth output. Published greedy D3 implies only `Q~3.765`, so D3
-   cannot authorize qwen D7. A cross-trunk offline bridge must run the candidate
-   sidecar against qwen post-norm hidden/token traces and predict a passing request
-   before affine Metal work. Difficulty S for MTPLX packet, M for bridge; belief
-   medium, upside potentially material.
-7. **Materially different A3B state-preserving verifier oracle**: strategic
-   speculative unlock, not a rerun or generic packed-kernel wiring task. Retain the
-   current physical-N8 implementation only as the known-negative state control.
-   Any new candidate must name a state organization that reproduces serial
-   recurrent, convolution, KV, logits, and multi-transition continuation state
-   before timing. Serial-order packing needs a kernel-level dispatch/memory
-   mechanism; WY must be one-dispatch-per-layer or materially matmul-shaped under a
-   numerical contract; checkpoint fusion and sparse suffix replay remain closed.
-   Approximate verification stays in the approximate lane. No charged product work
-   follows without state passage and at least 5% projected warm-decode movement.
-   Difficulty M-L, belief low-medium, conditional prize high.
-8. **Certified lm_head screening oracle**: exact selected-token work removal, not
-   bitwise full-logit equivalence. Before k-means, precompute outward-rounded
-   per-row/per-256-dimension Q6 block norms. Give the oracle the true production
-   winning logit, reveal blocks in query-global hidden-norm order, and prune only
-   when a conservative unseen-dot bound cannot win with tie handling. Kill unless
-   every primary capture safely prunes at least 80% of rows while touching at most
-   30% of baseline bytes after metadata. Only then add production accumulation
-   error and require about 70% charged head-wall removal. Difficulty S-M oracle,
-   belief low, but especially relevant to repeated draft heads.
-9. **Adaptive MoE top-k preflight**: low-ceiling approximate fallback, not a cheap
-   existing replay. Router mass is diffuse (`avg_top1 ~0.22`, mass beyond top-2
-   `~0.62`), and ideal k8-to-k6 removal gives only about `4.55%` throughput before
-   overhead or quality loss. Name an end-to-end quality replay first; k5 or average
-   below about 5.8 experts must pass quality and project `>=5%` charged movement.
-   Difficulty M, belief low.
-10. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
-   true-long decode, but explicitly input-changing. Prefix caching is a separate
-   exact reuse specialization and does not rank for fresh serial prompts.
+The active Trellis3 lane is the conditional model-changing leader, not an exact
+engine result. Its T=256 V2G floor is near Q4_K bandwidth but carries a
+source-coding quality tax and cross-session drift caveat. V1 is the stronger
+quality point but misses the current kernel hold gate. Real-weight PTQ must
+clear before either synthetic quality or kernel floors become a model, phase,
+or request speedup claim. If that gate passes, rerank it above the exact cold
+queue because it changes resident and streamed bytes across load, prefill, and
+decode.
+
+The July systems-audit pass promotes only candidates that attack measured work.
+It does not reopen generic Metal or compiler folklore. Dense 27B already
+measures about `98.7%` GPU-busy with `~0.20 ms` host encode against `~42.14 ms`
+GPU time; double-buffered submission measured only `~0.3%`, and dispatch
+boundaries are about `2-3 us`. That is existing falsification for ICB,
+argument-buffer churn, completed-handler pipelining, unretained references,
+deep CPU queueing, and broad hazard-mode surgery as primary work in the current
+hot decode graph. Prompt scratch already has phase-disjoint overlays, the Metal
+source is compiled ahead of runtime, and untracked retained storage was flat.
+The narrow 0.8B PSO cell costs only about `1.8-2.2 ms`; do not generalize that
+number to every model or first-use path. Runtime metallib temp-file write/load
+is still unpriced. Residency sets only match explicit touch; that closes the API
+choice, not the broader cold-residency problem.
+
+Likewise, `target-cpu`, PGO, allocator swaps, QoS, CPU SIMD, and Accelerate are
+deferred, not falsified: first require a host profile that puts at least 2-3% of
+first byte in their scope. BOLT does not target Mach-O. `MTLIO`, broad
+`MADV_WILLNEED`, and `F_NOCACHE` are complexity-deferred because cache-warm
+file-to-Metal behavior is unmeasured, not because a storage-cold ceiling closes
+them. Heaps, superpages, right-sized attention partials, and dead-scratch
+deletion are memory work until pressure or wall attribution says otherwise.
+Durable snapshots, paged KV, COW state, and a resident daemon remain
+reuse/serving work rather than fresh-prompt acceleration.
+
+1. **Topology-preserving loader I/O ladder**: largest immediate fresh-process
+   prize after v0.608. First sweep worker count and chunk size against the
+   frozen four-worker CPU baseline; v0.599 did not isolate those terms. Then
+   wrap the mapped shard as a transient Metal source and batch GPU blits into
+   the proven independent exact-sized destinations. A floor must preserve
+   exact bytes/topology and save at least `112 ms` candidate-ready: 15% of
+   `~748 ms`, projecting about 9% of v0.602 first byte. Full state and loaded
+   parity belong to a later integrated pilot, not the primitive gate. Test
+   write-combined as a separate
+   CPU-copy arm; use `pread` after blit. `MTLIO` remains complexity-deferred.
+   Belief medium, difficulty M, possible prize hundreds of milliseconds on A3B.
+2. **Coupled cold CPU census and work removal**: bracket all GGUF passes,
+   snapshot identity, serde numeric allocations, and runtime metallib write/load
+   in one artifact. Both workspace and sibling GGUF manifests enable
+   `serde_json/arbitrary_precision`, so 248,320 token-type integers become
+   string-backed `Value`s. Identity also traverses tensor descriptors and large
+   tokenizer metadata and formats numbers. Price a 2x2: feature on/off by eager
+   identity on/lazy. Preserve semantic metadata and tokenizer output; explicitly
+   version, preserve, or canonicalize identity rather than assuming text hashes
+   stay fixed. Require at least 10 ms broad fixed wall or 2% short-model first
+   byte. Only then consider typed packed metadata. Belief medium-high on work
+   removal, medium on wall, difficulty S-M across two repos.
+3. **Header consolidation after attribution**: the GGUF header is walked three
+   times, but this is independent of profitable lazy identity. Consolidate only
+   if its measured component clears the cheap-exact gate while preserving
+   duplicate and offset checks. The current separate opens do not prove inode
+   identity; either add that check or eliminate the need. Belief medium,
+   difficulty S-M, broad fixed-cost prize unknown.
+4. **A10B cold residency plus split-copy floor**: only if the heavy anchor
+   remains deployment-relevant. First adjudicate the already bit-exact native
+   embedding, which removes 2.24 GB. Then freeze that inventory and require at
+   least 1.5 seconds from a three-shard topology-preserving parallel-copy floor
+   before product code. Belief high on memory, medium on copy wall, difficulty
+   M-L; deployment relevance is below A3B and dense 27B. If relevant, this moves
+   ahead of GPU argmax and reuses the winning A3B population primitive.
+5. **Production GPU argmax contract**: three product paths still copy 993,280
+   bytes, about 970 KiB, and scan 248,320 values on CPU despite the measured GPU
+   path. CPU product semantics choose the highest equal index and order NaNs;
+   current GPU semantics choose the lowest finite tie and ignore NaNs. Preserve
+   or deliberately version that contract, then test all three call sites.
+   Existing MoE gain is only `1.0-1.5%` and dense is neutral, so authorize an
+   explicit low-complexity 1% gate rather than invoking the normal 2-3% bar.
+   Belief high on small work removal, difficulty S-M.
+6. **Grammar run and admissible-row oracle**: replay real structured traces and
+   count maximal uniquely forced tokenizer-token runs plus branch vocabulary
+   rows. Use `sum(H_r*(r*C1-Cpack(r))) - overhead`; require `T0/11` for a 1.10x
+   request. Runs below four are not locally positive at current N8 cost.
+   Contract-exact, belief medium-low until traces exist, difficulty S oracle/M
+   product.
+7. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+   true-long decode, but explicitly input-changing and quality-gated. Prefix
+   caching is a separate reuse specialization and does not rank here.
+8. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
+   131K token, but v0.607 closes the current cooperative read-once organization.
+   Do no GPU work until a source-free design changes ownership, scheduling,
+   residency, or physical bytes and clears the existing medium, breadth, 131K,
+   and whole-token ceilings. Prize high, implementation belief low.
+9. **MTPLX asset/contract decomposition**: pin the external runtime and compare
+   matched M4 AR/D3/D7 acceptance by depth. A cross-trunk sidecar bridge must
+   predict a passing qwen request before affine Metal work. This is high
+   information value for speculative decode, but below fresh-process work now.
+   Belief medium, difficulty S packet/M bridge.
+10. **Materially different A3B state-preserving verifier**: preserve serial
+    recurrence, convolution, KV, logits, and continuation state before timing.
+    Keep the failed physical-N8 implementation only as a negative control.
+    Require state passage and at least 5% projected decode movement. Conditional
+    prize high, belief low-medium, difficulty M-L.
+
+Below the line: exact lm_head screening remains an optimistic cheap oracle only
+after grammar rows; kill unless it prunes 80% of rows while touching at most
+30% of bytes. Adaptive top-k stays quality-blocked with only a `4.55%` ideal
+k8-to-k6 ceiling. Repack-on-load needs a named current-kernel instruction
+attribution; global allocators and tokenizer automata come only after deleting
+known metadata allocation work.
 
 Blocked cold follow-ons remain conditional. v0.602 satisfies the first prerequisite
 for async retained-to-copied promotion, but command-buffer-safe cutover, copy
@@ -759,9 +778,9 @@ not merge objective lanes; every result must retain its boundary label.
 
 ### Active attack sequence
 
-This is the dependency-aware execution order for the force-ranked entries above,
-not a second ranking. Re-rank conditional breadth after the A3B loader result rather
-than inserting it ahead of independent work prospectively.
+This is the dependency-aware execution order for the force-ranked entries
+above, not a second ranking. CPU-only work may advance while a foreign GPU lease
+is live, but timed Metal work remains serial.
 
 Treat v0.593 as a measured narrow 27B disposable-process optimization, v0.594 as
 broad force-only retained correctness, and v0.596 as the closure of current
@@ -771,42 +790,33 @@ automatic retained use stay copied without separate evidence.
 1. v0.608 completes scoped A3B admission without repeating performance.
    Preserve the exact profile/host/single-turn scope, explicit rollback,
    override priority, and force-only reusable-model policy.
-2. Run one A10B native-embedding process-cold packet if the heavy anchor remains a
-   deployment target. Stop after one valid adjudication; do not infer latency from
-   the already measured 2.24 GB allocation reduction. Apply the ranked entry's
-   exact-output, loaded-noninferiority, and MDE gates.
-3. If A10B deployment relevance justifies it, prefer item 2 before one three-shard
-   exact-topology parallel-copy floor; alternatively force native embedding in the
-   floor and freeze that inventory. Stop before loader code unless it saves at
-   least 1.5 seconds without topology drift or positive Compressions, Swapouts, or
-   swap-occupancy growth. Record cumulative Pageouts and compressor gauges as
-   diagnostics rather than unilateral vetoes.
-4. With no production code, run one structured-trace grammar artifact:
-   maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
-   unless savings-weighted request arithmetic clears 1.10x.
-5. v0.607 completes the admitted true-long body and kills it at 32K. Do not run
-   131K or a C/NWG/thread-count, barrier, format, staging, or split-ledger rescue.
-   Return only with a source-free new-premise ceiling inside every recorded gate.
-6. Run the MTPLX M4 AR/D3/D7 decomposition from v0.587 before downloading or
-   training another drafter or writing qwen affine kernels. If D7 is promising,
-   run the cross-trunk sidecar acceptance bridge and apply the total-request
-   equation.
-7. Keep A3B physical-N8 work behind one materially different full-state candidate.
-   The current implementation remains a negative control, not a rerun target.
-8. Run the optimistic block-norm lm_head oracle only after the cheaper grammar-row
-   artifact.
-9. Keep async promotion secondary despite v0.602 satisfying same-topology product
-    transfer. Stop at the first measured copy-contention or unsafe cutover
-    requirement.
-10. Keep top-k behind a named quality replay and prompt reduction explicitly
-    input-changing.
-11. Do not run tensor-class topology attribution for this result. Same-topology
-    parallel copy is fast and loaded-neutral; the discriminator already answered.
-12. Do not resume current retained-view retunes, broad external drafting, packed
-    MTP history, generic decode-storage diagnostics, matrix/compressed attention,
-    sparse retrieval for this fixture, same-body Q8, routed-tail work, generic packed
-    GDN, GPU deep queueing, model-funnel refresh, mixed quant, broad prompt lookup,
-    or local retuning without their explicit reopen conditions.
+2. Run one CPU-only cold phase census while GPU work is occupied. Measure the
+   2x2 `arbitrary_precision` by eager/lazy-identity matrix, and include metallib
+   write/load. Do not begin typed metadata work unless a primitive clears.
+3. When the GPU is free, sweep CPU worker/chunk shape, then run one transient
+   mmap-source to independent-destination blit floor. Stop below `112 ms` ready
+   saving. Keep write-combined separate and `pread` after blit.
+4. Consolidate GGUF header passes only after their independent census term
+   clears. Preserve duplicate/offset checks and resolve same-file identity.
+5. Decide whether A10B is a current target. If yes, run native embedding and its
+   split-copy floor before argmax; stop below the 2-3% and 1.5-second gates.
+6. Reconcile CPU/GPU argmax tie and NaN semantics, then wire all three product
+   greedy paths behind its explicit 1% low-complexity gate.
+7. Run the structured-trace grammar artifact before engine work. Stop unless the
+   savings-weighted request arithmetic clears 1.10x.
+8. Keep prompt reduction explicitly input-changing. Keep true-long attention
+   closed until a source-free new premise clears every existing ceiling.
+9. Run MTPLX AR/D3/D7 before new drafter or affine work. Keep A3B physical-N8
+   behind one materially different full-state candidate.
+10. Run the block-norm lm_head oracle only after grammar rows. Keep top-k behind
+    a named quality replay.
+11. Do not run tensor-class topology attribution, generic command-graph surgery,
+    compiler/allocator folklore, or storage-cold APIs without a new attribution
+    that raises their whole-objective ceiling.
+12. Do not resume retained-view retunes, broad external drafting, packed MTP
+    history, matrix/compressed attention, sparse retrieval for this fixture,
+    same-body Q8, routed-tail work, generic packed GDN, GPU deep queueing, mixed
+    quant, broad prompt lookup, or local retuning without explicit reopen gates.
 
 ### Decisive gates
 

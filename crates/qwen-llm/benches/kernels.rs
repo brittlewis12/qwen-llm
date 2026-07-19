@@ -17,7 +17,9 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
-    MetalContext, MetalTensor, bench_q4_k_chained, bench_q4_k_mat_mat_chained, bench_q6_k_chained,
+    MetalContext, MetalTensor, Trellis3Variant, bench_q4_k_chained, bench_q4_k_mat_mat_chained,
+    bench_q6_k_chained, bench_trellis3_chained, trellis3_compressed_bytes, trellis3_synthetic,
+    trellis3_upload,
 };
 use qwen_llm::tensor::{GgmlType, TensorDesc};
 
@@ -307,10 +309,105 @@ fn bench_q4k_mat_mat(c: &mut Criterion) {
     group.finish();
 }
 
+/// Trellis3 decode floor (docs/bench/2026-07-19-trellis3-gemv-floor/).
+///
+/// Synthetic buffers (no model file needed). Same harness discipline as
+/// `q4_k mat_vec`: persistent tensors, single + chained64 regimes.
+/// Throughput charges compressed weight+scale bytes; the Lut8x2 device
+/// LUT (1 KB) is deliberately uncharged and shows up as reduced achieved
+/// GB/s instead.
+fn bench_trellis3_mat_vec(c: &mut Criterion) {
+    let ctx = match MetalContext::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[bench] no metal context: {e}");
+            return;
+        }
+    };
+    // Primary cell: ffn_gate class (5120 x 17408). Diagnostic: transpose
+    // class (17408 x 5120, ffn_down-like).
+    // embed_t3_27b (476 MB) is an SLC-uncacheable control row: the two
+    // production shapes' 33.4 MB buffers could partially ride the ~48 MB
+    // SLC across chained dispatches, so the big row guards the primary
+    // result against cache inflation (diagnostic, not the gate cell).
+    let shapes: [(&str, usize, usize); 3] = [
+        ("ffn_gate_27b", 5120, 17408),
+        ("ffn_down_t_27b", 17408, 5120),
+        ("embed_t3_27b", 5120, 248320),
+    ];
+    let variants = [
+        Trellis3Variant::ThreeInst,
+        Trellis3Variant::ThreeInstV2,
+        Trellis3Variant::Lut8x2,
+        Trellis3Variant::HybV2,
+    ];
+
+    let mut group = c.benchmark_group("trellis3 mat_vec");
+    for (label, n_in, n_out) in shapes {
+        let syn = trellis3_synthetic(n_in, n_out, 0xF10D);
+        let (w_t, s_t, l_t) = trellis3_upload(&ctx, &syn).expect("upload");
+        let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x");
+        let y_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y");
+        let bytes = trellis3_compressed_bytes(n_in, n_out);
+
+        for variant in variants {
+            let row = format!("{}/{label}", variant.label());
+            group.throughput(Throughput::Bytes(bytes));
+            group.bench_with_input(BenchmarkId::new("single", &row), &row, |b, _| {
+                b.iter(|| {
+                    bench_trellis3_chained(
+                        &ctx,
+                        variant,
+                        &w_t,
+                        &s_t,
+                        Some(&l_t),
+                        &x_t,
+                        &y_t,
+                        n_in,
+                        n_out,
+                        1,
+                    )
+                    .expect("dispatch");
+                    black_box(&y_t);
+                });
+            });
+
+            group.throughput(Throughput::Bytes(bytes * 64));
+            group.bench_with_input(BenchmarkId::new("chained64", &row), &row, |b, _| {
+                b.iter(|| {
+                    bench_trellis3_chained(
+                        &ctx,
+                        variant,
+                        &w_t,
+                        &s_t,
+                        Some(&l_t),
+                        &x_t,
+                        &y_t,
+                        n_in,
+                        n_out,
+                        64,
+                    )
+                    .expect("chained");
+                    black_box(&y_t);
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_q4k_mat_vec,
     bench_q6k_mat_vec,
-    bench_q4k_mat_mat
+    bench_q4k_mat_mat,
+    bench_trellis3_mat_vec
 );
 criterion_main!(benches);

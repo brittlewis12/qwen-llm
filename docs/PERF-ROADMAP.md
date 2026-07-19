@@ -661,22 +661,15 @@ Keep the force path non-authoritative and do not extend this harness chain.
    constrained-output semantics and target state; this is not equivalence to
    unconstrained generation. Price both effects in one artifact. Difficulty S
    oracle/M packet, opportunity belief medium-low until traces exist.
-5. **27B Q4_K FFN-gate pipelining preflight**: candidate-tied prefill calibration,
-   not a generic decomposition or promised kernel. Freeze the production 27B Q4_K
-   `ffn_gate` shape `[5120,17408]` at `P=1024`, with `P=4096` as the guard. The sole
-   candidate is a two-slab threadgroup schedule that prepares K slab `i+1` before
-   consuming slab `i`, while preserving current Q4_K-to-F16 values and FP32 MMA K
-   order. First prove from current-kernel source/disassembly that lowering does not
-   already overlap the work. Use conservative resource arithmetic to show that the
-   candidate's added threadgroup/register state can preserve occupancy, then confirm
-   it from candidate disassembly after compilation. Require a zero-cost primitive
-   ceiling of at least 1.10x and at least 5% charged whole-prefill projection before
-   building fixed-grid controls for current, staging/dequant-only, MMA-only, and
-   complete candidate work. Do not remove simdgroup barriers, repack K-quants, or
-   infer additive costs from non-isomorphic timings; v0.485/v0.486 keep those
-   neighborhoods closed.
-   Exactness is numerical relative to the current mat-mat path. Difficulty M,
-   information belief medium, gain belief low-medium.
+5. **True-long attention ownership/body redesign**: highest user-greenlit pure
+   kernel branch after v0.606 closes Q4_K activation pipelining. Attention is the
+   only context-scaling term and reaches 46.2% of A3B's 131K token, with the
+   measured low-occupancy/under-stream signature. Start from the immutable
+   32K/131K capture and name one body that changes ownership or utilization; do
+   not retune V4, revive the killed scalar/matrix bodies, or assume compressed KV
+   wins. Require `>=10%` actual-shape primitive gain across medium/breadth guards,
+   then `>=15%` main-body and `>=6%` whole-token gain at 131K with no material 32K
+   regression. Difficulty L-XL, belief low-medium, true-long prize high.
 6. **MTPLX asset/contract decomposition**: highest information-value speculative
    decode move, not same-weight parity or current process-cold priority.
    Pin the local MTPLX runtime and published trunk, MTP sidecar, draft-head,
@@ -780,9 +773,9 @@ automatic retained use stay copied without separate evidence.
 4. With no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-5. Run only the candidate-tied 27B FFN-gate pipelining preflight above. Stop before
-   kernels unless its occupancy, 1.10x primitive-ceiling, and 5% charged
-   whole-prefill gates all clear.
+5. Design one materially different true-long attention body against the immutable
+   32K/131K capture. Reject it on ownership/resource arithmetic before kernels if
+   it cannot plausibly clear the ranked entry's primitive and whole-token gates.
 6. Run the MTPLX M4 AR/D3/D7 decomposition from v0.587 before downloading or
    training another drafter or writing qwen affine kernels. If D7 is promising,
    run the cross-trunk sidecar acceptance bridge and apply the total-request

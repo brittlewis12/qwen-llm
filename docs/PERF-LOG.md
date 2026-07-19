@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-18 - v0.606 Q4_K F16-Activation Floor
+
+Status: exact actual-shape falsifier killed and removed; advance to the
+user-greenlit true-long attention design.
+
+- Production Q4_K N64 at `[5120,17408]` measures `13.80553/55.06145 ms` for
+  N1024/N4096, or `13.22195/13.26054` nominal TFLOP/s, with only
+  `0.00384/0.00520 ms` sample SD.
+- A timed pp1024 trace places gate/up at `884.04/883.66 ms`, together 43.795% of
+  traced GPU and 40.754% of `4337.494 ms` whole prefill. A charged pair must
+  improve about `1.133x` to project `1.05x` whole prefill.
+- Naive A-only/full ping-pong needs 12/16 KiB versus the current 8 KiB dynamic
+  threadgroup memory, lowering its 32 KiB residency ceiling from four groups to
+  two. Current source already computes next-A values before the reuse barrier;
+  full ping-pong can advance stores, not all dequantization.
+- The bounded sidecar packs F32 activations to F16 once, then tests staged and
+  direct-device N64 consumers. Both are bit-exact against production on real
+  `blk.0.ffn_gate.weight` at N64 and N1024.
+- Staged F16 improves one kernel `13.80711 -> 13.31596 ms` (`1.03688x`). Charged
+  pack plus gate/up improves `27.61210 -> 26.69917 ms`, only `1.03419x`; pack is
+  `0.05895 ms`. The whole-prefill projection is just `1.01365x`.
+- Direct F16 regresses: one kernel is `14.15607 ms` (`0.97507x`), and the charged
+  pair is `28.37748 ms` (`0.97304x`). Removing `sb` loses valuable
+  cross-simdgroup B sharing while duplicating cache reads.
+- The experiment prices repeated B conversion/staging at only about 3.4% of the
+  kernel. A dequant/MMA remains dominant, and the residual A-store/barrier tail
+  cannot credibly bridge `1.034x -> 1.133x`. Do not build A ping-pong or widen to
+  P4096/model rows. The default-off source sidecar was removed.
+
+Summary: `docs/bench/2026-07-18-v0606-q4-f16-activation-floor/README.md`.
+Adversarial design review: `cx ask` session
+`019f77aa-b0e3-7f11-ae13-1c9d6b45ac26`.
+
 ## 2026-07-18 - v0.605 Dense-27B Parallel-Copied Loader Successor
 
 Status: sealed loaded-stage inconclusive; all 12 loaded children complete, fresh

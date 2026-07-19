@@ -192,6 +192,278 @@ kernel void kernel_mat_vec_trellis3_3inst_v2_f32(
 }
 
 // ---------------------------------------------------------------------------
+// T=256 group-ring variants (T6, docs/bench/2026-07-19-trellis3g-t256-kernels/).
+//
+// Same byte layout as the span variants (24 uint32 + fp16 scale per
+// 256-weight group); only window semantics change: states are 16-bit
+// windows over the GROUP's 768-bit ring (the T5 quality design point).
+// A lane covering weights [32*it, 32*it+32) loads a 4-word local frame
+// {prev word | its own 3 words}; window start for weight l is local bit
+// p = 3l + 19 (V=1) / pair t is p = 6t + 22 (V=2), compile-time under
+// full unroll. Lane 0's prev word is the group's word 23 (ring wrap).
+
+inline uint t3g_frame_extract16(uint wa, uint w0, uint w1, uint w2, uint p) {
+    const uint a = p >> 5;   // 0..3 (a==3 only with s<16 for our p range)
+    const uint s = p & 31u;
+    const uint lo = (a == 0) ? wa : ((a == 1) ? w0 : ((a == 2) ? w1 : w2));
+    const uint hi = (a == 0) ? w0 : ((a == 1) ? w1 : ((a == 2) ? w2 : 0u));
+    const uint v = (s == 0) ? lo : ((lo >> s) | (hi << (32u - s)));
+    return v & 0xFFFFu;
+}
+
+kernel void kernel_mat_vec_trellis3g_3inst_f32(
+        constant trellis3_args & args   [[buffer(0)]],
+        device const uchar     * weight [[buffer(1)]],
+        device const half      * scales [[buffer(2)]],
+        device const float     * x      [[buffer(3)]],
+        device       float     * y      [[buffer(4)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const ushort ix = tiisg / 8;
+    const ushort it = tiisg % 8;
+
+    const uint nb = args.n_in / T3_GROUP_W;
+    const uint first_row = (tgpig * NSG_T3 + sgitg) * NR0_T3;
+    if (first_row >= args.n_out) return;
+    const ulong row_stride = (ulong)nb * T3_GROUP_BYTES;
+
+    float sumf[NR0_T3] = {0.f, 0.f};
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        device const float * yp = x + ib * T3_GROUP_W + (uint)it * 32u;
+        half yh[32];
+#pragma clang loop unroll(full)
+        for (short i = 0; i < 32; ++i) {
+            yh[i] = (half)yp[i];
+        }
+
+        const uint base = 3u * (uint)it;
+        for (short row = 0; row < NR0_T3; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const uint * gw = (device const uint *)(
+                weight + (first_row + row) * row_stride
+                       + (ulong)ib * T3_GROUP_BYTES);
+            const uint wa = gw[it == 0 ? 23u : base - 1u];
+            const uint w0 = gw[base + 0u];
+            const uint w1 = gw[base + 1u];
+            const uint w2 = gw[base + 2u];
+
+            half acc = 0.0h;
+#pragma clang loop unroll(full)
+            for (uint l = 0; l < 32; ++l) {
+                const uint p  = 3u * l + 19u;
+                const uint st = t3g_frame_extract16(wa, w0, w1, w2, p);
+                const uint X  = st * T3_LCG_A + T3_LCG_B;
+                const uint hb = (X & T3_MASK) | T3_FIXED;
+                const half2 h = as_type<half2>(hb);
+                acc = fma((half)(h.x + h.y), yh[l], acc);
+            }
+            const half sc = scales[(first_row + row) * nb + ib];
+            sumf[row] = fma((float)sc, (float)acc, sumf[row]);
+        }
+    }
+
+    for (short row = 0; row < NR0_T3; ++row) {
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0 && first_row + row < args.n_out) {
+            y[first_row + row] = total;
+        }
+    }
+}
+
+// Tuning iteration 1 (T6): NSG=4 occupancy variant of the V1 group-ring
+// kernel — Apple9 overlaps int/FP16/FP32 pipes across resident
+// simdgroups, so doubling simdgroups per threadgroup targets the
+// decode-latency exposure of the per-weight code.
+kernel void kernel_mat_vec_trellis3g_3inst_nsg4_f32(
+        constant trellis3_args & args   [[buffer(0)]],
+        device const uchar     * weight [[buffer(1)]],
+        device const half      * scales [[buffer(2)]],
+        device const float     * x      [[buffer(3)]],
+        device       float     * y      [[buffer(4)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const ushort ix = tiisg / 8;
+    const ushort it = tiisg % 8;
+
+    const uint nb = args.n_in / T3_GROUP_W;
+    const uint first_row = (tgpig * 4u + sgitg) * NR0_T3;
+    if (first_row >= args.n_out) return;
+    const ulong row_stride = (ulong)nb * T3_GROUP_BYTES;
+
+    float sumf[NR0_T3] = {0.f, 0.f};
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        device const float * yp = x + ib * T3_GROUP_W + (uint)it * 32u;
+        half yh[32];
+#pragma clang loop unroll(full)
+        for (short i = 0; i < 32; ++i) {
+            yh[i] = (half)yp[i];
+        }
+
+        const uint base = 3u * (uint)it;
+        for (short row = 0; row < NR0_T3; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const uint * gw = (device const uint *)(
+                weight + (first_row + row) * row_stride
+                       + (ulong)ib * T3_GROUP_BYTES);
+            const uint wa = gw[it == 0 ? 23u : base - 1u];
+            const uint w0 = gw[base + 0u];
+            const uint w1 = gw[base + 1u];
+            const uint w2 = gw[base + 2u];
+
+            half acc = 0.0h;
+#pragma clang loop unroll(full)
+            for (uint l = 0; l < 32; ++l) {
+                const uint p  = 3u * l + 19u;
+                const uint st = t3g_frame_extract16(wa, w0, w1, w2, p);
+                const uint X  = st * T3_LCG_A + T3_LCG_B;
+                const uint hb = (X & T3_MASK) | T3_FIXED;
+                const half2 h = as_type<half2>(hb);
+                acc = fma((half)(h.x + h.y), yh[l], acc);
+            }
+            const half sc = scales[(first_row + row) * nb + ib];
+            sumf[row] = fma((float)sc, (float)acc, sumf[row]);
+        }
+    }
+
+    for (short row = 0; row < NR0_T3; ++row) {
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0 && first_row + row < args.n_out) {
+            y[first_row + row] = total;
+        }
+    }
+}
+
+// Tuning iteration 3 (T6): NR0=4 row-ILP variant of the V1 group-ring
+// kernel — four independent per-row decode chains per lane hide integer
+// latency; y conversion amortizes over 4 rows. NSG=2.
+kernel void kernel_mat_vec_trellis3g_3inst_nr4_f32(
+        constant trellis3_args & args   [[buffer(0)]],
+        device const uchar     * weight [[buffer(1)]],
+        device const half      * scales [[buffer(2)]],
+        device const float     * x      [[buffer(3)]],
+        device       float     * y      [[buffer(4)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const ushort ix = tiisg / 8;
+    const ushort it = tiisg % 8;
+
+    const uint nb = args.n_in / T3_GROUP_W;
+    const uint first_row = (tgpig * NSG_T3 + sgitg) * 4u;
+    if (first_row >= args.n_out) return;
+    const ulong row_stride = (ulong)nb * T3_GROUP_BYTES;
+
+    float sumf[4] = {0.f, 0.f, 0.f, 0.f};
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        device const float * yp = x + ib * T3_GROUP_W + (uint)it * 32u;
+        half yh[32];
+#pragma clang loop unroll(full)
+        for (short i = 0; i < 32; ++i) {
+            yh[i] = (half)yp[i];
+        }
+
+        const uint base = 3u * (uint)it;
+        for (short row = 0; row < 4; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const uint * gw = (device const uint *)(
+                weight + (first_row + row) * row_stride
+                       + (ulong)ib * T3_GROUP_BYTES);
+            const uint wa = gw[it == 0 ? 23u : base - 1u];
+            const uint w0 = gw[base + 0u];
+            const uint w1 = gw[base + 1u];
+            const uint w2 = gw[base + 2u];
+
+            half acc = 0.0h;
+#pragma clang loop unroll(full)
+            for (uint l = 0; l < 32; ++l) {
+                const uint p  = 3u * l + 19u;
+                const uint st = t3g_frame_extract16(wa, w0, w1, w2, p);
+                const uint X  = st * T3_LCG_A + T3_LCG_B;
+                const uint hb = (X & T3_MASK) | T3_FIXED;
+                const half2 h = as_type<half2>(hb);
+                acc = fma((half)(h.x + h.y), yh[l], acc);
+            }
+            const half sc = scales[(first_row + row) * nb + ib];
+            sumf[row] = fma((float)sc, (float)acc, sumf[row]);
+        }
+    }
+
+    for (short row = 0; row < 4; ++row) {
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0 && first_row + row < args.n_out) {
+            y[first_row + row] = total;
+        }
+    }
+}
+
+kernel void kernel_mat_vec_trellis3g_3inst_v2_f32(
+        constant trellis3_args & args   [[buffer(0)]],
+        device const uchar     * weight [[buffer(1)]],
+        device const half      * scales [[buffer(2)]],
+        device const float     * x      [[buffer(3)]],
+        device       float     * y      [[buffer(4)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const ushort ix = tiisg / 8;
+    const ushort it = tiisg % 8;
+
+    const uint nb = args.n_in / T3_GROUP_W;
+    const uint first_row = (tgpig * NSG_T3 + sgitg) * NR0_T3;
+    if (first_row >= args.n_out) return;
+    const ulong row_stride = (ulong)nb * T3_GROUP_BYTES;
+
+    float sumf[NR0_T3] = {0.f, 0.f};
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        device const float * yp = x + ib * T3_GROUP_W + (uint)it * 32u;
+        half yh[32];
+#pragma clang loop unroll(full)
+        for (short i = 0; i < 32; ++i) {
+            yh[i] = (half)yp[i];
+        }
+
+        const uint base = 3u * (uint)it;
+        for (short row = 0; row < NR0_T3; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const uint * gw = (device const uint *)(
+                weight + (first_row + row) * row_stride
+                       + (ulong)ib * T3_GROUP_BYTES);
+            const uint wa = gw[it == 0 ? 23u : base - 1u];
+            const uint w0 = gw[base + 0u];
+            const uint w1 = gw[base + 1u];
+            const uint w2 = gw[base + 2u];
+
+            half acc = 0.0h;
+#pragma clang loop unroll(full)
+            for (uint t = 0; t < 16; ++t) {
+                const uint p  = 6u * t + 22u;
+                const uint st = t3g_frame_extract16(wa, w0, w1, w2, p);
+                const uint X  = st * T3_LCG_A + T3_LCG_B;
+                const uint hb = (X & T3_MASK) | T3_FIXED;
+                const half2 h = as_type<half2>(hb);
+                acc = fma(h.x, yh[2 * t + 0], acc);
+                acc = fma(h.y, yh[2 * t + 1], acc);
+            }
+            const half sc = scales[(first_row + row) * nb + ib];
+            sumf[row] = fma((float)sc, (float)acc, sumf[row]);
+        }
+    }
+
+    for (short row = 0; row < NR0_T3; ++row) {
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0 && first_row + row < args.n_out) {
+            y[first_row + row] = total;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Variant D: hyb_v2 (QTIP HYB-style, V=2): one hash + one cached half2
 // lookup per TWO weights. LUT (512 x half2 = 2 KiB) is read directly from
 // device memory (Apple9 flexible cache; per cx research, prefer this over

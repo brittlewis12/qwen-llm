@@ -340,6 +340,10 @@ fn bench_trellis3_mat_vec(c: &mut Criterion) {
         Trellis3Variant::ThreeInstV2,
         Trellis3Variant::Lut8x2,
         Trellis3Variant::HybV2,
+        Trellis3Variant::ThreeInstG,
+        Trellis3Variant::ThreeInstV2G,
+        Trellis3Variant::ThreeInstGNsg4,
+        Trellis3Variant::ThreeInstGNr4,
     ];
 
     let mut group = c.benchmark_group("trellis3 mat_vec");
@@ -379,6 +383,47 @@ fn bench_trellis3_mat_vec(c: &mut Criterion) {
                 });
             });
 
+            group.throughput(Throughput::Bytes(bytes * 64));
+            group.bench_with_input(BenchmarkId::new("chained64", &row), &row, |b, _| {
+                b.iter(|| {
+                    bench_trellis3_chained(
+                        &ctx,
+                        variant,
+                        &w_t,
+                        &s_t,
+                        Some(&l_t),
+                        &x_t,
+                        &y_t,
+                        n_in,
+                        n_out,
+                        64,
+                    )
+                    .expect("chained");
+                    black_box(&y_t);
+                });
+            });
+        }
+    }
+    // T6 skinny/occupancy sweep (diagnostic, G variants only): bounds the
+    // attn_v-class exposure flagged by the T4 review.
+    for (label, n_in, n_out) in [
+        ("skinny1k_t3_27b", 5120usize, 1024usize),
+        ("skinny2k_t3_27b", 5120, 2048),
+    ] {
+        let syn = trellis3_synthetic(n_in, n_out, 0xF10D);
+        let (w_t, s_t, l_t) = trellis3_upload(&ctx, &syn).expect("upload");
+        let x: Vec<f32> = (0..n_in).map(|i| (i as f32 * 1e-3).sin()).collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .expect("x");
+        let y_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y");
+        let bytes = trellis3_compressed_bytes(n_in, n_out);
+        for variant in [Trellis3Variant::ThreeInstG, Trellis3Variant::ThreeInstV2G, Trellis3Variant::ThreeInstGNsg4] {
+            let row = format!("{}/{label}", variant.label());
             group.throughput(Throughput::Bytes(bytes * 64));
             group.bench_with_input(BenchmarkId::new("chained64", &row), &row, |b, _| {
                 b.iter(|| {

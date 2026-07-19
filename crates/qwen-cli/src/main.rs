@@ -1409,7 +1409,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
     let loaded = runtime
-        .load_model_with_config(
+        .load_model_for_disposable_single_turn_with_config(
             model_path,
             LoadedModelConfig {
                 prefix_cache_max_bytes: prefix_cache_max_bytes(args)?,

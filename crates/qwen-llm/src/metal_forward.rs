@@ -376,6 +376,18 @@ const GGUF_OWNED_A3B_GAP_BYTES: u64 = 13_824;
 const GGUF_OWNED_A3B_FALLBACK_BYTES: u64 = 8_192;
 const GGUF_OWNED_A3B_PHYSICAL_BYTES: u64 = 22_123_552_768;
 const GGUF_OWNED_WORKERS: usize = 4;
+const A3B_PARALLEL_COPY_AUTO_DEVICE: &str = "Apple M4 Max";
+const A3B_PARALLEL_COPY_AUTO_MIN_MEMORY: u64 = 128 * 1024 * 1024 * 1024;
+const A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 8] = [
+    "QWEN_GGUF_NO_COPY",
+    "QWEN_GGUF_OWNED_ARENA",
+    "QWEN_GGUF_NO_COPY_PREFAULT",
+    "QWEN_NATIVE_QUANT_EMBED",
+    "QWEN_MOE_ROUTER_F16",
+    "QWEN_MOE_IQ3_EXPERT_NATIVE",
+    "QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP",
+    "QWEN_PREFILL_ATTN_FUSED_QKV_G8",
+];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ParallelCopyProfileId {
@@ -685,6 +697,7 @@ enum GgufOwnedArenaMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GgufParallelCopyMode {
+    Auto,
     Disabled,
     Forced,
 }
@@ -712,7 +725,7 @@ fn gguf_owned_arena_mode() -> Result<GgufOwnedArenaMode, MfError> {
 
 fn parse_gguf_parallel_copy_mode(value: Option<&str>) -> Result<GgufParallelCopyMode, MfError> {
     match value {
-        None => Ok(GgufParallelCopyMode::Disabled),
+        None => Ok(GgufParallelCopyMode::Auto),
         Some(value) if crate::env_flag::env_value_truthy(value) => Ok(GgufParallelCopyMode::Forced),
         Some(value) if crate::env_flag::env_value_falsy(value) => {
             Ok(GgufParallelCopyMode::Disabled)
@@ -733,6 +746,21 @@ fn gguf_parallel_copy_mode() -> Result<GgufParallelCopyMode, MfError> {
     }
 }
 
+fn auto_parallel_copy_a3b_enabled(
+    admission_enabled: bool,
+    parallel_mode: GgufParallelCopyMode,
+    explicit_override_present: bool,
+) -> bool {
+    admission_enabled && parallel_mode == GgufParallelCopyMode::Auto && !explicit_override_present
+}
+
+fn auto_parallel_copy_a3b_override_present(mut is_present: impl FnMut(&str) -> bool) -> bool {
+    A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS
+        .iter()
+        .copied()
+        .any(&mut is_present)
+}
+
 fn validate_parallel_copy_policy(
     parallel_mode: GgufParallelCopyMode,
     no_copy_mode: GgufNoCopyMode,
@@ -741,7 +769,7 @@ fn validate_parallel_copy_policy(
     native_embedding_present: bool,
     router_f16: Option<&str>,
 ) -> Result<(), MfError> {
-    if parallel_mode == GgufParallelCopyMode::Disabled {
+    if parallel_mode != GgufParallelCopyMode::Forced {
         return Ok(());
     }
     if no_copy_mode == GgufNoCopyMode::Forced {
@@ -1087,6 +1115,11 @@ pub struct MetalModel {
     pub lm_head: MetalTensor,
 
     pub blocks: Vec<MetalBlock>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MetalModelLoadOptions {
+    pub auto_parallel_copy_a3b: bool,
 }
 
 pub enum MetalBlock {
@@ -3109,6 +3142,56 @@ fn select_parallel_copy_profile(
     })
 }
 
+fn host_physical_memory_bytes() -> Option<u64> {
+    let mut bytes = 0u64;
+    let mut size = std::mem::size_of::<u64>();
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut bytes as *mut u64).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && size == std::mem::size_of::<u64>()).then_some(bytes)
+}
+
+fn a3b_parallel_copy_auto_host_supported(
+    unified_memory: bool,
+    device_name: &str,
+    physical_memory_bytes: Option<u64>,
+) -> bool {
+    unified_memory
+        && device_name == A3B_PARALLEL_COPY_AUTO_DEVICE
+        && physical_memory_bytes.is_some_and(|bytes| bytes >= A3B_PARALLEL_COPY_AUTO_MIN_MEMORY)
+}
+
+fn select_auto_parallel_copy_profile(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    expected: &[ModelWeightStorageRequest<'_>],
+    embedding_selection: NativeQuantEmbeddingSelection,
+) -> Result<Option<&'static ParallelCopyProfile>, MfError> {
+    if !a3b_parallel_copy_auto_host_supported(
+        ctx.device.hasUnifiedMemory(),
+        &ctx.device.name().to_string(),
+        host_physical_memory_bytes(),
+    ) {
+        return Ok(None);
+    }
+    parallel_copy_profile_matches(
+        ctx,
+        gguf,
+        model,
+        expected,
+        embedding_selection,
+        &A3B_PARALLEL_COPY_PROFILE,
+    )
+    .map(|matched| matched.then_some(&A3B_PARALLEL_COPY_PROFILE))
+}
+
 fn authenticated_a3b_storage_plan(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -3303,6 +3386,24 @@ fn planned_parallel_copied_storage_for_load(
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<PlannedParallelCopiedStorage, MfError> {
     let profile = select_parallel_copy_profile(ctx, gguf, model, expected, embedding_selection)?;
+    planned_parallel_copied_storage_for_profile(
+        ctx,
+        gguf,
+        model,
+        expected,
+        embedding_selection,
+        profile,
+    )
+}
+
+fn planned_parallel_copied_storage_for_profile(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+    expected: &[ModelWeightStorageRequest<'_>],
+    embedding_selection: NativeQuantEmbeddingSelection,
+    profile: &'static ParallelCopyProfile,
+) -> Result<PlannedParallelCopiedStorage, MfError> {
     match profile.authentication {
         ParallelCopyAuthentication::A3bRetainedPlan => {
             let _plan =
@@ -3751,6 +3852,7 @@ fn direct_storage_for_load(
     prefault_enabled: bool,
     owned_mode: GgufOwnedArenaMode,
     parallel_mode: GgufParallelCopyMode,
+    auto_parallel_copy_a3b: bool,
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<(DirectStorage, bool), MfError> {
     let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
@@ -3773,6 +3875,25 @@ fn direct_storage_for_load(
         let storage =
             planned_owned_storage_for_load(ctx, gguf, model, expected, embedding_selection)?;
         return Ok((DirectStorage::ForcedOwned(storage), false));
+    }
+    if parallel_mode == GgufParallelCopyMode::Auto
+        && auto_parallel_copy_a3b
+        && let Some(profile) =
+            select_auto_parallel_copy_profile(ctx, gguf, model, expected, embedding_selection)?
+    {
+        eprintln!(
+            "[metal-gguf-parallel-policy] mode=auto profile={}",
+            profile.id.label()
+        );
+        let storage = planned_parallel_copied_storage_for_profile(
+            ctx,
+            gguf,
+            model,
+            expected,
+            embedding_selection,
+            profile,
+        )?;
+        return Ok((DirectStorage::ForcedParallelCopied(storage), false));
     }
     if mode == GgufNoCopyMode::Disabled {
         return Ok((DirectStorage::Copied, exact_sentinel));
@@ -3858,6 +3979,15 @@ impl MetalModel {
     /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q8_0
     /// embeddings can opt into native residency once their row kernels apply.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
+        Self::load_with_options(ctx, gguf, model, MetalModelLoadOptions::default())
+    }
+
+    pub(crate) fn load_with_options(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        model: &Model<'_>,
+        options: MetalModelLoadOptions,
+    ) -> Result<Self, MfError> {
         let no_copy_mode = gguf_no_copy_mode()?;
         let owned_mode = gguf_owned_arena_mode()?;
         let parallel_mode = gguf_parallel_copy_mode()?;
@@ -3905,6 +4035,13 @@ impl MetalModel {
             ));
         }
         let prefault_enabled = prefault_mode != GgufNoCopyPrefaultMode::Disabled;
+        let explicit_override_present =
+            auto_parallel_copy_a3b_override_present(|name| std::env::var_os(name).is_some());
+        let auto_parallel_copy_a3b = auto_parallel_copy_a3b_enabled(
+            options.auto_parallel_copy_a3b,
+            parallel_mode,
+            explicit_override_present,
+        );
         Self::load_with_storage_policy(
             ctx,
             gguf,
@@ -3913,6 +4050,7 @@ impl MetalModel {
             prefault_enabled,
             owned_mode,
             parallel_mode,
+            auto_parallel_copy_a3b,
         )
     }
 
@@ -3932,6 +4070,7 @@ impl MetalModel {
             prefault_enabled,
             GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Disabled,
+            false,
         )
     }
 
@@ -3943,6 +4082,7 @@ impl MetalModel {
         prefault_enabled: bool,
         owned_mode: GgufOwnedArenaMode,
         parallel_mode: GgufParallelCopyMode,
+        auto_parallel_copy_a3b: bool,
     ) -> Result<Self, MfError> {
         let embedding_mode = native_quant_embedding_mode();
         if matches!(
@@ -3981,6 +4121,7 @@ impl MetalModel {
             prefault_enabled,
             owned_mode,
             parallel_mode,
+            auto_parallel_copy_a3b,
             embedding_selection,
         )?;
         Self::load_with_direct_storage(
@@ -11846,7 +11987,7 @@ mod tests {
     fn parallel_copy_policy_is_strict_and_conflict_complete() {
         assert_eq!(
             parse_gguf_parallel_copy_mode(None).unwrap(),
-            GgufParallelCopyMode::Disabled
+            GgufParallelCopyMode::Auto
         );
         for value in ["1", "true", "TRUE", "yes", "YES"] {
             assert_eq!(
@@ -11924,7 +12065,7 @@ mod tests {
         );
         assert!(
             validate_parallel_copy_policy(
-                GgufParallelCopyMode::Disabled,
+                GgufParallelCopyMode::Auto,
                 GgufNoCopyMode::Forced,
                 GgufOwnedArenaMode::Forced,
                 true,
@@ -11933,6 +12074,76 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn parallel_copy_auto_requires_scope_and_yields_to_overrides() {
+        assert!(auto_parallel_copy_a3b_enabled(
+            true,
+            GgufParallelCopyMode::Auto,
+            false,
+        ));
+        assert!(!auto_parallel_copy_a3b_enabled(
+            false,
+            GgufParallelCopyMode::Auto,
+            false,
+        ));
+        assert!(!auto_parallel_copy_a3b_enabled(
+            true,
+            GgufParallelCopyMode::Disabled,
+            false,
+        ));
+        assert!(!auto_parallel_copy_a3b_enabled(
+            true,
+            GgufParallelCopyMode::Forced,
+            false,
+        ));
+        assert!(!auto_parallel_copy_a3b_enabled(
+            true,
+            GgufParallelCopyMode::Auto,
+            true,
+        ));
+        assert!(!auto_parallel_copy_a3b_override_present(|_| false));
+        for expected in A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS {
+            assert!(auto_parallel_copy_a3b_override_present(
+                |name| name == expected
+            ));
+        }
+        assert!(!MetalModelLoadOptions::default().auto_parallel_copy_a3b);
+    }
+
+    #[test]
+    fn parallel_copy_auto_host_gate_is_exact() {
+        assert!(a3b_parallel_copy_auto_host_supported(
+            true,
+            "Apple M4 Max",
+            Some(128 * 1024 * 1024 * 1024),
+        ));
+        assert!(a3b_parallel_copy_auto_host_supported(
+            true,
+            "Apple M4 Max",
+            Some(192 * 1024 * 1024 * 1024),
+        ));
+        assert!(!a3b_parallel_copy_auto_host_supported(
+            false,
+            "Apple M4 Max",
+            Some(128 * 1024 * 1024 * 1024),
+        ));
+        assert!(!a3b_parallel_copy_auto_host_supported(
+            true,
+            "Apple M4 Pro",
+            Some(128 * 1024 * 1024 * 1024),
+        ));
+        assert!(!a3b_parallel_copy_auto_host_supported(
+            true,
+            "Apple M4 Max",
+            Some(128 * 1024 * 1024 * 1024 - 1),
+        ));
+        assert!(!a3b_parallel_copy_auto_host_supported(
+            true,
+            "Apple M4 Max",
+            None,
+        ));
     }
 
     #[test]
@@ -12143,6 +12354,7 @@ mod tests {
             false,
             owned_mode,
             GgufParallelCopyMode::Disabled,
+            false,
         )
         .expect("load generic storage arm");
         run_loaded_model_arm(ctx, metal_model, tokens, forced_next)
@@ -13292,6 +13504,7 @@ mod tests {
             false,
             GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Disabled,
+            false,
             NativeQuantEmbeddingSelection::AutoUnpromoted,
         ) {
             Ok(_) => panic!("exact 27B rollback must fail before resource realization"),

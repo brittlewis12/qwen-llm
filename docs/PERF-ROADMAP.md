@@ -586,6 +586,15 @@ late post-warmup loaded measurements. The packet does not localize its cause, an
 the `2.063x` cold endpoint is not permission to hide the separate model-ready
 tradeoff.
 
+v0.608 admits that result only for disposable single-turn CLI loads. Auto
+requires the exact frozen A3B profile, unified-memory `Apple M4 Max`, and at
+least 128 GiB; host or profile mismatch falls back before allocation. Reusable
+runtime loads, JSONL, dense 27B, and every explicit storage or representation
+override remain on ordinary or force-only policy. Explicit
+`QWEN_GGUF_PARALLEL_COPY=0` is the rollback; explicit true preserves the strict
+broad force path. The admission consciously accepts v0.602's first-request
+tradeoff rather than claiming a strict Pareto win.
+
 v0.603 transfers the same-topology materialization floor to the exact dense-27B
 Q4_K_M inventory. Across six frozen pairs, parallel copied materialization falls
 from arm median `1519.5535` to `557.7565 ms`; authoritative paired saving is
@@ -625,20 +634,14 @@ eight-simdgroup cooperative QK/softmax/PV shape, while V4's sibling rereads are
 predominantly cache-served. Close direct-F16 C/NWG/thread-count, barrier,
 staging, format, and score-ledger rescues; no 131K row follows.
 
-1. **A3B default admission decision**: highest realized product leverage, not a
-   new performance search. v0.602 already proves the exact force path at
-   `2.06292x` first byte, `1.47929x` exit, and loaded parity. Decide whether absent
-   policy may select it only for the authenticated single-shard asset while
-   preserving explicit `=0` rollback and strict unsupported fallback. Do not rerun
-   the 24-child packet. Require policy/parser tests, the existing full-state gate,
-   and one unscored default-vs-force path-identity smoke. The decision must name the
-   separate first-prefill tradeoff: paired median `+4.768 ms`, TTFT B/A
-   `1.01225x`, model-ready complete-request delta `+5.481 ms`, and
-   final-output-to-exit delta `+22.159 ms`, despite a paired median
-   `1276.264 ms` first-byte saving. Either preserve force-only behavior for
-   serving and concurrent loading or explicitly accept their unmeasured CPU-
-   contention and energy surface. Difficulty S, mechanism certainty high; the
-   unresolved question is product preference, not speed.
+1. **A3B default admission — completed v0.608**: the authenticated disposable
+   single-turn CLI path now selects the v0.602 candidate by default. Reusable
+   runtime loads and JSONL remain force-only. Explicit `=0` rolls back, every
+   storage or representation override wins over Auto, and unsupported hosts or
+   assets fall back before allocation. The accepted product trade is
+   `1276.264 ms` paired first-byte saving for `+4.768 ms` first prefill,
+   `+5.481 ms` model-ready complete request, and `+22.159 ms` post-output exit.
+   Do not rerun the performance packet.
 2. **A10B native-embedding cold packet**: omitted cold-path adjudication for an
    implemented bit-exact row representation. v0.538 preserves the exact 128-token
    greedy stream, records loaded median `pp512/tg128` ratios of
@@ -765,12 +768,9 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. v0.602 completes the exact-topology A3B pilot at `2.06292x` first byte and
-   loaded parity. Decide default admission next without repeating performance.
-   Preserve `=0` rollback and explicitly accept the `+4.768 ms` first-prefill,
-   `+5.481 ms` model-ready-request, and `+22.159 ms` post-output exit tradeoffs.
-   Keep serving/concurrent loading force-only unless their unmeasured CPU-
-   contention and energy surface is consciously accepted.
+1. v0.608 completes scoped A3B admission without repeating performance.
+   Preserve the exact profile/host/single-turn scope, explicit rollback,
+   override priority, and force-only reusable-model policy.
 2. Run one A10B native-embedding process-cold packet if the heavy anchor remains a
    deployment target. Stop after one valid adjudication; do not infer latency from
    the already measured 2.24 GB allocation reduction. Apply the ranked entry's
@@ -824,14 +824,12 @@ automatic retained use stay copied without separate evidence.
   that one-window owned shares retained's decode tax despite exact destination
   population; the premise is closed. Any reopen must preserve per-tensor
   offset-zero topology through the loaded gates before fresh product timing.
-  v0.599 clears the A3B materialization floor and v0.602 clears exact A3B full
-  state, loaded parity, and cold product endpoints. v0.603 independently clears
-  the dense-27B same-topology floor but not product transfer. Authority remains
-  force-only for the frozen A3B asset and one separately preregistered dense pilot.
-  A3B default admission must preserve rollback and acknowledge the measured
-  first-prefill tax; dense product authority still requires exact full-state,
-  loaded, and fresh evidence. A10B breadth requires its own inventory, floor,
-  correctness, and product evidence.
+  v0.599 clears the A3B materialization floor, v0.602 clears exact A3B full
+  state, loaded parity, and cold product endpoints, and v0.608 admits only the
+  authenticated disposable single-turn use. v0.603 independently clears the
+  dense-27B same-topology floor but not product transfer. Dense product
+  authority still requires exact full-state, loaded, and fresh evidence. A10B
+  breadth requires its own inventory, floor, correctness, and product evidence.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

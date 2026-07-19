@@ -10,7 +10,8 @@ use crate::gguf::{GgufError, GgufFile};
 use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
 use crate::metal_forward::{
-    MetalForward, MetalModel, MetalSession, MfError, SessionSnapshot, SnapshotIdentity,
+    MetalForward, MetalModel, MetalModelLoadOptions, MetalSession, MfError, SessionSnapshot,
+    SnapshotIdentity,
 };
 use crate::model::Arch;
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
@@ -107,11 +108,31 @@ impl Runtime {
         path: impl AsRef<Path>,
         config: LoadedModelConfig,
     ) -> Result<LoadedModel, RuntimeError> {
+        self.load_model_with_intent(path, config, ModelLoadIntent::ForceOnly)
+    }
+
+    /// Load for a disposable single-turn request, permitting authenticated
+    /// cold-load policies that remain disabled for reusable model instances.
+    pub fn load_model_for_disposable_single_turn_with_config(
+        &self,
+        path: impl AsRef<Path>,
+        config: LoadedModelConfig,
+    ) -> Result<LoadedModel, RuntimeError> {
+        self.load_model_with_intent(path, config, ModelLoadIntent::DisposableSingleTurn)
+    }
+
+    fn load_model_with_intent(
+        &self,
+        path: impl AsRef<Path>,
+        config: LoadedModelConfig,
+        intent: ModelLoadIntent,
+    ) -> Result<LoadedModel, RuntimeError> {
         let path = path.as_ref();
         let gguf = GgufFile::open(path)?;
         let bound = Model::from_gguf(&gguf)?;
         let (model_id, tokenizer_id) = snapshot_identity_parts(&gguf, bound.arch);
-        let metal_model = MetalModel::load(self.context(), &gguf, &bound)?;
+        let metal_model =
+            MetalModel::load_with_options(self.context(), &gguf, &bound, intent.metal_options())?;
         Ok(LoadedModel {
             runtime: self.clone(),
             path: path.to_path_buf(),
@@ -124,9 +145,42 @@ impl Runtime {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_load_intent_scopes_parallel_copy_auto_admission() {
+        assert!(
+            !ModelLoadIntent::ForceOnly
+                .metal_options()
+                .auto_parallel_copy_a3b
+        );
+        assert!(
+            ModelLoadIntent::DisposableSingleTurn
+                .metal_options()
+                .auto_parallel_copy_a3b
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedModelConfig {
     pub prefix_cache_max_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelLoadIntent {
+    ForceOnly,
+    DisposableSingleTurn,
+}
+
+impl ModelLoadIntent {
+    fn metal_options(self) -> MetalModelLoadOptions {
+        MetalModelLoadOptions {
+            auto_parallel_copy_a3b: self == Self::DisposableSingleTurn,
+        }
+    }
 }
 
 impl Default for LoadedModelConfig {

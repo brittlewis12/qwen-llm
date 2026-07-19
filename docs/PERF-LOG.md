@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-19 - v0.608 A3B Parallel-Copy Admission
+
+Status: admitted by default only for authenticated disposable single-turn CLI
+loads; reusable runtime loads and JSONL remain force-only.
+
+- v0.602 supplies the performance and exactness authority: paired first byte
+  improves `2477.32 -> 1199.75 ms` (`2.06292x`), runtime plus model load saves
+  `1283.493 ms`, all loaded 1% gates pass, and full state is bit exact.
+- An absent `QWEN_GGUF_PARALLEL_COPY` now means `Auto`, but Auto is inert unless
+  the caller declares disposable single-turn intent. Explicit false remains the
+  rollback; explicit true retains the broader strict force path.
+- Auto admits only the frozen A3B profile on unified-memory `Apple M4 Max` with
+  at least 128 GiB. Every profile or host mismatch falls back to ordinary copied
+  storage before allocation. Dense 27B is not an Auto candidate.
+- Any explicit storage or weight-representation environment control suppresses
+  Auto, including native embeddings, router/expert representations, retained or
+  owned storage, prefault, and fused QKV. Once an authenticated candidate starts
+  materialization, errors remain errors rather than retrying with copied
+  storage.
+- The decision explicitly accepts v0.602's separate first-request costs:
+  `+4.768 ms` prefill, `+5.481 ms` model-ready complete request, and
+  `+22.159 ms` final-output-to-exit, against `1276.264 ms` first-byte saving.
+- Workspace check and five scoped policy tests pass. Unscored default and forced
+  path smokes both select schema-1 A3B storage and emit `Paris`; the final Auto
+  smoke reports `900.072 ms` ready wall. These smokes are identity evidence, not
+  a new performance packet.
+
+Adversarial implementation review: `cx ask` session
+`019f7c82-ff5d-7ea0-8101-700f0c9ed754`.
+
 ## 2026-07-18 - v0.607 Direct-F16 Matrix Attention
 
 Status: fixed 32K prerequisite killed; no 131K row or product path follows,

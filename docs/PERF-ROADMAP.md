@@ -614,6 +614,17 @@ at `559.370 ms` median but stops on loaded instability after 12 valid children.
 Fresh-process behavior is unobserved, and the protocol forbids another successor.
 Keep the force path non-authoritative and do not extend this harness chain.
 
+v0.607 closes the admitted true-long direct-F16 matrix point at its 32K
+prerequisite. The valid A1/P/A2 main medians are
+`0.164125/0.309084/0.164209 ms`; pair medians are
+`0.208626/0.356583/0.208458 ms`. Correctness is near V4, but the candidate is
+`2.09247x/1.90064x` its main/pair gates. Removing compressed decode,
+split-plane addressing, and 16 KiB K/V staging improves the prior v0.583 matrix
+body only `1.01402x`. The remaining loss is organization-level in the
+eight-simdgroup cooperative QK/softmax/PV shape, while V4's sibling rereads are
+predominantly cache-served. Close direct-F16 C/NWG/thread-count, barrier,
+staging, format, and score-ledger rescues; no 131K row follows.
+
 1. **A3B default admission decision**: highest realized product leverage, not a
    new performance search. v0.602 already proves the exact force path at
    `2.06292x` first byte, `1.47929x` exit, and loaded parity. Decide whether absent
@@ -661,15 +672,15 @@ Keep the force path non-authoritative and do not extend this harness chain.
    constrained-output semantics and target state; this is not equivalence to
    unconstrained generation. Price both effects in one artifact. Difficulty S
    oracle/M packet, opportunity belief medium-low until traces exist.
-5. **True-long attention ownership/body redesign**: highest user-greenlit pure
-   kernel branch after v0.606 closes Q4_K activation pipelining. Attention is the
-   only context-scaling term and reaches 46.2% of A3B's 131K token, with the
-   measured low-occupancy/under-stream signature. Start from the immutable
-   32K/131K capture and name one body that changes ownership or utilization; do
-   not retune V4, revive the killed scalar/matrix bodies, or assume compressed KV
-   wins. Require `>=10%` actual-shape primitive gain across medium/breadth guards,
-   then `>=15%` main-body and `>=6%` whole-token gain at 131K with no material 32K
-   regression. Difficulty L-XL, belief low-medium, true-long prize high.
+5. **True-long attention new-premise gate**: inactive after v0.607. Attention
+   remains the only context-scaling term and reaches 46.2% of A3B's 131K token,
+   but no current named exact body has charged margin. Logical read-once,
+   compressed/split-plane KV, scalar or direct-F16 matrix QK, TGM staging,
+   partition packing, C/NWG/thread-count rescues, and score-ledger splitting are
+   closed. Do not spend GPU time until a source-free design changes ownership,
+   scheduling, residency, or physical bytes and places its zero-cost ceiling
+   inside `>=10%` medium/breadth, `>=15%` 131K main, and `>=6%` whole-token
+   gates. Prize remains high; current implementation belief is low.
 6. **MTPLX asset/contract decomposition**: highest information-value speculative
    decode move, not same-weight parity or current process-cold priority.
    Pin the local MTPLX runtime and published trunk, MTP sidecar, draft-head,
@@ -773,9 +784,9 @@ automatic retained use stay copied without separate evidence.
 4. With no production code, run one structured-trace grammar artifact:
    maximal uniquely forced token runs plus grammar-admissible lm_head rows. Stop
    unless savings-weighted request arithmetic clears 1.10x.
-5. Design one materially different true-long attention body against the immutable
-   32K/131K capture. Reject it on ownership/resource arithmetic before kernels if
-   it cannot plausibly clear the ranked entry's primitive and whole-token gates.
+5. v0.607 completes the admitted true-long body and kills it at 32K. Do not run
+   131K or a C/NWG/thread-count, barrier, format, staging, or split-ledger rescue.
+   Return only with a source-free new-premise ceiling inside every recorded gate.
 6. Run the MTPLX M4 AR/D3/D7 decomposition from v0.587 before downloading or
    training another drafter or writing qwen affine kernels. If D7 is promising,
    run the cross-trunk sidecar acceptance bridge and apply the total-request

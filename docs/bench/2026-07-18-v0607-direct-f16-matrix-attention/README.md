@@ -1,8 +1,8 @@
 # v0.607 Direct-F16 Matrix Attention Falsifier
 
-Status: **PREREGISTERED**. Run one fixed 32K integrated body only. The packet
-must either authorize the identical 131K body or close this direct-F16 matrix
-point without a shape, compression, staging, or thread-count rescue.
+Status: **KILL**. The fixed direct-F16 body is numerically excellent but reaches
+`0.309084 ms` main against a valid `0.164125/0.164209 ms` A1/A2. It is
+`2.09247x` its authorization gate. No 131K row or product path is authorized.
 
 ## Admission Correction
 
@@ -95,5 +95,69 @@ capture, or rescue retune is part of the 32K decision.
   1%.
 - Any 131K main or full-token miss closes the point without nearby variants.
 
+## Result
+
+The first clean packet had valid correctness but exceeded the 1% anchor-spread
+limit: main drift was `1.01933x` and pair drift was `1.01183x`. It is retained
+as invalid evidence. One unchanged rerun of the same clean binary, arguments,
+capture, and row order produced valid main/pair spreads of
+`1.000511/1.000804x`.
+
+| Row | Main | Main + reducer |
+| --- | ---: | ---: |
+| V4 A1 | `0.164125 ms` | `0.208626 ms` |
+| Direct-F16 matrix | `0.309084 ms` | `0.356583 ms` |
+| V4 A2 | `0.164209 ms` | `0.208458 ms` |
+| Authorization gate | `0.147713 ms` | `0.187612 ms` |
+
+The candidate is `1.88322x` slower than the faster main anchor and `1.71057x`
+slower than the faster pair anchor. Relative to its gates, the misses are
+`2.09247x` and `1.90064x`. This is not an MDE or run-order decision.
+
+Correctness passes strongly:
+
+- candidate versus V4 cosine is `0.999999999999285`, maximum absolute error is
+  `4.411e-6`, and relative L2 is `1.234e-6`;
+- every NaN-primed output and softmax-state slot becomes finite, with positive
+  `l`;
+- input and per-row output hashes remain invariant.
+
+## Diagnosis
+
+Removing group16 Q8 decode, split-plane addressing, 16 KiB K/V staging, and
+most code-consistent integer pressure moves the v0.583 matrix body only
+`0.313416 -> 0.309084 ms` (`1.01402x`). Those features were correlated with its
+limiter signature but were not the dominant integration residual.
+
+Matrix QK does remove meaningful work: v0.607 is `1.66190x` faster than the
+v0.577 scalar-F16 read-once body before cross-packet anchor normalization. It
+still loses badly to V4. The common losing structure is organization-level:
+one 256-thread/eight-simdgroup cooperative group integrates QK, softmax, and
+distributed-V PV under repeated threadgroup rendezvous. Likely contributors
+include half-idle C32 QK phases, 13 barriers per partition, persistent
+distributed accumulators, shuffle-heavy weight distribution, strided matrix
+loads, and lost independent one-simdgroup scheduling. The packet does not
+isolate one sole cause.
+
+V4's sibling tile4 rereads are predominantly cache-served: charging both as
+external bytes would require roughly `818-823 GB/s`. Read-once ownership removes
+logical reads but not an equivalent external-byte floor.
+
+C64 is not a rescue. It could activate all eight QK simdgroups and halve tile
+barriers, but retains the same cooperative ownership and cannot exceed a
+generous `2x` ceiling from those named changes. Even `2x` gives `0.154542 ms`,
+still 4.6% slower than the gate; the body needs `2.09247x`. The split QK/PV
+score-ledger body remains killed by the admission arithmetic above.
+
+Close this fixed ownership point without C/NWG/thread-count, barrier, staging,
+format, or split-ledger variants. Reopen true-long attention only for a
+pre-costed body that changes ownership, scheduling, residency, or physical
+bytes and has a charged ceiling inside both primitive and whole-token gates.
+
+Artifacts:
+`target/profiles/v0607-direct-f16-matrix-attention/` (`canonical.out` and
+`canonical-rerun.out`).
+
 Adversarial design review used `cx ask` session
-`019f77d6-9613-7b63-b7e8-b87488a59255`.
+`019f77d6-9613-7b63-b7e8-b87488a59255`. Result review used session
+`019f77fc-0dae-7d11-8a33-9158769ba266`.

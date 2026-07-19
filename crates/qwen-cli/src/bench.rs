@@ -17,7 +17,6 @@
 //! re-sequencing review): the bench harness IS leverage, not hygiene.
 
 mod attn_capture;
-mod attn_direct_f16_matrix;
 mod attn_stage_floor;
 mod gguf_arena_floor;
 #[path = "../source_identity.rs"]
@@ -439,8 +438,6 @@ struct Args {
 enum Cmd {
     /// Capture sparse true-long prefill attention tensors; this is not a timing benchmark.
     AttnCapture(attn_capture::AttnCaptureArgs),
-    /// Test the fixed 32K direct-F16 matrix-attention body.
-    AttnDirectF16Matrix(attn_direct_f16_matrix::AttnDirectF16MatrixArgs),
     /// Price the fixed 32K compressed-KV matrix staging floor.
     AttnStageFloor(attn_stage_floor::AttnStageFloorArgs),
     /// Report compiled and runtime source identity without initializing Metal
@@ -2712,9 +2709,6 @@ fn main() -> Result<()> {
     match args.cmd {
         Cmd::AttnCapture(a) => {
             attn_capture::run(a, serde_json::to_value(qwen_build_identity_packet())?)
-        }
-        Cmd::AttnDirectF16Matrix(a) => {
-            attn_direct_f16_matrix::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
         Cmd::AttnStageFloor(a) => {
             attn_stage_floor::run(a, serde_json::to_value(qwen_build_identity_packet())?)

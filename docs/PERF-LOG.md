@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-18 - v0.607 Direct-F16 Matrix Attention
+
+Status: fixed 32K prerequisite killed; no 131K row or product path follows,
+and the bench-only source is removed.
+
+- Admission arithmetic first kills a split F32 score ledger. V4's sibling
+  tile4 reads cannot both be external: that would require about `823/785 GB/s`
+  at 32K/131K. Even one charged ledger traversal leaves only
+  `0.00051 ms` at the historical 32K gate and already misses the 131K gate.
+- The admitted body uses direct transposed F16 matrix loads, F32 MMA QK, eight
+  dimension-owning PV simdgroups, 5,152 bytes of TGM, and the existing V4 G8 H2
+  partial/reducer ABI. It removes Q8 decode, split-plane addressing, 16 KiB K/V
+  staging, and scalar cross-simdgroup QK reduction.
+- Correctness is strong: candidate/V4 cosine is `0.999999999999285`, maximum
+  absolute error `4.411e-6`, relative L2 `1.234e-6`; all poisoned partials and
+  softmax states are written, and input/output hashes are invariant.
+- The first clean packet is invalid on `1.01933/1.01183x` main/pair anchor
+  spreads. One unchanged rerun is valid at `1.000511/1.000804x` and decisive.
+- Valid A1/P/A2 main medians are `0.164125/0.309084/0.164209 ms`; pair medians
+  are `0.208626/0.356583/0.208458 ms`. The candidate is `2.09247x/1.90064x`
+  its main/pair authorization gates.
+- Direct F16 improves the v0.583 compressed matrix main only
+  `0.313416 -> 0.309084 ms` (`1.01402x`). Q8 decode/staging were not the
+  dominant integration residual. Matrix QK materially beats v0.577 scalar F16,
+  but the common eight-simdgroup cooperative organization remains slower than
+  V4.
+- Bounded diagnosis: read-once removes cache-served logical reads while paying
+  256-thread phasing, repeated TG barriers, persistent distributed state,
+  shuffle-heavy PV, strided matrix loads, and lost one-SG scheduling. No one
+  contributor is isolated.
+- C64 cannot rescue the `2.09247x` gap from its named changes: even a generous
+  `2x` ceiling still misses the main gate. Close C/NWG/thread-count, barrier,
+  staging, format, and split-ledger variants. A future body needs a new
+  ownership/scheduling/residency or physical-byte premise with charged margin.
+
+Artifacts: `target/profiles/v0607-direct-f16-matrix-attention/`. Summary:
+`docs/bench/2026-07-18-v0607-direct-f16-matrix-attention/README.md`.
+Adversarial design/result review: `cx ask` sessions
+`019f77d6-9613-7b63-b7e8-b87488a59255` and
+`019f77fc-0dae-7d11-8a33-9158769ba266`.
+
 ## 2026-07-18 - v0.606 Q4_K F16-Activation Floor
 
 Status: exact actual-shape falsifier killed and removed; advance to the

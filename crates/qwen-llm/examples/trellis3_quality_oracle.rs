@@ -116,7 +116,7 @@ fn build_code(kind: &'static str) -> Code {
         v,
         vx,
         vy,
-        name: kind,
+        _name: kind,
     }
 }
 

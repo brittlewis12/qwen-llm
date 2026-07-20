@@ -167,3 +167,25 @@ linearly with tokens while all else GEMM-parallelizes, and A3B's
 active-FFN is ~7x lighter than dense-27B's (whose measured GDN prefill
 share was 2.6%) => estimated A3B prefill GDN share ~20-30%. ONE pp-phase
 measurement on A3B decides W1b's go/no-go before any oracle investment.
+
+## Addendum 2: grouped verify-FFN at N=8 (m5, x3) and A3B pp1024 GDN split
+
+- M5 (QWEN_MTP_MOE_VERIFY_GROUPED_FFN=1, code prompt): verify 76.3
+  ms/packet vs 53.2 per-token row-views — grouped LOSES at N=8 (0.659x
+  total, deterministic x3). At 8 tokens x top-8 of 256 experts (~0.25
+  tokens/expert) grouping overhead swamps weight reuse. The 5.8-tr
+  packet floor stands with in-repo machinery.
+- pp1024 GDN split (QWEN_PREFILL_GDN_SPLIT ladder, x3 medians):
+  full 588.1 ms; prep_step_out 605.0 (zeroing-polluted); prep_out
+  560.9; out_only ~560; skip_all 521.7. Recurrence STEP = 27-44 ms =
+  4.6-7.5% of pp1024; whole post-projection GDN body 11.2%; free-step
+  prefill ceiling 8.1%; realistic 2x-step gain ~3.9% — BELOW the
+  roadmap's >=5% projected-prefill gate. (Decode-phase extrapolation of
+  20-30% was wrong: the packed kernel's in-register serial loop is far
+  cheaper per prefill token than decode arithmetic suggested.)
+- CONVERGENCE FINDING: a union-expert batched-shape GEMV (stream each
+  active expert's weights once, accumulate per token in serial-identical
+  order) is the ONE kernel family that simultaneously attacks the
+  parity defect (D2/D3, bit-exactness by per-token order preservation)
+  and the economics floor (weight-traffic amortization across the
+  packet). Any future A3B verifier work should start there.

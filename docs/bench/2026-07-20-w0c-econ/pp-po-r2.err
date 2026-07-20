@@ -1,0 +1,19 @@
+[pp] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[pp] power: source=AC Power battery=80% AC attached warning=none powermode_ac=2 powermode_battery=2 thermal_warning=false performance_warning=false
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [2048, 248320])
+[metal-load-ledger] source=733/22123538944 direct_copy=732/21583194624 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/540344320/2034237440 derived=0/0
+[pp] model=/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf source=synthetic token ids (seed=1) n_prompt=1024 runs=5 chunk=1024 tail=skip
+[pp] lowering: gdn_batched=30/30 attn_batched=10/10 dense_ffn_batched=0/0 moe_gpu_token_loop=40/40
+[pp] dtype sample gdn: qkv=Q8_0 z=Q8_0 out=Q8_0
+[pp] dtype sample attn: q=Q8_0 k=Q8_0 v=Q8_0 o=Q8_0
+[pp] dtype sample moe: gate=Q4_K up=Q4_K down=Q5_K
+[pp] run  1: wall    557.9 ms  gpu    549.8 ms  1835.37 t/s
+[pp] run  2: wall    558.6 ms  gpu    550.3 ms  1833.09 t/s
+[pp] run  3: wall    558.0 ms  gpu    549.6 ms  1835.05 t/s
+[pp] run  4: wall    562.9 ms  gpu    555.2 ms  1819.08 t/s
+[pp] run  5: wall    567.1 ms  gpu    559.1 ms  1805.81 t/s
+
+[pp] === results ===
+[pp] prompt: 1024 tokens in 560.9 ms avg = 0.55 ms/token = 1825.68 +/- 12.99 t/s
+[pp] gpu:    552.8 ms avg = 0.54 ms/token = 98.6% of wall
+[pp] note: session and scratch allocation are outside the timed interval; tail=skipped to match llama-bench pp logits policy.

@@ -1,0 +1,9 @@
+[mtp-bench] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [2048, 248320])
+[metal-load-ledger] source=733/22123538944 direct_copy=732/21583194624 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/540344320/2034237440 derived=0/0
+[mtp-bench] model=/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf prompt="Write a Python function to compute the Fibonacci sequence iteratively." rendered_mode=raw thinking=n/a spec_tokens=7 probe=Oracle physical_n=8 single_cb_draft=false draft_token_embd_head=false draft_lm_head_q4_1=false draft_lm_head_q4_0=false draft_lm_head_q4_affine64=false base_hidden=PostNorm recursive_hidden=PostNorm mtp_history=Committed (12 tokens) gen=16 stop_tokens=[248046]
+[mtp-bench] MTP MoE banks: policy=F32 gate/up/down=F32/F32/F32 bytes=3221225472
+[state-trace] prefill step=0 pos=12 n_eff=0 acc=0 keep=0 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=0 pos=12 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=2.653e-2 L11 over=30 | conv max=2.414e-1 L24 over=30 | kvpos_eq=true
+[state-trace] packet step=1 pos=20 n_eff=7 acc=7 keep=7 restore=false stop=true | gdn max=4.716e-2 L1 over=30 | conv max=3.860e-1 L24 over=30 | kvpos_eq=true
+Error: oracle terminal resume audit failed: MtpTargetStateAudit { resume_audit_pass: false, kv_position_equal: true, kv_payload_exact: false, kv_payload_max_abs: 0.59814453, kv_payload_cosine: 0.9998940173325989, reference_final_position: Some(42), candidate_final_position: Some(42), gdn_state_max_abs: 0.18576396, gdn_conv_max_abs: 0.99864906, continuation_argmax_equal: true, continuation_token: 498, continuation_logits_max_abs: 0.8099723, continuation_logits_cosine: 0.998494701736649 }

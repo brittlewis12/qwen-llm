@@ -81,3 +81,92 @@ under diagnostic momentum is how bugs get half-fixed.
 No timing evidence. No contract claims. The probe changes host-side
 pacing (extra readbacks + shadow decode between packets) — irrelevant
 to correctness comparisons, fatal to any timing quotation.
+
+---
+
+# RESULTS (2026-07-20; runs at commit a2e58f4-class HEAD, deterministic;
+adversarial interpretation review: cx 019f7ff3-8ef0-7100-bca4-6d8f16e15f7d,
+verdict SOUND-WITH-CAVEATS, caveats adopted throughout)
+
+## Trace evidence (all in this directory)
+
+1. trace-cser-code16: C-SER, default decode. Divergence seed ALREADY AT
+   PREFILL (gdn 4.1e-5 / conv 1.8e-4, 27-29/30 layers) before any packet;
+   packets grow it mildly (1.2e-4 by step 1). => E-PREFILL.
+2. Root cause of the seed (D1): the engine has two serial MoE single-token
+   organizations — "concurrent" (production decode default; used by the
+   v0.55x audits' reference and by our shadow) and "plain"
+   (single_token_argmax_with_hidden; used by the verifier's internal
+   prefill). They differ ~1e-5/token on A3B.
+3. trace-cser-noconc-code16 / -code128: with one organization
+   (QWEN_DECODE_MOE_CONCURRENT_GDN=0) + per-token verifier mixer
+   (BATCHED_MIXER=0), the audit is BIT-EXACT END TO END: kv cosine
+   1.0000000000, every gdn/conv/kv/continuation delta exactly 0.0, on both
+   16- and 128-token code fixtures. PASS.
+4. trace-cser-noconc-chat128: state stays bit-exact through all 55 packets
+   (acceptance patterns 0..7, restore-bearing and terminal packets
+   included) — but the STREAM still diverges: with state bit-exact, the
+   only remaining packed-vs-serial arithmetic is the batched
+   final-norm/output-head/argmax path (D3), and chat-prose near-ties flip
+   verify argmax (acceptance collapses to 0 before divergence).
+5. trace-c0-noconc-code16: production batched mixer vs plain reference
+   fails in ONE packet (gdn 2.7e-2, conv 2.4e-1, all 30 layers): batched
+   mma8 half-staged projections + batched route (D2, bundled — which
+   component dominates is untested; W0's C1 result weakly suggests the
+   route KERNEL swap alone is not the driver).
+
+## Findings (caveat-tightened language, binding for citations)
+
+- F1. No orchestration defect was observed on the exercised restore paths
+  (full accepts, partial accepts with restore, zero-accept packets,
+  terminal packets); the v0.556 failure is explained WITHOUT invoking
+  one. This is conditional on the verifier's committed token history
+  (the contract's own shape) and does NOT prove every orchestration
+  branch (e.g. terminal-with-rejection depth combinations not all
+  exercised).
+- F2. D1 (organization mismatch): concurrent-vs-plain serial MoE decode
+  differ ~1e-5/token. BENIGN-VS-HAZARD IS OPEN: deterministic reruns rule
+  out visible nondeterminism, not a deterministic missing-dependency/
+  aliasing hazard. First-differing-KERNEL isolation (not layer) decides;
+  if private-scratch/explicit-sync eliminates the difference, D1 is a
+  bug to fix, not an organization to standardize.
+- F3. D2 (batched mixer packet arithmetic): unacceptable for parity on
+  A3B as-is; bundles half-staged mma8 and batched route; crossed
+  interventions not yet run.
+- F4. D3 is localized to the batched final-norm + output-head + argmax
+  path as a WHOLE ("output-path decision arithmetic"); norm-vs-head-vs-
+  tie-breaking attribution requires split experiments with top-2 margin
+  logging.
+- F5. v0.556's A3B kill was confounded by D1+D2+D3 (sequential,
+  nonlinear — not an additive decomposition). Its "packed-MoE/GDN
+  verifier" framing over-implicated the packed machinery.
+- F6. A bit-exact A3B verifier configuration exists TODAY (per-token
+  mixer branch + plain-organization decode). Its wall-time economics are
+  UNMEASURED (approximately packet-width x serial mathematical work, but
+  encoder overlap/weight-streaming effects unknown). Do not retire or
+  promote it before measurement.
+- F7. Dense-27B is not currently blocking under the frozen contract and
+  tested fixtures — but the same mechanisms exist there sub-threshold
+  (kv max-abs 3.1e-2 with passing cosine); shared fixes should cover it;
+  "below today's threshold" is not "mechanism absent".
+
+## Recommended follow-ups (not under this packet)
+
+- W0c-econ: measure the bit-exact configuration's verify economics
+  (packet cost in serial-transition units, acceptance-rate-weighted;
+  plus plain-vs-concurrent serial decode cost) — this doubles as the
+  post-W0 verifier-economics packet gating W1c.
+- W0c-hazard: first-differing-kernel isolation of D1 (hazard vs
+  reduction-order); Metal API validation + private-scratch A/B.
+- W0c-parity: batched-shape GEMV kernel family (per-token serial-
+  identical accumulation, single weight stream) for projections, router,
+  and output head in verify packets — bit-parity is an EMPIRICAL kernel
+  invariant requiring byte-equality tests (quant formats x widths x
+  tails), with register-pressure/occupancy risk at vocab-wide 8-way
+  accumulation. This is the plausible production fix for D2+D3.
+- D3 split experiment with per-packet draft/target argmax + top-2 margin
+  logging (extend the step probe).
+
+Bottom line: the A3B speculation unlock is a NUMERICS-PARITY ENGINEERING
+program with a working bit-exact oracle, not a mystery. Chunked GDN (W1)
+remains a throughput play gated on W0c-econ.

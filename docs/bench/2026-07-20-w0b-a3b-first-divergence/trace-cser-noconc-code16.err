@@ -1,0 +1,21 @@
+[mtp-bench] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [2048, 248320])
+[metal-load-ledger] source=733/22123538944 direct_copy=732/21583194624 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/540344320/2034237440 derived=0/0
+[mtp-bench] model=/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf prompt="Write a Python function to compute the Fibonacci sequence iteratively." rendered_mode=raw thinking=n/a spec_tokens=7 probe=Oracle physical_n=8 single_cb_draft=false draft_token_embd_head=false draft_lm_head_q4_1=false draft_lm_head_q4_0=false draft_lm_head_q4_affine64=false base_hidden=PostNorm recursive_hidden=PostNorm mtp_history=Committed (12 tokens) gen=16 stop_tokens=[248046]
+[mtp-bench] MTP MoE banks: policy=F32 gate/up/down=F32/F32/F32 bytes=3221225472
+[state-trace] prefill step=0 pos=12 n_eff=0 acc=0 keep=0 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=0 pos=12 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=1 pos=20 n_eff=7 acc=7 keep=7 restore=false stop=true | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+
+[mtp-bench] === results ===
+[mtp-bench] MTP=off: 16 tokens, prefill 75.9 ms + decode 163.0 ms = 238.9 ms total
+[mtp-bench]   t/s: decode-only 98.2 | total 67.0
+[mtp-bench] MTP=on : 16 tokens, prefill 124.4 ms + decode 360.5 ms = 484.8 ms total
+[mtp-bench]   t/s: decode-only 44.4 | total 33.0
+[mtp-bench]   α (acceptance rate) = 1.000   steps=2  accepted=14
+[mtp-bench]   target transitions / verifier = 7.500 (15/2)
+[mtp-bench]   base_calls=14  mtp_calls=0 (= prompt prefill + step-B drafts + step-E bridges)
+[mtp-bench]   decode phases ms: draft=0.0 verify=155.4 restore=0.0 bridge=1.0 other=204.1
+[mtp-bench]   speedup (total ms): 238.9 / 484.8 = 0.493× (>1.0 means MTP wins)
+[mtp-bench] equivalence: PASS (identical sequences) (16 vs 16 emitted)
+[mtp-bench] terminal resume: PASS continuation_steps=16 kv_pos=Some(42) kv_max_abs=0.000e0 kv_cos=1.0000000000 gdn_state_max_abs=0.000e0 gdn_conv_max_abs=0.000e0 continuation_max_abs=0.000e0 continuation_cos=1.0000000000

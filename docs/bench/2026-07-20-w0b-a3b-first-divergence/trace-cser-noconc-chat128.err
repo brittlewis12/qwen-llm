@@ -1,0 +1,62 @@
+[mtp-bench] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [2048, 248320])
+[metal-load-ledger] source=733/22123538944 direct_copy=732/21583194624 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/540344320/2034237440 derived=0/0
+[mtp-bench] model=/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf prompt="Continue the scene for at least 500 words. Reva enters the nearest open hotel lobby, trying to get warm without drawing attention to the two computers in her backpack." rendered_mode=qwen-chat thinking=off spec_tokens=7 probe=Oracle physical_n=8 single_cb_draft=false draft_token_embd_head=false draft_lm_head_q4_1=false draft_lm_head_q4_0=false draft_lm_head_q4_affine64=false base_hidden=PostNorm recursive_hidden=PostNorm mtp_history=Committed (48 tokens) gen=128 stop_tokens=[248046]
+[mtp-bench] MTP MoE banks: policy=F32 gate/up/down=F32/F32/F32 bytes=3221225472
+[state-trace] prefill step=0 pos=48 n_eff=0 acc=0 keep=0 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=0 pos=48 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=1 pos=56 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=2 pos=64 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=3 pos=72 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=4 pos=80 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=5 pos=88 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=6 pos=96 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=7 pos=104 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=8 pos=112 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=9 pos=120 n_eff=8 acc=7 keep=8 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=10 pos=128 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=11 pos=129 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=12 pos=130 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=13 pos=131 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=14 pos=132 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=15 pos=133 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=16 pos=134 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=17 pos=135 n_eff=8 acc=1 keep=2 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=18 pos=137 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=19 pos=138 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=20 pos=139 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=21 pos=140 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=22 pos=141 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=23 pos=142 n_eff=8 acc=1 keep=2 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=24 pos=144 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=25 pos=145 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=26 pos=146 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=27 pos=147 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=28 pos=148 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=29 pos=149 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=30 pos=150 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=31 pos=151 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=32 pos=152 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=33 pos=153 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=34 pos=154 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=35 pos=155 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=36 pos=156 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=37 pos=157 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=38 pos=158 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=39 pos=159 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=40 pos=160 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=41 pos=161 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=42 pos=162 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=43 pos=163 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=44 pos=164 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=45 pos=165 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=46 pos=166 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=47 pos=167 n_eff=8 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=48 pos=168 n_eff=7 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=49 pos=169 n_eff=6 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=50 pos=170 n_eff=5 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=51 pos=171 n_eff=4 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=52 pos=172 n_eff=3 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=53 pos=173 n_eff=2 acc=0 keep=1 restore=true stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+[state-trace] packet step=54 pos=174 n_eff=1 acc=0 keep=1 restore=false stop=false | gdn max=0.000e0 L0 over=0 | conv max=0.000e0 L0 over=0 | kvpos_eq=true
+Error: oracle emitted tokens differ from serial target

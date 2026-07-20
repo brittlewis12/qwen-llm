@@ -153,3 +153,77 @@ classes from the 0.8B GGUF, run arms A0-A3 x 3 seeds per the frozen
 prereg (RHT rotation of W + Hessian, damped LDL, BlockLDLQ encode,
 plain + r_H scoring vs held-out chunks), apply the Stage A -> B gate.
 All inputs exist; no open design questions.
+
+---
+
+# STAGE A RESULTS (2026-07-20; artifacts in ./stage-a/; runner
+trellis3_t9_stage_a.rs; 3 seeds, seed-median then macro-mean over the 6
+0.8B classes; declared amendments in the runner header: A0/A2 use the
+T7a input-side incoherence recipe [the literal "A2 in original basis"
+would have confounded LDLQ's increment with removing incoherence];
+T7a-style row sampling restored after full-tensor encode measured
+448 s/case; anchors additionally scored in r_H — additive measurement,
+no arm or gate change)
+
+| Arm | bpw | P (plain rel-F) | r_H (held-out) |
+|---|---|---|---|
+| Q4_K anchor | 4.5 | 0.0720 | 0.0665 |
+| Q3_K anchor | 3.44 | 0.1522 | 0.1401 |
+| A0 (T7a recipe) | 3.06 | 0.1404 | 0.1345 |
+| A1 (+two-sided RHT) | 3.06 | 0.1402 | 0.1328 |
+| A2 (+BlockLDLQ) | 3.06 | 0.1653 | 0.1130 |
+| A3 (both) | 3.06 | 0.1654 | 0.1105 |
+
+Seed spread on A3: negligible (per-class values differ in the third
+decimal across seeds 11/22/33). Encode cost: LDLQ arms ~equal to plain
+(22-41 s/case sampled; feedback overhead is not the bottleneck, the
+span Viterbi is).
+
+## Frozen-gate verdict: STAGE-A FAIL (as preregistered)
+
+Delta_H(A3) = 17.9% (< 20%); P(A3) +17.8% vs A0 (gate allowed +2%);
+r_H improved 6/6 (>= 5 required). The sensitivity run permitted by the
+INCONCLUSIVE clause is NOT spent: damping 0.025 smooths feedback
+(lowers Delta_H); doubled calibration is unlikely to bridge 2.1 points;
+chasing the threshold with the one allowed knob would be gate-gaming.
+Stage B is NOT authorized under this preregistration.
+
+## Findings (the science, verdict-independent)
+
+1. BlockLDLQ AT g=256 WORKS on real weights/Hessians: -16% to -19%
+   held-out r_H (6/6 classes, 3 seeds), first-order consistent with the
+   cx prior (15-30%) despite 16x-coarser feedback than QTIP.
+2. The P-guardrail was miscalibrated at design time: LDLQ definitionally
+   trades plain error for weighted error; measured trade at g=256 is
+   +18% P for -18% r_H. A "no worse than +2% plain" screen requires the
+   trade to be free — physics says it is not. Design lesson recorded.
+3. Two-sided RHT increment ~ ZERO (A1: -1.3% r_H, -0.2% P) over the
+   input-side-only incoherence already in the tier recipe; A3 ~= A2.
+   The "RHT" half of the roadmap's repositioning lever is EXHAUSTED;
+   LDLQ carries everything.
+4. Anchor-relative repositioning (the extension's point): on r_H the
+   tier's Q3_K edge grows from 4.0% (A0) to 21.1% (A3) at 11% fewer
+   bits — but on plain P, A3 falls BELOW the Q3_K line (0.165 vs
+   0.152). The tier's claim is now METRIC-DEPENDENT, and the two
+   metrics disagree about sign vs the nearest anchor.
+5. R5 instrumentation: adjusted targets remain near-Gaussian
+   (kurtosis excess -0.06..0, rms flat across reverse-span index) —
+   no code/source mismatch from feedback; the trellis code's Gaussian
+   tuning stays valid under LDLQ.
+6. A0's P=0.1404 on 0.8B replicates T7a's 9B 0.140 almost exactly —
+   the trellis+incoherence error rate is dimension-stable, supporting
+   0.8B->9B transfer of arm RANKINGS (not absolute bars).
+
+## Disposition
+
+CLOSED at STAGE-A FAIL / proxy-evidence-banked. The decisive next
+question is not more proxy refinement — it is which metric predicts
+END QUALITY at this operating point. r_H is the literature's validated
+proxy (what GPTQ/QTIP/EXL3 optimize and what tracks PPL); plain
+Frobenius is the uncalibrated fallback; our r_H is wikitext-domain.
+A successor packet (T9b) should preregister the END-TO-END arbiter:
+quantize a full small model both ways (A0 vs A3 recipe) and measure
+PPL-class quality on held-out text vs Q3_K/Q4_K at matched bytes,
+with gates written against the anchors rather than a plain-error
+guardrail that LDLQ cannot satisfy by construction. No tier
+reopening claim is made from Stage A proxies.

@@ -18,6 +18,14 @@ pub const SPAN: usize = 256;
 // sign re-application (H orthonormal involution per block).
 // ---------------------------------------------------------------------
 
+/// Rademacher sign vector from a seeded xorshift. The two-sided
+/// transform derives its input-side signs as seed^0x1157 and its
+/// output-side signs as seed^0x2263 (callers rotating Hessians or
+/// activations MUST use the same derivation).
+pub fn rht_sign_vec(n: usize, seed: u64) -> Vec<f32> {
+    sign_vec(n, seed)
+}
+
 fn sign_vec(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..n)
@@ -337,6 +345,68 @@ pub fn ldlq_quantize_row(
         let enc = encode_group_sub_full(z, code, n_sub);
         (enc.reconstruct(code), enc.sq_err)
     })
+}
+
+// ---------------------------------------------------------------------
+// f64 rotation helpers (Hessian must stay in f64 through rotation).
+// ---------------------------------------------------------------------
+
+/// f64 sibling of `trellis_offline::fwht128_blocks`.
+pub fn fwht128_blocks_f64(x: &mut [f64]) {
+    assert_eq!(x.len() % 128, 0);
+    let norm = 1.0 / (128f64).sqrt();
+    for blk in x.chunks_mut(128) {
+        let mut h = 1;
+        while h < 128 {
+            let mut i = 0;
+            while i < 128 {
+                for j in i..i + h {
+                    let a = blk[j];
+                    let b = blk[j + h];
+                    blk[j] = a + b;
+                    blk[j + h] = a - b;
+                }
+                i += h << 1;
+            }
+            h <<= 1;
+        }
+        for v in blk.iter_mut() {
+            *v *= norm;
+        }
+    }
+}
+
+/// Rotate a symmetric f64 Hessian into the input-rotated basis:
+/// H~ = V H V^T with V = Hbd(128) * diag(signs) — matching the input
+/// side of [`rht_two_sided`] / [`rht_rotate_activation`] given the same
+/// sign vector. In place, row-major d x d.
+pub fn rotate_hessian_input_f64(h: &mut [f64], d: usize, signs: &[f32]) {
+    assert_eq!(h.len(), d * d);
+    assert_eq!(signs.len(), d);
+    assert!(d % 128 == 0);
+    for i in 0..d {
+        let si = signs[i] as f64;
+        for j in 0..d {
+            h[i * d + j] *= si * signs[j] as f64;
+        }
+    }
+    for row in h.chunks_mut(d) {
+        fwht128_blocks_f64(row);
+    }
+    let mut t = vec![0f64; d * d];
+    for i in 0..d {
+        for j in 0..d {
+            t[j * d + i] = h[i * d + j];
+        }
+    }
+    for row in t.chunks_mut(d) {
+        fwht128_blocks_f64(row);
+    }
+    for i in 0..d {
+        for j in 0..d {
+            h[j * d + i] = t[i * d + j];
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

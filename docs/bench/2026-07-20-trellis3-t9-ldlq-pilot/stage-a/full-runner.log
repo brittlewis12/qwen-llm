@@ -1,0 +1,86 @@
+[t9-stage-a] blk.0.ffn_gate.weight: sampled 256/3584 rows (1024 spans)
+[t9-stage-a] blk.0.ffn_up.weight: sampled 256/3584 rows (1024 spans)
+[t9-stage-a] blk.0.ffn_down.weight: sampled 128/1024 rows (1792 spans)
+[t9-stage-a] blk.3.ffn_gate.weight: sampled 256/3584 rows (1024 spans)
+[t9-stage-a] blk.3.ffn_up.weight: sampled 256/3584 rows (1024 spans)
+[t9-stage-a] blk.3.ffn_down.weight: sampled 128/1024 rows (1792 spans)
+[t9-stage-a] test gram blk0_h: d=1024 n=32768 tokens
+[t9-stage-a] test gram blk0_inner: d=3584 n=32768 tokens
+[t9-stage-a] test gram blk3_h: d=1024 n=32768 tokens
+[t9-stage-a] test gram blk3_inner: d=3584 n=32768 tokens
+[t9-stage-a] basis t7a: LDL+rotations 12.5s
+[t9-stage-a] basis seed11: LDL+rotations 12.4s
+[t9-stage-a] basis seed22: LDL+rotations 12.2s
+[t9-stage-a] basis seed33: LDL+rotations 12.1s
+[t9-stage-a] ANCHOR q4_k blk.0.ffn_gate.weight    P=0.07184 r_H=0.05929
+[t9-stage-a] ANCHOR q4_k blk.0.ffn_up.weight      P=0.07203 r_H=0.08093
+[t9-stage-a] ANCHOR q4_k blk.0.ffn_down.weight    P=0.07198 r_H=0.06952
+[t9-stage-a] ANCHOR q4_k blk.3.ffn_gate.weight    P=0.07181 r_H=0.03885
+[t9-stage-a] ANCHOR q4_k blk.3.ffn_up.weight      P=0.07234 r_H=0.07843
+[t9-stage-a] ANCHOR q4_k blk.3.ffn_down.weight    P=0.07203 r_H=0.07190
+[t9-stage-a] ANCHOR q3_k blk.0.ffn_gate.weight    P=0.15163 r_H=0.12354
+[t9-stage-a] ANCHOR q3_k blk.0.ffn_up.weight      P=0.15218 r_H=0.17096
+[t9-stage-a] ANCHOR q3_k blk.0.ffn_down.weight    P=0.15212 r_H=0.14830
+[t9-stage-a] ANCHOR q3_k blk.3.ffn_gate.weight    P=0.15183 r_H=0.08196
+[t9-stage-a] ANCHOR q3_k blk.3.ffn_up.weight      P=0.15287 r_H=0.16512
+[t9-stage-a] ANCHOR q3_k blk.3.ffn_down.weight    P=0.15227 r_H=0.15085
+[t9-stage-a] A0 seed=0 blk.0.ffn_gate.weight    P=0.14048 r_H=0.11951 (22s)
+[t9-stage-a] A0 seed=0 blk.0.ffn_up.weight      P=0.13991 r_H=0.16429 (23s)
+[t9-stage-a] A0 seed=0 blk.0.ffn_down.weight    P=0.13988 r_H=0.13778 (39s)
+[t9-stage-a] A0 seed=0 blk.3.ffn_gate.weight    P=0.14123 r_H=0.08662 (21s)
+[t9-stage-a] A0 seed=0 blk.3.ffn_up.weight      P=0.14010 r_H=0.15910 (21s)
+[t9-stage-a] A0 seed=0 blk.3.ffn_down.weight    P=0.14093 r_H=0.13959 (36s)
+[t9-stage-a] A2 seed=0 blk.0.ffn_gate.weight    P=0.16163 r_H=0.10584 (21s)
+[t9-stage-a] A2 seed=0 blk.0.ffn_up.weight      P=0.16212 r_H=0.13926 (21s)
+[t9-stage-a] A2 seed=0 blk.0.ffn_down.weight    P=0.17536 r_H=0.10667 (36s)
+[t9-stage-a] A2 seed=0 blk.3.ffn_gate.weight    P=0.15669 r_H=0.07202 (21s)
+[t9-stage-a] A2 seed=0 blk.3.ffn_up.weight      P=0.15631 r_H=0.14341 (21s)
+[t9-stage-a] A2 seed=0 blk.3.ffn_down.weight    P=0.17973 r_H=0.11047 (36s)
+[t9-stage-a] A1 seed=11 blk.0.ffn_gate.weight    P=0.14077 r_H=0.12033 (21s)
+[t9-stage-a] A1 seed=11 blk.0.ffn_up.weight      P=0.13972 r_H=0.15933 (21s)
+[t9-stage-a] A1 seed=11 blk.0.ffn_down.weight    P=0.14004 r_H=0.13713 (36s)
+[t9-stage-a] A1 seed=11 blk.3.ffn_gate.weight    P=0.14015 r_H=0.08138 (21s)
+[t9-stage-a] A1 seed=11 blk.3.ffn_up.weight      P=0.13941 r_H=0.16057 (21s)
+[t9-stage-a] A1 seed=11 blk.3.ffn_down.weight    P=0.14079 r_H=0.14069 (36s)
+[t9-stage-a] A3 seed=11 blk.0.ffn_gate.weight    P=0.16233 r_H=0.10208 (21s)
+[t9-stage-a] A3 seed=11 blk.0.ffn_up.weight      P=0.16259 r_H=0.14225 (21s)
+[t9-stage-a] A3 seed=11 blk.0.ffn_down.weight    P=0.17504 r_H=0.10703 (36s)
+[t9-stage-a] A3 seed=11 blk.3.ffn_gate.weight    P=0.15577 r_H=0.07054 (21s)
+[t9-stage-a] A3 seed=11 blk.3.ffn_up.weight      P=0.15560 r_H=0.13824 (21s)
+[t9-stage-a] A3 seed=11 blk.3.ffn_down.weight    P=0.18045 r_H=0.11119 (37s)
+[t9-stage-a] A1 seed=22 blk.0.ffn_gate.weight    P=0.14026 r_H=0.11488 (21s)
+[t9-stage-a] A1 seed=22 blk.0.ffn_up.weight      P=0.13976 r_H=0.16225 (21s)
+[t9-stage-a] A1 seed=22 blk.0.ffn_down.weight    P=0.14029 r_H=0.13787 (36s)
+[t9-stage-a] A1 seed=22 blk.3.ffn_gate.weight    P=0.14040 r_H=0.08161 (21s)
+[t9-stage-a] A1 seed=22 blk.3.ffn_up.weight      P=0.14130 r_H=0.16469 (21s)
+[t9-stage-a] A1 seed=22 blk.3.ffn_down.weight    P=0.14055 r_H=0.14064 (36s)
+[t9-stage-a] A3 seed=22 blk.0.ffn_gate.weight    P=0.16218 r_H=0.09990 (21s)
+[t9-stage-a] A3 seed=22 blk.0.ffn_up.weight      P=0.16263 r_H=0.13393 (21s)
+[t9-stage-a] A3 seed=22 blk.0.ffn_down.weight    P=0.17456 r_H=0.10700 (37s)
+[t9-stage-a] A3 seed=22 blk.3.ffn_gate.weight    P=0.15570 r_H=0.07208 (21s)
+[t9-stage-a] A3 seed=22 blk.3.ffn_up.weight      P=0.15701 r_H=0.13545 (21s)
+[t9-stage-a] A3 seed=22 blk.3.ffn_down.weight    P=0.18008 r_H=0.11081 (37s)
+[t9-stage-a] A1 seed=33 blk.0.ffn_gate.weight    P=0.13971 r_H=0.11152 (21s)
+[t9-stage-a] A1 seed=33 blk.0.ffn_up.weight      P=0.14038 r_H=0.16137 (21s)
+[t9-stage-a] A1 seed=33 blk.0.ffn_down.weight    P=0.14064 r_H=0.13819 (36s)
+[t9-stage-a] A1 seed=33 blk.3.ffn_gate.weight    P=0.14049 r_H=0.07828 (21s)
+[t9-stage-a] A1 seed=33 blk.3.ffn_up.weight      P=0.13991 r_H=0.15598 (21s)
+[t9-stage-a] A1 seed=33 blk.3.ffn_down.weight    P=0.13975 r_H=0.13899 (36s)
+[t9-stage-a] A3 seed=33 blk.0.ffn_gate.weight    P=0.16147 r_H=0.09956 (21s)
+[t9-stage-a] A3 seed=33 blk.0.ffn_up.weight      P=0.16169 r_H=0.13701 (21s)
+[t9-stage-a] A3 seed=33 blk.0.ffn_down.weight    P=0.17551 r_H=0.10667 (36s)
+[t9-stage-a] A3 seed=33 blk.3.ffn_gate.weight    P=0.15617 r_H=0.07205 (21s)
+[t9-stage-a] A3 seed=33 blk.3.ffn_up.weight      P=0.15668 r_H=0.13607 (21s)
+[t9-stage-a] A3 seed=33 blk.3.ffn_down.weight    P=0.17920 r_H=0.10984 (36s)
+
+== T9 Stage A summary (seed-median then macro-mean over 6 classes) ==
+anchor_q4_k: P=0.07200 r_H=0.06649  per-class P=[0.07183750463579128, 0.07202985779465229, 0.07198148953182272, 0.07181037166629847, 0.07234207914648208, 0.07202647495149267] r_H=[0.059289103770365746, 0.08093170050787685, 0.06951867616285103, 0.03884994683255494, 0.07843437272730981, 0.07189586414149177]
+anchor_q3_k: P=0.15215 r_H=0.14012  per-class P=[0.1516317161754535, 0.1521780218715719, 0.15211888585169603, 0.15183070497038526, 0.15287039697121793, 0.15226952870034313] r_H=[0.12354058041438641, 0.17096332338998643, 0.1482955791798331, 0.08195622771318464, 0.1651246007386501, 0.15085495296816293]
+A0: P=0.14042 r_H=0.13448  per-class P=[0.14047554824049507, 0.13990931244670507, 0.13988280996448213, 0.1412320081123755, 0.1401008741063534, 0.14092618049298009] r_H=[0.11950651424518148, 0.1642936982373191, 0.1377783453264049, 0.0866244192307722, 0.15909814217336266, 0.13958794840078761]
+A1: P=0.14019 r_H=0.13279  per-class P=[0.14026383647844892, 0.13976287160766893, 0.14029113503765314, 0.14039826243031348, 0.13990661225936515, 0.14054676013127682] r_H=[0.11488447733091184, 0.16137361838528466, 0.13787472444183227, 0.08138166154726546, 0.16057468003288203, 0.14064435273184878]
+A2: P=0.16531 r_H=0.11295  per-class P=[0.16162999973499423, 0.1621247383734195, 0.17535672726549598, 0.1566933361585151, 0.15631071366285204, 0.17972633372754054] r_H=[0.10584457456438293, 0.1392587192174028, 0.10667363282681076, 0.07202016214481542, 0.1434068756589007, 0.11046689646271622]
+A3: P=0.16539 r_H=0.11047  per-class P=[0.16218195863384174, 0.16258856706033972, 0.17504120393297304, 0.1557689721459975, 0.1566837352322377, 0.18007668281266545] r_H=[0.09990168404438395, 0.13700614880503093, 0.10700086919167158, 0.0720493583948727, 0.13606748939553856, 0.11081043817318474]
+
+Stage A -> B gate: Delta_H(A3) = 17.9% (need >= 20%), P(A3) 0.16539 vs P(A0) 0.14042 (need no worse than +2%), r_H improved on 6/6 (need >= 5)
+VERDICT: STAGE-A FAIL -> consult prereg (INCONCLUSIVE/KILL ladder)
+[t9-stage-a] wrote target/t9/stage-a-full/stage_a_results.jsonl and traces

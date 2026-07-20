@@ -1016,6 +1016,53 @@ fn matmat_bf16_bfloat_act_enabled() -> bool {
 /// per-phase entries are `(phase_name, gpu_ms)`.
 pub type PhaseProfileOutput = (Vec<f32>, f64, Vec<(String, f64)>);
 
+// --- T9 bench-only FFN-input capture (docs/bench/2026-07-20-trellis3-
+// t9-ldlq-pilot/). When installed, `encode_post_mixer_ffn` scatters the
+// post-norm FFN input (`s.h`) and the SwiGLU intermediate
+// (`s.ffn_inner`) into caller-owned buffers for the registered per-token
+// FFN-call indices (== absolute block index on the dense decode paths,
+// which invoke that fn exactly once per block in layer order). The
+// caller MUST call [`t9_ffn_capture_reset_token`] before each token.
+// Zero cost when not installed; never installed by production paths.
+
+thread_local! {
+    static T9_FFN_CAPTURE: std::cell::RefCell<Option<Vec<(usize, MetalTensor, MetalTensor)>>> =
+        const { std::cell::RefCell::new(None) };
+    static T9_FFN_CALL_IDX: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Install capture slots: (ffn_call_index, h_dst, inner_dst) triples.
+pub fn t9_ffn_capture_install(slots: Vec<(usize, MetalTensor, MetalTensor)>) {
+    T9_FFN_CAPTURE.with(|c| *c.borrow_mut() = Some(slots));
+    T9_FFN_CALL_IDX.with(|c| c.set(0));
+}
+
+/// Reset the per-token FFN call counter (call before every token).
+pub fn t9_ffn_capture_reset_token() {
+    T9_FFN_CALL_IDX.with(|c| c.set(0));
+}
+
+/// Uninstall capture.
+pub fn t9_ffn_capture_uninstall() {
+    T9_FFN_CAPTURE.with(|c| *c.borrow_mut() = None);
+}
+
+fn t9_ffn_capture_slots_for_current_call() -> Option<(MetalTensor, MetalTensor)> {
+    T9_FFN_CAPTURE.with(|c| {
+        let borrow = c.borrow();
+        let slots = borrow.as_ref()?;
+        let idx = T9_FFN_CALL_IDX.with(|i| {
+            let v = i.get();
+            i.set(v + 1);
+            v
+        });
+        slots
+            .iter()
+            .find(|(want, _, _)| *want == idx)
+            .map(|(_, h, inner)| (h.clone(), inner.clone()))
+    })
+}
+
 use objc2_metal::{
     MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState,
     MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
@@ -10261,6 +10308,12 @@ impl<'a> MetalForward<'a> {
             encode_mat_vec_dispatch(self.ctx, enc, g_w, &s.h, &s.ffn_gate, h, f)?;
             encode_mat_vec_dispatch(self.ctx, enc, u_w, &s.h, &s.ffn_up, h, f)?;
             encode_silu_mul_f32(self.ctx, enc, &s.ffn_gate, &s.ffn_up, &s.ffn_inner)?;
+        }
+        // T9 bench-only capture (no-op unless installed by the capture
+        // harness; see t9_ffn_capture_install).
+        if let Some((h_dst, inner_dst)) = t9_ffn_capture_slots_for_current_call() {
+            encode_scatter_offset_f32(self.ctx, enc, &s.h, &h_dst, 0, h)?;
+            encode_scatter_offset_f32(self.ctx, enc, &s.ffn_inner, &inner_dst, 0, f)?;
         }
         encode_mat_vec_dispatch(self.ctx, enc, d_w, &s.ffn_inner, &s.ffn_out, f, h)?;
 

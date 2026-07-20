@@ -125,6 +125,40 @@ impl GramAccumulator {
         self.n_samples += 1;
     }
 
+    /// Batched rank-k update H += sum_t x_t x_t^T, parallelized over
+    /// output rows with scoped threads (dependency-free). `xs` is
+    /// row-major [n_rows x d].
+    pub fn add_batch(&mut self, xs: &[f32], n_threads: usize) {
+        assert_eq!(xs.len() % self.d, 0);
+        let d = self.d;
+        let n_rows = xs.len() / d;
+        let nt = n_threads.max(1).min(d);
+        let rows_per = d.div_ceil(nt);
+        let h_chunks: Vec<&mut [f64]> = self.h.chunks_mut(rows_per * d).collect();
+        std::thread::scope(|scope| {
+            for (ci, chunk) in h_chunks.into_iter().enumerate() {
+                let i0 = ci * rows_per;
+                scope.spawn(move || {
+                    let n_i = chunk.len() / d;
+                    for t in 0..n_rows {
+                        let x = &xs[t * d..(t + 1) * d];
+                        for li in 0..n_i {
+                            let xi = x[i0 + li] as f64;
+                            if xi == 0.0 {
+                                continue;
+                            }
+                            let row = &mut chunk[li * d..(li + 1) * d];
+                            for (j, v) in row.iter_mut().enumerate() {
+                                *v += xi * x[j] as f64;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        self.n_samples += n_rows as u64;
+    }
+
     /// Symmetrize (guards accumulated asymmetry) and apply the frozen
     /// damping H + c*mean(diag)*I. Returns the damped matrix.
     pub fn damped(&self, c: f64) -> Vec<f64> {

@@ -324,6 +324,27 @@ fn build_rows() -> Vec<Row> {
         });
     }
 
+    // C5b (iteration-2 candidate): dual code with CHEAP second word
+    // hb_b = ((h >> 3) & MASK) | FIXED — saves the rotl vs C5.
+    {
+        let mut vx = vec![0f32; NSTATES];
+        let mut vy = vec![0f32; NSTATES];
+        for st in 0..NSTATES as u32 {
+            let h = hash(st);
+            let (ax, ay) = halves((h & MASK) | FIXED);
+            let (bx, by) = halves(((h >> 3) & MASK) | FIXED);
+            vx[st as usize] = f16r(ax + ay);
+            vy[st as usize] = f16r(bx + by);
+        }
+        rows.push(Row {
+            name: "C5b dual shr3 (cheap)".into(),
+            code: TrellisCode::from_tables(2, vx, vy),
+            n_sub: 1,
+            bpw: 3.0625,
+            kernel_ok: true,
+        });
+    }
+
     // V1-RLUT32 (imul-free): raw state bits or xor-folded index.
     for s in [3u32, 7, 11] {
         let mut vx = vec![0f32; NSTATES];

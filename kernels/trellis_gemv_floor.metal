@@ -464,6 +464,76 @@ kernel void kernel_mat_vec_trellis3g_3inst_v2_f32(
 }
 
 // ---------------------------------------------------------------------------
+// T8b: dual-3INST group-ring variant (T=256). One extract + one imad per
+// pair, then rotl+xor makes a second independent hash word; each word's
+// half-sum is one weight. T8a: 0.977x V1 quality at ~6.5 ops-eq/weight.
+
+kernel void kernel_mat_vec_trellis3g_3inst_d_f32(
+        constant trellis3_args & args   [[buffer(0)]],
+        device const uchar     * weight [[buffer(1)]],
+        device const half      * scales [[buffer(2)]],
+        device const float     * x      [[buffer(3)]],
+        device       float     * y      [[buffer(4)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const ushort ix = tiisg / 8;
+    const ushort it = tiisg % 8;
+
+    const uint nb = args.n_in / T3_GROUP_W;
+    const uint first_row = (tgpig * NSG_T3 + sgitg) * NR0_T3;
+    if (first_row >= args.n_out) return;
+    const ulong row_stride = (ulong)nb * T3_GROUP_BYTES;
+
+    float sumf[NR0_T3] = {0.f, 0.f};
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        device const float * yp = x + ib * T3_GROUP_W + (uint)it * 32u;
+        half yh[32];
+#pragma clang loop unroll(full)
+        for (short i = 0; i < 32; ++i) {
+            yh[i] = (half)yp[i];
+        }
+
+        const uint base = 3u * (uint)it;
+        for (short row = 0; row < NR0_T3; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const uint * gw = (device const uint *)(
+                weight + (first_row + row) * row_stride
+                       + (ulong)ib * T3_GROUP_BYTES);
+            const uint wa = gw[it == 0 ? 23u : base - 1u];
+            const uint w0 = gw[base + 0u];
+            const uint w1 = gw[base + 1u];
+            const uint w2 = gw[base + 2u];
+
+            // Tuning iteration 1: split accumulators (a-chain / b-chain)
+            // double the serial-fma ILP; folded once per group.
+            half acc = 0.0h;
+#pragma clang loop unroll(full)
+            for (uint t = 0; t < 16; ++t) {
+                const uint p  = 6u * t + 22u;
+                const uint st = t3g_frame_extract16(wa, w0, w1, w2, p);
+                const uint h  = st * T3_LCG_A + T3_LCG_B;
+                const uint g  = h ^ rotate(h, 13u);
+                const half2 a = as_type<half2>((h & T3_MASK) | T3_FIXED);
+                const half2 b = as_type<half2>((g & T3_MASK) | T3_FIXED);
+                acc = fma((half)(a.x + a.y), yh[2 * t + 0], acc);
+                acc = fma((half)(b.x + b.y), yh[2 * t + 1], acc);
+            }
+            const half sc = scales[(first_row + row) * nb + ib];
+            sumf[row] = fma((float)sc, (float)acc, sumf[row]);
+        }
+    }
+
+    for (short row = 0; row < NR0_T3; ++row) {
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0 && first_row + row < args.n_out) {
+            y[first_row + row] = total;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Variant D: hyb_v2 (QTIP HYB-style, V=2): one hash + one cached half2
 // lookup per TWO weights. LUT (512 x half2 = 2 KiB) is read directly from
 // device memory (Apple9 flexible cache; per cx research, prefer this over

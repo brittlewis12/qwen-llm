@@ -18844,6 +18844,8 @@ pub enum Trellis3Variant {
     ThreeInstGNsg4,
     /// T6 tuning iteration 3: NR0=4 row-ILP variant of ThreeInstG.
     ThreeInstGNr4,
+    /// T8b: dual-3INST group-ring V=2 (rotl+xor second hash word).
+    ThreeInstDG,
 }
 
 impl Trellis3Variant {
@@ -18857,6 +18859,7 @@ impl Trellis3Variant {
             Trellis3Variant::ThreeInstV2G => "kernel_mat_vec_trellis3g_3inst_v2_f32",
             Trellis3Variant::ThreeInstGNsg4 => "kernel_mat_vec_trellis3g_3inst_nsg4_f32",
             Trellis3Variant::ThreeInstGNr4 => "kernel_mat_vec_trellis3g_3inst_nr4_f32",
+            Trellis3Variant::ThreeInstDG => "kernel_mat_vec_trellis3g_3inst_d_f32",
         }
     }
     pub fn label(self) -> &'static str {
@@ -18869,6 +18872,7 @@ impl Trellis3Variant {
             Trellis3Variant::ThreeInstV2G => "3inst_v2_g256",
             Trellis3Variant::ThreeInstGNsg4 => "3inst_g256_nsg4",
             Trellis3Variant::ThreeInstGNr4 => "3inst_g256_nr4",
+            Trellis3Variant::ThreeInstDG => "3inst_d_g256",
         }
     }
 }
@@ -19094,6 +19098,30 @@ pub fn trellis3_cpu_reference(
                             let yv =
                                 half::f16::from_f32(x[ib * T3_GROUP_W + span * 32 + l as usize]);
                             acc = t3_fma_h(w, yv, acc);
+                        }
+                    }
+                    Trellis3Variant::ThreeInstDG => {
+                        for t in 0..16u32 {
+                            let tj = span as u32 * 16 + t;
+                            let st = t3_group_ring_state(gwords, 6 * (tj + 1));
+                            let h = st.wrapping_mul(T3_LCG_A).wrapping_add(T3_LCG_B);
+                            let g = h ^ h.rotate_left(13);
+                            let ha = (h & T3_MASK) | T3_FIXED;
+                            let hb = (g & T3_MASK) | T3_FIXED;
+                            let ax = half::f16::from_bits((ha & 0xFFFF) as u16).to_f32();
+                            let ay = half::f16::from_bits((ha >> 16) as u16).to_f32();
+                            let bx = half::f16::from_bits((hb & 0xFFFF) as u16).to_f32();
+                            let by = half::f16::from_bits((hb >> 16) as u16).to_f32();
+                            let w0 = half::f16::from_f32(ax + ay);
+                            let w1 = half::f16::from_f32(bx + by);
+                            let y0 = half::f16::from_f32(
+                                x[ib * T3_GROUP_W + span * 32 + 2 * t as usize],
+                            );
+                            let y1 = half::f16::from_f32(
+                                x[ib * T3_GROUP_W + span * 32 + 2 * t as usize + 1],
+                            );
+                            acc = t3_fma_h(w0, y0, acc);
+                            acc = t3_fma_h(w1, y1, acc);
                         }
                     }
                     Trellis3Variant::ThreeInstV2G => {
@@ -22173,6 +22201,7 @@ mod tests {
             Trellis3Variant::ThreeInstV2G,
             Trellis3Variant::ThreeInstGNsg4,
             Trellis3Variant::ThreeInstGNr4,
+            Trellis3Variant::ThreeInstDG,
         ] {
             let cpu = trellis3_cpu_reference(variant, &syn, &x, n_in, n_out);
             let gpu = mat_vec_trellis3_f32_readback_for_test(&ctx, variant, &syn, &x, n_in, n_out)

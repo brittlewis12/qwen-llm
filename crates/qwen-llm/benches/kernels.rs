@@ -344,6 +344,7 @@ fn bench_trellis3_mat_vec(c: &mut Criterion) {
         Trellis3Variant::ThreeInstV2G,
         Trellis3Variant::ThreeInstGNsg4,
         Trellis3Variant::ThreeInstGNr4,
+        Trellis3Variant::ThreeInstDG,
     ];
 
     let mut group = c.benchmark_group("trellis3 mat_vec");
@@ -422,7 +423,7 @@ fn bench_trellis3_mat_vec(c: &mut Criterion) {
         .expect("x");
         let y_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("y");
         let bytes = trellis3_compressed_bytes(n_in, n_out);
-        for variant in [Trellis3Variant::ThreeInstG, Trellis3Variant::ThreeInstV2G, Trellis3Variant::ThreeInstGNsg4] {
+        for variant in [Trellis3Variant::ThreeInstG, Trellis3Variant::ThreeInstV2G, Trellis3Variant::ThreeInstDG] {
             let row = format!("{}/{label}", variant.label());
             group.throughput(Throughput::Bytes(bytes * 64));
             group.bench_with_input(BenchmarkId::new("chained64", &row), &row, |b, _| {

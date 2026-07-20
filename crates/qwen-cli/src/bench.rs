@@ -11403,6 +11403,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         };
 
     let mut mtp_rank_rows: Vec<MtpRankRow> = Vec::new();
+    // Gate failures discovered mid-probe are DEFERRED until after the
+    // results/JSON emission so failing-audit runs still yield harvestable
+    // timing. Exit semantics are unchanged (nonzero exit, same message).
+    let mut deferred_gate_failure: Option<String> = None;
     let result = match mtp_probe {
         MtpProbeMode::Normal => {
             let mtp_session =
@@ -11441,31 +11445,37 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             };
             if spec_tokens >= 2 {
                 let generated = &ref_generated_vec[..ref_generated_vec.len().saturating_sub(1)];
-                anyhow::ensure!(
-                    output.tokens[prompt_ids.len()..] == ref_generated_vec,
-                    "native MTP emitted tokens differ from serial target"
-                );
-                let pending_terminal_token = *ref_generated_vec
-                    .last()
-                    .context("native MTP produced no terminal token")?;
-                let mut serial_session =
-                    MetalSession::fresh(&ctx, &mm, cap).context("state-audit serial session")?;
-                for (position, &token) in prompt_ids.iter().chain(generated).enumerate() {
-                    mf.single_token(token, position as u32, &mut serial_session)
-                        .context("state-audit serial transition")?;
+                if output.tokens[prompt_ids.len()..] != ref_generated_vec {
+                    // Stream divergent: a state audit against the serial
+                    // token reconstruction would not be comparable. Skip
+                    // it, defer the failure past the results emission.
+                    deferred_gate_failure.get_or_insert_with(|| {
+                        "native MTP emitted tokens differ from serial target".to_string()
+                    });
+                } else {
+                    let pending_terminal_token = *ref_generated_vec
+                        .last()
+                        .context("native MTP produced no terminal token")?;
+                    let mut serial_session = MetalSession::fresh(&ctx, &mm, cap)
+                        .context("state-audit serial session")?;
+                    for (position, &token) in prompt_ids.iter().chain(generated).enumerate() {
+                        mf.single_token(token, position as u32, &mut serial_session)
+                            .context("state-audit serial transition")?;
+                    }
+                    let audit = audit_mtp_target_state_chain(
+                        &mf,
+                        &mut serial_session,
+                        &mut spec_session,
+                        prompt_ids.len() + generated.len(),
+                        pending_terminal_token,
+                    )?;
+                    if !audit.resume_audit_pass {
+                        deferred_gate_failure.get_or_insert_with(|| {
+                            format!("native MTP terminal resume audit failed: {audit:?}")
+                        });
+                    }
+                    normal_state_audit = Some(audit);
                 }
-                let audit = audit_mtp_target_state_chain(
-                    &mf,
-                    &mut serial_session,
-                    &mut spec_session,
-                    prompt_ids.len() + generated.len(),
-                    pending_terminal_token,
-                )?;
-                anyhow::ensure!(
-                    audit.resume_audit_pass,
-                    "native MTP terminal resume audit failed: {audit:?}"
-                );
-                normal_state_audit = Some(audit);
             }
             output
         }
@@ -11620,7 +11630,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     };
     if mtp_probe == MtpProbeMode::Oracle {
         let audit = target_state_audit.context("oracle target-state audit missing")?;
-        anyhow::ensure!(identical, "oracle emitted tokens differ from serial target");
+        // Hard harness invariants stay immediate (timing is meaningless
+        // if these fire); stream/audit gate failures are deferred past
+        // the results emission.
         anyhow::ensure!(
             result.stats.mtp_calls == 0,
             "oracle unexpectedly executed {} MTP calls",
@@ -11632,10 +11644,14 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             result.stats.target_transitions,
             expected_target_transitions
         );
-        anyhow::ensure!(
-            audit.resume_audit_pass,
-            "oracle terminal resume audit failed: {audit:?}"
-        );
+        if !identical {
+            deferred_gate_failure.get_or_insert_with(|| {
+                "oracle emitted tokens differ from serial target".to_string()
+            });
+        } else if !audit.resume_audit_pass {
+            deferred_gate_failure
+                .get_or_insert_with(|| format!("oracle terminal resume audit failed: {audit:?}"));
+        }
     }
 
     // Apples-to-apples reporting. The earlier version mixed phases —
@@ -11716,20 +11732,32 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         ref_emitted,
     );
     if let Some(audit) = target_state_audit {
-        eprintln!(
-            "[mtp-bench] terminal resume: PASS continuation_steps={} \
-             kv_pos={:?} kv_max_abs={:.3e} kv_cos={:.10} \
-             gdn_state_max_abs={:.3e} gdn_conv_max_abs={:.3e} \
-             continuation_max_abs={:.3e} continuation_cos={:.10}",
-            MTP_CONTINUATION_AUDIT_STEPS,
-            audit.candidate_final_position,
-            audit.kv_payload_max_abs,
-            audit.kv_payload_cosine,
-            audit.gdn_state_max_abs,
-            audit.gdn_conv_max_abs,
-            audit.continuation_logits_max_abs,
-            audit.continuation_logits_cosine,
-        );
+        if identical {
+            eprintln!(
+                "[mtp-bench] terminal resume: {} continuation_steps={} \
+                 kv_pos={:?} kv_max_abs={:.3e} kv_cos={:.10} \
+                 gdn_state_max_abs={:.3e} gdn_conv_max_abs={:.3e} \
+                 continuation_max_abs={:.3e} continuation_cos={:.10}",
+                if audit.resume_audit_pass {
+                    "PASS"
+                } else {
+                    "FAIL"
+                },
+                MTP_CONTINUATION_AUDIT_STEPS,
+                audit.candidate_final_position,
+                audit.kv_payload_max_abs,
+                audit.kv_payload_cosine,
+                audit.gdn_state_max_abs,
+                audit.gdn_conv_max_abs,
+                audit.continuation_logits_max_abs,
+                audit.continuation_logits_cosine,
+            );
+        } else {
+            eprintln!(
+                "[mtp-bench] terminal resume: N/A (stream divergent; state \
+                 audit vs serial tokens not comparable)"
+            );
+        }
     }
     if !identical {
         let n_show = 8usize.min(ref_generated.len()).min(spec_generated.len());
@@ -11898,6 +11926,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         eprintln!("[mtp-bench] wrote {}", output_path.display());
     }
 
+    if let Some(msg) = deferred_gate_failure {
+        return Err(anyhow!("{msg}"));
+    }
     if !identical {
         return Err(anyhow!(
             "MTP=on and MTP=off generated different token sequences"

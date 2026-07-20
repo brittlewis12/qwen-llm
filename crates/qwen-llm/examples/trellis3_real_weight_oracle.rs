@@ -147,6 +147,29 @@ fn main() {
 
     let code_v1 = TrellisCode::v1_maskor();
     let code_v2 = TrellisCode::v2_split_maskor();
+    // T8a winner probe: dual-3INST R13 (V=2, ~6.5 ops/weight), built from
+    // explicit tables; 0.977x V1 on the synthetic oracle.
+    let code_d = {
+        const MASK: u32 = 0x8FFF_8FFF;
+        const FIXED: u32 = 0x3B60_3B60 & !MASK;
+        let mut vx = vec![0f32; 1 << 16];
+        let mut vy = vec![0f32; 1 << 16];
+        let hv = |bits: u32| {
+            (
+                half::f16::from_bits((bits & 0xFFFF) as u16).to_f32(),
+                half::f16::from_bits((bits >> 16) as u16).to_f32(),
+            )
+        };
+        for st in 0..(1u32 << 16) {
+            let h = st.wrapping_mul(89_226_354).wrapping_add(64_248_484);
+            let g = h ^ h.rotate_left(13);
+            let (ax, ay) = hv((h & MASK) | FIXED);
+            let (bx, by) = hv((g & MASK) | FIXED);
+            vx[st as usize] = f16r(ax + ay);
+            vy[st as usize] = f16r(bx + by);
+        }
+        TrellisCode::from_tables(2, vx, vy)
+    };
 
     println!(
         "\n{:<28} {:>7} | {:>9} {:>9} {:>9} | {:>9} {:>9} {:>9}",
@@ -206,6 +229,7 @@ fn main() {
         let rel = |e: f64| (e / norm2).sqrt();
         let e_v2 = rel(trellis_sq_err(&rot, &code_v2));
         let e_v1 = rel(trellis_sq_err(&rot, &code_v1));
+        let e_d = rel(trellis_sq_err(&rot, &code_d));
         let e_lm = rel(lm8_sq_err(&rot));
         let e_q4 = rel(ggml_sq_err(&orig, 12, n_in)); // Q4_K
         let e_q3 = rel(ggml_sq_err(&orig, 11, n_in)); // Q3_K
@@ -213,7 +237,7 @@ fn main() {
 
         let label = t.name.trim_end_matches(".weight");
         println!(
-            "{label:<28} {n_in:>7} | {e_v2:>9.5} {e_v1:>9.5} {e_lm:>9.5} | {e_q4:>9.5} {e_q3:>9.5} {e_iq3:>9.5}   ({} rows, {:.0}s)",
+            "{label:<28} {n_in:>7} | {e_v2:>9.5} {e_v1:>9.5} {e_lm:>9.5} | {e_q4:>9.5} {e_q3:>9.5} {e_iq3:>9.5} | d3inst {e_d:>9.5}   ({} rows, {:.0}s)",
             rows,
             t0.elapsed().as_secs_f32()
         );

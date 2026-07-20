@@ -72,6 +72,17 @@ impl TrellisCode {
         TrellisCode { v: 2, vx, vy }
     }
 
+    /// Arbitrary code from explicit per-state value tables (T8 code
+    /// search; v in {1,2}).
+    pub fn from_tables(v: usize, vx: Vec<f32>, vy: Vec<f32>) -> Self {
+        assert!(v == 1 || v == 2);
+        assert_eq!(vx.len(), NSTATES);
+        if v == 2 {
+            assert_eq!(vy.len(), NSTATES);
+        }
+        TrellisCode { v, vx, vy }
+    }
+
     /// RMS of the code's value distribution (for initial scale fits).
     pub fn value_rms(&self) -> f64 {
         let it = self.vx.iter().chain(self.vy.iter());
@@ -85,7 +96,8 @@ impl TrellisCode {
 /// initial state's low (L-k) bits (tail-biting pass 2).
 fn viterbi_pass(
     x: &[f32],
-    scale: f32,
+    scales: &[f32],
+    sub: usize,
     code: &TrellisCode,
     pin_lead: Option<u32>,
 ) -> (Vec<u32>, f32) {
@@ -96,11 +108,12 @@ fn viterbi_pass(
 
     let cost = |step: usize, st: usize| -> f32 {
         if code.v == 1 {
-            let d = x[step] - scale * self_get(&code.vx, st);
+            let d = x[step] - scales[step / sub] * self_get(&code.vx, st);
             d * d
         } else {
-            let d0 = x[2 * step] - scale * self_get(&code.vx, st);
-            let d1 = x[2 * step + 1] - scale * self_get(&code.vy, st);
+            let sc = scales[(2 * step) / sub];
+            let d0 = x[2 * step] - sc * self_get(&code.vx, st);
+            let d1 = x[2 * step + 1] - sc * self_get(&code.vy, st);
             d0 * d0 + d1 * d1
         }
     };
@@ -202,27 +215,33 @@ pub fn decode_group(words: &[u32; GROUP_WORDS], code: &TrellisCode) -> Vec<f32> 
     out
 }
 
-fn group_sq_err(x: &[f32], vals: &[f32], scale: f32) -> f64 {
-    x.iter()
-        .zip(vals)
-        .map(|(xx, vv)| {
-            let d = *xx as f64 - scale as f64 * *vv as f64;
-            d * d
-        })
-        .sum()
-}
 
 /// Encode one 256-weight group (two-pass tail-biting, keep the better
 /// TRUE ring-decoded stream) at a fixed scale.
-fn encode_group_at(x: &[f32], scale: f32, code: &TrellisCode) -> ([u32; GROUP_WORDS], f64) {
+fn encode_group_at(
+    x: &[f32],
+    scales: &[f32],
+    sub: usize,
+    code: &TrellisCode,
+) -> ([u32; GROUP_WORDS], f64) {
     let k = 3 * code.v;
-    let (p1, _) = viterbi_pass(x, scale, code, None);
+    let (p1, _) = viterbi_pass(x, scales, sub, code, None);
     let lead = p1[p1.len() - 1] >> k;
-    let (p2, _) = viterbi_pass(x, scale, code, Some(lead));
+    let (p2, _) = viterbi_pass(x, scales, sub, code, Some(lead));
     let w1 = pack_path(&p1, k);
     let w2 = pack_path(&p2, k);
-    let e1 = group_sq_err(x, &decode_group(&w1, code), scale);
-    let e2 = group_sq_err(x, &decode_group(&w2, code), scale);
+    let err = |w: &[u32; GROUP_WORDS]| -> f64 {
+        let vals = decode_group(w, code);
+        x.iter()
+            .zip(&vals)
+            .enumerate()
+            .map(|(i, (xx, vv))| {
+                let d = *xx as f64 - scales[i / sub] as f64 * *vv as f64;
+                d * d
+            })
+            .sum()
+    };
+    let (e1, e2) = (err(&w1), err(&w2));
     if e2 <= e1 { (w2, e2) } else { (w1, e1) }
 }
 
@@ -239,7 +258,8 @@ pub fn encode_group(x: &[f32], code: &TrellisCode) -> EncodedGroup {
     assert_eq!(x.len(), GROUP_W);
     let rms_x = (x.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / GROUP_W as f64).sqrt();
     let s0 = f16r((rms_x / code.value_rms().max(1e-12)) as f32);
-    let (w0, e0) = encode_group_at(x, s0, code);
+    let sv0 = [s0; 1];
+    let (w0, e0) = encode_group_at(x, &sv0, GROUP_W, code);
     // LS refit against the decoded values, then re-encode.
     let v0 = decode_group(&w0, code);
     let num: f64 = x
@@ -249,7 +269,8 @@ pub fn encode_group(x: &[f32], code: &TrellisCode) -> EncodedGroup {
         .sum();
     let den: f64 = v0.iter().map(|b| (*b as f64) * (*b as f64)).sum();
     let s1 = f16r(if den > 0.0 { (num / den) as f32 } else { s0 });
-    let (w1, e1) = encode_group_at(x, s1, code);
+    let sv1 = [s1; 1];
+    let (w1, e1) = encode_group_at(x, &sv1, GROUP_W, code);
     if e1 <= e0 {
         EncodedGroup {
             words: w1,
@@ -263,6 +284,40 @@ pub fn encode_group(x: &[f32], code: &TrellisCode) -> EncodedGroup {
             sq_err: e0,
         }
     }
+}
+
+/// Sub-scale variant (T8/B8): `n_sub` fp16 scales per 256-weight group
+/// (chunk = 256/n_sub). Same encode -> LS-refit-per-chunk -> re-encode
+/// discipline. Returns the group squared error only.
+pub fn encode_group_sub(x: &[f32], code: &TrellisCode, n_sub: usize) -> f64 {
+    assert_eq!(x.len(), GROUP_W);
+    assert!(GROUP_W % n_sub == 0);
+    let sub = GROUP_W / n_sub;
+    let crms = code.value_rms().max(1e-12);
+    let mut scales: Vec<f32> = x
+        .chunks(sub)
+        .map(|c| {
+            let rms =
+                (c.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / sub as f64).sqrt();
+            f16r((rms / crms) as f32)
+        })
+        .collect();
+    let (w0, e0) = encode_group_at(x, &scales, sub, code);
+    let v0 = decode_group(&w0, code);
+    for (ci, chunk) in x.chunks(sub).enumerate() {
+        let vs = &v0[ci * sub..(ci + 1) * sub];
+        let num: f64 = chunk
+            .iter()
+            .zip(vs)
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum();
+        let den: f64 = vs.iter().map(|b| (*b as f64) * (*b as f64)).sum();
+        if den > 0.0 {
+            scales[ci] = f16r((num / den) as f32);
+        }
+    }
+    let (_w1, e1) = encode_group_at(x, &scales, sub, code);
+    e0.min(e1)
 }
 
 /// In-place blockwise fast Walsh-Hadamard transform along 128-element

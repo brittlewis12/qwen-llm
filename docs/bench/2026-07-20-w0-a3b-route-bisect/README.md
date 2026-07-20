@@ -228,3 +228,74 @@ Decision A = PARTIAL, W0b required.
   stream.
 - No head-parity flag exists; MODE-STREAM outcomes on C3 cannot be
   further decomposed in W0.
+
+---
+
+# RESULTS (2026-07-20, all runs at commit 9c32b67; prereg text above unmodified)
+
+## F-code16 ladder (x2 each; every pair byte-identical => deterministic, P1 holds)
+
+| Config | Mode | kv_cos | kv_max_abs | gdn_state | gdn_conv | cont_cos | Gate |
+|---|---|---|---|---|---|---|---|
+| C0 | MODE-AUDIT | 0.999894 | 0.599 | 0.187 | 0.999 | 0.99849 | FAIL |
+| C1 (route serial) | MODE-AUDIT | 0.999894 | 0.480 | 0.219 | 1.018 | 0.99891 | FAIL |
+| C-SER (fully serial) | MODE-AUDIT | 0.9999901 | 0.269 | 0.062 | 0.697 | 0.99958 | FAIL |
+| C-SER+RV0 | MODE-AUDIT | byte-identical to C-SER | | | | | FAIL |
+| C-SER+RV0+CF0 | MODE-AUDIT | byte-identical to C-SER | | | | | FAIL |
+| C-SER+RV0+CF0+ST0 | MODE-AUDIT | byte-identical to C-SER | | | | | FAIL |
+
+Harness-version caveat (declared): current audit is the 16-step chain with
+gdn/conv gates — stricter than the v0.556-era record; C0 magnitudes are
+not comparable to the v0.556 numbers (final audited position 42 vs 27),
+but the failure class reproduces. Contingency-ladder byte-identity is
+positive evidence those flags are not consulted in the legacy branch.
+
+No config passed F-code16 => no promotion rows (F-code128 / F-chat128 /
+F-gen32 vacuous per prereg; F-gen32 remains frozen and unused — any
+future use must note it was frozen 2026-07-20 pre-observation).
+
+## VERDICT: NOT-FIXTURE-SUFFICIENT. Decision A = NO.
+
+The shipped serialization flags cannot reproduce serial recurrent state
+on F-code16. Under C-SER every state-feeding op we could identify runs
+the serial per-token kernels, yet terminal state remains far outside the
+contract (gdn 6.2e-2 vs 1e-2 gate, conv 7.0e-1 vs 1e-1 gate).
+
+## Post-hoc exploratory control (NOT part of the frozen protocol,
+labeled per house rules): dense-27B on the CURRENT harness
+
+Same fixture pattern (Fibonacci, tokens 16, spec 7, physical N8, oracle),
+model Qwen3.6-27B-MTP-Q4_K_M, default flags (fully batched):
+PASS — kv_cos 0.9999999199, kv_max_abs 3.1e-2, gdn_state 2.5e-3,
+gdn_conv 2.1e-2, cont_cos 0.9999999859.
+
+Contrast: dense-BATCHED residuals are ~25x (gdn) to ~33x (conv) smaller
+than A3B-FULLY-SERIAL residuals. The A3B defect is therefore not
+GEMM-batching reduction-order numerics. Remaining suspects, in order:
+(1) A3B/MoE-specific packed-verify ORCHESTRATION — GDN/conv
+checkpoint-restore slots, accept/rollback bookkeeping in the MoE branch
+(dense uses a different branch); (2) a state-feeding op in the MoE
+verify path still not per-token-identical under C-SER; (3) A3B dynamics
+amplifying some residual seed (cannot amplify exact-zero, so requires
+(1) or (2) to seed it).
+
+H-route (router-kernel-swap as the amplifier) is dead on this fixture:
+C1 ~= C0. Router-input-perturbation flips remain unassessed (W0b).
+
+## Program consequences
+
+- The A3B contract defect is a BUG HUNT (first-divergence packet,
+  restore-boundary correlation), not a numerics-parity project. W0b
+  next: per-packet first-divergence trace on A3B under C-SER (max
+  isolation), correlating divergence onset with accept/reject/restore
+  events and checkpoint slots; then targeted fix; then the v0.556
+  protocol rerun.
+- W1 chunked GDN: unaffected in validity (its gate was never contract-
+  repair), still throughput-play only; W1c remains blocked on the
+  post-fix verifier-economics packet. W1a/W1b proceed.
+- The dense-27B pass on the current stricter harness is a fresh
+  data point strengthening the dense verifier lane.
+
+Artifacts: this directory (c0/c1/cser*-code16-run{1,2}.{out,err},
+posthoc-dense27b-code16-run1.*, MANIFEST.txt). cx adversarial sessions:
+019f7fb5-9d3b-7ee1-808b-0107793d702a (2 redesign rounds + EXECUTE AS-IS).

@@ -8,3 +8,4 @@ therm-before: Note: No thermal warning level has been recorded Note: No performa
 gguf: /Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
 gguf-size: 22663387424
 gguf-sha256: 0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b
+therm-after: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 

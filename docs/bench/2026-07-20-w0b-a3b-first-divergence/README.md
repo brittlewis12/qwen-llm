@@ -170,3 +170,27 @@ verdict SOUND-WITH-CAVEATS, caveats adopted throughout)
 Bottom line: the A3B speculation unlock is a NUMERICS-PARITY ENGINEERING
 program with a working bit-exact oracle, not a mystery. Chunked GDN (W1)
 remains a throughput play gated on W0c-econ.
+
+---
+
+# ADDENDUM (same day): D1 diagnosed by flag A/B — not a hazard
+
+- trace-cser-noshared-code16: QWEN_DECODE_MOE_CONCURRENT_SHARED=0 with the
+  full concurrent-GDN encoder organization KEPT (+ per-token mixer):
+  bit-exact PASS end to end (prefill delta exactly 0). D1 is therefore
+  precisely the `encode_moe_ffn_apply_gpu_concurrent_shared` vs plain
+  `encode_moe_ffn_apply_gpu` arithmetic (shared-expert accumulation
+  organization), NOT the concurrent encoder split, NOT a hazard
+  (deterministic, flag-controlled, kill-switchable). F2's hazard question
+  is CLOSED for this mechanism.
+- Deviant call site: the verifier prefill path
+  (`single_token_argmax_with_hidden` -> `encode_moe_block_gpu`) hard-calls
+  the plain apply while production decode AND the verify packets use
+  concurrent_shared. Production D1 fix = align that call site (small).
+- trace-c0-ffnmatched-code16: clean D2 isolation (batched mixer, FFN
+  organization matched plain on BOTH sides via CONCURRENT_SHARED=0 +
+  MTP_MOE_VERIFY_CONCURRENT_FFN=0): packet-0 delta gdn 3.965e-3 /
+  conv 1.104e-2, growing to 4.7e-2/2.5e-1 by packet 1 — batched mma8
+  projections + batched route are contract-fatal on their own (the W0b
+  RESULTS' 2.7e-2 D2 figure was confounded by in-packet FFN-organization
+  mismatch; this supersedes it).

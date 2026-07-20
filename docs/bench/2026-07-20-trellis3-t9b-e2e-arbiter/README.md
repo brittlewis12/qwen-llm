@@ -84,3 +84,27 @@ without LDL; anchors seconds; PPL 5 variants x 32,768 tokens at
 Wikitext-domain PPL only; no speed claims; no 27B/9B extrapolation
 beyond the dimension-stability observation from Stage A; REOPEN-TIER
 reopens the roadmap conversation — nothing ships from T9b.
+
+---
+
+## EXECUTION STATUS (2026-07-20 ~15:30, prereg above unmodified)
+
+- 24-block Hessian capture complete (581.9s, 32K doc-disjoint train
+  tokens, target/t9/hessians-24/).
+- Evaluator smoke: original F32 -> ppl 19.4339 over 4 segments
+  (sane; word-level wikitext).
+- Pipeline launched (target/t9/run-t9b.sh, log
+  target/t9/t9b-pipeline.log): f32 copy + hash check, q3k/q4k patches
+  (~8s each) done; a0/a3 full-tensor encodes measured at ~283 s/tensor
+  x 72 => ~5.6 h/arm (the prereg's ~50-min budget repeated the Stage A
+  sampled-span arithmetic error against full tensors — cost note
+  corrected here, before results). PPL x5 (~7 min each) runs
+  automatically after. ETA complete ~03:00-04:00 local.
+- Analyzer (analyze.py, frozen in this dir) self-tested on degenerate
+  identical inputs: zero damages, TIED, sanity flags correctly raised.
+- CLOSE PROTOCOL when the log shows "T9B PIPELINE COMPLETE":
+  (1) verify the MATCH line (V-F32 bitwise == original);
+  (2) python3 analyze.py target/t9/ppl;
+  (3) check sanity preconditions (all D>0, D(q4k)<D(q3k));
+  (4) record G1/G2/G3 verdicts verbatim + the five PPLs in RESULTS;
+  (5) copy nll dumps + pipeline log into this dir; commit close.

@@ -69,9 +69,9 @@ use qwen_llm::{
     metal_forward::{encode_mat_mat_dispatch, encode_mat_vec_dispatch},
     metal_mtp::{
         DecodeOutput, MetalMtpHead, MetalMtpSession, MtpBaseHiddenVariant, MtpHistoryMode,
-        MtpRankRow, MtpRecursiveHiddenVariant, PackedDraftPlan, RecordedDraftStep, RecordedMtpWork,
-        SpeculativeDecoder, quantize_lm_head_to_affine_q4_gs64, quantize_lm_head_to_q4_0,
-        quantize_lm_head_to_q4_1,
+        MtpRankRow, MtpRecursiveHiddenVariant, PackedDraftPlan, PackedStepProbe,
+        PackedStepProbePhase, RecordedDraftStep, RecordedMtpWork, SpeculativeDecoder,
+        quantize_lm_head_to_affine_q4_gs64, quantize_lm_head_to_q4_0, quantize_lm_head_to_q4_1,
     },
     prompt_lookup::{
         DRAFT_TOKENS, PromptLookupProposer, PromptLookupTerminalCause, ProposalSource,
@@ -1435,6 +1435,11 @@ struct MtpArgs {
     /// readback and is diagnostic-only, not a timing path.
     #[arg(long)]
     mtp_rank_topk: Option<PathBuf>,
+    /// Per-packet candidate-vs-shadow-serial state trace (oracle probe
+    /// only). Prints per-packet GDN state/conv max-abs deltas against an
+    /// in-process serial shadow session. Diagnostic-only; wrecks timing.
+    #[arg(long)]
+    mtp_state_trace: bool,
     /// Write a compact JSON summary for MTPLX/profile-parity sweeps.
     #[arg(long)]
     output: Option<PathBuf>,
@@ -10318,6 +10323,29 @@ struct MtpTargetStateAudit {
     continuation_logits_cosine: f64,
 }
 
+fn max_abs_f32_pair(a: &MetalTensor, b: &MetalTensor) -> Result<f32> {
+    anyhow::ensure!(
+        a.dtype == GgmlType::F32
+            && b.dtype == GgmlType::F32
+            && a.shape == b.shape
+            && a.n_bytes() == b.n_bytes(),
+        "state tensor shape or dtype mismatch"
+    );
+    let mut max_abs = 0.0f32;
+    unsafe {
+        let pa = (a.buffer.contents().as_ptr() as *const u8).add(a.offset as usize) as *const f32;
+        let pb = (b.buffer.contents().as_ptr() as *const u8).add(b.offset as usize) as *const f32;
+        for i in 0..a.n_elements() as usize {
+            let delta = (*pa.add(i) - *pb.add(i)).abs();
+            if !delta.is_finite() {
+                return Ok(f32::INFINITY);
+            }
+            max_abs = max_abs.max(delta);
+        }
+    }
+    Ok(max_abs)
+}
+
 fn max_abs_f32_tensor_pairs(reference: &[MetalTensor], candidate: &[MetalTensor]) -> Result<f32> {
     anyhow::ensure!(
         reference.len() == candidate.len(),
@@ -10325,28 +10353,35 @@ fn max_abs_f32_tensor_pairs(reference: &[MetalTensor], candidate: &[MetalTensor]
     );
     let mut max_abs = 0.0f32;
     for (a, b) in reference.iter().zip(candidate) {
-        anyhow::ensure!(
-            a.dtype == GgmlType::F32
-                && b.dtype == GgmlType::F32
-                && a.shape == b.shape
-                && a.n_bytes() == b.n_bytes(),
-            "state tensor shape or dtype mismatch"
-        );
-        unsafe {
-            let pa =
-                (a.buffer.contents().as_ptr() as *const u8).add(a.offset as usize) as *const f32;
-            let pb =
-                (b.buffer.contents().as_ptr() as *const u8).add(b.offset as usize) as *const f32;
-            for i in 0..a.n_elements() as usize {
-                let delta = (*pa.add(i) - *pb.add(i)).abs();
-                if !delta.is_finite() {
-                    return Ok(f32::INFINITY);
-                }
-                max_abs = max_abs.max(delta);
-            }
-        }
+        max_abs = max_abs.max(max_abs_f32_pair(a, b)?);
     }
     Ok(max_abs)
+}
+
+/// Per-layer max-abs across two tensor lists: returns (global max, layer
+/// index of the max, count of layers with max-abs > 1e-6).
+fn max_abs_f32_layers(
+    reference: &[MetalTensor],
+    candidate: &[MetalTensor],
+) -> Result<(f32, usize, usize)> {
+    anyhow::ensure!(
+        reference.len() == candidate.len(),
+        "state tensor count mismatch"
+    );
+    let mut max_abs = 0.0f32;
+    let mut max_layer = 0usize;
+    let mut n_over = 0usize;
+    for (li, (a, b)) in reference.iter().zip(candidate).enumerate() {
+        let m = max_abs_f32_pair(a, b)?;
+        if m > 1e-6 {
+            n_over += 1;
+        }
+        if m > max_abs {
+            max_abs = m;
+            max_layer = li;
+        }
+    }
+    Ok((max_abs, max_layer, n_over))
 }
 
 fn kv_bytes_metrics(reference: &[u8], candidate: &[u8], dtype: GgmlType) -> Result<(f32, f64)> {
@@ -11025,6 +11060,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_base_hidden,
         mtp_history,
         mtp_rank_topk,
+        mtp_state_trace,
         output,
         include_token_ids,
         tokens,
@@ -11249,6 +11285,51 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         spec.set_base_hidden_variant(mtp_base_hidden.into());
         spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
         spec.set_history_mode(mtp_history.into());
+        if mtp_state_trace && audit_target_state {
+            let mut shadow = MetalSession::fresh(&ctx, &mm, cap).context("state-trace shadow")?;
+            for (i, &tid) in prompt_ids.iter().enumerate() {
+                mf.single_token(tid, i as u32, &mut shadow)
+                    .context("state-trace shadow prefill")?;
+            }
+            let mf_probe = &mf;
+            spec.set_step_probe(Box::new(move |ev: &PackedStepProbe<'_>| {
+                for (i, &tok) in ev.committed.iter().enumerate() {
+                    mf_probe
+                        .single_token(tok, ev.start_position + i as u32, &mut shadow)
+                        .map_err(|e| format!("shadow advance: {e}"))?;
+                }
+                let (g_max, g_layer, g_over) =
+                    max_abs_f32_layers(&shadow.gdn_state, &ev.session.gdn_state)
+                        .map_err(|e| format!("gdn compare: {e}"))?;
+                let (c_max, c_layer, c_over) =
+                    max_abs_f32_layers(&shadow.gdn_conv, &ev.session.gdn_conv)
+                        .map_err(|e| format!("conv compare: {e}"))?;
+                let phase = match ev.phase {
+                    PackedStepProbePhase::Prefill => "prefill",
+                    PackedStepProbePhase::Packet => "packet",
+                };
+                eprintln!(
+                    "[state-trace] {phase} step={} pos={} n_eff={} acc={} keep={} \
+                     restore={} stop={} | gdn max={:.3e} L{} over={} | \
+                     conv max={:.3e} L{} over={} | kvpos_eq={}",
+                    ev.step_idx,
+                    ev.start_position,
+                    ev.n_eff,
+                    ev.n_accepted,
+                    ev.n_keep,
+                    ev.restore_fired,
+                    ev.stop_now,
+                    g_max,
+                    g_layer,
+                    g_over,
+                    c_max,
+                    c_layer,
+                    c_over,
+                    shadow.kv_n_pos == ev.session.kv_n_pos,
+                );
+                Ok(())
+            }));
+        }
         let mut verify_scratch =
             MetalDFlashVerifyScratch::fresh(&ctx, &mm, planned_verify_n as u32, 1)
                 .context("mtp packed verify scratch")?;

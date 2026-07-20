@@ -861,6 +861,44 @@ pub struct SpeculativeDecoder<'a> {
     recursive_hidden_variant: MtpRecursiveHiddenVariant,
     base_hidden_variant: MtpBaseHiddenVariant,
     history_mode: MtpHistoryMode,
+    step_probe: Option<PackedStepProbeFn<'a>>,
+}
+
+/// Bench-only per-packet state probe callback for
+/// [`SpeculativeDecoder::decode_packed_n_planned`]. See
+/// [`PackedStepProbe`]. Returning `Err` aborts the decode.
+pub type PackedStepProbeFn<'a> = Box<dyn FnMut(&PackedStepProbe<'_>) -> Result<(), String> + 'a>;
+
+/// Which boundary a [`PackedStepProbe`] event describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackedStepProbePhase {
+    /// After prompt prefill, before the first verify packet.
+    Prefill,
+    /// After a verify packet's accept/restore completed (state buffers
+    /// coherent: verify and restore both waitUntilCompleted).
+    Packet,
+}
+
+/// Event payload handed to a step probe. `committed` holds exactly the
+/// tokens whose state this packet RETAINS in the target session (carry
+/// token then accepted drafts, truncated to `n_keep` — on a terminal
+/// packet the pending final token's state is rolled back and therefore
+/// excluded), positioned at `start_position..start_position+committed.len()`.
+pub struct PackedStepProbe<'e> {
+    pub phase: PackedStepProbePhase,
+    /// 0-based verify-packet index (meaningless for Prefill).
+    pub step_idx: usize,
+    /// Position of the packet's first token (for Prefill: prompt length,
+    /// i.e. the next position to be processed).
+    pub start_position: u32,
+    pub n_eff: u32,
+    pub n_accepted: usize,
+    pub n_keep: u32,
+    pub restore_fired: bool,
+    pub stop_now: bool,
+    pub committed: &'e [i32],
+    /// The candidate (packed-verify) session, read-only.
+    pub session: &'e MetalSession,
 }
 
 impl<'a> SpeculativeDecoder<'a> {
@@ -876,6 +914,7 @@ impl<'a> SpeculativeDecoder<'a> {
             draft_token_embd_head: false,
             draft_lm_head_override: None,
             draft_affine_q4_head_override: None,
+            step_probe: None,
             recursive_hidden_variant: MtpRecursiveHiddenVariant::PreNorm,
             base_hidden_variant: MtpBaseHiddenVariant::PreNorm,
             history_mode: MtpHistoryMode::Committed,
@@ -957,6 +996,13 @@ impl<'a> SpeculativeDecoder<'a> {
 
     pub fn set_history_mode(&mut self, mode: MtpHistoryMode) {
         self.history_mode = mode;
+    }
+
+    /// Install a bench-only per-packet state probe for
+    /// [`Self::decode_packed_n_planned`]. Diagnostic instrumentation:
+    /// never installed by production paths.
+    pub fn set_step_probe(&mut self, probe: PackedStepProbeFn<'a>) {
+        self.step_probe = Some(probe);
     }
 
     fn wants_base_post_norm(&self) -> bool {
@@ -2936,6 +2982,27 @@ impl<'a> SpeculativeDecoder<'a> {
         let mut emitted_count: usize = 0;
         let mut step_idx: usize = 0;
 
+        if let Some(probe) = self.step_probe.as_mut() {
+            let ev = PackedStepProbe {
+                phase: PackedStepProbePhase::Prefill,
+                step_idx: 0,
+                start_position: n_prompt as u32,
+                n_eff: 0,
+                n_accepted: 0,
+                n_keep: 0,
+                restore_fired: false,
+                stop_now: false,
+                committed: &[],
+                session: base_session,
+            };
+            probe(&ev).map_err(|detail| {
+                MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_decode_packed_n_planned.step_probe",
+                    detail,
+                })
+            })?;
+        }
+
         'outer: loop {
             tokens.push(emit_tok);
             emitted_count += 1;
@@ -3075,6 +3142,31 @@ impl<'a> SpeculativeDecoder<'a> {
                     Some(n_eff),
                 )?;
                 stats.restore_ms += t_restore.elapsed().as_secs_f64() * 1e3;
+            }
+
+            if let Some(probe) = self.step_probe.as_mut() {
+                let mut committed: Vec<i32> = Vec::with_capacity(1 + n_accepted);
+                committed.push(carry_tok);
+                committed.extend_from_slice(&drafts[..n_accepted]);
+                committed.truncate(n_keep as usize);
+                let ev = PackedStepProbe {
+                    phase: PackedStepProbePhase::Packet,
+                    step_idx,
+                    start_position,
+                    n_eff,
+                    n_accepted,
+                    n_keep,
+                    restore_fired: n_keep < n_eff,
+                    stop_now,
+                    committed: &committed,
+                    session: base_session,
+                };
+                probe(&ev).map_err(|detail| {
+                    MtpError::Metal(MetalError::BadShape {
+                        kernel: "mtp_decode_packed_n_planned.step_probe",
+                        detail,
+                    })
+                })?;
             }
 
             stats.steps += 1;

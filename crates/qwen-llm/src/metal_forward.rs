@@ -8736,6 +8736,165 @@ impl<'a> MetalForward<'a> {
         }
 
         let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+
+        if arch.kind == ArchKind::Moe && concurrent_gdn_moe_decode_enabled() {
+            // D1 fix (2026-07-20, packets w0b/w0c-econ): encode MoE blocks
+            // with the SAME organization as production decode
+            // (`single_token_moe` -> concurrent GDN split + flag-selected
+            // concurrent-shared FFN apply). This path previously hard-used
+            // the plain organization; the resulting ~1e-5/token FFN
+            // accumulation difference seeded recurrent-state divergence in
+            // every MoE MTP session built on this prefill (component D1 of
+            // the v0.556 A3B contract failure). The mirrored loop below
+            // must stay organization-identical to
+            // `single_token_profiled_concurrent_gdn_moe`.
+            {
+                let enc = KernelEncoder::begin(&cmd_buf);
+                encode_get_rows_f32(
+                    self.ctx,
+                    &enc,
+                    &self.model.token_embd,
+                    &session.ids_buf,
+                    &session.x,
+                    1,
+                    h,
+                )?;
+                enc.end();
+            }
+            let mut gdn_idx = 0usize;
+            let mut attn_idx = 0usize;
+            for block in &self.model.blocks {
+                match block {
+                    MetalBlock::Gdn(g) => {
+                        let i = gdn_idx;
+                        gdn_idx += 1;
+                        let moe = g.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_rms_norm_mul_f32(
+                                self.ctx,
+                                &enc,
+                                &session.x,
+                                &g.attn_norm,
+                                &session.h,
+                                RMS_EPS,
+                            )?;
+                            enc.end();
+                        }
+                        {
+                            let enc = KernelEncoder::begin_concurrent(&cmd_buf);
+                            self.encode_gdn_front_projections(&enc, g, session)?;
+                            enc.end();
+                        }
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            self.encode_gdn_after_projections(&enc, g, i, session)?;
+                            encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
+                            encode_rms_norm_mul_f32(
+                                self.ctx,
+                                &enc,
+                                &session.x,
+                                &g.post_attn_norm,
+                                &session.h,
+                                RMS_EPS,
+                            )?;
+                            self.encode_moe_route_prepare(&enc, session, moe)?;
+                            if !concurrent_shared_moe_decode_enabled() {
+                                self.encode_moe_ffn_apply_gpu(
+                                    &enc,
+                                    session,
+                                    &g.ffn_gate,
+                                    &g.ffn_up,
+                                    &g.ffn_down,
+                                    moe,
+                                )?;
+                            }
+                            enc.end();
+                        }
+                        if concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                                &cmd_buf,
+                                session,
+                                &g.ffn_gate,
+                                &g.ffn_up,
+                                &g.ffn_down,
+                                moe,
+                            )?;
+                        }
+                    }
+                    MetalBlock::Attn(a) => {
+                        let slot = MixerSlot::Attn(attn_idx);
+                        attn_idx += 1;
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
+                        let moe = a.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
+                        self.encode_moe_route_prepare(&enc, session, moe)?;
+                        if !concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu(
+                                &enc,
+                                session,
+                                &a.ffn_gate,
+                                &a.ffn_up,
+                                &a.ffn_down,
+                                moe,
+                            )?;
+                        }
+                        enc.end();
+                        if concurrent_shared_moe_decode_enabled() {
+                            self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                                &cmd_buf,
+                                session,
+                                &a.ffn_gate,
+                                &a.ffn_up,
+                                &a.ffn_down,
+                                moe,
+                            )?;
+                        }
+                    }
+                }
+            }
+            let enc = KernelEncoder::begin(&cmd_buf);
+            encode_rms_norm_mul_f32(
+                self.ctx,
+                &enc,
+                &session.x,
+                &self.model.output_norm,
+                &session.h,
+                RMS_EPS,
+            )?;
+            encode_mat_vec_dispatch(
+                self.ctx,
+                &enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                arch.vocab_size as usize,
+            )?;
+            let hidden_src = if post_norm_hidden {
+                &session.h
+            } else {
+                &session.x
+            };
+            encode_scatter_offset_f32(self.ctx, &enc, hidden_src, hidden_dst, 0, h)?;
+            encode_argmax_f32(
+                self.ctx,
+                &enc,
+                &session.logits,
+                &session.argmax_tok,
+                1,
+                arch.vocab_size as usize,
+            )?;
+            enc.end();
+            cmd_buf.commit();
+            cmd_buf.waitUntilCompleted();
+            let argmax = unsafe {
+                let src = session.argmax_tok.buffer.contents().as_ptr() as *const i32;
+                *src
+            };
+            return Ok(argmax);
+        }
+
         let enc = KernelEncoder::begin(&cmd_buf);
 
         encode_get_rows_f32(

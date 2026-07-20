@@ -121,3 +121,35 @@ No inference-speed claims (weight-error pilot; the two runtime
 transforms' cost is a later kernel question). No PPL claims. No
 end-to-end tier promotion — REOPEN-TIER reopens the roadmap
 conversation with quality evidence, nothing ships from T9.
+
+---
+
+## EXECUTION STATUS (2026-07-20, mid-packet checkpoint; prereg above unmodified)
+
+Built and committed (655ad16, e6ae2ca, 73f3ae5):
+- Offline core (trellis_ldlq.rs, 4/4 tests green): two-sided block-H128
+  RHT (roundtrip + Frobenius-invariance tested), f64 Gram accumulator
+  (scoped-thread batched), dense f64 Cholesky + 256-block unit-lower A
+  (reconstruction-tested; first cut solved the transposed system \u2014
+  caught by test), generic BlockLDLQ driver with R5 moment traces,
+  streaming r_H scorer. Mock-quantizer test isolates the feedback
+  algebra (>=5% held-out r_H gain on lag-256-correlated H); trellis
+  integration test >=2%. NEGATIVE quantified en route: adjacent-lag
+  correlation is INVISIBLE to g=256 block feedback (the cx geometry
+  concern made concrete \u2014 the original AR(1) test could not detect a
+  working implementation).
+- Capture: env-gated FFN-input hook (h + SwiGLU inner) + harness.
+- Stage A capture COMPLETE: 32,768 train / 32,768 test tokens,
+  64/66 disjoint documents, doc_max 512, 0.8B F32 on-engine (~120 t/s,
+  517.8 s wall), spaces blk{0,3} x {h d=1024, inner d=3584}.
+  Corpus: wikitext-2 WORD-LEVEL train.txt (raw-v1 zip link dead \u2014
+  declared substitution), sha256
+  9e9fa1ad55b1c2c95b08e37dd8e653f6$(unrecorded-tail) \u2014 full sha in
+  target/t9 runner logs. Artifacts: target/t9/stage-a/ (Grams f64,
+  test f32 chunks, manifest.json).
+
+NEXT (fresh session): Stage A runner example \u2014 load the 6 tensor
+classes from the 0.8B GGUF, run arms A0-A3 x 3 seeds per the frozen
+prereg (RHT rotation of W + Hessian, damped LDL, BlockLDLQ encode,
+plain + r_H scoring vs held-out chunks), apply the Stage A -> B gate.
+All inputs exist; no open design questions.

@@ -1,0 +1,1 @@
+{"model":"/Users/tito/models/Qwen3.5-0.8B.F32.gguf","corpus":"target/t9/wikitext2-train.txt","layers":[0, 3],"train_tokens":32768,"test_tokens":32768,"train_docs":64,"test_docs":66,"doc_max":512,"h_dim":1024,"f_dim":3584,"wall_s":517.8}

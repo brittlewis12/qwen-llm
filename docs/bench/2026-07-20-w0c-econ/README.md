@@ -153,3 +153,17 @@ flips costing the batched path acceptances on near-ties.)
    prefill case pending a phase measurement.
 
 No promotion claims; all numbers M4-Max, this build, these fixtures.
+
+## Addendum: A3B decode phase profile (phase-a3b-ctx1024, single probe)
+
+phase_sum 9.32 ms/token at ctx 1024 (~107 t/s, consistent with T1):
+GDN total 41.3% (front proj 23.2 + out_proj 8.1 + tail 6.0 + norms/misc
+4.0), attn 14.7%, MoE route+FFN 35.3%, lm_head 8.8%.
+
+W1 sizing consequence: chunked GDN attacks the TAIL (6.0% of decode) —
+decode-side and verify-side cases on A3B are Amdahl-small. The PREFILL
+case is the live one: the tail's serial in-kernel token loop scales
+linearly with tokens while all else GEMM-parallelizes, and A3B's
+active-FFN is ~7x lighter than dense-27B's (whose measured GDN prefill
+share was 2.6%) => estimated A3B prefill GDN share ~20-30%. ONE pp-phase
+measurement on A3B decides W1b's go/no-go before any oracle investment.

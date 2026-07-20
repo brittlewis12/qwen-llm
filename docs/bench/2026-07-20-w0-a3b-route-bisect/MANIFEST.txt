@@ -1,0 +1,10 @@
+# W0 manifest (2026-07-20T13:40:28Z)
+commit: d679a281b73466f299f2b9ee0833d3963d82cea2 dirty=1
+macos: 15.6.1 build 24G90
+hw: Apple M4 Max / 137438953472 bytes RAM
+binary: target/release/qwen-bench (1784553967 mtime)
+env QWEN_* at launch: 0 vars: []
+therm-before: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+gguf: /Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+gguf-size: 22663387424
+gguf-sha256: 0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b

@@ -1,0 +1,17 @@
+[mtp-bench] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q4_K [5120, 248320])
+[metal-load-ledger] source=851/16536406016 direct_copy=850/15821244416 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/715161600/5085593600 derived=0/0
+[mtp-bench] model=/Users/tito/models/Qwen3.6-27B-MTP-Q4_K_M.gguf prompt="Write a Python function to compute the Fibonacci sequence iteratively." rendered_mode=raw thinking=n/a spec_tokens=7 probe=Oracle physical_n=8 single_cb_draft=false draft_token_embd_head=false draft_lm_head_q4_1=false draft_lm_head_q4_0=false draft_lm_head_q4_affine64=false base_hidden=PostNorm recursive_hidden=PostNorm mtp_history=Committed (12 tokens) gen=16 stop_tokens=[248046]
+
+[mtp-bench] === results ===
+[mtp-bench] MTP=off: 16 tokens, prefill 212.7 ms + decode 571.7 ms = 784.4 ms total
+[mtp-bench]   t/s: decode-only 28.0 | total 20.4
+[mtp-bench] MTP=on : 16 tokens, prefill 469.4 ms + decode 355.3 ms = 824.7 ms total
+[mtp-bench]   t/s: decode-only 45.0 | total 19.4
+[mtp-bench]   α (acceptance rate) = 1.000   steps=2  accepted=14
+[mtp-bench]   target transitions / verifier = 7.500 (15/2)
+[mtp-bench]   base_calls=14  mtp_calls=0 (= prompt prefill + step-B drafts + step-E bridges)
+[mtp-bench]   decode phases ms: draft=0.0 verify=355.1 restore=0.0 bridge=0.2 other=0.0
+[mtp-bench]   speedup (total ms): 784.4 / 824.7 = 0.951× (>1.0 means MTP wins)
+[mtp-bench] equivalence: PASS (identical sequences) (16 vs 16 emitted)
+[mtp-bench] terminal resume: PASS continuation_steps=16 kv_pos=Some(42) kv_max_abs=3.125e-2 kv_cos=0.9999999199 gdn_state_max_abs=2.510e-3 gdn_conv_max_abs=2.111e-2 continuation_max_abs=3.864e-3 continuation_cos=0.9999999859

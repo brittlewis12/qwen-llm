@@ -1,0 +1,19 @@
+[mtp-bench] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [2048, 248320])
+[metal-load-ledger] source=733/22123538944 direct_copy=732/21583194624 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/540344320/2034237440 derived=0/0
+[mtp-bench] model=/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf prompt="Write a Python function to compute the Fibonacci sequence iteratively." rendered_mode=raw thinking=n/a spec_tokens=7 probe=Normal physical_n=8 single_cb_draft=false draft_token_embd_head=false draft_lm_head_q4_1=false draft_lm_head_q4_0=false draft_lm_head_q4_affine64=false base_hidden=PostNorm recursive_hidden=PostNorm mtp_history=Committed (12 tokens) gen=128 stop_tokens=[248046]
+[mtp-bench] MTP MoE banks: policy=F32 gate/up/down=F32/F32/F32 bytes=3221225472
+
+[mtp-bench] === results ===
+[mtp-bench] MTP=off: 128 tokens, prefill 81.3 ms + decode 1171.1 ms = 1252.4 ms total
+[mtp-bench]   t/s: decode-only 109.3 | total 102.2
+[mtp-bench] MTP=on : 128 tokens, prefill 121.8 ms + decode 1314.3 ms = 1436.1 ms total
+[mtp-bench]   t/s: decode-only 97.4 | total 89.1
+[mtp-bench]   α (acceptance rate) = 0.771   steps=20  accepted=108
+[mtp-bench]   target transitions / verifier = 6.350 (127/20)
+[mtp-bench]   base_calls=32  mtp_calls=258 (= prompt prefill + step-B drafts + step-E bridges)
+[mtp-bench]   decode phases ms: draft=229.0 verify=1046.2 restore=3.7 bridge=35.5 other=0.0
+[mtp-bench]   speedup (total ms): 1252.4 / 1436.1 = 0.872× (>1.0 means MTP wins)
+[mtp-bench] equivalence: PASS (identical sequences) (128 vs 128 emitted)
+[mtp-bench] terminal resume: FAIL continuation_steps=16 kv_pos=Some(154) kv_max_abs=1.471e0 kv_cos=0.9996987721 gdn_state_max_abs=1.294e-1 gdn_conv_max_abs=5.546e-1 continuation_max_abs=5.082e-1 continuation_cos=0.9991970091
+Error: native MTP terminal resume audit failed: MtpTargetStateAudit { resume_audit_pass: false, kv_position_equal: true, kv_payload_exact: false, kv_payload_max_abs: 1.4707031, kv_payload_cosine: 0.9996987721273843, reference_final_position: Some(154), candidate_final_position: Some(154), gdn_state_max_abs: 0.12935287, gdn_conv_max_abs: 0.5546303, continuation_argmax_equal: true, continuation_token: 4265, continuation_logits_max_abs: 0.50824857, continuation_logits_cosine: 0.9991970091305232 }

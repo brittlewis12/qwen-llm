@@ -1,0 +1,13 @@
+[tg] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[tg] power: source=AC Power battery=80% AC attached warning=none powermode_ac=2 powermode_battery=2 thermal_warning=false performance_warning=false
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [2048, 248320])
+[metal-load-ledger] source=733/22123538944 direct_copy=732/21583194624 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/540344320/2034237440 derived=0/0
+[tg] model=/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf n_gen=128 runs=3 seed=1 mode=default
+[tg] run  1: wall   1257.4 ms  gpu   1208.5 ms   101.80 t/s
+[tg] run  2: wall   1269.7 ms  gpu   1221.2 ms   100.81 t/s
+[tg] run  3: wall   1237.8 ms  gpu   1193.9 ms   103.41 t/s
+
+[tg] === results ===
+[tg] gen: 128 tokens × 3 runs, avg 1255.0 ms = 102.01 +/- 1.31 t/s
+[tg] gpu: 1207.9 ms avg (96.2% of wall)
+[tg] note: empty KV per rep, random tokens, no logits readback — matches `llama-bench tg128`.

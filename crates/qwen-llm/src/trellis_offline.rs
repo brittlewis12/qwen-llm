@@ -215,7 +215,6 @@ pub fn decode_group(words: &[u32; GROUP_WORDS], code: &TrellisCode) -> Vec<f32> 
     out
 }
 
-
 /// Encode one 256-weight group (two-pass tail-biting, keep the better
 /// TRUE ring-decoded stream) at a fixed scale.
 fn encode_group_at(
@@ -290,11 +289,38 @@ pub fn encode_group(x: &[f32], code: &TrellisCode) -> EncodedGroup {
 /// (chunk = 256/n_sub). Same encode -> LS-refit-per-chunk -> re-encode
 /// discipline. Returns the group squared error only.
 pub fn encode_group_sub(x: &[f32], code: &TrellisCode, n_sub: usize) -> f64 {
+    encode_group_sub_full(x, code, n_sub).sq_err
+}
+
+/// Full result of a sub-scaled group encode (T9 LDLQ needs the actual
+/// reconstruction, not just the error).
+pub struct EncodedGroupSub {
+    pub words: [u32; GROUP_WORDS],
+    pub scales_f16: Vec<u16>,
+    pub sq_err: f64,
+}
+
+impl EncodedGroupSub {
+    /// Scaled reconstruction of the 256 weights.
+    pub fn reconstruct(&self, code: &TrellisCode) -> Vec<f32> {
+        let vals = decode_group(&self.words, code);
+        let sub = GROUP_W / self.scales_f16.len();
+        vals.iter()
+            .enumerate()
+            .map(|(i, v)| half::f16::from_bits(self.scales_f16[i / sub]).to_f32() * v)
+            .collect()
+    }
+}
+
+/// Sub-scale encode returning the packed stream + fitted scales.
+/// Identical arithmetic to the T8-era `encode_group_sub` (the two-encode
+/// min is preserved by keeping whichever encode won).
+pub fn encode_group_sub_full(x: &[f32], code: &TrellisCode, n_sub: usize) -> EncodedGroupSub {
     assert_eq!(x.len(), GROUP_W);
     assert!(GROUP_W % n_sub == 0);
     let sub = GROUP_W / n_sub;
     let crms = code.value_rms().max(1e-12);
-    let mut scales: Vec<f32> = x
+    let scales0: Vec<f32> = x
         .chunks(sub)
         .map(|c| {
             let rms =
@@ -302,8 +328,9 @@ pub fn encode_group_sub(x: &[f32], code: &TrellisCode, n_sub: usize) -> f64 {
             f16r((rms / crms) as f32)
         })
         .collect();
-    let (w0, e0) = encode_group_at(x, &scales, sub, code);
+    let (w0, e0) = encode_group_at(x, &scales0, sub, code);
     let v0 = decode_group(&w0, code);
+    let mut scales1 = scales0.clone();
     for (ci, chunk) in x.chunks(sub).enumerate() {
         let vs = &v0[ci * sub..(ci + 1) * sub];
         let num: f64 = chunk
@@ -313,11 +340,29 @@ pub fn encode_group_sub(x: &[f32], code: &TrellisCode, n_sub: usize) -> f64 {
             .sum();
         let den: f64 = vs.iter().map(|b| (*b as f64) * (*b as f64)).sum();
         if den > 0.0 {
-            scales[ci] = f16r((num / den) as f32);
+            scales1[ci] = f16r((num / den) as f32);
         }
     }
-    let (_w1, e1) = encode_group_at(x, &scales, sub, code);
-    e0.min(e1)
+    let (w1, e1) = encode_group_at(x, &scales1, sub, code);
+    if e1 <= e0 {
+        EncodedGroupSub {
+            words: w1,
+            scales_f16: scales1
+                .iter()
+                .map(|s| half::f16::from_f32(*s).to_bits())
+                .collect(),
+            sq_err: e1,
+        }
+    } else {
+        EncodedGroupSub {
+            words: w0,
+            scales_f16: scales0
+                .iter()
+                .map(|s| half::f16::from_f32(*s).to_bits())
+                .collect(),
+            sq_err: e0,
+        }
+    }
 }
 
 /// In-place blockwise fast Walsh-Hadamard transform along 128-element

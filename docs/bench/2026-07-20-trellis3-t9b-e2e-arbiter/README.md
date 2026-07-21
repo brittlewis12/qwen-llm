@@ -108,3 +108,67 @@ reopens the roadmap conversation — nothing ships from T9b.
   (3) check sanity preconditions (all D>0, D(q4k)<D(q3k));
   (4) record G1/G2/G3 verdicts verbatim + the five PPLs in RESULTS;
   (5) copy nll dumps + pipeline log into this dir; commit close.
+
+---
+
+# RESULTS (2026-07-21 03:10 pipeline completion; analyzer output verbatim
+in ./analysis-output.txt; nll dumps + pipeline log in this dir; prereg
+text above unmodified)
+
+| Variant | mean_nll | PPL | Damage (nats) |
+|---|---|---|---|
+| V-F32 (baseline; hash-verified bitwise == original) | 2.984535 | 19.7773 | — |
+| V-Q4K (4.5 bpw) | 3.029159 | 20.6798 | +0.044625 |
+| V-Q3K (3.44 bpw) | 3.081613 | 21.7935 | +0.097078 |
+| V-A0 (trellis 3.06 bpw) | 3.132760 | 22.9372 | +0.148225 |
+| V-A3 (trellis+LDLQ 3.06 bpw) | 3.082884 | 21.8212 | +0.098349 |
+
+Sanity preconditions: PASS (V-F32 bitwise MATCH; all D > 0;
+D(q4k) < D(q3k)).
+
+## Frozen-gate verdicts (analyzer verbatim)
+
+- G1: D(a3)-D(a0) median -0.049893, 95% CI [-0.058690, -0.040480] —
+  **r_H VALIDATED** (a3 strictly better end-to-end; LDLQ cut the
+  trellis damage 34%).
+- G2: D(a3)/D(q3k) median 1.0122, 95% CI [0.9033, 1.1429] — REOPEN
+  (<= 0.75 / upper <= 0.85) decisively NOT met.
+- G3: D(a3) >= D(q3k) on point AND D(a0) >= D(q3k) — **TIER STAYS
+  CLOSED (no quality story at 3.06 bpw)**.
+- Context: D(a0)/D(q3k) = 1.5271 [1.3828, 1.7033].
+
+## Findings
+
+1. LDLQ's held-out r_H gain is REAL end quality: -34% PPL damage
+   (0.148 -> 0.098 nats), CI excluding zero by a wide margin. The
+   calibrated phase works; within-format, r_H ranked the intervention
+   correctly.
+2. CROSS-FORMAT, both weight-space proxies misled: r_H predicted
+   a3/q3k ~= 0.79, plain-P predicted ~= 1.09; reality 1.01. T7a's
+   "V1 beats Q3_K by 9% plain at 11% fewer bits" did NOT survive
+   end-to-end (a0 = 1.53x Q3_K's damage). METHOD RULE going forward:
+   weight-space proxies (either kind) are valid for ranking
+   interventions WITHIN a format; cross-format claims require the
+   end-to-end arbiter.
+3. The tier's final honest card: trellis+LDLQ at 3.06 bpw ==
+   statistical quality PARITY with Q3_K (ratio CI [0.90, 1.14]) at 11%
+   fewer bits, with kernel economics previously measured below the
+   ship bar (T8b) and a calibration pipeline as an operational cost.
+   Parity-at-minus-11%-bytes with no speed story does not clear any
+   preregistered bar. The 3.06-bpw trellis tier is CLOSED on
+   end-to-end evidence.
+
+## Reopen conditions (program-final)
+
+- A materially better code/bpw point (e.g. K=4 tier vs Q4_K — T7a's
+  parked probe (d)) evaluated END-TO-END from the start, or
+- an application where -11% weights bytes at quality parity carries
+  product value that the roadmap prices above the format's
+  operational cost, or
+- LDLQ-class calibration applied to a format that already has a
+  positive speed story (the machinery in trellis_ldlq.rs is
+  format-agnostic on the feedback side).
+
+Domain note (declared in prereg): all quality numbers are
+wikitext-domain PPL on 0.8B; the closure is at the operating point
+tested, extrapolated no further.

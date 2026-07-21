@@ -1,0 +1,13 @@
+predicted tokens: 32704  segments: 64
+   f32: mean_nll=2.984535 ppl=19.7773 damage=+0.000000
+   q3k: mean_nll=3.081613 ppl=21.7935 damage=+0.097078
+   q4k: mean_nll=3.029159 ppl=20.6798 damage=+0.044625
+    a0: mean_nll=3.132760 ppl=22.9372 damage=+0.148225
+    a3: mean_nll=3.082884 ppl=21.8212 damage=+0.098349
+
+G1 D(a3)-D(a0): median -0.049893  95% CI [-0.058690, -0.040480]
+G1 verdict: r_H VALIDATED (a3 strictly better end-to-end)
+G2 D(a3)/D(q3k): median 1.0122  95% CI [0.9033, 1.1429]
+G3 verdict: TIER STAYS CLOSED (no quality story at 3.06 bpw)
+context D(a0)/D(q3k): median 1.5271  95% CI [1.3828, 1.7033]
+sanity: D(q4k) < D(q3k): True   all D>0: True

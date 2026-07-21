@@ -1,0 +1,371 @@
+[15:25:58] patch f32
+[t9b-patch] f32 control copy done (0.0s)
+[15:25:58] hash check (V-F32 must equal original bitwise)
+orig=53d5c025769385c3c189cba43be43af53c4c8325dcf29497b44a6cadd8437c23 vf32=53d5c025769385c3c189cba43be43af53c4c8325dcf29497b44a6cadd8437c23 MATCH
+[15:26:08] patch q3k
+[t9b-patch] q3k blk.0.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.0.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.0.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.1.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.1.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.1.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.2.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.2.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.2.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.3.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.3.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.3.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.4.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.4.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.4.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.5.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.5.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.5.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.6.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.6.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.6.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.7.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.7.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.7.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.8.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.8.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.8.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.9.ffn_gate.weight    [3584x1024] 0.0s
+[t9b-patch] q3k blk.9.ffn_up.weight      [3584x1024] 0.0s
+[t9b-patch] q3k blk.9.ffn_down.weight    [1024x3584] 0.0s
+[t9b-patch] q3k blk.10.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.10.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.10.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.11.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.11.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.11.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.12.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.12.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.12.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.13.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.13.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.13.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.14.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.14.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.14.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.15.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.15.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.15.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.16.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.16.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.16.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.17.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.17.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.17.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.18.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.18.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.18.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.19.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.19.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.19.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.20.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.20.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.20.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.21.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.21.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.21.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.22.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.22.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.22.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k blk.23.ffn_gate.weight   [3584x1024] 0.0s
+[t9b-patch] q3k blk.23.ffn_up.weight     [3584x1024] 0.0s
+[t9b-patch] q3k blk.23.ffn_down.weight   [1024x3584] 0.0s
+[t9b-patch] q3k: 72 tensors patched into target/t9/variants/v-q3k.gguf (2.9s total)
+[15:26:11] patch q4k
+[t9b-patch] q4k blk.0.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.0.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.0.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.1.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.1.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.1.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.2.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.2.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.2.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.3.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.3.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.3.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.4.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.4.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.4.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.5.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.5.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.5.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.6.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.6.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.6.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.7.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.7.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.7.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.8.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.8.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.8.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.9.ffn_gate.weight    [3584x1024] 0.1s
+[t9b-patch] q4k blk.9.ffn_up.weight      [3584x1024] 0.1s
+[t9b-patch] q4k blk.9.ffn_down.weight    [1024x3584] 0.1s
+[t9b-patch] q4k blk.10.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.10.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.10.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.11.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.11.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.11.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.12.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.12.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.12.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.13.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.13.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.13.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.14.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.14.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.14.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.15.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.15.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.15.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.16.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.16.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.16.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.17.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.17.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.17.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.18.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.18.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.18.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.19.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.19.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.19.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.20.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.20.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.20.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.21.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.21.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.21.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.22.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.22.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.22.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k blk.23.ffn_gate.weight   [3584x1024] 0.1s
+[t9b-patch] q4k blk.23.ffn_up.weight     [3584x1024] 0.1s
+[t9b-patch] q4k blk.23.ffn_down.weight   [1024x3584] 0.1s
+[t9b-patch] q4k: 72 tensors patched into target/t9/variants/v-q4k.gguf (7.6s total)
+[15:26:19] patch a0 (long)
+[t9b-patch] a0 blk.0.ffn_gate.weight    [3584x1024] 283.3s
+[t9b-patch] a0 blk.0.ffn_up.weight      [3584x1024] 279.8s
+[t9b-patch] a0 blk.0.ffn_down.weight    [1024x3584] 284.1s
+[t9b-patch] a0 blk.1.ffn_gate.weight    [3584x1024] 278.8s
+[t9b-patch] a0 blk.1.ffn_up.weight      [3584x1024] 284.5s
+[t9b-patch] a0 blk.1.ffn_down.weight    [1024x3584] 280.9s
+[t9b-patch] a0 blk.2.ffn_gate.weight    [3584x1024] 283.9s
+[t9b-patch] a0 blk.2.ffn_up.weight      [3584x1024] 280.1s
+[t9b-patch] a0 blk.2.ffn_down.weight    [1024x3584] 284.5s
+[t9b-patch] a0 blk.3.ffn_gate.weight    [3584x1024] 278.8s
+[t9b-patch] a0 blk.3.ffn_up.weight      [3584x1024] 285.0s
+[t9b-patch] a0 blk.3.ffn_down.weight    [1024x3584] 285.4s
+[t9b-patch] a0 blk.4.ffn_gate.weight    [3584x1024] 279.7s
+[t9b-patch] a0 blk.4.ffn_up.weight      [3584x1024] 284.2s
+[t9b-patch] a0 blk.4.ffn_down.weight    [1024x3584] 280.2s
+[t9b-patch] a0 blk.5.ffn_gate.weight    [3584x1024] 280.8s
+[t9b-patch] a0 blk.5.ffn_up.weight      [3584x1024] 279.3s
+[t9b-patch] a0 blk.5.ffn_down.weight    [1024x3584] 280.0s
+[t9b-patch] a0 blk.6.ffn_gate.weight    [3584x1024] 278.3s
+[t9b-patch] a0 blk.6.ffn_up.weight      [3584x1024] 279.6s
+[t9b-patch] a0 blk.6.ffn_down.weight    [1024x3584] 281.9s
+[t9b-patch] a0 blk.7.ffn_gate.weight    [3584x1024] 279.1s
+[t9b-patch] a0 blk.7.ffn_up.weight      [3584x1024] 283.0s
+[t9b-patch] a0 blk.7.ffn_down.weight    [1024x3584] 284.4s
+[t9b-patch] a0 blk.8.ffn_gate.weight    [3584x1024] 280.1s
+[t9b-patch] a0 blk.8.ffn_up.weight      [3584x1024] 280.4s
+[t9b-patch] a0 blk.8.ffn_down.weight    [1024x3584] 280.4s
+[t9b-patch] a0 blk.9.ffn_gate.weight    [3584x1024] 280.9s
+[t9b-patch] a0 blk.9.ffn_up.weight      [3584x1024] 281.9s
+[t9b-patch] a0 blk.9.ffn_down.weight    [1024x3584] 282.7s
+[t9b-patch] a0 blk.10.ffn_gate.weight   [3584x1024] 279.3s
+[t9b-patch] a0 blk.10.ffn_up.weight     [3584x1024] 279.1s
+[t9b-patch] a0 blk.10.ffn_down.weight   [1024x3584] 282.7s
+[t9b-patch] a0 blk.11.ffn_gate.weight   [3584x1024] 280.3s
+[t9b-patch] a0 blk.11.ffn_up.weight     [3584x1024] 284.2s
+[t9b-patch] a0 blk.11.ffn_down.weight   [1024x3584] 285.9s
+[t9b-patch] a0 blk.12.ffn_gate.weight   [3584x1024] 283.5s
+[t9b-patch] a0 blk.12.ffn_up.weight     [3584x1024] 280.5s
+[t9b-patch] a0 blk.12.ffn_down.weight   [1024x3584] 280.9s
+[t9b-patch] a0 blk.13.ffn_gate.weight   [3584x1024] 278.1s
+[t9b-patch] a0 blk.13.ffn_up.weight     [3584x1024] 279.8s
+[t9b-patch] a0 blk.13.ffn_down.weight   [1024x3584] 281.6s
+[t9b-patch] a0 blk.14.ffn_gate.weight   [3584x1024] 279.6s
+[t9b-patch] a0 blk.14.ffn_up.weight     [3584x1024] 277.9s
+[t9b-patch] a0 blk.14.ffn_down.weight   [1024x3584] 280.0s
+[t9b-patch] a0 blk.15.ffn_gate.weight   [3584x1024] 278.8s
+[t9b-patch] a0 blk.15.ffn_up.weight     [3584x1024] 279.1s
+[t9b-patch] a0 blk.15.ffn_down.weight   [1024x3584] 279.8s
+[t9b-patch] a0 blk.16.ffn_gate.weight   [3584x1024] 278.2s
+[t9b-patch] a0 blk.16.ffn_up.weight     [3584x1024] 282.4s
+[t9b-patch] a0 blk.16.ffn_down.weight   [1024x3584] 282.3s
+[t9b-patch] a0 blk.17.ffn_gate.weight   [3584x1024] 282.3s
+[t9b-patch] a0 blk.17.ffn_up.weight     [3584x1024] 282.2s
+[t9b-patch] a0 blk.17.ffn_down.weight   [1024x3584] 281.8s
+[t9b-patch] a0 blk.18.ffn_gate.weight   [3584x1024] 280.6s
+[t9b-patch] a0 blk.18.ffn_up.weight     [3584x1024] 279.9s
+[t9b-patch] a0 blk.18.ffn_down.weight   [1024x3584] 281.2s
+[t9b-patch] a0 blk.19.ffn_gate.weight   [3584x1024] 284.2s
+[t9b-patch] a0 blk.19.ffn_up.weight     [3584x1024] 279.1s
+[t9b-patch] a0 blk.19.ffn_down.weight   [1024x3584] 280.0s
+[t9b-patch] a0 blk.20.ffn_gate.weight   [3584x1024] 284.8s
+[t9b-patch] a0 blk.20.ffn_up.weight     [3584x1024] 280.4s
+[t9b-patch] a0 blk.20.ffn_down.weight   [1024x3584] 282.4s
+[t9b-patch] a0 blk.21.ffn_gate.weight   [3584x1024] 286.6s
+[t9b-patch] a0 blk.21.ffn_up.weight     [3584x1024] 281.6s
+[t9b-patch] a0 blk.21.ffn_down.weight   [1024x3584] 283.1s
+[t9b-patch] a0 blk.22.ffn_gate.weight   [3584x1024] 281.1s
+[t9b-patch] a0 blk.22.ffn_up.weight     [3584x1024] 281.4s
+[t9b-patch] a0 blk.22.ffn_down.weight   [1024x3584] 283.0s
+[t9b-patch] a0 blk.23.ffn_gate.weight   [3584x1024] 288.0s
+[t9b-patch] a0 blk.23.ffn_up.weight     [3584x1024] 282.5s
+[t9b-patch] a0 blk.23.ffn_down.weight   [1024x3584] 284.5s
+[t9b-patch] a0: 72 tensors patched into target/t9/variants/v-a0.gguf (20270.7s total)
+[21:04:09] patch a3 (long)
+[t9b-patch] a3 blk.0.ffn_gate.weight    [3584x1024] 286.4s
+[t9b-patch] a3 blk.0.ffn_up.weight      [3584x1024] 288.6s
+[t9b-patch] a3 blk.0.ffn_down.weight    [1024x3584] 291.5s
+[t9b-patch] a3 blk.1.ffn_gate.weight    [3584x1024] 283.2s
+[t9b-patch] a3 blk.1.ffn_up.weight      [3584x1024] 285.0s
+[t9b-patch] a3 blk.1.ffn_down.weight    [1024x3584] 291.1s
+[t9b-patch] a3 blk.2.ffn_gate.weight    [3584x1024] 282.4s
+[t9b-patch] a3 blk.2.ffn_up.weight      [3584x1024] 282.0s
+[t9b-patch] a3 blk.2.ffn_down.weight    [1024x3584] 291.2s
+[t9b-patch] a3 blk.3.ffn_gate.weight    [3584x1024] 282.5s
+[t9b-patch] a3 blk.3.ffn_up.weight      [3584x1024] 284.2s
+[t9b-patch] a3 blk.3.ffn_down.weight    [1024x3584] 292.0s
+[t9b-patch] a3 blk.4.ffn_gate.weight    [3584x1024] 282.9s
+[t9b-patch] a3 blk.4.ffn_up.weight      [3584x1024] 282.3s
+[t9b-patch] a3 blk.4.ffn_down.weight    [1024x3584] 290.0s
+[t9b-patch] a3 blk.5.ffn_gate.weight    [3584x1024] 287.2s
+[t9b-patch] a3 blk.5.ffn_up.weight      [3584x1024] 283.2s
+[t9b-patch] a3 blk.5.ffn_down.weight    [1024x3584] 291.1s
+[t9b-patch] a3 blk.6.ffn_gate.weight    [3584x1024] 289.4s
+[t9b-patch] a3 blk.6.ffn_up.weight      [3584x1024] 284.4s
+[t9b-patch] a3 blk.6.ffn_down.weight    [1024x3584] 290.7s
+[t9b-patch] a3 blk.7.ffn_gate.weight    [3584x1024] 282.5s
+[t9b-patch] a3 blk.7.ffn_up.weight      [3584x1024] 284.8s
+[t9b-patch] a3 blk.7.ffn_down.weight    [1024x3584] 291.2s
+[t9b-patch] a3 blk.8.ffn_gate.weight    [3584x1024] 283.7s
+[t9b-patch] a3 blk.8.ffn_up.weight      [3584x1024] 285.7s
+[t9b-patch] a3 blk.8.ffn_down.weight    [1024x3584] 292.9s
+[t9b-patch] a3 blk.9.ffn_gate.weight    [3584x1024] 283.9s
+[t9b-patch] a3 blk.9.ffn_up.weight      [3584x1024] 283.9s
+[t9b-patch] a3 blk.9.ffn_down.weight    [1024x3584] 291.6s
+[t9b-patch] a3 blk.10.ffn_gate.weight   [3584x1024] 282.1s
+[t9b-patch] a3 blk.10.ffn_up.weight     [3584x1024] 282.9s
+[t9b-patch] a3 blk.10.ffn_down.weight   [1024x3584] 290.9s
+[t9b-patch] a3 blk.11.ffn_gate.weight   [3584x1024] 288.4s
+[t9b-patch] a3 blk.11.ffn_up.weight     [3584x1024] 291.8s
+[t9b-patch] a3 blk.11.ffn_down.weight   [1024x3584] 292.5s
+[t9b-patch] a3 blk.12.ffn_gate.weight   [3584x1024] 284.3s
+[t9b-patch] a3 blk.12.ffn_up.weight     [3584x1024] 284.2s
+[t9b-patch] a3 blk.12.ffn_down.weight   [1024x3584] 291.4s
+[t9b-patch] a3 blk.13.ffn_gate.weight   [3584x1024] 282.9s
+[t9b-patch] a3 blk.13.ffn_up.weight     [3584x1024] 285.9s
+[t9b-patch] a3 blk.13.ffn_down.weight   [1024x3584] 291.3s
+[t9b-patch] a3 blk.14.ffn_gate.weight   [3584x1024] 283.4s
+[t9b-patch] a3 blk.14.ffn_up.weight     [3584x1024] 284.3s
+[t9b-patch] a3 blk.14.ffn_down.weight   [1024x3584] 291.7s
+[t9b-patch] a3 blk.15.ffn_gate.weight   [3584x1024] 283.0s
+[t9b-patch] a3 blk.15.ffn_up.weight     [3584x1024] 284.0s
+[t9b-patch] a3 blk.15.ffn_down.weight   [1024x3584] 292.0s
+[t9b-patch] a3 blk.16.ffn_gate.weight   [3584x1024] 282.8s
+[t9b-patch] a3 blk.16.ffn_up.weight     [3584x1024] 284.7s
+[t9b-patch] a3 blk.16.ffn_down.weight   [1024x3584] 291.3s
+[t9b-patch] a3 blk.17.ffn_gate.weight   [3584x1024] 283.6s
+[t9b-patch] a3 blk.17.ffn_up.weight     [3584x1024] 282.6s
+[t9b-patch] a3 blk.17.ffn_down.weight   [1024x3584] 290.4s
+[t9b-patch] a3 blk.18.ffn_gate.weight   [3584x1024] 282.4s
+[t9b-patch] a3 blk.18.ffn_up.weight     [3584x1024] 283.2s
+[t9b-patch] a3 blk.18.ffn_down.weight   [1024x3584] 291.2s
+[t9b-patch] a3 blk.19.ffn_gate.weight   [3584x1024] 283.1s
+[t9b-patch] a3 blk.19.ffn_up.weight     [3584x1024] 283.4s
+[t9b-patch] a3 blk.19.ffn_down.weight   [1024x3584] 291.1s
+[t9b-patch] a3 blk.20.ffn_gate.weight   [3584x1024] 283.3s
+[t9b-patch] a3 blk.20.ffn_up.weight     [3584x1024] 285.0s
+[t9b-patch] a3 blk.20.ffn_down.weight   [1024x3584] 291.2s
+[t9b-patch] a3 blk.21.ffn_gate.weight   [3584x1024] 290.7s
+[t9b-patch] a3 blk.21.ffn_up.weight     [3584x1024] 286.2s
+[t9b-patch] a3 blk.21.ffn_down.weight   [1024x3584] 291.4s
+[t9b-patch] a3 blk.22.ffn_gate.weight   [3584x1024] 283.8s
+[t9b-patch] a3 blk.22.ffn_up.weight     [3584x1024] 283.3s
+[t9b-patch] a3 blk.22.ffn_down.weight   [1024x3584] 290.0s
+[t9b-patch] a3 blk.23.ffn_gate.weight   [3584x1024] 289.1s
+[t9b-patch] a3 blk.23.ffn_up.weight     [3584x1024] 284.5s
+[t9b-patch] a3 blk.23.ffn_down.weight   [1024x3584] 290.8s
+[t9b-patch] a3: 72 tensors patched into target/t9/variants/v-a3.gguf (20647.9s total)
+[02:48:18] ppl v-f32
+[metal-load] native quantized token embedding policy: unsupported (F32 [1024, 248320])
+[metal-load-ledger] source=321/4026690816 direct_copy=321/4026690816 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[t9b-ppl] target/t9/variants/v-f32.gguf: 308707 tokens available, using 32768 (64x512)
+[t9b-ppl] segment 0/64 (4s)
+[t9b-ppl] segment 8/64 (37s)
+[t9b-ppl] segment 16/64 (69s)
+[t9b-ppl] segment 24/64 (102s)
+[t9b-ppl] segment 32/64 (135s)
+[t9b-ppl] segment 40/64 (168s)
+[t9b-ppl] segment 48/64 (201s)
+[t9b-ppl] segment 56/64 (234s)
+[t9b-ppl] RESULT model=target/t9/variants/v-f32.gguf predicted_tokens=32704 mean_nll=2.984535 ppl=19.7773 wall=263s
+[t9b-ppl] wrote target/t9/ppl/nll-f32.f64
+[02:52:45] ppl v-q3k
+[metal-load] native quantized token embedding policy: unsupported (F32 [1024, 248320])
+[metal-load-ledger] source=321/4026690816 direct_copy=321/4026690816 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[t9b-ppl] target/t9/variants/v-q3k.gguf: 308707 tokens available, using 32768 (64x512)
+[t9b-ppl] segment 0/64 (4s)
+[t9b-ppl] segment 8/64 (37s)
+[t9b-ppl] segment 16/64 (70s)
+[t9b-ppl] segment 24/64 (103s)
+[t9b-ppl] segment 32/64 (135s)
+[t9b-ppl] segment 40/64 (168s)
+[t9b-ppl] segment 48/64 (201s)
+[t9b-ppl] segment 56/64 (234s)
+[t9b-ppl] RESULT model=target/t9/variants/v-q3k.gguf predicted_tokens=32704 mean_nll=3.081613 ppl=21.7935 wall=262s
+[t9b-ppl] wrote target/t9/ppl/nll-q3k.f64
+[02:57:12] ppl v-q4k
+[metal-load] native quantized token embedding policy: unsupported (F32 [1024, 248320])
+[metal-load-ledger] source=321/4026690816 direct_copy=321/4026690816 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[t9b-ppl] target/t9/variants/v-q4k.gguf: 308707 tokens available, using 32768 (64x512)
+[t9b-ppl] segment 0/64 (4s)
+[t9b-ppl] segment 8/64 (37s)
+[t9b-ppl] segment 16/64 (69s)
+[t9b-ppl] segment 24/64 (102s)
+[t9b-ppl] segment 32/64 (135s)
+[t9b-ppl] segment 40/64 (167s)
+[t9b-ppl] segment 48/64 (200s)
+[t9b-ppl] segment 56/64 (233s)
+[t9b-ppl] RESULT model=target/t9/variants/v-q4k.gguf predicted_tokens=32704 mean_nll=3.029159 ppl=20.6798 wall=261s
+[t9b-ppl] wrote target/t9/ppl/nll-q4k.f64
+[03:01:38] ppl v-a0
+[metal-load] native quantized token embedding policy: unsupported (F32 [1024, 248320])
+[metal-load-ledger] source=321/4026690816 direct_copy=321/4026690816 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[t9b-ppl] target/t9/variants/v-a0.gguf: 308707 tokens available, using 32768 (64x512)
+[t9b-ppl] segment 0/64 (4s)
+[t9b-ppl] segment 8/64 (37s)
+[t9b-ppl] segment 16/64 (69s)
+[t9b-ppl] segment 24/64 (102s)
+[t9b-ppl] segment 32/64 (135s)
+[t9b-ppl] segment 40/64 (167s)
+[t9b-ppl] segment 48/64 (200s)
+[t9b-ppl] segment 56/64 (233s)
+[t9b-ppl] RESULT model=target/t9/variants/v-a0.gguf predicted_tokens=32704 mean_nll=3.132760 ppl=22.9372 wall=261s
+[t9b-ppl] wrote target/t9/ppl/nll-a0.f64
+[03:06:02] ppl v-a3
+[metal-load] native quantized token embedding policy: unsupported (F32 [1024, 248320])
+[metal-load-ledger] source=321/4026690816 direct_copy=321/4026690816 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[t9b-ppl] target/t9/variants/v-a3.gguf: 308707 tokens available, using 32768 (64x512)
+[t9b-ppl] segment 0/64 (4s)
+[t9b-ppl] segment 8/64 (37s)
+[t9b-ppl] segment 16/64 (69s)
+[t9b-ppl] segment 24/64 (102s)
+[t9b-ppl] segment 32/64 (135s)
+[t9b-ppl] segment 40/64 (167s)
+[t9b-ppl] segment 48/64 (200s)
+[t9b-ppl] segment 56/64 (233s)
+[t9b-ppl] RESULT model=target/t9/variants/v-a3.gguf predicted_tokens=32704 mean_nll=3.082884 ppl=21.8212 wall=261s
+[t9b-ppl] wrote target/t9/ppl/nll-a3.f64
+[03:10:27] T9B PIPELINE COMPLETE

@@ -202,6 +202,7 @@ pub struct PrefixCacheInsert {
 #[derive(Clone, Debug)]
 pub struct PrefixCacheRestore {
     pub matched_prefix_len: usize,
+    pub restored_prefix_len: usize,
     pub exact: bool,
     pub exact_final_logits: Option<Vec<f32>>,
     /// Cache-index accounting captured at lookup, before the unlocked restore.
@@ -312,6 +313,19 @@ impl LoadedModel {
         prefix_tokens: Vec<i32>,
         final_logits: Option<Vec<f32>>,
     ) -> Result<PrefixCacheInsert, RuntimeError> {
+        self.cache_sequence_boundary(sequence, prefix_tokens, None, final_logits)
+    }
+
+    /// Cache a canonical request boundary. `prefix_tokens` must be the tokens
+    /// already consumed into `sequence`; `pending_token` is an optional final
+    /// token that was emitted but deliberately not transitioned.
+    pub fn cache_sequence_boundary(
+        &self,
+        sequence: &Sequence,
+        prefix_tokens: Vec<i32>,
+        pending_token: Option<i32>,
+        final_logits: Option<Vec<f32>>,
+    ) -> Result<PrefixCacheInsert, RuntimeError> {
         sequence.check_position(prefix_tokens.len())?;
         if let Some(logits) = final_logits.as_ref() {
             let expected = self.metal_model.arch.vocab_size as usize;
@@ -322,10 +336,13 @@ impl LoadedModel {
                 });
             }
         }
-        let snap = sequence.snapshot(
-            self.snapshot_identity(sequence),
-            prefix_tokens,
-            final_logits,
+        let identity = self.snapshot_identity(sequence);
+        let mut snap = sequence.snapshot(identity.clone(), prefix_tokens, final_logits)?;
+        snap.pending_token = pending_token;
+        snap.validate_for_restore(
+            &identity,
+            sequence.max_context_tokens(),
+            Some(self.metal_model.arch.vocab_size as usize),
         )?;
         let snapshot_bytes = snap.n_bytes();
         let mut cache = self.prefix_cache.lock();
@@ -346,8 +363,7 @@ impl LoadedModel {
         let identity = self.snapshot_identity(sequence);
         let (hit, stats) = {
             let mut cache = self.prefix_cache.lock();
-            let Some(hit) = cache.lookup_longest_with_exact_logits(&identity, request_tokens)
-            else {
+            let Some(hit) = cache.lookup_longest_for_completion(&identity, request_tokens) else {
                 return Ok(None);
             };
             (hit, cache.stats())
@@ -358,13 +374,14 @@ impl LoadedModel {
             Some(self.metal_model.arch.vocab_size as usize),
         )?;
         sequence.restore_from_snapshot(&hit.snapshot, &identity)?;
-        let exact_final_logits = if hit.exact {
+        let exact_final_logits = if hit.exact && hit.restored_prefix_len == hit.matched_prefix_len {
             hit.snapshot.final_logits.clone()
         } else {
             None
         };
         Ok(Some(PrefixCacheRestore {
             matched_prefix_len: hit.matched_prefix_len,
+            restored_prefix_len: hit.restored_prefix_len,
             exact: hit.exact,
             exact_final_logits,
             stats_at_lookup: stats,

@@ -12,7 +12,11 @@ struct PrefixCacheKey {
 #[derive(Clone, Debug)]
 pub struct PrefixCacheHit {
     pub snapshot: Arc<SessionSnapshot>,
+    /// Canonical token prefix matched, including an emitted pending token.
     pub matched_prefix_len: usize,
+    /// Tokens already represented in restored model state. The caller must
+    /// replay the request from this offset, which consumes a pending token.
+    pub restored_prefix_len: usize,
     pub exact: bool,
 }
 
@@ -112,26 +116,65 @@ impl PrefixCache {
     pub fn insert(&mut self, snap: SessionSnapshot) {
         let key = PrefixCacheKey {
             identity: snap.identity.clone(),
-            prefix_len: snap.prefix_len(),
-            prefix_hash: hash_tokens(&snap.prefix_tokens),
+            prefix_len: snap.matched_prefix_len(),
+            prefix_hash: hash_snapshot_prefix(&snap),
         };
         self.clock += 1;
         let stamp = self.clock;
         let snap = Arc::new(snap);
-        let bucket = self.buckets.entry(key.clone()).or_default();
-        if let Some((idx, existing)) = bucket
-            .iter_mut()
+        let bucket = self.buckets.remove(&key).unwrap_or_default();
+        let old_bucket_bytes: u64 = bucket.iter().map(|entry| entry.n_bytes()).sum();
+        self.total_bytes -= old_bucket_bytes;
+        let mut entries: Vec<(Arc<SessionSnapshot>, u64)> = bucket
+            .into_iter()
             .enumerate()
-            .find(|(_, s)| s.prefix_tokens == snap.prefix_tokens)
+            .map(|(idx, entry)| {
+                let old_stamp = self.last_used.remove(&(key.clone(), idx)).unwrap_or(0);
+                (entry, old_stamp)
+            })
+            .collect();
+
+        let equivalent: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, (entry, _))| same_canonical_prefix(entry, &snap))
+            .map(|(idx, _)| idx)
+            .collect();
+        let existing_complete_logits = equivalent.iter().copied().find(|&idx| {
+            let entry = &entries[idx].0;
+            entry.pending_token.is_none() && entry.final_logits.is_some()
+        });
+        let incoming_complete_logits = snap.pending_token.is_none() && snap.final_logits.is_some();
+
+        if let Some(winner) = existing_complete_logits {
+            entries[winner].1 = stamp;
+            entries = entries
+                .into_iter()
+                .enumerate()
+                .filter(|(idx, (entry, _))| *idx == winner || !same_canonical_prefix(entry, &snap))
+                .map(|(_, entry)| entry)
+                .collect();
+        } else if incoming_complete_logits {
+            entries.retain(|(entry, _)| !same_canonical_prefix(entry, &snap));
+            entries.push((snap, stamp));
+        } else if let Some(existing) = equivalent
+            .iter()
+            .copied()
+            .find(|&idx| same_snapshot_prefix(&entries[idx].0, &snap))
         {
-            self.total_bytes = self.total_bytes + snap.n_bytes() - existing.n_bytes();
-            *existing = snap;
-            self.last_used.insert((key, idx), stamp);
+            entries[existing].1 = stamp;
         } else {
-            self.total_bytes += snap.n_bytes();
-            let idx = bucket.len();
-            bucket.push(snap);
-            self.last_used.insert((key, idx), stamp);
+            entries.push((snap, stamp));
+        }
+
+        if !entries.is_empty() {
+            let mut bucket = Vec::with_capacity(entries.len());
+            for (idx, (entry, entry_stamp)) in entries.into_iter().enumerate() {
+                self.total_bytes += entry.n_bytes();
+                self.last_used.insert((key.clone(), idx), entry_stamp);
+                bucket.push(entry);
+            }
+            self.buckets.insert(key, bucket);
         }
         self.evict_to_budget();
     }
@@ -180,11 +223,10 @@ impl PrefixCache {
         self.lookup_longest_impl(identity, request_tokens, false)
     }
 
-    /// Find the longest reusable prefix, but only return an exact request hit
-    /// when that snapshot carries prompt-final logits. A state-only exact
-    /// snapshot remains useful for longer requests, but cannot complete an
-    /// exact prompt without another model transition.
-    pub fn lookup_longest_with_exact_logits(
+    /// Find the longest prefix that can produce prompt-final logits. An exact
+    /// state-only checkpoint is insufficient, but an exact checkpoint with a
+    /// pending token can replay that one required transition.
+    pub fn lookup_longest_for_completion(
         &mut self,
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
@@ -209,12 +251,18 @@ impl PrefixCache {
                 prefix_hash: prefix_hashes[prefix_len - 1],
             };
             let hit_idx = self.buckets.get(&key).and_then(|bucket| {
-                bucket.iter().position(|snap| {
-                    snap.prefix_tokens == request_tokens[..prefix_len]
-                        && (!exact_requires_logits
-                            || prefix_len != request_tokens.len()
-                            || snap.final_logits.is_some())
-                })
+                bucket
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, snap)| {
+                        snapshot_matches_request(snap, request_tokens, prefix_len)
+                            && (!exact_requires_logits
+                                || prefix_len != request_tokens.len()
+                                || snap.pending_token.is_some()
+                                || snap.final_logits.is_some())
+                    })
+                    .max_by_key(|(_, snap)| snap.prefix_len())
+                    .map(|(idx, _)| idx)
             });
             if let Some(idx) = hit_idx {
                 // Bump LRU stamp so hot prefixes survive eviction pressure.
@@ -223,6 +271,7 @@ impl PrefixCache {
                 self.last_used.insert((key.clone(), idx), stamp);
                 let snap = Arc::clone(&self.buckets[&key][idx]);
                 return Some(PrefixCacheHit {
+                    restored_prefix_len: snap.prefix_len(),
                     snapshot: snap,
                     matched_prefix_len: prefix_len,
                     exact: prefix_len == request_tokens.len(),
@@ -239,18 +288,55 @@ const HASH_PRIME: u64 = 0x100000001b3;
 fn hash_tokens(tokens: &[i32]) -> u64 {
     let mut h = HASH_SEED;
     for &tok in tokens {
-        h ^= (tok as u32 as u64).wrapping_add(0x9e3779b97f4a7c15);
-        h = h.wrapping_mul(HASH_PRIME);
+        h = hash_token(h, tok);
     }
     h
+}
+
+fn hash_snapshot_prefix(snapshot: &SessionSnapshot) -> u64 {
+    let mut h = hash_tokens(&snapshot.prefix_tokens);
+    if let Some(token) = snapshot.pending_token {
+        h = hash_token(h, token);
+    }
+    h
+}
+
+fn hash_token(mut hash: u64, token: i32) -> u64 {
+    hash ^= (token as u32 as u64).wrapping_add(0x9e3779b97f4a7c15);
+    hash.wrapping_mul(HASH_PRIME)
+}
+
+fn same_snapshot_prefix(a: &SessionSnapshot, b: &SessionSnapshot) -> bool {
+    a.prefix_tokens == b.prefix_tokens && a.pending_token == b.pending_token
+}
+
+fn same_canonical_prefix(a: &SessionSnapshot, b: &SessionSnapshot) -> bool {
+    a.matched_prefix_len() == b.matched_prefix_len()
+        && a.prefix_tokens.iter().copied().chain(a.pending_token).eq(b
+            .prefix_tokens
+            .iter()
+            .copied()
+            .chain(b.pending_token))
+}
+
+fn snapshot_matches_request(
+    snapshot: &SessionSnapshot,
+    request_tokens: &[i32],
+    matched_prefix_len: usize,
+) -> bool {
+    let consumed = snapshot.prefix_len();
+    matched_prefix_len == snapshot.matched_prefix_len()
+        && snapshot.prefix_tokens == request_tokens[..consumed]
+        && snapshot
+            .pending_token
+            .is_none_or(|token| request_tokens.get(consumed) == Some(&token))
 }
 
 fn prefix_hashes(tokens: &[i32]) -> Vec<u64> {
     let mut out = Vec::with_capacity(tokens.len());
     let mut h = HASH_SEED;
     for &tok in tokens {
-        h ^= (tok as u32 as u64).wrapping_add(0x9e3779b97f4a7c15);
-        h = h.wrapping_mul(HASH_PRIME);
+        h = hash_token(h, tok);
         out.push(h);
     }
     out
@@ -280,6 +366,7 @@ mod tests {
         SessionSnapshot {
             identity,
             prefix_tokens: prefix.to_vec(),
+            pending_token: None,
             kv_n_pos: vec![prefix.len(), prefix.len()],
             kv_k_arena: vec![1; half],
             kv_v_arena: vec![2; bytes - half],
@@ -322,13 +409,73 @@ mod tests {
         assert!(state_hit.snapshot.final_logits.is_none());
 
         let completion_hit = cache
-            .lookup_longest_with_exact_logits(&id, &[10, 11, 12])
+            .lookup_longest_for_completion(&id, &[10, 11, 12])
             .expect("shorter completion-capable hit");
         assert_eq!(completion_hit.matched_prefix_len, 2);
         assert!(!completion_hit.exact);
         assert!(completion_hit.snapshot.final_logits.is_some());
 
-        assert!(cache.lookup_longest_with_exact_logits(&id, &[99]).is_none());
+        assert!(cache.lookup_longest_for_completion(&id, &[99]).is_none());
+    }
+
+    #[test]
+    fn pending_terminal_token_matches_logically_and_replays_physically() {
+        let id = ident(1);
+        let mut cache = PrefixCache::new();
+        let mut checkpoint = snap(id.clone(), &[10, 11], 32);
+        checkpoint.pending_token = Some(12);
+        checkpoint.final_logits = None;
+        cache.insert(checkpoint);
+
+        let exact = cache
+            .lookup_longest_for_completion(&id, &[10, 11, 12])
+            .expect("pending exact hit");
+        assert!(exact.exact);
+        assert_eq!(exact.matched_prefix_len, 3);
+        assert_eq!(exact.restored_prefix_len, 2);
+
+        let extension = cache
+            .lookup_longest_for_completion(&id, &[10, 11, 12, 13])
+            .expect("pending extension hit");
+        assert!(!extension.exact);
+        assert_eq!(extension.matched_prefix_len, 3);
+        assert_eq!(extension.restored_prefix_len, 2);
+        assert!(
+            cache
+                .lookup_longest_for_completion(&id, &[10, 11, 99])
+                .is_none()
+        );
+
+        cache.insert(snap(id.clone(), &[10, 11, 12], 48));
+        let fully_consumed = cache
+            .lookup_longest_for_completion(&id, &[10, 11, 12, 13])
+            .expect("fully consumed state");
+        assert_eq!(fully_consumed.matched_prefix_len, 3);
+        assert_eq!(fully_consumed.restored_prefix_len, 3);
+    }
+
+    #[test]
+    fn pending_and_complete_without_logits_remain_complementary() {
+        let id = ident(1);
+        let mut cache = PrefixCache::new();
+        let mut pending = snap(id.clone(), &[10, 11], 32);
+        pending.pending_token = Some(12);
+        pending.final_logits = None;
+        let mut complete = snap(id.clone(), &[10, 11, 12], 64);
+        complete.final_logits = None;
+        cache.insert(pending);
+        cache.insert(complete);
+        assert_eq!(cache.len(), 2);
+
+        let exact = cache
+            .lookup_longest_for_completion(&id, &[10, 11, 12])
+            .expect("pending reconstructs exact logits");
+        assert_eq!(exact.restored_prefix_len, 2);
+
+        let extension = cache
+            .lookup_longest_for_completion(&id, &[10, 11, 12, 13])
+            .expect("complete state accelerates extension");
+        assert_eq!(extension.restored_prefix_len, 3);
     }
 
     #[test]
@@ -336,15 +483,12 @@ mod tests {
         let id = ident(1);
         let mut cache = PrefixCache::new();
         let mut old = snap(id.clone(), &[10, 11], 32);
-        old.final_logits = Some(vec![1.0, 2.0, 3.0]);
+        old.final_logits = None;
         cache.insert(old);
 
         let hit = cache.lookup_longest(&id, &[10, 11]).expect("old hit");
         let old_bytes = hit.snapshot.n_bytes();
-        assert_eq!(
-            hit.snapshot.final_logits.as_deref(),
-            Some(&[1.0, 2.0, 3.0][..])
-        );
+        assert!(hit.snapshot.final_logits.is_none());
 
         let mut replacement = snap(id, &[10, 11], 64);
         replacement.final_logits = Some(vec![4.0, 5.0, 6.0]);
@@ -355,10 +499,7 @@ mod tests {
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().indexed_bytes, 0);
         assert_eq!(hit.snapshot.prefix_tokens, [10, 11]);
-        assert_eq!(
-            hit.snapshot.final_logits.as_deref(),
-            Some(&[1.0, 2.0, 3.0][..])
-        );
+        assert!(hit.snapshot.final_logits.is_none());
     }
 
     #[test]
@@ -372,16 +513,44 @@ mod tests {
     }
 
     #[test]
-    fn insert_replaces_exact_prefix_and_updates_bytes() {
+    fn insert_keeps_first_equal_capability_snapshot() {
         let id = ident(1);
         let mut cache = PrefixCache::new();
         cache.insert(snap(id.clone(), &[1, 2, 3], 32));
         let before = cache.total_bytes();
         cache.insert(snap(id.clone(), &[1, 2, 3], 96));
         assert_eq!(cache.len(), 1);
-        assert!(cache.total_bytes() > before);
+        assert_eq!(cache.total_bytes(), before);
         let hit = cache.lookup_longest(&id, &[1, 2, 3]).expect("exact hit");
         assert!(hit.exact);
+    }
+
+    #[test]
+    fn complete_logits_checkpoint_dominates_pending_representation() {
+        let id = ident(1);
+        for complete_first in [false, true] {
+            let complete = snap(id.clone(), &[10, 11, 12], 64);
+            let mut pending = snap(id.clone(), &[10, 11], 32);
+            pending.pending_token = Some(12);
+            pending.final_logits = None;
+            let max_bytes = complete.n_bytes().max(pending.n_bytes());
+            let mut cache = PrefixCache::with_max_bytes(max_bytes);
+            if complete_first {
+                cache.insert(complete);
+                cache.insert(pending);
+            } else {
+                cache.insert(pending);
+                cache.insert(complete);
+            }
+
+            assert_eq!(cache.len(), 1);
+            let hit = cache
+                .lookup_longest_for_completion(&id, &[10, 11, 12, 13])
+                .expect("dominant complete checkpoint");
+            assert_eq!(hit.matched_prefix_len, 3);
+            assert_eq!(hit.restored_prefix_len, 3);
+            assert!(hit.snapshot.final_logits.is_some());
+        }
     }
 
     fn snap_bytes(prefix: &[i32], bytes: usize) -> u64 {

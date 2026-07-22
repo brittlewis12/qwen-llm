@@ -11878,7 +11878,7 @@ pub struct SnapshotIdentity {
 }
 
 /// Bump this when MetalSession's per-layer state shape changes.
-pub const SNAPSHOT_LAYOUT_VERSION: u32 = 2;
+pub const SNAPSHOT_LAYOUT_VERSION: u32 = 3;
 
 /// Captured state at the end of prefilling `prefix_tokens` through a
 /// fresh session. Restoring into a fresh session and running additional
@@ -11887,8 +11887,12 @@ pub const SNAPSHOT_LAYOUT_VERSION: u32 = 2;
 #[derive(Clone, Debug)]
 pub struct SessionSnapshot {
     pub identity: SnapshotIdentity,
-    /// Tokens consumed up to the snapshot boundary. Used as cache key.
+    /// Tokens consumed into the captured KV/GDN state.
     pub prefix_tokens: Vec<i32>,
+    /// A terminal token selected and emitted from `final_logits`, but not yet
+    /// consumed into model state. Prefix matching includes this token; restore
+    /// resumes from it so a completed request never pays an unused transition.
+    pub pending_token: Option<i32>,
     /// `kv_n_pos[attn_layer]` after prefill. Same value across layers
     /// for our forward pass (single-stream); kept per-layer for safety.
     pub kv_n_pos: Vec<usize>,
@@ -11959,12 +11963,18 @@ impl SessionSnapshot {
             + self.gdn_state_arena.len()
             + self.final_logits.as_ref().map_or(0, |v| v.len() * 4)
             + self.prefix_tokens.len() * 4
+            + self.pending_token.map_or(0, |_| 4)
             + self.kv_n_pos.len() * 8) as u64
     }
 
     /// Number of tokens consumed up to this snapshot.
     pub fn prefix_len(&self) -> usize {
         self.prefix_tokens.len()
+    }
+
+    /// Number of canonical prefix tokens represented by this checkpoint.
+    pub fn matched_prefix_len(&self) -> usize {
+        self.prefix_len() + usize::from(self.pending_token.is_some())
     }
 
     /// Validate every shape and offset premise used by restore before any
@@ -12045,6 +12055,15 @@ impl SessionSnapshot {
                         vocab_size,
                     });
                 }
+            }
+            if let Some(token) = self.pending_token
+                && (token < 0 || token as usize >= vocab_size)
+            {
+                return Err(SnapshotValidationError::TokenOutOfRange {
+                    index: prefix_len,
+                    token,
+                    vocab_size,
+                });
             }
             if let Some(logits) = self.final_logits.as_ref() {
                 require_snapshot_len("final_logits", logits.len(), vocab_size)?;
@@ -12318,6 +12337,7 @@ impl MetalSession {
         Ok(SessionSnapshot {
             identity,
             prefix_tokens,
+            pending_token: None,
             kv_n_pos: self.kv_n_pos.clone(),
             kv_k_arena,
             kv_v_arena,
@@ -12417,6 +12437,7 @@ mod tests {
                 gdn_conv_elements_per_layer: 6,
             },
             prefix_tokens: vec![1, 2],
+            pending_token: None,
             kv_n_pos: vec![2, 2],
             kv_k_arena: vec![0; 32],
             kv_v_arena: vec![0; 32],
@@ -12438,6 +12459,23 @@ mod tests {
         without_logits
             .validate_for_restore(&without_logits.identity, 8, Some(4))
             .expect("logits are an optional snapshot capability");
+
+        let mut with_pending = valid.clone();
+        with_pending.pending_token = Some(3);
+        assert_eq!(with_pending.matched_prefix_len(), 3);
+        with_pending
+            .validate_for_restore(&with_pending.identity, 8, Some(4))
+            .expect("valid pending token");
+        with_pending.pending_token = Some(-1);
+        assert!(matches!(
+            with_pending.validate_for_restore(&with_pending.identity, 8, Some(4)),
+            Err(SnapshotValidationError::TokenOutOfRange { index: 2, .. })
+        ));
+        with_pending.pending_token = Some(4);
+        assert!(matches!(
+            with_pending.validate_for_restore(&with_pending.identity, 8, Some(4)),
+            Err(SnapshotValidationError::TokenOutOfRange { index: 2, .. })
+        ));
 
         let mut bad = valid.clone();
         bad.kv_n_pos.pop();
@@ -18520,6 +18558,7 @@ mod tests {
             let bad_snap = SessionSnapshot {
                 identity: bogus_identity,
                 prefix_tokens: vec![],
+                pending_token: None,
                 kv_n_pos: vec![],
                 kv_k_arena: vec![],
                 kv_v_arena: vec![],

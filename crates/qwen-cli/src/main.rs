@@ -818,6 +818,10 @@ fn auto_prefill_cache_safe(cache_entries: usize, cache_prefix_tokens: Option<usi
     cache_entries == 0 && cache_prefix_tokens.is_none()
 }
 
+fn cache_prefix_needs_extension(configured_prefix: usize, restored_prefix: usize) -> bool {
+    configured_prefix > restored_prefix
+}
+
 fn auto_prefill_profile(
     arch: Arch,
     base_model_name: Option<&str>,
@@ -2376,20 +2380,21 @@ fn run_jsonl_request(
             cache_hit = true;
             matched_prefix_tokens = hit.matched_prefix_len;
             exact_cache_hit = hit.exact;
-            if matched_prefix_tokens == prompt_ids.len() {
+            let restored_prefix_tokens = hit.restored_prefix_len;
+            if restored_prefix_tokens == prompt_ids.len() {
                 hit.exact_final_logits.with_context(|| {
                     format!("exact prefix-cache hit for request {id} did not store logits")
                 })?
             } else if let Some(prefix_len) = cache_prefix_tokens
-                && prefix_len > matched_prefix_tokens
+                && cache_prefix_needs_extension(prefix_len, restored_prefix_tokens)
             {
-                let prefix_suffix = &prompt_ids[matched_prefix_tokens..prefix_len];
+                let prefix_suffix = &prompt_ids[restored_prefix_tokens..prefix_len];
                 let (prefix_logits, ms) = prefill_span(
                     &forward,
                     &mut sequence,
                     &mut scratch,
                     prefix_suffix,
-                    matched_prefix_tokens,
+                    restored_prefix_tokens,
                 )?;
                 prefill_ms += ms;
 
@@ -2414,13 +2419,13 @@ fn run_jsonl_request(
                     logits
                 }
             } else {
-                let suffix = &prompt_ids[matched_prefix_tokens..];
+                let suffix = &prompt_ids[restored_prefix_tokens..];
                 let (logits, ms) = prefill_span(
                     &forward,
                     &mut sequence,
                     &mut scratch,
                     suffix,
-                    matched_prefix_tokens,
+                    restored_prefix_tokens,
                 )?;
                 prefill_ms += ms;
                 logits
@@ -3529,6 +3534,13 @@ mod tests {
             assert_eq!(selected_source, source);
             assert!(!auto_prefill_cache_safe(0, selected));
         }
+    }
+
+    #[test]
+    fn cache_promotion_uses_restored_not_logical_prefix_depth() {
+        assert!(cache_prefix_needs_extension(3, 2));
+        assert!(!cache_prefix_needs_extension(3, 3));
+        assert!(!cache_prefix_needs_extension(2, 3));
     }
 
     #[test]

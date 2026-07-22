@@ -70,6 +70,10 @@ impl From<anyhow::Error> for GgufError {
 #[allow(dead_code)] // Debug is used by tests via expect_err
 pub struct GgufShard {
     pub path: PathBuf,
+    /// Original file description backing both the mmap and metadata parser.
+    /// Retained so later identity checks can use fstat without re-resolving
+    /// the display path.
+    pub(crate) file: Arc<File>,
     pub(crate) mmap: Arc<Mmap>,
     /// Absolute byte offset of the start of the tensor-data section.
     /// `TensorDesc.data_offset` values for this shard include this.
@@ -423,13 +427,13 @@ fn token_id_to_i32(key: &'static str, value: u64) -> Result<i32, GgufError> {
 
 fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufError> {
     // Open + mmap the file. mmap is the source of truth for tensor data.
-    let file = File::open(path)?;
+    let file = Arc::new(File::open(path)?);
     // SAFETY: regular file held for the lifetime of `Self`. Memory mapping a
     // file handed to us by the user is the standard path; if the file is
     // concurrently truncated underneath us we'll SIGBUS on access — that is an
     // OS-level signal we cannot prevent in safe Rust without copying, and
     // would be the user racing themselves.
-    let mmap = Arc::new(unsafe { Mmap::map(&file)? });
+    let mmap = Arc::new(unsafe { Mmap::map(file.as_ref())? });
 
     // Validate magic against the mmap directly. The mmap is the *only* path
     // that the rest of this function trusts; the streaming parser is given a
@@ -443,11 +447,10 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
     }
     prevalidate_header_before_decode(&mmap)?;
 
-    // Hand gguf-rs a fresh, separate File from byte 0. The checked decoder now
-    // reads and validates the magic itself before parsing the rest of the
-    // header. gguf-rs remains the metadata parser of record; we re-derive
-    // structural offsets independently below.
-    let parse_file = File::open(path)?;
+    // Parse through a duplicate of the exact open file description backing the
+    // mmap. Re-resolving the path here could bind metadata and tensor bytes to
+    // different vnodes if the path were atomically replaced during load.
+    let parse_file = file.try_clone()?;
     let mut container = GGUFContainer::new(
         Box::new(BufReader::with_capacity(64 * 1024, parse_file)),
         u64::MAX,
@@ -565,6 +568,7 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
     Ok(LoadedShard {
         shard: GgufShard {
             path: path.to_path_buf(),
+            file,
             mmap,
             tensor_data_start,
             alignment,

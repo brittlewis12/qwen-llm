@@ -39,6 +39,7 @@ pub mod model;
 pub mod prefix_cache;
 pub mod prompt_lookup;
 pub mod runtime;
+pub mod sampling;
 pub mod tensor;
 pub mod tokenizer;
 pub mod trellis_ldlq;

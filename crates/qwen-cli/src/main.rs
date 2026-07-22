@@ -2115,13 +2115,21 @@ fn execute_single_turn_request(
         )?;
         (generation, None)
     };
-    let inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
+    let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let generated = generation.tokens;
     if !generated.is_empty() {
         writeln!(stdout)?;
         stdout.flush().context("flush final newline")?;
+    }
+    if first_delivery_ms.is_none() {
+        let delivery_ms = request_t0.elapsed().as_secs_f64() * 1e3;
+        first_delivery_ms = Some(delivery_ms);
+        first_callback_duration_ms = Some(0.0);
+        first_delivery_allocated =
+            timing_enabled.then(|| loaded.context().current_allocated_size());
+        inference_complete_ms = inference_complete_ms.max(delivery_ms);
     }
     let total_request_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     report_prefill_chunk_decision(prefill_chunk_decision.as_ref(), prompt_ids.len());
@@ -2942,13 +2950,13 @@ where
         first_token_selection_ms.get_or_insert_with(|| selection_t0.elapsed().as_secs_f64() * 1e3);
         first_token_ready_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
         tokens.push(token);
-        on_token(token)?;
-        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
 
         if stop_tokens.contains(&token) {
             stop_reason = Some(StopReason::Eos);
             break;
         }
+        on_token(token)?;
+        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
         if tokens.len() == max_tokens {
             stop_reason = Some(StopReason::TokenLimit);
             break;
@@ -3040,12 +3048,12 @@ where
 
     let stop_reason = 'outer: loop {
         tokens.push(carry);
-        on_token(carry)?;
-        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
 
         if stop_tokens.contains(&carry) {
             break StopReason::Eos;
         }
+        on_token(carry)?;
+        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
         if tokens.len() == max_tokens {
             break StopReason::TokenLimit;
         }
@@ -3196,7 +3204,9 @@ where
 
         for token in accepted {
             tokens.push(token);
-            on_token(token)?;
+            if !stop_tokens.contains(&token) {
+                on_token(token)?;
+            }
             let update_t0 = Instant::now();
             proposer.commit_verified(&[token]);
             let update_ms = update_t0.elapsed().as_secs_f64() * 1e3;
@@ -4874,15 +4884,20 @@ mod tests {
 
     #[test]
     fn greedy_generation_does_not_transition_eos() {
+        let delivered = RefCell::new(Vec::new());
         let generation = generate_greedy(
             logits_with_argmax(1),
             4,
             &[1],
-            |_| Ok(()),
+            |token| {
+                delivered.borrow_mut().push(token);
+                Ok(())
+            },
             |_| -> Result<Vec<f32>> { panic!("EOS must not be consumed") },
         )
         .unwrap();
 
+        assert!(delivered.into_inner().is_empty());
         assert_eq!(generation.tokens, [1]);
         assert_eq!(generation.transitions, 0);
         assert_eq!(generation.transition_ms, 0.0);
@@ -4940,11 +4955,15 @@ mod tests {
 
     #[test]
     fn greedy_generation_does_not_transition_middle_eos() {
+        let delivered = RefCell::new(Vec::new());
         let generation = generate_greedy(
             logits_with_argmax(1),
             4,
             &[2],
-            |_| Ok(()),
+            |token| {
+                delivered.borrow_mut().push(token);
+                Ok(())
+            },
             |token| {
                 assert_eq!(token, 1);
                 Ok(logits_with_argmax(2))
@@ -4952,6 +4971,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(delivered.into_inner(), [1]);
         assert_eq!(generation.tokens, [1, 2]);
         assert_eq!(generation.transitions, 1);
         assert_eq!(generation.stop_reason, StopReason::Eos);
@@ -5074,6 +5094,7 @@ mod tests {
     #[test]
     fn request_timing_invariants_require_ordered_milestones_and_n_minus_one() {
         validate_request_timing_invariants(10.0, 11.0, 20.0, 21.0, 4, 3).unwrap();
+        validate_request_timing_invariants(10.0, 20.0, 20.0, 21.0, 1, 0).unwrap();
         assert!(validate_request_timing_invariants(12.0, 11.0, 20.0, 21.0, 4, 3).is_err());
         assert!(validate_request_timing_invariants(10.0, 11.0, 20.0, 21.0, 4, 4).is_err());
         assert!(validate_request_timing_invariants(10.0, f64::NAN, 20.0, 21.0, 4, 3).is_err());

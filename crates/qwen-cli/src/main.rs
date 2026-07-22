@@ -1,7 +1,10 @@
 //! `qwen` — interactive CLI for the qwen-llm engine.
 
+mod messages;
+
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
+use messages::{load_messages_prompt, messages_thinking_mode};
 use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome};
 use qwen_llm::metal::{
@@ -41,15 +44,39 @@ struct Args {
     info: bool,
 
     /// Raw prompt text for a single-turn greedy generation.
-    #[arg(short = 'p', long, conflicts_with = "prompt_file")]
+    #[arg(short = 'p', long, conflicts_with_all = ["prompt_file", "messages"])]
     prompt: Option<String>,
 
     /// Read raw prompt text from a file.
-    #[arg(long, conflicts_with = "prompt")]
+    #[arg(long, conflicts_with_all = ["prompt", "messages"])]
     prompt_file: Option<PathBuf>,
 
+    /// Render a bare or wrapped JSON messages file with the Qwen chat template.
+    #[arg(long, conflicts_with_all = ["prompt", "prompt_file", "requests_jsonl"])]
+    messages: Option<PathBuf>,
+
+    /// Render only the first N messages.
+    #[arg(long, requires = "messages")]
+    messages_max: Option<usize>,
+
+    /// Preserve assistant `<think>...</think>` history.
+    #[arg(
+        long,
+        requires = "messages",
+        conflicts_with = "messages_strip_thinking"
+    )]
+    messages_preserve_thinking: bool,
+
+    /// Strip a leading assistant `<think>...</think>` block from history.
+    #[arg(long, requires = "messages")]
+    messages_strip_thinking: bool,
+
+    /// Do not append the assistant generation prompt after messages.
+    #[arg(long, requires = "messages")]
+    messages_no_generation_prompt: bool,
+
     /// Read JSONL request objects from a file or '-' while keeping one model loaded.
-    #[arg(long, conflicts_with_all = ["prompt", "prompt_file"])]
+    #[arg(long, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
     requests_jsonl: Option<PathBuf>,
 
     /// Maximum number of tokens to generate.
@@ -322,6 +349,7 @@ impl CachePrefixSource {
 enum PromptSource {
     Inline,
     File,
+    Messages,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -723,11 +751,13 @@ fn main() -> Result<()> {
     }
 
     let Some(model_path) = args.model.as_ref() else {
-        eprintln!("usage: qwen -m <path-to-gguf> -p <prompt>  (or `qwen --info`)");
+        eprintln!(
+            "usage: qwen -m <path-to-gguf> (-p <prompt> | --messages <file>)  (or `qwen --info`)"
+        );
         std::process::exit(2);
     };
 
-    if args.prompt.is_some() || args.prompt_file.is_some() {
+    if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
         return run_single_turn(model_path, &args);
     }
 
@@ -753,8 +783,8 @@ fn validate_request_timing_mode(args: &Args) -> Result<()> {
         "--request-timings currently supports single-turn prompts only"
     );
     ensure!(
-        args.prompt.is_some() || args.prompt_file.is_some(),
-        "--request-timings requires --prompt or --prompt-file"
+        args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some(),
+        "--request-timings requires --prompt, --prompt-file, or --messages"
     );
     ensure!(
         path != Path::new("-"),
@@ -772,7 +802,7 @@ fn validate_durable_prefix_cache_mode(args: &Args) -> Result<()> {
         "--durable-prefix-cache cannot be used with --info"
     );
     ensure!(
-        args.prompt.is_some() || args.prompt_file.is_some(),
+        args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some(),
         "--durable-prefix-cache currently supports single-turn prompts only"
     );
     ensure!(
@@ -809,7 +839,25 @@ fn prompt_text(args: &Args) -> Result<(String, PromptSource)> {
             PromptSource::File,
         ));
     }
-    bail!("single-turn generation requires --prompt or --prompt-file")
+    if let Some(path) = args.messages.as_ref() {
+        return Ok((
+            load_messages_prompt(
+                path,
+                args.messages_max,
+                messages_thinking_mode(
+                    args.messages_preserve_thinking,
+                    args.messages_strip_thinking,
+                ),
+                !args.messages_no_generation_prompt,
+            )?,
+            PromptSource::Messages,
+        ));
+    }
+    bail!("single-turn generation requires --prompt, --prompt-file, or --messages")
+}
+
+fn prompt_add_special_tokens(args: &Args, source: PromptSource) -> bool {
+    source != PromptSource::Messages && !args.no_special_tokens
 }
 
 fn cli_sampling_config(args: &Args) -> Result<SamplingConfig> {
@@ -1625,7 +1673,10 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     let first_tokenizer_init_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
     let tokenization_t0 = Instant::now();
     let first_prompt_ids = tokenizer
-        .encode(&first_prompt, !args.no_special_tokens)
+        .encode(
+            &first_prompt,
+            prompt_add_special_tokens(args, first_prompt_source),
+        )
         .context("tokenize prompt")?;
     let first_tokenization_ms = tokenization_t0.elapsed().as_secs_f64() * 1e3;
     let first_prepared = PreparedRequest {
@@ -1674,7 +1725,10 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         let warm_prompt_acquisition_ms = prompt_t0.elapsed().as_secs_f64() * 1e3;
         let tokenization_t0 = Instant::now();
         let warm_prompt_ids = tokenizer
-            .encode(&warm_prompt, !args.no_special_tokens)
+            .encode(
+                &warm_prompt,
+                prompt_add_special_tokens(args, warm_prompt_source),
+            )
             .context("retokenize warm follow-up prompt")?;
         let warm_tokenization_ms = tokenization_t0.elapsed().as_secs_f64() * 1e3;
         ensure!(
@@ -2194,7 +2248,7 @@ fn execute_single_turn_request(
             },
             sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
             terminal_token_target_transition_consumed: false,
-            no_special_tokens: args.no_special_tokens,
+            no_special_tokens: !prompt_add_special_tokens(args, prompt_source),
             prefill_chunk_requested: args.prefill_chunk,
             prefill_chunk_effective: chunk,
             prefill_chunk_decision,
@@ -3902,6 +3956,48 @@ mod tests {
         ])
         .unwrap();
         validate_durable_prefix_cache_mode(&valid).unwrap();
+    }
+
+    #[test]
+    fn messages_input_is_single_turn_and_durable_cache_eligible() {
+        let args = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "game.json",
+            "--messages-strip-thinking",
+            "--durable-prefix-cache",
+            "cache",
+        ])
+        .unwrap();
+        validate_durable_prefix_cache_mode(&args).unwrap();
+        assert!(!prompt_add_special_tokens(&args, PromptSource::Messages));
+
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--prompt",
+                "hello",
+                "--messages",
+                "game.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--messages",
+                "game.json",
+                "--messages-preserve-thinking",
+                "--messages-strip-thinking",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

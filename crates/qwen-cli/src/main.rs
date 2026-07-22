@@ -1711,6 +1711,10 @@ fn execute_single_turn_request(
     let mut first_delivery_ms = None;
     let mut first_callback_duration_ms = None;
     let mut first_delivery_allocated = None;
+    let stop_tokens = loaded
+        .gguf()
+        .stop_token_ids()
+        .context("load producer-declared stop tokens")?;
     let (generation, prompt_lookup_stats) = if args.prompt_lookup {
         let result = generate_prompt_lookup(
             loaded,
@@ -1719,7 +1723,7 @@ fn execute_single_turn_request(
             &prompt_ids,
             logits,
             args.tokens,
-            tokenizer.eos(),
+            &stop_tokens,
             |token| {
                 let callback_t0 = Instant::now();
                 write!(stdout, "{}", tokenizer.decode_piece(token))?;
@@ -1739,7 +1743,7 @@ fn execute_single_turn_request(
         let generation = generate_greedy(
             logits,
             args.tokens,
-            tokenizer.eos(),
+            &stop_tokens,
             |token| {
                 let callback_t0 = Instant::now();
                 write!(stdout, "{}", tokenizer.decode_piece(token))?;
@@ -2350,6 +2354,10 @@ fn run_jsonl_request(
                 saved_bytes: stats.saved_bytes,
             });
 
+    let stop_tokens = loaded
+        .gguf()
+        .stop_token_ids()
+        .context("load producer-declared stop tokens")?;
     let (generation, generated_text, prompt_lookup_stats) = if args.prompt_lookup {
         let (result, generated_text) = decode_prompt_lookup(
             loaded,
@@ -2360,6 +2368,7 @@ fn run_jsonl_request(
             logits,
             prompt_ids.len(),
             n_generate,
+            &stop_tokens,
         )?;
         sequence = result.sequence;
         (result.generation, generated_text, Some(result.stats))
@@ -2371,6 +2380,7 @@ fn run_jsonl_request(
             logits,
             prompt_ids.len(),
             n_generate,
+            &stop_tokens,
         )?;
         (generation, generated_text, None)
     };
@@ -2514,7 +2524,7 @@ struct GreedyGeneration {
 fn generate_greedy<OnToken, Transition>(
     mut logits: Vec<f32>,
     max_tokens: usize,
-    eos: Option<i32>,
+    stop_tokens: &[i32],
     mut on_token: OnToken,
     mut transition: Transition,
 ) -> Result<GreedyGeneration>
@@ -2542,7 +2552,7 @@ where
         on_token(token)?;
         first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
 
-        if Some(token) == eos {
+        if stop_tokens.contains(&token) {
             stop_reason = Some(StopReason::Eos);
             break;
         }
@@ -2590,7 +2600,7 @@ fn generate_prompt_lookup<OnToken>(
     prompt_ids: &[i32],
     logits: Vec<f32>,
     max_tokens: usize,
-    eos: Option<i32>,
+    stop_tokens: &[i32],
     mut on_token: OnToken,
 ) -> Result<PromptLookupGeneration>
 where
@@ -2611,14 +2621,13 @@ where
     let mut stats = PromptLookupDecodeStats::default();
     let mut transition_wall_ms = 0.0;
     let mut post_callback_policy_ms = 0.0;
-    let stop_tokens = eos.as_slice();
 
     let stop_reason = 'outer: loop {
         tokens.push(carry);
         on_token(carry)?;
         first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
 
-        if Some(carry) == eos {
+        if stop_tokens.contains(&carry) {
             break StopReason::Eos;
         }
         if tokens.len() == max_tokens {
@@ -2729,7 +2738,7 @@ where
                 break;
             }
             accepted.push(draft);
-            if Some(draft) == eos {
+            if stop_tokens.contains(&draft) {
                 terminal = Some(StopReason::Eos);
                 break;
             }
@@ -2813,13 +2822,14 @@ fn decode_greedy(
     logits: Vec<f32>,
     start_position: usize,
     max_tokens: usize,
+    stop_tokens: &[i32],
 ) -> Result<(GreedyGeneration, String)> {
     sequence.check_position(start_position)?;
     let mut generated_text = String::new();
     let generation = generate_greedy(
         logits,
         max_tokens,
-        tokenizer.eos(),
+        stop_tokens,
         |token| {
             generated_text.push_str(&tokenizer.decode_piece(token));
             Ok(())
@@ -2849,6 +2859,7 @@ fn decode_prompt_lookup(
     logits: Vec<f32>,
     start_position: usize,
     max_tokens: usize,
+    stop_tokens: &[i32],
 ) -> Result<(PromptLookupGeneration, String)> {
     sequence.check_position(start_position)?;
     let mut generated_text = String::new();
@@ -2859,7 +2870,7 @@ fn decode_prompt_lookup(
         prompt_ids,
         logits,
         max_tokens,
-        tokenizer.eos(),
+        stop_tokens,
         |token| {
             generated_text.push_str(&tokenizer.decode_piece(token));
             Ok(())
@@ -4115,7 +4126,7 @@ mod tests {
         let generation = generate_greedy(
             logits_with_argmax(1),
             3,
-            None,
+            &[],
             |token| {
                 events.borrow_mut().push(format!("token:{token}"));
                 Ok(())
@@ -4151,7 +4162,7 @@ mod tests {
         let generation = generate_greedy(
             logits_with_argmax(1),
             4,
-            Some(1),
+            &[1],
             |_| Ok(()),
             |_| -> Result<Vec<f32>> { panic!("EOS must not be consumed") },
         )
@@ -4165,11 +4176,29 @@ mod tests {
     }
 
     #[test]
+    fn greedy_generation_honors_every_producer_stop_token() {
+        for terminal in [1_i32, 3] {
+            let generation = generate_greedy(
+                logits_with_argmax(terminal as usize),
+                4,
+                &[1, 3],
+                |_| Ok(()),
+                |_| -> Result<Vec<f32>> { panic!("stop token must not be consumed") },
+            )
+            .unwrap();
+
+            assert_eq!(generation.tokens, [terminal]);
+            assert_eq!(generation.transitions, 0);
+            assert_eq!(generation.stop_reason, StopReason::Eos);
+        }
+    }
+
+    #[test]
     fn greedy_generation_one_token_needs_no_transition() {
         let generation = generate_greedy(
             logits_with_argmax(2),
             1,
-            None,
+            &[],
             |_| Ok(()),
             |_| -> Result<Vec<f32>> { panic!("terminal token must not be consumed") },
         )
@@ -4185,7 +4214,7 @@ mod tests {
         let error = generate_greedy(
             logits_with_argmax(2),
             0,
-            None,
+            &[],
             |_| Ok(()),
             |_| Ok(logits_with_argmax(0)),
         )
@@ -4199,7 +4228,7 @@ mod tests {
         let generation = generate_greedy(
             logits_with_argmax(1),
             4,
-            Some(2),
+            &[2],
             |_| Ok(()),
             |token| {
                 assert_eq!(token, 1);
@@ -4219,7 +4248,7 @@ mod tests {
         let error = generate_greedy(
             logits_with_argmax(1),
             3,
-            None,
+            &[],
             |token| {
                 events.borrow_mut().push(format!("token:{token}"));
                 Ok(())

@@ -6,6 +6,7 @@
 //! gives callers semantic names for those lifetimes without changing the
 //! underlying execution path.
 
+use crate::cache_probe::probe_file_residency;
 use crate::checkpoint_codec::SNAPSHOT_RECORD_FIXED_BYTES;
 use crate::checkpoint_identity::{
     CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
@@ -22,12 +23,14 @@ use crate::metal_forward::{
     SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
+use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_file};
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
 use crate::tokenizer::{TokError, Tokenizer};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -160,6 +163,7 @@ impl Runtime {
     ) -> Result<LoadedModel, RuntimeError> {
         let path = path.as_ref();
         let gguf = GgufFile::open(path)?;
+        let prefetch_outcome = apply_prefetch_policy(&gguf, &config);
         let bound = Model::from_gguf(&gguf)?;
         let identity_shards = snapshot_shard_identity_inputs(&gguf);
         let metal_model =
@@ -173,7 +177,122 @@ impl Runtime {
             identity_parts: OnceLock::new(),
             prefix_cache: Mutex::new(PrefixCache::with_max_bytes(config.prefix_cache_max_bytes)),
             owner: Arc::new(ModelOwnerToken),
+            prefetch_outcome,
         })
+    }
+}
+
+/// Runs the prefetch policy against the freshly-opened GGUF and returns
+/// a per-shard outcome record for observability. On any I/O error we
+/// log via `tracing::warn` and mark the shard as `skipped: true` — a
+/// prefetch failure is a latency regression at worst, never a
+/// correctness issue, so it should not abort the load.
+fn apply_prefetch_policy(gguf: &GgufFile, config: &LoadedModelConfig) -> PrefetchOutcome {
+    let started = Instant::now();
+    let mut shards: Vec<ShardPrefetch> = Vec::with_capacity(gguf.shards.len());
+
+    if matches!(config.prefetch_policy, PrefetchPolicy::Off) {
+        return PrefetchOutcome {
+            policy: config.prefetch_policy,
+            shards,
+            total_wall: started.elapsed(),
+        };
+    }
+
+    let workers = if config.prefetch_workers == 0 {
+        DEFAULT_WORKERS
+    } else {
+        config.prefetch_workers
+    };
+    let chunk = if config.prefetch_chunk_bytes == 0 {
+        DEFAULT_CHUNK_BYTES
+    } else {
+        config.prefetch_chunk_bytes
+    };
+
+    for shard in &gguf.shards {
+        let mut record = ShardPrefetch {
+            path: shard.path.clone(),
+            bytes_returned: 0,
+            wall: Duration::ZERO,
+            pre_resident_fraction: 0.0,
+            skipped: false,
+            skipped_reason: None,
+        };
+
+        // Residency probe. Failure here is non-fatal: we treat unknown
+        // residency as "cold" and let the policy decide.
+        let residency = match probe_file_residency(&shard.path) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!(
+                    shard = %shard.path.display(),
+                    error = %e,
+                    "prefetch: residency probe failed; assuming cold"
+                );
+                None
+            }
+        };
+        if let Some(r) = residency {
+            record.pre_resident_fraction = r.resident_fraction();
+        }
+
+        let should_prefetch = match config.prefetch_policy {
+            PrefetchPolicy::Off => false,
+            PrefetchPolicy::Always => true,
+            PrefetchPolicy::ColdOnly { threshold } => match residency {
+                Some(r) => r.resident_fraction() < threshold,
+                None => true,
+            },
+        };
+
+        if !should_prefetch {
+            record.skipped = true;
+            record.skipped_reason = Some(format!(
+                "residency {:.1}% >= threshold ({:?})",
+                record.pre_resident_fraction * 100.0,
+                config.prefetch_policy
+            ));
+            tracing::info!(
+                shard = %shard.path.display(),
+                resident_pct = record.pre_resident_fraction * 100.0,
+                "prefetch: skipped (already warm)"
+            );
+            shards.push(record);
+            continue;
+        }
+
+        let phase = Instant::now();
+        match prefetch_file(&shard.path, workers, chunk) {
+            Ok(report) => {
+                record.bytes_returned = report.bytes;
+                record.wall = phase.elapsed();
+                tracing::info!(
+                    shard = %shard.path.display(),
+                    bytes = report.bytes,
+                    wall_ms = record.wall.as_secs_f64() * 1e3,
+                    effective_gbps = report.effective_bytes_per_sec() / 1e9,
+                    "prefetch: shard warmed"
+                );
+            }
+            Err(e) => {
+                record.skipped = true;
+                record.skipped_reason = Some(format!("prefetch io: {e}"));
+                record.wall = phase.elapsed();
+                tracing::warn!(
+                    shard = %shard.path.display(),
+                    error = %e,
+                    "prefetch: shard failed; falling back to demand paging"
+                );
+            }
+        }
+        shards.push(record);
+    }
+
+    PrefetchOutcome {
+        policy: config.prefetch_policy,
+        shards,
+        total_wall: started.elapsed(),
     }
 }
 
@@ -211,6 +330,91 @@ mod tests {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedModelConfig {
     pub prefix_cache_max_bytes: u64,
+    /// Policy for warming the OS unified buffer cache during model
+    /// load. Defaults to [`PrefetchPolicy::Off`] to preserve exact
+    /// prior behaviour.
+    pub prefetch_policy: PrefetchPolicy,
+    /// Number of parallel `pread` workers per shard when prefetching.
+    /// Zero uses [`crate::prefetch::DEFAULT_WORKERS`] (4).
+    pub prefetch_workers: usize,
+    /// Per-worker scratch buffer size in bytes. Zero uses
+    /// [`crate::prefetch::DEFAULT_CHUNK_BYTES`] (16 MiB).
+    pub prefetch_chunk_bytes: usize,
+}
+
+/// Cache-warming policy applied by [`Runtime::load_model_with_config`]
+/// between GGUF validation and Metal weight resident-load.
+///
+/// Rationale: on cold storage, `MetalModel::load_with_options` is
+/// bounded by mmap demand-paging (~0.5 GB/s on macOS APFS). Parallel
+/// `pread` warmup unlocks the drive's true ceiling (measured 6-7 GB/s
+/// on Apple Silicon internal SSD in the load_spike experiment).
+///
+/// See `docs/PLAN.md` v0.591 for prior evidence that unconditional
+/// whole-shard prefault costs 1.8-1.9s and degrades warm-cache paths.
+/// `ColdOnly` gates on `mincore` residency to preserve warm-load
+/// performance; this is the recommended default when the loader
+/// callsite doesn't otherwise know cache state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PrefetchPolicy {
+    /// Do not prefetch. Loader behaves exactly as before this option
+    /// existed.
+    Off,
+    /// Prefetch regardless of current residency.
+    Always,
+    /// Prefetch only when `mincore`-reported unified-cache residency
+    /// is below `threshold` (0.0..=1.0). A pragmatic default is
+    /// 0.5 — half the pages already resident means the win is
+    /// diminishing and the prefetch cost is not.
+    ColdOnly { threshold: f64 },
+}
+
+impl Eq for PrefetchPolicy {}
+
+impl Default for PrefetchPolicy {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+/// Per-shard observability record of what the prefetch policy did on
+/// one `load_model_*` call.
+#[derive(Clone, Debug)]
+pub struct ShardPrefetch {
+    pub path: PathBuf,
+    /// Bytes returned by `pread` calls. Warm cache hits count here too;
+    /// use `pid_metrics::PidDelta` for physical disk bytes.
+    pub bytes_returned: u64,
+    /// Wall-clock time of the prefetch or the residency-probe if
+    /// skipped.
+    pub wall: Duration,
+    /// mincore-reported residency of the shard *before* the arm.
+    pub pre_resident_fraction: f64,
+    pub skipped: bool,
+    pub skipped_reason: Option<String>,
+}
+
+/// Result of running the configured [`PrefetchPolicy`] during a
+/// `Runtime::load_model_*` call.
+#[derive(Clone, Debug)]
+pub struct PrefetchOutcome {
+    pub policy: PrefetchPolicy,
+    pub shards: Vec<ShardPrefetch>,
+    /// Total wall time of the prefetch phase across all shards
+    /// (including residency probes for skipped shards).
+    pub total_wall: Duration,
+}
+
+impl PrefetchOutcome {
+    pub fn bytes_returned_total(&self) -> u64 {
+        self.shards.iter().map(|s| s.bytes_returned).sum()
+    }
+    pub fn shards_prefetched(&self) -> usize {
+        self.shards.iter().filter(|s| !s.skipped).count()
+    }
+    pub fn shards_skipped(&self) -> usize {
+        self.shards.iter().filter(|s| s.skipped).count()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,6 +435,9 @@ impl Default for LoadedModelConfig {
     fn default() -> Self {
         Self {
             prefix_cache_max_bytes: DEFAULT_MAX_BYTES,
+            prefetch_policy: PrefetchPolicy::Off,
+            prefetch_workers: 0,
+            prefetch_chunk_bytes: 0,
         }
     }
 }
@@ -327,6 +534,7 @@ pub struct LoadedModel {
     identity_parts: OnceLock<(u64, u64)>,
     prefix_cache: Mutex<PrefixCache>,
     owner: Arc<ModelOwnerToken>,
+    prefetch_outcome: PrefetchOutcome,
 }
 
 impl LoadedModel {
@@ -338,6 +546,13 @@ impl LoadedModel {
     /// Underlying GGUF view, retained for metadata and tokenizer access.
     pub fn gguf(&self) -> &GgufFile {
         &self.gguf
+    }
+
+    /// What the configured [`PrefetchPolicy`] did during this load.
+    /// Always present; `PrefetchPolicy::Off` yields an outcome with an
+    /// empty `shards` vec and zero `total_wall`.
+    pub fn prefetch_outcome(&self) -> &PrefetchOutcome {
+        &self.prefetch_outcome
     }
 
     /// Resident Metal weights.

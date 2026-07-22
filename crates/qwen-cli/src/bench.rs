@@ -19,11 +19,18 @@
 mod attn_capture;
 mod attn_stage_floor;
 mod gguf_arena_floor;
+mod messages;
 #[path = "../source_identity.rs"]
 mod source_identity;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(test)]
+use messages::{
+    ChatMessage, messages_auto_preserve_thinking, parse_messages_input,
+    render_qwen_messages_prompt, strip_think,
+};
+use messages::{load_messages_prompt, messages_thinking_mode};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};
@@ -10027,139 +10034,6 @@ fn run_tok(args: TokArgs) -> Result<()> {
     print_tok_rate("ffi decode", ffi_decode, n_tokens);
     print_tok_rate("native decode", native_decode, n_tokens);
     Ok(())
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum MessagesThinkingMode {
-    Auto,
-    Preserve,
-    Strip,
-}
-
-fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThinkingMode {
-    if preserve {
-        MessagesThinkingMode::Preserve
-    } else if strip {
-        MessagesThinkingMode::Strip
-    } else {
-        MessagesThinkingMode::Auto
-    }
-}
-
-fn load_messages_prompt(
-    path: &PathBuf,
-    max_messages: Option<usize>,
-    thinking_mode: MessagesThinkingMode,
-    append_generation_prompt: bool,
-) -> Result<String> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parse messages input {}", path.display()))?;
-    let (mut messages, meta) = parse_messages_input(value)?;
-    if let Some(max) = max_messages {
-        messages.truncate(max);
-    }
-    if messages.is_empty() {
-        anyhow::bail!("messages input {} contains no messages", path.display());
-    }
-    let preserve_thinking = match thinking_mode {
-        MessagesThinkingMode::Preserve => true,
-        MessagesThinkingMode::Strip => false,
-        MessagesThinkingMode::Auto => messages_auto_preserve_thinking(&meta),
-    };
-    Ok(render_qwen_messages_prompt(
-        &messages,
-        preserve_thinking,
-        append_generation_prompt,
-    ))
-}
-
-fn messages_auto_preserve_thinking(meta: &serde_json::Value) -> bool {
-    if meta
-        .get("preserve_thinking")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    meta.get("model")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_ascii_lowercase().contains("qwen3.6"))
-        .unwrap_or(false)
-}
-
-fn parse_messages_input(value: serde_json::Value) -> Result<(Vec<ChatMessage>, serde_json::Value)> {
-    match value {
-        serde_json::Value::Array(_) => {
-            let messages: Vec<ChatMessage> =
-                serde_json::from_value(value).context("parse bare messages array")?;
-            Ok((messages, serde_json::Value::Null))
-        }
-        serde_json::Value::Object(mut obj) => {
-            let messages_value = obj.remove("messages").ok_or_else(|| {
-                anyhow!("wrapped messages input must contain a top-level `messages` array")
-            })?;
-            let messages: Vec<ChatMessage> =
-                serde_json::from_value(messages_value).context("parse wrapped messages array")?;
-
-            let mut merged = serde_json::Map::new();
-            if let Some(meta_value) = obj.remove("meta") {
-                match meta_value {
-                    serde_json::Value::Object(map) => merged.extend(map),
-                    serde_json::Value::Null => {}
-                    other => {
-                        merged.insert("meta".into(), other);
-                    }
-                }
-            }
-            for (key, value) in obj {
-                merged.insert(key, value);
-            }
-            Ok((messages, serde_json::Value::Object(merged)))
-        }
-        other => Err(anyhow!(
-            "messages input must be a message array or wrapped object, got {other}"
-        )),
-    }
-}
-
-fn render_qwen_messages_prompt(
-    messages: &[ChatMessage],
-    preserve_thinking: bool,
-    append_generation_prompt: bool,
-) -> String {
-    let mut out = String::new();
-    for msg in messages {
-        out.push_str("<|im_start|>");
-        out.push_str(&msg.role);
-        out.push('\n');
-        if msg.role == "assistant" && !preserve_thinking {
-            out.push_str(&strip_think(&msg.content));
-        } else {
-            out.push_str(&msg.content);
-        }
-        out.push_str("<|im_end|>\n");
-    }
-    if append_generation_prompt {
-        out.push_str("<|im_start|>assistant\n");
-    }
-    out
-}
-
-fn strip_think(text: &str) -> String {
-    let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("<think>") {
-        if let Some((_, tail)) = rest.split_once("</think>") {
-            return tail.trim().to_string();
-        }
-    }
-    text.to_string()
 }
 
 fn default_tok_prompt() -> String {

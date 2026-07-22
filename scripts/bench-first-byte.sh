@@ -2,7 +2,11 @@
 # End-to-end first-byte spike: measures how the cold-load prefetch win
 # propagates to time-to-first-token.
 #
-# Usage: ./scripts/bench-first-byte.sh <path-to-model.gguf> [rounds] [prompt]
+# Usage: ./scripts/bench-first-byte.sh <path-to-model.gguf> [rounds] [prompt] [tokens]
+#
+# tokens defaults to 0 (measures only first-byte). Set >0 to also
+# measure sustained decode throughput; useful for catching a
+# v0.591-style warm-decode regression that first-byte alone hides.
 #
 # Arms:
 #   D    policy=off,       invalidate=true  (baseline cold)
@@ -14,13 +18,14 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <model.gguf> [rounds] [prompt]" >&2
+  echo "usage: $0 <model.gguf> [rounds] [prompt] [tokens]" >&2
   exit 2
 fi
 
 MODEL="$1"
 ROUNDS="${2:-1}"
 PROMPT="${3:-The capital of France is}"
+TOKENS="${4:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -54,7 +59,7 @@ run_arm() {
   local arm="$1"
   local label="round${round}/${arm}"
 
-  local args=(--prompt "$PROMPT")
+  local args=(--prompt "$PROMPT" --tokens "$TOKENS")
   case "$arm" in
     D)  args+=(--policy off       --invalidate) ;;
     A)  args+=(--policy always    --invalidate) ;;

@@ -46,6 +46,11 @@ struct Args {
     invalidate: bool,
     prompt: String,
     max_context: usize,
+    /// Additional decoded tokens beyond the first-byte token. 0 stops
+    /// after first-byte (the default). Larger values measure the
+    /// sustained decode throughput, which is where a v0.591-style
+    /// warm-decode regression would surface.
+    tokens: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -56,6 +61,7 @@ fn parse_args() -> Result<Args, String> {
     let mut invalidate = false;
     let mut prompt = DEFAULT_PROMPT.to_string();
     let mut max_context = 512usize;
+    let mut tokens = 0usize;
 
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -94,6 +100,13 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--max-context: {e}"))?
             }
+            "--tokens" => {
+                tokens = it
+                    .next()
+                    .ok_or("--tokens value")?
+                    .parse()
+                    .map_err(|e| format!("--tokens: {e}"))?
+            }
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             other => {
                 if model.is_some() {
@@ -111,6 +124,7 @@ fn parse_args() -> Result<Args, String> {
         invalidate,
         prompt,
         max_context,
+        tokens,
     })
 }
 
@@ -275,12 +289,61 @@ fn main() {
     let pid_b = PidSnapshot::now().unwrap();
     print_phase("decode1:", decode_wall, PidDelta::between(pid_a, pid_b));
 
+    let first_byte_wall = t_start.elapsed();
+
+    // Sustained decode: N more tokens after first-byte. Feeds
+    // argmax-selected tokens back through single_token to measure
+    // steady-state decode throughput. This is the phase that would
+    // surface a v0.591-style warm-decode regression if pread-warming
+    // caused one (measured on cold decode; if warm and cold decode
+    // land the same tok/s, no regression).
+    let mut decoded_tokens: Vec<i32> = Vec::with_capacity(args.tokens);
+    if args.tokens > 0 {
+        decoded_tokens.push(first_token);
+        let pid_a = PidSnapshot::now().unwrap();
+        let t = Instant::now();
+        let mut tok = first_token;
+        for step in 0..args.tokens {
+            // Position of THIS token's forward pass: prompt.len() +
+            // 1 (for first_token) + step (for the tokens we've already
+            // decoded).
+            let pos = (ids.len() + 1 + step) as u32;
+            // SAFETY: sequence is our own; see prefill safety note.
+            let session = unsafe { sequence.metal_session_mut() };
+            let logits = forward
+                .single_token(tok, pos, session)
+                .expect("sustained decode single_token");
+            sequence.advance_by(1).expect("advance");
+            tok = argmax(&logits) as i32;
+            decoded_tokens.push(tok);
+        }
+        let decode_n_wall = t.elapsed();
+        let pid_b = PidSnapshot::now().unwrap();
+        let tok_per_s = args.tokens as f64 / decode_n_wall.as_secs_f64();
+        let ms_per_tok = decode_n_wall.as_secs_f64() * 1e3 / args.tokens as f64;
+        println!(
+            "decode {:>3}:   {}  ({:.2} tok/s, {:.2} ms/tok)",
+            args.tokens,
+            fmt_wall(decode_n_wall),
+            tok_per_s,
+            ms_per_tok,
+        );
+        print_phase(
+            "  (rusage)",
+            Duration::ZERO,
+            PidDelta::between(pid_a, pid_b),
+        );
+    }
+
     let total = t_start.elapsed();
     let pid_end = PidSnapshot::now().unwrap();
     let total_delta = PidDelta::between(pid_start, pid_end);
 
     println!();
-    println!("FIRST BYTE:  {}", fmt_wall(total));
+    println!("FIRST BYTE:  {}", fmt_wall(first_byte_wall));
+    if args.tokens > 0 {
+        println!("TOTAL (fb+{}): {}", args.tokens, fmt_wall(total));
+    }
     println!(
         "rusage total: pageins={:>7}  diskR={:>6.2} GiB  diskW={:>4.1} MiB  \u{0394}RSS={:+7.2} GiB",
         total_delta.pageins,
@@ -291,6 +354,10 @@ fn main() {
 
     let piece = tok.decode_piece(first_token);
     println!("first token: id={first_token} piece={piece:?}");
+    if !decoded_tokens.is_empty() {
+        let decoded = tok.decode(&decoded_tokens);
+        println!("decoded: {decoded:?}");
+    }
 
     if let Ok(r) = probe_file_residency(&args.model) {
         println!(

@@ -557,6 +557,7 @@ struct SingleTurnResult {
     prompt_ids: Vec<i32>,
     generated: Vec<i32>,
     transitions: usize,
+    stop_reason: StopReason,
     prefill_ms: f64,
     ttft_ms: f64,
     decode_tps: f64,
@@ -1823,7 +1824,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         };
         eprintln!(
             concat!(
-                "{}: prompt_tokens={} generated_tokens={} transitions={} ",
+                "{}: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} ",
                 "load_ms={:.1} prefill_ms={:.1} ttft_ms={:.1} ",
                 "decode_tps={:.2} transition_tps={:.2} cache_entries={} ",
                 "cache_mib={:.1}/{:.1}"
@@ -1832,6 +1833,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             result.prompt_ids.len(),
             result.generated.len(),
             result.transitions,
+            result.stop_reason.as_str(),
             load_ms,
             result.prefill_ms,
             result.ttft_ms,
@@ -2391,6 +2393,7 @@ fn execute_single_turn_request(
         prompt_ids,
         generated,
         transitions: generation.transitions,
+        stop_reason,
         prefill_ms,
         ttft_ms,
         decode_tps,

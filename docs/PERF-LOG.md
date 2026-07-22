@@ -6,6 +6,57 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-22 - v0.613 Completed-Turn Durable Checkpoints
+
+Status: promoted for automatic token-preserving messages histories. Explicit,
+raw, transformed, and no-generation-prompt inputs retain prompt-boundary
+publication. Pending-token state is live-validated for serial token-limit,
+serial EOS, and target-only prompt lookup.
+
+- Automatic messages input now publishes the completed request boundary when
+  the shared renderer resolves to preserving assistant content and appends the
+  generation prompt. The checkpoint contains prompt IDs plus every transitioned
+  generated ID; the final emitted token remains pending. Explicit
+  `--cache-prefix-tokens` remains prompt `c1`, and raw/file prompts,
+  strip-thinking histories, and no-generation-prompt messages remain automatic
+  prompt capture. No request takes both snapshots.
+- Boundary derivation requires a nonempty generation,
+  `transitions + 1 == generated_tokens`, and
+  `sequence.position == prompt_tokens + transitions`. Violations fail closed.
+  Oversize records, typed snapshot allocation failures, and publication I/O
+  fail open after the response. Expensive capture starts only after the final
+  newline flush; process-exit/EOF callers still pay capture and publication.
+- Clean-commit 0.8B output-limit pair: turn 1 publishes completed `25-p0`
+  (`matched=25`, `restored=24`); an independently rendered turn 2 hits that
+  record at `matched=25`, `restored=24`, `exact=false`, then publishes `44-p0`.
+  Capture is `21.2/0.4 ms`; publication is `281.6/31.8 ms` on identity
+  compute/hit.
+- Clean-commit natural-EOS pair: turn 1 emits 24 authoritative tokens, suppresses
+  EOS from stdout, and publishes `55-p0`. Re-rendering the visible assistant
+  response plus a new user turn hits at `matched=55`, `restored=54`; turn 2
+  publishes `70-p0`. Capture is `19.0/0.4 ms`; publication is
+  `251.8/31.6 ms`.
+- Explicit-prefix guard publishes only `10-c1` with `capture=prompt`,
+  `pending=false`, and `stop_reason=none`. It does not also publish a completed
+  head.
+- The canonical Qwen3.6 27B MTP prompt-lookup pair publishes `25-p0`, restores
+  it at `matched=25/restored=24`, and publishes `44-p0`. This validates the
+  alternate product loop and pending restore, but the one-token row has zero
+  speculative transitions and does not price partial acceptance.
+- The 27B clean-store publication exposes a separate cold tax: first
+  publication spends `6,734.5 ms` computing/storing strong identity, while the
+  populated-store follow-up hashes zero model bytes and publishes in `159.1 ms`.
+  This is outside TTFT and streaming completion but inside subprocess EOF. Price
+  BLAKE3 parallel content hashing before changing identity semantics.
+- Preserve-thinking is necessary, not sufficient for every future hit. Invalid
+  UTF-8 normalization, alternate token decomposition, or a producer stop token
+  different from the renderer boundary can still miss safely. The product claim
+  is accelerated reconstructible histories, not universal no-regression.
+
+Artifacts: `target/profiles/v0613-completed-boundary-live/`. Checks: 45 CLI
+tests, all CLI binaries, clean release build, and adversarial review in `cx`
+session `019f8c1e-5e50-70d3-98cf-cb1fe4fb6b38`. Commit: `2a311db`.
+
 ## 2026-07-22 - v0.612 Loader-Union and Prefix-Reuse Census
 
 Status: CPU-only decision artifact landed. Range-selective warming is closed as

@@ -719,18 +719,29 @@ This is not a fresh-prompt gain and the historical saves lack authoritative
 generated IDs, but it moves completed-turn publication ahead of another loader
 primitive for process-cold continuation after one live-token proof.
 
-1. **Authoritative completed-turn durable checkpoint publication**: record one
-   ordinary stop and one output-limit completion with authoritative generated
-   IDs, stop reason, pending terminal token, final sequence position, and the
-   next rendered request. Require the consumed state plus pending token to map
-   exactly onto the next request prefix. If it clears, publish that boundary and
-   restore it through the existing durable store. The current prompt boundary
-   remains a valid fallback and already hits 9/9 reconstructed transitions.
-   Expected work removal on the observed continuations is 479-3,023 prefill
-   tokens per turn (median 1,306), 94.84% of current suffix replay. Zero gain on
-   a first unseen prompt. Belief high after the live proof; difficulty S proof,
-   S-M product.
-2. **Single-pass topology-preserving loader I/O ladder, post-v0.612**: range
+v0.613 closes that proof and product seam. Automatic token-preserving messages
+histories publish completed `p0` boundaries; serial output-limit, serial EOS,
+and target-only prompt lookup all restore at `matched=L/restored=L-1` from an
+independently rendered next request. Explicit and transform-capable surfaces
+retain prompt capture. The first 27B clean-store publication reveals a new
+`6,734.5 ms` subprocess-exit tax in strong content hashing; an identity hit
+publishes in `159.1 ms` with zero model bytes hashed.
+
+1. **Parallel strong-identity content hashing**: enable BLAKE3's parallel large-
+   input path only inside the existing ordered per-shard content hash. Require
+   byte-identical content and compatibility IDs, unchanged source-stamp race
+   checks, no TTFT movement, and a material reduction from the measured
+   `6,734.5 ms` clean-store 27B publication. This is one-time per stable
+   store/model identity, but it directly improves current process-cold EOF and
+   makes durable caching less punitive on first use. Belief high; difficulty S.
+2. **Real long-history completed-checkpoint packet**: run one 27B 6K+ messages
+   continuation and one dissimilar agent/messages guardrail. Report prompt work
+   avoided, restore/capture/publish wall, blob bytes, peak memory, first byte,
+   and process exit. Keep the tiny v0.613 packet as semantic authority, not a
+   performance projection. Then wire the generic CLI flags into the motivating
+   client without adding game-specific cache semantics. Belief high; difficulty
+   S packet/S client adapter.
+3. **Single-pass topology-preserving loader I/O ladder, post-v0.612**: range
    selection is closed because every base-weight tensor byte is required.
    Compare direct parallel `pread` into the proven exact-sized shared
    destinations against a transient mapped source plus batched GPU blits. Both
@@ -742,14 +753,14 @@ primitive for process-cold continuation after one live-token proof.
    `--intent disposable` in `scripts/bench-first-byte.sh` so more than a single
    A3B round is available. Belief medium; difficulty M. Prize hundreds of
    milliseconds on every fresh A3B load plus reduced page-cache duplication.
-3. **A10B cold residency plus split-copy floor**: only if the heavy anchor
+4. **A10B cold residency plus split-copy floor**: only if the heavy anchor
    remains deployment-relevant. First adjudicate the already bit-exact native
    embedding, which removes 2.24 GB. Then freeze that inventory and require at
    least 1.5 seconds from a three-shard topology-preserving parallel-copy floor
    before product code. Belief high on memory, medium on copy wall, difficulty
    M-L; deployment relevance is below A3B and dense 27B. If relevant, this moves
    ahead of GPU argmax and reuses the winning A3B population primitive.
-4. **Production GPU argmax contract**: three product paths still copy 993,280
+5. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes, about 970 KiB, and scan 248,320 values on CPU despite the measured GPU
    path. CPU product semantics choose the highest equal index and order NaNs;
    current GPU semantics choose the lowest finite tie and ignore NaNs. Preserve
@@ -757,35 +768,31 @@ primitive for process-cold continuation after one live-token proof.
    Existing MoE gain is only `1.0-1.5%` and dense is neutral, so authorize an
    explicit low-complexity 1% gate rather than invoking the normal 2-3% bar.
    Belief high on small work removal, difficulty S-M.
-5. **Grammar run and admissible-row oracle**: replay real structured traces and
+6. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal uniquely forced tokenizer-token runs plus branch vocabulary
    rows. Use `sum(H_r*(r*C1-Cpack(r))) - overhead`; require `T0/11` for a 1.10x
    request. Runs below four are not locally positive at current N8 cost.
    Contract-exact, belief medium-low until traces exist, difficulty S oracle/M
    product.
-6. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+7. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing and quality-gated. Prefix
    caching is a separate reuse specialization and does not inherit this
    fresh-prompt gain band.
-7. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
+8. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
    131K token, but v0.607 closes the current cooperative read-once organization.
    Do no GPU work until a source-free design changes ownership, scheduling,
    residency, or physical bytes and clears the existing medium, breadth, 131K,
    and whole-token ceilings. Prize high, implementation belief low.
-8. **MTPLX asset/contract decomposition**: pin the external runtime and compare
+9. **MTPLX asset/contract decomposition**: pin the external runtime and compare
    matched M4 AR/D3/D7 acceptance by depth. A cross-trunk sidecar bridge must
    predict a passing qwen request before affine Metal work. This is high
    information value for speculative decode, but below fresh-process work now.
    Belief medium, difficulty S packet/M bridge.
-9. **Materially different A3B state-preserving verifier**: preserve serial
+10. **Materially different A3B state-preserving verifier**: preserve serial
    recurrence, convolution, KV, logits, and continuation state before timing.
    Keep the failed physical-N8 implementation only as a negative control.
    Require state passage and at least 5% projected decode movement. Conditional
    prize high, belief low-medium, difficulty M-L.
-10. **Certified lm_head screening oracle**: exact selected-token work removal.
-   Kill unless an optimistic bound prunes 80% of rows while touching at most
-   30% of bytes, then require about 70% charged head-wall removal. Run only
-   after the cheaper grammar-row artifact. Belief low, difficulty S-M oracle.
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
 allocation removal under the same latency gate; typed metadata retains only an
@@ -793,7 +800,8 @@ independent memory or changed-representation case. Repack-on-load needs a named
 current-kernel instruction attribution; global allocators and tokenizer automata
 need new independent cases. Adaptive MoE top-k also falls below the active ten:
 router mass is diffuse and ideal k8-to-k6 removal is only about `4.55%` before
-overhead or quality loss.
+overhead or quality loss. Certified lm-head screening also moves below the line
+until the cheaper grammar-row artifact produces a positive signal.
 
 Blocked cold follow-ons remain conditional. v0.602 satisfies the first prerequisite
 for async retained-to-copied promotion, but command-buffer-safe cutover, copy
@@ -840,12 +848,12 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Run the authoritative completed-turn token census on one ordinary stop and
-   one output-limit completion. Compare consumed state plus pending token with
-   the next rendered request; do not infer this from retokenized save text.
-2. If the live-token gate clears, publish and restore completed-turn state
-   through the existing durable store. Preserve prompt-boundary publication as
-   fallback and validate uninterrupted, RAM-restored, and disk-restored paths.
+1. Spike BLAKE3 parallel content hashing against the clean-store 27B identity
+   boundary. Preserve IDs and source-stamp checks exactly; remove the change if
+   it does not materially reduce the measured `6,734.5 ms` first publication.
+2. Run one real 27B long-history completed-checkpoint packet and a dissimilar
+   messages guardrail before broad client integration. Report both first-byte
+   and subprocess-exit boundaries; keep transformed histories on prompt capture.
 3. For fresh loads, compare direct destination `pread` with one transient
    mmap-source to independent-destination blit floor. Stop below `112 ms` ready
    saving on the blit floor. Keep write-combined separate. Do not spend more

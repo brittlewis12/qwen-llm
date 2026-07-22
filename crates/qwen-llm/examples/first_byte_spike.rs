@@ -51,6 +51,13 @@ struct Args {
     /// sustained decode throughput, which is where a v0.591-style
     /// warm-decode regression would surface.
     tokens: usize,
+    intent: LoadIntent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoadIntent {
+    ForceOnly,
+    DisposableSingleTurn,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -62,6 +69,7 @@ fn parse_args() -> Result<Args, String> {
     let mut prompt = DEFAULT_PROMPT.to_string();
     let mut max_context = 512usize;
     let mut tokens = 0usize;
+    let mut intent = LoadIntent::ForceOnly;
 
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -107,6 +115,14 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--tokens: {e}"))?
             }
+            "--intent" => {
+                let v = it.next().ok_or("--intent value")?;
+                intent = match v.as_str() {
+                    "force-only" => LoadIntent::ForceOnly,
+                    "disposable" => LoadIntent::DisposableSingleTurn,
+                    other => return Err(format!("unknown intent: {other}")),
+                };
+            }
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             other => {
                 if model.is_some() {
@@ -125,6 +141,7 @@ fn parse_args() -> Result<Args, String> {
         prompt,
         max_context,
         tokens,
+        intent,
     })
 }
 
@@ -170,6 +187,7 @@ fn main() {
     println!("model:      {}", args.model.display());
     println!("size:       {:.2} GiB", gib(file_size));
     println!("policy:     {:?}", args.policy);
+    println!("intent:     {:?}", args.intent);
     println!("invalidate: {}", args.invalidate);
     println!("prompt:     {:?}", args.prompt);
     println!();
@@ -218,9 +236,14 @@ fn main() {
     };
     let pid_a = PidSnapshot::now().unwrap();
     let t = Instant::now();
-    let loaded = runtime
-        .load_model_with_config(&args.model, config)
-        .expect("load_model_with_config");
+    let loaded = match args.intent {
+        LoadIntent::ForceOnly => runtime
+            .load_model_with_config(&args.model, config)
+            .expect("load_model_with_config"),
+        LoadIntent::DisposableSingleTurn => runtime
+            .load_model_for_disposable_single_turn_with_config(&args.model, config)
+            .expect("load_model_for_disposable_single_turn_with_config"),
+    };
     let load_wall = t.elapsed();
     let pid_b = PidSnapshot::now().unwrap();
     print_phase("load:", load_wall, PidDelta::between(pid_a, pid_b));

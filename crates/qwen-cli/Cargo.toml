@@ -18,6 +18,10 @@ path = "src/bench.rs"
 name = "qwen-tok"
 path = "src/tok.rs"
 
+[[bin]]
+name = "qwen-census"
+path = "src/census.rs"
+
 [lints]
 workspace = true
 

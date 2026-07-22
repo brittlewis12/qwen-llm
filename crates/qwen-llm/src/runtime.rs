@@ -6,7 +6,7 @@
 //! gives callers semantic names for those lifetimes without changing the
 //! underlying execution path.
 
-use crate::cache_probe::probe_fd_residency;
+use crate::cache_probe::{available_memory_bytes, probe_fd_residency};
 use crate::checkpoint_codec::SNAPSHOT_RECORD_FIXED_BYTES;
 use crate::checkpoint_identity::{
     CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
@@ -220,13 +220,27 @@ fn apply_prefetch_policy(gguf: &GgufFile, config: &LoadedModelConfig) -> Prefetc
         total_wall: started.elapsed(),
     }
 }
-
-/// Per-shard prefetch. Uses the shard's retained file description (no
-/// path reopen -> no TOCTOU) and fails **closed** on residency-probe
-/// failure: if we can't observe the current state, we do not prefetch.
-/// This preserves the invariant "prefetch never makes cold worse than
-/// baseline" — the worst case with fail-closed is missed opportunity,
-/// not double I/O + eviction.
+/// Per-shard prefetch. Uses the shard's retained file description
+/// (no path reopen, no TOCTOU).
+///
+/// **Fail-open policy on probe failure.** Both the residency probe and
+/// the memory-headroom probe are diagnostic; a failure returns fresh
+/// unknown state, not a veto. Codex jam session 019f8b66 worked
+/// through the expected value: skipping-on-probe-failure trades
+/// certain small waste (a warm reread ~600 ms) for potentially
+/// forgoing large wins (~18 s on 27B cold). The failed probe's error
+/// is recorded in `skipped_reason` for diagnosis, and the prefetch
+/// is attempted anyway. If the actual prefetch also fails, that
+/// path records the real I/O error.
+///
+/// **Memory-headroom is telemetry-only in this build.** A hard skip
+/// gate needs a controlled pressure experiment first (A3B under three
+/// admission regimes) to identify the actual regression boundary.
+/// Until then we compute the conservative bound, log if it would fail,
+/// but let the prefetch proceed. On Britt's 128 GiB workstation the
+/// naive `missing + shard + margin` formula would silently prevent
+/// the measured 5× first-byte wins because `available_memory` on an
+/// active desktop is often < 30 GiB.
 fn apply_shard_prefetch(
     shard: &GgufShard,
     config: &LoadedModelConfig,
@@ -242,39 +256,40 @@ fn apply_shard_prefetch(
         skipped_reason: None,
     };
 
-    // Always allow explicit-Always overrides to skip the residency
-    // probe (it's a small cost, but Always callers have opted into
-    // unconditional work regardless).
+    // Explicit-Always callers opt out of the residency probe entirely.
+    // ColdOnly needs the residency to decide, but a probe failure
+    // resolves fail-open (proceed with prefetch) rather than skip.
     let need_residency = !matches!(config.prefetch_policy, PrefetchPolicy::Always);
     let residency = if need_residency {
         match probe_fd_residency(shard.file.as_ref()) {
-            Ok(r) => Some(r),
+            Ok(r) => {
+                record.pre_resident_fraction = r.resident_fraction();
+                Some(r)
+            }
             Err(e) => {
-                // Fail closed: if we can't observe residency, we don't
-                // know whether prefetching would help or waste I/O. Skip.
                 tracing::warn!(
                     shard = %shard.path.display(),
                     error = %e,
-                    "prefetch: residency probe failed; skipping (fail-closed)"
+                    "prefetch: residency probe failed; attempting anyway (fail-open)"
                 );
-                record.skipped = true;
-                record.skipped_reason = Some(format!("residency probe failed: {e} (fail-closed)"));
-                return record;
+                // Record the failure for observability, but proceed.
+                record.skipped_reason = Some(format!(
+                    "residency probe failed (fail-open, prefetch attempted): {e}"
+                ));
+                None
             }
         }
     } else {
         None
     };
-    if let Some(r) = residency {
-        record.pre_resident_fraction = r.resident_fraction();
-    }
 
     let should_prefetch = match config.prefetch_policy {
         PrefetchPolicy::Off => false,
         PrefetchPolicy::Always => true,
         PrefetchPolicy::ColdOnly { threshold } => match residency {
             Some(r) => r.resident_fraction() < threshold.value(),
-            None => unreachable!("need_residency guarantees Some here"),
+            // Probe failed under ColdOnly: fail-open (attempt prefetch).
+            None => true,
         },
     };
 
@@ -291,6 +306,49 @@ fn apply_shard_prefetch(
             "prefetch: skipped (already warm)"
         );
         return record;
+    }
+
+    // Memory-headroom telemetry (see fn-doc for why it does not gate).
+    // The `+ shard_size` term models the copied-storage case (Metal
+    // allocates fresh dest bytes while we still hold the source in
+    // page cache); it is over-cautious for retained storage, which is
+    // the common dense-model path. Refactoring the loader to bind
+    // Model and build a MetalLoadPlan before prefetch would let us
+    // pick the right formula per storage plan; captured as a follow-up.
+    let shard_size = shard.mmap_len() as u64;
+    let missing_bytes = ((1.0 - record.pre_resident_fraction) * shard_size as f64) as u64;
+    let margin = config.effective_prefetch_min_headroom_bytes();
+    let conservative_bound = missing_bytes
+        .saturating_add(shard_size)
+        .saturating_add(margin);
+    match available_memory_bytes() {
+        Ok(available) => {
+            if available < conservative_bound {
+                tracing::warn!(
+                    shard = %shard.path.display(),
+                    available_mib = available / (1 << 20),
+                    conservative_bound_mib = conservative_bound / (1 << 20),
+                    missing_mib = missing_bytes / (1 << 20),
+                    shard_mib = shard_size / (1 << 20),
+                    margin_mib = margin / (1 << 20),
+                    "prefetch: available memory below conservative bound; proceeding anyway (telemetry-only until validated)"
+                );
+            } else {
+                tracing::debug!(
+                    shard = %shard.path.display(),
+                    available_mib = available / (1 << 20),
+                    conservative_bound_mib = conservative_bound / (1 << 20),
+                    "prefetch: memory headroom adequate for conservative bound"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                shard = %shard.path.display(),
+                error = %e,
+                "prefetch: headroom probe failed (fail-open; proceeding)"
+            );
+        }
     }
 
     let phase = Instant::now();
@@ -414,7 +472,27 @@ pub struct LoadedModelConfig {
     /// Per-worker scratch buffer size in bytes. Zero uses
     /// [`crate::prefetch::DEFAULT_CHUNK_BYTES`] (16 MiB).
     pub prefetch_chunk_bytes: usize,
+    /// Additional bytes to require above the theoretical prefetch +
+    /// destination sizes before prefetching. Zero uses
+    /// [`DEFAULT_PREFETCH_MIN_HEADROOM_BYTES`] (1 GiB).
+    pub prefetch_min_headroom_bytes: u64,
 }
+
+impl LoadedModelConfig {
+    pub(crate) fn effective_prefetch_min_headroom_bytes(&self) -> u64 {
+        if self.prefetch_min_headroom_bytes == 0 {
+            DEFAULT_PREFETCH_MIN_HEADROOM_BYTES
+        } else {
+            self.prefetch_min_headroom_bytes
+        }
+    }
+}
+
+/// Safety margin above `missing_bytes + shard_size` required for a
+/// prefetch to proceed. 1 GiB is generous for kernel bookkeeping and
+/// unrelated allocations without being so large it prevents
+/// prefetching on memory-tight systems.
+pub const DEFAULT_PREFETCH_MIN_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// A validated cache-residency threshold in `[0.0, 1.0]`.
 ///
@@ -568,6 +646,7 @@ impl Default for LoadedModelConfig {
             prefetch_policy: PrefetchPolicy::Off,
             prefetch_workers: 0,
             prefetch_chunk_bytes: 0,
+            prefetch_min_headroom_bytes: 0,
         }
     }
 }

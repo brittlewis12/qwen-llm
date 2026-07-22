@@ -204,6 +204,45 @@ pub struct InvalidateReport {
     pub after: ResidencyReport,
 }
 
+/// Estimate of memory the kernel could hand out without pressuring
+/// currently-active work. Sums the vm_stat categories that XNU treats
+/// as cheaply reclaimable: `free`, `inactive`, `speculative`, and
+/// `purgeable`. Excludes wired, active, and compressor pages.
+///
+/// Used by the prefetch policy to skip warmup when the system doesn't
+/// have room to hold the prefetched pages plus Metal's destination
+/// buffers without evicting either during the load.
+///
+/// Errors surface any `host_statistics64` failure.
+pub fn available_memory_bytes() -> io::Result<u64> {
+    let host = unsafe { libc::mach_host_self() };
+    // SAFETY: host is a valid mach port; we pass a properly sized and
+    // aligned buffer for the requested flavor; count is initialized to
+    // the required size in units of integer_t.
+    let mut stats = std::mem::MaybeUninit::<libc::vm_statistics64>::zeroed();
+    let mut count: libc::mach_msg_type_number_t = libc::HOST_VM_INFO64_COUNT;
+    let ret = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            stats.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    if ret != libc::KERN_SUCCESS {
+        return Err(io::Error::other(format!(
+            "host_statistics64(HOST_VM_INFO64) returned kern={ret}"
+        )));
+    }
+    let stats = unsafe { stats.assume_init() };
+    let page = host_page_size() as u64;
+    let reclaimable = stats.free_count as u64
+        + stats.inactive_count as u64
+        + stats.speculative_count as u64
+        + stats.purgeable_count as u64;
+    Ok(reclaimable * page)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +277,23 @@ mod tests {
         }
         f.sync_all().expect("sync");
         Fixture(path)
+    }
+
+    #[test]
+    fn available_memory_is_positive_and_bounded_by_total() {
+        // Sanity: the call succeeds on macOS, returns a positive value,
+        // and is less than or equal to total physical memory (from the
+        // hw.memsize sysctl).
+        let avail = available_memory_bytes().expect("available_memory_bytes");
+        assert!(avail > 0, "expected positive available memory, got {avail}");
+
+        let total_pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) } as u64;
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+        let total = total_pages * page;
+        assert!(
+            avail <= total,
+            "available {avail} exceeds total physical {total}"
+        );
     }
 
     #[test]

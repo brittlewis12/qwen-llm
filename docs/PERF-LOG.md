@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-22 - v0.612 Loader-Union and Prefix-Reuse Census
+
+Status: CPU-only decision artifact landed. Range-selective warming is closed as
+a material loader lane on the current dense-27B and A3B assets. Completed-turn
+checkpoint publication advances to one authoritative live-token proof.
+
+- `qwen-census` binds the production-default base-weight request plan without
+  constructing Metal. It reports exact and 16 KiB-rounded source unions per
+  shard, storage-kind accounting, repeated sources, complements, MTP/unbound
+  scope, and a strict 90% range-warmer screening rule. It also reconstructs
+  messages with the shared renderer and native tokenizer, measures adjacent
+  prompt/completed-prefix reuse, and finds longest local or cross-file exact
+  token prefixes. Cross-file matches are corpus opportunities, not claimed
+  causal ancestors.
+- Dense Qwen3.6 27B has 851 logical base requests totaling
+  `16,806,250,496` bytes. A3B has 733 totaling `22,123,538,944` bytes. On both
+  assets the unique source union is one contiguous interval equal to 100% of
+  the tensor-data region: no gaps, repeated source bytes, MTP descriptors, or
+  unbound descriptors. Page rounding adds only 224 bytes on 27B and 12,768
+  bytes on A3B; the apparent whole-file savings are the roughly 10.99 MB
+  pre-tensor headers.
+- Drop range-selective warming as a material lever. The v0.611 `4.13 GiB`
+  resident-page observation was not a map of required loader bytes. Coalescing
+  851/733 operations may still change transfer overhead, but it belongs to the
+  single-pass population ladder rather than byte omission. Every base-model
+  tensor byte remains required on these two assets.
+- Two real Qwen3.6 27B ring0 saves supply nine adjacent request transitions.
+  The immediate prior full-prompt checkpoint is an exact rendered-byte and
+  token prefix in 9/9 transitions with zero boundary loss. It leaves
+  582-3,126 request tokens to replay (median 1,376; sum 17,014): the previous
+  assistant output plus the next user suffix.
+- Retokenized completed-response proxies are also exact prefixes in 9/9. They
+  leave 30-154 tokens (median 103; sum 878), avoiding 479-3,023 replay tokens
+  per transition (median 1,306; sum 16,136). This is `19.378x` less aggregate
+  suffix replay than prompt-boundary snapshots, or 94.84% of that work removed.
+- Historical saves do not contain authoritative generated token IDs or the
+  suppressed terminal token. The completed result is therefore a work-removal
+  estimate, not state-equivalence authority. Next record one ordinary stop and
+  one output-limit completion with authoritative generated IDs, stop reason,
+  pending token, final sequence position, and next-request prefix comparison.
+  If that clears, publish completed-turn state before returning to loader
+  transfer experiments for the repeated-conversation workload.
+
+Artifacts:
+`target/profiles/v0612-27b-loader-prefix-census.json` and
+`target/profiles/v0612-a3b-loader-census.json`, both clean commit `8f421ca`.
+Checks: nine census/message tests, all CLI binaries checked, clean standalone
+build, and adversarial review in `cx` session
+`019f8bf9-fb08-7193-a6f3-b7d323759599`.
+
 ## 2026-07-22 - v0.611 Parallel-Pread Cache Warmer
 
 Status: promoted through `LoadedModelConfig::default()` as `ColdOnly` prefetch

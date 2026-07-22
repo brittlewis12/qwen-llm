@@ -97,11 +97,24 @@ impl PrefetchReport {
 ///
 /// Errors surface any per-worker `pread` failure with the offending
 /// worker's context.
+///
+/// Prefer [`prefetch_fd`] when a caller already holds an open file
+/// description; that avoids reopening by path and the associated TOCTOU
+/// window where a rename could point us at a different inode.
 pub fn prefetch_file(
     path: impl AsRef<Path>,
     workers: usize,
     chunk_bytes: usize,
 ) -> io::Result<PrefetchReport> {
+    let file = File::open(path.as_ref())?;
+    prefetch_fd(&file, workers, chunk_bytes)
+}
+
+/// Warm the OS page cache for an already-open file. Same mechanism as
+/// [`prefetch_file`] but takes a borrowed [`File`] so callers with a
+/// retained descriptor (e.g. `GgufShard`) avoid the path reopen and its
+/// TOCTOU exposure.
+pub fn prefetch_fd(file: &File, workers: usize, chunk_bytes: usize) -> io::Result<PrefetchReport> {
     if workers == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -115,7 +128,6 @@ pub fn prefetch_file(
         ));
     }
 
-    let file = File::open(path.as_ref())?;
     let len = file.metadata()?.len();
     if len == 0 {
         return Ok(PrefetchReport {
@@ -126,7 +138,6 @@ pub fn prefetch_file(
         });
     }
 
-    let file = &file;
     let bytes_read = AtomicU64::new(0);
     let bytes_read_ref = &bytes_read;
 

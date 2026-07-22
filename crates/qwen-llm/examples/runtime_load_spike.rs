@@ -54,7 +54,9 @@ fn parse_args() -> Result<Args, String> {
                 policy = match v.as_str() {
                     "off" => PrefetchPolicy::Off,
                     "always" => PrefetchPolicy::Always,
-                    "cold-only" => PrefetchPolicy::ColdOnly { threshold: 0.5 },
+                    "cold-only" => {
+                        PrefetchPolicy::cold_only(0.5).expect("0.5 is a valid threshold")
+                    }
                     other => return Err(format!("unknown policy: {other}")),
                 };
             }

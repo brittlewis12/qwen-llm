@@ -139,8 +139,19 @@ pub fn invalidate_file_cache(path: impl AsRef<Path>) -> io::Result<InvalidateRep
 
 /// Snapshot of the residency of the file backing an open mmap, without
 /// modifying anything.
+///
+/// Prefer [`probe_fd_residency`] when a caller already holds an open
+/// file description; that avoids reopening by path and its TOCTOU
+/// window.
 pub fn probe_file_residency(path: impl AsRef<Path>) -> io::Result<ResidencyReport> {
     let file = File::open(path.as_ref())?;
+    probe_fd_residency(&file)
+}
+
+/// Same as [`probe_file_residency`] but takes a borrowed [`File`] so
+/// callers with a retained descriptor (e.g. `GgufShard.file`) avoid
+/// the path reopen.
+pub fn probe_fd_residency(file: &File) -> io::Result<ResidencyReport> {
     let len = file.metadata()?.len() as usize;
     if len == 0 {
         return Ok(ResidencyReport {

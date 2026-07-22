@@ -6,7 +6,7 @@
 //! gives callers semantic names for those lifetimes without changing the
 //! underlying execution path.
 
-use crate::cache_probe::probe_file_residency;
+use crate::cache_probe::probe_fd_residency;
 use crate::checkpoint_codec::SNAPSHOT_RECORD_FIXED_BYTES;
 use crate::checkpoint_identity::{
     CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
@@ -15,7 +15,7 @@ use crate::checkpoint_identity::{
 use crate::checkpoint_store::{
     CheckpointStoreError, DurableCheckpointStore, PublishReport, StoreContext,
 };
-use crate::gguf::{GgufError, GgufFile};
+use crate::gguf::{GgufError, GgufFile, GgufShard};
 use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
 use crate::metal_forward::{
@@ -23,7 +23,7 @@ use crate::metal_forward::{
     SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
-use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_file};
+use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
 use crate::tokenizer::{TokError, Tokenizer};
 use parking_lot::Mutex;
@@ -211,82 +211,7 @@ fn apply_prefetch_policy(gguf: &GgufFile, config: &LoadedModelConfig) -> Prefetc
     };
 
     for shard in &gguf.shards {
-        let mut record = ShardPrefetch {
-            path: shard.path.clone(),
-            bytes_returned: 0,
-            wall: Duration::ZERO,
-            pre_resident_fraction: 0.0,
-            skipped: false,
-            skipped_reason: None,
-        };
-
-        // Residency probe. Failure here is non-fatal: we treat unknown
-        // residency as "cold" and let the policy decide.
-        let residency = match probe_file_residency(&shard.path) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                tracing::warn!(
-                    shard = %shard.path.display(),
-                    error = %e,
-                    "prefetch: residency probe failed; assuming cold"
-                );
-                None
-            }
-        };
-        if let Some(r) = residency {
-            record.pre_resident_fraction = r.resident_fraction();
-        }
-
-        let should_prefetch = match config.prefetch_policy {
-            PrefetchPolicy::Off => false,
-            PrefetchPolicy::Always => true,
-            PrefetchPolicy::ColdOnly { threshold } => match residency {
-                Some(r) => r.resident_fraction() < threshold,
-                None => true,
-            },
-        };
-
-        if !should_prefetch {
-            record.skipped = true;
-            record.skipped_reason = Some(format!(
-                "residency {:.1}% >= threshold ({:?})",
-                record.pre_resident_fraction * 100.0,
-                config.prefetch_policy
-            ));
-            tracing::info!(
-                shard = %shard.path.display(),
-                resident_pct = record.pre_resident_fraction * 100.0,
-                "prefetch: skipped (already warm)"
-            );
-            shards.push(record);
-            continue;
-        }
-
-        let phase = Instant::now();
-        match prefetch_file(&shard.path, workers, chunk) {
-            Ok(report) => {
-                record.bytes_returned = report.bytes;
-                record.wall = phase.elapsed();
-                tracing::info!(
-                    shard = %shard.path.display(),
-                    bytes = report.bytes,
-                    wall_ms = record.wall.as_secs_f64() * 1e3,
-                    effective_gbps = report.effective_bytes_per_sec() / 1e9,
-                    "prefetch: shard warmed"
-                );
-            }
-            Err(e) => {
-                record.skipped = true;
-                record.skipped_reason = Some(format!("prefetch io: {e}"));
-                record.wall = phase.elapsed();
-                tracing::warn!(
-                    shard = %shard.path.display(),
-                    error = %e,
-                    "prefetch: shard failed; falling back to demand paging"
-                );
-            }
-        }
-        shards.push(record);
+        shards.push(apply_shard_prefetch(shard, config, workers, chunk));
     }
 
     PrefetchOutcome {
@@ -294,6 +219,105 @@ fn apply_prefetch_policy(gguf: &GgufFile, config: &LoadedModelConfig) -> Prefetc
         shards,
         total_wall: started.elapsed(),
     }
+}
+
+/// Per-shard prefetch. Uses the shard's retained file description (no
+/// path reopen -> no TOCTOU) and fails **closed** on residency-probe
+/// failure: if we can't observe the current state, we do not prefetch.
+/// This preserves the invariant "prefetch never makes cold worse than
+/// baseline" — the worst case with fail-closed is missed opportunity,
+/// not double I/O + eviction.
+fn apply_shard_prefetch(
+    shard: &GgufShard,
+    config: &LoadedModelConfig,
+    workers: usize,
+    chunk: usize,
+) -> ShardPrefetch {
+    let mut record = ShardPrefetch {
+        path: shard.path.clone(),
+        bytes_returned: 0,
+        wall: Duration::ZERO,
+        pre_resident_fraction: 0.0,
+        skipped: false,
+        skipped_reason: None,
+    };
+
+    // Always allow explicit-Always overrides to skip the residency
+    // probe (it's a small cost, but Always callers have opted into
+    // unconditional work regardless).
+    let need_residency = !matches!(config.prefetch_policy, PrefetchPolicy::Always);
+    let residency = if need_residency {
+        match probe_fd_residency(shard.file.as_ref()) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                // Fail closed: if we can't observe residency, we don't
+                // know whether prefetching would help or waste I/O. Skip.
+                tracing::warn!(
+                    shard = %shard.path.display(),
+                    error = %e,
+                    "prefetch: residency probe failed; skipping (fail-closed)"
+                );
+                record.skipped = true;
+                record.skipped_reason = Some(format!("residency probe failed: {e} (fail-closed)"));
+                return record;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(r) = residency {
+        record.pre_resident_fraction = r.resident_fraction();
+    }
+
+    let should_prefetch = match config.prefetch_policy {
+        PrefetchPolicy::Off => false,
+        PrefetchPolicy::Always => true,
+        PrefetchPolicy::ColdOnly { threshold } => match residency {
+            Some(r) => r.resident_fraction() < threshold.value(),
+            None => unreachable!("need_residency guarantees Some here"),
+        },
+    };
+
+    if !should_prefetch {
+        record.skipped = true;
+        record.skipped_reason = Some(format!(
+            "residency {:.1}% >= threshold ({:?})",
+            record.pre_resident_fraction * 100.0,
+            config.prefetch_policy
+        ));
+        tracing::info!(
+            shard = %shard.path.display(),
+            resident_pct = record.pre_resident_fraction * 100.0,
+            "prefetch: skipped (already warm)"
+        );
+        return record;
+    }
+
+    let phase = Instant::now();
+    match prefetch_fd(shard.file.as_ref(), workers, chunk) {
+        Ok(report) => {
+            record.bytes_returned = report.bytes;
+            record.wall = phase.elapsed();
+            tracing::info!(
+                shard = %shard.path.display(),
+                bytes = report.bytes,
+                wall_ms = record.wall.as_secs_f64() * 1e3,
+                effective_gbps = report.effective_bytes_per_sec() / 1e9,
+                "prefetch: shard warmed"
+            );
+        }
+        Err(e) => {
+            record.skipped = true;
+            record.skipped_reason = Some(format!("prefetch io: {e}"));
+            record.wall = phase.elapsed();
+            tracing::warn!(
+                shard = %shard.path.display(),
+                error = %e,
+                "prefetch: shard failed; falling back to demand paging"
+            );
+        }
+    }
+    record
 }
 
 #[cfg(test)]
@@ -325,6 +349,56 @@ mod tests {
                 .auto_parallel_copy_a3b
         );
     }
+
+    #[test]
+    fn residency_threshold_accepts_bounds() {
+        assert!(ResidencyThreshold::new(0.0).is_ok());
+        assert!(ResidencyThreshold::new(1.0).is_ok());
+        assert!(ResidencyThreshold::new(0.5).is_ok());
+    }
+
+    #[test]
+    fn residency_threshold_rejects_nan_inf_and_out_of_range() {
+        assert!(ResidencyThreshold::new(f64::NAN).is_err());
+        assert!(ResidencyThreshold::new(f64::INFINITY).is_err());
+        assert!(ResidencyThreshold::new(f64::NEG_INFINITY).is_err());
+        assert!(ResidencyThreshold::new(-0.001).is_err());
+        assert!(ResidencyThreshold::new(1.001).is_err());
+        assert!(ResidencyThreshold::new(-1e100).is_err());
+    }
+
+    #[test]
+    fn residency_threshold_equality_is_reflexive_and_transitive() {
+        // Reflexivity is the property that makes `Eq` sound on a
+        // f64-containing type. NaN would break this; the constructor
+        // excludes NaN.
+        let a = ResidencyThreshold::new(0.42).unwrap();
+        let b = ResidencyThreshold::new(0.42).unwrap();
+        let c = ResidencyThreshold::new(0.42).unwrap();
+        assert_eq!(a, a);
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        // Order sanity: different values are unequal.
+        let d = ResidencyThreshold::new(0.43).unwrap();
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn prefetch_policy_cold_only_convenience_constructor() {
+        let ok = PrefetchPolicy::cold_only(0.5).unwrap();
+        assert!(matches!(ok, PrefetchPolicy::ColdOnly { .. }));
+        assert!(PrefetchPolicy::cold_only(f64::NAN).is_err());
+        assert!(PrefetchPolicy::cold_only(1.1).is_err());
+    }
+
+    #[test]
+    fn prefetch_policy_default_is_off_backcompat() {
+        // Backward compat with pre-spike behaviour: default MUST be
+        // Off. If you change this, every caller of Runtime::load_model
+        // (not _with_config) silently starts prefetching. Update the
+        // roadmap and roll out with an intent-scoped default first.
+        assert_eq!(PrefetchPolicy::default(), PrefetchPolicy::Off);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +416,54 @@ pub struct LoadedModelConfig {
     pub prefetch_chunk_bytes: usize,
 }
 
+/// A validated cache-residency threshold in `[0.0, 1.0]`.
+///
+/// Rejects NaN, negative, subnormal-but-negative, and >1 values at
+/// construction. Wrapping the raw `f64` (rather than exposing it in
+/// [`PrefetchPolicy`]) lets the enum soundly derive `Eq`, `PartialEq`,
+/// and `Hash` even though `f64` normally cannot: the newtype's manual
+/// impls are safe because construction excludes NaN.
+#[derive(Clone, Copy, Debug)]
+pub struct ResidencyThreshold(f64);
+
+/// Error returned by [`ResidencyThreshold::new`] when the caller-supplied
+/// value is not a finite fraction in `[0.0, 1.0]`.
+#[derive(Debug, thiserror::Error)]
+#[error("residency threshold must be finite in [0.0, 1.0]; got {0}")]
+pub struct InvalidResidencyThreshold(pub f64);
+
+impl ResidencyThreshold {
+    /// Construct a threshold from a fraction in `[0.0, 1.0]`. Rejects
+    /// non-finite (NaN or infinity) and out-of-range values.
+    pub fn new(value: f64) -> Result<Self, InvalidResidencyThreshold> {
+        if !value.is_finite() || value < 0.0 || value > 1.0 {
+            return Err(InvalidResidencyThreshold(value));
+        }
+        Ok(Self(value))
+    }
+
+    /// Extract the underlying fraction. Guaranteed to be finite and
+    /// in `[0.0, 1.0]`.
+    pub const fn value(self) -> f64 {
+        self.0
+    }
+}
+
+// Safe: `new` rejects NaN, so `to_bits` equality coincides with `==`
+// on the stored value AND reflexivity holds. No infinities or NaNs to
+// worry about.
+impl PartialEq for ResidencyThreshold {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+impl Eq for ResidencyThreshold {}
+impl std::hash::Hash for ResidencyThreshold {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
 /// Cache-warming policy applied by [`Runtime::load_model_with_config`]
 /// between GGUF validation and Metal weight resident-load.
 ///
@@ -355,7 +477,7 @@ pub struct LoadedModelConfig {
 /// `ColdOnly` gates on `mincore` residency to preserve warm-load
 /// performance; this is the recommended default when the loader
 /// callsite doesn't otherwise know cache state.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum PrefetchPolicy {
     /// Do not prefetch. Loader behaves exactly as before this option
     /// existed.
@@ -363,13 +485,21 @@ pub enum PrefetchPolicy {
     /// Prefetch regardless of current residency.
     Always,
     /// Prefetch only when `mincore`-reported unified-cache residency
-    /// is below `threshold` (0.0..=1.0). A pragmatic default is
-    /// 0.5 — half the pages already resident means the win is
-    /// diminishing and the prefetch cost is not.
-    ColdOnly { threshold: f64 },
+    /// is below `threshold`. Use [`PrefetchPolicy::cold_only`] to
+    /// construct with a validated fraction.
+    ColdOnly { threshold: ResidencyThreshold },
 }
 
-impl Eq for PrefetchPolicy {}
+impl PrefetchPolicy {
+    /// Convenience constructor for [`PrefetchPolicy::ColdOnly`] that
+    /// validates `threshold` at the call site rather than forcing
+    /// callers to hand-construct a [`ResidencyThreshold`].
+    pub fn cold_only(threshold: f64) -> Result<Self, InvalidResidencyThreshold> {
+        Ok(Self::ColdOnly {
+            threshold: ResidencyThreshold::new(threshold)?,
+        })
+    }
+}
 
 impl Default for PrefetchPolicy {
     fn default() -> Self {

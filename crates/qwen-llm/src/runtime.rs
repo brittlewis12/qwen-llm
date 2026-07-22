@@ -6,6 +6,7 @@
 //! gives callers semantic names for those lifetimes without changing the
 //! underlying execution path.
 
+use crate::checkpoint_codec::SNAPSHOT_RECORD_FIXED_BYTES;
 use crate::checkpoint_identity::{
     CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
     checkpoint_compatibility,
@@ -72,6 +73,8 @@ pub enum RuntimeError {
     CheckpointIdentity(#[from] CheckpointIdentityError),
     #[error("durable checkpoint store: {0}")]
     CheckpointStore(#[from] CheckpointStoreError),
+    #[error("checkpoint size estimate overflow")]
+    CheckpointSizeOverflow,
 }
 
 struct RuntimeInner {
@@ -254,6 +257,12 @@ pub struct PreparedCheckpoint {
     owner: Arc<ModelOwnerToken>,
     snapshot: Arc<SessionSnapshot>,
     max_context_tokens: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckpointBoundarySizeEstimate {
+    pub snapshot_bytes: u64,
+    pub record_bytes: u64,
 }
 
 impl PreparedCheckpoint {
@@ -482,6 +491,46 @@ impl LoadedModel {
             owner: Arc::clone(&self.owner),
             snapshot: Arc::new(snap),
             max_context_tokens: sequence.max_context_tokens(),
+        })
+    }
+
+    /// Estimate the CPU payload retained by a prepared boundary before copying
+    /// any Metal state. Encoded records add a small fixed header and digest.
+    pub fn estimate_checkpoint_boundary_sizes(
+        &self,
+        sequence: &Sequence,
+        prefix_len: usize,
+        has_pending_token: bool,
+        has_final_logits: bool,
+    ) -> Result<CheckpointBoundarySizeEstimate, RuntimeError> {
+        self.ensure_owns(sequence)?;
+        sequence.check_position(prefix_len)?;
+        let abi = sequence.snapshot_abi();
+        let prefix_len = prefix_len as u128;
+        let n_attn = abi.n_attn_layers as u128;
+        let n_gdn = abi.n_gdn_layers as u128;
+        let kv_bytes = 2u128 * n_attn * prefix_len * abi.kv_bytes_per_token as u128;
+        let gdn_bytes = 4u128
+            * n_gdn
+            * (abi.gdn_conv_elements_per_layer as u128 + abi.gdn_state_elements_per_layer as u128);
+        let token_bytes = 4u128 * prefix_len + 4u128 * u128::from(has_pending_token);
+        let position_bytes = 8u128 * n_attn;
+        let logits_bytes = if has_final_logits {
+            4u128 * self.metal_model.arch.vocab_size as u128
+        } else {
+            0
+        };
+        let snapshot_bytes =
+            u64::try_from(kv_bytes + gdn_bytes + token_bytes + position_bytes + logits_bytes)
+                .map_err(|_| RuntimeError::CheckpointSizeOverflow)?;
+        let pending_memory_bytes = 4 * u64::from(has_pending_token);
+        let record_bytes = snapshot_bytes
+            .checked_sub(pending_memory_bytes)
+            .and_then(|bytes| bytes.checked_add(SNAPSHOT_RECORD_FIXED_BYTES))
+            .ok_or(RuntimeError::CheckpointSizeOverflow)?;
+        Ok(CheckpointBoundarySizeEstimate {
+            snapshot_bytes,
+            record_bytes,
         })
     }
 

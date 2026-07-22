@@ -64,6 +64,13 @@ impl DurableCheckpointStore {
         CheckpointIdentityCache::new(self.namespace_root().join("identity"))
     }
 
+    /// Cheap global emptiness probe for callers that can skip strong identity
+    /// resolution when no checkpoint blob could possibly match.
+    pub fn has_managed_blobs(&self) -> Result<bool, CheckpointStoreError> {
+        let _lock = self.lock_shared()?;
+        Ok(!scan_managed_blobs(&self.blobs_root())?.blobs.is_empty())
+    }
+
     pub fn publish(
         &self,
         context: StoreContext<'_>,
@@ -1225,11 +1232,13 @@ mod tests {
     fn store_publishes_and_finds_exact_or_extended_prefix() {
         let temp = TestDir::new("basic");
         let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        assert!(!store.has_managed_blobs().unwrap());
         let snapshot = snapshot(&[1, 2], None, true);
         let published = store
             .publish(context(&snapshot.identity), &snapshot)
             .unwrap();
         assert_eq!(published.outcome, PublishOutcome::Published);
+        assert!(store.has_managed_blobs().unwrap());
         let existing = store
             .publish(context(&snapshot.identity), &snapshot)
             .unwrap();

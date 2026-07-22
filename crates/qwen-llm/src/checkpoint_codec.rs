@@ -15,6 +15,7 @@ const CODEC_VERSION: u32 = 1;
 const HEADER_BYTES: usize = 256;
 const PAYLOAD_OFFSET: usize = 16 * 1024;
 const DIGEST_BYTES: usize = 32;
+pub const SNAPSHOT_RECORD_FIXED_BYTES: u64 = (PAYLOAD_OFFSET + DIGEST_BYTES) as u64;
 const FLAG_PENDING_TOKEN: u64 = 1 << 0;
 const FLAG_FINAL_LOGITS: u64 = 1 << 1;
 const KNOWN_FLAGS: u64 = FLAG_PENDING_TOKEN | FLAG_FINAL_LOGITS;
@@ -816,6 +817,10 @@ mod tests {
         assert_eq!(get_u32(&first, OFF_HEADER_BYTES), HEADER_BYTES as u32);
         assert_eq!(get_u64(&first, OFF_FLAGS), 3);
         assert_eq!(get_u64(&first, OFF_RECORD_BYTES), first.len() as u64);
+        assert_eq!(
+            first.len() as u64,
+            snapshot.n_bytes() - 4 + SNAPSHOT_RECORD_FIXED_BYTES
+        );
         assert_eq!(get_u64(&first, OFF_PAYLOAD_OFFSET), PAYLOAD_OFFSET as u64);
         assert_eq!(get_u64(&first, OFF_PREFIX_COUNT), 2);
         assert_eq!(get_i32(&first, OFF_PENDING_TOKEN), 3);

@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
+use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
+use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome};
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, evaluate_metal_memory_admission,
@@ -11,10 +13,13 @@ use qwen_llm::metal_dflash::{
     PrefillScratchOverlayStats, PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
     plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
-use qwen_llm::metal_forward::MetalForward;
+use qwen_llm::metal_forward::{MetalForward, MfError, SnapshotValidationError};
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
-use qwen_llm::runtime::{LoadedModel, LoadedModelConfig, Runtime, Sequence, SequenceConfig};
+use qwen_llm::runtime::{
+    LoadedModel, LoadedModelConfig, PreparedCheckpoint, Runtime, RuntimeError, Sequence,
+    SequenceConfig,
+};
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
@@ -94,6 +99,22 @@ struct Args {
     /// Auto-cache repeated JSONL prompt prefixes at or above this token length.
     #[arg(long, default_value_t = 1024)]
     cache_prefix_auto_min_tokens: usize,
+
+    /// Persist anonymous prefix checkpoints under this private directory.
+    #[arg(long)]
+    durable_prefix_cache: Option<PathBuf>,
+
+    /// Aggregate durable checkpoint budget in MiB.
+    #[arg(long, default_value_t = 32 * 1024)]
+    durable_prefix_cache_max_mib: u64,
+
+    /// Maximum size of one encoded durable checkpoint record in MiB.
+    #[arg(long, default_value_t = 16 * 1024)]
+    durable_prefix_cache_max_entry_mib: u64,
+
+    /// Auto-persist one-shot prompt boundaries at or above this token length.
+    #[arg(long, default_value_t = 1024)]
+    durable_prefix_cache_min_tokens: usize,
 
     /// Append per-request JSON stats for multi-request runs.
     ///
@@ -693,6 +714,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     validate_request_timing_mode(&args)?;
+    validate_durable_prefix_cache_mode(&args)?;
 
     if args.info {
         let runtime = Runtime::metal()?;
@@ -737,6 +759,41 @@ fn validate_request_timing_mode(args: &Args) -> Result<()> {
     ensure!(
         path != Path::new("-"),
         "--request-timings requires a file path, not stdout"
+    );
+    Ok(())
+}
+
+fn validate_durable_prefix_cache_mode(args: &Args) -> Result<()> {
+    let Some(_) = args.durable_prefix_cache.as_ref() else {
+        return Ok(());
+    };
+    ensure!(
+        !args.info,
+        "--durable-prefix-cache cannot be used with --info"
+    );
+    ensure!(
+        args.prompt.is_some() || args.prompt_file.is_some(),
+        "--durable-prefix-cache currently supports single-turn prompts only"
+    );
+    ensure!(
+        args.requests_jsonl.is_none(),
+        "--durable-prefix-cache does not yet support --requests-jsonl"
+    );
+    ensure!(
+        args.request_timings.is_none() && !args.request_timing_warm_followup,
+        "--durable-prefix-cache does not yet support --request-timings"
+    );
+    ensure!(
+        args.durable_prefix_cache_max_mib > 0,
+        "--durable-prefix-cache-max-mib must be >= 1"
+    );
+    ensure!(
+        args.durable_prefix_cache_max_entry_mib > 0,
+        "--durable-prefix-cache-max-entry-mib must be >= 1"
+    );
+    ensure!(
+        args.durable_prefix_cache_max_entry_mib <= args.durable_prefix_cache_max_mib,
+        "durable prefix per-entry budget cannot exceed aggregate budget"
     );
     Ok(())
 }
@@ -1506,6 +1563,12 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     let sampling = cli_sampling_config(args)?;
     validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
+    let durable_store = durable_checkpoint_store(args)?;
+    let durable_max_record_bytes = if durable_store.is_some() {
+        durable_prefix_cache_max_entry_bytes(args)?
+    } else {
+        0
+    };
 
     let mut timing_file = args
         .request_timings
@@ -1590,6 +1653,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         "first_post_model_load",
         first_prepared,
         stdout_sink,
+        durable_store.as_ref(),
+        durable_max_record_bytes,
     )?;
     let mut results = vec![first];
 
@@ -1643,6 +1708,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             "warm_followup",
             warm_prepared,
             stdout_sink,
+            durable_store.as_ref(),
+            durable_max_record_bytes,
         )?;
         let first_stop = results[0].row.as_ref().map(|row| row.stop_reason);
         let warm_stop = warm.row.as_ref().map(|row| row.stop_reason);
@@ -1728,6 +1795,8 @@ fn execute_single_turn_request(
     request_epoch: &'static str,
     prepared: PreparedRequest,
     stdout_sink: &'static str,
+    durable_store: Option<&DurableCheckpointStore>,
+    durable_max_record_bytes: u64,
 ) -> Result<SingleTurnResult> {
     let PreparedRequest {
         request_start_unix_ms,
@@ -1766,7 +1835,7 @@ fn execute_single_turn_request(
         args.prefill_chunk,
         prompt_ids.len(),
         capacity,
-        true,
+        durable_store.is_none(),
     )?;
     let chunk = allocated.chunk;
     let prefill_chunk_decision = allocated.decision;
@@ -1780,17 +1849,129 @@ fn execute_single_turn_request(
 
     let pipeline_cache_prefill_entry =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
-    let prefill_t0 = Instant::now();
-    let logits = prefill_tokens_with_multi_hidden(
-        &forward,
-        &prompt_ids,
-        0,
-        unsafe { sequence.metal_session_mut() },
-        &mut scratch,
-        &[],
-        None,
-    )
-    .context("prefill prompt")?;
+    let durable_prefix_len =
+        durable_store.and_then(|_| selected_single_turn_durable_prefix(args, prompt_ids.len()));
+    let mut durable_prepared: Option<PreparedCheckpoint> = None;
+    let mut durable_restore_ms = 0.0;
+    let mut durable_capture_ms = 0.0;
+    let mut prompt_logits = None;
+    if let Some(store) = durable_store {
+        let restore_t0 = Instant::now();
+        let has_blobs = match store.has_managed_blobs() {
+            Ok(has_blobs) => Some(has_blobs),
+            Err(error) => {
+                durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+                eprintln!(
+                    "warning: durable prefix inventory failed after {:.1} ms; cold-prefilling: {error}",
+                    durable_restore_ms,
+                );
+                None
+            }
+        };
+        if has_blobs == Some(true) {
+            let lookup_len = selected_single_turn_durable_lookup_len(args, prompt_ids.len());
+            match loaded.restore_durable_prefix(
+                store,
+                &mut sequence,
+                &prompt_ids[..lookup_len],
+                durable_max_record_bytes,
+            ) {
+                Ok(attempt) => {
+                    durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+                    eprintln!(
+                        concat!(
+                            "durable_prefix_cache: identity_cache={} hashed_bytes={} ",
+                            "checkpoint_hit={} matched={} restored={} exact={} candidates={} ",
+                            "corrupt_removed={} restore_total_ms={:.1}"
+                        ),
+                        identity_cache_outcome_label(attempt.compatibility.outcome),
+                        attempt.compatibility.bytes_hashed,
+                        attempt.hit.is_some(),
+                        attempt.lookup.matched_prefix_len,
+                        attempt.lookup.restored_prefix_len,
+                        attempt.lookup.exact,
+                        attempt.lookup.candidates_examined,
+                        attempt.lookup.corrupt_entries_removed,
+                        durable_restore_ms,
+                    );
+                    if let Some(hit) = attempt.hit {
+                        prompt_logits = hit.exact_final_logits;
+                    }
+                }
+                Err(RuntimeError::CheckpointStore(error)) => {
+                    durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+                    eprintln!(
+                        "warning: durable prefix lookup failed after {:.1} ms; cold-prefilling: {error}",
+                        durable_restore_ms,
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else if has_blobs == Some(false) {
+            durable_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "durable_prefix_cache: store_empty=true restore_total_ms={:.1}",
+                durable_restore_ms,
+            );
+        }
+    }
+
+    let mut prefill_ms = 0.0;
+    if let Some(prefix_len) = durable_prefix_len
+        && prefix_len > sequence.position()
+    {
+        let position = sequence.position();
+        let (logits, ms) = prefill_span(
+            &forward,
+            &mut sequence,
+            &mut scratch,
+            &prompt_ids[position..prefix_len],
+            position,
+        )?;
+        prefill_ms += ms;
+        let capture_t0 = Instant::now();
+        let estimated =
+            loaded.estimate_checkpoint_boundary_sizes(&sequence, prefix_len, false, true)?;
+        if estimated.record_bytes > durable_max_record_bytes {
+            eprintln!(
+                concat!(
+                    "warning: durable prefix capture skipped: estimated_record_bytes={} ",
+                    "estimated_snapshot_bytes={} max_entry_bytes={}"
+                ),
+                estimated.record_bytes, estimated.snapshot_bytes, durable_max_record_bytes,
+            );
+        } else {
+            match loaded.prepare_checkpoint_boundary(
+                &sequence,
+                prompt_ids[..prefix_len].to_vec(),
+                None,
+                Some(logits.clone()),
+            ) {
+                Ok(prepared) => durable_prepared = Some(prepared),
+                Err(RuntimeError::MetalModel(MfError::Snapshot(
+                    SnapshotValidationError::AllocationFailed { .. },
+                ))) => eprintln!(
+                    "warning: durable prefix capture allocation failed; continuing without publication"
+                ),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+        prompt_logits = Some(logits);
+    }
+    if sequence.position() < prompt_ids.len() {
+        let position = sequence.position();
+        let (logits, ms) = prefill_span(
+            &forward,
+            &mut sequence,
+            &mut scratch,
+            &prompt_ids[position..],
+            position,
+        )?;
+        prefill_ms += ms;
+        prompt_logits = Some(logits);
+    }
+    let logits = prompt_logits.context("durable prefix restore did not produce prompt logits")?;
     let prefill_attention_query =
         (scratch.attn_matrix_tiled_layer_calls() > 0).then(|| PrefillAttentionQueryStats {
             outer_chunk_rows: chunk,
@@ -1807,8 +1988,6 @@ fn execute_single_turn_request(
                 gdn_bytes: stats.gdn_bytes,
                 saved_bytes: stats.saved_bytes,
             });
-    sequence.advance_by(prompt_ids.len())?;
-    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_prefill_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
     let after_prefill_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
@@ -1930,6 +2109,31 @@ fn execute_single_turn_request(
     drop(scratch);
     let after_state_drop_allocated =
         timing_enabled.then(|| loaded.context().current_allocated_size());
+    if let (Some(store), Some(prepared)) = (durable_store, durable_prepared.as_ref()) {
+        let publish_t0 = Instant::now();
+        match loaded.publish_prepared_checkpoint(store, prepared, durable_max_record_bytes) {
+            Ok(report) => eprintln!(
+                concat!(
+                    "durable_prefix_cache: publish={} prefix_tokens={} blob_bytes={} ",
+                    "evicted={} identity={} capture_ms={:.1} publish_ms={:.1}"
+                ),
+                publish_outcome_label(report.store.outcome),
+                prepared.matched_prefix_len(),
+                report.store.blob_bytes,
+                report.store.evicted_entries,
+                identity_cache_outcome_label(report.compatibility.outcome),
+                durable_capture_ms,
+                publish_t0.elapsed().as_secs_f64() * 1e3,
+            ),
+            Err(error) => eprintln!(
+                concat!(
+                    "warning: durable prefix publication failed after response ",
+                    "(restore_ms={:.1} capture_ms={:.1}): {}"
+                ),
+                durable_restore_ms, durable_capture_ms, error,
+            ),
+        }
+    }
 
     let row = timing_values.map(|samples| {
         let model_identity = model_identity.expect("timing identity");
@@ -3040,9 +3244,63 @@ fn decode_prompt_lookup(
 }
 
 fn prefix_cache_max_bytes(args: &Args) -> Result<u64> {
-    args.prefix_cache_max_mib
-        .checked_mul(1024 * 1024)
-        .context("prefix cache byte budget overflow")
+    mib_to_bytes(args.prefix_cache_max_mib, "prefix cache byte budget")
+}
+
+fn durable_checkpoint_store(args: &Args) -> Result<Option<DurableCheckpointStore>> {
+    let Some(root) = args.durable_prefix_cache.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(DurableCheckpointStore::new(
+        root,
+        mib_to_bytes(
+            args.durable_prefix_cache_max_mib,
+            "durable prefix cache byte budget",
+        )?,
+    )))
+}
+
+fn durable_prefix_cache_max_entry_bytes(args: &Args) -> Result<u64> {
+    mib_to_bytes(
+        args.durable_prefix_cache_max_entry_mib,
+        "durable prefix cache per-entry budget",
+    )
+}
+
+fn mib_to_bytes(mib: u64, label: &str) -> Result<u64> {
+    mib.checked_mul(1024 * 1024)
+        .with_context(|| format!("{label} overflow"))
+}
+
+fn selected_single_turn_durable_prefix(args: &Args, prompt_len: usize) -> Option<usize> {
+    if let Some(configured) = args.cache_prefix_tokens {
+        return (configured > 0 && prompt_len > 0).then_some(configured.min(prompt_len));
+    }
+    (args.durable_prefix_cache_min_tokens > 0 && prompt_len >= args.durable_prefix_cache_min_tokens)
+        .then_some(prompt_len)
+}
+
+fn selected_single_turn_durable_lookup_len(args: &Args, prompt_len: usize) -> usize {
+    args.cache_prefix_tokens
+        .filter(|&configured| configured > 0)
+        .map_or(prompt_len, |configured| configured.min(prompt_len))
+}
+
+fn identity_cache_outcome_label(outcome: IdentityCacheOutcome) -> &'static str {
+    match outcome {
+        IdentityCacheOutcome::Hit => "hit",
+        IdentityCacheOutcome::ComputedAndStored => "computed_stored",
+        IdentityCacheOutcome::ComputedAndRepaired => "computed_repaired",
+        IdentityCacheOutcome::ComputedUncached => "computed_uncached",
+    }
+}
+
+fn publish_outcome_label(outcome: PublishOutcome) -> &'static str {
+    match outcome {
+        PublishOutcome::Published => "published",
+        PublishOutcome::ExistingValid => "existing_valid",
+        PublishOutcome::RepairedCorrupt => "repaired_corrupt",
+    }
 }
 
 fn unix_epoch_ms_u64() -> Result<u64> {
@@ -3545,6 +3803,105 @@ mod tests {
         assert!(cache_prefix_needs_extension(3, 2));
         assert!(!cache_prefix_needs_extension(3, 3));
         assert!(!cache_prefix_needs_extension(2, 3));
+    }
+
+    #[test]
+    fn one_shot_durable_admission_respects_threshold_and_explicit_override() {
+        let automatic = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--durable-prefix-cache",
+            "cache",
+        ])
+        .unwrap();
+        assert_eq!(selected_single_turn_durable_prefix(&automatic, 1023), None);
+        assert_eq!(
+            selected_single_turn_durable_prefix(&automatic, 1024),
+            Some(1024)
+        );
+        assert_eq!(
+            selected_single_turn_durable_lookup_len(&automatic, 2048),
+            2048
+        );
+
+        let explicit = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--durable-prefix-cache",
+            "cache",
+            "--cache-prefix-tokens",
+            "64",
+        ])
+        .unwrap();
+        assert_eq!(selected_single_turn_durable_prefix(&explicit, 32), Some(32));
+        assert_eq!(selected_single_turn_durable_lookup_len(&explicit, 2048), 64);
+
+        let disabled = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--durable-prefix-cache",
+            "cache",
+            "--cache-prefix-tokens",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(selected_single_turn_durable_prefix(&disabled, 4096), None);
+        assert_eq!(
+            selected_single_turn_durable_lookup_len(&disabled, 4096),
+            4096
+        );
+    }
+
+    #[test]
+    fn durable_mode_rejects_unsupported_surfaces_and_invalid_budgets() {
+        let jsonl = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--durable-prefix-cache",
+            "cache",
+        ])
+        .unwrap();
+        assert!(validate_durable_prefix_cache_mode(&jsonl).is_err());
+
+        let invalid_budget = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--durable-prefix-cache",
+            "cache",
+            "--durable-prefix-cache-max-mib",
+            "1024",
+            "--durable-prefix-cache-max-entry-mib",
+            "2048",
+        ])
+        .unwrap();
+        assert!(validate_durable_prefix_cache_mode(&invalid_budget).is_err());
+
+        let valid = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--durable-prefix-cache",
+            "cache",
+        ])
+        .unwrap();
+        validate_durable_prefix_cache_mode(&valid).unwrap();
     }
 
     #[test]

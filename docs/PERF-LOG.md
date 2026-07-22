@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-22 - v0.615 Real Long-History Durable Restore
+
+Status: a real 6.5K-token 27B continuation clears the product-value gate. The
+generic CLI is ready for a bounded external-client pilot; this is not yet a
+population-level conversational speedup claim.
+
+- The exact turn-2 prompt has 6,499 tokens. Its completed checkpoint matches
+  6,483 canonical tokens and restores 6,482 state tokens; normal prefill then
+  processes the pending token plus 16 suffix tokens. The uncached control
+  processes all 6,499 positions.
+- Identical-prompt 27B results are: prefill `27,923.0 -> 1,575.7 ms`
+  (`17.72x`), TTFT `27,945.2 -> 1,937.1 ms` (`14.43x`, 93.07% removed),
+  and process wall `30.14 -> 4.90 s` (`6.15x`, 83.74% removed). This is one
+  fully resident, fixed-order row; retain the absolute roughly 26-second TTFT
+  saving, but do not generalize the ratios as a distribution.
+- Cached TTFT decomposes into `335.6 ms` restore, `1,575.7 ms` for the 17-position
+  pending/suffix prefill, and about `25.8 ms` first-token/residual work. The
+  small-N prefill still traverses the 27B model and attends over 6.5K history;
+  token-count reduction is `382.29x`, not a matching wall multiplier.
+- The first completed blob is `581,740,008` bytes. Turn 2 publishes
+  `582,854,188` bytes after adding 17 consumed positions: `65,540` bytes per
+  token and an inferred roughly 156.9 MB fixed component. Restore is `335.6 ms`,
+  next capture `28.6 ms`, and identity-hit publication `644.9 ms`.
+- Cached maximum RSS is 1.600 GB above the uncached row and peak footprint is
+  419.2 MB higher. Do not attribute either delta to one phase: restore decodes
+  CPU arenas and copies Metal state, while publication overlaps the prepared
+  snapshot with staged-file validation. The accounting systems also differ.
+- A dissimilar sampled 0.8B agent/tool-shaped messages pair publishes `48-p0`,
+  restores at `48/47`, and publishes `64-p0` with temperature 0.7 and seed 42.
+  This validates realized sampled-token reuse outside ring0, not distributional
+  output equivalence.
+- The bounded client pilot must use a stable private cache root, wrapped messages,
+  explicit thinking preservation, positive/fail-loud output cap, clean stdout,
+  and a small observed disk budget rather than the 32 GiB default. The intended
+  ring0 target has no year-core injection; do not insert or relocate one. Keep
+  qwen's cache substrate workload-neutral.
+- Multi-token generation will add common decode work and reduce the process-wall
+  ratio while preserving most of the absolute TTFT saving. Run one natural-EOS
+  representative client turn before calling the adapter complete.
+
+Artifacts: `target/profiles/v0615-long-history/`. Adversarial review: `cx`
+session `019f8c39-8f4f-7de1-a46b-87119b971e66`.
+
 ## 2026-07-22 - v0.614 Parallel Strong-Identity Hashing
 
 Status: promoted for clean-store durable-checkpoint identity misses. Cache hits

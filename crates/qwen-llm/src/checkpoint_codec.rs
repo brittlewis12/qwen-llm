@@ -455,7 +455,7 @@ fn parse_and_validate_header(
         gdn_state_elements_per_layer: get_u32(header, OFF_GDN_STATE_ELEMENTS),
         gdn_conv_elements_per_layer: get_u32(header, OFF_GDN_CONV_ELEMENTS),
     };
-    if &actual_identity != constraints.expected_identity {
+    if actual_identity.abi() != constraints.expected_identity.abi() {
         return Err(SnapshotCodecError::IdentityMismatch);
     }
     let pending_token = get_i32(header, OFF_PENDING_TOKEN);
@@ -875,7 +875,6 @@ mod tests {
             (OFF_FLAGS, 0x80),
             (OFF_RESERVED, 1),
             (OFF_COMPATIBILITY_ID, 0),
-            (OFF_MODEL_ID, 0),
             (OFF_KV_STORAGE_KIND, 0xff),
         ] {
             let mut corrupt = encoded.clone();
@@ -1023,6 +1022,32 @@ mod tests {
         assert!(matches!(
             decode_snapshot(&mut Cursor::new(&encoded), constraints(&snapshot.identity)),
             Err(SnapshotCodecError::InvalidHeader("pending token range"))
+        ));
+    }
+
+    #[test]
+    fn checkpoint_codec_uses_strong_identity_plus_structural_abi() {
+        let snapshot = snapshot(identity());
+        let mut renamed = encode(&snapshot);
+        put_u64(&mut renamed, OFF_MODEL_ID, 99);
+        put_u64(&mut renamed, OFF_TOKENIZER_ID, 100);
+        refresh_digest(&mut renamed);
+        let restored = decode(&renamed, &snapshot.identity);
+        assert_snapshot_bits_eq(&snapshot, &restored);
+
+        let mut wrong_abi = encode(&snapshot);
+        put_u32(
+            &mut wrong_abi,
+            OFF_LAYOUT_VERSION,
+            snapshot.identity.layout_version + 1,
+        );
+        refresh_digest(&mut wrong_abi);
+        assert!(matches!(
+            decode_snapshot(
+                &mut Cursor::new(&wrong_abi),
+                constraints(&snapshot.identity)
+            ),
+            Err(SnapshotCodecError::IdentityMismatch)
         ));
     }
 

@@ -11880,6 +11880,33 @@ pub struct SnapshotIdentity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SnapshotAbi {
+    pub layout_version: u32,
+    pub n_attn_layers: u32,
+    pub n_gdn_layers: u32,
+    pub kv_dim_elements: u32,
+    pub kv_bytes_per_token: u32,
+    pub kv_storage_kind: SnapshotKvStorageKind,
+    pub gdn_state_elements_per_layer: u32,
+    pub gdn_conv_elements_per_layer: u32,
+}
+
+impl SnapshotIdentity {
+    pub fn abi(&self) -> SnapshotAbi {
+        SnapshotAbi {
+            layout_version: self.layout_version,
+            n_attn_layers: self.n_attn_layers,
+            n_gdn_layers: self.n_gdn_layers,
+            kv_dim_elements: self.kv_dim_elements,
+            kv_bytes_per_token: self.kv_bytes_per_token,
+            kv_storage_kind: self.kv_storage_kind,
+            gdn_state_elements_per_layer: self.gdn_state_elements_per_layer,
+            gdn_conv_elements_per_layer: self.gdn_conv_elements_per_layer,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum SnapshotKvStorageKind {
     None = 0,

@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-22 - v0.614 Parallel Strong-Identity Hashing
+
+Status: promoted for clean-store durable-checkpoint identity misses. Cache hits
+remain unchanged and hash zero model bytes.
+
+- BLAKE3's Rayon path now hashes already-mapped shard buffers of at least 1 MiB.
+  Smaller sources retain the serial update. Ordered shard domain/index/length
+  framing, content/compatibility composition, the cache format, and pre/post
+  source-stamp validation are unchanged.
+- On fully resident Qwen3.6 27B MTP with clean stores, candidate publication is
+  `742.1/733.0/734.8 ms`, median `734.8 ms`, versus the v0.613 serial baseline
+  `6,734.5 ms`: a measured `9.17x` boundary speedup. Full process wall is
+  `3.93/3.87/3.92 s`, median `3.92 s`, versus `9.79 s` (`2.50x`). The clean
+  committed row is `734.9 ms` publication and `3.92 s` process wall.
+- TTFT remains outside the changed boundary and is effectively flat in the
+  compared rows (`346.1 ms` serial versus `347.4 ms` candidate median). This is
+  post-response process-exit acceleration, not model-ready TTFT movement.
+- The latency win costs more aggregate CPU: median user time is `9.94 s` versus
+  `7.95 s`, and system time is `1.72 s` versus `1.61 s`. Do not claim improved
+  CPU efficiency or energy; energy was not measured.
+- The persisted serial identity entry and all three candidate entries have the
+  same metadata-key filename and compare byte-for-byte equal. The candidate
+  checkpoint blobs and compatibility directories are also identical. A 2 MiB
+  incremental equivalence test and all eight identity cache/race tests pass.
+- Enabling BLAKE3's `rayon` feature adds a production dependency edge to
+  `rayon-core`; the package/version already existed in the lockfile through
+  Criterion. The global worker pool is initialized only on a qualifying miss
+  and persists for that process. Do not add custom-pool policy without evidence.
+
+Artifacts: `target/profiles/v0614-parallel-identity*.stderr` and corresponding
+cache directories. Checks: identity tests, all CLI binaries, clean release row,
+and adversarial review in `cx` session
+`019f8c2d-9044-7071-8ad3-7570994a9f8a`. Commit: `4ca5512`.
+
 ## 2026-07-22 - v0.613 Completed-Turn Durable Checkpoints
 
 Status: promoted for automatic token-preserving messages histories. Explicit,

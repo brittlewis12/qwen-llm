@@ -6,6 +6,93 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-22 - v0.611 Parallel-Pread Cache Warmer
+
+Status: promoted as default `ColdOnly` prefetch at `0.9` full-file residency
+for `load_model`, disposable single-turn CLI, and four `qwen-cli` bench
+paths. Reusable runtime loads and explicit `ForceOnly` callers unchanged.
+
+- Four scoped workers share each shard's retained `Arc<File>` via
+  `FileExt::read_at`, own one contiguous file stripe each, and reuse a
+  `16 MiB` buffer per worker for `~64 MiB` total scratch. Reads are
+  discarded; the effect is populating the macOS unified buffer cache so
+  the existing mmap faults from RAM at Metal load. Tensor representation,
+  lifetime, and downstream code paths do not change. Split shards prefetch
+  sequentially, one complete shard at a time, each with a fresh pool.
+- Dense 27B `Q4_K_M`, two balanced rounds: first byte
+  `23.69 s -> 4.87 s` (`4.86x`); prefill median `0.29 s vs 0.30 s`; first
+  token identity across 12 runs. Sustained 64-token decode
+  (`21.3 vs 20.1 tok/s` warm) is inconclusive under strong reported
+  round-2 thermal drift, not proven neutral.
+- A3B disposable, single round: `Off` `7.99 s` first byte at `0.96 GiB`
+  physical reads; `Always` `7.03 s` first byte at `20.14 GiB` physical
+  reads. `12%` first-byte win at `~20x` physical I/O because whole-file
+  warming duplicates the source-side work the selective parallel copied-
+  storage path (v0.602 / v0.608) already avoids: Metal touches only
+  `4.13 GiB` of a `20.5 GiB` shard. A coalesced tensor-range warmer that
+  reads only the pages Metal will consume is the natural next refinement;
+  see roadmap frontier item 1. `scripts/bench-first-byte.sh` does not
+  yet pass `--intent disposable`, so no successor rounds are available
+  under the standard runner.
+- The `0.9` residency threshold is derived analytically from endpoint
+  throughput proxies: parallel prefetch reaches `~6.7 GB/s` while mmap
+  demand paging is `0.5-0.7 GB/s`. At `~10-13x`, warming the missing
+  `10%` breaks even against demand-paging the same bytes at Metal load.
+  Intermediate residencies (25/50/75%) are not swept, so the point is an
+  extrapolation rather than a measured policy curve. Always overhead on a
+  fully resident dense file is `~+170 ms`; the older `runtime.rs:226`
+  comment citing `~600 ms` warm-reread is stale.
+- Headroom is telemetry-only. `runtime.rs:311` computes
+  `missing + shard_size + 1 GiB`, warns when unavailable memory is below
+  it, and proceeds regardless. The reclaimable-memory estimate at
+  `cache_probe.rs:207` sums free + inactive + speculative + purgeable
+  pages (sampled at `~23 GiB` on the 128 GiB workstation versus a
+  conservative `32 GiB` heuristic). Residency-probe failure is fail-open
+  with the error stored in `skipped_reason` even when the warmer runs.
+  `Always` skips the residency probe entirely, so its
+  `pre_resident_fraction=0` combined with telemetry-only headroom treats
+  every shard as maximally missing even when fully resident. Physical
+  reads use `proc_pid_rusage`; `PrefetchReport.bytes` includes RAM hits
+  and is not physical I/O.
+- Durable-identity interaction: when the `checkpoint_identity` durable
+  store is already populated, the first snapshot lookup runs a full
+  BLAKE3 ordered-shard hash before prefill
+  (`crates/qwen-cli/src/main.rs:1912`), traversing every shard a second
+  time inside TTFT and defeating A3B copy-plan selectivity again. When
+  the store is empty, hashing is deferred to publication after generation
+  (`main.rs:1964`, `main.rs:2174`) and stays out of TTFT. This
+  composition was invisible before v0.611 shortened the surrounding load
+  wall.
+- The added multi-second prefetch widens an existing rename race: ordinary
+  snapshot identity at `runtime.rs:1365` still re-resolves metadata by
+  path rather than reusing the retained-descriptor metadata that strong
+  durable compatibility already captures (`checkpoint_identity.rs:147`).
+  Not a new correctness bug, but a wider window between path resolution
+  and Metal binding.
+- Adding `prefetch_policy`, `prefetch_min_headroom_bytes`, workers, and
+  chunk to `LoadedModelConfig` broke both non-exhaustive CLI struct
+  literals at `crates/qwen-cli/src/main.rs:1631` and `main.rs:2327`.
+  Fixed in `3560228` with `..Default::default()`;
+  `cargo check -p qwen-cli --bins` passes.
+- Split-shard example harnesses (`examples/runtime_load_spike.rs:146`,
+  `examples/first_byte_spike.rs:197`) invalidate/probe only the first
+  supplied path while runtime opens every inferred shard; per-shard
+  headroom telemetry is per-current-shard and ignores earlier warmed
+  shards plus cumulative destination allocations. Integration tests cover
+  only constructor/default behavior (`runtime.rs:411`); real policy
+  execution, probe failure, headroom, split shards, partial residency,
+  A3B copied-storage interaction, CLI caller compilation, and durable-
+  hash composition are not tested.
+
+Commits: `4da872f` (parallel-pread cache warmer with targeted macOS
+observability), `1aa1f82` (opt-in `PrefetchPolicy` in `LoadedModelConfig`),
+`b67d040` (load-spike bench harnesses), `db765b5` (first-byte spike
+harness), `1193dbc` (safety hardening), `8549bde` (gate recalibration),
+`e2c3980` (default promotion to `ColdOnly`), `cbfe7c1` (sustained-decode
+extension), `c9b0374` (`--intent disposable` flag), `300690f` (threshold
+`0.5 -> 0.9`), `f6747ee` (spike examples use `DEFAULT_COLD_ONLY_THRESHOLD`),
+`3560228` (CLI default inheritance + struct-literal compile fix).
+
 ## 2026-07-19 - v0.610 JSON Numeric Allocation Falsifier
 
 Status: killed under the fixed-wall latency gate; both manifests remain

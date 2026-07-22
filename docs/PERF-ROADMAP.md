@@ -688,17 +688,45 @@ deletion are memory work until pressure or wall attribution says otherwise.
 Durable snapshots, paged KV, COW state, and a resident daemon remain
 reuse/serving work rather than fresh-prompt acceleration.
 
-1. **Topology-preserving loader I/O ladder**: largest immediate fresh-process
-   prize after v0.608. First sweep worker count and chunk size against the
-   frozen four-worker CPU baseline; v0.599 did not isolate those terms. Then
-   wrap the mapped shard as a transient Metal source and batch GPU blits into
-   the proven independent exact-sized destinations. A floor must preserve
-   exact bytes/topology and save at least `112 ms` candidate-ready: 15% of
-   `~748 ms`, projecting about 9% of v0.602 first byte. Full state and loaded
-   parity belong to a later integrated pilot, not the primitive gate. Test
-   write-combined as a separate CPU-copy arm; use `pread` after blit. `MTLIO`
-   remains complexity-deferred.
-   Belief medium, difficulty M, possible prize hundreds of milliseconds on A3B.
+Banked process-cold win: v0.611 defaults a parallel-pread cache warmer to
+`ColdOnly` at `0.9` full-file residency across every convenience loader
+(`load_model`, disposable single-turn CLI, four `qwen-cli` bench paths).
+Four workers share each shard's retained descriptor and pread `16 MiB`
+stripes to populate the macOS page cache before mmap. Dense 27B `Q4_K_M`
+first byte improves `23.69 s -> 4.87 s` (`4.86x`) with first-token identity
+across 12 runs and prefill unchanged. Endpoint throughput is `~6.7 GB/s`
+prefetch versus `0.5-0.7 GB/s` mmap demand paging; the `0.9` gate is the
+analytical break-even of that ratio rather than a swept residency curve.
+Always overhead on a fully resident dense file is `~+170 ms`. A3B
+disposable is a single-round `12%` first-byte win at `~20x` physical I/O:
+whole-file warming duplicates the source-side work the selective parallel
+copied-storage path (v0.602 / v0.608) already avoids, because Metal
+touches only `4.13 GiB` of the `20.5 GiB` shard. Durable-identity
+composition changes with the shorter load: when the `checkpoint_identity`
+store is already populated, a full BLAKE3 ordered-shard hash now lands
+before prefill and traverses the shortened load a second time inside TTFT.
+Reusable runtime loads and explicit `ForceOnly` callers unchanged.
+Coalesced tensor-range prefetch and the standard-runner
+`--intent disposable` fix move to frontier item 1.
+
+1. **Topology-preserving loader I/O ladder, post-v0.611**: v0.611 defaults
+   the parallel pread cache warmer at `~6.7 GB/s`, `4 workers`, `16 MiB`
+   chunk, but only along the mmap page-cache lane. Remaining pieces:
+   (a) coalesced tensor-range prefetch that reads only the pages Metal
+   will consume, priced against the current A3B disposable `~20x`
+   physical-I/O duplication (`4.13 GiB` used of `20.5 GiB` warmed);
+   (b) wrap the mapped shard as a transient Metal source and batch GPU
+   blits into the proven independent exact-sized destinations (v0.599),
+   preserving exact bytes/topology and saving at least `112 ms`
+   candidate-ready: 15% of `~748 ms`, projecting about 9% of v0.602 first
+   byte. Full state and loaded parity belong to a later integrated pilot,
+   not the primitive gate. Test write-combined as a separate CPU-copy
+   arm; use `pread` after blit. `MTLIO` remains complexity-deferred.
+   First expose `--intent disposable` in `scripts/bench-first-byte.sh` so
+   more than a single measurement round is available on A3B.
+   Belief medium-high on (a) since the copy plan already names its
+   ranges; belief medium on (b) unchanged from pre-v0.611. Difficulty M.
+   Prize hundreds of milliseconds on A3B plus reduced page-cache pressure.
 2. **A10B cold residency plus split-copy floor**: only if the heavy anchor
    remains deployment-relevant. First adjudicate the already bit-exact native
    embedding, which removes 2.24 GB. Then freeze that inventory and require at
@@ -805,9 +833,15 @@ automatic retained use stay copied without separate evidence.
 2. While GPU work is paused, limit execution to CPU-only structured-trace
    grammar reconnaissance or semantic design for the argmax contract. Do not
    launch Metal inference or benchmark work.
-3. When GPU work is explicitly resumed, sweep CPU worker/chunk shape, then run
-   one transient mmap-source to independent-destination blit floor. Stop below
-   `112 ms` ready saving. Keep write-combined separate and `pread` after blit.
+3. v0.611 defaults the parallel pread cache warmer at `4 workers`, `16 MiB`,
+   `~6.7 GB/s`, `ColdOnly` at `0.9`. When GPU work resumes, the remaining
+   item-1 pieces are (a) coalesced tensor-range prefetch to stop
+   duplicating A3B disposable's selective copy-plan I/O, then (b) one
+   transient mmap-source to independent-destination blit floor. Stop
+   below `112 ms` ready saving on the blit floor. Keep write-combined
+   separate; use `pread` after blit. First fix
+   `scripts/bench-first-byte.sh` to pass `--intent disposable` so the A3B
+   arm can be replicated beyond a single round.
 4. Decide whether A10B is a current target. If yes, run native embedding and its
    split-copy floor before argmax; stop below the 2-3% and 1.5-second gates.
 5. Reconcile CPU/GPU argmax tie and NaN semantics, then wire all three product

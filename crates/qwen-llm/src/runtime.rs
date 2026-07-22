@@ -6,6 +6,10 @@
 //! gives callers semantic names for those lifetimes without changing the
 //! underlying execution path.
 
+use crate::checkpoint_identity::{
+    CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
+    checkpoint_compatibility,
+};
 use crate::gguf::{GgufError, GgufFile};
 use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
@@ -59,10 +63,27 @@ pub enum RuntimeError {
     PrefixLogitsLengthMismatch { got: usize, expected: usize },
     #[error("prefix snapshot validation: {0}")]
     SnapshotValidation(#[from] SnapshotValidationError),
+    #[error("sequence belongs to a different loaded model")]
+    SequenceModelMismatch,
+    #[error("checkpoint compatibility identity: {0}")]
+    CheckpointIdentity(#[from] CheckpointIdentityError),
 }
 
 struct RuntimeInner {
     ctx: MetalContext,
+}
+
+#[derive(Debug)]
+struct ModelOwnerToken;
+
+fn ensure_same_model_owner(
+    expected: &Arc<ModelOwnerToken>,
+    actual: &Arc<ModelOwnerToken>,
+) -> Result<(), RuntimeError> {
+    if !Arc::ptr_eq(expected, actual) {
+        return Err(RuntimeError::SequenceModelMismatch);
+    }
+    Ok(())
 }
 
 /// Backend/device execution environment.
@@ -143,6 +164,7 @@ impl Runtime {
             identity_shards,
             identity_parts: OnceLock::new(),
             prefix_cache: Mutex::new(PrefixCache::with_max_bytes(config.prefix_cache_max_bytes)),
+            owner: Arc::new(ModelOwnerToken),
         })
     }
 }
@@ -150,6 +172,18 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_owner_tokens_reject_cross_model_state() {
+        let first = Arc::new(ModelOwnerToken);
+        let same = Arc::clone(&first);
+        let second = Arc::new(ModelOwnerToken);
+        assert!(ensure_same_model_owner(&first, &same).is_ok());
+        assert!(matches!(
+            ensure_same_model_owner(&first, &second),
+            Err(RuntimeError::SequenceModelMismatch)
+        ));
+    }
 
     #[test]
     fn model_load_intent_scopes_parallel_copy_auto_admission() {
@@ -222,6 +256,7 @@ pub struct LoadedModel {
     identity_shards: Vec<SnapshotShardIdentityInput>,
     identity_parts: OnceLock<(u64, u64)>,
     prefix_cache: Mutex<PrefixCache>,
+    owner: Arc<ModelOwnerToken>,
 }
 
 impl LoadedModel {
@@ -274,6 +309,7 @@ impl LoadedModel {
             max_context_tokens: config.max_context_tokens,
             position: 0,
             state,
+            owner: Arc::clone(&self.owner),
         })
     }
 
@@ -282,13 +318,34 @@ impl LoadedModel {
         MetalForward::new(self.context(), &self.metal_model)
     }
 
-    pub fn snapshot_identity(&self, sequence: &Sequence) -> SnapshotIdentity {
+    pub fn snapshot_identity(&self, sequence: &Sequence) -> Result<SnapshotIdentity, RuntimeError> {
+        self.ensure_owns(sequence)?;
         let &(model_id, tokenizer_id) = self.identity_parts.get_or_init(|| {
             snapshot_identity_parts(&self.gguf, self.metal_model.arch, &self.identity_shards)
         });
-        sequence
+        Ok(sequence
             .metal_session()
-            .snapshot_identity(model_id, tokenizer_id)
+            .snapshot_identity(model_id, tokenizer_id))
+    }
+
+    /// Resolve the strong durable-checkpoint identity lazily. A cache hit only
+    /// validates retained shard file descriptions and reads one tiny entry;
+    /// complete shard bytes are hashed only on a cache miss.
+    pub fn checkpoint_compatibility(
+        &self,
+        sequence: &Sequence,
+        cache: &CheckpointIdentityCache,
+    ) -> Result<CheckpointCompatibilityReport, RuntimeError> {
+        self.ensure_owns(sequence)?;
+        Ok(checkpoint_compatibility(
+            &self.gguf,
+            sequence.snapshot_abi(),
+            cache,
+        )?)
+    }
+
+    fn ensure_owns(&self, sequence: &Sequence) -> Result<(), RuntimeError> {
+        ensure_same_model_owner(&self.owner, &sequence.owner)
     }
 
     pub fn prefix_cache_stats(&self) -> PrefixCacheStats {
@@ -326,6 +383,7 @@ impl LoadedModel {
         pending_token: Option<i32>,
         final_logits: Option<Vec<f32>>,
     ) -> Result<PrefixCacheInsert, RuntimeError> {
+        self.ensure_owns(sequence)?;
         sequence.check_position(prefix_tokens.len())?;
         if let Some(logits) = final_logits.as_ref() {
             let expected = self.metal_model.arch.vocab_size as usize;
@@ -336,7 +394,7 @@ impl LoadedModel {
                 });
             }
         }
-        let identity = self.snapshot_identity(sequence);
+        let identity = self.snapshot_identity(sequence)?;
         let mut snap = sequence.snapshot(identity.clone(), prefix_tokens, final_logits)?;
         snap.pending_token = pending_token;
         snap.validate_for_restore(
@@ -358,9 +416,10 @@ impl LoadedModel {
         sequence: &mut Sequence,
         request_tokens: &[i32],
     ) -> Result<Option<PrefixCacheRestore>, RuntimeError> {
+        self.ensure_owns(sequence)?;
         sequence.check_position(0)?;
         sequence.ensure_can_append(request_tokens.len())?;
-        let identity = self.snapshot_identity(sequence);
+        let identity = self.snapshot_identity(sequence)?;
         let (hit, stats) = {
             let mut cache = self.prefix_cache.lock();
             let Some(hit) = cache.lookup_longest_for_completion(&identity, request_tokens) else {
@@ -417,9 +476,14 @@ pub struct Sequence {
     max_context_tokens: usize,
     position: usize,
     state: MetalSession,
+    owner: Arc<ModelOwnerToken>,
 }
 
 impl Sequence {
+    pub fn snapshot_abi(&self) -> crate::metal_forward::SnapshotAbi {
+        self.state.snapshot_abi()
+    }
+
     pub fn max_context_tokens(&self) -> usize {
         self.max_context_tokens
     }
@@ -467,7 +531,7 @@ impl Sequence {
         Ok(())
     }
 
-    pub fn snapshot(
+    fn snapshot(
         &self,
         identity: SnapshotIdentity,
         prefix_tokens: Vec<i32>,
@@ -476,7 +540,7 @@ impl Sequence {
         Ok(self.state.snapshot(identity, prefix_tokens, final_logits)?)
     }
 
-    pub fn restore_from_snapshot(
+    fn restore_from_snapshot(
         &mut self,
         snapshot: &SessionSnapshot,
         expected_identity: &SnapshotIdentity,
@@ -499,8 +563,14 @@ impl Sequence {
         &self.state
     }
 
-    /// Low-level mutable bridge for the existing Metal execution functions.
-    pub fn metal_session_mut(&mut self) -> &mut MetalSession {
+    /// Low-level mutable bridge outside the safe runtime provenance contract.
+    ///
+    /// # Safety
+    ///
+    /// Every state-producing operation must use the same `LoadedModel` that
+    /// created this sequence. Mixing another model's executor can create state
+    /// that must never be snapshotted or published under this sequence owner.
+    pub unsafe fn metal_session_mut(&mut self) -> &mut MetalSession {
         &mut self.state
     }
 }

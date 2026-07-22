@@ -12215,13 +12215,8 @@ fn write_tensor_bytes(t: &MetalTensor, bytes: &[u8]) {
 }
 
 impl MetalSession {
-    /// Compute the identity tag for snapshots produced by this session
-    /// shape under the given model. Stable across runs of the same
-    /// (model, tokenizer, layout) tuple.
-    pub fn snapshot_identity(&self, model_id: u64, tokenizer_id: u64) -> SnapshotIdentity {
-        SnapshotIdentity {
-            model_id,
-            tokenizer_id,
+    pub fn snapshot_abi(&self) -> SnapshotAbi {
+        SnapshotAbi {
             layout_version: SNAPSHOT_LAYOUT_VERSION,
             n_attn_layers: self.kv_k.len() as u32,
             n_gdn_layers: self.gdn_state.len() as u32,
@@ -12245,6 +12240,25 @@ impl MetalSession {
                 .unwrap_or(0) as u32,
             gdn_conv_elements_per_layer: self.gdn_conv.first().map(|t| t.n_elements()).unwrap_or(0)
                 as u32,
+        }
+    }
+
+    /// Compute the identity tag for snapshots produced by this session
+    /// shape under the given model. Stable across runs of the same
+    /// (model, tokenizer, layout) tuple.
+    pub fn snapshot_identity(&self, model_id: u64, tokenizer_id: u64) -> SnapshotIdentity {
+        let abi = self.snapshot_abi();
+        SnapshotIdentity {
+            model_id,
+            tokenizer_id,
+            layout_version: abi.layout_version,
+            n_attn_layers: abi.n_attn_layers,
+            n_gdn_layers: abi.n_gdn_layers,
+            kv_dim_elements: abi.kv_dim_elements,
+            kv_bytes_per_token: abi.kv_bytes_per_token,
+            kv_storage_kind: abi.kv_storage_kind,
+            gdn_state_elements_per_layer: abi.gdn_state_elements_per_layer,
+            gdn_conv_elements_per_layer: abi.gdn_conv_elements_per_layer,
         }
     }
 

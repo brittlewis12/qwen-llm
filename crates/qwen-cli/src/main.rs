@@ -1785,7 +1785,7 @@ fn execute_single_turn_request(
         &forward,
         &prompt_ids,
         0,
-        sequence.metal_session_mut(),
+        unsafe { sequence.metal_session_mut() },
         &mut scratch,
         &[],
         None,
@@ -1873,7 +1873,7 @@ fn execute_single_turn_request(
                     .single_token(
                         token,
                         u32::try_from(position).context("position does not fit u32")?,
-                        sequence.metal_session_mut(),
+                        unsafe { sequence.metal_session_mut() },
                     )
                     .context("decode token")?;
                 sequence.advance_by(1)?;
@@ -1910,7 +1910,11 @@ fn execute_single_turn_request(
     } else {
         0.0
     };
-    let model_identity = timing_enabled.then(|| loaded.snapshot_identity(&sequence));
+    let model_identity = if timing_enabled {
+        Some(loaded.snapshot_identity(&sequence)?)
+    } else {
+        None
+    };
     let timing_values = timing_enabled.then(|| {
         (
             process_model_ready_allocated.expect("timing sample"),
@@ -2628,7 +2632,7 @@ fn prefill_span(
         forward,
         token_ids,
         u32::try_from(start_position).context("position does not fit u32")?,
-        sequence.metal_session_mut(),
+        unsafe { sequence.metal_session_mut() },
         scratch,
         &[],
         None,
@@ -2811,7 +2815,7 @@ where
                 u32::try_from(sequence.position()).context("position does not fit u32")?;
             let serial_t0 = Instant::now();
             let next = forward
-                .single_token(carry, position, sequence.metal_session_mut())
+                .single_token(carry, position, unsafe { sequence.metal_session_mut() })
                 .context("prompt-lookup serial decode")?;
             stats.serial_ms += serial_t0.elapsed().as_secs_f64() * 1e3;
             stats.physical_target_positions += 1;
@@ -2872,7 +2876,7 @@ where
             start_position,
             &mut scratch.verify,
             &mut scratch.layer,
-            sequence.metal_session_mut(),
+            unsafe { sequence.metal_session_mut() },
             None,
             Some(n_eff as u32),
         )
@@ -2918,7 +2922,7 @@ where
                 &scratch.verify,
                 n_keep as u32,
                 start_position,
-                sequence.metal_session_mut(),
+                unsafe { sequence.metal_session_mut() },
                 Some(n_eff as u32),
             )
             .context("prompt-lookup restore after partial accept")?;
@@ -2996,7 +3000,7 @@ fn decode_serial(
                 .single_token(
                     token,
                     u32::try_from(position).context("position does not fit u32")?,
-                    sequence.metal_session_mut(),
+                    unsafe { sequence.metal_session_mut() },
                 )
                 .context("decode token")?;
             sequence.advance_by(1)?;

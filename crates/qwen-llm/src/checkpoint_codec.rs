@@ -4,6 +4,7 @@
 //! hardware-independent tensor encoding. Publication, locking, and catalog
 //! policy deliberately live above this module.
 
+use crate::checkpoint_identity::STATE_ENCODING_ABI_VERSION;
 use crate::metal_forward::{
     SessionSnapshot, SnapshotIdentity, SnapshotKvStorageKind, SnapshotValidationError,
 };
@@ -14,7 +15,6 @@ const CODEC_VERSION: u32 = 1;
 const HEADER_BYTES: usize = 256;
 const PAYLOAD_OFFSET: usize = 16 * 1024;
 const DIGEST_BYTES: usize = 32;
-const STATE_ENCODING_METAL_LE_V1: u32 = 1;
 const FLAG_PENDING_TOKEN: u64 = 1 << 0;
 const FLAG_FINAL_LOGITS: u64 = 1 << 1;
 const KNOWN_FLAGS: u64 = FLAG_PENDING_TOKEN | FLAG_FINAL_LOGITS;
@@ -355,7 +355,7 @@ fn build_header(
     put_u64(&mut header, OFF_PAYLOAD_BYTES, layout.payload_bytes);
     put_u64(&mut header, OFF_PREFIX_COUNT, layout.prefix_count);
     put_i32(&mut header, OFF_PENDING_TOKEN, layout.pending_token);
-    put_u32(&mut header, OFF_STATE_ENCODING, STATE_ENCODING_METAL_LE_V1);
+    put_u32(&mut header, OFF_STATE_ENCODING, STATE_ENCODING_ABI_VERSION);
     put_u64(&mut header, OFF_MODEL_ID, snapshot.identity.model_id);
     put_u64(
         &mut header,
@@ -425,7 +425,7 @@ fn parse_and_validate_header(
     if get_u64(header, OFF_PAYLOAD_OFFSET) != PAYLOAD_OFFSET as u64 {
         return Err(SnapshotCodecError::InvalidHeader("payload offset"));
     }
-    if get_u32(header, OFF_STATE_ENCODING) != STATE_ENCODING_METAL_LE_V1 {
+    if get_u32(header, OFF_STATE_ENCODING) != STATE_ENCODING_ABI_VERSION {
         return Err(SnapshotCodecError::InvalidHeader("state encoding"));
     }
     if header[OFF_RESERVED..].iter().any(|&byte| byte != 0) {

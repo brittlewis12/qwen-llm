@@ -20,6 +20,7 @@
 //! `Cursor`) — fine for its 5 MB test fixture, catastrophic for a 27 GB
 //! GGUF. We avoid that path entirely.
 
+use crate::checkpoint_identity::{SourceStamp, source_stamp};
 use crate::tensor::{GgmlType, TensorDesc, ggml_type_layout_raw};
 use gguf_rs::{GGUFContainer, GGUFModel};
 use memmap2::Mmap;
@@ -75,6 +76,7 @@ pub struct GgufShard {
     /// the display path.
     pub(crate) file: Arc<File>,
     pub(crate) mmap: Arc<Mmap>,
+    pub(crate) source_stamp: SourceStamp,
     /// Absolute byte offset of the start of the tensor-data section.
     /// `TensorDesc.data_offset` values for this shard include this.
     pub tensor_data_start: u64,
@@ -428,12 +430,19 @@ fn token_id_to_i32(key: &'static str, value: u64) -> Result<i32, GgufError> {
 fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufError> {
     // Open + mmap the file. mmap is the source of truth for tensor data.
     let file = Arc::new(File::open(path)?);
+    let baseline_source_stamp = source_stamp(file.as_ref()).map_err(GgufError::Io)?;
     // SAFETY: regular file held for the lifetime of `Self`. Memory mapping a
     // file handed to us by the user is the standard path; if the file is
     // concurrently truncated underneath us we'll SIGBUS on access — that is an
     // OS-level signal we cannot prevent in safe Rust without copying, and
     // would be the user racing themselves.
     let mmap = Arc::new(unsafe { Mmap::map(file.as_ref())? });
+    if baseline_source_stamp.size() != mmap.len() as u64 {
+        return Err(GgufError::Decode(format!(
+            "GGUF size changed while mapping {}",
+            path.display()
+        )));
+    }
 
     // Validate magic against the mmap directly. The mmap is the *only* path
     // that the rest of this function trusts; the streaming parser is given a
@@ -565,11 +574,19 @@ fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufErro
         }
     }
 
+    if source_stamp(file.as_ref()).map_err(GgufError::Io)? != baseline_source_stamp {
+        return Err(GgufError::Decode(format!(
+            "GGUF changed while loading {}",
+            path.display()
+        )));
+    }
+
     Ok(LoadedShard {
         shard: GgufShard {
             path: path.to_path_buf(),
             file,
             mmap,
+            source_stamp: baseline_source_stamp,
             tensor_data_start,
             alignment,
         },

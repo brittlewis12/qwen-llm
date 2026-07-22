@@ -13176,7 +13176,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
                 &mf,
                 &ids,
                 0,
-                s.metal_session_mut(),
+                unsafe { s.metal_session_mut() },
                 &mut scratch,
                 &[],
                 None,
@@ -13187,7 +13187,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
                 &mf,
                 &ids,
                 0,
-                s.metal_session_mut(),
+                unsafe { s.metal_session_mut() },
                 &mut scratch,
             )
             .context("warmup prompt-only prefill")?;
@@ -13210,7 +13210,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
                 &mf,
                 &ids,
                 0,
-                s.metal_session_mut(),
+                unsafe { s.metal_session_mut() },
                 &mut scratch,
                 &[],
                 None,
@@ -13218,8 +13218,14 @@ fn run_pp(args: PpArgs) -> Result<()> {
             .context("timed prefill with tail")?;
             gpu_ms
         } else {
-            prefill_tokens_prompt_only_profiled(&mf, &ids, 0, s.metal_session_mut(), &mut scratch)
-                .context("timed prompt-only prefill")?
+            prefill_tokens_prompt_only_profiled(
+                &mf,
+                &ids,
+                0,
+                unsafe { s.metal_session_mut() },
+                &mut scratch,
+            )
+            .context("timed prompt-only prefill")?
         };
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
         let ts = ids.len() as f64 * 1000.0 / wall_ms;
@@ -13524,17 +13530,19 @@ fn run_tg(args: TgArgs) -> Result<()> {
                         mf.single_token_argmax_profiled_concurrent_gdn_dense(
                             tok,
                             pos as u32,
-                            s.metal_session_mut(),
+                            unsafe { s.metal_session_mut() },
                         )?
                     } else {
                         mf.single_token_argmax_profiled_concurrent_gdn_moe(
                             tok,
                             pos as u32,
-                            s.metal_session_mut(),
+                            unsafe { s.metal_session_mut() },
                         )?
                     }
                 } else {
-                    mf.single_token_argmax_profiled(tok, pos as u32, s.metal_session_mut())?
+                    mf.single_token_argmax_profiled(tok, pos as u32, unsafe {
+                        s.metal_session_mut()
+                    })?
                 };
                 gpu_ms_acc += prof.gpu_kernel_ms;
                 tok = ranges();
@@ -13567,7 +13575,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
         mf.encode_single_token_argmax(
             &first_enc,
             0,
-            s.metal_session_mut(),
+            unsafe { s.metal_session_mut() },
             &ids_ping[0],
             &argmax_ping[0],
         )?;
@@ -13586,7 +13594,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
             mf.encode_single_token_argmax(
                 &next_enc,
                 pos as u32,
-                s.metal_session_mut(),
+                unsafe { s.metal_session_mut() },
                 &ids_ping[next_slot],
                 &argmax_ping[next_slot],
             )?;
@@ -13808,7 +13816,7 @@ fn run_suite_pp_row(
             &mf,
             &ids,
             0,
-            seq.metal_session_mut(),
+            unsafe { seq.metal_session_mut() },
             &mut scratch,
         )
         .context("suite pp warmup")?;
@@ -13836,7 +13844,7 @@ fn run_suite_pp_row(
             &mf,
             &ids,
             0,
-            seq.metal_session_mut(),
+            unsafe { seq.metal_session_mut() },
             &mut scratch,
         )
         .context("suite pp timed prefill")?;
@@ -13928,8 +13936,9 @@ fn run_suite_tg_row(
         let mut tok = first_tok;
         let mut gpu_ms_acc = 0.0;
         for pos in 0..n_gen {
-            let (_argmax, prof) =
-                mf.single_token_argmax_profiled(tok, pos as u32, seq.metal_session_mut())?;
+            let (_argmax, prof) = mf.single_token_argmax_profiled(tok, pos as u32, unsafe {
+                seq.metal_session_mut()
+            })?;
             gpu_ms_acc += prof.gpu_kernel_ms;
             tok = ranges();
         }
@@ -16923,13 +16932,13 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
                 &mf,
                 &[prefix_ids[0]],
                 0,
-                s.metal_session_mut(),
+                unsafe { s.metal_session_mut() },
                 &mut warm_scratch,
                 &[],
                 None,
             )?;
         } else {
-            let _ = mf.single_token(prefix_ids[0], 0, s.metal_session_mut())?;
+            let _ = mf.single_token(prefix_ids[0], 0, unsafe { s.metal_session_mut() })?;
         }
     }
 
@@ -16945,7 +16954,7 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         &mf,
         &full_ids,
         0,
-        seq_cold.metal_session_mut(),
+        unsafe { seq_cold.metal_session_mut() },
         prefill_mode,
         cold_scratch.as_mut(),
     )?;
@@ -16955,11 +16964,9 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     // First decoded token = TTFT-equivalent measurement.
     let cold_first_decode_t = Instant::now();
     let cold_first_id = argmax_i32(&last_logits);
-    let _ = mf.single_token(
-        cold_first_id,
-        total_len as u32,
-        seq_cold.metal_session_mut(),
-    )?;
+    let _ = mf.single_token(cold_first_id, total_len as u32, unsafe {
+        seq_cold.metal_session_mut()
+    })?;
     seq_cold.advance_by(1)?;
     let cold_first_decode_ms = cold_first_decode_t.elapsed().as_secs_f64() * 1e3;
 
@@ -16976,7 +16983,7 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         &mf,
         &prefix_ids,
         0,
-        seq_pre.metal_session_mut(),
+        unsafe { seq_pre.metal_session_mut() },
         prefill_mode,
         prefix_scratch.as_mut(),
     )?;
@@ -17030,7 +17037,7 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         &mf,
         &suffix_ids,
         prefix_ids.len() as u32,
-        seq_warm.metal_session_mut(),
+        unsafe { seq_warm.metal_session_mut() },
         effective_suffix_mode,
         suffix_scratch.as_mut(),
     )?;
@@ -17040,11 +17047,9 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
 
     let warm_first_decode_t = Instant::now();
     let warm_first_id = argmax_i32(&last_warm_logits);
-    let _ = mf.single_token(
-        warm_first_id,
-        total_len as u32,
-        seq_warm.metal_session_mut(),
-    )?;
+    let _ = mf.single_token(warm_first_id, total_len as u32, unsafe {
+        seq_warm.metal_session_mut()
+    })?;
     seq_warm.advance_by(1)?;
     let warm_first_decode_ms = warm_first_decode_t.elapsed().as_secs_f64() * 1e3;
 
@@ -17094,16 +17099,12 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         let mut warm_extra = vec![warm_first_id];
         for k in 1..tokens {
             let pos = (total_len + k) as u32;
-            let cold_logits = mf.single_token(
-                *cold_extra.last().unwrap(),
-                pos,
-                seq_cold.metal_session_mut(),
-            )?;
-            let warm_logits = mf.single_token(
-                *warm_extra.last().unwrap(),
-                pos,
-                seq_warm.metal_session_mut(),
-            )?;
+            let cold_logits = mf.single_token(*cold_extra.last().unwrap(), pos, unsafe {
+                seq_cold.metal_session_mut()
+            })?;
+            let warm_logits = mf.single_token(*warm_extra.last().unwrap(), pos, unsafe {
+                seq_warm.metal_session_mut()
+            })?;
             seq_cold.advance_by(1)?;
             seq_warm.advance_by(1)?;
             cold_extra.push(argmax_i32(&cold_logits));

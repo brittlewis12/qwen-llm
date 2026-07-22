@@ -27,6 +27,7 @@
 //! pair is the v1 correctness bar.
 
 pub mod checkpoint_codec;
+pub mod checkpoint_identity;
 pub mod codec;
 pub mod env_flag;
 pub mod forward;

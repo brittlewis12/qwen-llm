@@ -10447,10 +10447,12 @@ fn audit_mtp_target_state(
     let gdn_state_max_abs = max_abs_f32_tensor_pairs(&reference.gdn_state, &candidate.gdn_state)?;
     let gdn_conv_max_abs = max_abs_f32_tensor_pairs(&reference.gdn_conv, &candidate.gdn_conv)?;
     let snapshot_identity = reference.snapshot_identity(0, 0);
-    let reference_snapshot =
-        reference.snapshot(snapshot_identity.clone(), vec![0; expected_position], None);
-    let candidate_snapshot =
-        candidate.snapshot(snapshot_identity, vec![0; expected_position], None);
+    let reference_snapshot = reference
+        .snapshot(snapshot_identity.clone(), vec![0; expected_position], None)
+        .context("snapshot reference target state")?;
+    let candidate_snapshot = candidate
+        .snapshot(snapshot_identity, vec![0; expected_position], None)
+        .context("snapshot candidate target state")?;
     let kv_payload_exact = reference_snapshot.kv_k_arena == candidate_snapshot.kv_k_arena
         && reference_snapshot.kv_v_arena == candidate_snapshot.kv_v_arena;
     let kv_dtype = reference

@@ -177,6 +177,27 @@ impl PrefixCache {
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
     ) -> Option<PrefixCacheHit> {
+        self.lookup_longest_impl(identity, request_tokens, false)
+    }
+
+    /// Find the longest reusable prefix, but only return an exact request hit
+    /// when that snapshot carries prompt-final logits. A state-only exact
+    /// snapshot remains useful for longer requests, but cannot complete an
+    /// exact prompt without another model transition.
+    pub fn lookup_longest_with_exact_logits(
+        &mut self,
+        identity: &SnapshotIdentity,
+        request_tokens: &[i32],
+    ) -> Option<PrefixCacheHit> {
+        self.lookup_longest_impl(identity, request_tokens, true)
+    }
+
+    fn lookup_longest_impl(
+        &mut self,
+        identity: &SnapshotIdentity,
+        request_tokens: &[i32],
+        exact_requires_logits: bool,
+    ) -> Option<PrefixCacheHit> {
         if request_tokens.is_empty() {
             return None;
         }
@@ -188,9 +209,12 @@ impl PrefixCache {
                 prefix_hash: prefix_hashes[prefix_len - 1],
             };
             let hit_idx = self.buckets.get(&key).and_then(|bucket| {
-                bucket
-                    .iter()
-                    .position(|snap| snap.prefix_tokens == request_tokens[..prefix_len])
+                bucket.iter().position(|snap| {
+                    snap.prefix_tokens == request_tokens[..prefix_len]
+                        && (!exact_requires_logits
+                            || prefix_len != request_tokens.len()
+                            || snap.final_logits.is_some())
+                })
             });
             if let Some(idx) = hit_idx {
                 // Bump LRU stamp so hot prefixes survive eviction pressure.
@@ -280,6 +304,31 @@ mod tests {
         assert_eq!(hit.matched_prefix_len, 3);
         assert!(!hit.exact);
         assert_eq!(hit.snapshot.prefix_tokens, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn completion_lookup_falls_back_from_exact_state_without_logits() {
+        let id = ident(1);
+        let mut cache = PrefixCache::new();
+        cache.insert(snap(id.clone(), &[10, 11], 32));
+        let mut exact_without_logits = snap(id.clone(), &[10, 11, 12], 48);
+        exact_without_logits.final_logits = None;
+        cache.insert(exact_without_logits);
+
+        let state_hit = cache
+            .lookup_longest(&id, &[10, 11, 12])
+            .expect("state-only exact hit");
+        assert!(state_hit.exact);
+        assert!(state_hit.snapshot.final_logits.is_none());
+
+        let completion_hit = cache
+            .lookup_longest_with_exact_logits(&id, &[10, 11, 12])
+            .expect("shorter completion-capable hit");
+        assert_eq!(completion_hit.matched_prefix_len, 2);
+        assert!(!completion_hit.exact);
+        assert!(completion_hit.snapshot.final_logits.is_some());
+
+        assert!(cache.lookup_longest_with_exact_logits(&id, &[99]).is_none());
     }
 
     #[test]

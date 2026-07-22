@@ -11,7 +11,7 @@ use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
 use crate::metal_forward::{
     MetalForward, MetalModel, MetalModelLoadOptions, MetalSession, MfError, SessionSnapshot,
-    SnapshotIdentity,
+    SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
@@ -57,6 +57,8 @@ pub enum RuntimeError {
     },
     #[error("prefix snapshot logits length {got} != vocab size {expected}")]
     PrefixLogitsLengthMismatch { got: usize, expected: usize },
+    #[error("prefix snapshot validation: {0}")]
+    SnapshotValidation(#[from] SnapshotValidationError),
 }
 
 struct RuntimeInner {
@@ -324,7 +326,7 @@ impl LoadedModel {
             self.snapshot_identity(sequence),
             prefix_tokens,
             final_logits,
-        );
+        )?;
         let snapshot_bytes = snap.n_bytes();
         let mut cache = self.prefix_cache.lock();
         cache.insert(snap);
@@ -344,11 +346,17 @@ impl LoadedModel {
         let identity = self.snapshot_identity(sequence);
         let (hit, stats) = {
             let mut cache = self.prefix_cache.lock();
-            let Some(hit) = cache.lookup_longest(&identity, request_tokens) else {
+            let Some(hit) = cache.lookup_longest_with_exact_logits(&identity, request_tokens)
+            else {
                 return Ok(None);
             };
             (hit, cache.stats())
         };
+        hit.snapshot.validate_for_restore(
+            &identity,
+            sequence.max_context_tokens(),
+            Some(self.metal_model.arch.vocab_size as usize),
+        )?;
         sequence.restore_from_snapshot(&hit.snapshot, &identity)?;
         let exact_final_logits = if hit.exact {
             hit.snapshot.final_logits.clone()
@@ -447,8 +455,8 @@ impl Sequence {
         identity: SnapshotIdentity,
         prefix_tokens: Vec<i32>,
         final_logits: Option<Vec<f32>>,
-    ) -> SessionSnapshot {
-        self.state.snapshot(identity, prefix_tokens, final_logits)
+    ) -> Result<SessionSnapshot, RuntimeError> {
+        Ok(self.state.snapshot(identity, prefix_tokens, final_logits)?)
     }
 
     pub fn restore_from_snapshot(
@@ -464,7 +472,7 @@ impl Sequence {
         }
         self.check_position(0)?;
         self.ensure_can_append(snapshot.prefix_len())?;
-        self.state.restore_from(snapshot)?;
+        self.state.restore_from(snapshot, expected_identity)?;
         self.position = snapshot.prefix_len();
         Ok(())
     }

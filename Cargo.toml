@@ -44,6 +44,7 @@ gguf-rs = { path = "../gguf" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
+blake3 = "1"
 unicode-general-category = "0.6"
 rustc-hash = "2"
 

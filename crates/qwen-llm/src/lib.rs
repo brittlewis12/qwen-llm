@@ -26,6 +26,7 @@
 //! against `~/models/Qwen3.5-0.8B.F32.gguf`. Logits-byte-equivalence on this
 //! pair is the v1 correctness bar.
 
+pub mod checkpoint_codec;
 pub mod codec;
 pub mod env_flag;
 pub mod forward;

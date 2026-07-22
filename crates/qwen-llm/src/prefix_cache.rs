@@ -345,7 +345,9 @@ fn prefix_hashes(tokens: &[i32]) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::{PrefixCache, hash_tokens};
-    use crate::metal_forward::{SNAPSHOT_LAYOUT_VERSION, SessionSnapshot, SnapshotIdentity};
+    use crate::metal_forward::{
+        SNAPSHOT_LAYOUT_VERSION, SessionSnapshot, SnapshotIdentity, SnapshotKvStorageKind,
+    };
 
     fn ident(model_id: u64) -> SnapshotIdentity {
         SnapshotIdentity {
@@ -356,6 +358,7 @@ mod tests {
             n_gdn_layers: 3,
             kv_dim_elements: 4,
             kv_bytes_per_token: 8,
+            kv_storage_kind: SnapshotKvStorageKind::F16,
             gdn_state_elements_per_layer: 5,
             gdn_conv_elements_per_layer: 6,
         }

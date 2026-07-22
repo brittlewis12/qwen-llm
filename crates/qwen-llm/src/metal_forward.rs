@@ -4348,7 +4348,8 @@ pub struct MetalSession {
     /// n_v_heads * head_dim * head_dim per GDN layer, F32.
     pub gdn_state: Vec<MetalTensor>,
 
-    /// `[capacity_tokens, n_kv_heads, head_dim]` per attn layer, F32.
+    /// `[capacity_tokens, n_kv_heads, head_dim]` per attention layer in the
+    /// active KV storage type (normally F16, optionally Q8_0).
     pub kv_k: Vec<MetalTensor>,
     pub kv_v: Vec<MetalTensor>,
     pub kv_n_pos: Vec<usize>,
@@ -11873,12 +11874,21 @@ pub struct SnapshotIdentity {
     pub n_gdn_layers: u32,
     pub kv_dim_elements: u32,
     pub kv_bytes_per_token: u32,
+    pub kv_storage_kind: SnapshotKvStorageKind,
     pub gdn_state_elements_per_layer: u32,
     pub gdn_conv_elements_per_layer: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum SnapshotKvStorageKind {
+    None = 0,
+    F16 = 1,
+    Q8_0 = 2,
+}
+
 /// Bump this when MetalSession's per-layer state shape changes.
-pub const SNAPSHOT_LAYOUT_VERSION: u32 = 3;
+pub const SNAPSHOT_LAYOUT_VERSION: u32 = 4;
 
 /// Captured state at the end of prefilling `prefix_tokens` through a
 /// fresh session. Restoring into a fresh session and running additional
@@ -12195,6 +12205,12 @@ impl MetalSession {
                 .first()
                 .map(|t| t.n_bytes() / self.kv_capacity as u64)
                 .unwrap_or(0) as u32,
+            kv_storage_kind: match self.kv_k.first().map(|tensor| tensor.dtype) {
+                None => SnapshotKvStorageKind::None,
+                Some(GgmlType::F16) => SnapshotKvStorageKind::F16,
+                Some(GgmlType::Q8_0) => SnapshotKvStorageKind::Q8_0,
+                Some(_) => unreachable!("unsupported snapshot KV storage"),
+            },
             gdn_state_elements_per_layer: self
                 .gdn_state
                 .first()
@@ -12433,6 +12449,7 @@ mod tests {
                 n_gdn_layers: 3,
                 kv_dim_elements: 4,
                 kv_bytes_per_token: 8,
+                kv_storage_kind: SnapshotKvStorageKind::F16,
                 gdn_state_elements_per_layer: 5,
                 gdn_conv_elements_per_layer: 6,
             },
@@ -18552,6 +18569,7 @@ mod tests {
                 n_gdn_layers: 0,
                 kv_dim_elements: 0,
                 kv_bytes_per_token: 0,
+                kv_storage_kind: SnapshotKvStorageKind::None,
                 gdn_state_elements_per_layer: 0,
                 gdn_conv_elements_per_layer: 0,
             };

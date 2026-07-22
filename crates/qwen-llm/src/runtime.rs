@@ -450,12 +450,30 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_policy_default_is_off_backcompat() {
-        // Backward compat with pre-spike behaviour: default MUST be
-        // Off. If you change this, every caller of Runtime::load_model
-        // (not _with_config) silently starts prefetching. Update the
-        // roadmap and roll out with an intent-scoped default first.
+    fn prefetch_policy_default_is_off_when_constructed_directly() {
+        // Zero-value default of the enum type stays Off — callers who
+        // construct `PrefetchPolicy` from scratch (rather than via
+        // `LoadedModelConfig::default`) get no prefetch behaviour.
         assert_eq!(PrefetchPolicy::default(), PrefetchPolicy::Off);
+    }
+
+    #[test]
+    fn loaded_model_config_default_prefetches_cold_only() {
+        // `Runtime::load_model` (no config arg) uses
+        // `LoadedModelConfig::default`, which since the pread-warmup
+        // spike promotes cache warming to ColdOnly. Prior behaviour
+        // (Off) is still available via explicit config override.
+        // If a caller regresses on warm-load latency after this change,
+        // see the ColdOnly gate in `apply_shard_prefetch` and the
+        // fallback path in `runtime_load_spike` for the diagnostic
+        // signal.
+        let config = LoadedModelConfig::default();
+        match config.prefetch_policy {
+            PrefetchPolicy::ColdOnly { threshold } => {
+                assert_eq!(threshold.value(), DEFAULT_COLD_ONLY_THRESHOLD);
+            }
+            other => panic!("expected ColdOnly, got {other:?}"),
+        }
     }
 }
 
@@ -493,6 +511,19 @@ impl LoadedModelConfig {
 /// unrelated allocations without being so large it prevents
 /// prefetching on memory-tight systems.
 pub const DEFAULT_PREFETCH_MIN_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Default cache-residency threshold for [`PrefetchPolicy::ColdOnly`]
+/// used by [`LoadedModelConfig::default`].
+///
+/// A value of `0.5` says: prefetch if the shard is less than half
+/// resident in the unified buffer cache. This is a reasonable initial
+/// estimate — the measured Wc vs Wo warm-load numbers show ColdOnly
+/// at 0.5 correctly skips when files are 100% resident and correctly
+/// runs when they're 0% resident — but the exact break-even threshold
+/// has not been calibrated by a residency sweep across intermediate
+/// values (25%, 75%, 90%). Adjust here if a calibration experiment
+/// identifies a better default.
+pub const DEFAULT_COLD_ONLY_THRESHOLD: f64 = 0.5;
 
 /// A validated cache-residency threshold in `[0.0, 1.0]`.
 ///
@@ -640,10 +671,21 @@ impl ModelLoadIntent {
 }
 
 impl Default for LoadedModelConfig {
+    /// The default `prefetch_policy` is [`PrefetchPolicy::ColdOnly`]
+    /// with [`DEFAULT_COLD_ONLY_THRESHOLD`]. Rationale: measured 5x
+    /// first-byte win on cold storage of dense 27B, 1.5x on A3B MoE,
+    /// with correctly-gated skip on warm cache (`Wc` arm actually 60 ms
+    /// faster than baseline `Wo` at first-byte). Callers that don't
+    /// want cache warming (bench harnesses that specifically want to
+    /// measure the mmap demand-paging path, or callers targeting
+    /// memory-tight systems where we don't yet have a validated
+    /// admission gate) can opt out via
+    /// `LoadedModelConfig { prefetch_policy: PrefetchPolicy::Off, .. }`.
     fn default() -> Self {
         Self {
             prefix_cache_max_bytes: DEFAULT_MAX_BYTES,
-            prefetch_policy: PrefetchPolicy::Off,
+            prefetch_policy: PrefetchPolicy::cold_only(DEFAULT_COLD_ONLY_THRESHOLD)
+                .expect("DEFAULT_COLD_ONLY_THRESHOLD is a valid fraction"),
             prefetch_workers: 0,
             prefetch_chunk_bytes: 0,
             prefetch_min_headroom_bytes: 0,

@@ -114,6 +114,10 @@ impl PrefixCache {
     }
 
     pub fn insert(&mut self, snap: SessionSnapshot) {
+        self.insert_shared(Arc::new(snap));
+    }
+
+    pub(crate) fn insert_shared(&mut self, snap: Arc<SessionSnapshot>) {
         let key = PrefixCacheKey {
             identity: snap.identity.clone(),
             prefix_len: snap.matched_prefix_len(),
@@ -121,7 +125,6 @@ impl PrefixCache {
         };
         self.clock += 1;
         let stamp = self.clock;
-        let snap = Arc::new(snap);
         let bucket = self.buckets.remove(&key).unwrap_or_default();
         let old_bucket_bytes: u64 = bucket.iter().map(|entry| entry.n_bytes()).sum();
         self.total_bytes -= old_bucket_bytes;
@@ -348,6 +351,7 @@ mod tests {
     use crate::metal_forward::{
         SNAPSHOT_LAYOUT_VERSION, SessionSnapshot, SnapshotIdentity, SnapshotKvStorageKind,
     };
+    use std::sync::Arc;
 
     fn ident(model_id: u64) -> SnapshotIdentity {
         SnapshotIdentity {
@@ -394,6 +398,17 @@ mod tests {
         assert_eq!(hit.matched_prefix_len, 3);
         assert!(!hit.exact);
         assert_eq!(hit.snapshot.prefix_tokens, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn shared_insert_indexes_without_cloning_snapshot_arenas() {
+        let id = ident(1);
+        let snapshot = Arc::new(snap(id.clone(), &[10, 11], 32));
+        let mut cache = PrefixCache::new();
+        cache.insert_shared(Arc::clone(&snapshot));
+
+        let hit = cache.lookup_longest(&id, &[10, 11, 12]).expect("hit");
+        assert!(Arc::ptr_eq(&snapshot, &hit.snapshot));
     }
 
     #[test]

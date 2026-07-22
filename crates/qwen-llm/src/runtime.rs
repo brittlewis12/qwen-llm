@@ -10,6 +10,9 @@ use crate::checkpoint_identity::{
     CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
     checkpoint_compatibility,
 };
+use crate::checkpoint_store::{
+    CheckpointStoreError, DurableCheckpointStore, PublishReport, StoreContext,
+};
 use crate::gguf::{GgufError, GgufFile};
 use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
@@ -67,6 +70,8 @@ pub enum RuntimeError {
     SequenceModelMismatch,
     #[error("checkpoint compatibility identity: {0}")]
     CheckpointIdentity(#[from] CheckpointIdentityError),
+    #[error("durable checkpoint store: {0}")]
+    CheckpointStore(#[from] CheckpointStoreError),
 }
 
 struct RuntimeInner {
@@ -243,6 +248,62 @@ pub struct PrefixCacheRestore {
     pub stats_at_lookup: PrefixCacheStats,
 }
 
+/// An immutable CPU snapshot which may retain hundreds of MiB until dropped.
+/// RAM insertion shares its arenas; it does not transfer their ownership.
+pub struct PreparedCheckpoint {
+    owner: Arc<ModelOwnerToken>,
+    snapshot: Arc<SessionSnapshot>,
+    max_context_tokens: usize,
+}
+
+impl PreparedCheckpoint {
+    pub fn snapshot_bytes(&self) -> u64 {
+        self.snapshot.n_bytes()
+    }
+
+    pub fn matched_prefix_len(&self) -> usize {
+        self.snapshot.matched_prefix_len()
+    }
+
+    pub fn restored_prefix_len(&self) -> usize {
+        self.snapshot.prefix_len()
+    }
+
+    pub fn has_pending_token(&self) -> bool {
+        self.snapshot.pending_token.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurableLookupTelemetry {
+    pub matched_prefix_len: usize,
+    pub restored_prefix_len: usize,
+    pub exact: bool,
+    pub candidates_examined: usize,
+    pub corrupt_entries_removed: usize,
+    pub touched: bool,
+}
+
+pub struct DurablePrefixRestore {
+    pub matched_prefix_len: usize,
+    pub restored_prefix_len: usize,
+    pub exact: bool,
+    pub exact_final_logits: Option<Vec<f32>>,
+    checkpoint: PreparedCheckpoint,
+}
+
+pub struct DurableRestoreAttempt {
+    pub compatibility: CheckpointCompatibilityReport,
+    pub lookup: DurableLookupTelemetry,
+    pub hit: Option<DurablePrefixRestore>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurablePublishReport {
+    pub compatibility: CheckpointCompatibilityReport,
+    pub store: PublishReport,
+}
+
 /// One model loaded into a [`Runtime`].
 ///
 /// This is the expensive model-load boundary: the GGUF is mmap'd and the Metal
@@ -383,6 +444,21 @@ impl LoadedModel {
         pending_token: Option<i32>,
         final_logits: Option<Vec<f32>>,
     ) -> Result<PrefixCacheInsert, RuntimeError> {
+        let prepared =
+            self.prepare_checkpoint_boundary(sequence, prefix_tokens, pending_token, final_logits)?;
+        self.cache_prepared_checkpoint(&prepared)
+    }
+
+    /// Capture one immutable sequence boundary for RAM insertion, deferred
+    /// durable publication, or both. The snapshot remains independent of later
+    /// sequence mutation.
+    pub fn prepare_checkpoint_boundary(
+        &self,
+        sequence: &Sequence,
+        prefix_tokens: Vec<i32>,
+        pending_token: Option<i32>,
+        final_logits: Option<Vec<f32>>,
+    ) -> Result<PreparedCheckpoint, RuntimeError> {
         self.ensure_owns(sequence)?;
         sequence.check_position(prefix_tokens.len())?;
         if let Some(logits) = final_logits.as_ref() {
@@ -402,13 +478,136 @@ impl LoadedModel {
             sequence.max_context_tokens(),
             Some(self.metal_model.arch.vocab_size as usize),
         )?;
-        let snapshot_bytes = snap.n_bytes();
+        Ok(PreparedCheckpoint {
+            owner: Arc::clone(&self.owner),
+            snapshot: Arc::new(snap),
+            max_context_tokens: sequence.max_context_tokens(),
+        })
+    }
+
+    /// Index a prepared boundary in the process-local cache without cloning its
+    /// large state arenas.
+    pub fn cache_prepared_checkpoint(
+        &self,
+        prepared: &PreparedCheckpoint,
+    ) -> Result<PrefixCacheInsert, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &prepared.owner)?;
+        let snapshot_bytes = prepared.snapshot.n_bytes();
         let mut cache = self.prefix_cache.lock();
-        cache.insert(snap);
+        cache.insert_shared(Arc::clone(&prepared.snapshot));
         Ok(PrefixCacheInsert {
             snapshot_bytes,
             stats: cache.stats(),
         })
+    }
+
+    /// Publish an already captured boundary. Callers can defer this until after
+    /// response generation so codec and filesystem durability do not enter TTFT.
+    /// `max_record_bytes` bounds one encoded record independently of the store's
+    /// aggregate managed-byte budget.
+    pub fn publish_prepared_checkpoint(
+        &self,
+        store: &DurableCheckpointStore,
+        prepared: &PreparedCheckpoint,
+        max_record_bytes: u64,
+    ) -> Result<DurablePublishReport, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &prepared.owner)?;
+        let compatibility = checkpoint_compatibility(
+            &self.gguf,
+            prepared.snapshot.identity.abi(),
+            &store.identity_cache(),
+        )?;
+        let store_report = store.publish(
+            StoreContext {
+                compatibility_id: &compatibility.compatibility_id,
+                identity: &prepared.snapshot.identity,
+                vocab_size: self.metal_model.arch.vocab_size as usize,
+                max_context_tokens: prepared.max_context_tokens,
+                max_record_bytes,
+            },
+            &prepared.snapshot,
+        )?;
+        Ok(DurablePublishReport {
+            compatibility,
+            store: store_report,
+        })
+    }
+
+    /// Restore the longest compatible durable prefix into a fresh sequence.
+    /// Clean misses retain identity and lookup telemetry for cold-start policy.
+    /// `max_record_bytes` is a per-record allocation bound, not a disk budget.
+    pub fn restore_durable_prefix(
+        &self,
+        store: &DurableCheckpointStore,
+        sequence: &mut Sequence,
+        request_tokens: &[i32],
+        max_record_bytes: u64,
+    ) -> Result<DurableRestoreAttempt, RuntimeError> {
+        self.ensure_owns(sequence)?;
+        sequence.check_position(0)?;
+        sequence.ensure_can_append(request_tokens.len())?;
+        let identity = self.snapshot_identity(sequence)?;
+        let compatibility = self.checkpoint_compatibility(sequence, &store.identity_cache())?;
+        let mut lookup = store.lookup(
+            StoreContext {
+                compatibility_id: &compatibility.compatibility_id,
+                identity: &identity,
+                vocab_size: self.metal_model.arch.vocab_size as usize,
+                max_context_tokens: sequence.max_context_tokens(),
+                max_record_bytes,
+            },
+            request_tokens,
+        )?;
+        let telemetry = DurableLookupTelemetry {
+            matched_prefix_len: lookup.matched_prefix_len,
+            restored_prefix_len: lookup.restored_prefix_len,
+            exact: lookup.exact,
+            candidates_examined: lookup.candidates_examined,
+            corrupt_entries_removed: lookup.corrupt_entries_removed,
+            touched: lookup.touched,
+        };
+        let hit = if let Some(snapshot) = lookup.snapshot.take() {
+            snapshot.validate_for_restore(
+                &identity,
+                sequence.max_context_tokens(),
+                Some(self.metal_model.arch.vocab_size as usize),
+            )?;
+            sequence.restore_from_snapshot(&snapshot, &identity)?;
+            let snapshot = Arc::new(snapshot);
+            let exact_final_logits =
+                if lookup.exact && lookup.restored_prefix_len == lookup.matched_prefix_len {
+                    snapshot.final_logits.clone()
+                } else {
+                    None
+                };
+            Some(DurablePrefixRestore {
+                matched_prefix_len: lookup.matched_prefix_len,
+                restored_prefix_len: lookup.restored_prefix_len,
+                exact: lookup.exact,
+                exact_final_logits,
+                checkpoint: PreparedCheckpoint {
+                    owner: Arc::clone(&self.owner),
+                    snapshot,
+                    max_context_tokens: sequence.max_context_tokens(),
+                },
+            })
+        } else {
+            None
+        };
+        Ok(DurableRestoreAttempt {
+            compatibility,
+            lookup: telemetry,
+            hit,
+        })
+    }
+
+    /// Promote a durable restore into the process-local cache without another
+    /// state capture or arena clone.
+    pub fn cache_durable_restore(
+        &self,
+        restored: &DurablePrefixRestore,
+    ) -> Result<PrefixCacheInsert, RuntimeError> {
+        self.cache_prepared_checkpoint(&restored.checkpoint)
     }
 
     pub fn restore_cached_prefix(

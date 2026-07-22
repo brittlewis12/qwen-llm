@@ -202,7 +202,8 @@ pub struct PrefixCacheRestore {
     pub matched_prefix_len: usize,
     pub exact: bool,
     pub exact_final_logits: Option<Vec<f32>>,
-    pub stats: PrefixCacheStats,
+    /// Cache-index accounting captured at lookup, before the unlocked restore.
+    pub stats_at_lookup: PrefixCacheStats,
 }
 
 /// One model loaded into a [`Runtime`].
@@ -341,11 +342,14 @@ impl LoadedModel {
         sequence.check_position(0)?;
         sequence.ensure_can_append(request_tokens.len())?;
         let identity = self.snapshot_identity(sequence);
-        let mut cache = self.prefix_cache.lock();
-        let Some(hit) = cache.lookup_longest(&identity, request_tokens) else {
-            return Ok(None);
+        let (hit, stats) = {
+            let mut cache = self.prefix_cache.lock();
+            let Some(hit) = cache.lookup_longest(&identity, request_tokens) else {
+                return Ok(None);
+            };
+            (hit, cache.stats())
         };
-        sequence.restore_from_snapshot(hit.snapshot, &identity)?;
+        sequence.restore_from_snapshot(&hit.snapshot, &identity)?;
         let exact_final_logits = if hit.exact {
             hit.snapshot.final_logits.clone()
         } else {
@@ -355,7 +359,7 @@ impl LoadedModel {
             matched_prefix_len: hit.matched_prefix_len,
             exact: hit.exact,
             exact_final_logits,
-            stats: cache.stats(),
+            stats_at_lookup: stats,
         }))
     }
 }

@@ -1694,8 +1694,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             result.decode_tps,
             result.transition_tps,
             cache_stats.entries,
-            cache_stats.total_bytes as f64 / 1024.0 / 1024.0,
-            cache_stats.max_bytes as f64 / 1024.0 / 1024.0,
+            cache_stats.indexed_bytes as f64 / 1024.0 / 1024.0,
+            cache_stats.max_indexed_bytes as f64 / 1024.0 / 1024.0,
         );
     }
 
@@ -2157,8 +2157,8 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
         "stats: requests={} cache_entries={} cache_mib={:.1}/{:.1}",
         n_requests,
         stats.entries,
-        stats.total_bytes as f64 / 1024.0 / 1024.0,
-        stats.max_bytes as f64 / 1024.0 / 1024.0,
+        stats.indexed_bytes as f64 / 1024.0 / 1024.0,
+        stats.max_indexed_bytes as f64 / 1024.0 / 1024.0,
     );
     Ok(())
 }
@@ -2586,8 +2586,8 @@ fn run_jsonl_request(
         transition_tps,
         total_ms,
         cache_entries: stats_now.entries,
-        cache_bytes: stats_now.total_bytes,
-        cache_max_bytes: stats_now.max_bytes,
+        cache_bytes: stats_now.indexed_bytes,
+        cache_max_bytes: stats_now.max_indexed_bytes,
         prompt_lookup: prompt_lookup_stats,
     };
     let output = RequestOutput {

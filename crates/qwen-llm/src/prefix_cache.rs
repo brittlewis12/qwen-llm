@@ -1,5 +1,6 @@
 use crate::metal_forward::{SessionSnapshot, SnapshotIdentity};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct PrefixCacheKey {
@@ -8,9 +9,9 @@ struct PrefixCacheKey {
     prefix_hash: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct PrefixCacheHit<'a> {
-    pub snapshot: &'a SessionSnapshot,
+#[derive(Clone, Debug)]
+pub struct PrefixCacheHit {
+    pub snapshot: Arc<SessionSnapshot>,
     pub matched_prefix_len: usize,
     pub exact: bool,
 }
@@ -18,8 +19,11 @@ pub struct PrefixCacheHit<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrefixCacheStats {
     pub entries: usize,
-    pub total_bytes: u64,
-    pub max_bytes: u64,
+    /// Payload bytes currently reachable from the cache index. Active restore
+    /// Arcs may temporarily keep replaced or evicted payloads resident.
+    pub indexed_bytes: u64,
+    /// Budget for indexed payload bytes, not a process-RSS ceiling.
+    pub max_indexed_bytes: u64,
 }
 
 /// Session snapshots are large (KV arenas + GDN state — tens to hundreds of
@@ -33,7 +37,7 @@ pub struct PrefixCacheStats {
 pub const DEFAULT_MAX_BYTES: u64 = 16 << 30;
 
 pub struct PrefixCache {
-    buckets: HashMap<PrefixCacheKey, Vec<SessionSnapshot>>,
+    buckets: HashMap<PrefixCacheKey, Vec<Arc<SessionSnapshot>>>,
     total_bytes: u64,
     max_bytes: u64,
     /// Monotonic logical clock for LRU accounting. Bumped on insert and on
@@ -89,8 +93,8 @@ impl PrefixCache {
     pub fn stats(&self) -> PrefixCacheStats {
         PrefixCacheStats {
             entries: self.len(),
-            total_bytes: self.total_bytes,
-            max_bytes: self.max_bytes,
+            indexed_bytes: self.total_bytes,
+            max_indexed_bytes: self.max_bytes,
         }
     }
 
@@ -113,6 +117,7 @@ impl PrefixCache {
         };
         self.clock += 1;
         let stamp = self.clock;
+        let snap = Arc::new(snap);
         let bucket = self.buckets.entry(key.clone()).or_default();
         if let Some((idx, existing)) = bucket
             .iter_mut()
@@ -167,11 +172,11 @@ impl PrefixCache {
         }
     }
 
-    pub fn lookup_longest<'a>(
-        &'a mut self,
+    pub fn lookup_longest(
+        &mut self,
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
-    ) -> Option<PrefixCacheHit<'a>> {
+    ) -> Option<PrefixCacheHit> {
         if request_tokens.is_empty() {
             return None;
         }
@@ -192,7 +197,7 @@ impl PrefixCache {
                 self.clock += 1;
                 let stamp = self.clock;
                 self.last_used.insert((key.clone(), idx), stamp);
-                let snap = &self.buckets[&key][idx];
+                let snap = Arc::clone(&self.buckets[&key][idx]);
                 return Some(PrefixCacheHit {
                     snapshot: snap,
                     matched_prefix_len: prefix_len,
@@ -278,6 +283,36 @@ mod tests {
     }
 
     #[test]
+    fn retained_hit_survives_replacement_and_clear_outside_index_accounting() {
+        let id = ident(1);
+        let mut cache = PrefixCache::new();
+        let mut old = snap(id.clone(), &[10, 11], 32);
+        old.final_logits = Some(vec![1.0, 2.0, 3.0]);
+        cache.insert(old);
+
+        let hit = cache.lookup_longest(&id, &[10, 11]).expect("old hit");
+        let old_bytes = hit.snapshot.n_bytes();
+        assert_eq!(
+            hit.snapshot.final_logits.as_deref(),
+            Some(&[1.0, 2.0, 3.0][..])
+        );
+
+        let mut replacement = snap(id, &[10, 11], 64);
+        replacement.final_logits = Some(vec![4.0, 5.0, 6.0]);
+        cache.insert(replacement);
+        assert_ne!(cache.stats().indexed_bytes, old_bytes);
+        cache.clear();
+
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().indexed_bytes, 0);
+        assert_eq!(hit.snapshot.prefix_tokens, [10, 11]);
+        assert_eq!(
+            hit.snapshot.final_logits.as_deref(),
+            Some(&[1.0, 2.0, 3.0][..])
+        );
+    }
+
+    #[test]
     fn lookup_filters_by_identity() {
         let id_a = ident(1);
         let id_b = ident(2);
@@ -357,17 +392,17 @@ mod tests {
         cache.insert(snap(id.clone(), &[2], 64));
         let before = cache.stats();
         assert_eq!(before.entries, 2);
-        assert!(before.total_bytes > 0);
+        assert!(before.indexed_bytes > 0);
 
         cache.set_max_bytes(1);
         let after = cache.stats();
         assert_eq!(after.entries, 1);
-        assert_eq!(after.max_bytes, 1);
+        assert_eq!(after.max_indexed_bytes, 1);
 
         cache.clear();
         let cleared = cache.stats();
         assert_eq!(cleared.entries, 0);
-        assert_eq!(cleared.total_bytes, 0);
-        assert_eq!(cleared.max_bytes, 1);
+        assert_eq!(cleared.indexed_bytes, 0);
+        assert_eq!(cleared.max_indexed_bytes, 1);
     }
 }

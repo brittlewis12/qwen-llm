@@ -16995,8 +16995,8 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     eprintln!(
         "[prefix-cache] cache after insert: entries={} bytes={:.1}/{:.1} MB",
         inserted.stats.entries,
-        inserted.stats.total_bytes as f64 / 1e6,
-        inserted.stats.max_bytes as f64 / 1e6
+        inserted.stats.indexed_bytes as f64 / 1e6,
+        inserted.stats.max_indexed_bytes as f64 / 1e6
     );
 
     // Now simulate request 2 starting fresh and finding the cached prefix.
@@ -17019,9 +17019,9 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         hit.matched_prefix_len,
         hit.exact,
         hit.exact_final_logits.is_some(),
-        hit.stats.entries,
-        hit.stats.total_bytes as f64 / 1e6,
-        hit.stats.max_bytes as f64 / 1e6
+        hit.stats_at_lookup.entries,
+        hit.stats_at_lookup.indexed_bytes as f64 / 1e6,
+        hit.stats_at_lookup.max_indexed_bytes as f64 / 1e6
     );
 
     let last_warm_logits = prefix_cache_prefill_logits(

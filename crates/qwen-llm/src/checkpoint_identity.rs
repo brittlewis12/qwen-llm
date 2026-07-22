@@ -24,6 +24,7 @@ const METADATA_DOMAIN: &[u8] = b"qwen-checkpoint-source-metadata-v1\0";
 const SHARD_DOMAIN: &[u8] = b"qwen-checkpoint-shard-content-v1\0";
 const CONTENT_DOMAIN: &[u8] = b"qwen-checkpoint-ordered-content-v1\0";
 const COMPATIBILITY_DOMAIN: &[u8] = b"qwen-checkpoint-compatibility-v1\0";
+const PARALLEL_HASH_MIN_BYTES: usize = 1024 * 1024;
 const CACHE_MAGIC: &[u8; 8] = b"QWENMID\0";
 const CACHE_VERSION: u32 = 1;
 const CACHE_ENTRY_BYTES: usize = 128;
@@ -263,7 +264,7 @@ fn hash_ordered_content(
         shard.update(SHARD_DOMAIN);
         hash_u64(&mut shard, index as u64);
         hash_u64(&mut shard, source.bytes.len() as u64);
-        shard.update(source.bytes);
+        update_content_bytes(&mut shard, source.bytes);
         let shard_id = shard.finalize();
         hash_u64(&mut content, index as u64);
         hash_u64(&mut content, source.bytes.len() as u64);
@@ -273,6 +274,17 @@ fn hash_ordered_content(
             .ok_or(CheckpointIdentityError::ByteCountOverflow)?;
     }
     Ok((*content.finalize().as_bytes(), bytes_hashed))
+}
+
+fn update_content_bytes<'a>(
+    hasher: &'a mut blake3::Hasher,
+    bytes: &[u8],
+) -> &'a mut blake3::Hasher {
+    if bytes.len() >= PARALLEL_HASH_MIN_BYTES {
+        hasher.update_rayon(bytes)
+    } else {
+        hasher.update(bytes)
+    }
 }
 
 fn compose_compatibility_id(content_id: [u8; 32], abi: SnapshotAbi) -> [u8; 32] {
@@ -513,6 +525,20 @@ mod tests {
         ];
         let result = unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) };
         assert_eq!(result, 0, "restore source mtime");
+    }
+
+    #[test]
+    fn parallel_content_update_matches_serial_digest() {
+        let bytes = (0..PARALLEL_HASH_MIN_BYTES * 2)
+            .map(|index| (index.wrapping_mul(131) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let mut serial = blake3::Hasher::new();
+        serial.update(b"framing");
+        serial.update(&bytes);
+        let mut parallel = blake3::Hasher::new();
+        parallel.update(b"framing");
+        update_content_bytes(&mut parallel, &bytes);
+        assert_eq!(parallel.finalize(), serial.finalize());
     }
 
     #[test]

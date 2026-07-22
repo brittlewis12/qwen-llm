@@ -227,7 +227,7 @@ fn apply_prefetch_policy(gguf: &GgufFile, config: &LoadedModelConfig) -> Prefetc
 /// the memory-headroom probe are diagnostic; a failure returns fresh
 /// unknown state, not a veto. Codex jam session 019f8b66 worked
 /// through the expected value: skipping-on-probe-failure trades
-/// certain small waste (a warm reread ~600 ms) for potentially
+/// certain small waste (a fully warm reread measured at ~170 ms) for potentially
 /// forgoing large wins (~18 s on 27B cold). The failed probe's error
 /// is recorded in `skipped_reason` for diagnosis, and the prefetch
 /// is attempted anyway. If the actual prefetch also fails, that
@@ -480,9 +480,9 @@ mod tests {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedModelConfig {
     pub prefix_cache_max_bytes: u64,
-    /// Policy for warming the OS unified buffer cache during model
-    /// load. Defaults to [`PrefetchPolicy::Off`] to preserve exact
-    /// prior behaviour.
+    /// Policy for warming the OS unified buffer cache during model load.
+    /// [`LoadedModelConfig::default`] selects residency-gated `ColdOnly`;
+    /// [`PrefetchPolicy::default`] itself remains `Off`.
     pub prefetch_policy: PrefetchPolicy,
     /// Number of parallel `pread` workers per shard when prefetching.
     /// Zero uses [`crate::prefetch::DEFAULT_WORKERS`] (4).
@@ -490,9 +490,8 @@ pub struct LoadedModelConfig {
     /// Per-worker scratch buffer size in bytes. Zero uses
     /// [`crate::prefetch::DEFAULT_CHUNK_BYTES`] (16 MiB).
     pub prefetch_chunk_bytes: usize,
-    /// Additional bytes to require above the theoretical prefetch +
-    /// destination sizes before prefetching. Zero uses
-    /// [`DEFAULT_PREFETCH_MIN_HEADROOM_BYTES`] (1 GiB).
+    /// Additional telemetry margin above theoretical prefetch + destination
+    /// sizes. Zero uses [`DEFAULT_PREFETCH_MIN_HEADROOM_BYTES`] (1 GiB).
     pub prefetch_min_headroom_bytes: u64,
 }
 
@@ -506,10 +505,9 @@ impl LoadedModelConfig {
     }
 }
 
-/// Safety margin above `missing_bytes + shard_size` required for a
-/// prefetch to proceed. 1 GiB is generous for kernel bookkeeping and
-/// unrelated allocations without being so large it prevents
-/// prefetching on memory-tight systems.
+/// Telemetry margin above `missing_bytes + shard_size`. The current build logs
+/// a failed conservative bound but does not veto prefetch. One GiB covers kernel
+/// bookkeeping and unrelated allocations in that diagnostic estimate.
 pub const DEFAULT_PREFETCH_MIN_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Default cache-residency threshold for [`PrefetchPolicy::ColdOnly`]

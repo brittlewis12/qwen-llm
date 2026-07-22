@@ -8,9 +8,12 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
 ## 2026-07-22 - v0.611 Parallel-Pread Cache Warmer
 
-Status: promoted as default `ColdOnly` prefetch at `0.9` full-file residency
-for `load_model`, disposable single-turn CLI, and four `qwen-cli` bench
-paths. Reusable runtime loads and explicit `ForceOnly` callers unchanged.
+Status: promoted through `LoadedModelConfig::default()` as `ColdOnly` prefetch
+at `0.9` full-file residency. This covers `load_model`, CLI single-turn and
+JSONL paths that inherit the default, and four `qwen-cli` bench paths.
+`ModelLoadIntent::ForceOnly` controls authenticated copied-storage admission;
+it does not disable prefetch. Explicit `PrefetchPolicy::Off` callers remain
+unchanged.
 
 - Four scoped workers share each shard's retained `Arc<File>` via
   `FileExt::read_at`, own one contiguous file stripe each, and reuse a
@@ -26,14 +29,16 @@ paths. Reusable runtime loads and explicit `ForceOnly` callers unchanged.
   round-2 thermal drift, not proven neutral.
 - A3B disposable, single round: `Off` `7.99 s` first byte at `0.96 GiB`
   physical reads; `Always` `7.03 s` first byte at `20.14 GiB` physical
-  reads. `12%` first-byte win at `~20x` physical I/O because whole-file
-  warming duplicates the source-side work the selective parallel copied-
-  storage path (v0.602 / v0.608) already avoids: Metal touches only
-  `4.13 GiB` of a `20.5 GiB` shard. A coalesced tensor-range warmer that
-  reads only the pages Metal will consume is the natural next refinement;
-  see roadmap frontier item 1. `scripts/bench-first-byte.sh` does not
-  yet pass `--intent disposable`, so no successor rounds are available
-  under the standard runner.
+  reads. This is a `12%` first-byte win at `~20x` physical I/O. The prior
+  `4.13 GiB of 20.5 GiB` explanation does not price the loader's required
+  source union: the authenticated copied plan contains 733 all-direct logical
+  requests totaling `22,123,538,944` bytes, with aliases and page overlap still
+  needing a unique-interval census. Do not infer a four-fifths range-prefetch
+  saving from physical-read or first-forward working-set observations. The
+  changed-premise opportunity is single-pass destination population that avoids
+  warm-then-copy duplication; see roadmap frontier item 1.
+  `scripts/bench-first-byte.sh` does not yet pass `--intent disposable`, so no
+  successor rounds are available under the standard runner.
 - The `0.9` residency threshold is derived analytically from endpoint
   throughput proxies: parallel prefetch reaches `~6.7 GB/s` while mmap
   demand paging is `0.5-0.7 GB/s`. At `~10-13x`, warming the missing
@@ -54,15 +59,16 @@ paths. Reusable runtime loads and explicit `ForceOnly` callers unchanged.
   every shard as maximally missing even when fully resident. Physical
   reads use `proc_pid_rusage`; `PrefetchReport.bytes` includes RAM hits
   and is not physical I/O.
-- Durable-identity interaction: when the `checkpoint_identity` durable
-  store is already populated, the first snapshot lookup runs a full
-  BLAKE3 ordered-shard hash before prefill
-  (`crates/qwen-cli/src/main.rs:1912`), traversing every shard a second
-  time inside TTFT and defeating A3B copy-plan selectivity again. When
-  the store is empty, hashing is deferred to publication after generation
-  (`main.rs:1964`, `main.rs:2174`) and stays out of TTFT. This
-  composition was invisible before v0.611 shortened the surrounding load
-  wall.
+- Durable-identity interaction: a valid metadata-keyed identity entry returns
+  `IdentityCacheOutcome::Hit` with `bytes_hashed=0`; it validates retained
+  descriptors and reads only the small entry. Full ordered-shard BLAKE3 occurs
+  only when that entry is absent, corrupt, or unreadable. An empty blob store
+  skips compatibility lookup before prefill, and normal post-response
+  publication computes and stores identity before publishing its first blob.
+  The TTFT duplicate traversal is therefore a bootstrap/repair or repeated
+  `ComputedUncached` case, not normal populated-store behavior. Preserve the
+  strong check, but measure these exceptional outcomes before ranking hash/
+  prefetch fusion as a primary lever.
 - The added multi-second prefetch widens an existing rename race: ordinary
   snapshot identity at `runtime.rs:1365` still re-resolves metadata by
   path rather than reusing the retained-descriptor metadata that strong

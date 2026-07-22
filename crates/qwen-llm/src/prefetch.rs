@@ -16,15 +16,14 @@
 //! for the existing `Arc<Mmap>` view. No change to the tensor storage
 //! model, MTLBuffer construction, page alignment, or lifetime.
 //!
-//! # Spike scope
+//! # Integrated scope
 //!
-//! * Warms the whole file, not just live tensor ranges. If this doesn't
-//!   move end-to-end wall time, coalesced-range prefetch won't either.
-//! * Runs against a single file; split shards should call it per shard
-//!   (later: one global pool for all shards).
-//! * Not wired into `open_one_shard`. Callers invoke `prefetch_file`
-//!   explicitly. This is deliberately opt-in so it can be measured
-//!   against status quo and MADV_WILLNEED as separate arms.
+//! * Warms the whole file, not just a source-range union. Runtime applies it
+//!   once per shard, sequentially, before Metal model loading.
+//! * [`crate::runtime::LoadedModelConfig::default`] selects residency-gated
+//!   `ColdOnly`; explicit callers can still select `Off` or `Always`.
+//! * [`prefetch_file`] remains available for standalone probes, while runtime
+//!   uses [`prefetch_fd`] with each shard's retained descriptor.
 //!
 //! # Design
 //!

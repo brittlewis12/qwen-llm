@@ -209,9 +209,9 @@ pub struct InvalidateReport {
 /// as cheaply reclaimable: `free`, `inactive`, `speculative`, and
 /// `purgeable`. Excludes wired, active, and compressor pages.
 ///
-/// Used by the prefetch policy to skip warmup when the system doesn't
-/// have room to hold the prefetched pages plus Metal's destination
-/// buffers without evicting either during the load.
+/// Used by the prefetch policy for headroom telemetry. The current policy logs
+/// when its conservative bound would fail but does not skip warmup; a hard gate
+/// awaits a controlled pressure-regime experiment.
 ///
 /// Errors surface any `host_statistics64` failure.
 pub fn available_memory_bytes() -> io::Result<u64> {

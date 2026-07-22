@@ -15,6 +15,7 @@ use qwen_llm::metal_forward::MetalForward;
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::runtime::{LoadedModel, LoadedModelConfig, Runtime, Sequence, SequenceConfig};
+use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -46,9 +47,29 @@ struct Args {
     #[arg(long, conflicts_with_all = ["prompt", "prompt_file"])]
     requests_jsonl: Option<PathBuf>,
 
-    /// Number of greedy tokens to generate.
+    /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, default_value_t = 64)]
     tokens: usize,
+
+    /// Sampling temperature; zero preserves greedy decoding.
+    #[arg(long = "temp", visible_alias = "temperature", default_value_t = 0.0)]
+    temperature: f32,
+
+    /// Top-k sampling cutoff; zero disables it.
+    #[arg(long, default_value_t = 200)]
+    top_k: usize,
+
+    /// Nucleus sampling cutoff; one disables it.
+    #[arg(long, default_value_t = 1.0)]
+    top_p: f32,
+
+    /// Min-p sampling cutoff; zero disables it.
+    #[arg(long, default_value_t = 0.05)]
+    min_p: f32,
+
+    /// Effective deterministic seed; identical requests reuse the same stream.
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
 
     /// Enable experimental dense-27B Q4_K_M prompt-lookup decode.
     #[arg(long)]
@@ -220,12 +241,25 @@ struct PrefillAdmissionDecision {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonlRequest {
     id: Option<String>,
     prompt: Option<String>,
     prompt_file: Option<PathBuf>,
     tokens: Option<usize>,
     cache_prefix_tokens: Option<usize>,
+    sampling: Option<JsonlSampling>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonlSampling {
+    #[serde(alias = "temp")]
+    temperature: Option<f32>,
+    top_k: Option<usize>,
+    top_p: Option<f32>,
+    min_p: Option<f32>,
+    seed: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -234,6 +268,7 @@ struct PreparedJsonlRequest {
     id: String,
     line: usize,
     prompt_ids: Vec<i32>,
+    sampling: SamplingConfig,
     auto_cache_prefix_tokens: Option<usize>,
     auto_cache_future_hits: usize,
 }
@@ -273,6 +308,31 @@ enum PromptSource {
 enum StopReason {
     Eos,
     TokenLimit,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct SamplingTelemetry {
+    algorithm_version: u32,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    min_p: f32,
+    effective_seed: u64,
+    draws: usize,
+}
+
+impl SamplingTelemetry {
+    fn sampled(config: SamplingConfig, draws: usize) -> Option<Self> {
+        (config.temperature > 0.0).then_some(Self {
+            algorithm_version: SAMPLER_ALGORITHM_VERSION,
+            temperature: config.temperature,
+            top_k: config.top_k,
+            top_p: config.top_p,
+            min_p: config.min_p,
+            effective_seed: config.seed,
+            draws,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -340,6 +400,8 @@ struct RequestTimingRow {
     generated_tokens: usize,
     stop_reason: StopReason,
     decode_policy: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sampling: Option<SamplingTelemetry>,
     terminal_token_target_transition_consumed: bool,
     no_special_tokens: bool,
     prefill_chunk_requested: PrefillChunkArg,
@@ -558,6 +620,8 @@ struct RequestStatsRow {
     generated_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     decode_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sampling: Option<SamplingTelemetry>,
     cache_prefix_tokens: Option<usize>,
     cache_prefix_source: String,
     cache_prefix_hash: Option<String>,
@@ -691,6 +755,41 @@ fn prompt_text(args: &Args) -> Result<(String, PromptSource)> {
     bail!("single-turn generation requires --prompt or --prompt-file")
 }
 
+fn cli_sampling_config(args: &Args) -> Result<SamplingConfig> {
+    SamplingConfig {
+        temperature: args.temperature,
+        top_k: args.top_k,
+        top_p: args.top_p,
+        min_p: args.min_p,
+        seed: args.seed,
+    }
+    .validate()
+    .map_err(anyhow::Error::new)
+    .context("validate CLI sampling configuration")
+}
+
+fn request_sampling_config(request: &JsonlRequest, args: &Args) -> Result<SamplingConfig> {
+    let request = request.sampling.unwrap_or_default();
+    SamplingConfig {
+        temperature: request.temperature.unwrap_or(args.temperature),
+        top_k: request.top_k.unwrap_or(args.top_k),
+        top_p: request.top_p.unwrap_or(args.top_p),
+        min_p: request.min_p.unwrap_or(args.min_p),
+        seed: request.seed.unwrap_or(args.seed),
+    }
+    .validate()
+    .map_err(anyhow::Error::new)
+    .context("validate request sampling configuration")
+}
+
+fn validate_sampling_decode_policy(config: SamplingConfig, prompt_lookup: bool) -> Result<()> {
+    ensure!(
+        !prompt_lookup || config.temperature == 0.0,
+        "--prompt-lookup currently requires greedy decoding (--temp 0)"
+    );
+    Ok(())
+}
+
 const AUTO_CHUNK_PROMPT_MIN: usize = 8192;
 const AUTO_CHUNK_PROMPT_MAX: usize = 16384;
 const AUTO_CHUNK_QUERY_ROWS: usize = 1024;
@@ -702,8 +801,11 @@ fn request_schema_version(
     prompt_lookup: bool,
     has_query_topology: bool,
     has_scratch_overlay: bool,
+    sampled: bool,
 ) -> u32 {
-    if prefill_chunk.is_auto() {
+    if sampled {
+        6
+    } else if prefill_chunk.is_auto() {
         5
     } else if prompt_lookup || has_query_topology || has_scratch_overlay {
         4
@@ -1398,6 +1500,8 @@ fn report_prefill_chunk_decision(decision: Option<&PrefillChunkDecision>, prompt
 fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    let sampling = cli_sampling_config(args)?;
+    validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
 
     let mut timing_file = args
         .request_timings
@@ -1715,6 +1819,8 @@ fn execute_single_turn_request(
         .gguf()
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
+    let sampling_config = cli_sampling_config(args)?;
+    let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let (generation, prompt_lookup_stats) = if args.prompt_lookup {
         let result = generate_prompt_lookup(
             loaded,
@@ -1740,10 +1846,11 @@ fn execute_single_turn_request(
         sequence = result.sequence;
         (result.generation, Some(result.stats))
     } else {
-        let generation = generate_greedy(
+        let generation = generate_serial(
             logits,
             args.tokens,
             &stop_tokens,
+            &mut sampler,
             |token| {
                 let callback_t0 = Instant::now();
                 write!(stdout, "{}", tokenizer.decode_piece(token))?;
@@ -1839,6 +1946,7 @@ fn execute_single_turn_request(
                 args.prompt_lookup,
                 prefill_attention_query.is_some(),
                 prefill_scratch_overlay.is_some(),
+                sampling_config.temperature > 0.0,
             ),
             request_epoch,
             request_index,
@@ -1867,9 +1975,12 @@ fn execute_single_turn_request(
             stop_reason: generation.stop_reason,
             decode_policy: if args.prompt_lookup {
                 "prompt_lookup_l8_d7_target_n8"
+            } else if sampling_config.temperature > 0.0 {
+                "sampled_cpu"
             } else {
                 "greedy_argmax"
             },
+            sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
             terminal_token_target_transition_consumed: false,
             no_special_tokens: args.no_special_tokens,
             prefill_chunk_requested: args.prefill_chunk,
@@ -1934,6 +2045,7 @@ fn execute_single_turn_request(
 fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    cli_sampling_config(args)?;
 
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
@@ -2105,11 +2217,15 @@ fn prepare_jsonl_request_line(
     if prompt_ids.is_empty() {
         bail!("request {id} tokenized to zero tokens");
     }
+    let sampling = request_sampling_config(&request, args)?;
+    validate_sampling_decode_policy(sampling, args.prompt_lookup)
+        .with_context(|| format!("validate decode policy for request {id}"))?;
     Ok(Some(PreparedJsonlRequest {
         request,
         id,
         line: line_no,
         prompt_ids,
+        sampling,
         auto_cache_prefix_tokens: None,
         auto_cache_future_hits: 0,
     }))
@@ -2358,6 +2474,8 @@ fn run_jsonl_request(
         .gguf()
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
+    let sampling_config = prepared.sampling;
+    let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let (generation, generated_text, prompt_lookup_stats) = if args.prompt_lookup {
         let (result, generated_text) = decode_prompt_lookup(
             loaded,
@@ -2373,7 +2491,7 @@ fn run_jsonl_request(
         sequence = result.sequence;
         (result.generation, generated_text, Some(result.stats))
     } else {
-        let (generation, generated_text) = decode_greedy(
+        let (generation, generated_text) = decode_serial(
             &forward,
             tokenizer,
             &mut sequence,
@@ -2381,6 +2499,7 @@ fn run_jsonl_request(
             prompt_ids.len(),
             n_generate,
             &stop_tokens,
+            &mut sampler,
         )?;
         (generation, generated_text, None)
     };
@@ -2407,6 +2526,7 @@ fn run_jsonl_request(
             args.prompt_lookup,
             prefill_attention_query.is_some(),
             prefill_scratch_overlay.is_some(),
+            sampling_config.temperature > 0.0,
         ),
         id: id.to_string(),
         line: prepared.line,
@@ -2417,9 +2537,14 @@ fn run_jsonl_request(
         prompt_hash,
         requested_tokens: n_generate,
         generated_tokens: generated.len(),
-        decode_policy: args
-            .prompt_lookup
-            .then_some("prompt_lookup_l8_d7_target_n8"),
+        decode_policy: if args.prompt_lookup {
+            Some("prompt_lookup_l8_d7_target_n8")
+        } else if sampling_config.temperature > 0.0 {
+            Some("sampled_cpu")
+        } else {
+            None
+        },
+        sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
         cache_prefix_tokens,
         cache_prefix_source: cache_prefix_source.as_str().to_string(),
         cache_prefix_hash,
@@ -2509,7 +2634,7 @@ fn prefill_span(
 }
 
 #[derive(Debug)]
-struct GreedyGeneration {
+struct GenerationResult {
     tokens: Vec<i32>,
     wall_ms: f64,
     first_token_selection_ms: f64,
@@ -2521,13 +2646,14 @@ struct GreedyGeneration {
     stop_reason: StopReason,
 }
 
-fn generate_greedy<OnToken, Transition>(
+fn generate_serial<OnToken, Transition>(
     mut logits: Vec<f32>,
     max_tokens: usize,
     stop_tokens: &[i32],
+    sampler: &mut Sampler,
     mut on_token: OnToken,
     mut transition: Transition,
-) -> Result<GreedyGeneration>
+) -> Result<GenerationResult>
 where
     OnToken: FnMut(i32) -> Result<()>,
     Transition: FnMut(i32) -> Result<Vec<f32>>,
@@ -2545,7 +2671,7 @@ where
 
     while tokens.len() < max_tokens {
         let selection_t0 = Instant::now();
-        let token = argmax_i32(&logits);
+        let token = sampler.sample(&logits)?.token;
         first_token_selection_ms.get_or_insert_with(|| selection_t0.elapsed().as_secs_f64() * 1e3);
         first_token_ready_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
         tokens.push(token);
@@ -2569,7 +2695,7 @@ where
         transitions += 1;
     }
 
-    Ok(GreedyGeneration {
+    Ok(GenerationResult {
         tokens,
         wall_ms: wall_t0.elapsed().as_secs_f64() * 1e3,
         first_token_selection_ms: first_token_selection_ms.unwrap_or(0.0),
@@ -2582,8 +2708,31 @@ where
     })
 }
 
+#[cfg(test)]
+fn generate_greedy<OnToken, Transition>(
+    logits: Vec<f32>,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    on_token: OnToken,
+    transition: Transition,
+) -> Result<GenerationResult>
+where
+    OnToken: FnMut(i32) -> Result<()>,
+    Transition: FnMut(i32) -> Result<Vec<f32>>,
+{
+    let mut sampler = Sampler::new(SamplingConfig::default()).expect("valid greedy sampler");
+    generate_serial(
+        logits,
+        max_tokens,
+        stop_tokens,
+        &mut sampler,
+        on_token,
+        transition,
+    )
+}
+
 struct PromptLookupGeneration {
-    generation: GreedyGeneration,
+    generation: GenerationResult,
     stats: PromptLookupDecodeStats,
     sequence: Sequence,
 }
@@ -2799,7 +2948,7 @@ where
     );
     let transition_ms = transition_wall_ms + post_callback_policy_ms;
     Ok(PromptLookupGeneration {
-        generation: GreedyGeneration {
+        generation: GenerationResult {
             tokens,
             wall_ms: wall_t0.elapsed().as_secs_f64() * 1e3,
             first_token_selection_ms,
@@ -2815,7 +2964,7 @@ where
     })
 }
 
-fn decode_greedy(
+fn decode_serial(
     forward: &MetalForward<'_>,
     tokenizer: &Tokenizer,
     sequence: &mut Sequence,
@@ -2823,13 +2972,15 @@ fn decode_greedy(
     start_position: usize,
     max_tokens: usize,
     stop_tokens: &[i32],
-) -> Result<(GreedyGeneration, String)> {
+    sampler: &mut Sampler,
+) -> Result<(GenerationResult, String)> {
     sequence.check_position(start_position)?;
     let mut generated_text = String::new();
-    let generation = generate_greedy(
+    let generation = generate_serial(
         logits,
         max_tokens,
         stop_tokens,
+        sampler,
         |token| {
             generated_text.push_str(&tokenizer.decode_piece(token));
             Ok(())
@@ -3230,10 +3381,12 @@ mod tests {
                 prompt_file: None,
                 tokens: None,
                 cache_prefix_tokens: None,
+                sampling: None,
             },
             id: id.to_string(),
             line: 1,
             prompt_ids: tokens.to_vec(),
+            sampling: SamplingConfig::default(),
             auto_cache_prefix_tokens: None,
             auto_cache_future_hits: 0,
         }
@@ -3272,26 +3425,89 @@ mod tests {
     }
 
     #[test]
-    fn prefill_schema_versions_preserve_numeric_rows_and_reserve_auto_v5() {
+    fn sampling_request_contract_supports_cli_defaults_and_jsonl_overrides() {
+        let args = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--temp",
+            "0.7",
+            "--seed",
+            "99",
+        ])
+        .unwrap();
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Fixed(1024), false, false, false),
+            cli_sampling_config(&args).unwrap(),
+            SamplingConfig::qwen_chat(99)
+        );
+
+        let request: JsonlRequest = serde_json::from_str(
+            r#"{"prompt":"hello","sampling":{"temp":1.0,"top_k":8,"top_p":0.9,"min_p":0.1,"seed":7}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request_sampling_config(&request, &args).unwrap(),
+            SamplingConfig {
+                temperature: 1.0,
+                top_k: 8,
+                top_p: 0.9,
+                min_p: 0.1,
+                seed: 7,
+            }
+        );
+        assert!(validate_sampling_decode_policy(SamplingConfig::qwen_chat(7), true).is_err());
+        assert!(validate_sampling_decode_policy(SamplingConfig::default(), true).is_ok());
+
+        let prompt_lookup_args = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "-",
+            "--prompt-lookup",
+            "--temp",
+            "0.7",
+        ])
+        .unwrap();
+        cli_sampling_config(&prompt_lookup_args).unwrap();
+        let greedy_override: JsonlRequest =
+            serde_json::from_str(r#"{"prompt":"hello","sampling":{"temperature":0.0}}"#).unwrap();
+        let effective = request_sampling_config(&greedy_override, &prompt_lookup_args).unwrap();
+        assert!(validate_sampling_decode_policy(effective, true).is_ok());
+
+        let typo = serde_json::from_str::<JsonlRequest>(
+            r#"{"prompt":"hello","sampling":{"temprature":0.7}}"#,
+        );
+        assert!(typo.is_err(), "sampling field typos must fail closed");
+    }
+
+    #[test]
+    fn request_schema_versions_preserve_greedy_rows_and_reserve_sampling_v6() {
+        assert_eq!(
+            request_schema_version(PrefillChunkArg::Fixed(1024), false, false, false, false),
             3
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Fixed(1024), true, false, false),
+            request_schema_version(PrefillChunkArg::Fixed(1024), true, false, false, false),
             4
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Fixed(2048), false, true, true),
+            request_schema_version(PrefillChunkArg::Fixed(2048), false, true, true, false),
             4
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Auto, false, false, false),
+            request_schema_version(PrefillChunkArg::Auto, false, false, false, false),
             5
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Auto, true, true, true),
+            request_schema_version(PrefillChunkArg::Auto, true, true, true, false),
             5
+        );
+        assert_eq!(
+            request_schema_version(PrefillChunkArg::Fixed(1024), false, false, false, true),
+            6
         );
     }
 
@@ -4155,6 +4371,36 @@ mod tests {
                 "token:0",
             ]
         );
+    }
+
+    #[test]
+    fn serial_generation_uses_the_seeded_request_sampler() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 0x1234_5678_9abc_def0,
+        };
+        let mut sampler = Sampler::new(config).unwrap();
+        let logits = vec![2.0, 1.5, 1.0, 0.5];
+        let generation = generate_serial(
+            logits.clone(),
+            4,
+            &[],
+            &mut sampler,
+            |_| Ok(()),
+            |_| Ok(logits.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(generation.tokens, [0, 1, 1, 1]);
+        assert_eq!(generation.transitions, 3);
+        assert_eq!(sampler.draws(), 4);
+        let telemetry = SamplingTelemetry::sampled(config, sampler.draws()).unwrap();
+        assert_eq!(telemetry.algorithm_version, SAMPLER_ALGORITHM_VERSION);
+        assert_eq!(telemetry.effective_seed, config.seed);
+        assert_eq!(telemetry.draws, 4);
     }
 
     #[test]

@@ -143,7 +143,6 @@ impl Sampler {
     /// replay is scoped to the supported target/build and guarded by golden
     /// vectors for the RNG, f64 draw conversion, and sampled token stream.
     pub fn sample(&mut self, logits: &[f32]) -> Result<SampledToken, SamplingError> {
-        validate_logits(logits)?;
         if self.config.temperature == 0.0 {
             return Ok(SampledToken {
                 token: greedy_token(logits)?,
@@ -151,10 +150,7 @@ impl Sampler {
             });
         }
 
-        let mut candidates = sorted_candidates(logits)?;
-        if self.config.top_k > 0 {
-            candidates.truncate(self.config.top_k.min(candidates.len()));
-        }
+        let mut candidates = sorted_candidates(logits, self.config.top_k)?;
 
         if self.config.min_p > 0.0 {
             let max_logit = candidates[0].logit;
@@ -218,49 +214,63 @@ impl Sampler {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Candidate {
     token: i32,
     logit: f64,
 }
 
-fn validate_logits(logits: &[f32]) -> Result<(), SamplingError> {
+fn validate_logits_shape(logits: &[f32]) -> Result<(), SamplingError> {
     if logits.is_empty() {
         return Err(SamplingError::EmptyLogits);
     }
     if logits.len() > i32::MAX as usize {
         return Err(SamplingError::VocabularyTooLarge(logits.len()));
     }
-    if let Some((token, _)) = logits.iter().enumerate().find(|(_, logit)| logit.is_nan()) {
-        return Err(SamplingError::NanLogit { token });
-    }
     Ok(())
 }
 
 fn greedy_token(logits: &[f32]) -> Result<i32, SamplingError> {
-    validate_logits(logits)?;
-    Ok(logits
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
-        .expect("validated non-empty logits")
-        .0 as i32)
+    validate_logits_shape(logits)?;
+    let mut best_token = 0usize;
+    let mut best_logit = logits[0];
+    if best_logit.is_nan() {
+        return Err(SamplingError::NanLogit { token: 0 });
+    }
+    for (token, &logit) in logits.iter().enumerate().skip(1) {
+        if logit.is_nan() {
+            return Err(SamplingError::NanLogit { token });
+        }
+        if logit.total_cmp(&best_logit) != Ordering::Less {
+            best_token = token;
+            best_logit = logit;
+        }
+    }
+    Ok(best_token as i32)
 }
 
-fn sorted_candidates(logits: &[f32]) -> Result<Vec<Candidate>, SamplingError> {
-    validate_logits(logits)?;
-    let mut candidates: Vec<_> = logits
-        .iter()
-        .enumerate()
-        .map(|(token, &logit)| Candidate {
+fn sorted_candidates(logits: &[f32], top_k: usize) -> Result<Vec<Candidate>, SamplingError> {
+    validate_logits_shape(logits)?;
+    let mut candidates = Vec::with_capacity(logits.len());
+    for (token, &logit) in logits.iter().enumerate() {
+        if logit.is_nan() {
+            return Err(SamplingError::NanLogit { token });
+        }
+        candidates.push(Candidate {
             token: token as i32,
             logit: f64::from(logit),
-        })
-        .collect();
-    candidates.sort_unstable_by(|a, b| match b.logit.total_cmp(&a.logit) {
+        });
+    }
+
+    let compare = |a: &Candidate, b: &Candidate| match b.logit.total_cmp(&a.logit) {
         Ordering::Equal => a.token.cmp(&b.token),
         order => order,
-    });
+    };
+    if top_k > 0 && top_k < candidates.len() {
+        candidates.select_nth_unstable_by(top_k, compare);
+        candidates.truncate(top_k);
+    }
+    candidates.sort_unstable_by(compare);
     Ok(candidates)
 }
 
@@ -612,6 +622,38 @@ mod tests {
             .map(|_| tied_min_p.sample(&[3.0, 3.0, 1.0]).unwrap().token)
             .collect();
         assert!(tokens.contains(&0) && tokens.contains(&1));
+    }
+
+    #[test]
+    fn partial_top_k_matches_the_total_order_full_sort() {
+        let mut splitmix = SplitMix64(0xfeed_face_cafe_beef);
+        for len in [2usize, 3, 17, 257] {
+            let mut logits: Vec<f32> = (0..len)
+                .map(|_| {
+                    let bits = (splitmix.next() >> 40) as u32;
+                    (bits as f32 / (1u32 << 24) as f32) * 20.0 - 10.0
+                })
+                .collect();
+            logits[0] = 0.0;
+            logits[1] = -0.0;
+            if len >= 3 {
+                logits[2] = logits[0];
+            }
+            if len >= 17 {
+                logits[5] = f32::INFINITY;
+                logits[11] = f32::NEG_INFINITY;
+            }
+
+            let full = sorted_candidates(&logits, 0).unwrap();
+            let mut ks = vec![1, len - 1, len];
+            if len > 8 {
+                ks.push(8);
+            }
+            for k in ks {
+                let partial = sorted_candidates(&logits, k).unwrap();
+                assert_eq!(partial, full[..k], "len={len} k={k}");
+            }
+        }
     }
 
     #[test]

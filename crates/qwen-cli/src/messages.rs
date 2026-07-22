@@ -25,12 +25,23 @@ pub(crate) fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThi
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn load_messages_prompt(
     path: &Path,
     max_messages: Option<usize>,
     thinking_mode: MessagesThinkingMode,
     append_generation_prompt: bool,
 ) -> Result<String> {
+    load_messages_prompt_with_policy(path, max_messages, thinking_mode, append_generation_prompt)
+        .map(|(prompt, _)| prompt)
+}
+
+pub(crate) fn load_messages_prompt_with_policy(
+    path: &Path,
+    max_messages: Option<usize>,
+    thinking_mode: MessagesThinkingMode,
+    append_generation_prompt: bool,
+) -> Result<(String, bool)> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&raw)
         .with_context(|| format!("parse messages input {}", path.display()))?;
@@ -46,10 +57,9 @@ pub(crate) fn load_messages_prompt(
         MessagesThinkingMode::Strip => false,
         MessagesThinkingMode::Auto => messages_auto_preserve_thinking(&meta),
     };
-    Ok(render_qwen_messages_prompt(
-        &messages,
+    Ok((
+        render_qwen_messages_prompt(&messages, preserve_thinking, append_generation_prompt),
         preserve_thinking,
-        append_generation_prompt,
     ))
 }
 

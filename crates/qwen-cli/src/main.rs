@@ -4,7 +4,7 @@ mod messages;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use messages::{load_messages_prompt, messages_thinking_mode};
+use messages::{load_messages_prompt_with_policy, messages_thinking_mode};
 use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome};
 use qwen_llm::metal::{
@@ -359,6 +359,15 @@ enum StopReason {
     TokenLimit,
 }
 
+impl StopReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Eos => "eos",
+            Self::TokenLimit => "token_limit",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 struct SamplingTelemetry {
     algorithm_version: u32,
@@ -507,6 +516,7 @@ struct PreparedRequest {
     pipeline_cache_start: Option<MetalPipelineCacheMetrics>,
     prompt: String,
     prompt_source: PromptSource,
+    completed_checkpoint_eligible: bool,
     prompt_ids: Vec<i32>,
     prompt_acquisition_ms: f64,
     tokenizer_init_ms: f64,
@@ -828,29 +838,32 @@ fn validate_durable_prefix_cache_mode(args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn prompt_text(args: &Args) -> Result<(String, PromptSource)> {
+fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {
     if let Some(prompt) = args.prompt.as_ref() {
-        return Ok((prompt.clone(), PromptSource::Inline));
+        return Ok((prompt.clone(), PromptSource::Inline, false));
     }
     if let Some(path) = args.prompt_file.as_ref() {
         return Ok((
             std::fs::read_to_string(path)
                 .with_context(|| format!("read prompt file {}", path.display()))?,
             PromptSource::File,
+            false,
         ));
     }
     if let Some(path) = args.messages.as_ref() {
+        let (prompt, preserves_assistant_content) = load_messages_prompt_with_policy(
+            path,
+            args.messages_max,
+            messages_thinking_mode(
+                args.messages_preserve_thinking,
+                args.messages_strip_thinking,
+            ),
+            !args.messages_no_generation_prompt,
+        )?;
         return Ok((
-            load_messages_prompt(
-                path,
-                args.messages_max,
-                messages_thinking_mode(
-                    args.messages_preserve_thinking,
-                    args.messages_strip_thinking,
-                ),
-                !args.messages_no_generation_prompt,
-            )?,
+            prompt,
             PromptSource::Messages,
+            preserves_assistant_content && !args.messages_no_generation_prompt,
         ));
     }
     bail!("single-turn generation requires --prompt, --prompt-file, or --messages")
@@ -1667,7 +1680,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
     let first_request_start_allocated =
         timing_enabled.then(|| loaded.context().current_allocated_size());
     let prompt_t0 = Instant::now();
-    let (first_prompt, first_prompt_source) = prompt_text(args)?;
+    let (first_prompt, first_prompt_source, first_completed_checkpoint_eligible) =
+        prompt_text(args)?;
     let first_prompt_acquisition_ms = prompt_t0.elapsed().as_secs_f64() * 1e3;
     let tokenizer_t0 = Instant::now();
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
@@ -1687,6 +1701,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         pipeline_cache_start: first_pipeline_cache_start,
         prompt: first_prompt,
         prompt_source: first_prompt_source,
+        completed_checkpoint_eligible: first_completed_checkpoint_eligible,
         prompt_ids: first_prompt_ids,
         prompt_acquisition_ms: first_prompt_acquisition_ms,
         tokenizer_init_ms: first_tokenizer_init_ms,
@@ -1722,7 +1737,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         let warm_request_start_allocated =
             timing_enabled.then(|| loaded.context().current_allocated_size());
         let prompt_t0 = Instant::now();
-        let (warm_prompt, warm_prompt_source) = prompt_text(args)?;
+        let (warm_prompt, warm_prompt_source, warm_completed_checkpoint_eligible) =
+            prompt_text(args)?;
         let warm_prompt_acquisition_ms = prompt_t0.elapsed().as_secs_f64() * 1e3;
         let tokenization_t0 = Instant::now();
         let warm_prompt_ids = tokenizer
@@ -1735,7 +1751,8 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
         ensure!(
             warm_prompt_source == results[0].prompt_source
                 && warm_prompt == results[0].prompt
-                && warm_prompt_ids == results[0].prompt_ids,
+                && warm_prompt_ids == results[0].prompt_ids
+                && warm_completed_checkpoint_eligible == first_completed_checkpoint_eligible,
             "warm follow-up prompt bytes or token IDs differ from request 0"
         );
         let warm_prepared = PreparedRequest {
@@ -1745,6 +1762,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             pipeline_cache_start: warm_pipeline_cache_start,
             prompt: warm_prompt,
             prompt_source: warm_prompt_source,
+            completed_checkpoint_eligible: warm_completed_checkpoint_eligible,
             prompt_ids: warm_prompt_ids,
             prompt_acquisition_ms: warm_prompt_acquisition_ms,
             tokenizer_init_ms: 0.0,
@@ -1860,6 +1878,7 @@ fn execute_single_turn_request(
         pipeline_cache_start,
         prompt,
         prompt_source,
+        completed_checkpoint_eligible,
         prompt_ids,
         prompt_acquisition_ms,
         tokenizer_init_ms,
@@ -1904,9 +1923,13 @@ fn execute_single_turn_request(
 
     let pipeline_cache_prefill_entry =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
-    let durable_prefix_len =
-        durable_store.and_then(|_| selected_single_turn_durable_prefix(args, prompt_ids.len()));
+    let durable_capture_policy = durable_store.map_or(DurableCapturePolicy::Disabled, |_| {
+        selected_single_turn_durable_policy(args, prompt_ids.len(), completed_checkpoint_eligible)
+    });
+    let durable_prefix_len = durable_capture_policy.prompt_prefix_len();
     let mut durable_prepared: Option<PreparedCheckpoint> = None;
+    let mut durable_capture_kind = None;
+    let mut durable_capture_stop_reason = None;
     let mut durable_restore_ms = 0.0;
     let mut durable_capture_ms = 0.0;
     let mut prompt_logits = None;
@@ -2002,7 +2025,10 @@ fn execute_single_turn_request(
                 None,
                 Some(logits.clone()),
             ) {
-                Ok(prepared) => durable_prepared = Some(prepared),
+                Ok(prepared) => {
+                    durable_prepared = Some(prepared);
+                    durable_capture_kind = Some("prompt");
+                }
                 Err(RuntimeError::MetalModel(MfError::Snapshot(
                     SnapshotValidationError::AllocationFailed { .. },
                 ))) => eprintln!(
@@ -2119,7 +2145,18 @@ fn execute_single_turn_request(
     let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
+    let stop_reason = generation.stop_reason;
     let generated = generation.tokens;
+    let completed_boundary = if durable_capture_policy == DurableCapturePolicy::AutomaticCompleted {
+        Some(derive_completed_checkpoint_boundary(
+            prompt_ids.len(),
+            &generated,
+            generation.transitions,
+            sequence.position(),
+        )?)
+    } else {
+        None
+    };
     if !generated.is_empty() {
         writeln!(stdout)?;
         stdout.flush().context("flush final newline")?;
@@ -2136,6 +2173,46 @@ fn execute_single_turn_request(
     report_prefill_chunk_decision(prefill_chunk_decision.as_ref(), prompt_ids.len());
     let request_end_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
     drop(stdout);
+
+    if let Some(boundary) = completed_boundary {
+        let capture_t0 = Instant::now();
+        let estimated = loaded.estimate_checkpoint_boundary_sizes(
+            &sequence,
+            boundary.consumed_prefix_len,
+            true,
+            false,
+        )?;
+        if estimated.record_bytes > durable_max_record_bytes {
+            eprintln!(
+                concat!(
+                    "warning: completed durable checkpoint skipped: estimated_record_bytes={} ",
+                    "estimated_snapshot_bytes={} max_entry_bytes={}"
+                ),
+                estimated.record_bytes, estimated.snapshot_bytes, durable_max_record_bytes,
+            );
+        } else {
+            let consumed = boundary.consumed_tokens(&prompt_ids, &generated);
+            match loaded.prepare_checkpoint_boundary(
+                &sequence,
+                consumed,
+                Some(boundary.pending_token),
+                None,
+            ) {
+                Ok(prepared) => {
+                    durable_prepared = Some(prepared);
+                    durable_capture_kind = Some("completed");
+                    durable_capture_stop_reason = Some(stop_reason);
+                }
+                Err(RuntimeError::MetalModel(MfError::Snapshot(
+                    SnapshotValidationError::AllocationFailed { .. },
+                ))) => eprintln!(
+                    "warning: completed durable checkpoint allocation failed; continuing without publication"
+                ),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        durable_capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
+    }
 
     let ttft_ms = first_delivery_ms.context("generation produced no first-token delivery")?;
     let first_token_ready_ms = generation_start_ms
@@ -2177,11 +2254,16 @@ fn execute_single_turn_request(
         match loaded.publish_prepared_checkpoint(store, prepared, durable_max_record_bytes) {
             Ok(report) => eprintln!(
                 concat!(
-                    "durable_prefix_cache: publish={} prefix_tokens={} blob_bytes={} ",
+                    "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
+                    "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
                     "evicted={} identity={} capture_ms={:.1} publish_ms={:.1}"
                 ),
                 publish_outcome_label(report.store.outcome),
+                durable_capture_kind.unwrap_or("unknown"),
                 prepared.matched_prefix_len(),
+                prepared.restored_prefix_len(),
+                prepared.has_pending_token(),
+                durable_capture_stop_reason.map_or("none", StopReason::as_str),
                 report.store.blob_bytes,
                 report.store.evicted_entries,
                 identity_cache_outcome_label(report.compatibility.outcome),
@@ -2247,7 +2329,7 @@ fn execute_single_turn_request(
             prompt_tokens: prompt_ids.len(),
             requested_tokens: args.tokens,
             generated_tokens: generated.len(),
-            stop_reason: generation.stop_reason,
+            stop_reason,
             decode_policy: if args.prompt_lookup {
                 "prompt_lookup_l8_d7_target_n8"
             } else if sampling_config.temperature > 0.0 {
@@ -3338,12 +3420,90 @@ fn mib_to_bytes(mib: u64, label: &str) -> Result<u64> {
         .with_context(|| format!("{label} overflow"))
 }
 
-fn selected_single_turn_durable_prefix(args: &Args, prompt_len: usize) -> Option<usize> {
-    if let Some(configured) = args.cache_prefix_tokens {
-        return (configured > 0 && prompt_len > 0).then_some(configured.min(prompt_len));
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurableCapturePolicy {
+    Disabled,
+    ExplicitPrompt(usize),
+    AutomaticPrompt(usize),
+    AutomaticCompleted,
+}
+
+impl DurableCapturePolicy {
+    fn prompt_prefix_len(self) -> Option<usize> {
+        match self {
+            Self::ExplicitPrompt(len) | Self::AutomaticPrompt(len) => Some(len),
+            Self::Disabled | Self::AutomaticCompleted => None,
+        }
     }
-    (args.durable_prefix_cache_min_tokens > 0 && prompt_len >= args.durable_prefix_cache_min_tokens)
-        .then_some(prompt_len)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompletedCheckpointBoundary {
+    consumed_generated_tokens: usize,
+    consumed_prefix_len: usize,
+    pending_token: i32,
+}
+
+impl CompletedCheckpointBoundary {
+    fn consumed_tokens(self, prompt_ids: &[i32], generated: &[i32]) -> Vec<i32> {
+        let mut consumed = Vec::with_capacity(self.consumed_prefix_len);
+        consumed.extend_from_slice(prompt_ids);
+        consumed.extend_from_slice(&generated[..self.consumed_generated_tokens]);
+        consumed
+    }
+}
+
+fn derive_completed_checkpoint_boundary(
+    prompt_len: usize,
+    generated: &[i32],
+    transitions: usize,
+    sequence_position: usize,
+) -> Result<CompletedCheckpointBoundary> {
+    ensure!(!generated.is_empty(), "completed generation has no tokens");
+    ensure!(
+        transitions.checked_add(1) == Some(generated.len()),
+        "completed generation transitions {} do not match token count {}",
+        transitions,
+        generated.len()
+    );
+    let consumed_prefix_len = prompt_len
+        .checked_add(transitions)
+        .context("completed checkpoint prefix length overflow")?;
+    ensure!(
+        sequence_position == consumed_prefix_len,
+        "completed sequence position {} does not match consumed prefix length {}",
+        sequence_position,
+        consumed_prefix_len
+    );
+    Ok(CompletedCheckpointBoundary {
+        consumed_generated_tokens: transitions,
+        consumed_prefix_len,
+        pending_token: generated[transitions],
+    })
+}
+
+fn selected_single_turn_durable_policy(
+    args: &Args,
+    prompt_len: usize,
+    completed_checkpoint_eligible: bool,
+) -> DurableCapturePolicy {
+    if let Some(configured) = args.cache_prefix_tokens {
+        return if configured > 0 && prompt_len > 0 {
+            DurableCapturePolicy::ExplicitPrompt(configured.min(prompt_len))
+        } else {
+            DurableCapturePolicy::Disabled
+        };
+    }
+    if args.durable_prefix_cache_min_tokens == 0
+        || prompt_len < args.durable_prefix_cache_min_tokens
+    {
+        return DurableCapturePolicy::Disabled;
+    }
+    if completed_checkpoint_eligible {
+        DurableCapturePolicy::AutomaticCompleted
+    } else {
+        DurableCapturePolicy::AutomaticPrompt(prompt_len)
+    }
 }
 
 fn selected_single_turn_durable_lookup_len(args: &Args, prompt_len: usize) -> usize {
@@ -3883,10 +4043,13 @@ mod tests {
             "cache",
         ])
         .unwrap();
-        assert_eq!(selected_single_turn_durable_prefix(&automatic, 1023), None);
         assert_eq!(
-            selected_single_turn_durable_prefix(&automatic, 1024),
-            Some(1024)
+            selected_single_turn_durable_policy(&automatic, 1023, false),
+            DurableCapturePolicy::Disabled
+        );
+        assert_eq!(
+            selected_single_turn_durable_policy(&automatic, 1024, false),
+            DurableCapturePolicy::AutomaticPrompt(1024)
         );
         assert_eq!(
             selected_single_turn_durable_lookup_len(&automatic, 2048),
@@ -3905,8 +4068,27 @@ mod tests {
             "64",
         ])
         .unwrap();
-        assert_eq!(selected_single_turn_durable_prefix(&explicit, 32), Some(32));
+        assert_eq!(
+            selected_single_turn_durable_policy(&explicit, 32, true),
+            DurableCapturePolicy::ExplicitPrompt(32)
+        );
         assert_eq!(selected_single_turn_durable_lookup_len(&explicit, 2048), 64);
+
+        let completed = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-preserve-thinking",
+            "--durable-prefix-cache",
+            "cache",
+        ])
+        .unwrap();
+        assert_eq!(
+            selected_single_turn_durable_policy(&completed, 1024, true),
+            DurableCapturePolicy::AutomaticCompleted
+        );
 
         let disabled = Args::try_parse_from([
             "qwen",
@@ -3920,11 +4102,111 @@ mod tests {
             "0",
         ])
         .unwrap();
-        assert_eq!(selected_single_turn_durable_prefix(&disabled, 4096), None);
+        assert_eq!(
+            selected_single_turn_durable_policy(&disabled, 4096, true),
+            DurableCapturePolicy::Disabled
+        );
         assert_eq!(
             selected_single_turn_durable_lookup_len(&disabled, 4096),
             4096
         );
+    }
+
+    #[test]
+    fn completed_checkpoint_boundary_tracks_consumed_and_pending_tokens() {
+        for generated in [[7].as_slice(), [7, 8, 9].as_slice()] {
+            let transitions = generated.len() - 1;
+            let boundary =
+                derive_completed_checkpoint_boundary(3, generated, transitions, 3 + transitions)
+                    .unwrap();
+            assert_eq!(boundary.consumed_generated_tokens, transitions);
+            assert_eq!(boundary.consumed_prefix_len, 3 + transitions);
+            assert_eq!(boundary.pending_token, generated[transitions]);
+            assert_eq!(
+                boundary.consumed_tokens(&[1, 2, 3], generated),
+                [1, 2, 3]
+                    .into_iter()
+                    .chain(generated[..transitions].iter().copied())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn completed_checkpoint_boundary_rejects_invalid_generation_state() {
+        assert!(derive_completed_checkpoint_boundary(3, &[], 0, 3).is_err());
+        assert!(derive_completed_checkpoint_boundary(3, &[7, 8], 0, 3).is_err());
+        assert!(derive_completed_checkpoint_boundary(3, &[7, 8], 1, 3).is_err());
+    }
+
+    #[test]
+    fn prompt_loading_gates_completed_capture_on_canonical_history() {
+        let root =
+            std::env::temp_dir().join(format!("qwen-completed-policy-{}", std::process::id()));
+        let messages = root.with_extension("json");
+        let prompt_file = root.with_extension("txt");
+        std::fs::write(
+            &messages,
+            r#"{
+                "meta": {"preserve_thinking": true},
+                "messages": [{"role": "user", "content": "hi"}]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(&prompt_file, "hi").unwrap();
+
+        let messages_path = messages.to_str().unwrap();
+        let prompt_path = prompt_file.to_str().unwrap();
+        let cases = [
+            (
+                vec!["qwen", "--model", "model.gguf", "--messages", messages_path],
+                true,
+            ),
+            (
+                vec![
+                    "qwen",
+                    "--model",
+                    "model.gguf",
+                    "--messages",
+                    messages_path,
+                    "--messages-strip-thinking",
+                ],
+                false,
+            ),
+            (
+                vec![
+                    "qwen",
+                    "--model",
+                    "model.gguf",
+                    "--messages",
+                    messages_path,
+                    "--messages-no-generation-prompt",
+                ],
+                false,
+            ),
+            (
+                vec!["qwen", "--model", "model.gguf", "--prompt", "hi"],
+                false,
+            ),
+            (
+                vec![
+                    "qwen",
+                    "--model",
+                    "model.gguf",
+                    "--prompt-file",
+                    prompt_path,
+                ],
+                false,
+            ),
+        ];
+        for (argv, expected) in cases {
+            let args = Args::try_parse_from(argv).unwrap();
+            let (_, _, eligible) = prompt_text(&args).unwrap();
+            assert_eq!(eligible, expected);
+        }
+
+        std::fs::remove_file(messages).unwrap();
+        std::fs::remove_file(prompt_file).unwrap();
     }
 
     #[test]

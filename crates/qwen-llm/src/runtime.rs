@@ -515,15 +515,29 @@ pub const DEFAULT_PREFETCH_MIN_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 /// Default cache-residency threshold for [`PrefetchPolicy::ColdOnly`]
 /// used by [`LoadedModelConfig::default`].
 ///
-/// A value of `0.5` says: prefetch if the shard is less than half
-/// resident in the unified buffer cache. This is a reasonable initial
-/// estimate — the measured Wc vs Wo warm-load numbers show ColdOnly
-/// at 0.5 correctly skips when files are 100% resident and correctly
-/// runs when they're 0% resident — but the exact break-even threshold
-/// has not been calibrated by a residency sweep across intermediate
-/// values (25%, 75%, 90%). Adjust here if a calibration experiment
-/// identifies a better default.
-pub const DEFAULT_COLD_ONLY_THRESHOLD: f64 = 0.5;
+/// Value `0.9` says: prefetch if the shard is less than 90% resident.
+///
+/// Reasoning (analytical, verified against measured cold/warm endpoints;
+/// intermediate-residency sweep is a follow-up):
+///
+/// * Cold-drive prefetch throughput: ~6.7 GB/s (4-worker parallel pread
+///   on Apple Silicon internal SSD; measured on 27B and A3B).
+/// * Metal demand-page throughput: ~0.5–0.7 GB/s (single-thread mmap
+///   demand paging; measured on the same drive).
+/// * Ratio: prefetch is ~10× faster per byte than demand paging.
+/// * Therefore prefetching a fraction `f = (1 - resident_fraction)` of
+///   cold bytes wins vs. paying `f × 10× per byte` for Metal to
+///   demand-page them, as long as `f > 0.1`, i.e. the file is < 90%
+///   resident.
+///
+/// The prior default was `0.5`, chosen without this analysis. `0.5`
+/// would skip prefetch on files at 60–89% resident even though prefetch
+/// still wins there. Numerical values above ~0.9 have small effective
+/// difference because at very-warm the prefetch itself is a short RAM
+/// copy (measured Wa vs Wo on 27B: only +170 ms overhead when file was
+/// 100% resident with `Always`), so the loss from an unnecessary
+/// prefetch is bounded.
+pub const DEFAULT_COLD_ONLY_THRESHOLD: f64 = 0.9;
 
 /// A validated cache-residency threshold in `[0.0, 1.0]`.
 ///

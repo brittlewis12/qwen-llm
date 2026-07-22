@@ -1632,6 +1632,7 @@ fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
             model_path,
             LoadedModelConfig {
                 prefix_cache_max_bytes: prefix_cache_max_bytes(args)?,
+                ..LoadedModelConfig::default()
             },
         )
         .with_context(|| format!("load model {}", model_path.display()))?;
@@ -2328,6 +2329,7 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
             model_path,
             LoadedModelConfig {
                 prefix_cache_max_bytes: prefix_cache_max_bytes(args)?,
+                ..LoadedModelConfig::default()
             },
         )
         .with_context(|| format!("load model {}", model_path.display()))?;

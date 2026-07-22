@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use qwen_llm::cache_probe::{invalidate_file_cache, probe_file_residency};
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
-use qwen_llm::runtime::{LoadedModelConfig, PrefetchPolicy, Runtime};
+use qwen_llm::runtime::{DEFAULT_COLD_ONLY_THRESHOLD, LoadedModelConfig, PrefetchPolicy, Runtime};
 
 #[derive(Debug)]
 struct Args {
@@ -54,9 +54,8 @@ fn parse_args() -> Result<Args, String> {
                 policy = match v.as_str() {
                     "off" => PrefetchPolicy::Off,
                     "always" => PrefetchPolicy::Always,
-                    "cold-only" => {
-                        PrefetchPolicy::cold_only(0.5).expect("0.5 is a valid threshold")
-                    }
+                    "cold-only" => PrefetchPolicy::cold_only(DEFAULT_COLD_ONLY_THRESHOLD)
+                        .expect("DEFAULT_COLD_ONLY_THRESHOLD is a valid fraction"),
                     other => return Err(format!("unknown policy: {other}")),
                 };
             }

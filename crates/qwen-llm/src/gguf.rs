@@ -84,6 +84,28 @@ pub struct GgufShard {
     pub alignment: u64,
 }
 
+impl GgufShard {
+    /// Length of the mapped file in bytes.
+    pub fn mmap_len(&self) -> usize {
+        self.mmap.len()
+    }
+
+    /// Read-only view over the whole mapped file. Used by external
+    /// warmup / diagnostic tooling that needs to walk the mapping
+    /// without going through the tensor table. Not on the hot path.
+    pub fn mmap_bytes(&self) -> &[u8] {
+        &self.mmap
+    }
+
+    /// Pass an [`memmap2::Advice`] hint to the kernel for this shard's
+    /// mapping. Callers can use this to signal expected access patterns
+    /// (e.g. `WillNeed` before a warmup phase) without needing access to
+    /// the underlying `Arc<Mmap>`.
+    pub fn advise(&self, advice: memmap2::Advice) -> std::io::Result<()> {
+        self.mmap.advise(advice)
+    }
+}
+
 /// One logical GGUF model, backed by one or more mmap'd GGUF shards.
 ///
 /// * `shards` are held for the full lifetime; tensor slices reference them.

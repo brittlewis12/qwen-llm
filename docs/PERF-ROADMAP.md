@@ -749,18 +749,19 @@ policy, and makes assistant-boundary forks ancestor-reusable. There is no
 year-core injection. Prefix productization is complete for guarded serial use;
 do not keep it in the active optimization queue by inventing more cache policy.
 
-1. **Single-pass topology-preserving loader I/O ladder, post-v0.612**: range
-   selection is closed because every base-weight tensor byte is required.
-   Compare direct parallel `pread` into the proven exact-sized shared
-   destinations against a transient mapped source plus batched GPU blits. Both
-   must preserve exact bytes and 733 independent offset-zero resources. The blit
-   floor must save at least `112 ms` candidate-ready: 15% of `~748 ms`,
-   projecting about 9% of v0.602 first byte. Full state and loaded parity belong
-   to a later integrated pilot, not the primitive gate. Test write-combined as a
-   separate CPU-copy arm. `MTLIO` remains complexity-deferred. First expose
-   `--intent disposable` in `scripts/bench-first-byte.sh` so more than a single
-   A3B round is available. Belief medium; difficulty M. Prize hundreds of
-   milliseconds on every fresh A3B load plus reduced page-cache duplication.
+1. **A3B direct-pread Auto admission**: v0.617 and v0.620 close the mechanism
+   and force-only product path. Against the current mmap parallel population,
+   pread saves paired median `205.122 ms` of load, `205.937 ms` to first generated
+   byte, and `249.905 ms` through exit, all 6/6. Full state is bit exact and all
+   loaded P/D/R gates pass. Change only the authenticated disposable A3B Auto
+   selector from `MmapCopy` to `Pread`; preserve explicit true as mmap copy,
+   explicit `pread`, `=0` rollback, unsupported fallback, and reusable intent.
+   Run policy tests plus one actual-Auto six-pair confirmation and a bounded
+   storage-cold guardrail. Do not claim the halved task RSS as physical-memory
+   removal: footprint is flat and system CPU rises. Current `ColdOnly` prefetch
+   still precedes population on storage-cold loads; coordinate or suppress that
+   first pass only if the cold guard proves duplicated work is material. Belief
+   high; difficulty S for warm admission, M for later cold-pass coordination.
 2. **Checkpoint restore/publication I/O and memory**: the intended client grows
    the observed identity-hit boundary to `554.5 ms` restore plus `53.1 ms`
    capture and `1,121.2 ms` publication for a roughly 1.02 GB checkpoint.

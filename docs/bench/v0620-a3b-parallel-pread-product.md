@@ -1,6 +1,7 @@
 # v0.620 A3B Direct-Pread Product Confirmation
 
-Status: preregistered; this packet remains unrun.
+Status: GO for explicit direct pread over explicit mmap parallel copy on the
+frozen single-shard A3B asset. Default Auto remains unchanged.
 
 ## Intent
 
@@ -107,3 +108,19 @@ single-shard A3B asset.
 
 A GO does not authorize default selection, other assets, storage-cold claims,
 physical-memory savings, serving, concurrent loading, or lower system CPU.
+
+## Result
+
+All six fixed-order output-128 pairs pass every gate. Authoritative paired
+median savings are `205.122 ms` load, `205.937 ms` first byte, and `249.905 ms`
+exit, with 6/6 wins and 3/3 in both order strata. Median load B/A is
+`0.810124x`. Population ready improves by paired median `206.301 ms`, localizing
+the endpoint movement to destination population.
+
+Every child emits the frozen 590-byte stdout with SHA-256
+`e18fd50a1e2add01cfed4f498bf0052b630653517057cda3620b302d1a68f198`.
+Maximum RSS B/A is `0.504262`, while physical-footprint B/A is `0.999592`.
+User CPU falls sharply, system CPU rises, and total CPU falls. All fresh major
+fault, block-input, pressure, identity, marker, ledger, inventory, and
+completion seals pass. The exact authority remains force-only; an Auto selector
+change requires a separate policy decision and actual-Auto guard.

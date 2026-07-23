@@ -1,7 +1,8 @@
 # v0.619 A3B Direct-Pread Loader Confirmation
 
-Status: preregistered; implementation is present and this v0.619 packet remains
-unrun.
+Status: completed with no authority. Correctness and loaded noninferiority pass;
+the first fresh child exposes stdout tracing contamination and seals a contract
+defect.
 
 ## Intent
 
@@ -117,3 +118,18 @@ single-shard A3B asset and geometry. It does not authorize default selection,
 other assets, storage-cold claims, physical-memory savings, serving or
 concurrent-load behavior. v0.618 remains non-authoritative regardless of this
 packet's outcome.
+
+## Result
+
+The full-state correctness gate passes. All 12 loaded children complete and all
+six pairs pass stability, per-pair prefill/decode/request noninferiority,
+memory, pressure, and output-identity gates.
+
+The first fresh A child exits successfully, but stdout begins with timestamped
+INFO prefetch telemetry before generated model bytes. The inherited external
+first-byte parser therefore observes output before the recorded model-load
+boundary and rejects `outer_residual_ms.left` as nonpositive. The packet seals
+`implementation_or_contract_defect`, authority `none`, and launches no further
+fresh child. Its A arm also selects ordinary copied loading, so it is not the
+marginal mmap-parallel baseline. v0.620 imports only the sealed correctness and
+loaded evidence after the isolated stdout fix.

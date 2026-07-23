@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-23 - v0.617-v0.620 A3B Direct-Pread Population
+
+Status: GO for explicit direct-pread population over explicit mmap parallel
+copy on the frozen single-shard A3B asset. Default Auto and reusable loads are
+unchanged.
+
+- v0.617 establishes the primitive. Across six `AB/BA/BA/AB/AB/BA` pairs,
+  direct retained-descriptor pread populates the same 733 exact-sized,
+  offset-zero resources in `574.661 ms` versus `788.664 ms`; paired saving is
+  `214.743 ms`, B/A is `0.727711x`, and B wins 6/6. Minor faults fall by about
+  1.350 million, matching one 16 KiB page pass over the tensor bytes.
+- v0.618 transfers the direction but has no authority: its one-repetition
+  output-1 packet silently replaced the inherited per-pair loaded contract with
+  an aggregate check. Keep its roughly 211 ms load/estimated-first-byte result
+  as reconnaissance only.
+- v0.619 restores full-state correctness and the exact v0.602 loaded protocol.
+  Every destination byte, logit, KV/GDN/conv state, argmax, transition, marker,
+  and ledger passes. All six loaded pairs pass every stability and 1% P/D/R
+  gate. The first fresh A child then exposes INFO prefetch telemetry on stdout;
+  the external first-byte timestamp observes diagnostics before model load and
+  the packet seals `implementation_or_contract_defect` with no authority.
+- Commit `ea8ec11` routes `qwen` tracing to stderr, restoring stdout as a clean
+  generated-byte channel. v0.619 also reveals that inherited `=0` A is ordinary
+  sequential copied loading, not the marginal current Auto baseline.
+- v0.620 therefore imports the sealed correctness/loaded evidence and compares
+  forced mmap parallel copy with forced pread over six fresh output-128 pairs.
+  Paired median load saving is `205.122 ms`, first-byte saving is `205.937 ms`,
+  and exit saving is `249.905 ms`; every metric wins 6/6 and 3/3 in each order
+  stratum. Median arm endpoints are load `1078.014 -> 875.757 ms`, first byte
+  `1472.369 -> 1266.928 ms`, and exit `2979.628 -> 2732.224 ms`.
+- Population ready falls `737.242 -> 532.404 ms`; its paired `206.301 ms`
+  saving explains essentially all load and first-byte movement. Allocation,
+  source setup, and binding are unchanged at this scale.
+- Maximum RSS B/A is `0.504262`, but physical-footprint B/A is `0.999592`.
+  Direct pread avoids process population of the source mmap and associated PTEs;
+  it does not remove the 22.1 GB destination or prove physical-memory savings.
+  User CPU falls `1.58 -> 0.20 s`, system CPU rises `2.155 -> 2.67 s`, and total
+  CPU falls `3.735 -> 2.87 s`. Energy and concurrent-loader effects are
+  unmeasured.
+- All 12 stdout files are byte-identical, every fresh child has zero major
+  faults and block input, pressure remains clean, and the complete v0.619/v0.620
+  inventories and completion seals verify. Slight fresh prefill/TTFT regressions
+  in 2/6 pairs stay below 0.57%; four pairs and both medians favor pread, while
+  the stronger five-repetition loaded result is neutral.
+
+Artifacts: `target/profiles/v0617-a3b-parallel-pread-floor-p1/`,
+`target/profiles/v0619-a3b-parallel-pread-loader-p1/`, and
+`target/profiles/v0620-a3b-parallel-pread-product-p1/`. Implementation commits:
+`7aebed4`, `375d263`, and `ea8ec11`. Adversarial review: `cx` sessions
+`019f9093-8c5e-7950-b7cd-a6517d197fe2`,
+`019f90a2-2c35-7fe1-8f73-27f0744adbc8`, and
+`019f90de-4941-7792-bbb2-937b70bca220`.
+
 ## 2026-07-23 - v0.616 Ring0 Durable-Checkpoint Product Transfer
 
 Status: the bounded external client adapter and intended Qwen3.6 27B path pass.

@@ -26,7 +26,8 @@ use gguf_rs::{GGUFContainer, GGUFModel};
 use memmap2::Mmap;
 use serde_json::Value;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{self, BufReader};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -304,6 +305,59 @@ impl GgufFile {
             )));
         }
         Ok(&shard.mmap[start..end])
+    }
+
+    /// Read an exact validated range from the descriptor retained for a shard.
+    ///
+    /// This deliberately does not reopen `GgufShard::path`: callers keep the
+    /// same vnode identity that was parsed, validated, and memory-mapped.
+    pub fn read_shard_exact_at(
+        &self,
+        shard_idx: usize,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), GgufError> {
+        let Some(shard) = self.shards.get(shard_idx) else {
+            return Err(GgufError::Decode(format!(
+                "range references missing shard {shard_idx}"
+            )));
+        };
+        let length = u64::try_from(destination.len()).map_err(|_| {
+            GgufError::Decode(format!(
+                "range length {} does not fit u64",
+                destination.len()
+            ))
+        })?;
+        let end = offset.checked_add(length).ok_or_else(|| {
+            GgufError::Decode(format!(
+                "range endpoint overflows: offset={offset} length={length}"
+            ))
+        })?;
+        if end > shard.mmap.len() as u64 {
+            return Err(GgufError::Decode(format!(
+                "range [{offset}..{end}) exceeds shard {shard_idx} length {}",
+                shard.mmap.len()
+            )));
+        }
+
+        let mut read = 0usize;
+        while read < destination.len() {
+            let read_offset = offset
+                .checked_add(read as u64)
+                .ok_or_else(|| GgufError::Decode("range read offset overflow".to_string()))?;
+            match shard.file.read_at(&mut destination[read..], read_offset) {
+                Ok(0) => {
+                    return Err(GgufError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("unexpected EOF in shard {shard_idx} at {read_offset}"),
+                    )));
+                }
+                Ok(bytes) => read += bytes,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(GgufError::Io(error)),
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn slice(&self, desc: &TensorDesc) -> &[u8] {
@@ -1579,6 +1633,35 @@ mod tests {
     }
 
     #[test]
+    fn exact_shard_read_keeps_opened_file_identity() {
+        let bytes = build_minimal_gguf();
+        let path = write_temp(&bytes);
+        let replacement = path.with_extension("replacement.gguf");
+        let g = GgufFile::open(&path).expect("minimal gguf should parse");
+        let tensor = g.find("t").expect("tensor").clone();
+
+        write_file(&replacement, &vec![0xA5; bytes.len()]);
+        std::fs::rename(&replacement, &path).expect("replace path");
+
+        let mut actual = vec![0u8; tensor.n_bytes as usize];
+        g.read_shard_exact_at(tensor.shard_idx, tensor.data_offset, &mut actual)
+            .expect("read retained descriptor");
+        assert_eq!(actual, g.try_slice(&tensor).expect("mapped tensor"));
+        assert!(actual.iter().any(|&byte| byte != 0xA5));
+
+        assert!(matches!(
+            g.read_shard_exact_at(99, 0, &mut actual),
+            Err(GgufError::Decode(_))
+        ));
+        assert!(matches!(
+            g.read_shard_exact_at(0, u64::MAX, &mut actual),
+            Err(GgufError::Decode(_))
+        ));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn opens_split_gguf_from_first_shard() {
         let dir = temp_split_dir();
         let first = dir.join("model-00001-of-00002.gguf");
@@ -1626,6 +1709,13 @@ mod tests {
                 .expect("validated shard range"),
             &1.0f32.to_le_bytes()
         );
+        let mut exact = [0u8; 4];
+        g.read_shard_exact_at(a.shard_idx, a.data_offset, &mut exact)
+            .expect("exact retained-descriptor read");
+        assert_eq!(exact, 1.0f32.to_le_bytes());
+        g.read_shard_exact_at(b.shard_idx, b.data_offset, &mut exact)
+            .expect("exact second-shard read");
+        assert_eq!(exact, 2.0f32.to_le_bytes());
 
         let mut forged = a.clone();
         forged.shard_idx = 99;
@@ -1650,6 +1740,13 @@ mod tests {
         );
         assert!(matches!(
             g.try_shard_range(0, (first_len - 1) as u64, 2),
+            Err(GgufError::Decode(_))
+        ));
+        let mut empty = [];
+        g.read_shard_exact_at(0, first_len as u64, &mut empty)
+            .expect("exact-end empty read");
+        assert!(matches!(
+            g.read_shard_exact_at(0, (first_len - 1) as u64, &mut exact[..2]),
             Err(GgufError::Decode(_))
         ));
 

@@ -296,6 +296,7 @@ const FLOOR_PROFILES: [FloorProfile; 2] = [
 enum ArenaFloorArm {
     Copied,
     ParallelCopied,
+    ParallelPread,
     ArenaSerial,
     ArenaFour,
 }
@@ -305,9 +306,14 @@ impl ArenaFloorArm {
         match self {
             Self::Copied => "copied",
             Self::ParallelCopied => "parallel-copied",
+            Self::ParallelPread => "parallel-pread",
             Self::ArenaSerial => "arena-serial",
             Self::ArenaFour => "arena-four",
         }
+    }
+
+    fn uses_parallel_schedule(self) -> bool {
+        matches!(self, Self::ParallelCopied | Self::ParallelPread)
     }
 }
 
@@ -391,6 +397,12 @@ struct ParallelCopySchedule {
 
 struct ParallelCopyTask<'a> {
     source: &'a [u8],
+    destination: &'a mut [u8],
+}
+
+struct ParallelPreadTask<'a> {
+    shard_idx: usize,
+    source_offset: u64,
     destination: &'a mut [u8],
 }
 
@@ -869,6 +881,138 @@ unsafe fn exclusive_buffer_bytes_mut(buffer: &mut Buffer) -> &mut [u8] {
     }
 }
 
+fn allocate_copied_resources(ctx: &MetalContext, direct: &[&TensorDesc]) -> Result<Vec<Buffer>> {
+    let mut resources = Vec::with_capacity(direct.len());
+    for desc in direct {
+        let length = usize::try_from(desc.n_bytes)
+            .map_err(|_| anyhow!("tensor byte length does not fit usize"))?;
+        resources.push(ctx.buffer_uninit(length)?);
+    }
+    Ok(resources)
+}
+
+fn validate_copied_destinations(
+    resources: &[Buffer],
+    direct: &[&TensorDesc],
+    operation: &str,
+) -> Result<Vec<(usize, usize)>> {
+    if resources.len() != direct.len() {
+        return Err(anyhow!("{operation} destination count drifted"));
+    }
+    let mut resource_identities = HashSet::with_capacity(resources.len());
+    let mut destination_ranges = Vec::with_capacity(resources.len());
+    for (request_index, buffer) in resources.iter().enumerate() {
+        let identity = Retained::as_ptr(buffer) as *const () as usize;
+        if buffer.length() == 0
+            || buffer.storageMode() != MTLStorageMode::Shared
+            || buffer.cpuCacheMode() != MTLCPUCacheMode::DefaultCache
+            || buffer.hazardTrackingMode() != MTLHazardTrackingMode::Tracked
+            || buffer.length() as u64 != direct[request_index].n_bytes
+        {
+            return Err(anyhow!(
+                "{operation} destination resource {request_index} mode or length drifted"
+            ));
+        }
+        let start = buffer.contents().as_ptr().cast::<u8>() as usize;
+        let end = start
+            .checked_add(buffer.length())
+            .ok_or_else(|| anyhow!("{operation} destination range overflow"))?;
+        if !resource_identities.insert(identity) || start == 0 {
+            return Err(anyhow!(
+                "{operation} destination resource {request_index} drifted"
+            ));
+        }
+        destination_ranges.push((start, end));
+    }
+    let mut ranges_by_address = destination_ranges.clone();
+    ranges_by_address.sort_unstable();
+    if ranges_by_address
+        .windows(2)
+        .any(|pair| pair[0].1 > pair[1].0)
+    {
+        return Err(anyhow!("{operation} destination resources overlap"));
+    }
+    Ok(destination_ranges)
+}
+
+fn order_parallel_tasks<T>(
+    tasks_by_request: &mut [Option<T>],
+    schedule: &ParallelCopySchedule,
+    operation: &str,
+) -> Result<Vec<T>> {
+    let mut tasks = Vec::with_capacity(tasks_by_request.len());
+    for &request_index in &schedule.sorted_request_indices {
+        tasks.push(
+            tasks_by_request
+                .get_mut(request_index)
+                .ok_or_else(|| anyhow!("{operation} request {request_index} is out of range"))?
+                .take()
+                .ok_or_else(|| {
+                    anyhow!("{operation} request {request_index} was assigned more than once")
+                })?,
+        );
+    }
+    if tasks_by_request.iter().any(Option::is_some) {
+        return Err(anyhow!("{operation} task union is incomplete"));
+    }
+    Ok(tasks)
+}
+
+fn partition_parallel_tasks<'a, T>(
+    tasks: &'a mut [T],
+    schedule: &ParallelCopySchedule,
+    operation: &str,
+) -> Result<Vec<&'a mut [T]>> {
+    let mut task_tail = tasks;
+    let mut worker_partitions = Vec::with_capacity(PARALLEL_COPY_WORKERS);
+    let mut consumed = 0usize;
+    for (worker, partition) in schedule.partitions.iter().enumerate() {
+        if partition.start != consumed || partition.end > schedule.sorted_request_indices.len() {
+            return Err(anyhow!("{operation} worker {worker} partition is invalid"));
+        }
+        let count = partition
+            .end
+            .checked_sub(partition.start)
+            .ok_or_else(|| anyhow!("{operation} worker {worker} partition underflow"))?;
+        if count == 0 || count > task_tail.len() {
+            return Err(anyhow!(
+                "{operation} worker {worker} partition extent is invalid"
+            ));
+        }
+        let (worker_tasks, remaining) = task_tail.split_at_mut(count);
+        worker_partitions.push(worker_tasks);
+        task_tail = remaining;
+        consumed = partition.end;
+    }
+    if consumed != schedule.sorted_request_indices.len() || !task_tail.is_empty() {
+        return Err(anyhow!("{operation} partitions do not consume every task"));
+    }
+    Ok(worker_partitions)
+}
+
+fn build_copied_bindings(
+    profile: &FloorProfile,
+    direct: &[&TensorDesc],
+    resources: &[Buffer],
+) -> Result<Vec<Binding>> {
+    let bindings = resources
+        .iter()
+        .enumerate()
+        .zip(direct)
+        .map(|((resource_index, buffer), desc)| {
+            Ok(Binding {
+                buffer: buffer.clone(),
+                resource_index,
+                offset: 0,
+                length: usize::try_from(desc.n_bytes)
+                    .map_err(|_| anyhow!("tensor byte length does not fit usize"))?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    validate_copied_topology(profile, direct, resources, &bindings)?;
+    Ok(bindings)
+}
+
 fn materialize_copied(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -920,51 +1064,14 @@ fn materialize_parallel_copied(
 ) -> Result<Materialized> {
     let ready_started = Instant::now();
     let allocation_started = ready_started;
-    let mut resources = Vec::with_capacity(direct.len());
-    for desc in direct {
-        let length = usize::try_from(desc.n_bytes)
-            .map_err(|_| anyhow!("tensor byte length does not fit usize"))?;
-        resources.push(ctx.buffer_uninit(length)?);
-    }
+    let mut resources = allocate_copied_resources(ctx, direct)?;
     let allocation_finished = Instant::now();
 
     let timed_schedule = frozen_parallel_copy_schedule(profile, direct)?;
     if &timed_schedule != schedule {
         return Err(anyhow!("parallel-copy timed schedule proof drifted"));
     }
-    let mut resource_identities = HashSet::with_capacity(resources.len());
-    let mut destination_ranges = Vec::with_capacity(resources.len());
-    for (request_index, buffer) in resources.iter().enumerate() {
-        let identity = Retained::as_ptr(buffer) as *const () as usize;
-        if buffer.length() == 0
-            || buffer.storageMode() != MTLStorageMode::Shared
-            || buffer.cpuCacheMode() != MTLCPUCacheMode::DefaultCache
-            || buffer.hazardTrackingMode() != MTLHazardTrackingMode::Tracked
-            || buffer.length() as u64 != direct[request_index].n_bytes
-        {
-            return Err(anyhow!(
-                "parallel-copy destination resource {request_index} mode or length drifted"
-            ));
-        }
-        let start = buffer.contents().as_ptr().cast::<u8>() as usize;
-        let end = start
-            .checked_add(buffer.length())
-            .ok_or_else(|| anyhow!("parallel-copy destination range overflow"))?;
-        if !resource_identities.insert(identity) || start == 0 {
-            return Err(anyhow!(
-                "parallel-copy destination resource {request_index} drifted"
-            ));
-        }
-        destination_ranges.push((start, end));
-    }
-    let mut ranges_by_address = destination_ranges.clone();
-    ranges_by_address.sort_unstable();
-    if ranges_by_address
-        .windows(2)
-        .any(|pair| pair[0].1 > pair[1].0)
-    {
-        return Err(anyhow!("parallel-copy destination resources overlap"));
-    }
+    let destination_ranges = validate_copied_destinations(&resources, direct, "parallel-copy")?;
 
     let shard_lengths = gguf.shard_mapped_lengths();
     let mut sources = Vec::with_capacity(direct.len());
@@ -1015,49 +1122,8 @@ fn materialize_parallel_copied(
             })
         })
         .collect::<Vec<_>>();
-    let mut tasks = Vec::with_capacity(tasks_by_request.len());
-    for &request_index in &schedule.sorted_request_indices {
-        tasks.push(
-            tasks_by_request
-                .get_mut(request_index)
-                .ok_or_else(|| anyhow!("parallel-copy request {request_index} is out of range"))?
-                .take()
-                .ok_or_else(|| {
-                    anyhow!("parallel-copy request {request_index} was assigned more than once")
-                })?,
-        );
-    }
-    if tasks_by_request.iter().any(Option::is_some) {
-        return Err(anyhow!("parallel-copy task union is incomplete"));
-    }
-    let mut task_tail = tasks.as_mut_slice();
-    let mut worker_partitions = Vec::with_capacity(PARALLEL_COPY_WORKERS);
-    let mut consumed = 0usize;
-    for (worker, partition) in schedule.partitions.iter().enumerate() {
-        if partition.start != consumed || partition.end > schedule.sorted_request_indices.len() {
-            return Err(anyhow!(
-                "parallel-copy worker {worker} partition is invalid"
-            ));
-        }
-        let count = partition
-            .end
-            .checked_sub(partition.start)
-            .ok_or_else(|| anyhow!("parallel-copy worker {worker} partition underflow"))?;
-        if count == 0 || count > task_tail.len() {
-            return Err(anyhow!(
-                "parallel-copy worker {worker} partition extent is invalid"
-            ));
-        }
-        let (worker_tasks, remaining) = task_tail.split_at_mut(count);
-        worker_partitions.push(worker_tasks);
-        task_tail = remaining;
-        consumed = partition.end;
-    }
-    if consumed != schedule.sorted_request_indices.len() || !task_tail.is_empty() {
-        return Err(anyhow!(
-            "parallel-copy partitions do not consume every task"
-        ));
-    }
+    let mut tasks = order_parallel_tasks(&mut tasks_by_request, schedule, "parallel-copy")?;
+    let worker_partitions = partition_parallel_tasks(&mut tasks, schedule, "parallel-copy")?;
 
     let (copy_result, source_finished) = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(PARALLEL_COPY_WORKERS);
@@ -1099,21 +1165,7 @@ fn materialize_parallel_copied(
     drop(tasks_by_request);
     drop(sources);
 
-    let bindings = resources
-        .iter()
-        .enumerate()
-        .zip(direct)
-        .map(|((resource_index, buffer), desc)| {
-            Ok(Binding {
-                buffer: buffer.clone(),
-                resource_index,
-                offset: 0,
-                length: usize::try_from(desc.n_bytes)
-                    .map_err(|_| anyhow!("tensor byte length does not fit usize"))?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    validate_copied_topology(profile, direct, &resources, &bindings)?;
+    let bindings = build_copied_bindings(profile, direct, &resources)?;
     let binding_finished = Instant::now();
     let allocation_wall = allocation_finished.duration_since(allocation_started);
     let source_resolution_wall = source_finished.duration_since(allocation_finished);
@@ -1127,6 +1179,134 @@ fn materialize_parallel_copied(
         .ok_or_else(|| anyhow!("parallel-copy phase duration overflow"))?;
     if ready_wall.as_micros().abs_diff(phase_wall.as_micros()) > 4 {
         return Err(anyhow!("parallel-copy phase timing does not reconcile"));
+    }
+    Ok(Materialized {
+        resources,
+        bindings,
+        allocation_wall: Some(allocation_wall),
+        source_resolution_wall: Some(source_resolution_wall),
+        copy_wall: Some(copy_wall),
+        binding_wall,
+        worker_count: PARALLEL_COPY_WORKERS,
+        schedule: Some(schedule.clone()),
+        ready_wall,
+    })
+}
+
+fn materialize_parallel_pread(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    direct: &[&TensorDesc],
+    schedule: &ParallelCopySchedule,
+    profile: &FloorProfile,
+) -> Result<Materialized> {
+    let ready_started = Instant::now();
+    let allocation_started = ready_started;
+    let mut resources = allocate_copied_resources(ctx, direct)?;
+    let allocation_finished = Instant::now();
+
+    let timed_schedule = frozen_parallel_copy_schedule(profile, direct)?;
+    if &timed_schedule != schedule {
+        return Err(anyhow!("parallel-pread timed schedule proof drifted"));
+    }
+    let destination_ranges = validate_copied_destinations(&resources, direct, "parallel-pread")?;
+    let shard_lengths = gguf.shard_mapped_lengths();
+    let mut tasks_by_request = Vec::with_capacity(direct.len());
+    for (request_index, (resource, desc)) in resources.iter_mut().zip(direct).enumerate() {
+        let endpoint = desc
+            .data_offset
+            .checked_add(desc.n_bytes)
+            .ok_or_else(|| anyhow!("parallel-pread source endpoint overflow"))?;
+        if endpoint
+            > *shard_lengths
+                .get(desc.shard_idx)
+                .ok_or_else(|| anyhow!("parallel-pread source shard is unavailable"))?
+                as u64
+        {
+            return Err(anyhow!(
+                "parallel-pread source {request_index} exceeds its shard"
+            ));
+        }
+        let (start, end) = destination_ranges[request_index];
+        if end - start != resource.length() || resource.length() as u64 != desc.n_bytes {
+            return Err(anyhow!(
+                "parallel-pread destination {request_index} length drifted"
+            ));
+        }
+        tasks_by_request.push(Some(ParallelPreadTask {
+            shard_idx: desc.shard_idx,
+            source_offset: desc.data_offset,
+            // SAFETY: complete destination range, mode, identity, and
+            // exclusivity prerequisites were proven above.
+            destination: unsafe { exclusive_buffer_bytes_mut(resource) },
+        }));
+    }
+    let mut tasks = order_parallel_tasks(&mut tasks_by_request, schedule, "parallel-pread")?;
+    let worker_partitions = partition_parallel_tasks(&mut tasks, schedule, "parallel-pread")?;
+
+    let (copy_result, source_finished) = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(PARALLEL_COPY_WORKERS);
+        let mut spawn_error = None;
+        let source_finished = Instant::now();
+        for (worker, worker_tasks) in worker_partitions.into_iter().enumerate() {
+            match std::thread::Builder::new().spawn_scoped(scope, move || -> Result<()> {
+                for task in worker_tasks {
+                    gguf.read_shard_exact_at(task.shard_idx, task.source_offset, task.destination)?;
+                }
+                Ok(())
+            }) {
+                Ok(handle) => handles.push((worker, handle)),
+                Err(error) => {
+                    spawn_error = Some((worker, error));
+                    break;
+                }
+            }
+        }
+        let mut worker_error = None;
+        let mut panicked_worker = None;
+        for (worker, handle) in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if worker_error.is_none() => {
+                    worker_error = Some((worker, error));
+                }
+                Ok(Err(_)) => {}
+                Err(_) if panicked_worker.is_none() => panicked_worker = Some(worker),
+                Err(_) => {}
+            }
+        }
+        let result = if let Some((worker, error)) = spawn_error {
+            Err(anyhow!(
+                "parallel-pread worker {worker} spawn failed: {error}"
+            ))
+        } else if let Some((worker, error)) = worker_error {
+            Err(error.context(format!("parallel-pread worker {worker} failed")))
+        } else if let Some(worker) = panicked_worker {
+            Err(anyhow!("parallel-pread worker {worker} panicked"))
+        } else {
+            Ok(())
+        };
+        (result, source_finished)
+    });
+    copy_result?;
+    let copy_finished = Instant::now();
+    drop(tasks);
+    drop(tasks_by_request);
+
+    let bindings = build_copied_bindings(profile, direct, &resources)?;
+    let binding_finished = Instant::now();
+    let allocation_wall = allocation_finished.duration_since(allocation_started);
+    let source_resolution_wall = source_finished.duration_since(allocation_finished);
+    let copy_wall = copy_finished.duration_since(source_finished);
+    let binding_wall = binding_finished.duration_since(copy_finished);
+    let ready_wall = binding_finished.duration_since(ready_started);
+    let phase_wall = allocation_wall
+        .checked_add(source_resolution_wall)
+        .and_then(|value| value.checked_add(copy_wall))
+        .and_then(|value| value.checked_add(binding_wall))
+        .ok_or_else(|| anyhow!("parallel-pread phase duration overflow"))?;
+    if ready_wall.as_micros().abs_diff(phase_wall.as_micros()) > 4 {
+        return Err(anyhow!("parallel-pread phase timing does not reconcile"));
     }
     Ok(Materialized {
         resources,
@@ -1402,7 +1582,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         .ok_or_else(|| anyhow!("materialization arm is required"))?;
     if matches!(arm, ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour) {
         return Err(anyhow!(
-            "arena materialization arms are retired; use copied or parallel-copied"
+            "arena materialization arms are retired; use copied, parallel-copied, or parallel-pread"
         ));
     }
     if std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some() {
@@ -1437,17 +1617,19 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         ArenaFloorArm::ParallelCopied => {
             materialize_parallel_copied(&ctx, &gguf, &direct, &parallel_schedule, profile)?
         }
+        ArenaFloorArm::ParallelPread => {
+            materialize_parallel_pread(&ctx, &gguf, &direct, &parallel_schedule, profile)?
+        }
         ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour => unreachable!(),
     };
     let ready_wall = materialized.ready_wall;
     let usage_after = capture_usage()?;
     let proc_after = capture_proc_usage()?;
     let allocated_ready = ctx.current_allocated_size();
-    if (arm == ArenaFloorArm::ParallelCopied
-        && materialized.schedule.as_ref() != Some(&parallel_schedule))
-        || (arm != ArenaFloorArm::ParallelCopied && materialized.schedule.is_some())
+    if (arm.uses_parallel_schedule() && materialized.schedule.as_ref() != Some(&parallel_schedule))
+        || (!arm.uses_parallel_schedule() && materialized.schedule.is_some())
     {
-        return Err(anyhow!("materialized parallel-copy schedule drifted"));
+        return Err(anyhow!("materialized parallel-population schedule drifted"));
     }
 
     let user_cpu_us = usage_after

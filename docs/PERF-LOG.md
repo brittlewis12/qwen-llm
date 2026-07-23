@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-23 - v0.616 Ring0 Durable-Checkpoint Product Transfer
+
+Status: the bounded external client adapter and intended Qwen3.6 27B path pass.
+Completed-turn durable reuse leaves the active implementation queue; measured
+restore/publication cost remains a separately gated optimization target.
+
+- External `llm` commit `eccccb7` routes each process-cold turn through qwen's
+  generic wrapped-messages and durable-checkpoint interfaces. It preserves
+  Qwen3.6 thinking history, streams only visible post-think output, rejects
+  token-limit turns without changing the save, and atomically replaces saves
+  only after natural EOS. There is no year-core injection.
+- The cache policy is a private shared 32 GiB aggregate budget with a 4 GiB
+  default per-entry limit. Cache state remains disposable: misses, skipped
+  publications, corruption removal, and eviction can only fall back to replay.
+- Forks retain the selected assistant boundary and require a distinct output
+  path. The generic store's longest-prefix lookup can therefore restore a
+  surviving ancestor and replay only the divergent suffix; no game-specific
+  checkpoint API or revision catalog was added.
+- A disposable 0.8B ring0 smoke publishes completed state at `6919/6918`, then
+  the next process restores the same `matched/restored` boundary and extends it
+  to `7117/7116`. Both requests terminate by EOS.
+- The intended Qwen3.6 27B pilot starts from a copied real ring0 save. Process
+  one publishes `12536/12535`, pending true, in a `978,453,628`-byte blob.
+  Process two restores that exact completed boundary in `554.5 ms`, then
+  publishes `13130/13129` in a `1,017,384,388`-byte blob. Capture/publication are
+  `113.5/1807.7 ms` on the first identity miss and `53.1/1121.2 ms` on the hit.
+- Observed process walls are `80.33 s` and `31.69 s`, but they are not a paired
+  speedup result: prompts, suffixes, and generated outputs differ. v0.615's
+  identical-prompt packet remains the quantified acceleration authority.
+- Adversarial review found and closed concurrent-pipe deadlock, child-reaping,
+  legacy thinking-policy, seed-zero, fork-alias, and atomic-save hazards. A
+  200 KiB stderr-before-stdout stress exercises the former deadlock condition.
+
+Checks: Python syntax/helper/fork/fail-loud tests, 0.8B two-process smoke, and
+Qwen3.6 27B two-process disposable pilot. Adversarial review: `cx` session
+`019f8ea8-9c97-7ac1-97c2-7153166fa345`.
+
 ## 2026-07-22 - v0.615 Real Long-History Durable Restore
 
 Status: a real 6.5K-token 27B continuation clears the product-value gate. The

@@ -3287,6 +3287,15 @@ fn select_auto_parallel_copy_profile(
     .map(|matched| matched.then_some(&A3B_PARALLEL_COPY_PROFILE))
 }
 
+fn auto_parallel_copy_population(
+    profile: ParallelCopyProfileId,
+) -> Option<ParallelPopulationMethod> {
+    match profile {
+        ParallelCopyProfileId::A3bQ4kmV1 => Some(ParallelPopulationMethod::Pread),
+        ParallelCopyProfileId::Dense27bQ4kmV1 => None,
+    }
+}
+
 fn authenticated_a3b_storage_plan(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -4037,25 +4046,26 @@ fn direct_storage_for_load(
             planned_owned_storage_for_load(ctx, gguf, model, expected, embedding_selection)?;
         return Ok((DirectStorage::ForcedOwned(storage), false));
     }
-    if parallel_mode == GgufParallelCopyMode::Auto
-        && auto_parallel_copy_a3b
-        && let Some(profile) =
+    if parallel_mode == GgufParallelCopyMode::Auto && auto_parallel_copy_a3b {
+        if let Some(profile) =
             select_auto_parallel_copy_profile(ctx, gguf, model, expected, embedding_selection)?
-    {
-        eprintln!(
-            "[metal-gguf-parallel-policy] mode=auto profile={}",
-            profile.id.label()
-        );
-        let storage = planned_parallel_copied_storage_for_profile(
-            ctx,
-            gguf,
-            model,
-            expected,
-            embedding_selection,
-            profile,
-            ParallelPopulationMethod::MmapCopy,
-        )?;
-        return Ok((DirectStorage::ForcedParallelCopied(storage), false));
+            && let Some(population) = auto_parallel_copy_population(profile.id)
+        {
+            eprintln!(
+                "[metal-gguf-parallel-policy] mode=auto profile={}",
+                profile.id.label()
+            );
+            let storage = planned_parallel_copied_storage_for_profile(
+                ctx,
+                gguf,
+                model,
+                expected,
+                embedding_selection,
+                profile,
+                population,
+            )?;
+            return Ok((DirectStorage::ForcedParallelCopied(storage), false));
+        }
     }
     if mode == GgufNoCopyMode::Disabled {
         return Ok((DirectStorage::Copied, exact_sentinel));
@@ -13011,6 +13021,18 @@ mod tests {
             ));
         }
         assert!(!MetalModelLoadOptions::default().auto_parallel_copy_a3b);
+    }
+
+    #[test]
+    fn parallel_copy_auto_population_is_exact_and_narrow() {
+        assert_eq!(
+            auto_parallel_copy_population(ParallelCopyProfileId::A3bQ4kmV1),
+            Some(ParallelPopulationMethod::Pread)
+        );
+        assert_eq!(
+            auto_parallel_copy_population(ParallelCopyProfileId::Dense27bQ4kmV1),
+            None
+        );
     }
 
     #[test]

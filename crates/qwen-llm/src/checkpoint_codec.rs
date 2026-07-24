@@ -15,6 +15,7 @@ const CODEC_VERSION: u32 = 1;
 const HEADER_BYTES: usize = 256;
 const PAYLOAD_OFFSET: usize = 16 * 1024;
 const DIGEST_BYTES: usize = 32;
+const STAGED_VERIFY_BUFFER_BYTES: usize = 64 * 1024;
 pub const SNAPSHOT_RECORD_FIXED_BYTES: u64 = (PAYLOAD_OFFSET + DIGEST_BYTES) as u64;
 const FLAG_PENDING_TOKEN: u64 = 1 << 0;
 const FLAG_FINAL_LOGITS: u64 = 1 << 1;
@@ -271,6 +272,43 @@ pub fn encode_snapshot<W: Write>(
         record_bytes: layout.record_bytes,
         digest,
     })
+}
+
+/// Verify that a staged file is the exact record emitted by this encoder
+/// invocation without materializing a second `SessionSnapshot`.
+///
+/// This is only a publication readback check. Persisted files still require
+/// `decode_snapshot`, which is the adversarial-file validation boundary. `src`
+/// must be positioned at the record start, and `expected` must be the unmodified
+/// result of the corresponding `encode_snapshot` call. The check binds the file
+/// to that encoder output under BLAKE3's collision-resistance assumption; it is
+/// not an independent semantic decode.
+pub fn verify_staged_encoder_output<R: Read>(
+    src: &mut R,
+    expected: EncodedSnapshot,
+) -> Result<(), SnapshotCodecError> {
+    if expected.record_bytes < SNAPSHOT_RECORD_FIXED_BYTES {
+        return Err(SnapshotCodecError::InvalidHeader("encoded record size"));
+    }
+    let content_bytes = expected.record_bytes - DIGEST_BYTES as u64;
+    let mut remaining = content_bytes;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; STAGED_VERIFY_BUFFER_BYTES];
+    while remaining != 0 {
+        let count = usize::try_from(remaining.min(buffer.len() as u64))
+            .expect("bounded verifier chunk fits usize");
+        src.read_exact(&mut buffer[..count])?;
+        hasher.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+
+    let mut trailer = [0u8; DIGEST_BYTES];
+    src.read_exact(&mut trailer)?;
+    let actual = *hasher.finalize().as_bytes();
+    if actual != expected.digest || trailer != expected.digest {
+        return Err(SnapshotCodecError::DigestMismatch);
+    }
+    require_eof(src)
 }
 
 pub fn decode_snapshot<R: Read>(
@@ -764,12 +802,16 @@ mod tests {
     }
 
     fn encode(snapshot: &SessionSnapshot) -> Vec<u8> {
+        encode_with_meta(snapshot).0
+    }
+
+    fn encode_with_meta(snapshot: &SessionSnapshot) -> (Vec<u8>, EncodedSnapshot) {
         let mut out = Vec::new();
         let encoded = encode_snapshot(&mut out, snapshot, constraints(&snapshot.identity))
             .expect("encode fixture");
         assert_eq!(encoded.record_bytes as usize, out.len());
         assert_eq!(encoded.digest, out[out.len() - DIGEST_BYTES..]);
-        out
+        (out, encoded)
     }
 
     fn decode(bytes: &[u8], identity: &SnapshotIdentity) -> SessionSnapshot {
@@ -868,6 +910,106 @@ mod tests {
         let mut q8 = snapshot(identity());
         q8.identity.kv_storage_kind = SnapshotKvStorageKind::Q8_0;
         assert_snapshot_bits_eq(&q8, &decode(&encode(&q8), &q8.identity));
+    }
+
+    #[test]
+    fn staged_verifier_accepts_exact_encoder_output_for_all_modes() {
+        let base = snapshot(identity());
+        for pending in [None, Some(3)] {
+            for logits in [false, true] {
+                let mut candidate = base.clone();
+                candidate.pending_token = pending;
+                candidate.final_logits = logits.then(|| base.final_logits.clone().unwrap());
+                let (encoded, expected) = encode_with_meta(&candidate);
+                verify_staged_encoder_output(&mut Cursor::new(encoded), expected)
+                    .expect("exact staged output");
+            }
+        }
+    }
+
+    #[test]
+    fn staged_verifier_streams_multiple_fixed_buffer_chunks() {
+        let mut snapshot = snapshot(identity());
+        let state_bytes = STAGED_VERIFY_BUFFER_BYTES * 2 + 4096;
+        snapshot.identity.gdn_state_elements_per_layer = (state_bytes / 4) as u32;
+        snapshot.gdn_state_arena = (0..state_bytes).map(|index| index as u8).collect();
+        let (encoded, expected) = encode_with_meta(&snapshot);
+        assert!(encoded.len() > STAGED_VERIFY_BUFFER_BYTES * 2);
+        verify_staged_encoder_output(&mut Cursor::new(&encoded), expected)
+            .expect("multi-chunk staged output");
+
+        for end in [
+            STAGED_VERIFY_BUFFER_BYTES,
+            STAGED_VERIFY_BUFFER_BYTES + 1,
+            encoded.len() - DIGEST_BYTES - 1,
+        ] {
+            assert!(
+                verify_staged_encoder_output(&mut Cursor::new(&encoded[..end]), expected).is_err(),
+                "multi-chunk truncation at {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_verifier_binds_complete_record_to_encoder_digest() {
+        let snapshot = snapshot(identity());
+        let (encoded, expected) = encode_with_meta(&snapshot);
+
+        for offset in [0, HEADER_BYTES, PAYLOAD_OFFSET, encoded.len() - 1] {
+            let mut corrupt = encoded.clone();
+            corrupt[offset] ^= 1;
+            assert!(matches!(
+                verify_staged_encoder_output(&mut Cursor::new(corrupt), expected),
+                Err(SnapshotCodecError::DigestMismatch)
+            ));
+        }
+
+        let mut recomputed = encoded.clone();
+        recomputed[PAYLOAD_OFFSET] ^= 1;
+        refresh_digest(&mut recomputed);
+        assert!(matches!(
+            verify_staged_encoder_output(&mut Cursor::new(recomputed), expected),
+            Err(SnapshotCodecError::DigestMismatch)
+        ));
+
+        let mut different = snapshot.clone();
+        different.kv_k_arena[0] ^= 1;
+        let (different_record, _) = encode_with_meta(&different);
+        assert!(matches!(
+            verify_staged_encoder_output(&mut Cursor::new(different_record), expected),
+            Err(SnapshotCodecError::DigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn staged_verifier_rejects_wrong_boundaries() {
+        let snapshot = snapshot(identity());
+        let (encoded, expected) = encode_with_meta(&snapshot);
+
+        for end in [0, HEADER_BYTES, PAYLOAD_OFFSET, encoded.len() - 1] {
+            assert!(
+                verify_staged_encoder_output(&mut Cursor::new(&encoded[..end]), expected).is_err(),
+                "truncation at {end}"
+            );
+        }
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(matches!(
+            verify_staged_encoder_output(&mut Cursor::new(trailing), expected),
+            Err(SnapshotCodecError::TrailingBytes)
+        ));
+
+        for record_bytes in [DIGEST_BYTES as u64, SNAPSHOT_RECORD_FIXED_BYTES - 1] {
+            let impossible = EncodedSnapshot {
+                record_bytes,
+                digest: expected.digest,
+            };
+            assert!(matches!(
+                verify_staged_encoder_output(&mut Cursor::new(&encoded), impossible),
+                Err(SnapshotCodecError::InvalidHeader("encoded record size"))
+            ));
+        }
     }
 
     #[test]
@@ -1074,6 +1216,14 @@ mod tests {
         assert_snapshot_bits_eq(&snapshot, &restored);
     }
 
+    #[test]
+    fn staged_verifier_accepts_arbitrary_short_reads() {
+        let snapshot = snapshot(identity());
+        let (encoded, expected) = encode_with_meta(&snapshot);
+        let mut reader = OneByteReader(Cursor::new(encoded));
+        verify_staged_encoder_output(&mut reader, expected).unwrap();
+    }
+
     struct InterruptOnceAtEof {
         inner: Cursor<Vec<u8>>,
         interrupted: bool,
@@ -1099,6 +1249,18 @@ mod tests {
         let restored = decode_snapshot(&mut reader, constraints(&snapshot.identity)).unwrap();
         assert!(reader.interrupted);
         assert_snapshot_bits_eq(&snapshot, &restored);
+    }
+
+    #[test]
+    fn staged_verifier_retries_interrupted_eof_probe() {
+        let snapshot = snapshot(identity());
+        let (encoded, expected) = encode_with_meta(&snapshot);
+        let mut reader = InterruptOnceAtEof {
+            inner: Cursor::new(encoded),
+            interrupted: false,
+        };
+        verify_staged_encoder_output(&mut reader, expected).unwrap();
+        assert!(reader.interrupted);
     }
 
     #[test]

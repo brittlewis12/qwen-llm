@@ -758,22 +758,38 @@ fallback, and reusable intent are unchanged. The flat physical footprint and
 small per-pair prefill/TTFT noise forbid broader memory or Pareto claims. This
 admission leaves the active queue.
 
-1. **Checkpoint restore/publication I/O and memory**: the intended client grows
-   the observed identity-hit boundary to `554.5 ms` restore plus `53.1 ms`
-   capture and `1,121.2 ms` publication for a roughly 1.02 GB checkpoint.
-   First attribute decode/copy/write/fsync/validation phases and peak timing;
-   require at least 250 ms process-wall removal or 500 MB peak-footprint
-   reduction before representation work. Belief medium-high that the boundary
-   is measurable, medium on removable wall, difficulty M. Keep it below the
-   broader fresh-loader transfer until attribution identifies avoidable work.
-2. **A10B cold residency plus split-copy floor**: only if the heavy anchor
+v0.622-v0.623 attribute and close publication's duplicate staged decode. On an
+exact 582.9 MB checkpoint, fixed-buffer digest validation removes one complete
+snapshot population but saves only `17.4/18.1 ms`; publication and whole-process
+footprint stay flat. Extra baseline page reclaims match the removed bytes, so
+the negative transfer is explained: both arms still reread/hash the full file,
+and the late temporary snapshot never owns the process high-water mark. Do not
+reopen allocation-free readback under the same publication contract.
+
+1. **Checkpoint immediate-readback contract**: the remaining full
+   encoder-digest readback costs `268.4/269.0 ms`. Because checkpoints are
+   disposable and every lookup already performs full adversarial validation,
+   price publishing the fsynced encoder output without immediate reread, while
+   retaining exact format, source digest, hard-link publication, directory
+   durability, and restore-time corruption fallback. This is process-exit/E2E,
+   not TTFT, and its measured ceiling only narrowly clears the 250 ms gate.
+   Decide the integrity contract before code; belief medium-high on mechanism,
+   medium on product transfer, difficulty S-M.
+2. **Checkpoint direct restore/capture dataflow**: direct file-to-disposable
+   session restore could remove the decoded CPU arena plus one state copy from
+   the `554.5 ms` restore path. Direct completed-session staging could remove
+   the prepared snapshot that overlaps live state. Expect memory movement before
+   large wall movement. Require a source-free lifetime/safety proof and a 250 ms
+   TTFT/process-wall or 500 MB phase-peak projection before implementation.
+   Belief medium on memory, low-medium on wall, difficulty M-L.
+3. **A10B cold residency plus split-copy floor**: only if the heavy anchor
    remains deployment-relevant. First adjudicate the already bit-exact native
    embedding, which removes 2.24 GB. Then freeze that inventory and require at
    least 1.5 seconds from a three-shard topology-preserving parallel-copy floor
    before product code. Belief high on memory, medium on copy wall, difficulty
    M-L; deployment relevance is below A3B and dense 27B. If relevant, this moves
    ahead of GPU argmax and reuses the winning A3B population primitive.
-3. **Production GPU argmax contract**: three product paths still copy 993,280
+4. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes, about 970 KiB, and scan 248,320 values on CPU despite the measured GPU
    path. CPU product semantics choose the highest equal index and order NaNs;
    current GPU semantics choose the lowest finite tie and ignore NaNs. Preserve
@@ -781,37 +797,37 @@ admission leaves the active queue.
    Existing MoE gain is only `1.0-1.5%` and dense is neutral, so authorize an
    explicit low-complexity 1% gate rather than invoking the normal 2-3% bar.
    Belief high on small work removal, difficulty S-M.
-4. **Grammar run and admissible-row oracle**: replay real structured traces and
+5. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal uniquely forced tokenizer-token runs plus branch vocabulary
    rows. Use `sum(H_r*(r*C1-Cpack(r))) - overhead`; require `T0/11` for a 1.10x
    request. Runs below four are not locally positive at current N8 cost.
    Contract-exact, belief medium-low until traces exist, difficulty S oracle/M
    product.
-5. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+6. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing and quality-gated. Prefix
    caching is a separate reuse specialization and does not inherit this
    fresh-prompt gain band.
-6. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
+7. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
    131K token, but v0.607 closes the current cooperative read-once organization.
    Do no GPU work until a source-free design changes ownership, scheduling,
    residency, or physical bytes and clears the existing medium, breadth, 131K,
    and whole-token ceilings. Prize high, implementation belief low.
-7. **MTPLX asset/contract decomposition**: pin the external runtime and compare
+8. **MTPLX asset/contract decomposition**: pin the external runtime and compare
    matched M4 AR/D3/D7 acceptance by depth. A cross-trunk sidecar bridge must
    predict a passing qwen request before affine Metal work. This is high
    information value for speculative decode, but below fresh-process work now.
    Belief medium, difficulty S packet/M bridge.
-8. **Materially different A3B state-preserving verifier**: preserve serial
+9. **Materially different A3B state-preserving verifier**: preserve serial
    recurrence, convolution, KV, logits, and continuation state before timing.
    Keep the failed physical-N8 implementation only as a negative control.
    Require state passage and at least 5% projected decode movement. Conditional
    prize high, belief low-medium, difficulty M-L.
-9. **Certified lm-head screening oracle**: use outward-rounded row/block bounds
-   to measure exact-argmax pruning before engine work. Require at least 80% of
-   rows pruned while touching at most 30% of lm-head bytes. Base decode prize is
-   small; the better customer is a repeated speculative draft head. Keep this
-   behind a positive grammar/admissible-row signal. Belief low-medium,
-   difficulty S oracle/M product.
+10. **Certified lm-head screening oracle**: use outward-rounded row/block bounds
+    to measure exact-argmax pruning before engine work. Require at least 80% of
+    rows pruned while touching at most 30% of lm-head bytes. Base decode prize
+    is small; the better customer is a repeated speculative draft head. Keep
+    this behind a positive grammar/admissible-row signal. Belief low-medium,
+    difficulty S oracle/M product.
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
 allocation removal under the same latency gate; typed metadata retains only an

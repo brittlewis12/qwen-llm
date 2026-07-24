@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-24 - v0.622-v0.623 Checkpoint Staged Validation
+
+Status: KILL. Allocation-free encoder-digest readback is exact and removes one
+583 MB snapshot population, but it misses every product wall and footprint gate.
+
+- v0.622 seals without authority after one A child. The current stats schema
+  added `stop_reason=token_limit`; the stale parser stopped before a scored row
+  or blob inspection, and no B child launched. v0.623 imports the complete
+  packet, repairs only that grammar, and makes major faults advisory before any
+  B observation. All four fresh v0.623 children record zero major faults.
+- Two fresh `AB/BA` pairs produce byte-identical eight-byte output and exact
+  `582,854,188`-byte blobs with SHA-256 `69c883f5...`. Every store is fresh,
+  identity-hit, single-blob, mode `0600`, link-count one, and free of temporary
+  residue; host, pressure, swap, and physical-I/O gates pass.
+- Fixed-buffer validation improves `285.8 -> 268.4 ms` and
+  `287.1 -> 269.0 ms`, only `17.4/18.1 ms`. Whole publication moves
+  `610.1 -> 611.5 ms` and `624.1 -> 626.7 ms`; unchanged write/fsync/link work
+  varies enough to consume the small validation gain.
+- Peak-footprint savings are `-704,416/+147,456` bytes and RSS is similarly
+  flat. Baseline decode incurs `35,542/35,576` extra page reclaims, matching
+  `582.3/582.9 MB`: the allocation really disappears, but its late lifetime is
+  below the earlier model/session/capture high-water mark.
+- B appears `870/881 ms` slower through process exit, entirely dominated by
+  `796/887 ms` slower prefill before the selector is read. Treat that as an
+  A-B-B-A temporal/noise confound, not a causal regression. Removing load and
+  prefill drift leaves about `28/19 ms`, consistent with the isolated phase.
+- Close only replacement of staged semantic decode with fixed-buffer digest
+  verification on this 27B completed-checkpoint shape. Both arms still reread
+  and hash the full file. Changed premises remain: omit immediate readback under
+  the disposable-cache contract, remove the earlier prepared snapshot, or
+  restore directly into disposable destination state.
+
+Artifacts: `target/profiles/v0622-checkpoint-staged-validation-p1/` and
+`target/profiles/v0623-checkpoint-staged-validation-p1/`. Implementation:
+`b9362e6`, `a0aec06`; packet commits: `b728443`, `329367c`. Adversarial review:
+`cx` sessions `019f91a0-da7f-7541-8b97-864b7efad0ae` and
+`019f94d7-7645-7870-b49f-42a2c1e499ce`.
+
 ## 2026-07-23 - v0.621 A3B Direct-Pread Auto Admission
 
 Status: GO. The authenticated disposable single-shard A3B Auto selector now

@@ -1,7 +1,8 @@
 # v0.622 Allocation-Free Checkpoint Staged Validation
 
-Status: preregistered; force-only implementation is present and the packet is
-unrun.
+Status: sealed implementation/contract defect with no authority. The first A
+child completed, but the runner rejected the current stats grammar before
+emitting a scored row; no B child launched. v0.623 supersedes this packet.
 
 ## Intent
 

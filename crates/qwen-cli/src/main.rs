@@ -2259,9 +2259,7 @@ fn execute_single_turn_request(
                 concat!(
                     "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
                     "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
-                    "evicted={} identity={} staged_validation={} ",
-                    "staged_validation_ms={:.1} ",
-                    "capture_ms={:.1} publish_ms={:.1}"
+                    "evicted={} identity={} capture_ms={:.1} publish_ms={:.1}"
                 ),
                 publish_outcome_label(report.store.outcome),
                 durable_capture_kind.unwrap_or("unknown"),
@@ -2272,8 +2270,6 @@ fn execute_single_turn_request(
                 report.store.blob_bytes,
                 report.store.evicted_entries,
                 identity_cache_outcome_label(report.compatibility.outcome),
-                report.store.staged_validation.mode.as_str(),
-                report.store.staged_validation.elapsed.as_secs_f64() * 1e3,
                 durable_capture_ms,
                 publish_t0.elapsed().as_secs_f64() * 1e3,
             ),

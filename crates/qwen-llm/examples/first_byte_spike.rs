@@ -31,10 +31,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use qwen_llm::cache_probe::{invalidate_file_cache, probe_file_residency};
-use qwen_llm::metal_forward::MetalSession;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::runtime::{
-    DEFAULT_COLD_ONLY_THRESHOLD, LoadedModelConfig, PrefetchPolicy, Runtime, SequenceConfig,
+    DEFAULT_COLD_ONLY_THRESHOLD, LoadedModelConfig, PrefetchAction, PrefetchPolicy,
+    PrefetchSuppressionReason, Runtime, SequenceConfig,
 };
 
 const DEFAULT_PROMPT: &str = "The capital of France is";
@@ -251,7 +251,12 @@ fn main() {
 
     // Report the internal prefetch breakdown for observability.
     let outcome = loaded.prefetch_outcome();
-    if !matches!(outcome.policy, PrefetchPolicy::Off) {
+    if let PrefetchAction::Suppressed {
+        reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
+    } = outcome.action
+    {
+        println!("  prefetch:    suppressed (authenticated disposable Auto A3B direct pread)");
+    } else if !matches!(outcome.policy, PrefetchPolicy::Off) {
         let bytes_returned = outcome.bytes_returned_total();
         println!(
             "  prefetch:    {}  {} shards prefetched, {} skipped, {:.2} GiB returned",

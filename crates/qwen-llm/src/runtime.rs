@@ -19,8 +19,8 @@ use crate::gguf::{GgufError, GgufFile, GgufShard};
 use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
 use crate::metal_forward::{
-    MetalForward, MetalModel, MetalModelLoadOptions, MetalSession, MfError, SessionSnapshot,
-    SnapshotIdentity, SnapshotValidationError,
+    MetalForward, MetalLoadPrefetchAdvice, MetalModel, MetalModelLoadOptions, MetalSession,
+    MfError, SessionSnapshot, SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
 use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
@@ -163,11 +163,16 @@ impl Runtime {
     ) -> Result<LoadedModel, RuntimeError> {
         let path = path.as_ref();
         let gguf = GgufFile::open(path)?;
-        let prefetch_outcome = apply_prefetch_policy(&gguf, &config);
         let bound = Model::from_gguf(&gguf)?;
+        let prepared = MetalModel::prepare_load_with_options(
+            self.context(),
+            &gguf,
+            &bound,
+            intent.metal_options(),
+        )?;
+        let prefetch_outcome = apply_prefetch_policy(&gguf, &config, prepared.prefetch_advice());
         let identity_shards = snapshot_shard_identity_inputs(&gguf);
-        let metal_model =
-            MetalModel::load_with_options(self.context(), &gguf, &bound, intent.metal_options())?;
+        let metal_model = MetalModel::load_prepared(prepared)?;
         Ok(LoadedModel {
             runtime: self.clone(),
             path: path.to_path_buf(),
@@ -187,13 +192,32 @@ impl Runtime {
 /// log via `tracing::warn` and mark the shard as `skipped: true` — a
 /// prefetch failure is a latency regression at worst, never a
 /// correctness issue, so it should not abort the load.
-fn apply_prefetch_policy(gguf: &GgufFile, config: &LoadedModelConfig) -> PrefetchOutcome {
+fn apply_prefetch_policy(
+    gguf: &GgufFile,
+    config: &LoadedModelConfig,
+    advice: MetalLoadPrefetchAdvice,
+) -> PrefetchOutcome {
     let started = Instant::now();
+    let action = effective_prefetch_action(config.prefetch_policy, advice);
+
+    if let PrefetchAction::Suppressed {
+        reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
+    } = action
+    {
+        eprintln!(concat!(
+            "[runtime-prefetch] schema=1 configured=cold-only action=suppressed ",
+            "reason=authenticated-disposable-auto-a3b-direct-pread ",
+            "profile=a3b-q4km-v1 population=pread"
+        ));
+        return PrefetchOutcome::suppressed(config.prefetch_policy, action);
+    }
+
     let mut shards: Vec<ShardPrefetch> = Vec::with_capacity(gguf.shards.len());
 
     if matches!(config.prefetch_policy, PrefetchPolicy::Off) {
         return PrefetchOutcome {
             policy: config.prefetch_policy,
+            action,
             shards,
             total_wall: started.elapsed(),
         };
@@ -216,6 +240,7 @@ fn apply_prefetch_policy(gguf: &GgufFile, config: &LoadedModelConfig) -> Prefetc
 
     PrefetchOutcome {
         policy: config.prefetch_policy,
+        action,
         shards,
         total_wall: started.elapsed(),
     }
@@ -406,6 +431,54 @@ mod tests {
                 .metal_options()
                 .auto_parallel_copy_a3b
         );
+    }
+
+    #[test]
+    fn prefetch_action_selector_table_is_fail_closed() {
+        let cold_only = PrefetchPolicy::cold_only(DEFAULT_COLD_ONLY_THRESHOLD).unwrap();
+        let suppress = MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread;
+        let preserve = MetalLoadPrefetchAdvice::PreserveConfiguredPolicy;
+        let suppressed = PrefetchAction::Suppressed {
+            reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
+        };
+
+        let cases = [
+            ("cold-only-authenticated", cold_only, suppress, suppressed),
+            (
+                "cold-only-preserve",
+                cold_only,
+                preserve,
+                PrefetchAction::ConfiguredPolicy,
+            ),
+            (
+                "off-authenticated",
+                PrefetchPolicy::Off,
+                suppress,
+                PrefetchAction::ConfiguredPolicy,
+            ),
+            (
+                "always-authenticated",
+                PrefetchPolicy::Always,
+                suppress,
+                PrefetchAction::ConfiguredPolicy,
+            ),
+        ];
+        for (name, policy, advice, expected) in cases {
+            assert_eq!(
+                effective_prefetch_action(policy, advice),
+                expected,
+                "{name}"
+            );
+        }
+
+        let outcome = PrefetchOutcome::suppressed(cold_only, suppressed);
+        assert_eq!(outcome.policy, cold_only);
+        assert_eq!(outcome.action, suppressed);
+        assert!(outcome.shards.is_empty());
+        assert_eq!(outcome.bytes_returned_total(), 0);
+        assert_eq!(outcome.shards_prefetched(), 0);
+        assert_eq!(outcome.shards_skipped(), 0);
+        assert_eq!(outcome.total_wall, Duration::ZERO);
     }
 
     #[test]
@@ -647,16 +720,54 @@ pub struct ShardPrefetch {
 
 /// Result of running the configured [`PrefetchPolicy`] during a
 /// `Runtime::load_model_*` call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrefetchSuppressionReason {
+    AuthenticatedDisposableAutoA3bDirectPread,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrefetchAction {
+    ConfiguredPolicy,
+    Suppressed { reason: PrefetchSuppressionReason },
+}
+
+fn effective_prefetch_action(
+    policy: PrefetchPolicy,
+    advice: MetalLoadPrefetchAdvice,
+) -> PrefetchAction {
+    match (policy, advice) {
+        (
+            PrefetchPolicy::ColdOnly { .. },
+            MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread,
+        ) => PrefetchAction::Suppressed {
+            reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
+        },
+        _ => PrefetchAction::ConfiguredPolicy,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PrefetchOutcome {
     pub policy: PrefetchPolicy,
+    pub action: PrefetchAction,
     pub shards: Vec<ShardPrefetch>,
     /// Total wall time of the prefetch phase across all shards
-    /// (including residency probes for skipped shards).
+    /// (including residency probes for skipped shards), or zero when
+    /// prefetch is suppressed before that phase begins.
     pub total_wall: Duration,
 }
 
 impl PrefetchOutcome {
+    fn suppressed(policy: PrefetchPolicy, action: PrefetchAction) -> Self {
+        debug_assert!(matches!(action, PrefetchAction::Suppressed { .. }));
+        Self {
+            policy,
+            action,
+            shards: Vec::new(),
+            total_wall: Duration::ZERO,
+        }
+    }
+
     pub fn bytes_returned_total(&self) -> u64 {
         self.shards.iter().map(|s| s.bytes_returned).sum()
     }

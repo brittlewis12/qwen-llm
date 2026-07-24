@@ -3,11 +3,11 @@
 //! starting state.
 //!
 //! Differs from `load_spike.rs`: this exercises the real production
-//! load path (`GgufFile::open` -> optional prefetch ->
-//! `MetalModel::load_with_options`), including full Metal buffer
-//! creation, not just a bare mmap-page walk. This is the number that
-//! actually reflects "how long does the user wait before they can call
-//! `sequence.step()`".
+//! load path (`GgufFile::open` -> model bind/load-plan preparation ->
+//! optional prefetch -> prepared Metal load), including full Metal
+//! buffer creation, not just a bare mmap-page walk. This is the number
+//! that actually reflects "how long does the user wait before they can
+//! call `sequence.step()`".
 //!
 //! Usage:
 //!

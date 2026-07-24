@@ -128,6 +128,13 @@ fn moe_iq3_expert_native_enabled(desc: &TensorDesc) -> bool {
     desc.shape.len() >= 3 && desc.shape[0..3] == [2048, 512, 256]
 }
 
+fn prefill_attn_fused_qkv_g8_enabled() -> bool {
+    matches!(
+        std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
 fn alloc_shape_error(detail: &'static str) -> MetalError {
     MetalError::BadShape {
         kernel: "session_alloc",
@@ -1187,6 +1194,80 @@ pub struct MetalModel {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MetalModelLoadOptions {
     pub auto_parallel_copy_a3b: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MetalLoadPrefetchAdvice {
+    PreserveConfiguredPolicy,
+    SuppressColdOnlyAuthenticatedA3bDirectPread,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolvedStoragePolicy {
+    no_copy_mode: GgufNoCopyMode,
+    prefault_enabled: bool,
+    owned_mode: GgufOwnedArenaMode,
+    parallel_mode: GgufParallelCopyMode,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolvedWeightLoadChoices {
+    embedding_selection: NativeQuantEmbeddingSelection,
+    router_f16: bool,
+    fused_qkv_g8: bool,
+}
+
+#[derive(Clone, Copy)]
+enum PreparedParallelCopyProof {
+    A3bRetainedPlan,
+    DensePlannerFree,
+}
+
+struct PreparedParallelCopiedProfile {
+    profile: &'static ParallelCopyProfile,
+    population: ParallelPopulationMethod,
+    expected_identities: Vec<ModelWeightStorageIdentity>,
+    sorted_request_indices: Vec<usize>,
+    _proof: PreparedParallelCopyProof,
+}
+
+enum PreparedAutoSelection {
+    NotEligible,
+    NoMatch,
+    Selected(PreparedParallelCopiedProfile),
+}
+
+impl PreparedAutoSelection {
+    fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
+        match self {
+            Self::Selected(prepared)
+                if prepared.profile.id == ParallelCopyProfileId::A3bQ4kmV1
+                    && prepared.population == ParallelPopulationMethod::Pread
+                    && matches!(&prepared._proof, PreparedParallelCopyProof::A3bRetainedPlan) =>
+            {
+                MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread
+            }
+            Self::NotEligible | Self::NoMatch | Self::Selected(_) => {
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
+            }
+        }
+    }
+}
+
+pub(crate) struct PreparedMetalModelLoad<'ctx, 'gguf, 'model> {
+    ctx: &'ctx MetalContext,
+    gguf: &'gguf GgufFile,
+    model: &'model Model<'gguf>,
+    storage: ResolvedStoragePolicy,
+    choices: ResolvedWeightLoadChoices,
+    expected: Vec<ModelWeightStorageRequest<'gguf>>,
+    auto: PreparedAutoSelection,
+}
+
+impl PreparedMetalModelLoad<'_, '_, '_> {
+    pub(crate) fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
+        self.auto.prefetch_advice()
+    }
 }
 
 pub enum MetalBlock {
@@ -2746,16 +2827,23 @@ struct MetalWeightLoader<'a> {
     ctx: &'a MetalContext,
     gguf: &'a GgufFile,
     direct_storage: DirectStorage,
+    router_f16: bool,
     seen_forced: HashSet<(usize, u64, u64)>,
     ledger: WeightLoadLedger,
 }
 
 impl<'a> MetalWeightLoader<'a> {
-    fn new(ctx: &'a MetalContext, gguf: &'a GgufFile, direct_storage: DirectStorage) -> Self {
+    fn new(
+        ctx: &'a MetalContext,
+        gguf: &'a GgufFile,
+        direct_storage: DirectStorage,
+        router_f16: bool,
+    ) -> Self {
         Self {
             ctx,
             gguf,
             direct_storage,
+            router_f16,
             seen_forced: HashSet::new(),
             ledger: WeightLoadLedger::default(),
         }
@@ -2860,7 +2948,7 @@ impl<'a> MetalWeightLoader<'a> {
     }
 
     fn load_router_weight(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
-        if !moe_router_f16_enabled() {
+        if !self.router_f16 {
             return self.load_f32(desc);
         }
         let f32 = crate::codec::dequant_to_f32(desc, self.gguf.slice(desc))?;
@@ -3491,7 +3579,7 @@ fn planned_parallel_copied_storage_for_load(
     population: ParallelPopulationMethod,
 ) -> Result<PlannedParallelCopiedStorage, MfError> {
     let profile = select_parallel_copy_profile(ctx, gguf, model, expected, embedding_selection)?;
-    planned_parallel_copied_storage_for_profile(
+    let prepared = prepare_parallel_copied_profile(
         ctx,
         gguf,
         model,
@@ -3499,10 +3587,11 @@ fn planned_parallel_copied_storage_for_load(
         embedding_selection,
         profile,
         population,
-    )
+    )?;
+    realize_parallel_copied_profile(ctx, gguf, expected, prepared)
 }
 
-fn planned_parallel_copied_storage_for_profile(
+fn prepare_parallel_copied_profile(
     ctx: &MetalContext,
     gguf: &GgufFile,
     model: &Model<'_>,
@@ -3510,7 +3599,7 @@ fn planned_parallel_copied_storage_for_profile(
     embedding_selection: NativeQuantEmbeddingSelection,
     profile: &'static ParallelCopyProfile,
     population: ParallelPopulationMethod,
-) -> Result<PlannedParallelCopiedStorage, MfError> {
+) -> Result<PreparedParallelCopiedProfile, MfError> {
     if population == ParallelPopulationMethod::Pread
         && profile.id != ParallelCopyProfileId::A3bQ4kmV1
     {
@@ -3518,19 +3607,41 @@ fn planned_parallel_copied_storage_for_profile(
             "parallel pread is authenticated only for the A3B profile".to_string(),
         ));
     }
-    match profile.authentication {
+    let proof = match profile.authentication {
         ParallelCopyAuthentication::A3bRetainedPlan => {
-            let _plan =
-                authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection)?;
+            authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection)?;
+            PreparedParallelCopyProof::A3bRetainedPlan
         }
-        ParallelCopyAuthentication::DensePlannerFree => {}
-    }
+        ParallelCopyAuthentication::DensePlannerFree => PreparedParallelCopyProof::DensePlannerFree,
+    };
     let expected_identities = expected
         .iter()
         .map(expected_model_weight_identity)
         .collect::<Vec<_>>();
     let sorted_request_indices = frozen_parallel_copy_order(profile, &expected_identities)?;
+    Ok(PreparedParallelCopiedProfile {
+        profile,
+        population,
+        expected_identities,
+        sorted_request_indices,
+        _proof: proof,
+    })
+}
 
+fn realize_parallel_copied_profile(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    expected: &[ModelWeightStorageRequest<'_>],
+    prepared: PreparedParallelCopiedProfile,
+) -> Result<PlannedParallelCopiedStorage, MfError> {
+    let PreparedParallelCopiedProfile {
+        profile,
+        population,
+        expected_identities,
+        sorted_request_indices,
+        _proof,
+    } = prepared;
+    validate_model_weight_request_sequence(&expected_identities, expected)?;
     let usage_before = match profile.marker_contract {
         ParallelCopyMarkerContract::A3bSchema1 => None,
         ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_usage()?),
@@ -3552,12 +3663,6 @@ fn planned_parallel_copied_storage_for_profile(
     let mut resources = resources_result?;
     let allocation_finished = std::time::Instant::now();
 
-    let schedule_check = frozen_parallel_copy_order(profile, &expected_identities)?;
-    if schedule_check != sorted_request_indices {
-        return Err(MfError::LoadPolicy(
-            "parallel-copy schedule changed during materialization".to_string(),
-        ));
-    }
     let sources = match population {
         ParallelPopulationMethod::MmapCopy => Some(
             expected
@@ -4021,7 +4126,7 @@ fn direct_storage_for_load(
     prefault_enabled: bool,
     owned_mode: GgufOwnedArenaMode,
     parallel_mode: GgufParallelCopyMode,
-    auto_parallel_copy_a3b: bool,
+    prepared_auto: PreparedAutoSelection,
     embedding_selection: NativeQuantEmbeddingSelection,
 ) -> Result<(DirectStorage, bool), MfError> {
     let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
@@ -4046,26 +4151,9 @@ fn direct_storage_for_load(
             planned_owned_storage_for_load(ctx, gguf, model, expected, embedding_selection)?;
         return Ok((DirectStorage::ForcedOwned(storage), false));
     }
-    if parallel_mode == GgufParallelCopyMode::Auto && auto_parallel_copy_a3b {
-        if let Some(profile) =
-            select_auto_parallel_copy_profile(ctx, gguf, model, expected, embedding_selection)?
-            && let Some(population) = auto_parallel_copy_population(profile.id)
-        {
-            eprintln!(
-                "[metal-gguf-parallel-policy] mode=auto profile={}",
-                profile.id.label()
-            );
-            let storage = planned_parallel_copied_storage_for_profile(
-                ctx,
-                gguf,
-                model,
-                expected,
-                embedding_selection,
-                profile,
-                population,
-            )?;
-            return Ok((DirectStorage::ForcedParallelCopied(storage), false));
-        }
+    if let PreparedAutoSelection::Selected(prepared) = prepared_auto {
+        let storage = realize_parallel_copied_profile(ctx, gguf, expected, prepared)?;
+        return Ok((DirectStorage::ForcedParallelCopied(storage), false));
     }
     if mode == GgufNoCopyMode::Disabled {
         return Ok((DirectStorage::Copied, exact_sentinel));
@@ -4160,6 +4248,15 @@ impl MetalModel {
         model: &Model<'_>,
         options: MetalModelLoadOptions,
     ) -> Result<Self, MfError> {
+        Self::load_prepared(Self::prepare_load_with_options(ctx, gguf, model, options)?)
+    }
+
+    pub(crate) fn prepare_load_with_options<'ctx, 'gguf, 'model>(
+        ctx: &'ctx MetalContext,
+        gguf: &'gguf GgufFile,
+        model: &'model Model<'gguf>,
+        options: MetalModelLoadOptions,
+    ) -> Result<PreparedMetalModelLoad<'ctx, 'gguf, 'model>, MfError> {
         let no_copy_mode = gguf_no_copy_mode()?;
         let owned_mode = gguf_owned_arena_mode()?;
         let parallel_mode = gguf_parallel_copy_mode()?;
@@ -4212,15 +4309,114 @@ impl MetalModel {
             parallel_mode,
             explicit_override_present,
         );
-        Self::load_with_storage_policy(
+        let embedding_mode = native_quant_embedding_mode();
+        if (owned_mode == GgufOwnedArenaMode::Forced || parallel_mode.is_forced())
+            && embedding_mode != NativeQuantEmbeddingMode::Auto
+        {
+            return Err(MfError::LoadPolicy(
+                "forced A3B storage requires production-auto native embedding selection"
+                    .to_string(),
+            ));
+        }
+        let embedding_selection = resolve_native_quant_embedding(
+            embedding_mode,
+            native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
+            native_quant_embedding_default_promoted(
+                &model.arch,
+                model.tied_embeddings,
+                model.mtp.is_some(),
+                model.token_embd.dtype,
+                &model.token_embd.shape,
+            ),
+        );
+        emit_native_quant_embedding_policy(model, embedding_selection);
+        let router_f16 = moe_router_f16_enabled();
+        let expected =
+            model_weight_storage_requests(model, embedding_selection.uses_native(), router_f16)?;
+        let auto = if auto_parallel_copy_a3b {
+            match select_auto_parallel_copy_profile(
+                ctx,
+                gguf,
+                model,
+                &expected,
+                embedding_selection,
+            )? {
+                Some(profile) => match auto_parallel_copy_population(profile.id) {
+                    Some(population) => {
+                        let prepared = prepare_parallel_copied_profile(
+                            ctx,
+                            gguf,
+                            model,
+                            &expected,
+                            embedding_selection,
+                            profile,
+                            population,
+                        )?;
+                        emit_metal_load_line(format_args!(
+                            "[metal-gguf-parallel-policy] mode=auto profile={}",
+                            profile.id.label()
+                        ));
+                        PreparedAutoSelection::Selected(prepared)
+                    }
+                    None => PreparedAutoSelection::NoMatch,
+                },
+                None => PreparedAutoSelection::NoMatch,
+            }
+        } else {
+            PreparedAutoSelection::NotEligible
+        };
+        Ok(PreparedMetalModelLoad {
             ctx,
             gguf,
             model,
-            no_copy_mode,
-            prefault_enabled,
-            owned_mode,
-            parallel_mode,
-            auto_parallel_copy_a3b,
+            storage: ResolvedStoragePolicy {
+                no_copy_mode,
+                prefault_enabled,
+                owned_mode,
+                parallel_mode,
+            },
+            choices: ResolvedWeightLoadChoices {
+                embedding_selection,
+                router_f16,
+                fused_qkv_g8: prefill_attn_fused_qkv_g8_enabled(),
+            },
+            expected,
+            auto,
+        })
+    }
+
+    pub(crate) fn load_prepared(
+        prepared: PreparedMetalModelLoad<'_, '_, '_>,
+    ) -> Result<Self, MfError> {
+        let PreparedMetalModelLoad {
+            ctx,
+            gguf,
+            model,
+            storage,
+            choices,
+            expected,
+            auto,
+        } = prepared;
+        let (direct_storage, exact_sentinel) = direct_storage_for_load(
+            ctx,
+            gguf,
+            model,
+            &expected,
+            storage.no_copy_mode,
+            storage.prefault_enabled,
+            storage.owned_mode,
+            storage.parallel_mode,
+            auto,
+            choices.embedding_selection,
+        )?;
+        Self::load_with_direct_storage(
+            ctx,
+            gguf,
+            model,
+            choices,
+            &expected,
+            direct_storage,
+            exact_sentinel,
         )
     }
 
@@ -4244,6 +4440,7 @@ impl MetalModel {
         )
     }
 
+    #[cfg(test)]
     fn load_with_storage_policy(
         ctx: &MetalContext,
         gguf: &GgufFile,
@@ -4254,6 +4451,11 @@ impl MetalModel {
         parallel_mode: GgufParallelCopyMode,
         auto_parallel_copy_a3b: bool,
     ) -> Result<Self, MfError> {
+        if auto_parallel_copy_a3b {
+            return Err(MfError::LoadPolicy(
+                "test storage-policy helper cannot select Auto parallel copy".to_string(),
+            ));
+        }
         let embedding_mode = native_quant_embedding_mode();
         if (owned_mode == GgufOwnedArenaMode::Forced || parallel_mode.is_forced())
             && embedding_mode != NativeQuantEmbeddingMode::Auto
@@ -4275,11 +4477,9 @@ impl MetalModel {
             ),
         );
         emit_native_quant_embedding_policy(model, embedding_selection);
-        let expected_storage_requests = model_weight_storage_requests(
-            model,
-            embedding_selection.uses_native(),
-            moe_router_f16_enabled(),
-        )?;
+        let router_f16 = moe_router_f16_enabled();
+        let expected_storage_requests =
+            model_weight_storage_requests(model, embedding_selection.uses_native(), router_f16)?;
         let (direct_storage, exact_sentinel) = direct_storage_for_load(
             ctx,
             gguf,
@@ -4289,14 +4489,18 @@ impl MetalModel {
             prefault_enabled,
             owned_mode,
             parallel_mode,
-            auto_parallel_copy_a3b,
+            PreparedAutoSelection::NotEligible,
             embedding_selection,
         )?;
         Self::load_with_direct_storage(
             ctx,
             gguf,
             model,
-            embedding_selection,
+            ResolvedWeightLoadChoices {
+                embedding_selection,
+                router_f16,
+                fused_qkv_g8: prefill_attn_fused_qkv_g8_enabled(),
+            },
             &expected_storage_requests,
             direct_storage,
             exact_sentinel,
@@ -4307,14 +4511,14 @@ impl MetalModel {
         ctx: &MetalContext,
         gguf: &GgufFile,
         model: &Model<'_>,
-        embedding_selection: NativeQuantEmbeddingSelection,
+        choices: ResolvedWeightLoadChoices,
         expected_storage_requests: &[ModelWeightStorageRequest<'_>],
         direct_storage: DirectStorage,
         exact_sentinel: bool,
     ) -> Result<Self, MfError> {
-        let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage);
+        let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage, choices.router_f16);
         let token_embd =
-            loader.load_embedding(model.token_embd, embedding_selection.uses_native())?;
+            loader.load_embedding(model.token_embd, choices.embedding_selection.uses_native())?;
         let output_norm = loader.load_f32(model.output_norm)?;
         let lm_head = loader.load_weight(model.lm_head)?;
 
@@ -4322,11 +4526,7 @@ impl MetalModel {
                                    k: &MetalTensor,
                                    v: &MetalTensor|
          -> Result<Option<MetalTensor>, MfError> {
-            let enabled = matches!(
-                std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
-                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-            );
-            if !enabled {
+            if !choices.fused_qkv_g8 {
                 return Ok(None);
             }
             if !(q.dtype == k.dtype
@@ -13036,6 +13236,144 @@ mod tests {
     }
 
     #[test]
+    fn prepared_auto_prefetch_advice_selector_table_is_fail_closed() {
+        #[derive(Clone, Copy)]
+        enum Selection {
+            A3bPread,
+            A3bCopy,
+            A3bPreadWrongProof,
+            DenseCopy,
+            NoMatch,
+        }
+
+        let selected = |profile: &'static ParallelCopyProfile,
+                        population: ParallelPopulationMethod,
+                        proof: PreparedParallelCopyProof| {
+            PreparedAutoSelection::Selected(PreparedParallelCopiedProfile {
+                profile,
+                population,
+                expected_identities: Vec::new(),
+                sorted_request_indices: Vec::new(),
+                _proof: proof,
+            })
+        };
+        let selection = |case| match case {
+            Selection::A3bPread => selected(
+                &A3B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::Pread,
+                PreparedParallelCopyProof::A3bRetainedPlan,
+            ),
+            Selection::A3bCopy => selected(
+                &A3B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::MmapCopy,
+                PreparedParallelCopyProof::A3bRetainedPlan,
+            ),
+            Selection::A3bPreadWrongProof => selected(
+                &A3B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::Pread,
+                PreparedParallelCopyProof::DensePlannerFree,
+            ),
+            Selection::DenseCopy => selected(
+                &DENSE27B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::MmapCopy,
+                PreparedParallelCopyProof::DensePlannerFree,
+            ),
+            Selection::NoMatch => PreparedAutoSelection::NoMatch,
+        };
+        let cases = [
+            (
+                "disposable-auto-authenticated-a3b-pread",
+                true,
+                GgufParallelCopyMode::Auto,
+                false,
+                Selection::A3bPread,
+                MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread,
+            ),
+            (
+                "force-only",
+                false,
+                GgufParallelCopyMode::Auto,
+                false,
+                Selection::A3bPread,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "forced-copy",
+                true,
+                GgufParallelCopyMode::ForcedCopy,
+                false,
+                Selection::A3bPread,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "forced-pread",
+                true,
+                GgufParallelCopyMode::ForcedPread,
+                false,
+                Selection::A3bPread,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "parallel-copy-disabled",
+                true,
+                GgufParallelCopyMode::Disabled,
+                false,
+                Selection::A3bPread,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "explicit-override",
+                true,
+                GgufParallelCopyMode::Auto,
+                true,
+                Selection::A3bPread,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "no-profile-match",
+                true,
+                GgufParallelCopyMode::Auto,
+                false,
+                Selection::NoMatch,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "mmap-copy-population",
+                true,
+                GgufParallelCopyMode::Auto,
+                false,
+                Selection::A3bCopy,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "authentication-proof-mismatch",
+                true,
+                GgufParallelCopyMode::Auto,
+                false,
+                Selection::A3bPreadWrongProof,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+            (
+                "other-profile",
+                true,
+                GgufParallelCopyMode::Auto,
+                false,
+                Selection::DenseCopy,
+                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+            ),
+        ];
+
+        for (name, admission, mode, override_present, selected, expected) in cases {
+            let auto = if auto_parallel_copy_a3b_enabled(admission, mode, override_present) {
+                selection(selected)
+            } else {
+                PreparedAutoSelection::NotEligible
+            };
+            assert_eq!(auto.prefetch_advice(), expected, "{name}");
+        }
+    }
+
+    #[test]
     fn parallel_copy_auto_host_gate_is_exact() {
         assert!(a3b_parallel_copy_auto_host_supported(
             true,
@@ -13733,7 +14071,11 @@ mod tests {
                 &ctx,
                 &gguf,
                 &model,
-                embedding_selection,
+                ResolvedWeightLoadChoices {
+                    embedding_selection,
+                    router_f16: false,
+                    fused_qkv_g8: false,
+                },
                 &expected,
                 DirectStorage::ForcedParallelCopied(storage),
                 false,
@@ -13994,7 +14336,11 @@ mod tests {
                 &ctx,
                 &gguf,
                 &model,
-                embedding_selection,
+                ResolvedWeightLoadChoices {
+                    embedding_selection,
+                    router_f16: false,
+                    fused_qkv_g8: false,
+                },
                 &expected,
                 DirectStorage::ForcedParallelCopied(storage),
                 false,
@@ -14460,7 +14806,7 @@ mod tests {
             false,
             GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Disabled,
-            false,
+            PreparedAutoSelection::NotEligible,
             NativeQuantEmbeddingSelection::AutoUnpromoted,
         ) {
             Ok(_) => panic!("exact 27B rollback must fail before resource realization"),

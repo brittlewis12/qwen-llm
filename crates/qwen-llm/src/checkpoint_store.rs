@@ -14,7 +14,8 @@
 //! returns an error; callers must remain correct after any cache entry disappears.
 
 use crate::checkpoint_codec::{
-    EncodedSnapshot, SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot, encode_snapshot,
+    EncodedSnapshot, SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot,
+    encode_snapshot, verify_staged_encoder_output,
 };
 use crate::checkpoint_identity::CheckpointIdentityCache;
 use crate::metal_forward::{SessionSnapshot, SnapshotIdentity};
@@ -25,7 +26,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 const NAMESPACE_VERSION: &str = "v1";
 const PREFIX_KEY_DOMAIN: &[u8] = b"qwen-checkpoint-prefix-key-v1\0";
@@ -33,6 +34,7 @@ const BLOB_EXTENSION: &str = "qcp";
 const TEMP_PREFIX: &str = ".tmp-";
 const LOCK_FILE: &str = "store.lock";
 const MAX_PUBLICATION_ATTEMPTS: usize = 8;
+const STAGED_VALIDATION_ENV: &str = "QWEN_CHECKPOINT_STAGED_VALIDATION";
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -76,6 +78,7 @@ impl DurableCheckpointStore {
         context: StoreContext<'_>,
         snapshot: &SessionSnapshot,
     ) -> Result<PublishReport, CheckpointStoreError> {
+        let staged_validation_mode = staged_validation_mode()?;
         let mode = SnapshotMode::from_snapshot(snapshot);
         let matched_len = snapshot.matched_prefix_len();
         let digest = snapshot_prefix_key(context.compatibility_id, snapshot);
@@ -83,7 +86,12 @@ impl DurableCheckpointStore {
         self.ensure_blob_dir(&blob_dir)?;
         let final_path = blob_dir.join(blob_name(matched_len, mode, &digest));
         let temp_path = unique_temp_path(&blob_dir, &digest);
-        let staged = match self.encode_staged(&temp_path, context, snapshot) {
+        let (staged, staged_validation) = match self.encode_staged_with_mode(
+            &temp_path,
+            context,
+            snapshot,
+            staged_validation_mode,
+        ) {
             Ok(staged) => staged,
             Err(error) => {
                 let _ = std::fs::remove_file(&temp_path);
@@ -106,6 +114,7 @@ impl DurableCheckpointStore {
             &temp_path,
             &final_path,
             staged,
+            staged_validation,
         );
         let _ = std::fs::remove_file(&temp_path);
         result
@@ -179,6 +188,7 @@ impl DurableCheckpointStore {
         temp_path: &Path,
         final_path: &Path,
         staged: EncodedSnapshot,
+        staged_validation: StagedValidationReport,
     ) -> Result<PublishReport, CheckpointStoreError> {
         let mut repaired = false;
         for _ in 0..MAX_PUBLICATION_ATTEMPTS {
@@ -194,7 +204,9 @@ impl DurableCheckpointStore {
                     Err(error) => return Err(error.into()),
                 };
                 if valid {
-                    if let Some(report) = self.admit_existing(final_path, &lease)? {
+                    if let Some(report) =
+                        self.admit_existing(final_path, &lease, staged_validation)?
+                    {
                         return Ok(report);
                     }
                     continue;
@@ -259,17 +271,19 @@ impl DurableCheckpointStore {
                 evicted_entries,
                 evicted_bytes,
                 touched: false,
+                staged_validation,
             });
         }
         Err(CheckpointStoreError::ConcurrentChurn)
     }
 
-    fn encode_staged(
+    fn encode_staged_with_mode(
         &self,
         temp_path: &Path,
         context: StoreContext<'_>,
         snapshot: &SessionSnapshot,
-    ) -> Result<EncodedSnapshot, CheckpointStoreError> {
+        mode: StagedValidationMode,
+    ) -> Result<(EncodedSnapshot, StagedValidationReport), CheckpointStoreError> {
         let mut options = OpenOptions::new();
         options
             .read(true)
@@ -286,13 +300,28 @@ impl DurableCheckpointStore {
         };
         file.sync_all()?;
         file.seek(SeekFrom::Start(0))?;
-        let decoded = decode_snapshot(&mut file, context.codec_constraints())?;
-        if !same_snapshot_prefix(&decoded, snapshot)
-            || SnapshotMode::from_snapshot(&decoded) != SnapshotMode::from_snapshot(snapshot)
-        {
-            return Err(CheckpointStoreError::StagedValidation);
+        let validation_started = Instant::now();
+        match mode {
+            StagedValidationMode::MaterializedDecode => {
+                let decoded = decode_snapshot(&mut file, context.codec_constraints())?;
+                if !same_snapshot_prefix(&decoded, snapshot)
+                    || SnapshotMode::from_snapshot(&decoded)
+                        != SnapshotMode::from_snapshot(snapshot)
+                {
+                    return Err(CheckpointStoreError::StagedValidation);
+                }
+            }
+            StagedValidationMode::EncoderDigest => {
+                verify_staged_encoder_output(&mut file, encoded)?;
+            }
         }
-        Ok(encoded)
+        Ok((
+            encoded,
+            StagedValidationReport {
+                mode,
+                elapsed: validation_started.elapsed(),
+            },
+        ))
     }
 
     fn discover_candidates(
@@ -378,6 +407,7 @@ impl DurableCheckpointStore {
         &self,
         path: &Path,
         lease: &BlobLease,
+        staged_validation: StagedValidationReport,
     ) -> Result<Option<PublishReport>, CheckpointStoreError> {
         let _lock = self.lock_exclusive()?;
         let Some(metadata) = metadata_nofollow(path)? else {
@@ -403,6 +433,7 @@ impl DurableCheckpointStore {
             evicted_entries,
             evicted_bytes,
             touched,
+            staged_validation,
         }))
     }
 
@@ -542,6 +573,27 @@ pub enum PublishOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StagedValidationMode {
+    MaterializedDecode,
+    EncoderDigest,
+}
+
+impl StagedValidationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaterializedDecode => "decode",
+            Self::EncoderDigest => "encoder-digest",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StagedValidationReport {
+    pub mode: StagedValidationMode,
+    pub elapsed: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PublishReport {
     pub outcome: PublishOutcome,
     pub blob_bytes: u64,
@@ -549,6 +601,7 @@ pub struct PublishReport {
     pub evicted_entries: usize,
     pub evicted_bytes: u64,
     pub touched: bool,
+    pub staged_validation: StagedValidationReport,
 }
 
 #[derive(Debug)]
@@ -601,10 +654,32 @@ pub enum CheckpointStoreError {
     },
     #[error("checkpoint staged validation failed")]
     StagedValidation,
+    #[error("invalid {STAGED_VALIDATION_ENV}; expected 'decode' or 'encoder-digest'")]
+    InvalidStagedValidationMode,
     #[error("checkpoint store changed repeatedly during publication")]
     ConcurrentChurn,
     #[error("checkpoint touch lost an eviction or replacement race")]
     TouchLostRace,
+}
+
+fn staged_validation_mode() -> Result<StagedValidationMode, CheckpointStoreError> {
+    match std::env::var(STAGED_VALIDATION_ENV) {
+        Err(std::env::VarError::NotPresent) => parse_staged_validation_mode(None),
+        Ok(value) => parse_staged_validation_mode(Some(&value)),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(CheckpointStoreError::InvalidStagedValidationMode)
+        }
+    }
+}
+
+fn parse_staged_validation_mode(
+    value: Option<&str>,
+) -> Result<StagedValidationMode, CheckpointStoreError> {
+    match value {
+        None | Some("decode") => Ok(StagedValidationMode::MaterializedDecode),
+        Some("encoder-digest") => Ok(StagedValidationMode::EncoderDigest),
+        Some(_) => Err(CheckpointStoreError::InvalidStagedValidationMode),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -1226,6 +1301,71 @@ mod tests {
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>())
         );
+    }
+
+    #[test]
+    fn staged_validation_mode_is_strict_and_defaults_to_decode() {
+        assert_eq!(
+            parse_staged_validation_mode(None).unwrap(),
+            StagedValidationMode::MaterializedDecode
+        );
+        assert_eq!(
+            parse_staged_validation_mode(Some("decode")).unwrap(),
+            StagedValidationMode::MaterializedDecode
+        );
+        assert_eq!(
+            parse_staged_validation_mode(Some("encoder-digest")).unwrap(),
+            StagedValidationMode::EncoderDigest
+        );
+        for value in ["", "digest", "Decode", "encoder_digest", "ture"] {
+            assert!(matches!(
+                parse_staged_validation_mode(Some(value)),
+                Err(CheckpointStoreError::InvalidStagedValidationMode)
+            ));
+        }
+    }
+
+    #[test]
+    fn staged_validation_modes_emit_identical_records() {
+        let temp = TestDir::new("staged-validation-modes");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let snapshot = snapshot(&[1, 2], Some(3), true);
+        let decode_path = temp.0.join("decode.qcp");
+        let digest_path = temp.0.join("encoder-digest.qcp");
+
+        let (decode, decode_validation) = store
+            .encode_staged_with_mode(
+                &decode_path,
+                context(&snapshot.identity),
+                &snapshot,
+                StagedValidationMode::MaterializedDecode,
+            )
+            .unwrap();
+        let (digest, digest_validation) = store
+            .encode_staged_with_mode(
+                &digest_path,
+                context(&snapshot.identity),
+                &snapshot,
+                StagedValidationMode::EncoderDigest,
+            )
+            .unwrap();
+
+        assert_eq!(decode, digest);
+        assert_eq!(
+            decode_validation.mode,
+            StagedValidationMode::MaterializedDecode
+        );
+        assert_eq!(digest_validation.mode, StagedValidationMode::EncoderDigest);
+        assert_eq!(
+            std::fs::read(&decode_path).unwrap(),
+            std::fs::read(&digest_path).unwrap()
+        );
+        let restored = decode_snapshot(
+            &mut File::open(&digest_path).unwrap(),
+            context(&snapshot.identity).codec_constraints(),
+        )
+        .unwrap();
+        assert_snapshot_equal(&snapshot, &restored);
     }
 
     #[test]

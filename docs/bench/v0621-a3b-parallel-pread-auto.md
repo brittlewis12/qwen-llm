@@ -1,7 +1,6 @@
 # v0.621 A3B Direct-Pread Auto Admission
 
-Status: preregistered; selector implementation is present and the packet is
-unrun.
+Status: sealed GO for the authenticated disposable A3B Auto selector.
 
 ## Intent
 
@@ -94,3 +93,49 @@ losses or retry authority.
 
 No authority extends to reusable/JSONL loads, other assets, concurrent loading,
 energy, physical-memory savings, or prefetch suppression.
+
+## Result
+
+Source commit: `f6c856c04869c7a97920a9375abad1a5e3992a52`.
+
+Current packet seals:
+
+- decision: `e46e0d3966d0d01c950b2bb50042dbe7a63141a7488b9dbcffad4393e784696e`;
+- inventory: `cdd0281bc3f1bdbe77fc6fe9f701d40f5f22fe07b823e79beb4d9062a9551827`;
+- completion:
+  `8321ed29ee33c5abdd5fb42a6e6fb13aa6afc58d9bb6c8fe1858a58d4a395004`.
+
+Stage 1 proves the actual absent-environment Auto selector takes the intended
+pread path and reproduces the force-only product result:
+
+| Metric | Overall median | AB median | BA median | Wins |
+|---|---:|---:|---:|---:|
+| Load saving | 203.771 ms | 201.886 ms | 205.656 ms | 6/6 |
+| First-byte saving | 209.427 ms | 211.009 ms | 207.846 ms | 6/6 |
+| Exit saving | 252.488 ms | 251.937 ms | 253.039 ms | 6/6 |
+| Load B/A | 0.812437x | 0.815017x | 0.809858x | 6/6 |
+
+Maximum RSS B/A is `0.504261x`, while maximum physical-footprint B/A is
+`0.999661x`. All 12 outputs are byte-identical to v0.620. Two pairs show small
+fresh prefill/TTFT regressions; the maxima are `1.00493x` and `1.00539x`, while
+both medians favor pread. This remains a load/first-byte improvement, not a
+strict Pareto claim for every recorded endpoint.
+
+Stage 2 validates the current default-ColdOnly composition after each child
+invalidates the target file from the buffer cache:
+
+| Order | Load P-M | First byte P-M | Read P/M | CPU P/M | Footprint P/M |
+|---|---:|---:|---:|---:|---:|
+| MP | -221 ms | -227 ms | 1.000x | 0.847134x | 0.999780x |
+| PM | -202 ms | -198 ms | 1.000x | 0.859649x | 0.999755x |
+
+Every cold child invalidates all `1,350,985` pages, physically reads
+`20.61 GiB`, completes one full-shard ColdOnly prefetch, and returns to 100%
+residency. The prefetch costs about `3.6 s` before population. This certifies
+target-file-buffer-cache-cold default-ColdOnly composition, not untouched-media
+loading or explicit prefetch-off behavior.
+
+The mechanical decision is `status=go` with
+`authority=auto-exact-a3b-pread-disposable`. It does not extend to other assets,
+hosts, reusable/JSONL loads, serving, concurrent loading, energy, physical
+memory removal, or prefetch suppression.

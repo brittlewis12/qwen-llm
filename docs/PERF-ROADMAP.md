@@ -749,20 +749,16 @@ policy, and makes assistant-boundary forks ancestor-reusable. There is no
 year-core injection. Prefix productization is complete for guarded serial use;
 do not keep it in the active optimization queue by inventing more cache policy.
 
-1. **A3B direct-pread Auto admission**: v0.617 and v0.620 close the mechanism
-   and force-only product path. Against the current mmap parallel population,
-   pread saves paired median `205.122 ms` of load, `205.937 ms` to first generated
-   byte, and `249.905 ms` through exit, all 6/6. Full state is bit exact and all
-   loaded P/D/R gates pass. Change only the authenticated disposable A3B Auto
-   selector from `MmapCopy` to `Pread`; preserve explicit true as mmap copy,
-   explicit `pread`, `=0` rollback, unsupported fallback, and reusable intent.
-   Run policy tests plus one actual-Auto six-pair confirmation and a bounded
-   storage-cold guardrail. Do not claim the halved task RSS as physical-memory
-   removal: footprint is flat and system CPU rises. Current `ColdOnly` prefetch
-   still precedes population on storage-cold loads; coordinate or suppress that
-   first pass only if the cold guard proves duplicated work is material. Belief
-   high; difficulty S for warm admission, M for later cold-pass coordination.
-2. **Checkpoint restore/publication I/O and memory**: the intended client grows
+v0.621 completes A3B direct-pread Auto admission. The actual absent-environment
+selector saves median `203.771 ms` of load, `209.427 ms` to first byte, and
+`252.488 ms` through exit over forced mmap, all 6/6. A two-pair target-file-cold
+default-ColdOnly guard also passes after full invalidation and physical reread.
+Authority remains limited to authenticated disposable A3B; explicit controls,
+fallback, and reusable intent are unchanged. The flat physical footprint and
+small per-pair prefill/TTFT noise forbid broader memory or Pareto claims. This
+admission leaves the active queue.
+
+1. **Checkpoint restore/publication I/O and memory**: the intended client grows
    the observed identity-hit boundary to `554.5 ms` restore plus `53.1 ms`
    capture and `1,121.2 ms` publication for a roughly 1.02 GB checkpoint.
    First attribute decode/copy/write/fsync/validation phases and peak timing;
@@ -770,14 +766,14 @@ do not keep it in the active optimization queue by inventing more cache policy.
    reduction before representation work. Belief medium-high that the boundary
    is measurable, medium on removable wall, difficulty M. Keep it below the
    broader fresh-loader transfer until attribution identifies avoidable work.
-3. **A10B cold residency plus split-copy floor**: only if the heavy anchor
+2. **A10B cold residency plus split-copy floor**: only if the heavy anchor
    remains deployment-relevant. First adjudicate the already bit-exact native
    embedding, which removes 2.24 GB. Then freeze that inventory and require at
    least 1.5 seconds from a three-shard topology-preserving parallel-copy floor
    before product code. Belief high on memory, medium on copy wall, difficulty
    M-L; deployment relevance is below A3B and dense 27B. If relevant, this moves
    ahead of GPU argmax and reuses the winning A3B population primitive.
-4. **Production GPU argmax contract**: three product paths still copy 993,280
+3. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes, about 970 KiB, and scan 248,320 values on CPU despite the measured GPU
    path. CPU product semantics choose the highest equal index and order NaNs;
    current GPU semantics choose the lowest finite tie and ignore NaNs. Preserve
@@ -785,37 +781,37 @@ do not keep it in the active optimization queue by inventing more cache policy.
    Existing MoE gain is only `1.0-1.5%` and dense is neutral, so authorize an
    explicit low-complexity 1% gate rather than invoking the normal 2-3% bar.
    Belief high on small work removal, difficulty S-M.
-5. **Grammar run and admissible-row oracle**: replay real structured traces and
+4. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal uniquely forced tokenizer-token runs plus branch vocabulary
    rows. Use `sum(H_r*(r*C1-Cpack(r))) - overhead`; require `T0/11` for a 1.10x
    request. Runs below four are not locally positive at current N8 cost.
    Contract-exact, belief medium-low until traces exist, difficulty S oracle/M
    product.
-6. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
+5. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
    true-long decode, but explicitly input-changing and quality-gated. Prefix
    caching is a separate reuse specialization and does not inherit this
    fresh-prompt gain band.
-7. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
+6. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
    131K token, but v0.607 closes the current cooperative read-once organization.
    Do no GPU work until a source-free design changes ownership, scheduling,
    residency, or physical bytes and clears the existing medium, breadth, 131K,
    and whole-token ceilings. Prize high, implementation belief low.
-8. **MTPLX asset/contract decomposition**: pin the external runtime and compare
+7. **MTPLX asset/contract decomposition**: pin the external runtime and compare
    matched M4 AR/D3/D7 acceptance by depth. A cross-trunk sidecar bridge must
    predict a passing qwen request before affine Metal work. This is high
    information value for speculative decode, but below fresh-process work now.
    Belief medium, difficulty S packet/M bridge.
-9. **Materially different A3B state-preserving verifier**: preserve serial
+8. **Materially different A3B state-preserving verifier**: preserve serial
    recurrence, convolution, KV, logits, and continuation state before timing.
    Keep the failed physical-N8 implementation only as a negative control.
    Require state passage and at least 5% projected decode movement. Conditional
    prize high, belief low-medium, difficulty M-L.
-10. **Certified lm-head screening oracle**: use outward-rounded row/block bounds
-    to measure exact-argmax pruning before engine work. Require at least 80% of
-    rows pruned while touching at most 30% of lm-head bytes. Base decode prize is
-    small; the better customer is a repeated speculative draft head. Keep this
-    behind a positive grammar/admissible-row signal. Belief low-medium,
-    difficulty S oracle/M product.
+9. **Certified lm-head screening oracle**: use outward-rounded row/block bounds
+   to measure exact-argmax pruning before engine work. Require at least 80% of
+   rows pruned while touching at most 30% of lm-head bytes. Base decode prize is
+   small; the better customer is a repeated speculative draft head. Keep this
+   behind a positive grammar/admissible-row signal. Belief low-medium,
+   difficulty S oracle/M product.
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
 allocation removal under the same latency gate; typed metadata retains only an

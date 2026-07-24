@@ -709,7 +709,10 @@ metadata-keyed durable-identity entry returns `bytes_hashed=0`; full BLAKE3 is
 a missing/corrupt/unreadable-entry bootstrap or repair path, and an empty blob
 store defers it until post-response publication. `ModelLoadIntent::ForceOnly`
 does not disable prefetch; any `LoadedModelConfig` inheriting the default
-receives `ColdOnly` unless it explicitly selects `PrefetchPolicy::Off`.
+receives `ColdOnly` unless it explicitly selects `PrefetchPolicy::Off`. The
+authenticated disposable A3B Auto direct-pread path is now the one measured
+exception: v0.624-v0.625 suppress its redundant `ColdOnly` pass only after exact
+plan authentication.
 
 v0.612 also measures the active repeated-conversation reuse shape. Across nine
 adjacent Qwen3.6 27B ring0 transitions, full-prompt checkpoints are exact token
@@ -758,6 +761,20 @@ fallback, and reusable intent are unchanged. The flat physical footprint and
 small per-pair prefill/TTFT noise forbid broader memory or Pareto claims. This
 admission leaves the active queue.
 
+v0.624 removes the remaining duplicate A3B cold pass. Across six target-file-
+cold pairs, suppressing full `ColdOnly` warming before the same direct pread saves
+paired medians of `815.0 ms` load and `810.5 ms` to first byte, with 6/6 wins and
+both order strata clear. AB/BA medians are `517/851 ms` load and `525/846 ms`
+first byte; the overall values are balanced-protocol medians, not stable per-load
+constants. Every child reports one shard-equivalent physical read within
+0.01 GiB resolution, total CPU falls to `0.578-0.736x`, and footprint is flat:
+the mechanism removes a second logical pass, not physical I/O or final copied
+residency. v0.625 then seals the edited product path: both selector tables and
+exact `ColdOnly`/`Always`/`Off` marker, residency, physical-read, and first-token
+contracts pass. This completes the authenticated disposable A3B Auto pread
+stack; do not spend another product packet on its current four-worker policy
+without a changed worker or destination premise.
+
 v0.622-v0.623 attribute and close publication's duplicate staged decode. On an
 exact 582.9 MB checkpoint, fixed-buffer digest validation removes one complete
 snapshot population but saves only `17.4/18.1 ms`; publication and whole-process
@@ -766,68 +783,83 @@ the negative transfer is explained: both arms still reread/hash the full file,
 and the late temporary snapshot never owns the process high-water mark. Do not
 reopen allocation-free readback under the same publication contract.
 
-1. **Checkpoint immediate-readback contract**: the remaining full
-   encoder-digest readback costs `268.4/269.0 ms`. Because checkpoints are
-   disposable and every lookup already performs full adversarial validation,
-   price publishing the fsynced encoder output without immediate reread, while
-   retaining exact format, source digest, hard-link publication, directory
-   durability, and restore-time corruption fallback. This is process-exit/E2E,
-   not TTFT, and its measured ceiling only narrowly clears the 250 ms gate.
-   Decide the integrity contract before code; belief medium-high on mechanism,
-   medium on product transfer, difficulty S-M.
-2. **Checkpoint direct restore/capture dataflow**: direct file-to-disposable
-   session restore could remove the decoded CPU arena plus one state copy from
-   the `554.5 ms` restore path. Direct completed-session staging could remove
-   the prepared snapshot that overlaps live state. Expect memory movement before
-   large wall movement. Require a source-free lifetime/safety proof and a 250 ms
-   TTFT/process-wall or 500 MB phase-peak projection before implementation.
-   Belief medium on memory, low-medium on wall, difficulty M-L.
-3. **A10B cold residency plus split-copy floor**: only if the heavy anchor
-   remains deployment-relevant. First adjudicate the already bit-exact native
-   embedding, which removes 2.24 GB. Then freeze that inventory and require at
-   least 1.5 seconds from a three-shard topology-preserving parallel-copy floor
-   before product code. Belief high on memory, medium on copy wall, difficulty
-   M-L; deployment relevance is below A3B and dense 27B. If relevant, this moves
-   ahead of GPU argmax and reuses the winning A3B population primitive.
-4. **Production GPU argmax contract**: three product paths still copy 993,280
-   bytes, about 970 KiB, and scan 248,320 values on CPU despite the measured GPU
-   path. CPU product semantics choose the highest equal index and order NaNs;
-   current GPU semantics choose the lowest finite tie and ignore NaNs. Preserve
-   or deliberately version that contract, then test all three call sites.
-   Existing MoE gain is only `1.0-1.5%` and dense is neutral, so authorize an
-   explicit low-complexity 1% gate rather than invoking the normal 2-3% bar.
-   Belief high on small work removal, difficulty S-M.
-5. **Grammar run and admissible-row oracle**: replay real structured traces and
-   count maximal uniquely forced tokenizer-token runs plus branch vocabulary
-   rows. Use `sum(H_r*(r*C1-Cpack(r))) - overhead`; require `T0/11` for a 1.10x
-   request. Runs below four are not locally positive at current N8 cost.
-   Contract-exact, belief medium-low until traces exist, difficulty S oracle/M
-   product.
-6. **Fresh prompt/context reduction**: potentially `1.1-2x` TTFT and `5-30%`
-   true-long decode, but explicitly input-changing and quality-gated. Prefix
-   caching is a separate reuse specialization and does not inherit this
-   fresh-prompt gain band.
-7. **True-long attention new-premise gate**: attention reaches 46.2% of A3B's
-   131K token, but v0.607 closes the current cooperative read-once organization.
-   Do no GPU work until a source-free design changes ownership, scheduling,
-   residency, or physical bytes and clears the existing medium, breadth, 131K,
-   and whole-token ceilings. Prize high, implementation belief low.
-8. **MTPLX asset/contract decomposition**: pin the external runtime and compare
-   matched M4 AR/D3/D7 acceptance by depth. A cross-trunk sidecar bridge must
-   predict a passing qwen request before affine Metal work. This is high
-   information value for speculative decode, but below fresh-process work now.
-   Belief medium, difficulty S packet/M bridge.
-9. **Materially different A3B state-preserving verifier**: preserve serial
-   recurrence, convolution, KV, logits, and continuation state before timing.
-   Keep the failed physical-N8 implementation only as a negative control.
-   Require state passage and at least 5% projected decode movement. Conditional
-   prize high, belief low-medium, difficulty M-L.
-10. **Certified lm-head screening oracle**: use outward-rounded row/block bounds
-    to measure exact-argmax pruning before engine work. Require at least 80% of
-    rows pruned while touching at most 30% of lm-head bytes. Base decode prize
-    is small; the better customer is a repeated speculative draft head. Keep
-    this behind a positive grammar/admissible-row signal. Belief low-medium,
-    difficulty S oracle/M product.
+1. **Dense-27B W4 direct-pread product transfer**: v0.603 already proves a
+   `965.0405 ms` same-topology materialization saving, while v0.617-v0.621 seal
+   four-worker destination pread as a materially changed population primitive
+   after the closed v0.605 mmap-copy successor. Authenticate the exact 851-
+   resource dense inventory and keep W=4. Run exact correctness and fresh-process
+   pairs before any repeated loaded stage so v0.605-style nonstationarity cannot
+   erase the cold observation. Product authority still requires a separately
+   redesigned loaded-stability protocol with short-period arm alternation below
+   the observed drift timescale; an inconclusive loaded stage may retain fresh
+   evidence but cannot admit the selector. Prize about one second, belief high on
+   population and medium on product transfer, difficulty M.
+2. **Page-rounded compatibility control, then one sidecar image**: on the
+   v0.602 copied arm, round each of 733 destination allocations to 16 KiB while
+   preserving independent resources, offset zero, exact logical bindings,
+   population, and schedule. Require full-state identity and every loaded 1%
+   P/D/R gate. Red kills only this page-rounded 733-independent-resource image
+   construction. Green clears buffer-length compatibility and authorizes one
+   bench-only page-aligned A3B image; it does not establish no-copy lifetime,
+   mapping, backing-page, or warm-parity behavior. No converter policy follows
+   before that image passes. Eventual prize is deletion of the `~0.5-0.75 s`
+   cache-warm population wall plus private weight allocation; belief medium.
+3. **Checkpoint immediate-readback contract**: current encoder-digest
+   validation is `268.4/269.0 ms`; that is not a pure read-only timing. Price
+   publishing the fsynced encoder output without immediate reread while retaining
+   exact format, source digest, hard-link publication, directory durability, and
+   restore-time adversarial validation. This is process-exit/E2E, not TTFT, and
+   only narrowly clears the 250 ms gate. Belief medium-high on mechanism, medium
+   on transfer, difficulty S-M.
+4. **A3B direct-pread worker screen**: only if cache-warm process-cold population
+   remains material in deployment. Sweep `W={1,2,4,6,8,12}` on authenticated A3B
+   inventory with the target file fully resident, counterbalanced, reporting
+   `ready_us` decomposition and total CPU without QoS or chunk changes. The
+   `50-150 ms` band is a prior; `60 ms` is an approximately 11% policy threshold
+   against the current ~532 ms ready wall, not an MDE. A miss closes cache-warm
+   worker tuning only. A winner must separately beat W=4 target-file-cold before
+   promotion; QoS remains untested. Difficulty S-M.
+5. **Transient mmap-source to independent-Shared blit floor**: compare current
+   direct destination pread with a transient retained source and 733 independent
+   Shared destinations. Stop below `112 ms` ready-wall saving and exclude
+   `StorageModePrivate`, sidecar format, and loaded-policy changes. The threshold
+   is inherited from v0.619-v0.620 as a portfolio gate, not a measured blit MDE.
+   This experiment is scientifically independent of #2 but lower-EV if its image
+   preserves warm parity. Belief medium, difficulty M.
+6. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
+   materialization idea with named production-grid ablations: A production; B
+   deterministic initialized tile writes with dequant ALU removed but quant loads
+   kept observably live; C removes those global loads; D is included only if a
+   race-free initialized replacement can remove the production barriers without
+   changing another intended term; E is initialized MMA-only with the same grid,
+   K-loop, half-to-float MMA family, accumulator, and stores. Inspect generated
+   code so DCE or undefined values cannot manufacture a ceiling. These non-
+   isomorphic arms bound terms; they are not additive attribution. This is the
+   actual-shape decomposition left open by v0.606, not a reopening of activation
+   packing or generic no-dequant work. `<=14.7 TFLOP/s` MMA-only closes the lane;
+   any faster result still needs a named charged `>=1.133x` gate/up prediction.
+   Information value high, payoff belief unknown, difficulty S-M.
+7. **Production GPU argmax contract**: three product paths still copy 993,280
+   bytes and scan 248,320 logits on CPU. Reconcile highest-index CPU ties and NaN
+   ordering with lowest-finite-index GPU semantics, then wire all call sites
+   behind an explicit low-complexity 1% gate. Existing MoE gain is `1.0-1.5%`
+   and dense is neutral. Belief high on small work removal, difficulty S-M.
+8. **A10B cold residency plus split-copy floor**: proceed only if the heavy
+   anchor remains deployment-relevant. First adjudicate the bit-exact native
+   embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
+   three-shard topology-preserving population floor. Belief high on memory,
+   medium on copy wall, difficulty M-L.
+9. **Grammar run and admissible-row oracle**: replay real structured traces and
+   count maximal forced-token runs plus branch vocabulary rows. Require
+   `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
+   positive at current N8 cost. Contract-exact, belief medium-low until traces
+   exist, difficulty S oracle/M product.
+10. **High-ceiling structural options**: true-long attention needs a source-free
+    body that changes ownership, scheduling, residency, or physical bytes after
+    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
+    before asset or affine work; A3B verification needs a materially different
+    serial-state-preserving organization. Keep all three behind their existing
+    source-free oracle and whole-token gates. Prize high, belief low-medium.
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
 allocation removal under the same latency gate; typed metadata retains only an
@@ -838,15 +870,18 @@ router mass is diffuse and ideal k8-to-k6 removal is only about `4.55%` before
 overhead or quality loss. Certified lm-head screening remains behind a positive
 grammar-row signal.
 
-Blocked cold follow-ons remain conditional. v0.602 satisfies the first prerequisite
-for async retained-to-copied promotion, but command-buffer-safe cutover, copy
-contention, and secondary serving scope still keep it below serial cold breadth.
-Resource-count/size/offset attribution is no longer needed for the A3B decision:
-the same-topology pilot preserves loaded parity and transfers the cold floor. Metal
-does not expose physical GPU page placement or TLB policy; do not reopen
-resource-shape A/Bs as purported MMU control. Completed-turn durable snapshots
-are banked reuse evidence above. A resident daemon remains a useful deployment
-lane, but neither mechanism is fresh-prompt, model-process-cold acceleration.
+Blocked cold follow-ons remain conditional. v0.602 satisfies the first
+prerequisite for async retained-to-copied promotion, but command-buffer-safe
+cutover, copy contention, and secondary serving scope keep it below serial cold
+breadth. Broad resource-count/offset/MMU attribution is not needed for the
+current A3B decision: same-topology copied storage already transfers the floor.
+The one permitted size control in #2 exists only to test buffer-length
+compatibility for one page-rounded independent-resource image construction while
+every other topology dimension is frozen; it is not authority for an open-ended
+MMU sweep or a verdict on all no-copy images. Metal does not expose physical GPU
+page placement or TLB policy. Completed-turn durable snapshots are banked reuse
+evidence above. A resident daemon remains useful deployment work, not fresh-
+prompt model-process-cold acceleration.
 
 Memory follow-up: v0.590 promotes native embeddings for 27B and A3B. v0.591 proves
 that CPU-prefaulted 27B views remove about 16.8 GB but lose latency; v0.593 proves
@@ -883,30 +918,35 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. For fresh loads, compare direct destination `pread` with one transient
-   mmap-source to independent-destination blit floor. Stop below `112 ms` ready
-   saving on the blit floor. Keep write-combined separate. Do not spend more
-   time on range selection: v0.612 proves 100% tensor-region coverage.
-2. Attribute the intended client's `554.5 ms` restore and `1,121.2 ms`
-   identity-hit publication before redesign. Require 250 ms wall or 500 MB
-   peak-footprint movement from a named phase.
-3. Fix `scripts/bench-first-byte.sh` to pass `--intent disposable` before any
-   new A3B product packet. Decide whether A10B is a current target before its
-   native-embedding and split-copy floors.
-4. Reconcile CPU/GPU argmax tie and NaN semantics, then wire all three product
-   greedy paths behind its explicit 1% low-complexity gate.
-5. Run the structured-trace grammar artifact before engine work. Stop unless the
-   savings-weighted request arithmetic clears 1.10x.
-6. Keep prompt reduction explicitly input-changing. Keep true-long attention
-   closed until a source-free new premise clears every existing ceiling.
-7. Run MTPLX AR/D3/D7 before new drafter or affine work. Keep A3B physical-N8
-   behind one materially different full-state candidate.
-8. Run the block-norm lm_head oracle only after grammar rows. Keep top-k behind
-   a named quality replay.
-9. Do not resume topology attribution, generic command-graph or compiler work,
-   retained-view retunes, broad external drafting, matrix/compressed attention,
-   sparse retrieval, routed-tail work, generic packed GDN, mixed quant, broad
-   prompt lookup, or local retuning without an explicit reopen gate.
+1. Transfer sealed W4 direct destination pread to the exact dense-27B inventory
+   now. Use a new fresh-first packet, not a v0.604/v0.605 successor, so the cold
+   endpoint is observed before repeated loaded work. Redesign loaded stability
+   separately with short-period arm alternation; no default authority exists
+   until full-state, loaded, fresh, CPU, and pressure gates all pass.
+2. Run only the copied page-rounding compatibility control. Green advances one
+   bench-only A3B aligned image; red kills only that independent-resource image
+   construction before converter or policy work.
+3. Decide the checkpoint immediate-readback integrity contract before code;
+   direct restore/capture remains behind a 250 ms wall or 500 MB phase-peak case.
+4. Run the A3B resident worker screen only if cache-warm population still matters.
+   A warm miss closes only that regime; a winner needs a separate storage-cold
+   W=4 comparison. QoS remains independent and untested.
+5. Run the transient-source Shared-destination blit floor if the sidecar path
+   fails or is rejected. This is portfolio ordering, not a causal dependency;
+   keep Private storage and write-combined destinations separate.
+6. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
+   hardened Q4 ladder before any new dense-prefill representation. Treat a low
+   MMA-only ceiling as a valuable closure.
+7. Decide whether A10B is a current deployment target. If yes, its native-
+   embedding/split-copy floor moves ahead of GPU argmax; otherwise reconcile
+   argmax semantics first, then run grammar traces.
+8. Keep prompt reduction explicitly input-changing. Keep true-long attention,
+   MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
+   their named source-free, state, quality, and whole-token gates.
+9. Do not resume broad topology attribution, generic command-graph or compiler
+   work, retained-view retunes, broad external drafting, matrix/compressed
+   attention, sparse retrieval, routed-tail work, generic packed GDN, mixed
+   quant, broad prompt lookup, or local retuning without an explicit reopen gate.
 
 ### Decisive gates
 
@@ -932,10 +972,13 @@ automatic retained use stay copied without separate evidence.
   offset-zero topology through the loaded gates before fresh product timing.
   v0.599 clears the A3B materialization floor, v0.602 clears exact A3B full
   state, loaded parity, and cold product endpoints, and v0.608 admits only the
-  authenticated disposable single-turn use. v0.603 independently clears the
-  dense-27B same-topology floor but not product transfer. Dense product
-  authority still requires exact full-state, loaded, and fresh evidence. A10B
-  breadth requires its own inventory, floor, correctness, and product evidence.
+  authenticated disposable single-turn use. v0.621/v0.624/v0.625 complete its
+  direct-pread Auto population and redundant-prefetch suppression. Any worker
+  change must first clear the isolated 60 ms ready-wall gate and then repeat
+  storage-cold transfer. v0.603 independently clears the dense-27B same-topology
+  floor but not product transfer. Dense product authority still requires exact
+  full-state, loaded, and fresh evidence under a changed primitive. A10B breadth
+  requires its own inventory, floor, correctness, and product evidence.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;
@@ -949,6 +992,15 @@ automatic retained use stay copied without separate evidence.
   environment overrides, cache interaction, disabled online attention/overlay,
   or insufficient memory fall back to 1024. Require fresh TTFT confirmation on
   each admitted profile before default-on.
+- **Production-Q4 attribution**: no-op arms must preserve the exact production
+  grid, loop counts, initialized inputs, half-to-float MMA family,
+  accumulation/store observability, and every instruction not intentionally
+  removed by that named arm. Reject DCE, races, or undefined-value shortcuts.
+  Close exact dense-prefill kernel work if the MMA-only arm is no better than
+  `14.7 TFLOP/s`: that is only about `1.11x` over v0.606's `13.22195 TFLOP/s`,
+  below the measured `1.133x` charged gate/up requirement. Above that ceiling, a
+  named race-free arm plus all charged costs must still predict `>=1.133x`
+  before implementation; do not add non-isomorphic deltas as if independent.
 - **Grammar fast-forward**: count uniquely admissible tokenizer-token runs, not
   characters, grammar transitions, or isolated singleton positions. Charge grammar
   scanning and use measured terminal-head-only packed state cost. Require

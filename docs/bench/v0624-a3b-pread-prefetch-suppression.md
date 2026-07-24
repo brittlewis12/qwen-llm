@@ -1,6 +1,6 @@
 # v0.624 A3B Direct-Pread Prefetch Suppression
 
-Status: preregistration. No v0.624 child or performance observation exists.
+Status: sealed GO for one selector implementation.
 
 ## Intent
 
@@ -95,3 +95,35 @@ Off, explicit `Always` still runs, and observability must distinguish configured
 No authority extends to ForceOnly or reusable loads, JSONL, forced pread or
 copy, overrides, other assets or hosts, serving, concurrency, energy,
 partial-residency policy, or untouched-media claims.
+
+## Result
+
+Source commit: `787bd3ccf776b45f220199c7d89c7860e6a3048e`.
+
+Packet seals:
+
+- decision: `451982802bd1b5348c0cab23d69cfd85a7b7c9bf6806f512e89c7d8152ddf3f8`;
+- inventory: `0ad18a2886e085aa7805807ac85c3d6fc74987120dfc834eb379e5f5e0858d0e`;
+- completion:
+  `5e8f35ab6747ce520a112aebf0d178a2099e37377c59b67e81b8f58dabe24d03`.
+
+All six pairs and both order strata pass. Removing the preceding `ColdOnly`
+phase saves `517, 851, 802, 828, 447, 2522 ms` of load and
+`525, 846, 794, 827, 359, 2647 ms` to first byte. Paired medians are
+`815.0/810.5 ms`; AB/BA medians are `517/851 ms` load and `525/846 ms` first
+byte. B wins 6/6 overall and 3/3 in each stratum. The overall values are
+balanced-protocol medians across a broad distribution, not stable per-load
+constants.
+
+Every child reports one complete shard-equivalent physical read within 0.01 GiB
+reporting resolution. Physical-read B/A is `0.9995-1.0000`, total-CPU B/A is
+`0.578-0.736`, and physical-footprint B/A is `0.99789-0.99810`. The mechanism
+removes the second logical/cache pass and its system CPU by moving the inevitable
+physical read into final destination population. It does not remove physical
+I/O, final copied residency, or footprint. Pair 6's retained A-side prefetch
+outlier remains scored; neither median depends on it.
+
+The sealed GO authorizes only the prepare/authenticate/advice/consume selector
+implemented in `4f2117c`; it does not itself certify the edited product path.
+Adversarial result review: `cx` session
+`019f95cd-20b5-7311-9256-6048923c44c5`.

@@ -1,6 +1,6 @@
 # v0.625 A3B Prefetch-Suppression Confirmation
 
-Status: preregistration. No v0.625 child or product observation exists.
+Status: sealed GO for the exact registered product scope.
 
 ## Intent
 
@@ -85,3 +85,28 @@ does not re-estimate, v0.624's measured first-byte benefit.
 No authority extends to ForceOnly or reusable loads, JSONL, forced copy or
 pread, overrides, other assets or hosts, serving, concurrency, energy,
 partial-residency policy, untouched-media claims, or any new performance cell.
+
+## Result
+
+Source commit: `5cfe8738a7e2aee7f8f5270c99d54fea0f77b482`.
+Implementation commit: `4f2117c39740f3b9187ae8a7b0e6749094b7393d`.
+
+Packet seals:
+
+- decision: `039ee9497e66f66f89c4d974e02fa4f2ec7911804747318ef77727712af1be43`;
+- inventory: `13eb6be4fa3bc095612c93dc4a8361b1fbfdaab21cabf89ff5de92b756f8bbf9`;
+- completion:
+  `e783a5ccf04234652535dcb0e94cddcf1a8259057a0da17277bc53f55cd0bece`.
+
+Both exact selector tests pass and all three children are valid. `S` emits
+native embedding -> Auto profile -> authenticated suppression -> direct pread
+-> copied ledger. `A` and `O` omit only suppression; `A` prefetches one complete
+20.61 GiB shard while `O` performs no prefetch. Every child invalidates all
+`1,350,985` pages to zero, physically reads `20.61-20.62 GiB`, returns to 100%
+residency, and emits `id=11751 piece=" Paris"`.
+
+This certifies authority
+`authenticated-disposable-a3b-auto-pread-coldonly-always-off`. It imports
+v0.624's benefit finding but creates no new timing, effect-size, reliability, or
+performance-cell authority. Adversarial review and result certification: `cx`
+session `019f961b-0f92-7922-9f64-5cacc48a757a`.

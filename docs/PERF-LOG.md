@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-24 - v0.624-v0.625 A3B Redundant-Prefetch Removal
+
+Status: GO. Authenticated disposable A3B Auto direct pread now suppresses the
+default `ColdOnly` warmer. v0.625 product-confirms explicit `Always` and `Off`;
+selector tests separately fail closed for forced, override, fallback, and
+reusable cases without extending product authority to them.
+
+- v0.624 compares full `ColdOnly` warming followed by hot direct pread with the
+  same target-file-cold path under prefetch Off. Across six
+  `AB/BA/BA/AB/AB/BA` pairs, Off saves `517-2522 ms` of load and `359-2647 ms`
+  to first byte. Paired medians are `815.0/810.5 ms`; B wins 6/6 overall and
+  3/3 in each order stratum. AB/BA medians are `517/851 ms` load and
+  `525/846 ms` first byte; the overall values are balanced-protocol medians,
+  not stable per-load constants.
+- Physical-read B/A is `0.9995-1.0000`, total-CPU B/A is `0.578-0.736`, and
+  physical-footprint B/A is `0.99789-0.99810`. The win removes a redundant
+  logical/cache pass and system CPU. Each child reports one complete shard-
+  equivalent physical read within 0.01 GiB resolution; the win does not remove
+  physical I/O, final copied residency, or footprint.
+- The authenticated plan is now prepared before Runtime applies prefetch and is
+  consumed by value afterward. Suppression advice exists only for disposable
+  exact A3B Auto pread after retained-plan authentication; selector tables fail
+  closed across intent, policy, forced mode, overrides, profile, population,
+  and proof.
+- v0.625 seals both CPU selector tests and one target-file-cold child each for
+  suppressed `ColdOnly`, explicit `Always`, and explicit `Off`. Marker order,
+  733-resource/22,123,538,944-byte copied ledger, full invalidation and
+  residency, `20.61-20.62 GiB` physical reads, and first token all pass.
+- v0.625 is deterministic product confirmation, not a repeated performance
+  packet. Its authority is exactly
+  `authenticated-disposable-a3b-auto-pread-coldonly-always-off`; v0.624 remains
+  the effect-size authority. No claim extends to reusable/ForceOnly loads,
+  other assets or hosts, serving, energy, concurrency, partial residency, or
+  untouched media.
+
+Artifacts:
+`target/profiles/v0624-a3b-pread-prefetch-suppression-p1/` and
+`target/profiles/v0625-a3b-prefetch-suppression-confirmation-p1/`.
+Implementation: `4f2117c`; packet commits: `787bd3c`, `5cfe873`. Adversarial
+review: `cx` sessions `019f95cd-20b5-7311-9256-6048923c44c5` and
+`019f961b-0f92-7922-9f64-5cacc48a757a`.
+
 ## 2026-07-24 - v0.622-v0.623 Checkpoint Staged Validation
 
 Status: KILL. Allocation-free encoder-digest readback is exact and removes one

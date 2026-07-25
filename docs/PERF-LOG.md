@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-25 - v0.634 Dense-27B Terminal Ramp-Controlled Direct Pread
+
+Status: sealed `inconclusive` (`inconclusive-instability`), with
+`authority=none`, `force_authorized=false`, and
+`successor_authorization=none`. Terminal disposition is
+`closed-unable-to-certify-frozen-loaded-noninferiority`.
+
+- The complete 171-file packet authenticates eight valid unscored ramp children
+  and 32 valid scored children, exact schedule/event/raw bindings, one shared
+  32-ID trace, full target residency, valid pressure and temporal evidence,
+  zero block input/swaps, symmetric 92 process-wide faults, and zero B-marker
+  major faults. Ramp observations contribute zero scores, medians, stability
+  values, or continuation decisions.
+- Frozen all/ABBA/BAAB B/A medians are prefill
+  `1.015568/1.018036/1.014478`, decode
+  `1.001632/1.001446/1.002299`, and request
+  `1.010219/1.011377/1.009829`. Complete CPU is `0.957523x`, maximum RSS is
+  `0.501902x`, and physical footprint is `0.999473x` overall.
+- Prefill exceeds 1.01 in 8/8 quartets and is mechanically KILL-consistent;
+  request exceeds it in 4/8. A/B prefill ranges are `13.261%/14.090%`, and
+  request ranges are `8.488%/9.271%`, so frozen instability precedence requires
+  formal `inconclusive`, not KILL.
+- Directionally, this is strong repeated evidence of a roughly `1.45-1.80%`
+  loaded-prefill cost across order-stratum medians, not a stable effect-size or
+  confidence-interval claim. Decode remains within about 0.23% in both strata.
+- v0.629's separate two-pair target-file-cold result retains descriptive
+  `1.132-1.141 s` first-byte savings. That may be a favorable one-shot tradeoff,
+  but it does not satisfy or offset the loaded noninferiority gate.
+- Because v0.634 was prospectively terminal, this non-GO closes exact dense-27B
+  Q4_K_M ForceOnly direct pread under the frozen `<=1%` loaded-prefill
+  criterion. Procedural closure does not relabel the result a mechanism KILL.
+  No force, retry, repair, ramp, or Auto/default selector authority remains.
+
+Artifacts: `target/profiles/v0634-dense27b-pread-ramp-controlled-p1/`. Packet
+commit: `f0a92f9`. Decision/inventory/completion seals: `387e5bc5...` /
+`ac5796fa...` / `1464b24e...`; attempts: `820fbdc2...`. Independent adversarial
+review: `cx` session `019f9aae-a278-7df3-83a5-6cac4f407cd7`.
+
 ## 2026-07-25 - v0.630-v0.633 Dense-27B Direct-Pread Loaded Stability
 
 Status: sealed `inconclusive` (`inconclusive-instability`), with

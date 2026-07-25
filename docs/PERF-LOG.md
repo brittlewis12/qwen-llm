@@ -6,6 +6,54 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-25 - v0.630-v0.633 Dense-27B Direct-Pread Loaded Stability
+
+Status: sealed `inconclusive` (`inconclusive-instability`), with
+`authority=none`. The complete packet authenticates exact loaded behavior but
+does not certify the frozen `<=1%` prefill noninferiority criterion.
+
+- v0.630 preregisters 32 independent children in eight short-period
+  `ABBA/BAAB` quartets. v0.631 repairs only a nonexistent device-preflight
+  command, v0.632 makes phase-unattributed correctness-run faults advisory, and
+  v0.633 applies the same symmetric treatment to timed-child process faults.
+  Every repair reruns fresh evidence and imports no timing authority.
+- The v0.633 seal contains 137 inventoried members and all 32 valid children.
+  Every child has full target residency, zero block input and swaps, valid
+  pressure and temporal evidence, and the same exact 32-ID token trace. All 16
+  pread markers report zero phase-local major faults. `/usr/bin/time` reports
+  exactly 92 process-wide faults for every A and B child, confirming that the
+  repaired field is symmetric but not target- or phase-attributed.
+- Frozen all/ABBA/BAAB B/A medians are prefill
+  `1.013090/1.013479/1.012442`, decode
+  `1.000551/1.000551/1.001001`, and request
+  `1.008423/1.008423/1.009059`. Complete-process CPU is `0.959659x`, maximum
+  RSS is `0.501877x`, and physical footprint is `0.999522x` overall.
+- Prefill exceeds 1.01 in 5/8 quartets and request in 4/8. Per-arm prefill
+  ranges are `9.419%/10.815%`; request ranges are `5.881%/6.870%`. Those miss
+  the frozen 5% stability gate. The packet is neither GO nor KILL: prefill and
+  every-quartet gates prevent GO, while 5/8 misses do not meet the frozen 7/8
+  consistent-miss rule.
+- Drift is mostly common-mode: ABBA and BAAB prefill medians differ by about
+  0.10 percentage point. The first reversal block is ramp-affected, but
+  quartets 3-8 have a `1.01538x` prefill median with 5/6 over 1.01. Prospective
+  ramp control is therefore adjudication, not a favorable post-hoc exclusion.
+- Keep objective boundaries separate. v0.633's loaded request is about
+  `25-27 ms` slower in this 419-prompt/31-transition cell, while diagnostic
+  whole-process wall is `7.155 -> 5.935 s`. v0.629 separately observes
+  `1.132-1.141 s` target-file-cold first-byte savings. That supports a favorable
+  one-shot tradeoff, not strict loaded P/D/R noninferiority.
+- Permit at most one new terminal preregistration: one fixed, fully validated
+  but unscored `ABBA+BAAB` reversal block followed by eight scored quartets
+  under the inherited gates. Any non-GO closes this exact profile as unable to
+  certify the frozen loaded-prefill criterion. Auto/default selection remains
+  separate.
+
+Artifacts:
+`target/profiles/v0633-dense27b-pread-child-fault-repair-p1/`. Packet commits:
+`d30a0f4`, `d90aecd`, `ecc9e70`, `2e71e1a`, `e237917`. Decision/inventory/
+completion seals: `3cf6427e...` / `1faac9ba...` / `1892674c...`. Independent
+adversarial review: `cx` session `019f9a70-7540-7960-8d4f-7960f7980b4e`.
+
 ## 2026-07-25 - v0.628-v0.629 Dense-27B Target-File-Cold Direct Pread
 
 Status: `cold_composition_pass`, with `authority=none`. Exact dense direct pread

@@ -643,9 +643,12 @@ endpoint at `559.370 ms` median but stops on loaded instability after 12 valid
 children. Do not extend that harness chain. v0.626-v0.627 enter through a changed
 population premise—direct destination pread—and independently establish exact
 full state plus cache-warm fresh-process transfer. v0.628-v0.629 now clear the
-separate default-ColdOnly target-file-cold composition guard in both orders. The
-only authorized successor is short-period loaded stability, not force use or
-Auto/default admission.
+separate default-ColdOnly target-file-cold composition guard in both orders.
+v0.630-v0.633 complete the authorized short-period loaded packet but seal
+`inconclusive-instability`: decode and request medians remain within 1%, while
+prefill is `1.0124-1.0135x` and both arms exceed the frozen trajectory gate. One
+terminal ramp-controlled discriminator may adjudicate strict force-only loaded
+noninferiority. Auto/default admission remains separate.
 
 v0.607 closes the admitted true-long direct-F16 matrix point at its 32K
 prerequisite. The valid A1/P/A2 main medians are
@@ -801,6 +804,20 @@ load and `1141.071/1132.456 ms` to first byte. Physical reads are
 are two descriptive cold pairs, not an effect estimate. Loaded stability is now
 the sole authorized successor; selector admission remains separate.
 
+v0.630-v0.633 execute that successor without importing earlier timing. After
+three harness-only validity repairs, v0.633 completes all 32 short-period
+children with exact token identity, full residency, zero block input/swaps, zero
+pread-marker major faults, and valid pressure and timing evidence. Frozen
+all/ABBA/BAAB B/A medians are prefill
+`1.013090/1.013479/1.012442`, decode
+`1.000551/1.000551/1.001001`, and request
+`1.008423/1.008423/1.009059`. Prefill misses in 5/8 quartets, below the 7/8 KILL
+rule, while per-arm prefill ranges of `9.419%/10.815%` fail the 5% stability
+gate. The sealed result is `inconclusive-instability`, not force authority.
+Quartets 3-8 have a `1.01538x` prefill median, so a prospective ramp-control
+block does not favor the candidate. Permit one terminal discriminator only;
+any non-GO closes this exact profile under the frozen loaded-prefill contract.
+
 v0.622-v0.623 attribute and close publication's duplicate staged decode. On an
 exact 582.9 MB checkpoint, fixed-buffer digest validation removes one complete
 snapshot population but saves only `17.4/18.1 ms`; publication and whole-process
@@ -809,16 +826,18 @@ the negative transfer is explained: both arms still reread/hash the full file,
 and the late temporary snapshot never owns the process high-water mark. Do not
 reopen allocation-free readback under the same publication contract.
 
-1. **Dense-27B short-period loaded stability**: v0.627 proves exact full state
-   and six-pair cache-warm fresh transfer; v0.629 adds two target-file-cold
-   composition pairs with `1.137-1.143 s` observed load savings and flat
-   physical reads, CPU, and footprint. The remaining risk is the loaded drift
-   that stopped v0.605. Preregister one new packet with A/B alternation well
-   below that observed drift timescale, exact P/D/R or equivalent loaded cells,
-   full-state/token guards, and no reuse of the v0.605 harness chain. A pass may
-   decide explicit force-only admission; absent-environment Auto/default
-   selection remains separate. Prize protection about `1.1-1.2 s` per fresh
-   load, belief high, difficulty S-M.
+1. **Dense-27B terminal ramp-controlled loaded discriminator**: v0.633 clears
+   correctness, token, residency, pressure, and short-period temporal contracts
+   but seals `inconclusive-instability`. Prefill medians are
+   `1.013090/1.013479/1.012442`; quartets 3-8 center at `1.01538x`, so a fixed
+   ramp block is adjudication rather than result rescue. If the observed
+   `1.132-1.141 s` cold-first-byte prize remains material, preregister exactly
+   one fully validated but unscored `ABBA+BAAB` reversal block followed by eight
+   scored quartets. Preserve every inherited gate and permit no inspection,
+   retry, second repair, or selector packet. GO decides explicit force-only
+   admission; any other terminal result closes this exact profile as unable to
+   certify the frozen `<=1%` loaded-prefill criterion. Auto/default remains out
+   of scope. Belief medium, difficulty S-M.
 2. **Page-rounded compatibility control, then one sidecar image**: on the
    v0.602 copied arm, round each of 733 destination allocations to 16 KiB while
    preserving independent resources, offset zero, exact logical bindings,
@@ -943,11 +962,13 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Preregister the v0.629-authorized dense short-period loaded-stability packet.
-   Alternate faster than v0.605's measured drift, retain exact loaded
-   P/D/R-state and token guards, and do not import v0.605 or v0.629 performance
-   for scoring. Only that packet may decide explicit force-only admission;
-   Auto/default population remains separate.
+1. Preregister the terminal dense ramp-controlled loaded discriminator. Run one
+   fixed unscored `ABBA+BAAB` reversal block before eight scored quartets;
+   validate every child but never inspect or reuse the ramp block for scoring.
+   Preserve v0.633's P/D/R, token, state, pressure, temporal, and stability
+   gates. GO alone admits explicit force-only pread; any other terminal result
+   closes this exact profile under the frozen criterion. Auto/default population
+   remains separate.
 2. Run only the copied page-rounding compatibility control. Green advances one
    bench-only A3B aligned image; red kills only that independent-resource image
    construction before converter or policy work.
@@ -999,14 +1020,16 @@ automatic retained use stay copied without separate evidence.
   state, loaded parity, and cold product endpoints, and v0.608 admits only the
   authenticated disposable single-turn use. v0.621/v0.624/v0.625 complete its
   direct-pread Auto population and redundant-prefetch suppression. Any worker
-   change must first clear the isolated 60 ms ready-wall gate and then repeat
-   storage-cold transfer. v0.603 clears the dense-27B same-topology floor;
-   v0.626-v0.627 add exact full state and cache-warm fresh transfer under direct
-   pread; v0.628-v0.629 clear default-ColdOnly target-file-cold composition.
-   Dense explicit force authority still requires separately stable loaded
-   evidence, and Auto/default population remains a later selector question.
-   A10B breadth requires its own inventory, floor, correctness, and product
-   evidence.
+  change must first clear the isolated 60 ms ready-wall gate and then repeat
+  storage-cold transfer. v0.603 clears the dense-27B same-topology floor;
+  v0.626-v0.627 add exact full state and cache-warm fresh transfer under direct
+  pread; v0.628-v0.629 clear default-ColdOnly target-file-cold composition.
+  v0.630-v0.633 leave dense explicit force authority unresolved under unstable
+  loaded evidence. One terminal ramp-controlled packet may adjudicate it; any
+  non-GO closes the exact profile under the frozen criterion. Auto/default
+  population remains a separate selector question.
+  A10B breadth requires its own inventory, floor, correctness, and product
+  evidence.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

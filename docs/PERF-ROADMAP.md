@@ -642,8 +642,10 @@ v0.603 proves a `965.0405 ms` materialization-floor saving; v0.605 transfers tha
 endpoint at `559.370 ms` median but stops on loaded instability after 12 valid
 children. Do not extend that harness chain. v0.626-v0.627 enter through a changed
 population premise—direct destination pread—and independently establish exact
-full state plus cache-warm fresh-process transfer. That result authorizes only a
-separate target-file-cold guard, not force use or loaded/default admission.
+full state plus cache-warm fresh-process transfer. v0.628-v0.629 now clear the
+separate default-ColdOnly target-file-cold composition guard in both orders. The
+only authorized successor is short-period loaded stability, not force use or
+Auto/default admission.
 
 v0.607 closes the admitted true-long direct-F16 matrix point at its 32K
 prerequisite. The valid A1/P/A2 main medians are
@@ -787,9 +789,17 @@ exit is `1.154306x`; both external endpoints win 6/6. First-prefill, TTFT,
 generation, and model-ready request B/A are
 `1.002296/1.002437/0.998844/1.000148x`. Full state, all 38 gates, pressure, output
 identity, and both order strata pass. RSS halves only as process accounting;
-footprint is `0.999577x`. Keep the claim cache-warm and explicit-force-only. The
-sole authorized successor is a two-pair default-ColdOnly target-file-cold guard;
-loaded stability and selector admission remain separate.
+footprint is `0.999577x`. Keep the claim cache-warm and explicit-force-only.
+
+v0.628-v0.629 then clear the target-file-cold composition premise. v0.628 stops
+after A1 because its warm-derived zero-major-fault rule rejects the intended cold
+page-ins; no B observation exists. v0.629 repairs only that validity premise and
+reruns four new `AB/BA` children. Direct pread saves `1143.253/1137.355 ms` of
+load and `1141.071/1132.456 ms` to first byte. Physical reads are
+`0.999929/1.000000x`, CPU `1.002469/1.007444x`, and footprint
+`0.999242/0.999869x`; every pair gate passes and the first token agrees. These
+are two descriptive cold pairs, not an effect estimate. Loaded stability is now
+the sole authorized successor; selector admission remains separate.
 
 v0.622-v0.623 attribute and close publication's duplicate staged decode. On an
 exact 582.9 MB checkpoint, fixed-buffer digest validation removes one complete
@@ -799,16 +809,16 @@ the negative transfer is explained: both arms still reread/hash the full file,
 and the late temporary snapshot never owns the process high-water mark. Do not
 reopen allocation-free readback under the same publication contract.
 
-1. **Dense-27B target-file-cold composition guard**: v0.627 now proves exact
-   direct pread plus `1.453035x` cache-warm process-cold first byte, with a
-   `1172.990 ms` load saving and flat model-ready work. Run only the authorized
-   two-pair `AB/BA` guard under actual default ColdOnly after complete targeted
-   invalidation. Require every pair to show no load or first-byte loss, physical-
-   read B/A `<=1.10`, complete CPU B/A `<=1.10`, and footprint B/A `<=1.05`.
-   Record RSS diagnostically. A pass authorizes only a separately preregistered
-   loaded-stability packet with short-period alternation; it still does not admit
-   force, Auto/default selection, or product use. Prize protection about one
-   second, belief high, difficulty S-M.
+1. **Dense-27B short-period loaded stability**: v0.627 proves exact full state
+   and six-pair cache-warm fresh transfer; v0.629 adds two target-file-cold
+   composition pairs with `1.137-1.143 s` observed load savings and flat
+   physical reads, CPU, and footprint. The remaining risk is the loaded drift
+   that stopped v0.605. Preregister one new packet with A/B alternation well
+   below that observed drift timescale, exact P/D/R or equivalent loaded cells,
+   full-state/token guards, and no reuse of the v0.605 harness chain. A pass may
+   decide explicit force-only admission; absent-environment Auto/default
+   selection remains separate. Prize protection about `1.1-1.2 s` per fresh
+   load, belief high, difficulty S-M.
 2. **Page-rounded compatibility control, then one sidecar image**: on the
    v0.602 copied arm, round each of 733 destination allocations to 16 KiB while
    preserving independent resources, offset zero, exact logical bindings,
@@ -933,11 +943,11 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Run the v0.627-authorized two-pair dense target-file-cold guard now. Force
-   complete invalidation, retain actual default ColdOnly in both arms, and gate
-   every pair on nonnegative load/first-byte transfer plus physical-read, CPU,
-   and footprint bounds. Only a pass may preregister short-period loaded
-   stability; no force or default authority exists yet.
+1. Preregister the v0.629-authorized dense short-period loaded-stability packet.
+   Alternate faster than v0.605's measured drift, retain exact loaded
+   P/D/R-state and token guards, and do not import v0.605 or v0.629 performance
+   for scoring. Only that packet may decide explicit force-only admission;
+   Auto/default population remains separate.
 2. Run only the copied page-rounding compatibility control. Green advances one
    bench-only A3B aligned image; red kills only that independent-resource image
    construction before converter or policy work.
@@ -992,9 +1002,11 @@ automatic retained use stay copied without separate evidence.
    change must first clear the isolated 60 ms ready-wall gate and then repeat
    storage-cold transfer. v0.603 clears the dense-27B same-topology floor;
    v0.626-v0.627 add exact full state and cache-warm fresh transfer under direct
-   pread. Dense product authority still requires the authorized target-file-cold
-   guard and separately stable loaded evidence. A10B breadth requires its own
-   inventory, floor, correctness, and product evidence.
+   pread; v0.628-v0.629 clear default-ColdOnly target-file-cold composition.
+   Dense explicit force authority still requires separately stable loaded
+   evidence, and Auto/default population remains a later selector question.
+   A10B breadth requires its own inventory, floor, correctness, and product
+   evidence.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

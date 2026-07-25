@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-25 - v0.628-v0.629 Dense-27B Target-File-Cold Direct Pread
+
+Status: `cold_composition_pass`, with `authority=none`. Exact dense direct pread
+composes with actual default ColdOnly after complete target-file invalidation in
+both pair orders. Only a separately preregistered short-period loaded-stability
+packet is authorized; force, Auto/default population, and product use remain
+unauthorized.
+
+- v0.628 adds a harness-only `--policy default` path that constructs the actual
+  `LoadedModelConfig::default()`, rejects worker/chunk overrides, embeds its own
+  source hash, and emits exact typed policy, identity, timing, I/O, and prefetch
+  evidence. Its first A child satisfies every composition contract but records
+  638 process-wide page faults/pageins in the deliberately cold-I/O cell. The
+  frozen warm-derived zero-major-fault gate correctly seals `inconclusive`; no B
+  child launches and no performance result exists.
+- v0.629 imports that immutable forensic seal, changes only process-wide page
+  faults from hard-zero to exact advisory evidence before any B observation,
+  and reruns all four children. Child swaps remain zero and B's phase-local
+  marker major faults remain zero. Observed advisory faults are
+  `638/613/613/613`; all four attempts are valid.
+- Every child proves 1,026,444/1,026,444 resident pages, complete in-child
+  invalidation to zero, unchanged device/inode/size/mtime, one unsuppressed
+  default ColdOnly `0.9` prefetch returning exactly `16,817,244,384` bytes,
+  100% post residency, exact copied/pread storage contracts, and first token
+  `id=11751 piece=" Paris"`.
+- In AB, load moves `4329.744 -> 3186.491 ms` and first byte
+  `4643.995 -> 3502.924 ms`, savings `1143.253/1141.071 ms`. In BA, load moves
+  `4320.088 -> 3182.733 ms` and first byte `4627.301 -> 3494.845 ms`, savings
+  `1137.355/1132.456 ms`. The two observed load savings center at
+  `1140.304 ms`; this is descriptive, not an effect-size/MDE claim.
+- Physical-read B/A is `0.999929/1.000000`, complete CPU B/A
+  `1.002469/1.007444`, and peak-footprint B/A `0.999242/0.999869`. Every frozen
+  gate passes in both orders. RSS falls from `31.45-31.46 GiB` to `15.80 GiB`
+  only as mapped/file-backed accounting; physical footprint is flat.
+- Scope is the exact dense asset, host, ForceOnly short first-byte cell, and
+  targeted buffer-cache-cold state. It does not certify the 419-token/output-128
+  request cold, untouched media, serving, concurrency, energy, loaded stability,
+  Auto/default population, another model, or a promised 1.14-second saving.
+
+Artifacts: `target/profiles/v0628-dense27b-pread-cold-composition-p1/` and
+`target/profiles/v0629-dense27b-pread-cold-composition-repair-p1/`. Harness
+implementation: `1133506`; packet commits: `0f76a18`, `fd089c7`. v0.629
+decision/inventory seals: `949f8066...` / `6a94d45e...`. Adversarial review:
+`cx` session `019f9725-9a90-7743-bffe-0f89177bd0fa`.
+
 ## 2026-07-24 - v0.626-v0.627 Dense-27B Direct-Pread Fresh Transfer
 
 Status: `fresh_effect_pass`, with `authority=none`. Explicit dense-27B direct

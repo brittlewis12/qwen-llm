@@ -667,6 +667,9 @@ struct DecodeArgs {
     /// re-decodes from a fresh session. avg_ts / stddev_ts are over reps.
     #[arg(long, default_value = "1")]
     runs: usize,
+    /// Print the exact initial token plus every timed transition result.
+    #[arg(long)]
+    generated_token_trace: bool,
     /// `text` or `json` (`llama-bench -o json` shape).
     #[arg(short = 'o', long, value_enum, default_value = "text")]
     output: OutputFormat,
@@ -14178,6 +14181,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         kv_capacity,
         full_logits_decode,
         runs,
+        generated_token_trace,
         output,
     } = args;
     if runs == 0 {
@@ -14284,6 +14288,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     let mut last_logits: Vec<f32> = Vec::new();
     let mut prefill_logits_for_oracle: Option<Vec<f32>> = None;
     let mut gen_ids: Vec<i32> = Vec::with_capacity(tokens);
+    let mut final_next_token: Option<i32> = None;
 
     for rep in 0..runs {
         // Fresh session per rep so we measure a steady-state cold-cache
@@ -14374,6 +14379,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         decode_walls.push(decode_wall);
         let request_wall = request_started.elapsed().as_secs_f64() * 1e3;
         request_walls.push(request_wall);
+        final_next_token = Some(next_tok);
         // Decode-only steady-state: skip the very first decode (cache-cold
         // for some downstream PSO + heavily warm-up sensitive).
         let steady_ms = if decode_token_ms.len() > 1 {
@@ -14700,12 +14706,34 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         );
     }
 
+    if let Some(line) =
+        generated_token_trace_line(generated_token_trace, &gen_ids, final_next_token)
+    {
+        eprintln!("{line}");
+    }
     if !gen_ids.is_empty() {
         let text = tok.try_decode(&gen_ids)?;
         eprintln!("[bench] generated: {:?}", text);
     }
 
     Ok(())
+}
+
+fn generated_token_trace_line(
+    enabled: bool,
+    generated: &[i32],
+    final_next_token: Option<i32>,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let mut trace = Vec::with_capacity(generated.len() + usize::from(final_next_token.is_some()));
+    trace.extend_from_slice(generated);
+    if let Some(token) = final_next_token {
+        trace.push(token);
+    }
+    let encoded = serde_json::to_string(&trace).expect("i32 token trace serialization");
+    Some(format!("[bench] generated token trace: {encoded}"))
 }
 
 /// Built-in audit corpus, classified by category. Designed to stress

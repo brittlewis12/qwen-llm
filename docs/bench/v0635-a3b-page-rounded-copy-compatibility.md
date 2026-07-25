@@ -1,6 +1,8 @@
 # v0.635 A3B Page-Rounded Copy Compatibility
 
 Status: preregistration. No v0.635 GPU, model, correctness, or timing work has run.
+One post-H preflight stopped before model hashing because `qwen-bench metal-info`
+is no longer a supported command. R2 repairs only that preflight dialect.
 
 ## Question And Scope
 
@@ -18,10 +20,15 @@ converter, default, no-copy conclusion, or production sidecar.
 
 ## Frozen Source And Host
 
-The base is `0619c925d488a9f4b47b64c509b6231f4ab6bfb1`. R is its clean,
-single-parent child and adds exactly this document and
-`scripts/profile/v0635_a3b_page_rounded_copy_compatibility.py`. H is R's clean,
-single-parent child and modifies only `crates/qwen-llm/src/metal_forward.rs`.
+The base is `0619c925d488a9f4b47b64c509b6231f4ab6bfb1`. R
+(`6fe16d5c878314b093799b551658eb651fdedbdc`) is its clean, single-parent child
+and adds exactly this document and
+`scripts/profile/v0635_a3b_page_rounded_copy_compatibility.py`. H
+(`94e819b47d56553d8b298600b45a01b151ce5ddf`) is R's clean, single-parent child
+and modifies only `crates/qwen-llm/src/metal_forward.rs`. R2 is H's clean,
+single-parent child and modifies only this document and runner to replace the
+nonexistent `qwen-bench metal-info` preflight with `qwen --info`. No artifact was
+reserved and no model hash, correctness test, or timed child ran before R2.
 
 ```text
 final metal_forward.rs SHA-256  0c7fa44527365eb791fd0edf8e581d88c5a7de849059b8aefd2c251fa3d24ce8
@@ -33,13 +40,16 @@ llama-cpp-rs commit              fe4fb533d1ed2855b6ac5492e56c42007d410409
 The main worktree and tracked sibling state must be clean. GGUF permits no
 untracked file. llama-cpp-rs permits exactly `.claude/settings.local.json` in the
 all-untracked porcelain view. The runner freezes the final file and R..H binary
-patch digests, requires `HEAD=H`, matching clean build/runtime identity H, and
-hashes the v0.602 gate-definition source plus the imported v0.630 infrastructure
-helper and its v0.593 dependency without monkeypatching any module.
+patch digests, requires `HEAD=R2` and clean matching `qwen-bench` build/runtime
+identity R2, and hashes the v0.602 gate-definition source plus the imported v0.630
+infrastructure helper and its v0.593 dependency without monkeypatching any module.
 
 Host identity is macOS `15.6.1` build `24G90`, Apple M4 Max, 128 GiB. The runner
-requires the exact Metal identity, source topology, sibling identities, release
-binary identity, normalized environments, and parser dialects.
+requires the exact Metal identity, source topology, sibling identities,
+source-authoritative `qwen-bench` identity, normalized environments, and parser
+dialects. `qwen --info` is only a content-hashed device-query probe: its SHA-256 is
+checked before and after execution and frozen in the manifest, but it carries no
+source-provenance claim and never runs a scored or correctness path.
 
 ## Asset And Protocol
 

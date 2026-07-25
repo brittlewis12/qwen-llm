@@ -25,11 +25,14 @@ METAL_SOURCE = ROOT / "crates/qwen-llm/src/metal_forward.rs"
 MODEL = Path("/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf")
 PROMPT = ROOT / "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
 BENCH = ROOT / "target/release/qwen-bench"
+CLI = ROOT / "target/release/qwen"
 V0593 = ROOT / "scripts/profile/v0593_demand_paged_no_copy.py"
 V0602 = ROOT / "scripts/profile/v0602_a3b_parallel_copied_loader.py"
 V0630 = ROOT / "scripts/profile/v0630_dense27b_pread_loaded_stability.py"
 
 BASE_COMMIT = "0619c925d488a9f4b47b64c509b6231f4ab6bfb1"
+PREREG_COMMIT = "6fe16d5c878314b093799b551658eb651fdedbdc"
+IMPLEMENTATION_COMMIT = "94e819b47d56553d8b298600b45a01b151ce5ddf"
 FINAL_METAL_SHA256 = "0c7fa44527365eb791fd0edf8e581d88c5a7de849059b8aefd2c251fa3d24ce8"
 IMPLEMENTATION_PATCH_SHA256 = (
     "e14a5a08a105d7cbaeb76e789a097a238e2b37127d07de73c10ec5d02bf05dab"
@@ -197,10 +200,17 @@ def verify_source() -> dict[str, object]:
     if dirty:
         raise ContractDefect(f"worktree is not clean: {dirty!r}")
     head = git(["rev-parse", "HEAD"])
-    prereg = parent(head)
+    implementation = parent(head)
+    prereg = parent(implementation)
     base = parent(prereg)
-    if base != BASE_COMMIT:
-        raise ContractDefect(f"base commit drifted: {base}")
+    if (
+        base != BASE_COMMIT
+        or prereg != PREREG_COMMIT
+        or implementation != IMPLEMENTATION_COMMIT
+    ):
+        raise ContractDefect(
+            f"frozen base/R/H chain drifted: {base}/{prereg}/{implementation}"
+        )
     prereg_paths = sorted(
         (str(PREREG.relative_to(ROOT)), str(RUNNER.relative_to(ROOT)))
     )
@@ -208,13 +218,17 @@ def verify_source() -> dict[str, object]:
     if sorted(r_status) != sorted(f"A\t{path}" for path in prereg_paths):
         raise ContractDefect("R must add exactly the preregistration and runner")
     metal_rel = str(METAL_SOURCE.relative_to(ROOT))
-    if git(["diff", "--name-status", f"{prereg}..{head}"]).splitlines() != [
+    if git(["diff", "--name-status", f"{prereg}..{implementation}"]).splitlines() != [
         f"M\t{metal_rel}"
     ]:
         raise ContractDefect("H must modify only metal_forward.rs")
+    if sorted(
+        git(["diff", "--name-status", f"{implementation}..{head}"]).splitlines()
+    ) != sorted(f"M\t{path}" for path in prereg_paths):
+        raise ContractDefect("R2 must modify only the preregistration and runner")
     if sha256(METAL_SOURCE) != FINAL_METAL_SHA256:
         raise ContractDefect("final metal_forward.rs digest drifted")
-    if patch_hash(prereg, head) != IMPLEMENTATION_PATCH_SHA256:
+    if patch_hash(prereg, implementation) != IMPLEMENTATION_PATCH_SHA256:
         raise ContractDefect("R..H file-only binary patch digest drifted")
     build = json.loads(command([str(BENCH), "build-info", "--output", "json"]))
     if not isinstance(build, dict) or any(
@@ -227,10 +241,12 @@ def verify_source() -> dict[str, object]:
             build.get("build_source_state") != build.get("runtime_source_state"),
         )
     ):
-        raise ContractDefect(f"build/runtime H identity drifted: {build}")
+        raise ContractDefect(f"build/runtime R2 identity drifted: {build}")
     return {
         "head": head,
         "preregistration_commit": prereg,
+        "implementation_commit": implementation,
+        "preflight_repair_commit": head,
         "base_commit": base,
         "metal_source_sha256": FINAL_METAL_SHA256,
         "implementation_patch_sha256": IMPLEMENTATION_PATCH_SHA256,
@@ -316,7 +332,10 @@ def build_manifest(
         raise ContractDefect("macOS identity drifted")
     if int(command(["sysctl", "-n", "hw.memsize"])) != HW_MEMSIZE:
         raise ContractDefect("host memory identity drifted")
-    if command([str(BENCH), "metal-info"]).strip() != DEVICE:
+    cli_sha256_before = sha256(CLI)
+    device_output = command([str(CLI), "--info"]).strip()
+    cli_sha256_after = sha256(CLI)
+    if cli_sha256_before != cli_sha256_after or device_output != DEVICE:
         raise ContractDefect("Metal device identity drifted")
     model_id = file_identity(MODEL)
     model_sha256 = sha256(MODEL)
@@ -332,6 +351,7 @@ def build_manifest(
         MODEL,
         PROMPT,
         BENCH,
+        CLI,
         V0593,
         V0602,
         V0630,
@@ -342,6 +362,8 @@ def build_manifest(
             if path == MODEL
             else prompt_sha256
             if path == PROMPT
+            else cli_sha256_after
+            if path == CLI
             else sha256(path)
         )
         for path in paths
@@ -360,6 +382,12 @@ def build_manifest(
         },
         "macos_product_version": MACOS_VERSION,
         "macos_build_version": MACOS_BUILD,
+        "device_probe": {
+            "command": [str(CLI), "--info"],
+            "output": device_output,
+            "sha256": cli_sha256_after,
+            "source_authoritative": False,
+        },
         "child_environment": child_env,
         "test_environment": test_env,
         "removed_environment": removed,

@@ -637,11 +637,13 @@ The `12.5-12.8` nominal-TFLOP/s Q4_K anchor remains a current-dispatcher ceiling
 not an independent silicon peak. One causal actual-shape decomposition can test
 that premise, but a derived peak is not itself an optimization result.
 
-Dense-27B exact-topology validation is closed without product authority. v0.603
-proves a `965.0405 ms` materialization-floor saving; v0.605 transfers that endpoint
-at `559.370 ms` median but stops on loaded instability after 12 valid children.
-Fresh-process behavior is unobserved, and the protocol forbids another successor.
-Keep the force path non-authoritative and do not extend this harness chain.
+Dense-27B mmap-copy topology validation is closed without product authority.
+v0.603 proves a `965.0405 ms` materialization-floor saving; v0.605 transfers that
+endpoint at `559.370 ms` median but stops on loaded instability after 12 valid
+children. Do not extend that harness chain. v0.626-v0.627 enter through a changed
+population premise—direct destination pread—and independently establish exact
+full state plus cache-warm fresh-process transfer. That result authorizes only a
+separate target-file-cold guard, not force use or loaded/default admission.
 
 v0.607 closes the admitted true-long direct-F16 matrix point at its 32K
 prerequisite. The valid A1/P/A2 main medians are
@@ -775,6 +777,20 @@ contracts pass. This completes the authenticated disposable A3B Auto pread
 stack; do not spend another product packet on its current four-worker policy
 without a changed worker or destination premise.
 
+v0.626-v0.627 clear dense-27B direct-pread correctness and cache-warm fresh
+transfer without granting product authority. v0.626's Rust full-state test
+passes, but its packet stops before fresh work because interleaved `--nocapture`
+load lines break a contiguous result recognizer. v0.627 repairs only that grammar
+and reruns everything. Across six counterbalanced output-128 pairs, load saves
+`1172.990 ms` median, runtime B/A is `0.361548x`, first byte is `1.453035x`, and
+exit is `1.154306x`; both external endpoints win 6/6. First-prefill, TTFT,
+generation, and model-ready request B/A are
+`1.002296/1.002437/0.998844/1.000148x`. Full state, all 38 gates, pressure, output
+identity, and both order strata pass. RSS halves only as process accounting;
+footprint is `0.999577x`. Keep the claim cache-warm and explicit-force-only. The
+sole authorized successor is a two-pair default-ColdOnly target-file-cold guard;
+loaded stability and selector admission remain separate.
+
 v0.622-v0.623 attribute and close publication's duplicate staged decode. On an
 exact 582.9 MB checkpoint, fixed-buffer digest validation removes one complete
 snapshot population but saves only `17.4/18.1 ms`; publication and whole-process
@@ -783,17 +799,16 @@ the negative transfer is explained: both arms still reread/hash the full file,
 and the late temporary snapshot never owns the process high-water mark. Do not
 reopen allocation-free readback under the same publication contract.
 
-1. **Dense-27B W4 direct-pread product transfer**: v0.603 already proves a
-   `965.0405 ms` same-topology materialization saving, while v0.617-v0.621 seal
-   four-worker destination pread as a materially changed population primitive
-   after the closed v0.605 mmap-copy successor. Authenticate the exact 851-
-   resource dense inventory and keep W=4. Run exact correctness and fresh-process
-   pairs before any repeated loaded stage so v0.605-style nonstationarity cannot
-   erase the cold observation. Product authority still requires a separately
-   redesigned loaded-stability protocol with short-period arm alternation below
-   the observed drift timescale; an inconclusive loaded stage may retain fresh
-   evidence but cannot admit the selector. Prize about one second, belief high on
-   population and medium on product transfer, difficulty M.
+1. **Dense-27B target-file-cold composition guard**: v0.627 now proves exact
+   direct pread plus `1.453035x` cache-warm process-cold first byte, with a
+   `1172.990 ms` load saving and flat model-ready work. Run only the authorized
+   two-pair `AB/BA` guard under actual default ColdOnly after complete targeted
+   invalidation. Require every pair to show no load or first-byte loss, physical-
+   read B/A `<=1.10`, complete CPU B/A `<=1.10`, and footprint B/A `<=1.05`.
+   Record RSS diagnostically. A pass authorizes only a separately preregistered
+   loaded-stability packet with short-period alternation; it still does not admit
+   force, Auto/default selection, or product use. Prize protection about one
+   second, belief high, difficulty S-M.
 2. **Page-rounded compatibility control, then one sidecar image**: on the
    v0.602 copied arm, round each of 733 destination allocations to 16 KiB while
    preserving independent resources, offset zero, exact logical bindings,
@@ -918,11 +933,11 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Transfer sealed W4 direct destination pread to the exact dense-27B inventory
-   now. Use a new fresh-first packet, not a v0.604/v0.605 successor, so the cold
-   endpoint is observed before repeated loaded work. Redesign loaded stability
-   separately with short-period arm alternation; no default authority exists
-   until full-state, loaded, fresh, CPU, and pressure gates all pass.
+1. Run the v0.627-authorized two-pair dense target-file-cold guard now. Force
+   complete invalidation, retain actual default ColdOnly in both arms, and gate
+   every pair on nonnegative load/first-byte transfer plus physical-read, CPU,
+   and footprint bounds. Only a pass may preregister short-period loaded
+   stability; no force or default authority exists yet.
 2. Run only the copied page-rounding compatibility control. Green advances one
    bench-only A3B aligned image; red kills only that independent-resource image
    construction before converter or policy work.
@@ -974,11 +989,12 @@ automatic retained use stay copied without separate evidence.
   state, loaded parity, and cold product endpoints, and v0.608 admits only the
   authenticated disposable single-turn use. v0.621/v0.624/v0.625 complete its
   direct-pread Auto population and redundant-prefetch suppression. Any worker
-  change must first clear the isolated 60 ms ready-wall gate and then repeat
-  storage-cold transfer. v0.603 independently clears the dense-27B same-topology
-  floor but not product transfer. Dense product authority still requires exact
-  full-state, loaded, and fresh evidence under a changed primitive. A10B breadth
-  requires its own inventory, floor, correctness, and product evidence.
+   change must first clear the isolated 60 ms ready-wall gate and then repeat
+   storage-cold transfer. v0.603 clears the dense-27B same-topology floor;
+   v0.626-v0.627 add exact full state and cache-warm fresh transfer under direct
+   pread. Dense product authority still requires the authorized target-file-cold
+   guard and separately stable loaded evidence. A10B breadth requires its own
+   inventory, floor, correctness, and product evidence.
 - **N8 verifier**: every speculative ratio names a current denominator artifact.
   Require a verifier-only whole-decode oracle `>=1.10x` in a regime before
   authorizing a new proposal source there. Dense 27B short/interactive clears;

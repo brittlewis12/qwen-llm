@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-24 - v0.626-v0.627 Dense-27B Direct-Pread Fresh Transfer
+
+Status: `fresh_effect_pass`, with `authority=none`. Explicit dense-27B direct
+pread clears exact correctness and every cache-warm process-cold fresh gate. It
+authorizes only a separate default-ColdOnly target-file-cold guard; force,
+Auto/default selection, loaded stability, and product use remain unauthorized.
+
+- v0.626 adds direct pread only to the exact authenticated 851-resource dense
+  profile. Dense Auto remains `None`, configured prefetch policy is preserved,
+  and schema-2 differs only in copied-versus-pread marker kind. All four CPU
+  selectors pass. The full-state Rust test also passes, but interleaved
+  `--nocapture` output breaks the packet's contiguous `... ok` recognizer.
+  v0.626 seals `implementation_or_contract_defect` before any fresh child.
+- v0.627 imports that immutable forensic seal, repairs only exact correctness-
+  result recognition, and reruns every gate. Full-state direct pread preserves
+  all `16,806,250,496` source bytes, 851 independent offset-zero resources,
+  write rejection, prefill/continuation logits, complete KV/GDN/convolution
+  state, argmax, transition, five-line load order, and zero marker major faults.
+- Across six `AB/BA/BA/AB/AB/BA` fresh output-128 pairs, direct pread saves
+  median `1172.990 ms` of runtime/model load; B/A is `0.361548x`. AB/BA savings
+  are `1174.715/1171.266 ms`. First byte improves `1.453035x` and process exit
+  `1.154306x`, both 6/6 overall and 3/3 per order stratum.
+- Model-ready work stays flat: first-prefill B/A is `1.002296x`, TTFT
+  `1.002437x`, generation `0.998844x`, and request wall `1.000148x`. Candidate
+  endpoint CPU is `1577.029 ms`; complete-process CPU B-A is `-10 ms` median.
+  All 38 frozen gates pass and every output matches SHA-256 `c94cb4d2...`.
+- Maximum RSS B/A is `0.501888x`, but physical-footprint B/A is `0.999577x`.
+  The former reflects mapped/file-backed process accounting; this is not a
+  half-memory result. Every child is explicitly whole-file resident, emits one
+  ordinary ColdOnly skip, and records zero block input and major faults. Claim
+  cache-warm fresh-process transfer only, not storage-cold behavior.
+- The minimal authorized successor is a two-pair `AB/BA` target-file-cold
+  composition guard. It must force full invalidation, require one default
+  ColdOnly physical read, and prove direct pread never loses load or first byte
+  while physical reads, CPU, and footprint remain bounded. Loaded stability is
+  still a separate later packet.
+
+Artifacts: `target/profiles/v0626-dense27b-parallel-pread-fresh-p1/` and
+`target/profiles/v0627-dense27b-parallel-pread-fresh-repair-p1/`. Implementation:
+`7fb0488`; packet commits: `db6ffc5`, `26d805a`. v0.627 decision/inventory seals:
+`63718402...` / `110941aa...`. Adversarial review: `cx` sessions
+`019f9706-b6f1-7761-ba38-e4e91a2cb81c` and
+`019f9725-9a90-7743-bffe-0f89177bd0fa`.
+
 ## 2026-07-24 - v0.624-v0.625 A3B Redundant-Prefetch Removal
 
 Status: GO. Authenticated disposable A3B Auto direct pread now suppresses the

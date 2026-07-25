@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-25 - v0.635 A3B Page-Rounded Copy Compatibility
+
+Status: sealed `KILL`, with `authority=no-production-authority`,
+`force_authorized=false`, and `successor_authorization=none`. The frozen
+733-independent-resource page-rounded image route is closed.
+
+- B requests a 16-KiB multiple for every exposed destination length; 232 of 733
+  lengths increase, raising the sum of exposed `MTLBuffer.length` values by
+  `2,758,144` bytes. All logical bytes, independent offset-zero resources, the
+  four-worker population schedule, storage modes, and exact tensor bindings are
+  unchanged. This is a buffer-length control, not a physical-page claim.
+- The complete 59-file packet contains 12/12 valid sole attempts in the frozen
+  `AB BA BA AB AB BA` order. Full-state correctness passes; every child rereads
+  and hashes the complete model and emits the same 128-ID trace and output
+  digest. Prefill, within-child stability, memory, pressure, and identity gates
+  all pass.
+- Pairwise prefill A/B is
+  `1.001954/0.998375/0.999675/1.000000/1.002934/1.004229`; decode A/B is
+  `0.967820/1.001004/0.988598/0.945817/1.050180/1.050321`; request B/A is
+  `1.024741/0.999668/1.010366/1.045887/0.961162/0.961144`. Decode and request
+  miss the every-pair 1% gates in pairs 1, 3, and 4, requiring KILL under the
+  frozen stable-performance precedence.
+- Do not relabel this as a page-rounding tax. Post-hoc decode clusters at
+  `1132.9-1157.9 ms` and `1187.8-1201.5 ms` split exactly 2A/2B and 4A/4B.
+  Marginal A/B means are `1177.017/1177.300 ms` decode and
+  `1485.183/1485.300 ms` request; B is lower in three of six pairwise comparisons
+  on each endpoint. This is unexplained, arm-balanced between-child latency
+  clustering, not an identified GPU/runtime state or treatment-aligned direction.
+  The frozen contract cannot post-hoc filter those clusters or rescue the KILL.
+- Close only this page-rounded independent-resource image construction. Infer
+  nothing general about VM/TLB placement, no-copy storage, Metal compatibility,
+  or other image topologies. v0.602 exact-sized force-only authority is
+  unchanged; no rerun, pooling, state filter, converter, sidecar, or product
+  successor is authorized.
+
+Artifacts:
+`target/profiles/v0635-a3b-page-rounded-copy-compatibility-p1/`. Source:
+`9e25d09`; decision/inventory/completion seals: `08fd4478...` / `d4ef8181...` /
+`ac99dd04...`; attempts: `0ae349c4...`. Independent adversarial review: `cx`
+session `019f9b41-1954-7c32-8436-a7145447a8fc`.
+
 ## 2026-07-25 - v0.634 Dense-27B Terminal Ramp-Controlled Direct Pread
 
 Status: sealed `inconclusive` (`inconclusive-instability`), with

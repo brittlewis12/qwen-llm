@@ -840,24 +840,27 @@ the negative transfer is explained: both arms still reread/hash the full file,
 and the late temporary snapshot never owns the process high-water mark. Do not
 reopen allocation-free readback under the same publication contract.
 
-1. **Page-rounded compatibility control, then one sidecar image**: on the
-   v0.602 copied arm, round each of 733 destination allocations to 16 KiB while
-   preserving independent resources, offset zero, exact logical bindings,
-   population, and schedule. Require full-state identity and every loaded 1%
-   P/D/R gate. Red kills only this page-rounded 733-independent-resource image
-   construction. Green clears buffer-length compatibility and authorizes one
-   bench-only page-aligned A3B image; it does not establish no-copy lifetime,
-   mapping, backing-page, or warm-parity behavior. No converter policy follows
-   before that image passes. Eventual prize is deletion of the `~0.5-0.75 s`
-   cache-warm population wall plus private weight allocation; belief medium.
-2. **Checkpoint immediate-readback contract**: current encoder-digest
+v0.635 closes the page-rounded independent-resource image route. B requests a
+16-KiB multiple for every exposed length; 232 of 733 lengths increase, raising
+the exposed-length sum by `2,758,144` bytes while preserving logical bytes,
+offset-zero topology, population, modes, and full state. Prefill, within-child
+stability, memory, pressure, and identity all pass, but decode and request miss
+the frozen every-pair 1% gates in pairs 1, 3, and 4, mechanically requiring KILL.
+The post-hoc latency clustering is not treatment-directed: the four-child fast
+cluster is 2A/2B, the eight-child slow cluster is 4A/4B, and marginal A/B
+decode/request means are nearly identical. Record both lessons: this packet
+authorizes no successor for the frozen route, while the evidence does not
+establish a page-rounding, VM/TLB, no-copy, or Metal compatibility tax. Do not
+rerun or rescue it by filtering those post-hoc clusters.
+
+1. **Checkpoint immediate-readback contract**: current encoder-digest
    validation is `268.4/269.0 ms`; that is not a pure read-only timing. Price
    publishing the fsynced encoder output without immediate reread while retaining
    exact format, source digest, hard-link publication, directory durability, and
    restore-time adversarial validation. This is process-exit/E2E, not TTFT, and
    only narrowly clears the 250 ms gate. Belief medium-high on mechanism, medium
    on transfer, difficulty S-M.
-3. **A3B direct-pread worker screen**: only if cache-warm process-cold population
+2. **A3B direct-pread worker screen**: only if cache-warm process-cold population
    remains material in deployment. Sweep `W={1,2,4,6,8,12}` on authenticated A3B
    inventory with the target file fully resident, counterbalanced, reporting
    `ready_us` decomposition and total CPU without QoS or chunk changes. The
@@ -865,14 +868,14 @@ reopen allocation-free readback under the same publication contract.
    against the current ~532 ms ready wall, not an MDE. A miss closes cache-warm
    worker tuning only. A winner must separately beat W=4 target-file-cold before
    promotion; QoS remains untested. Difficulty S-M.
-4. **Transient mmap-source to independent-Shared blit floor**: compare current
+3. **Transient mmap-source to independent-Shared blit floor**: compare current
    direct destination pread with a transient retained source and 733 independent
    Shared destinations. Stop below `112 ms` ready-wall saving and exclude
    `StorageModePrivate`, sidecar format, and loaded-policy changes. The threshold
    is inherited from v0.619-v0.620 as a portfolio gate, not a measured blit MDE.
-   This experiment is scientifically independent of #1 but lower-EV if its image
-   preserves warm parity. Belief medium, difficulty M.
-5. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
+   v0.635 does not price this population primitive: it changes destination length,
+   not source or copy mechanism. Belief medium, difficulty M.
+4. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
    materialization idea with named production-grid ablations: A production; B
    deterministic initialized tile writes with dequant ALU removed but quant loads
    kept observably live; C removes those global loads; D is included only if a
@@ -885,22 +888,22 @@ reopen allocation-free readback under the same publication contract.
    packing or generic no-dequant work. `<=14.7 TFLOP/s` MMA-only closes the lane;
    any faster result still needs a named charged `>=1.133x` gate/up prediction.
    Information value high, payoff belief unknown, difficulty S-M.
-6. **Production GPU argmax contract**: three product paths still copy 993,280
+5. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes and scan 248,320 logits on CPU. Reconcile highest-index CPU ties and NaN
    ordering with lowest-finite-index GPU semantics, then wire all call sites
    behind an explicit low-complexity 1% gate. Existing MoE gain is `1.0-1.5%`
    and dense is neutral. Belief high on small work removal, difficulty S-M.
-7. **A10B cold residency plus split-copy floor**: proceed only if the heavy
+6. **A10B cold residency plus split-copy floor**: proceed only if the heavy
    anchor remains deployment-relevant. First adjudicate the bit-exact native
    embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
    three-shard topology-preserving population floor. Belief high on memory,
    medium on copy wall, difficulty M-L.
-8. **Grammar run and admissible-row oracle**: replay real structured traces and
+7. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
    `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
    positive at current N8 cost. Contract-exact, belief medium-low until traces
    exist, difficulty S oracle/M product.
-9. **High-ceiling structural options**: true-long attention needs a source-free
+8. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -921,13 +924,13 @@ prerequisite for async retained-to-copied promotion, but command-buffer-safe
 cutover, copy contention, and secondary serving scope keep it below serial cold
 breadth. Broad resource-count/offset/MMU attribution is not needed for the
 current A3B decision: same-topology copied storage already transfers the floor.
-The one permitted size control in #1 exists only to test buffer-length
-compatibility for one page-rounded independent-resource image construction while
-every other topology dimension is frozen; it is not authority for an open-ended
-MMU sweep or a verdict on all no-copy images. Metal does not expose physical GPU
-page placement or TLB policy. Completed-turn durable snapshots are banked reuse
-evidence above. A resident daemon remains useful deployment work, not fresh-
-prompt model-process-cold acceleration.
+v0.635's completed size control failed its frozen every-pair loaded gate and
+closes that page-rounded independent-resource image route. Its arm-balanced
+post-hoc latency clustering does not support treating the KILL as an open-ended
+MMU verdict or a conclusion about every no-copy image. Metal does not expose
+physical GPU page placement or TLB policy. Completed-turn durable snapshots are
+banked reuse evidence above. A resident daemon remains useful deployment work,
+not fresh-prompt model-process-cold acceleration.
 
 Memory follow-up: v0.590 promotes native embeddings for 27B and A3B. v0.591 proves
 that CPU-prefaulted 27B views remove about 16.8 GB but lose latency; v0.593 proves
@@ -964,30 +967,28 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Run only the copied page-rounding compatibility control. Green advances one
-   bench-only A3B aligned image; red kills only that independent-resource image
-   construction before converter or policy work.
-2. Decide the checkpoint immediate-readback integrity contract before code;
+1. Decide the checkpoint immediate-readback integrity contract before code;
    direct restore/capture remains behind a 250 ms wall or 500 MB phase-peak case.
-3. Run the A3B resident worker screen only if cache-warm population still matters.
+2. Run the A3B resident worker screen only if cache-warm population still matters.
    A warm miss closes only that regime; a winner needs a separate storage-cold
    W=4 comparison. QoS remains independent and untested.
-4. Run the transient-source Shared-destination blit floor if the sidecar path
-   fails or is rejected. This is portfolio ordering, not a causal dependency;
-   keep Private storage and write-combined destinations separate.
-5. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
+3. Run the transient-source Shared-destination blit floor as an independent
+   population-primitive test. Keep Private storage, sidecar format, and
+   write-combined destinations separate.
+4. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
    hardened Q4 ladder before any new dense-prefill representation. Treat a low
    MMA-only ceiling as a valuable closure.
-6. Decide whether A10B is a current deployment target. If yes, its native-
+5. Decide whether A10B is a current deployment target. If yes, its native-
    embedding/split-copy floor moves ahead of GPU argmax; otherwise reconcile
    argmax semantics first, then run grammar traces.
-7. Keep prompt reduction explicitly input-changing. Keep true-long attention,
+6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
-8. Do not resume broad topology attribution, generic command-graph or compiler
-   work, retained-view retunes, broad external drafting, matrix/compressed
-   attention, sparse retrieval, routed-tail work, generic packed GDN, mixed
-   quant, broad prompt lookup, or local retuning without an explicit reopen gate.
+7. Do not resume the closed page-rounded image route, broad topology attribution,
+   generic command-graph or compiler work, retained-view retunes, broad external
+   drafting, matrix/compressed attention, sparse retrieval, routed-tail work,
+   generic packed GDN, mixed quant, broad prompt lookup, or local retuning without
+   an explicit reopen gate.
 
 ### Decisive gates
 

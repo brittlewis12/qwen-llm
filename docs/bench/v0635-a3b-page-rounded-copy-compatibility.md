@@ -1,8 +1,73 @@
 # v0.635 A3B Page-Rounded Copy Compatibility
 
-Status: preregistration. No v0.635 GPU, model, correctness, or timing work has run.
+Status: sealed `KILL`, with `authority=no-production-authority`,
+`force_authorized=false`, and `successor_authorization=none`. The frozen
+page-rounded independent-resource image route is closed. The preregistered
+contract remains below for auditability.
+
+## Sealed Result
+
+The complete packet has 57 inventoried members and 59 final regular files. All
+12 sole-attempt children are valid in the frozen `AB BA BA AB AB BA` order, all
+12 full-model rereads cover `22,134,528,992` bytes, and every child has the same
+128-ID trace and generated-output digest. Fresh full-state correctness passes.
+
+B requests a 16-KiB multiple for every exposed buffer length; 232 of 733 lengths
+increase, raising the sum of exposed `MTLBuffer.length` values by only
+`2,758,144` bytes. It preserves the logical byte inventory, independent
+offset-zero resources, population schedule, storage modes, and tensor bindings.
+Every prefill, within-child stability, RSS, footprint, pressure, and identity gate
+passes. The frozen pair ratios are:
+
+```text
+pair                 1         2         3         4         5         6
+P = prefill A/B  1.001954  0.998375  0.999675  1.000000  1.002934  1.004229
+D = decode A/B   0.967820  1.001004  0.988598  0.945817  1.050180  1.050321
+R = request B/A  1.024741  0.999668  1.010366  1.045887  0.961162  0.961144
+```
+
+Decode and request therefore fail the every-pair 1% gates in pairs 1, 3, and 4.
+Stable performance failure has frozen precedence over descriptive aggregation,
+so the mechanical result is `KILL`.
+
+Do not interpret that classification as evidence of a page-rounding tax. Using
+each child's preregistered repetition-3-5 median, decode values form two post-hoc
+clusters in this packet: four children at `1132.9-1157.9 ms` contain two A and two
+B arms, while eight at `1187.8-1201.5 ms` contain four of each. Marginal arm means
+are nearly identical (`1177.017/1177.300 ms` decode and
+`1485.183/1485.300 ms` request for A/B), and B is lower in three of six pairwise
+comparisons on each endpoint. Per-child aggregate timing summaries place the
+separation in GPU-kernel and commit/wait time rather than load-ready time. This is
+unexplained, arm-balanced between-child latency clustering; the packet does not
+identify a latent GPU/runtime state or its cause. It cannot rescue the
+preregistered result, and it does not support a causal claim about page rounding,
+VM/TLB placement, no-copy storage, or general Metal buffer compatibility.
+
+This closes only the frozen 733-independent-resource page-rounded image
+construction. It grants no sidecar, converter, product, default, or no-copy
+authority and does not alter v0.602's exact-sized force-only result. No rerun,
+pooling, state filter, or post-hoc successor is authorized.
+
+```text
+source
+  9e25d09b630a0458cadf176133f7d0f38eb8860e
+decision SHA-256
+  08fd44783034e71f29b7318154a0d6299de45ce4dc0006a2fa058cbc71a0d833
+inventory SHA-256
+  d4ef81815debb41a817e0113d4ac25312b1162f732ec497a8ff86b3303b39f34
+packet-complete SHA-256
+  ac99dd0413005f4e159d0985f0ff43b0f28747cee84e422a93ccf1249f972269
+attempts SHA-256
+  0ae349c4b6a2afb3e778f095f06bbe23d1018e00ad05da4c516c7c050bbd4b91
+launch-seal SHA-256
+  2cbd50c35127547bd94aec9ba2d620e46b8c5f5e6d0b15cd5ccf80546d2ea051
+sealed preregistration-document SHA-256
+  c17ec3ac74a2621538e2b37ab6cda1ba9690e8e0177d7300b5eb13ac038d64b8
+```
+
 One post-H preflight stopped before model hashing because `qwen-bench metal-info`
-is no longer a supported command. R2 repairs only that preflight dialect.
+is no longer a supported command. R2 repaired only that preflight dialect before
+the sealed execution.
 
 ## Question And Scope
 

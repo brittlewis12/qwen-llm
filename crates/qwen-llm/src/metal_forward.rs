@@ -459,6 +459,7 @@ struct ParallelCopyProfile {
     device_constraint: ParallelCopyDeviceConstraint,
     authentication: ParallelCopyAuthentication,
     marker_contract: ParallelCopyMarkerContract,
+    supports_direct_pread: bool,
     request_count: usize,
     source_bytes: u64,
     cuts: [usize; GGUF_OWNED_WORKERS - 1],
@@ -527,6 +528,7 @@ const A3B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
     device_constraint: ParallelCopyDeviceConstraint::UnifiedAnyName,
     authentication: ParallelCopyAuthentication::A3bRetainedPlan,
     marker_contract: ParallelCopyMarkerContract::A3bSchema1,
+    supports_direct_pread: true,
     request_count: GGUF_OWNED_A3B_REQUESTS,
     source_bytes: GGUF_OWNED_A3B_SOURCE_BYTES,
     cuts: [155, 359, 539],
@@ -614,6 +616,7 @@ const DENSE27B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile 
     device_constraint: ParallelCopyDeviceConstraint::ExactUnified("Apple M4 Max"),
     authentication: ParallelCopyAuthentication::DensePlannerFree,
     marker_contract: ParallelCopyMarkerContract::DenseSchema2,
+    supports_direct_pread: true,
     request_count: GGUF_NO_COPY_27B_DESCRIPTOR_COUNT,
     source_bytes: GGUF_NO_COPY_27B_SOURCE_BYTES,
     cuts: [136, 377, 618],
@@ -2077,12 +2080,37 @@ fn finish_parallel_copy_accounting(
     })
 }
 
+fn validate_parallel_population(
+    profile: &ParallelCopyProfile,
+    population: ParallelPopulationMethod,
+) -> Result<(), MfError> {
+    if population == ParallelPopulationMethod::Pread && !profile.supports_direct_pread {
+        return Err(MfError::LoadPolicy(format!(
+            "parallel pread rejects unauthenticated profile {}",
+            profile.id.label()
+        )));
+    }
+    Ok(())
+}
+
+fn parallel_copy_marker_label(
+    profile: &ParallelCopyProfile,
+    population: ParallelPopulationMethod,
+) -> Result<&'static str, MfError> {
+    validate_parallel_population(profile, population)?;
+    Ok(match population {
+        ParallelPopulationMethod::MmapCopy => "[metal-gguf-parallel-copied]",
+        ParallelPopulationMethod::Pread => "[metal-gguf-parallel-pread]",
+    })
+}
+
 fn emit_parallel_copy_marker(
     profile: &ParallelCopyProfile,
     population: ParallelPopulationMethod,
     timing: ParallelCopyTiming,
     accounting: Option<ParallelCopyEndpointAccounting>,
 ) -> Result<(), MfError> {
+    let marker = parallel_copy_marker_label(profile, population)?;
     match profile.marker_contract {
         ParallelCopyMarkerContract::A3bSchema1 => {
             if accounting.is_some() {
@@ -2090,10 +2118,6 @@ fn emit_parallel_copy_marker(
                     "A3B parallel-copy marker received dense accounting".to_string(),
                 ));
             }
-            let marker = match population {
-                ParallelPopulationMethod::MmapCopy => "[metal-gguf-parallel-copied]",
-                ParallelPopulationMethod::Pread => "[metal-gguf-parallel-pread]",
-            };
             emit_metal_load_line(format_args!(
                 concat!(
                     "{} schema=1 resources=733 bytes=22123538944 ",
@@ -2117,11 +2141,6 @@ fn emit_parallel_copy_marker(
             ));
         }
         ParallelCopyMarkerContract::DenseSchema2 => {
-            if population != ParallelPopulationMethod::MmapCopy {
-                return Err(MfError::LoadPolicy(
-                    "parallel pread is authenticated only for the A3B profile".to_string(),
-                ));
-            }
             let accounting = accounting.ok_or_else(|| {
                 MfError::LoadPolicy(
                     "dense parallel-copy marker is missing endpoint accounting".to_string(),
@@ -2130,7 +2149,7 @@ fn emit_parallel_copy_marker(
             let boundary = profile.boundaries;
             emit_metal_load_line(format_args!(
                 concat!(
-                    "[metal-gguf-parallel-copied] schema=2 profile={} ",
+                    "{} schema=2 profile={} ",
                     "resources={} bytes={} workers=4 cuts={},{},{} ",
                     "tasks={},{},{},{} worker_bytes={},{},{},{} ",
                     "w0_first={},{},{},{},{} w0_last={},{},{},{},{} ",
@@ -2146,6 +2165,7 @@ fn emit_parallel_copy_marker(
                     "total_cpu_us={} timer_minor_faults={} timer_major_faults={} ",
                     "instructions_delta_raw={} cycles_delta_raw={}"
                 ),
+                marker,
                 profile.id.label(),
                 profile.request_count,
                 profile.source_bytes,
@@ -3600,13 +3620,7 @@ fn prepare_parallel_copied_profile(
     profile: &'static ParallelCopyProfile,
     population: ParallelPopulationMethod,
 ) -> Result<PreparedParallelCopiedProfile, MfError> {
-    if population == ParallelPopulationMethod::Pread
-        && profile.id != ParallelCopyProfileId::A3bQ4kmV1
-    {
-        return Err(MfError::LoadPolicy(
-            "parallel pread is authenticated only for the A3B profile".to_string(),
-        ));
-    }
+    validate_parallel_population(profile, population)?;
     let proof = match profile.authentication {
         ParallelCopyAuthentication::A3bRetainedPlan => {
             authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection)?;
@@ -4314,7 +4328,7 @@ impl MetalModel {
             && embedding_mode != NativeQuantEmbeddingMode::Auto
         {
             return Err(MfError::LoadPolicy(
-                "forced A3B storage requires production-auto native embedding selection"
+                "forced owned or parallel storage requires production-auto native embedding selection"
                     .to_string(),
             ));
         }
@@ -4461,7 +4475,7 @@ impl MetalModel {
             && embedding_mode != NativeQuantEmbeddingMode::Auto
         {
             return Err(MfError::LoadPolicy(
-                "forced A3B storage requires production-auto native embedding selection"
+                "forced owned or parallel storage requires production-auto native embedding selection"
                     .to_string(),
             ));
         }
@@ -13236,6 +13250,78 @@ mod tests {
     }
 
     #[test]
+    fn gguf_parallel_pread_capability_table_is_exact() {
+        let observed = PARALLEL_COPY_PROFILES
+            .iter()
+            .map(|profile| (profile.id, profile.supports_direct_pread))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                (ParallelCopyProfileId::A3bQ4kmV1, true),
+                (ParallelCopyProfileId::Dense27bQ4kmV1, true),
+            ]
+        );
+        for profile in PARALLEL_COPY_PROFILES {
+            validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy)
+                .expect("mmap population capability");
+            validate_parallel_population(profile, ParallelPopulationMethod::Pread)
+                .expect("pread population capability");
+        }
+    }
+
+    #[test]
+    fn gguf_parallel_pread_dense_marker_table_is_exact() {
+        assert_eq!(
+            parallel_copy_marker_label(
+                &DENSE27B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::MmapCopy,
+            )
+            .unwrap(),
+            "[metal-gguf-parallel-copied]"
+        );
+        assert_eq!(
+            parallel_copy_marker_label(
+                &DENSE27B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::Pread,
+            )
+            .unwrap(),
+            "[metal-gguf-parallel-pread]"
+        );
+    }
+
+    #[test]
+    fn gguf_parallel_pread_dense_auto_remains_none() {
+        assert_eq!(
+            auto_parallel_copy_population(ParallelCopyProfileId::Dense27bQ4kmV1),
+            None
+        );
+        assert_eq!(
+            auto_parallel_copy_population(ParallelCopyProfileId::A3bQ4kmV1),
+            Some(ParallelPopulationMethod::Pread)
+        );
+    }
+
+    #[test]
+    fn gguf_parallel_pread_dense_advice_preserves_configured_policy() {
+        let selected = PreparedAutoSelection::Selected(PreparedParallelCopiedProfile {
+            profile: &DENSE27B_PARALLEL_COPY_PROFILE,
+            population: ParallelPopulationMethod::Pread,
+            expected_identities: Vec::new(),
+            sorted_request_indices: Vec::new(),
+            _proof: PreparedParallelCopyProof::DensePlannerFree,
+        });
+        assert_eq!(
+            selected.prefetch_advice(),
+            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
+        );
+        assert_eq!(
+            PreparedAutoSelection::NotEligible.prefetch_advice(),
+            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
+        );
+    }
+
+    #[test]
     fn prepared_auto_prefetch_advice_selector_table_is_fail_closed() {
         #[derive(Clone, Copy)]
         enum Selection {
@@ -14210,9 +14296,10 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "requires local Qwen3.6 dense 27B Q4 fixture"]
-    fn gguf_parallel_copied_dense27b_q4_is_bit_exact() {
+    fn assert_gguf_parallel_dense27b_q4_is_bit_exact(
+        population: ParallelPopulationMethod,
+        marker: &str,
+    ) {
         let model_path = "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf";
         assert_eq!(
             native_quant_embedding_mode(),
@@ -14282,13 +14369,13 @@ mod tests {
                 &model,
                 &expected,
                 embedding_selection,
-                ParallelPopulationMethod::MmapCopy,
+                population,
             )
-            .expect("realize parallel-copy dense storage");
+            .expect("realize parallel dense storage");
             assert_eq!(storage.profile.id, ParallelCopyProfileId::Dense27bQ4kmV1);
             storage
                 .validate_source_bytes(&gguf, &expected)
-                .expect("audit every parallel-copy resource byte");
+                .expect("audit every parallel resource byte");
             validate_parallel_copied_topology(
                 storage.profile,
                 &storage.expected,
@@ -14309,7 +14396,7 @@ mod tests {
             }));
             assert!(
                 write_result.is_err(),
-                "parallel-copy weights must reject compute writes"
+                "parallel weights must reject compute writes"
             );
             encoder.end();
 
@@ -14328,7 +14415,7 @@ mod tests {
             }));
             assert!(
                 write_result.is_err(),
-                "parallel-copy weights must reject blit writes"
+                "parallel weights must reject blit writes"
             );
             blit.end();
 
@@ -14361,22 +14448,22 @@ mod tests {
         assert_eq!(copied.next_token, parallel_argmax);
         assert_eq!(parallel.next_token, parallel_argmax);
         assert_generic_retained_f32_bits(
-            "parallel-copy prefill logits",
+            "parallel prefill logits",
             &copied.prefill_logits,
             &parallel.prefill_logits,
         );
         assert_generic_retained_snapshot(
-            "parallel-copy prefill snapshot",
+            "parallel prefill snapshot",
             &copied.prefill_snapshot,
             &parallel.prefill_snapshot,
         );
         assert_generic_retained_f32_bits(
-            "parallel-copy decode logits",
+            "parallel decode logits",
             &copied.decode_logits,
             &parallel.decode_logits,
         );
         assert_generic_retained_snapshot(
-            "parallel-copy decode snapshot",
+            "parallel decode snapshot",
             &copied.decode_snapshot,
             &parallel.decode_snapshot,
         );
@@ -14398,7 +14485,7 @@ mod tests {
         assert_eq!(
             load_lines
                 .iter()
-                .filter(|line| line.starts_with("[metal-gguf-parallel-copied]"))
+                .filter(|line| line.starts_with(marker))
                 .count(),
             1,
             "candidate marker count"
@@ -14412,27 +14499,32 @@ mod tests {
             "copied ledger count"
         );
 
-        let marker_prefix = concat!(
-            "[metal-gguf-parallel-copied] schema=2 profile=dense27b-q4km-v1 ",
-            "resources=851 bytes=16806250496 workers=4 cuts=136,377,618 ",
-            "tasks=136,241,241,233 ",
-            "worker_bytes=4194110464,4214375808,4204933376,4192830848 ",
-            "w0_first=2,output.weight,0,10993888,1042944000 ",
-            "w0_last=135,blk.9.ssm_norm.weight,0,4205103840,512 ",
-            "w1_first=136,blk.9.ssm_out.weight,0,4205104352,21626880 ",
-            "w1_last=379,blk.28.attn_qkv.weight,0,8376472160,43008000 ",
-            "w2_first=378,blk.28.ffn_down.weight,0,8419480160,73113600 ",
-            "w2_last=618,blk.46.ffn_down.weight,0,12551299936,73113600 ",
-            "w3_first=616,blk.46.ffn_gate.weight,0,12624413536,50135040 ",
-            "w3_last=844,blk.63.post_attention_norm.weight,0,16817223904,20480 ",
-            "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-            "page=16384 alignment=32 max_buffer=77309411328 ",
-            "mapped=16817244384 layout=0xd116405fd99f54d9 ",
-            "inventory=50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07 "
+        let marker_prefix = format!(
+            "{}{}",
+            marker,
+            concat!(
+                " schema=2 profile=dense27b-q4km-v1 ",
+                "resources=851 bytes=16806250496 workers=4 cuts=136,377,618 ",
+                "tasks=136,241,241,233 ",
+                "worker_bytes=4194110464,4214375808,4204933376,4192830848 ",
+                "w0_first=2,output.weight,0,10993888,1042944000 ",
+                "w0_last=135,blk.9.ssm_norm.weight,0,4205103840,512 ",
+                "w1_first=136,blk.9.ssm_out.weight,0,4205104352,21626880 ",
+                "w1_last=379,blk.28.attn_qkv.weight,0,8376472160,43008000 ",
+                "w2_first=378,blk.28.ffn_down.weight,0,8419480160,73113600 ",
+                "w2_last=618,blk.46.ffn_down.weight,0,12551299936,73113600 ",
+                "w3_first=616,blk.46.ffn_gate.weight,0,12624413536,50135040 ",
+                "w3_last=844,blk.63.post_attention_norm.weight,0,16817223904,20480 ",
+                "create=shared,default_cache,default ",
+                "observed=shared,default_cache,tracked ",
+                "page=16384 alignment=32 max_buffer=77309411328 ",
+                "mapped=16817244384 layout=0xd116405fd99f54d9 ",
+                "inventory=50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07 "
+            )
         );
         assert!(!load_lines[3].contains(" plan="));
         let timing_suffix = load_lines[3]
-            .strip_prefix(marker_prefix)
+            .strip_prefix(&marker_prefix)
             .expect("exact dense candidate marker prefix and field order");
         let timing_fields = timing_suffix.split(' ').collect::<Vec<_>>();
         let timing_names = [
@@ -14483,6 +14575,24 @@ mod tests {
             timing_values[7],
             timing_values[5] + timing_values[6],
             "candidate CPU reconciliation"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local Qwen3.6 dense 27B Q4 fixture"]
+    fn gguf_parallel_copied_dense27b_q4_is_bit_exact() {
+        assert_gguf_parallel_dense27b_q4_is_bit_exact(
+            ParallelPopulationMethod::MmapCopy,
+            "[metal-gguf-parallel-copied]",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local Qwen3.6 dense 27B Q4 fixture"]
+    fn gguf_parallel_pread_dense27b_q4_is_bit_exact() {
+        assert_gguf_parallel_dense27b_q4_is_bit_exact(
+            ParallelPopulationMethod::Pread,
+            "[metal-gguf-parallel-pread]",
         );
     }
 

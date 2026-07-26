@@ -25,7 +25,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 const NAMESPACE_VERSION: &str = "v1";
 const PREFIX_KEY_DOMAIN: &[u8] = b"qwen-checkpoint-prefix-key-v1\0";
@@ -41,6 +41,8 @@ pub struct DurableCheckpointStore {
     root: PathBuf,
     max_managed_blob_bytes: u64,
     namespace_ready: Arc<AtomicBool>,
+    staged_integrity: StagedIntegrityMode,
+    staged_integrity_explicit: bool,
 }
 
 impl DurableCheckpointStore {
@@ -49,6 +51,22 @@ impl DurableCheckpointStore {
             root: root.into(),
             max_managed_blob_bytes,
             namespace_ready: Arc::new(AtomicBool::new(false)),
+            staged_integrity: StagedIntegrityMode::Decode,
+            staged_integrity_explicit: false,
+        }
+    }
+
+    pub fn with_staged_integrity(
+        root: impl Into<PathBuf>,
+        max_managed_blob_bytes: u64,
+        staged_integrity: StagedIntegrityMode,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            max_managed_blob_bytes,
+            namespace_ready: Arc::new(AtomicBool::new(false)),
+            staged_integrity,
+            staged_integrity_explicit: true,
         }
     }
 
@@ -58,6 +76,14 @@ impl DurableCheckpointStore {
 
     pub fn max_managed_blob_bytes(&self) -> u64 {
         self.max_managed_blob_bytes
+    }
+
+    pub fn staged_integrity_mode(&self) -> StagedIntegrityMode {
+        self.staged_integrity
+    }
+
+    pub fn staged_integrity_is_explicit(&self) -> bool {
+        self.staged_integrity_explicit
     }
 
     pub fn identity_cache(&self) -> CheckpointIdentityCache {
@@ -90,24 +116,16 @@ impl DurableCheckpointStore {
                 return Err(error);
             }
         };
-        if staged.record_bytes > self.max_managed_blob_bytes {
+        if staged.encoded.record_bytes > self.max_managed_blob_bytes {
             let _ = std::fs::remove_file(&temp_path);
             return Err(CheckpointStoreError::OversizedBlob {
-                blob_bytes: staged.record_bytes,
+                blob_bytes: staged.encoded.record_bytes,
                 max_managed_blob_bytes: self.max_managed_blob_bytes,
             });
         }
 
-        let result = self.publish_staged(
-            context,
-            snapshot,
-            mode,
-            digest,
-            &temp_path,
-            &final_path,
-            staged,
-        );
-        let _ = std::fs::remove_file(&temp_path);
+        let result = self.publish_staged(context, snapshot, mode, digest, &final_path, &staged);
+        let _ = std::fs::remove_file(&staged.path);
         result
     }
 
@@ -176,9 +194,8 @@ impl DurableCheckpointStore {
         snapshot: &SessionSnapshot,
         mode: SnapshotMode,
         digest: [u8; 32],
-        temp_path: &Path,
         final_path: &Path,
-        staged: EncodedSnapshot,
+        staged: &StagedBlob,
     ) -> Result<PublishReport, CheckpointStoreError> {
         let mut repaired = false;
         for _ in 0..MAX_PUBLICATION_ATTEMPTS {
@@ -194,7 +211,9 @@ impl DurableCheckpointStore {
                     Err(error) => return Err(error.into()),
                 };
                 if valid {
-                    if let Some(report) = self.admit_existing(final_path, &lease)? {
+                    if let Some(report) =
+                        self.admit_existing(final_path, &lease, staged.integrity)?
+                    {
                         return Ok(report);
                     }
                     continue;
@@ -211,11 +230,21 @@ impl DurableCheckpointStore {
             let before = scan_managed_blobs(&self.blobs_root())?;
             let (evicted_entries, evicted_bytes, remaining_bytes) = evict_to_fit(
                 before,
-                staged.record_bytes,
+                staged.encoded.record_bytes,
                 self.max_managed_blob_bytes,
                 Some(final_path),
             )?;
-            if let Err(source) = std::fs::hard_link(temp_path, final_path) {
+            let source_meta = metadata_nofollow(&staged.path)?.ok_or(
+                CheckpointStoreError::StagedMetadata("staging path disappeared"),
+            )?;
+            let source_stamp = FileStamp::from_metadata(&source_meta);
+            validate_staged_stamp(
+                &source_stamp,
+                staged.encoded.record_bytes,
+                1,
+                Some(&staged.synced),
+            )?;
+            if let Err(source) = std::fs::hard_link(&staged.path, final_path) {
                 if evicted_entries > 0 {
                     return Err(CheckpointStoreError::PostMutationIo {
                         operation: "publish blob after eviction",
@@ -224,21 +253,32 @@ impl DurableCheckpointStore {
                 }
                 return Err(source.into());
             }
-            let staged_meta = std::fs::metadata(temp_path).map_err(|source| {
-                CheckpointStoreError::PostMutationIo {
+            let staged_meta = metadata_nofollow(&staged.path)
+                .map_err(|source| CheckpointStoreError::PostMutationIo {
                     operation: "stat staged blob after publication",
                     source,
-                }
-            })?;
+                })?
+                .ok_or_else(|| CheckpointStoreError::PostCommit("staged blob disappeared"))?;
             let final_meta = metadata_nofollow(final_path)
                 .map_err(|source| CheckpointStoreError::PostMutationIo {
                     operation: "stat final blob after publication",
                     source,
                 })?
                 .ok_or_else(|| CheckpointStoreError::PostCommit("final disappeared"))?;
-            if !same_inode(&staged_meta, &final_meta) {
-                return Err(CheckpointStoreError::PostCommit("final inode mismatch"));
-            }
+            let fd_stamp = FileStamp::from_metadata(&staged.file.metadata().map_err(|source| {
+                CheckpointStoreError::PostMutationIo {
+                    operation: "stat staged descriptor after publication",
+                    source,
+                }
+            })?);
+            let staged_stamp = FileStamp::from_metadata(&staged_meta);
+            let final_stamp = FileStamp::from_metadata(&final_meta);
+            validate_post_link_stamp(&fd_stamp, staged.encoded.record_bytes, &staged.opening)
+                .map_err(|_| CheckpointStoreError::PostCommit("staged descriptor drifted"))?;
+            validate_post_link_stamp(&staged_stamp, staged.encoded.record_bytes, &fd_stamp)
+                .map_err(|_| CheckpointStoreError::PostCommit("staged path drifted"))?;
+            validate_post_link_stamp(&final_stamp, staged.encoded.record_bytes, &fd_stamp)
+                .map_err(|_| CheckpointStoreError::PostCommit("final blob drifted"))?;
             sync_directory(final_path.parent().expect("blob parent")).map_err(|source| {
                 CheckpointStoreError::PostMutationIo {
                     operation: "sync published blob directory",
@@ -252,13 +292,14 @@ impl DurableCheckpointStore {
                 } else {
                     PublishOutcome::Published
                 },
-                blob_bytes: staged.record_bytes,
+                blob_bytes: staged.encoded.record_bytes,
                 managed_bytes_after: remaining_bytes
-                    .checked_add(staged.record_bytes)
+                    .checked_add(staged.encoded.record_bytes)
                     .ok_or(CheckpointStoreError::ManagedBytesOverflow)?,
                 evicted_entries,
                 evicted_bytes,
                 touched: false,
+                staged_integrity: staged.integrity,
             });
         }
         Err(CheckpointStoreError::ConcurrentChurn)
@@ -269,15 +310,17 @@ impl DurableCheckpointStore {
         temp_path: &Path,
         context: StoreContext<'_>,
         snapshot: &SessionSnapshot,
-    ) -> Result<EncodedSnapshot, CheckpointStoreError> {
+    ) -> Result<StagedBlob, CheckpointStoreError> {
         let mut options = OpenOptions::new();
         options
-            .read(true)
+            .read(self.staged_integrity == StagedIntegrityMode::Decode)
             .write(true)
             .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW);
         let mut file = options.open(temp_path)?;
+        let opening = FileStamp::from_metadata(&file.metadata()?);
+        validate_staged_stamp(&opening, 0, 1, None)?;
         let encoded = {
             let mut writer = BufWriter::new(&mut file);
             let encoded = encode_snapshot(&mut writer, snapshot, context.codec_constraints())?;
@@ -285,14 +328,29 @@ impl DurableCheckpointStore {
             encoded
         };
         file.sync_all()?;
-        file.seek(SeekFrom::Start(0))?;
-        let decoded = decode_snapshot(&mut file, context.codec_constraints())?;
-        if !same_snapshot_prefix(&decoded, snapshot)
-            || SnapshotMode::from_snapshot(&decoded) != SnapshotMode::from_snapshot(snapshot)
-        {
-            return Err(CheckpointStoreError::StagedValidation);
+        let integrity_t0 = Instant::now();
+        let synced = FileStamp::from_metadata(&file.metadata()?);
+        validate_staged_stamp(&synced, encoded.record_bytes, 1, Some(&opening))?;
+        if self.staged_integrity == StagedIntegrityMode::Decode {
+            file.seek(SeekFrom::Start(0))?;
+            let decoded = decode_snapshot(&mut file, context.codec_constraints())?;
+            if !same_snapshot_prefix(&decoded, snapshot)
+                || SnapshotMode::from_snapshot(&decoded) != SnapshotMode::from_snapshot(snapshot)
+            {
+                return Err(CheckpointStoreError::StagedValidation);
+            }
         }
-        Ok(encoded)
+        Ok(StagedBlob {
+            file,
+            path: temp_path.to_path_buf(),
+            encoded,
+            opening,
+            synced,
+            integrity: StagedIntegrityReport {
+                mode: self.staged_integrity,
+                elapsed: integrity_t0.elapsed(),
+            },
+        })
     }
 
     fn discover_candidates(
@@ -378,6 +436,7 @@ impl DurableCheckpointStore {
         &self,
         path: &Path,
         lease: &BlobLease,
+        staged_integrity: StagedIntegrityReport,
     ) -> Result<Option<PublishReport>, CheckpointStoreError> {
         let _lock = self.lock_exclusive()?;
         let Some(metadata) = metadata_nofollow(path)? else {
@@ -403,6 +462,7 @@ impl DurableCheckpointStore {
             evicted_entries,
             evicted_bytes,
             touched,
+            staged_integrity,
         }))
     }
 
@@ -542,6 +602,35 @@ pub enum PublishOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StagedIntegrityMode {
+    Decode,
+    DeferredRestore,
+}
+
+impl StagedIntegrityMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "decode" => Some(Self::Decode),
+            "deferred-restore" => Some(Self::DeferredRestore),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Decode => "decode",
+            Self::DeferredRestore => "deferred-restore",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StagedIntegrityReport {
+    pub mode: StagedIntegrityMode,
+    pub elapsed: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PublishReport {
     pub outcome: PublishOutcome,
     pub blob_bytes: u64,
@@ -549,6 +638,7 @@ pub struct PublishReport {
     pub evicted_entries: usize,
     pub evicted_bytes: u64,
     pub touched: bool,
+    pub staged_integrity: StagedIntegrityReport,
 }
 
 #[derive(Debug)]
@@ -601,6 +691,8 @@ pub enum CheckpointStoreError {
     },
     #[error("checkpoint staged validation failed")]
     StagedValidation,
+    #[error("checkpoint staged metadata failed: {0}")]
+    StagedMetadata(&'static str),
     #[error("checkpoint store changed repeatedly during publication")]
     ConcurrentChurn,
     #[error("checkpoint touch lost an eviction or replacement race")]
@@ -680,6 +772,38 @@ struct Candidate {
     matched_len: usize,
     mode: SnapshotMode,
     digest: [u8; 32],
+}
+
+struct StagedBlob {
+    file: File,
+    path: PathBuf,
+    encoded: EncodedSnapshot,
+    opening: FileStamp,
+    synced: FileStamp,
+    integrity: StagedIntegrityReport,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileStamp {
+    regular: bool,
+    len: u64,
+    mode: u32,
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+}
+
+impl FileStamp {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            regular: metadata.file_type().is_file(),
+            len: metadata.len(),
+            mode: metadata.mode() & 0o7777,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            nlink: metadata.nlink(),
+        }
+    }
 }
 
 struct BlobLease {
@@ -1063,8 +1187,38 @@ fn flock_retry(file: &File, operation: libc::c_int) -> io::Result<()> {
     }
 }
 
-fn same_inode(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    a.dev() == b.dev() && a.ino() == b.ino()
+fn validate_staged_stamp(
+    actual: &FileStamp,
+    expected_len: u64,
+    expected_nlink: u64,
+    expected_identity: Option<&FileStamp>,
+) -> Result<(), CheckpointStoreError> {
+    if !actual.regular {
+        return Err(CheckpointStoreError::StagedMetadata("not a regular file"));
+    }
+    if actual.len != expected_len {
+        return Err(CheckpointStoreError::StagedMetadata("length mismatch"));
+    }
+    if actual.mode != 0o600 {
+        return Err(CheckpointStoreError::StagedMetadata("mode mismatch"));
+    }
+    if actual.nlink != expected_nlink {
+        return Err(CheckpointStoreError::StagedMetadata("link-count mismatch"));
+    }
+    if expected_identity
+        .is_some_and(|expected| actual.dev != expected.dev || actual.ino != expected.ino)
+    {
+        return Err(CheckpointStoreError::StagedMetadata("inode mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_post_link_stamp(
+    actual: &FileStamp,
+    expected_len: u64,
+    expected_identity: &FileStamp,
+) -> Result<(), CheckpointStoreError> {
+    validate_staged_stamp(actual, expected_len, 2, Some(expected_identity))
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -1120,7 +1274,9 @@ mod tests {
     use crate::metal_forward::{
         SNAPSHOT_LAYOUT_VERSION, SnapshotKvStorageKind, SnapshotValidationError,
     };
+    use sha2::{Digest, Sha256};
     use std::io::{Read, Seek, SeekFrom};
+    use std::os::fd::AsRawFd;
     use std::sync::{Arc, Barrier};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1228,6 +1384,147 @@ mod tests {
         );
     }
 
+    fn sha256_path(path: &Path) -> String {
+        let mut file = File::open(path).unwrap();
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 8 * 1024 * 1024];
+        loop {
+            let count = file.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        hex(&hasher.finalize())
+    }
+
+    #[test]
+    fn staged_integrity_configuration_is_explicit_and_decode_default() {
+        let temp = TestDir::new("integrity-config");
+        let default = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        assert_eq!(default.staged_integrity_mode(), StagedIntegrityMode::Decode);
+        assert!(!default.staged_integrity_is_explicit());
+
+        let deferred = DurableCheckpointStore::with_staged_integrity(
+            &temp.0,
+            1 << 20,
+            StagedIntegrityMode::DeferredRestore,
+        );
+        assert_eq!(
+            deferred.staged_integrity_mode(),
+            StagedIntegrityMode::DeferredRestore
+        );
+        assert!(deferred.staged_integrity_is_explicit());
+        assert_eq!(
+            StagedIntegrityMode::parse("decode"),
+            Some(StagedIntegrityMode::Decode)
+        );
+        assert_eq!(
+            StagedIntegrityMode::parse("deferred-restore"),
+            Some(StagedIntegrityMode::DeferredRestore)
+        );
+        for invalid in ["", "Decode", "deferred_restore", "deferred", "true"] {
+            assert_eq!(StagedIntegrityMode::parse(invalid), None);
+        }
+    }
+
+    #[test]
+    fn staged_file_stamp_validator_rejects_every_contract_mismatch() {
+        let opening = FileStamp {
+            regular: true,
+            len: 0,
+            mode: 0o600,
+            dev: 7,
+            ino: 11,
+            nlink: 1,
+        };
+        let synced = FileStamp {
+            len: 123,
+            ..opening
+        };
+        validate_staged_stamp(&opening, 0, 1, None).unwrap();
+        validate_staged_stamp(&synced, 123, 1, Some(&opening)).unwrap();
+
+        for invalid in [
+            FileStamp {
+                regular: false,
+                ..synced
+            },
+            FileStamp { len: 122, ..synced },
+            FileStamp {
+                mode: 0o640,
+                ..synced
+            },
+            FileStamp { dev: 8, ..synced },
+            FileStamp { ino: 12, ..synced },
+            FileStamp { nlink: 2, ..synced },
+        ] {
+            assert!(validate_staged_stamp(&invalid, 123, 1, Some(&opening)).is_err());
+        }
+        let linked = FileStamp { nlink: 2, ..synced };
+        validate_post_link_stamp(&linked, 123, &opening).unwrap();
+    }
+
+    #[test]
+    fn staged_integrity_modes_emit_identical_small_records() {
+        let temp = TestDir::new("integrity-records");
+        let snapshot = snapshot(&[1, 2], Some(3), true);
+        let decode_path = temp.0.join("decode.qcp");
+        let deferred_path = temp.0.join("deferred.qcp");
+        let decode_store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let deferred_store = DurableCheckpointStore::with_staged_integrity(
+            &temp.0,
+            1 << 20,
+            StagedIntegrityMode::DeferredRestore,
+        );
+
+        let decode = decode_store
+            .encode_staged(&decode_path, context(&snapshot.identity), &snapshot)
+            .unwrap();
+        let deferred = deferred_store
+            .encode_staged(&deferred_path, context(&snapshot.identity), &snapshot)
+            .unwrap();
+        assert_eq!(decode.encoded, deferred.encoded);
+        assert_eq!(decode.integrity.mode, StagedIntegrityMode::Decode);
+        assert_eq!(
+            deferred.integrity.mode,
+            StagedIntegrityMode::DeferredRestore
+        );
+        let deferred_flags = unsafe { libc::fcntl(deferred.file.as_raw_fd(), libc::F_GETFL) };
+        assert!(deferred_flags >= 0);
+        assert_eq!(deferred_flags & libc::O_ACCMODE, libc::O_WRONLY);
+        assert_eq!(
+            std::fs::read(&decode_path).unwrap(),
+            std::fs::read(&deferred_path).unwrap()
+        );
+
+        let final_path = temp.0.join("final.qcp");
+        std::fs::hard_link(&deferred.path, &final_path).unwrap();
+        let fd_meta = deferred.file.metadata().unwrap();
+        let staged_meta = deferred.path.metadata().unwrap();
+        let final_meta = final_path.metadata().unwrap();
+        assert_eq!(
+            (fd_meta.dev(), fd_meta.ino()),
+            (staged_meta.dev(), staged_meta.ino())
+        );
+        assert_eq!(
+            (fd_meta.dev(), fd_meta.ino()),
+            (final_meta.dev(), final_meta.ino())
+        );
+        assert_eq!(fd_meta.nlink(), 2);
+        assert_eq!(staged_meta.nlink(), 2);
+        assert_eq!(final_meta.nlink(), 2);
+        std::fs::remove_file(&deferred.path).unwrap();
+        assert_eq!(final_path.metadata().unwrap().nlink(), 1);
+
+        let restored = decode_snapshot(
+            &mut File::open(&final_path).unwrap(),
+            context(&snapshot.identity).codec_constraints(),
+        )
+        .unwrap();
+        assert_snapshot_equal(&snapshot, &restored);
+    }
+
     #[test]
     fn store_publishes_and_finds_exact_or_extended_prefix() {
         let temp = TestDir::new("basic");
@@ -1330,6 +1627,44 @@ mod tests {
         assert_eq!(report.outcome, PublishOutcome::RepairedCorrupt);
         let restored = store.lookup(context(&snapshot.identity), &[1, 2]).unwrap();
         assert!(restored.snapshot.is_some());
+    }
+
+    #[test]
+    fn deferred_restore_rejects_corruption_on_first_lookup() {
+        let temp = TestDir::new("deferred-corruption");
+        let store = DurableCheckpointStore::with_staged_integrity(
+            &temp.0,
+            1 << 20,
+            StagedIntegrityMode::DeferredRestore,
+        );
+        let snapshot = snapshot(&[1, 2], None, true);
+        let published = store
+            .publish(context(&snapshot.identity), &snapshot)
+            .unwrap();
+        assert_eq!(published.outcome, PublishOutcome::Published);
+        assert_eq!(
+            published.staged_integrity.mode,
+            StagedIntegrityMode::DeferredRestore
+        );
+
+        let path = blob_path(&store, &snapshot);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(16 * 1024)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        file.seek(SeekFrom::Start(16 * 1024)).unwrap();
+        file.write_all(&[byte[0] ^ 1]).unwrap();
+        file.sync_all().unwrap();
+
+        let lookup = store.lookup(context(&snapshot.identity), &[1, 2]).unwrap();
+        assert!(lookup.snapshot.is_none());
+        assert_eq!(lookup.candidates_examined, 1);
+        assert_eq!(lookup.corrupt_entries_removed, 1);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1544,13 +1879,22 @@ mod tests {
     }
 
     #[test]
-    fn store_concurrent_publishers_converge_on_one_valid_inode() {
+    fn mixed_integrity_publishers_converge_on_one_valid_inode() {
         let temp = TestDir::new("concurrent");
-        let store = Arc::new(DurableCheckpointStore::new(&temp.0, 1 << 20));
+        let decode = Arc::new(DurableCheckpointStore::new(&temp.0, 1 << 20));
+        let deferred = Arc::new(DurableCheckpointStore::with_staged_integrity(
+            &temp.0,
+            1 << 20,
+            StagedIntegrityMode::DeferredRestore,
+        ));
         let barrier = Arc::new(Barrier::new(8));
         let mut threads = Vec::new();
-        for _ in 0..8 {
-            let store = Arc::clone(&store);
+        for index in 0..8 {
+            let store = if index % 2 == 0 {
+                Arc::clone(&decode)
+            } else {
+                Arc::clone(&deferred)
+            };
             let barrier = Arc::clone(&barrier);
             threads.push(std::thread::spawn(move || {
                 let snapshot = snapshot(&[1, 2], None, true);
@@ -1572,10 +1916,13 @@ mod tests {
                 .count(),
             1
         );
-        let restored = store.lookup(context(&identity()), &[1, 2]).unwrap();
+        let restored = decode.lookup(context(&identity()), &[1, 2]).unwrap();
         assert!(restored.snapshot.is_some());
         assert_eq!(
-            scan_managed_blobs(&store.blobs_root()).unwrap().blobs.len(),
+            scan_managed_blobs(&decode.blobs_root())
+                .unwrap()
+                .blobs
+                .len(),
             1
         );
     }
@@ -1705,6 +2052,148 @@ mod tests {
         assert!(codec_error_proves_invalid_blob(&SnapshotCodecError::Io(
             io::Error::new(io::ErrorKind::UnexpectedEof, "truncated")
         )));
+    }
+
+    #[test]
+    #[ignore = "v0.636 exact-size filesystem floor"]
+    fn checkpoint_deferred_restore_exact_size_floor() {
+        const EXPECTED_BYTES: u64 = 582_854_188;
+        const EXPECTED_SHA256: &str =
+            "69c883f5130e5108cc3b948c5cc500c4d92db1fc2f96aa25b75f5f38abda1e65";
+        const EXPECTED_ENCODER_BLAKE3: &str =
+            "2833fd870009a299dbaa389ae7ed379ea69d50fc31ff250f4e349dc3056eeb67";
+        const EXPECTED_RELATIVE: &str = concat!(
+            "v1/blobs/",
+            "fe9d70c202425683190d1c6a3ef50474940915e8c2e918f3ad50574e12e92b4e/",
+            "6500-p0-63362870ab8f272dfc0c5a5f1dbbe474921b1554a4f589e728d5a2cfbb1bbc2a.qcp"
+        );
+        const STORE_BUDGET: u64 = 805_306_368;
+        const MAX_CONTEXT: usize = 6_516;
+        const VOCAB_SIZE: usize = 248_320;
+
+        let fixture = PathBuf::from(
+            std::env::var("QWEN_CHECKPOINT_FLOOR_FIXTURE").expect("QWEN_CHECKPOINT_FLOOR_FIXTURE"),
+        );
+        let root = PathBuf::from(
+            std::env::var("QWEN_CHECKPOINT_FLOOR_ROOT").expect("QWEN_CHECKPOINT_FLOOR_ROOT"),
+        );
+        let mode_value = std::env::var("QWEN_CHECKPOINT_STAGED_INTEGRITY")
+            .expect("QWEN_CHECKPOINT_STAGED_INTEGRITY");
+        let mode = StagedIntegrityMode::parse(&mode_value).expect("floor integrity mode");
+        assert!(root.is_dir());
+        assert!(root.read_dir().unwrap().next().is_none());
+        assert_eq!(fixture.metadata().unwrap().len(), EXPECTED_BYTES);
+        assert_eq!(sha256_path(&fixture), EXPECTED_SHA256);
+
+        let identity = SnapshotIdentity {
+            model_id: 7_081_852_628_295_403_893,
+            tokenizer_id: 11_867_181_210_256_840_983,
+            layout_version: 4,
+            n_attn_layers: 16,
+            n_gdn_layers: 48,
+            kv_dim_elements: 1_024,
+            kv_bytes_per_token: 2_048,
+            kv_storage_kind: SnapshotKvStorageKind::F16,
+            gdn_state_elements_per_layer: 786_432,
+            gdn_conv_elements_per_layer: 30_720,
+        };
+        let compatibility =
+            parse_hex_32("fe9d70c202425683190d1c6a3ef50474940915e8c2e918f3ad50574e12e92b4e")
+                .unwrap();
+        let context = StoreContext {
+            compatibility_id: &compatibility,
+            identity: &identity,
+            vocab_size: VOCAB_SIZE,
+            max_context_tokens: MAX_CONTEXT,
+            max_record_bytes: STORE_BUDGET,
+        };
+        let snapshot = decode_snapshot(
+            &mut File::open(&fixture).unwrap(),
+            context.codec_constraints(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.prefix_len(), 6_499);
+        assert_eq!(snapshot.matched_prefix_len(), 6_500);
+        assert_eq!(snapshot.pending_token, Some(248_068));
+
+        let store = DurableCheckpointStore::with_staged_integrity(&root, STORE_BUDGET, mode);
+        let publish_t0 = Instant::now();
+        let report = store.publish(context, &snapshot).unwrap();
+        let publish_us = publish_t0.elapsed().as_micros();
+        assert_eq!(report.outcome, PublishOutcome::Published);
+        assert_eq!(report.evicted_entries, 0);
+        assert_eq!(report.managed_bytes_after, EXPECTED_BYTES);
+        assert_eq!(report.blob_bytes, EXPECTED_BYTES);
+        assert_eq!(report.staged_integrity.mode, mode);
+
+        let blob = blob_path_for(&store, &compatibility, &snapshot);
+        assert_eq!(
+            blob.strip_prefix(&root).unwrap(),
+            Path::new(EXPECTED_RELATIVE)
+        );
+        let metadata = blob.metadata().unwrap();
+        assert_eq!(metadata.len(), EXPECTED_BYTES);
+        assert_eq!(metadata.mode() & 0o7777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        let temp_files = blob
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX))
+            .count();
+        assert_eq!(temp_files, 0);
+
+        let mut trailer_file = File::open(&blob).unwrap();
+        trailer_file.seek(SeekFrom::End(-32)).unwrap();
+        let mut encoder_digest = [0u8; 32];
+        trailer_file.read_exact(&mut encoder_digest).unwrap();
+        assert_eq!(hex(&encoder_digest), EXPECTED_ENCODER_BLAKE3);
+        assert_eq!(sha256_path(&blob), EXPECTED_SHA256);
+
+        let decode_t0 = Instant::now();
+        let decoded =
+            decode_snapshot(&mut File::open(&blob).unwrap(), context.codec_constraints()).unwrap();
+        let full_decode_us = decode_t0.elapsed().as_micros();
+        assert_snapshot_equal(&snapshot, &decoded);
+
+        let outcome = match report.outcome {
+            PublishOutcome::Published => "published",
+            PublishOutcome::ExistingValid => "existing_valid",
+            PublishOutcome::RepairedCorrupt => "repaired_corrupt",
+        };
+        println!(
+            concat!(
+                "[checkpoint-deferred-floor] schema=1 mode={} record_bytes={} ",
+                "encoder_blake3={} blob_sha256={} staged_integrity_us={} ",
+                "publish_us={} full_decode_us={} outcome={} evicted={} ",
+                "managed_bytes_after={} vocab_size={} max_context={} ",
+                "max_record_bytes={} store_budget_bytes={} matched={} restored={} ",
+                "pending={} file_mode={:04o} nlink={} temp_files={} blob_relative={}"
+            ),
+            mode.as_str(),
+            report.blob_bytes,
+            hex(&encoder_digest),
+            EXPECTED_SHA256,
+            report.staged_integrity.elapsed.as_micros(),
+            publish_us,
+            full_decode_us,
+            outcome,
+            report.evicted_entries,
+            report.managed_bytes_after,
+            VOCAB_SIZE,
+            MAX_CONTEXT,
+            context.max_record_bytes,
+            STORE_BUDGET,
+            snapshot.matched_prefix_len(),
+            snapshot.prefix_len(),
+            snapshot.pending_token.is_some(),
+            metadata.mode() & 0o7777,
+            metadata.nlink(),
+            temp_files,
+            blob.strip_prefix(&root).unwrap().display(),
+        );
     }
 
     #[test]

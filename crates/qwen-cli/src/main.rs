@@ -2,11 +2,11 @@
 
 mod messages;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Parser;
 use messages::{load_messages_prompt_with_policy, messages_thinking_mode};
 use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
-use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome};
+use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, evaluate_metal_memory_admission,
@@ -31,6 +31,8 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+const CHECKPOINT_STAGED_INTEGRITY_ENV: &str = "QWEN_CHECKPOINT_STAGED_INTEGRITY";
 
 #[derive(Parser, Debug)]
 #[command(name = "qwen", version, about = "qwen-llm inference CLI")]
@@ -753,6 +755,11 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let staged_integrity = configured_checkpoint_staged_integrity()?;
+    ensure!(
+        staged_integrity.is_none() || args.durable_prefix_cache.is_some(),
+        "{CHECKPOINT_STAGED_INTEGRITY_ENV} requires --durable-prefix-cache"
+    );
     validate_request_timing_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
 
@@ -770,7 +777,7 @@ fn main() -> Result<()> {
     };
 
     if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
-        return run_single_turn(model_path, &args);
+        return run_single_turn(model_path, &args, staged_integrity);
     }
 
     if let Some(path) = args.requests_jsonl.as_ref() {
@@ -1621,12 +1628,16 @@ fn report_prefill_chunk_decision(decision: Option<&PrefillChunkDecision>, prompt
     );
 }
 
-fn run_single_turn(model_path: &Path, args: &Args) -> Result<()> {
+fn run_single_turn(
+    model_path: &Path,
+    args: &Args,
+    staged_integrity: Option<StagedIntegrityMode>,
+) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     let sampling = cli_sampling_config(args)?;
     validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
-    let durable_store = durable_checkpoint_store(args)?;
+    let durable_store = durable_checkpoint_store(args, staged_integrity)?;
     let durable_max_record_bytes = if durable_store.is_some() {
         durable_prefix_cache_max_entry_bytes(args)?
     } else {
@@ -2172,6 +2183,7 @@ fn execute_single_turn_request(
             timing_enabled.then(|| loaded.context().current_allocated_size());
         inference_complete_ms = inference_complete_ms.max(delivery_ms);
     }
+    let response_flushed_t0 = Instant::now();
     let total_request_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     report_prefill_chunk_decision(prefill_chunk_decision.as_ref(), prompt_ids.len());
     let request_end_allocated = timing_enabled.then(|| loaded.context().current_allocated_size());
@@ -2255,31 +2267,78 @@ fn execute_single_turn_request(
     if let (Some(store), Some(prepared)) = (durable_store, durable_prepared.as_ref()) {
         let publish_t0 = Instant::now();
         match loaded.publish_prepared_checkpoint(store, prepared, durable_max_record_bytes) {
-            Ok(report) => eprintln!(
-                concat!(
-                    "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
-                    "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
-                    "evicted={} identity={} capture_ms={:.1} publish_ms={:.1}"
-                ),
-                publish_outcome_label(report.store.outcome),
-                durable_capture_kind.unwrap_or("unknown"),
-                prepared.matched_prefix_len(),
-                prepared.restored_prefix_len(),
-                prepared.has_pending_token(),
-                durable_capture_stop_reason.map_or("none", StopReason::as_str),
-                report.store.blob_bytes,
-                report.store.evicted_entries,
-                identity_cache_outcome_label(report.compatibility.outcome),
-                durable_capture_ms,
-                publish_t0.elapsed().as_secs_f64() * 1e3,
-            ),
-            Err(error) => eprintln!(
-                concat!(
-                    "warning: durable prefix publication failed after response ",
-                    "(restore_ms={:.1} capture_ms={:.1}): {}"
-                ),
-                durable_restore_ms, durable_capture_ms, error,
-            ),
+            Ok(report) => {
+                let publish_elapsed = publish_t0.elapsed();
+                if store.staged_integrity_is_explicit() {
+                    eprintln!(
+                        concat!(
+                            "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
+                            "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
+                            "evicted={} identity={} staged_integrity={} ",
+                            "staged_integrity_us={} capture_ms={:.1} publish_us={} ",
+                            "post_response_us={}"
+                        ),
+                        publish_outcome_label(report.store.outcome),
+                        durable_capture_kind.unwrap_or("unknown"),
+                        prepared.matched_prefix_len(),
+                        prepared.restored_prefix_len(),
+                        prepared.has_pending_token(),
+                        durable_capture_stop_reason.map_or("none", StopReason::as_str),
+                        report.store.blob_bytes,
+                        report.store.evicted_entries,
+                        identity_cache_outcome_label(report.compatibility.outcome),
+                        report.store.staged_integrity.mode.as_str(),
+                        report.store.staged_integrity.elapsed.as_micros(),
+                        durable_capture_ms,
+                        publish_elapsed.as_micros(),
+                        response_flushed_t0.elapsed().as_micros(),
+                    );
+                } else {
+                    eprintln!(
+                        concat!(
+                            "durable_prefix_cache: publish={} capture={} matched_tokens={} ",
+                            "restored_tokens={} pending={} stop_reason={} blob_bytes={} ",
+                            "evicted={} identity={} capture_ms={:.1} publish_ms={:.1}"
+                        ),
+                        publish_outcome_label(report.store.outcome),
+                        durable_capture_kind.unwrap_or("unknown"),
+                        prepared.matched_prefix_len(),
+                        prepared.restored_prefix_len(),
+                        prepared.has_pending_token(),
+                        durable_capture_stop_reason.map_or("none", StopReason::as_str),
+                        report.store.blob_bytes,
+                        report.store.evicted_entries,
+                        identity_cache_outcome_label(report.compatibility.outcome),
+                        durable_capture_ms,
+                        publish_elapsed.as_secs_f64() * 1e3,
+                    );
+                }
+            }
+            Err(error) => {
+                let publish_elapsed = publish_t0.elapsed();
+                if store.staged_integrity_is_explicit() {
+                    eprintln!(
+                        concat!(
+                            "durable_prefix_cache: publish=failed staged_integrity={} ",
+                            "staged_integrity_us=none capture_ms={:.1} publish_us={} ",
+                            "post_response_us={} error={}"
+                        ),
+                        store.staged_integrity_mode().as_str(),
+                        durable_capture_ms,
+                        publish_elapsed.as_micros(),
+                        response_flushed_t0.elapsed().as_micros(),
+                        error,
+                    );
+                } else {
+                    eprintln!(
+                        concat!(
+                            "warning: durable prefix publication failed after response ",
+                            "(restore_ms={:.1} capture_ms={:.1}): {}"
+                        ),
+                        durable_restore_ms, durable_capture_ms, error,
+                    );
+                }
+            }
         }
     }
 
@@ -3399,17 +3458,42 @@ fn prefix_cache_max_bytes(args: &Args) -> Result<u64> {
     mib_to_bytes(args.prefix_cache_max_mib, "prefix cache byte budget")
 }
 
-fn durable_checkpoint_store(args: &Args) -> Result<Option<DurableCheckpointStore>> {
+fn durable_checkpoint_store(
+    args: &Args,
+    staged_integrity: Option<StagedIntegrityMode>,
+) -> Result<Option<DurableCheckpointStore>> {
     let Some(root) = args.durable_prefix_cache.as_ref() else {
         return Ok(None);
     };
-    Ok(Some(DurableCheckpointStore::new(
-        root,
-        mib_to_bytes(
-            args.durable_prefix_cache_max_mib,
-            "durable prefix cache byte budget",
-        )?,
-    )))
+    let budget = mib_to_bytes(
+        args.durable_prefix_cache_max_mib,
+        "durable prefix cache byte budget",
+    )?;
+    Ok(Some(match staged_integrity {
+        Some(mode) => DurableCheckpointStore::with_staged_integrity(root, budget, mode),
+        None => DurableCheckpointStore::new(root, budget),
+    }))
+}
+
+fn configured_checkpoint_staged_integrity() -> Result<Option<StagedIntegrityMode>> {
+    match std::env::var(CHECKPOINT_STAGED_INTEGRITY_ENV) {
+        Ok(value) => parse_checkpoint_staged_integrity(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_checkpoint_staged_integrity(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("invalid {CHECKPOINT_STAGED_INTEGRITY_ENV}; expected decode or deferred-restore")
+        }
+    }
+}
+
+fn parse_checkpoint_staged_integrity(value: Option<&str>) -> Result<Option<StagedIntegrityMode>> {
+    match value {
+        None => Ok(None),
+        Some(value) => StagedIntegrityMode::parse(value).map(Some).ok_or_else(|| {
+            anyhow!(
+                "invalid {CHECKPOINT_STAGED_INTEGRITY_ENV}; expected decode or deferred-restore"
+            )
+        }),
+    }
 }
 
 fn durable_prefix_cache_max_entry_bytes(args: &Args) -> Result<u64> {
@@ -4254,6 +4338,22 @@ mod tests {
         ])
         .unwrap();
         validate_durable_prefix_cache_mode(&valid).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_staged_integrity_parser_is_strict() {
+        assert_eq!(parse_checkpoint_staged_integrity(None).unwrap(), None);
+        assert_eq!(
+            parse_checkpoint_staged_integrity(Some("decode")).unwrap(),
+            Some(StagedIntegrityMode::Decode)
+        );
+        assert_eq!(
+            parse_checkpoint_staged_integrity(Some("deferred-restore")).unwrap(),
+            Some(StagedIntegrityMode::DeferredRestore)
+        );
+        for invalid in ["", "Decode", "deferred_restore", "deferred", "true"] {
+            assert!(parse_checkpoint_staged_integrity(Some(invalid)).is_err());
+        }
     }
 
     #[test]

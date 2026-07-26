@@ -10157,7 +10157,7 @@ mod tok_tests {
     fn pld_terminal_window_counts_target_transitions() {
         let drafts = [11, 12, 13, 14, 15, 16, 17];
         let count = |emitted, stop| {
-            pld_terminal_draft_count(&drafts, emitted, 128, stop).map(|window| window.count)
+            terminal_draft_window(&drafts, emitted, 128, stop).map(|window| window.count)
         };
         assert_eq!(count(1, &[99]), None);
         assert_eq!(count(121, &[99]), Some(7));
@@ -10165,21 +10165,21 @@ mod tok_tests {
         assert_eq!(count(1, &[14]), Some(4));
 
         for remaining in 1..=DRAFT_TOKENS {
-            let window = pld_terminal_draft_count(&drafts, 128 - remaining, 128, &[99])
+            let window = terminal_draft_window(&drafts, 128 - remaining, 128, &[99])
                 .expect("output-limit window");
             assert_eq!(window.count, remaining);
-            assert_eq!(window.cause, PldTerminalCause::OutputLimit);
+            assert_eq!(window.cause, PromptLookupTerminalCause::OutputLimit);
         }
         for stop_index in 0..DRAFT_TOKENS {
-            let window = pld_terminal_draft_count(&drafts, 1, 128, &[drafts[stop_index]])
+            let window = terminal_draft_window(&drafts, 1, 128, &[drafts[stop_index]])
                 .expect("stop-token window");
             assert_eq!(window.count, stop_index + 1);
-            assert_eq!(window.cause, PldTerminalCause::StopToken);
+            assert_eq!(window.cause, PromptLookupTerminalCause::StopToken);
         }
-        let output_first = pld_terminal_draft_count(&drafts, 125, 128, &[16])
+        let output_first = terminal_draft_window(&drafts, 125, 128, &[16])
             .expect("output limit precedes proposed stop");
         assert_eq!(output_first.count, 3);
-        assert_eq!(output_first.cause, PldTerminalCause::OutputLimit);
+        assert_eq!(output_first.cause, PromptLookupTerminalCause::OutputLimit);
     }
 }
 

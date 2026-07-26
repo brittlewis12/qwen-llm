@@ -867,15 +867,35 @@ frozen SHA-256/BLAKE3/namespace/topology and passes post-publication full decode
 snapshot equality. This is CPU-floor authority for one real product packet only;
 verification is deferred to first use, not removed.
 
-1. **Real-27B deferred-restore product transfer**: execute only the successor
-   authorized by v0.637. Use six fresh `AB/BA/BA/AB/AB/BA` pairs, the same
-   completed `582,854,188`-byte checkpoint, unique seeded stores, and explicit
-   `decode` versus `deferred-restore`. Require at least 250 ms A-minus-B in every
-   pair for both complete publication and externally measured final-stdout-flush
-   to clean-process-exit. Preserve exact response and checkpoint identity,
-   topology, zero residue/eviction, and pressure/resource gates. Only after the
-   performance decision passes, retain one B blob for unscored adversarial restore
-   and continuation. This can authorize at most the exact explicit opt-in 27B
+v0.638-v0.639 then expose two pre-model-child packet-contract defects without
+producing a model execution or product-performance observation. v0.639 manifest
+construction nevertheless hashes the frozen model file. v0.638 preflight
+incorrectly requires the full commit as a contiguous raw substring in
+`qwen-bench`; semantic build identity is exact, but LLVM does not preserve that
+representation, so no packet is reserved. v0.639 repairs executable-specific
+identity and all four fresh gates pass, then its exact-`0755` policy conflicts
+with its own `umask(077)` build output (`0700`). It seals after gates with no
+model child, row, restore, scored-timing, or performance artifact. Its sealed
+gate rows and process records contain gate wall/timestamp evidence, none of which
+transfers to v0.640. The complete seal is authenticated in the log. Because
+v0.639 reserved and terminally closed packet ordinal 1, it authorizes no informal
+retry. This post-v0.639 PERF certification independently authorizes one ordinal-2
+v0.640 correction changing only the executable-mode set to `{0700,0755}`; every
+gate and product observation must be fresh, and all experiment and product-
+authority limits remain frozen. Any v0.640 result exhausts ordinal 2 and grants
+no successor authorization.
+
+1. **Real-27B deferred-restore product transfer**: preregister and execute only
+   the newly authorized v0.640 ordinal-2 mode correction. Authenticate v0.639,
+   accept exact safe executable modes `{0700,0755}`, and change no experiment
+   term. Use six fresh `AB/BA/BA/AB/AB/BA` pairs, the same completed
+   `582,854,188`-byte checkpoint, unique seeded stores, and explicit `decode`
+   versus `deferred-restore`. Require at least 250 ms A-minus-B in every pair for
+   both complete publication and externally measured final-stdout-flush to
+   clean-process-exit. Preserve exact response and checkpoint identity, topology,
+   zero residue/eviction, and pressure/resource gates. Only after the performance
+   decision passes, retain one B blob for unscored adversarial restore and
+   continuation. This can authorize at most the exact explicit opt-in 27B
    surface, never default or automatic use. Belief high on the removed wall,
    medium-high on product transfer, difficulty M.
 2. **A3B direct-pread worker screen**: only if cache-warm process-cold population
@@ -985,9 +1005,12 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Run the one real-27B deferred-restore product packet authorized by v0.637.
-   Keep final-response-flush-to-exit external, preserve every record/response gate,
-   and run the unscored restore only after the performance decision passes.
+1. Preregister and run only the ordinal-2 v0.640 executable-mode repair
+   independently authorized by this post-v0.639 PERF certification. Rerun every
+   gate; import no v0.639 gate result or gate/scored timing or performance
+   observation into v0.640 validity or decision. Keep
+   final-response-flush-to-exit external, preserve every record/response gate, and
+   run the unscored restore only after the performance decision passes.
 2. Run the A3B resident worker screen only if cache-warm population still matters.
    A warm miss closes only that regime; a winner needs a separate storage-cold
    W=4 comparison. QoS remains independent and untested.

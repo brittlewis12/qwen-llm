@@ -6,6 +6,52 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-26 - v0.638-v0.639 Product-Packet Contract Defects
+
+Status: v0.638 fails before packet reservation; v0.639 is sealed
+`implementation_or_contract_defect` with `authority=none`, zero model children,
+and no timing or performance authority. This post-v0.639 certification
+independently authorizes exactly one fresh v0.640 mode-repair product packet. It
+imports no v0.639 gate result or gate/scored timing or performance observation
+into v0.640 validity or decision, and it must rerun every gate.
+
+- v0.638 preregisters the real-27B transfer authorized by v0.637, but its
+  preflight requires the full execution commit to occur as one contiguous raw
+  substring in both release executables. `qwen-bench build-info` reports the
+  exact clean commit and source state, while LLVM does not retain that full
+  commit contiguously in `qwen-bench`. Preflight fails before reservation, so no
+  v0.638 packet, gate, model-file read, child, or observation exists.
+- v0.639 independently repairs only executable authentication. It derives the
+  canonical source state outside the binary, uses executable-specific raw
+  policies, brackets semantic `qwen-bench` identity with complete descriptor
+  stamps, and preserves the frozen experiment. Its packet reserves and all four
+  code/build gates pass, but the runner's own `umask(077)` recreates both release
+  binaries as safe regular mode `0700`; the repaired policy requires exact
+  `0755` and therefore seals a contract defect immediately after gates.
+- The v0.639 seal has 27 files and 25 inventory members. It contains exactly four
+  successful gate rows and eight gate launch/completion records. It contains no
+  model child, conditioning, scored row, restore, execution identity, retained
+  candidate, or performance artifact. Manifest construction did hash the frozen
+  model file; the packet proves zero model execution and zero performance
+  observation, not zero model-file I/O.
+- v0.640 may change only the executable-mode contract to the exact accepted set
+  `{0700,0755}`, rename that property from private to safe executable, and carry
+  the corresponding policy through manifest, post-gate identity, per-child
+  equality, GO rederivation, and self-test. It is newly authorized packet ordinal
+  2, not a retry or a continuation authorized by v0.639. It must authenticate the
+  complete v0.639 defect seal, import no v0.639 gate result or gate/scored timing
+  or performance observation into its validity or decision, use fresh roots, and
+  preserve every workload, order, endpoint, threshold, restore, and authority
+  limit from v0.638-v0.639. Any v0.640 result exhausts ordinal 2 and grants no
+  successor authorization.
+
+Artifact:
+`target/profiles/v0639-checkpoint-deferred-restore-product-repair-p1/`.
+Source: `e2c3acc`. Decision/inventory/completion/gates seals:
+`f77a8704...` / `64a98e83...` / `8bcc59d7...` / `d0d51ae4...`.
+Independent adversarial review: `cx` session
+`019f9c3c-a899-7380-b84b-6274ebe7b5bf`.
+
 ## 2026-07-25 - v0.636-v0.637 Deferred-Restore Publication Floor
 
 Status: v0.636 is sealed `implementation_or_contract_defect` with no authority;

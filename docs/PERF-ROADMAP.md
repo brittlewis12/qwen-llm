@@ -853,13 +853,31 @@ authorizes no successor for the frozen route, while the evidence does not
 establish a page-rounding, VM/TLB, no-copy, or Metal compatibility tax. Do not
 rerun or rescue it by filtering those post-hoc clusters.
 
-1. **Checkpoint immediate-readback contract**: current encoder-digest
-   validation is `268.4/269.0 ms`; that is not a pure read-only timing. Price
-   publishing the fsynced encoder output without immediate reread while retaining
-   exact format, source digest, hard-link publication, directory durability, and
-   restore-time adversarial validation. This is process-exit/E2E, not TTFT, and
-   only narrowly clears the 250 ms gate. Belief medium-high on mechanism, medium
-   on transfer, difficulty S-M.
+v0.636 implements the changed checkpoint integrity premise, but its first packet
+correctly seals `implementation_or_contract_defect`: Cargo libtest prefixes the
+canonical marker on its physical line while the runner requires a whole-line
+match. One A child launched, no B observation exists, and no gate, row, timing, or
+authority transfers. v0.637 independently preregisters only a strict parser repair
+over the unchanged implementation, authenticates the complete predecessor seal,
+and reruns four fresh `AB BA` children. It seals `GO`: staged integrity falls from
+`258201/262030 us` to `21/20 us`, while complete publication falls
+`650608 -> 384879 us` and `613572 -> 340732 us`. Savings of
+`265729/272840 us` clear the 250 ms gate in both orders. Every final record has the
+frozen SHA-256/BLAKE3/namespace/topology and passes post-publication full decode and
+snapshot equality. This is CPU-floor authority for one real product packet only;
+verification is deferred to first use, not removed.
+
+1. **Real-27B deferred-restore product transfer**: execute only the successor
+   authorized by v0.637. Use six fresh `AB/BA/BA/AB/AB/BA` pairs, the same
+   completed `582,854,188`-byte checkpoint, unique seeded stores, and explicit
+   `decode` versus `deferred-restore`. Require at least 250 ms A-minus-B in every
+   pair for both complete publication and externally measured final-stdout-flush
+   to clean-process-exit. Preserve exact response and checkpoint identity,
+   topology, zero residue/eviction, and pressure/resource gates. Only after the
+   performance decision passes, retain one B blob for unscored adversarial restore
+   and continuation. This can authorize at most the exact explicit opt-in 27B
+   surface, never default or automatic use. Belief high on the removed wall,
+   medium-high on product transfer, difficulty M.
 2. **A3B direct-pread worker screen**: only if cache-warm process-cold population
    remains material in deployment. Sweep `W={1,2,4,6,8,12}` on authenticated A3B
    inventory with the target file fully resident, counterbalanced, reporting
@@ -967,8 +985,9 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Decide the checkpoint immediate-readback integrity contract before code;
-   direct restore/capture remains behind a 250 ms wall or 500 MB phase-peak case.
+1. Run the one real-27B deferred-restore product packet authorized by v0.637.
+   Keep final-response-flush-to-exit external, preserve every record/response gate,
+   and run the unscored restore only after the performance decision passes.
 2. Run the A3B resident worker screen only if cache-warm population still matters.
    A warm miss closes only that regime; a winner needs a separate storage-cold
    W=4 comparison. QoS remains independent and untested.

@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-25 - v0.636-v0.637 Deferred-Restore Publication Floor
+
+Status: v0.636 is sealed `implementation_or_contract_defect` with no authority;
+v0.637 is sealed `GO` with `authority=no-production-authority`,
+`force_authorized=false`, and successor authorization limited to one separately
+preregistered real-27B deferred-restore product packet.
+
+- v0.636 adds an explicit `deferred-restore` publication mode. It retains source
+  validation, the canonical encoder and v1 format, post-write digest generation,
+  flush and file synchronization, retained-descriptor metadata and inode checks,
+  no-clobber hard-link publication, directory synchronization, and full
+  adversarial decode before every later admission, lookup, or restore. It removes
+  only the immediate staged-inode seek/read/digest/decode before publication.
+- The first v0.636 child passed every Rust assertion and emitted its marker, but
+  Cargo libtest prefixed that marker on the same physical line. The frozen runner
+  used whole-line `fullmatch`, found zero markers, and correctly sealed a defect
+  after one A launch and no B observation. It contributes no row, timing, gate,
+  or authority to v0.637.
+- v0.637 independently preregisters only a strict parser repair over the unchanged
+  implementation. It authenticates the complete v0.636 seal, parses stdout and
+  stderr separately, admits only an empty or exact libtest lead, reruns all four
+  release gates, and runs four fresh sole-attempt children in `AB BA` order.
+- On the exact `582,854,188`-byte 27B checkpoint, staged integrity A/B is
+  `258201/21 us` and `262030/20 us`. Savings are `258180/262010 us`. Complete
+  publication A/B is `650608/384879 us` and `613572/340732 us`, saving
+  `265729/272840 us`. Both independent pairs clear both inclusive `250000 us`
+  gates.
+- All four final records have the frozen size and SHA-256, the same encoder BLAKE3
+  trailer and namespace, mode `0600`, one final link, zero eviction and temporary
+  residue, and the expected `6500/6499 + pending` boundary. Post-publication full
+  adversarial decode and complete snapshot comparison pass in every child.
+- This proves a CPU exact-size floor and changed integrity contract, not product
+  transfer or restore acceleration. Verification moves to first use rather than
+  disappearing. It says nothing about live capture, final-response-to-exit wall,
+  default policy, crash cleanup, broad model support, or malicious writers.
+
+Artifacts:
+`target/profiles/v0636-checkpoint-deferred-restore-floor-p1/` and
+`target/profiles/v0637-checkpoint-deferred-restore-floor-p1/`. Implementation:
+`3d59d94`; execution packet: `61f852e`. v0.637 decision/inventory/completion/
+attempts seals: `29c4ae3c...` / `8d218da1...` / `6f1ed348...` / `18796d61...`.
+Independent adversarial review: `cx` sessions
+`019f9c12-9604-78d1-a208-f83b9e09de47` and
+`019f9c2d-87df-7873-8042-24e322e39ce7`.
+
 ## 2026-07-25 - v0.635 A3B Page-Rounded Copy Compatibility
 
 Status: sealed `KILL`, with `authority=no-production-authority`,

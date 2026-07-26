@@ -897,14 +897,19 @@ automatic, other-model, other-shape, retry, or successor authority exists. The
 external endpoint is a post-response publication/exit tail, not TTFT or complete
 request latency.
 
-1. **A3B direct-pread worker screen**: only if cache-warm process-cold population
-   remains material in deployment. Sweep `W={1,2,4,6,8,12}` on authenticated A3B
-   inventory with the target file fully resident, counterbalanced, reporting
-   `ready_us` decomposition and total CPU without QoS or chunk changes. The
-   `50-150 ms` band is a prior; `60 ms` is an approximately 11% policy threshold
-   against the current ~532 ms ready wall, not an MDE. A miss closes cache-warm
-   worker tuning only. A winner must separately beat W=4 target-file-cold before
-   promotion; QoS remains untested. Difficulty S-M.
+1. **A3B direct-pread worker screen**: v0.641 stops inconclusive after its sole
+   R1/P1/W1 child because process-wide `/usr/bin/time -l` reports 89 major faults.
+   That field is over-broad for the scored interval: Rust reports zero major faults
+   from immediately before materialization through `ready_us`, block input is zero,
+   and all `1,350,985` model pages remain resident before and after. Preregister
+   only the independently authorized repair confined to a new v0.642 document and
+   runner. Apart from mechanical version, source/hash, and root changes, only make
+   process-wide faults advisory. Import no v0.641 timing and rerun all 36 fresh
+   children. Keep crates, command, `W={1,2,4,6,8,12}`, Williams order, schedules,
+   scoring, lifecycle, authority boundary, complete residency, fatal interval-
+   major/block-input/swap/compression gates, CPU guard, and 60 ms policy gate
+   unchanged. A miss closes cache-warm worker tuning only. A winner must separately
+   beat W4 target-file-cold before promotion; QoS remains untested. Difficulty S-M.
 2. **Transient mmap-source to independent-Shared blit floor**: compare current
    direct destination pread with a transient retained source and 733 independent
    Shared destinations. Stop below `112 ms` ready-wall saving and exclude
@@ -1007,9 +1012,11 @@ automatic retained use stay copied without separate evidence.
 v0.640 banks exact-27B deferred restore behind its existing explicit environment
 control. It is no longer an active experiment; keep `decode` as the default.
 
-1. Run the A3B resident worker screen only if cache-warm population still matters.
-   A warm miss closes only that regime; a winner needs a separate storage-cold
-   W=4 comparison. QoS remains independent and untested.
+1. Preregister and run only the fresh v0.642 process-fault-scope repair authorized
+   by this post-v0.641 certification. Import no v0.641 timing or result, retain all
+   interval-local fault/residency gates, and restart at R1/P1. A warm miss closes
+   only that regime; a winner needs a separate target-file-cold W4 comparison.
+   QoS remains independent and untested.
 2. Run the transient-source Shared-destination blit floor as an independent
    population-primitive test. Keep Private storage, sidecar format, and
    write-combined destinations separate.

@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-26 - v0.641 A3B Pread Worker Screen Inconclusive
+
+Status: sealed `inconclusive` with `authority=none`, one invalid W1 child, zero
+scored rows, and `successor_authorization=none`. This post-v0.641 certification
+independently authorizes a repair confined to one new v0.642 preregistration and
+runner, plus one fresh 36-child packet. No v0.641 timing or result may contribute.
+
+- v0.641 preregisters the cache-warm A3B direct-pread worker screen over
+  `W={1,2,4,6,8,12}` in a six-row Williams order. The diagnostic implementation
+  leaves production W4, Auto, destination topology, QoS, and chunking unchanged.
+- The first and only child is the registered R1/P1/W1 attempt. It exits cleanly,
+  authenticates the one-worker schedule, and verifies all 733 resources and all
+  `22,123,538,944` payload bytes. It proves all `1,350,985` pages of the
+  `22,134,528,992`-byte model resident before and after. Host/lifecycle and the
+  fatal swapout, compression, swap-occupancy, process-swap, and block-input gates
+  are clean; advisory pageout evidence is also zero.
+- The packet stops because whole-process `/usr/bin/time -l` reports 89 major page
+  faults. The scored Rust interval reports `timer_major_faults=0`; child block
+  input is zero; source residency is `1,350,985/1,350,985` both before and after.
+  Therefore the 89 faults occurred outside allocation/population through
+  `ready_us`, although their exact startup/setup/verification/teardown source is
+  not identified. Do not call them minor or generally unrelated to the process.
+- W1 `ready_us=1,519,188` is quarantined: it is an invalid, unpaired observation
+  and supplies no score, prior, winner, or v0.642 decision input. No W2 or later
+  child launched.
+- Apart from mechanical v0.642 identifiers, source/hash bindings, and fresh roots,
+  the sole substantive validity change is process-wide `page_faults`: fatal to
+  retained advisory evidence. No crate, production, Auto, command, schedule,
+  order, scoring, CPU, QoS, chunking, lifecycle, or authority-boundary change is
+  authorized. Keep block input, process swaps, Rust timer-major-faults, complete
+  pre/post residency, swapout/compression/swap-occupancy, host, and correctness
+  gates fatal. v0.642 must authenticate the v0.641 seal, import zero observations,
+  rebuild cleanly, use fresh roots, and rerun all 36 children from R1/P1 without
+  retry, replacement, pooling, or resume.
+
+Artifact: `target/profiles/v0641-a3b-pread-worker-screen-p1/`. Source:
+`18fd67a`; implementation: `1b8dd17`. Decision/inventory/completion/attempts
+seals: `230b661b...` / `6d8c8f9e...` / `4b130372...` / `e955c6e6...`.
+Independent adversarial review: `cx` session
+`019f9f74-2a70-7010-98ea-04cda6bba951`.
+
 ## 2026-07-26 - v0.640 Real-27B Deferred-Restore Product Transfer
 
 Status: sealed `GO` with authority limited to

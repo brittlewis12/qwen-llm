@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 const REQUIRED_ALIGNMENT: usize = 32;
 const EXPECTED_PAGE_SIZE: usize = 16_384;
 const EXPECTED_MAX_BUFFER_LENGTH: usize = 77_309_411_328;
-const PARALLEL_COPY_WORKERS: usize = 4;
+const FROZEN_PARALLEL_COPY_WORKERS: usize = 4;
+const PARALLEL_COPY_ALGORITHM: &str = "minimax-contiguous-v1";
+const ALLOWED_DIAGNOSTIC_WORKERS: [usize; 6] = [1, 2, 4, 6, 8, 12];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, ValueEnum)]
 enum FloorProfileId {
@@ -73,10 +75,10 @@ struct FloorProfile {
     request_count: usize,
     logical_copy_bytes: u64,
     device_name: &'static str,
-    cuts: [usize; PARALLEL_COPY_WORKERS - 1],
-    task_counts: [usize; PARALLEL_COPY_WORKERS],
-    worker_bytes: [u64; PARALLEL_COPY_WORKERS],
-    boundaries: [ScheduleBoundary; PARALLEL_COPY_WORKERS],
+    cuts: [usize; FROZEN_PARALLEL_COPY_WORKERS - 1],
+    task_counts: [usize; FROZEN_PARALLEL_COPY_WORKERS],
+    worker_bytes: [u64; FROZEN_PARALLEL_COPY_WORKERS],
+    boundaries: [ScheduleBoundary; FROZEN_PARALLEL_COPY_WORKERS],
 }
 
 const A3B_ARCH: Arch = Arch {
@@ -331,9 +333,61 @@ pub(crate) struct GgufArenaFloorArgs {
     /// Emit authenticated geometry without touching payload bytes.
     #[arg(long)]
     describe: bool,
+    /// Diagnostic population workers: exactly one of 1, 2, 4, 6, 8, or 12.
+    #[arg(long, default_value_t = FROZEN_PARALLEL_COPY_WORKERS, value_parser = parse_worker_count)]
+    workers: usize,
     /// `text` or `json`.
     #[arg(short = 'o', long, value_enum, default_value = "json")]
     output: OutputFormat,
+}
+
+fn parse_worker_count(value: &str) -> std::result::Result<usize, String> {
+    let workers = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid worker count {value:?}"))?;
+    if ALLOWED_DIAGNOSTIC_WORKERS.contains(&workers) {
+        Ok(workers)
+    } else {
+        Err(format!(
+            "worker count must be one of 1, 2, 4, 6, 8, or 12 (got {workers})"
+        ))
+    }
+}
+
+fn validate_worker_scope(
+    workers: usize,
+    describe: bool,
+    arm: Option<ArenaFloorArm>,
+    profile: Option<FloorProfileId>,
+) -> Result<()> {
+    if !ALLOWED_DIAGNOSTIC_WORKERS.contains(&workers) {
+        return Err(anyhow!("unsupported diagnostic worker count {workers}"));
+    }
+    if workers == FROZEN_PARALLEL_COPY_WORKERS || describe {
+        return Ok(());
+    }
+    if arm == Some(ArenaFloorArm::ParallelPread) && profile == Some(FloorProfileId::A3bQ4kmV1) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "non-default --workers is diagnostic-only and requires --arm parallel-pread --profile a3b-q4km-v1 or authenticated A3B describe geometry"
+        ))
+    }
+}
+
+fn validate_describe_worker_scope(
+    workers: usize,
+    authenticated_profile: Option<FloorProfileId>,
+) -> Result<()> {
+    if workers == FROZEN_PARALLEL_COPY_WORKERS
+        || authenticated_profile == Some(FloorProfileId::A3bQ4kmV1)
+    {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "non-default --workers with --describe requires geometry authenticated as a3b-q4km-v1"
+        ))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -391,7 +445,7 @@ struct ParallelCopyPartition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ParallelCopySchedule {
     sorted_request_indices: Vec<usize>,
-    cuts: [usize; PARALLEL_COPY_WORKERS - 1],
+    cuts: Vec<usize>,
     partitions: Vec<ParallelCopyPartition>,
 }
 
@@ -481,10 +535,10 @@ fn can_partition_exactly(lengths: &[u64], groups: usize, capacity: u64) -> bool 
         && minimum_contiguous_groups(lengths, capacity).is_some_and(|minimum| minimum <= groups)
 }
 
-fn minimax_partition_cuts(lengths: &[u64]) -> Result<[usize; PARALLEL_COPY_WORKERS - 1]> {
-    if lengths.len() < PARALLEL_COPY_WORKERS || lengths.contains(&0) {
+fn minimax_partition_cuts(lengths: &[u64], workers: usize) -> Result<Vec<usize>> {
+    if workers == 0 || lengths.len() < workers || lengths.contains(&0) {
         return Err(anyhow!(
-            "parallel copy requires at least four nonempty tasks"
+            "parallel copy requires at least {workers} nonempty tasks and at least one worker"
         ));
     }
     let mut total = 0u64;
@@ -498,7 +552,7 @@ fn minimax_partition_cuts(lengths: &[u64]) -> Result<[usize; PARALLEL_COPY_WORKE
     let mut upper = total;
     while lower < upper {
         let midpoint = lower + (upper - lower) / 2;
-        if can_partition_exactly(lengths, PARALLEL_COPY_WORKERS, midpoint) {
+        if can_partition_exactly(lengths, workers, midpoint) {
             upper = midpoint;
         } else {
             lower = midpoint + 1;
@@ -506,10 +560,10 @@ fn minimax_partition_cuts(lengths: &[u64]) -> Result<[usize; PARALLEL_COPY_WORKE
     }
 
     let capacity = lower;
-    let mut cuts = [0usize; PARALLEL_COPY_WORKERS - 1];
+    let mut cuts = vec![0usize; workers - 1];
     let mut start = 0usize;
     for (cut_index, cut) in cuts.iter_mut().enumerate() {
-        let remaining_groups = PARALLEL_COPY_WORKERS - cut_index - 1;
+        let remaining_groups = workers - cut_index - 1;
         let latest_cut = lengths.len() - remaining_groups;
         let mut group_bytes = 0u64;
         let mut selected = None;
@@ -533,7 +587,7 @@ fn minimax_partition_cuts(lengths: &[u64]) -> Result<[usize; PARALLEL_COPY_WORKE
     Ok(cuts)
 }
 
-fn parallel_copy_schedule(direct: &[&TensorDesc]) -> Result<ParallelCopySchedule> {
+fn parallel_copy_schedule(direct: &[&TensorDesc], workers: usize) -> Result<ParallelCopySchedule> {
     let mut sorted_request_indices = (0..direct.len()).collect::<Vec<_>>();
     sorted_request_indices.sort_by_key(|&request_index| {
         let desc = direct[request_index];
@@ -543,10 +597,13 @@ fn parallel_copy_schedule(direct: &[&TensorDesc]) -> Result<ParallelCopySchedule
         .iter()
         .map(|&request_index| direct[request_index].n_bytes)
         .collect::<Vec<_>>();
-    let cuts = minimax_partition_cuts(&lengths)?;
-    let boundaries = [0, cuts[0], cuts[1], cuts[2], direct.len()];
-    let mut partitions = Vec::with_capacity(PARALLEL_COPY_WORKERS);
-    for worker in 0..PARALLEL_COPY_WORKERS {
+    let cuts = minimax_partition_cuts(&lengths, workers)?;
+    let boundaries = std::iter::once(0)
+        .chain(cuts.iter().copied())
+        .chain(std::iter::once(direct.len()))
+        .collect::<Vec<_>>();
+    let mut partitions = Vec::with_capacity(workers);
+    for worker in 0..workers {
         let start = boundaries[worker];
         let end = boundaries[worker + 1];
         let bytes = lengths[start..end]
@@ -568,11 +625,105 @@ fn parallel_copy_schedule(direct: &[&TensorDesc]) -> Result<ParallelCopySchedule
             last_source_offset: last.data_offset,
         });
     }
-    Ok(ParallelCopySchedule {
+    let schedule = ParallelCopySchedule {
         sorted_request_indices,
         cuts,
         partitions,
-    })
+    };
+    validate_parallel_copy_schedule(&schedule, direct, workers)?;
+    Ok(schedule)
+}
+
+fn validate_parallel_copy_schedule(
+    schedule: &ParallelCopySchedule,
+    direct: &[&TensorDesc],
+    expected_workers: usize,
+) -> Result<()> {
+    if !ALLOWED_DIAGNOSTIC_WORKERS.contains(&expected_workers)
+        || schedule.partitions.len() != expected_workers
+        || schedule.cuts.len() != expected_workers - 1
+        || direct.len() < expected_workers
+        || schedule.sorted_request_indices.len() != direct.len()
+    {
+        return Err(anyhow!(
+            "parallel-copy schedule worker or task count drifted"
+        ));
+    }
+
+    let mut expected_order = (0..direct.len()).collect::<Vec<_>>();
+    expected_order.sort_by_key(|&request_index| {
+        let desc = direct[request_index];
+        (desc.shard_idx, desc.data_offset, request_index)
+    });
+    if schedule.sorted_request_indices != expected_order {
+        return Err(anyhow!(
+            "parallel-copy schedule is not the deterministic request permutation"
+        ));
+    }
+
+    let mut boundaries = Vec::with_capacity(expected_workers + 1);
+    boundaries.push(0);
+    boundaries.extend(schedule.cuts.iter().copied());
+    boundaries.push(direct.len());
+    if boundaries.iter().any(|&boundary| boundary > direct.len())
+        || boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(anyhow!(
+            "parallel-copy schedule has an empty or unordered partition"
+        ));
+    }
+
+    let mut total_bytes = 0u64;
+    for (worker, (partition, pair)) in schedule
+        .partitions
+        .iter()
+        .zip(boundaries.windows(2))
+        .enumerate()
+    {
+        let start = pair[0];
+        let end = pair[1];
+        if partition.start != start || partition.end != end {
+            return Err(anyhow!(
+                "parallel-copy worker {worker} partition has an overlap or gap"
+            ));
+        }
+        let request_indices = schedule
+            .sorted_request_indices
+            .get(start..end)
+            .ok_or_else(|| anyhow!("parallel-copy worker {worker} partition is out of range"))?;
+        let bytes = request_indices
+            .iter()
+            .try_fold(0u64, |total, &request_index| {
+                total
+                    .checked_add(direct[request_index].n_bytes)
+                    .ok_or_else(|| anyhow!("parallel-copy partition byte overflow"))
+            })?;
+        let first = direct[request_indices[0]];
+        let last = direct[*request_indices.last().expect("partition is nonempty")];
+        if bytes == 0
+            || partition.bytes != bytes
+            || partition.first_shard != first.shard_idx
+            || partition.first_source_offset != first.data_offset
+            || partition.last_shard != last.shard_idx
+            || partition.last_source_offset != last.data_offset
+        {
+            return Err(anyhow!(
+                "parallel-copy worker {worker} bytes or boundaries drifted"
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow!("parallel-copy schedule byte overflow"))?;
+    }
+    let expected_bytes = direct.iter().try_fold(0u64, |total, desc| {
+        total
+            .checked_add(desc.n_bytes)
+            .ok_or_else(|| anyhow!("parallel-copy request byte overflow"))
+    })?;
+    if total_bytes != expected_bytes {
+        return Err(anyhow!("parallel-copy schedule task union is incomplete"));
+    }
+    Ok(())
 }
 
 fn schedule_identity_matches(
@@ -612,15 +763,15 @@ fn frozen_parallel_copy_schedule(
         profile.cuts[2],
         direct.len(),
     ];
-    if boundaries[PARALLEL_COPY_WORKERS] != direct.len()
+    if boundaries[FROZEN_PARALLEL_COPY_WORKERS] != direct.len()
         || boundaries.iter().any(|&boundary| boundary > direct.len())
         || boundaries.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(anyhow!("floor profile schedule has an empty partition"));
     }
-    let mut partitions = Vec::with_capacity(PARALLEL_COPY_WORKERS);
+    let mut partitions = Vec::with_capacity(FROZEN_PARALLEL_COPY_WORKERS);
     let mut total_bytes = 0u64;
-    for worker in 0..PARALLEL_COPY_WORKERS {
+    for worker in 0..FROZEN_PARALLEL_COPY_WORKERS {
         let start = boundaries[worker];
         let end = boundaries[worker + 1];
         let partition = sorted_request_indices
@@ -666,11 +817,13 @@ fn frozen_parallel_copy_schedule(
     if total_bytes != profile.logical_copy_bytes {
         return Err(anyhow!("floor profile schedule byte total drifted"));
     }
-    Ok(ParallelCopySchedule {
+    let schedule = ParallelCopySchedule {
         sorted_request_indices,
-        cuts: profile.cuts,
+        cuts: profile.cuts.to_vec(),
         partitions,
-    })
+    };
+    validate_parallel_copy_schedule(&schedule, direct, FROZEN_PARALLEL_COPY_WORKERS)?;
+    Ok(schedule)
 }
 
 struct ProfileFacts<'a> {
@@ -758,6 +911,8 @@ fn parallel_copy_schedule_json(
     schedule: &ParallelCopySchedule,
     direct: &[&TensorDesc],
 ) -> Result<Value> {
+    let workers = schedule.partitions.len();
+    validate_parallel_copy_schedule(schedule, direct, workers)?;
     let total_bytes = schedule
         .partitions
         .iter()
@@ -771,13 +926,13 @@ fn parallel_copy_schedule_json(
         .iter()
         .map(|partition| partition.bytes)
         .min()
-        .expect("schedule has four partitions");
+        .expect("validated schedule has partitions");
     let max_bytes = schedule
         .partitions
         .iter()
         .map(|partition| partition.bytes)
         .max()
-        .expect("schedule has four partitions");
+        .expect("validated schedule has partitions");
     let partitions = schedule
         .partitions
         .iter()
@@ -816,7 +971,8 @@ fn parallel_copy_schedule_json(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
-        "workers": PARALLEL_COPY_WORKERS,
+        "algorithm": PARALLEL_COPY_ALGORITHM,
+        "workers": workers,
         "cuts": schedule.cuts,
         "task_counts": schedule.partitions.iter().map(|partition| {
             partition.end - partition.start
@@ -826,7 +982,7 @@ fn parallel_copy_schedule_json(
         }).collect::<Vec<_>>(),
         "max_to_min": max_bytes as f64 / min_bytes as f64,
         "max_to_ideal": max_bytes as f64
-            / (total_bytes as f64 / PARALLEL_COPY_WORKERS as f64),
+            / (total_bytes as f64 / workers as f64),
         "partitions": partitions,
     }))
 }
@@ -964,7 +1120,7 @@ fn partition_parallel_tasks<'a, T>(
     operation: &str,
 ) -> Result<Vec<&'a mut [T]>> {
     let mut task_tail = tasks;
-    let mut worker_partitions = Vec::with_capacity(PARALLEL_COPY_WORKERS);
+    let mut worker_partitions = Vec::with_capacity(schedule.partitions.len());
     let mut consumed = 0usize;
     for (worker, partition) in schedule.partitions.iter().enumerate() {
         if partition.start != consumed || partition.end > schedule.sorted_request_indices.len() {
@@ -1062,14 +1218,17 @@ fn materialize_parallel_copied(
     schedule: &ParallelCopySchedule,
     profile: &FloorProfile,
 ) -> Result<Materialized> {
+    if schedule.partitions.len() != FROZEN_PARALLEL_COPY_WORKERS {
+        return Err(anyhow!("parallel-copy materialization is frozen at W4"));
+    }
     let ready_started = Instant::now();
     let allocation_started = ready_started;
     let mut resources = allocate_copied_resources(ctx, direct)?;
     let allocation_finished = Instant::now();
 
     let timed_schedule = frozen_parallel_copy_schedule(profile, direct)?;
-    if &timed_schedule != schedule {
-        return Err(anyhow!("parallel-copy timed schedule proof drifted"));
+    if schedule != &timed_schedule {
+        return Err(anyhow!("parallel-copy timed W4 schedule proof drifted"));
     }
     let destination_ranges = validate_copied_destinations(&resources, direct, "parallel-copy")?;
 
@@ -1126,7 +1285,7 @@ fn materialize_parallel_copied(
     let worker_partitions = partition_parallel_tasks(&mut tasks, schedule, "parallel-copy")?;
 
     let (copy_result, source_finished) = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(PARALLEL_COPY_WORKERS);
+        let mut handles = Vec::with_capacity(schedule.partitions.len());
         let mut spawn_error = None;
         let source_finished = Instant::now();
         for (worker, worker_tasks) in worker_partitions.into_iter().enumerate() {
@@ -1187,7 +1346,7 @@ fn materialize_parallel_copied(
         source_resolution_wall: Some(source_resolution_wall),
         copy_wall: Some(copy_wall),
         binding_wall,
-        worker_count: PARALLEL_COPY_WORKERS,
+        worker_count: schedule.partitions.len(),
         schedule: Some(schedule.clone()),
         ready_wall,
     })
@@ -1200,14 +1359,22 @@ fn materialize_parallel_pread(
     schedule: &ParallelCopySchedule,
     profile: &FloorProfile,
 ) -> Result<Materialized> {
+    let workers = schedule.partitions.len();
+    if workers != FROZEN_PARALLEL_COPY_WORKERS {
+        let dynamic_schedule = parallel_copy_schedule(direct, workers)?;
+        if schedule != &dynamic_schedule {
+            return Err(anyhow!("parallel-pread dynamic schedule proof drifted"));
+        }
+    }
     let ready_started = Instant::now();
     let allocation_started = ready_started;
     let mut resources = allocate_copied_resources(ctx, direct)?;
     let allocation_finished = Instant::now();
 
-    let timed_schedule = frozen_parallel_copy_schedule(profile, direct)?;
-    if &timed_schedule != schedule {
-        return Err(anyhow!("parallel-pread timed schedule proof drifted"));
+    if workers == FROZEN_PARALLEL_COPY_WORKERS
+        && schedule != &frozen_parallel_copy_schedule(profile, direct)?
+    {
+        return Err(anyhow!("parallel-pread timed W4 schedule proof drifted"));
     }
     let destination_ranges = validate_copied_destinations(&resources, direct, "parallel-pread")?;
     let shard_lengths = gguf.shard_mapped_lengths();
@@ -1245,7 +1412,7 @@ fn materialize_parallel_pread(
     let worker_partitions = partition_parallel_tasks(&mut tasks, schedule, "parallel-pread")?;
 
     let (copy_result, source_finished) = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(PARALLEL_COPY_WORKERS);
+        let mut handles = Vec::with_capacity(schedule.partitions.len());
         let mut spawn_error = None;
         let source_finished = Instant::now();
         for (worker, worker_tasks) in worker_partitions.into_iter().enumerate() {
@@ -1315,7 +1482,7 @@ fn materialize_parallel_pread(
         source_resolution_wall: Some(source_resolution_wall),
         copy_wall: Some(copy_wall),
         binding_wall,
-        worker_count: PARALLEL_COPY_WORKERS,
+        worker_count: schedule.partitions.len(),
         schedule: Some(schedule.clone()),
         ready_wall,
     })
@@ -1372,6 +1539,7 @@ fn verify_materialized(
 }
 
 pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()> {
+    validate_worker_scope(args.workers, args.describe, args.arm, args.profile)?;
     let gguf = GgufFile::open(&args.model).context("open GGUF")?;
     let model = Model::from_gguf(&gguf).context("bind model")?;
     let native_embedding_supported = native_quant_embedding_storage_supported(&model);
@@ -1443,7 +1611,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     if args.describe {
         let usage_capability = capture_usage()?;
         let proc_capability = capture_proc_usage()?;
-        let computed_schedule = parallel_copy_schedule(&direct)?;
+        let computed_schedule = parallel_copy_schedule(&direct, args.workers)?;
         let planner_descriptive = (|| -> Result<Value> {
             let plan = qwen_llm::metal::plan_retained_storage(
                 &gguf.shard_mapped_lengths(),
@@ -1521,6 +1689,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             return Err(anyhow!("GGUF floor geometry matches multiple profiles"));
         }
         let matched_profile = matching.first().map(|(profile, _)| *profile);
+        validate_describe_worker_scope(args.workers, matched_profile.map(|profile| profile.id))?;
         let frozen_schedule = matching.first().map(|(_, schedule)| schedule);
         let computed_schedule_json = parallel_copy_schedule_json(&computed_schedule, &direct)?;
         let embedding_environment_absent = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_none();
@@ -1600,11 +1769,18 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             matching.len()
         ));
     }
-    let (profile, parallel_schedule) = matching.pop().expect("one profile match exists");
+    let (profile, frozen_parallel_schedule) = matching.pop().expect("one profile match exists");
     if !native_embedding_supported || !native_embedding || profile.id != profile_id {
         return Err(anyhow!(
             "requested floor profile {} does not match loaded geometry",
             profile_id.label()
+        ));
+    }
+    let parallel_schedule = parallel_copy_schedule(&direct, args.workers)?;
+    if args.workers == FROZEN_PARALLEL_COPY_WORKERS && parallel_schedule != frozen_parallel_schedule
+    {
+        return Err(anyhow!(
+            "dynamic W4 schedule does not reproduce the frozen floor schedule"
         ));
     }
     validate_source_endpoints(&gguf, &direct)?;
@@ -1829,32 +2005,302 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::minimax_partition_cuts;
+    use super::{
+        ALLOWED_DIAGNOSTIC_WORKERS, ArenaFloorArm, FROZEN_PARALLEL_COPY_WORKERS, FloorProfileId,
+        GgufArenaFloorArgs, PARALLEL_COPY_ALGORITHM, minimax_partition_cuts,
+        parallel_copy_schedule, parallel_copy_schedule_json, parse_worker_count,
+        validate_describe_worker_scope, validate_parallel_copy_schedule, validate_worker_scope,
+    };
+    use clap::Parser;
+    use qwen_llm::tensor::{GgmlType, TensorDesc};
+
+    fn descriptors(lengths: &[u64]) -> Vec<TensorDesc> {
+        lengths
+            .iter()
+            .enumerate()
+            .map(|(index, &n_bytes)| TensorDesc {
+                name: format!("tensor.{index}"),
+                shape: vec![n_bytes],
+                dtype: GgmlType::F32,
+                shard_idx: index % 2,
+                data_offset: (index as u64) * 100,
+                n_bytes,
+            })
+            .collect()
+    }
+
+    fn descriptor_refs(descriptors: &[TensorDesc]) -> Vec<&TensorDesc> {
+        descriptors.iter().collect()
+    }
+
+    #[test]
+    fn worker_parser_accepts_exact_bounded_set() {
+        for workers in ALLOWED_DIAGNOSTIC_WORKERS {
+            assert_eq!(parse_worker_count(&workers.to_string()), Ok(workers));
+            let args = GgufArenaFloorArgs::try_parse_from([
+                "qwen",
+                "--model",
+                "fixture.gguf",
+                "--describe",
+                "--workers",
+                &workers.to_string(),
+            ])
+            .expect("allowed worker count");
+            assert_eq!(args.workers, workers);
+        }
+        let default =
+            GgufArenaFloorArgs::try_parse_from(["qwen", "--model", "fixture.gguf", "--describe"])
+                .expect("default worker count");
+        assert_eq!(default.workers, FROZEN_PARALLEL_COPY_WORKERS);
+    }
+
+    #[test]
+    fn worker_parser_rejects_other_and_malformed_values() {
+        for workers in [0, 3, 5, 7, 9, 10, 11, 13] {
+            let value = workers.to_string();
+            assert!(parse_worker_count(&value).is_err());
+            assert!(
+                GgufArenaFloorArgs::try_parse_from([
+                    "qwen",
+                    "--model",
+                    "fixture.gguf",
+                    "--describe",
+                    "--workers",
+                    &value,
+                ])
+                .is_err()
+            );
+        }
+        for malformed in ["", "abc", "1.0", "-1", " 4"] {
+            assert!(parse_worker_count(malformed).is_err());
+            assert!(
+                GgufArenaFloorArgs::try_parse_from([
+                    "qwen",
+                    "--model",
+                    "fixture.gguf",
+                    "--describe",
+                    "--workers",
+                    malformed,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_partition_supports_every_allowed_worker_count() {
+        let lengths = [1; 24];
+        for workers in ALLOWED_DIAGNOSTIC_WORKERS {
+            let cuts = minimax_partition_cuts(&lengths, workers).expect("partition");
+            let expected = (1..workers)
+                .map(|partition| partition * lengths.len() / workers)
+                .collect::<Vec<_>>();
+            assert_eq!(cuts, expected, "W{workers}");
+        }
+        assert!(
+            minimax_partition_cuts(&lengths, 1)
+                .expect("W1 partition")
+                .is_empty()
+        );
+    }
 
     #[test]
     fn minimax_partition_uses_lexicographically_first_equal_cuts() {
         assert_eq!(
-            minimax_partition_cuts(&[1; 8]).expect("partition"),
+            minimax_partition_cuts(&[1; 8], 4).expect("partition"),
             [2, 4, 6]
         );
         assert_eq!(
-            minimax_partition_cuts(&[1, 1, 1, 2, 3]).expect("global tie partition"),
+            minimax_partition_cuts(&[1, 1, 1, 2, 3], 4).expect("global tie partition"),
             [1, 2, 4]
         );
     }
 
     #[test]
     fn minimax_partition_keeps_a_giant_task_whole() {
-        assert_eq!(
-            minimax_partition_cuts(&[10, 1, 1, 1, 1, 1]).expect("partition"),
-            [1, 2, 3]
-        );
+        let lengths = [100, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        for workers in ALLOWED_DIAGNOSTIC_WORKERS {
+            let cuts = minimax_partition_cuts(&lengths, workers).expect("partition");
+            if workers > 1 {
+                assert_eq!(cuts[0], 1, "W{workers}");
+            }
+        }
     }
 
     #[test]
     fn minimax_partition_rejects_invalid_inputs() {
-        assert!(minimax_partition_cuts(&[1, 1, 1]).is_err());
-        assert!(minimax_partition_cuts(&[1, 1, 1, 0]).is_err());
-        assert!(minimax_partition_cuts(&[u64::MAX, 1, 1, 1]).is_err());
+        assert!(minimax_partition_cuts(&[1], 0).is_err());
+        assert!(minimax_partition_cuts(&[1, 1, 1], 4).is_err());
+        assert!(minimax_partition_cuts(&[1, 1, 1, 0], 4).is_err());
+        assert!(minimax_partition_cuts(&[u64::MAX, 1, 1, 1], 4).is_err());
+    }
+
+    #[test]
+    fn dynamic_w1_schedule_covers_every_task_and_serializes() {
+        let descriptors = descriptors(&[1, 2, 3, 4, 5]);
+        let direct = descriptor_refs(&descriptors);
+        let schedule = parallel_copy_schedule(&direct, 1).expect("W1 schedule");
+
+        assert!(schedule.cuts.is_empty());
+        assert_eq!(schedule.partitions.len(), 1);
+        assert_eq!(schedule.partitions[0].start, 0);
+        assert_eq!(schedule.partitions[0].end, direct.len());
+        assert_eq!(schedule.partitions[0].bytes, 15);
+        validate_parallel_copy_schedule(&schedule, &direct, 1).expect("valid W1 schedule");
+
+        let encoded = parallel_copy_schedule_json(&schedule, &direct).expect("W1 schedule JSON");
+        assert_eq!(encoded["algorithm"].as_str(), Some(PARALLEL_COPY_ALGORITHM));
+        assert_eq!(encoded["workers"].as_u64(), Some(1));
+        assert!(encoded["cuts"].as_array().expect("cuts array").is_empty());
+        assert_eq!(
+            encoded["worker_bytes"].as_array().expect("worker bytes")[0].as_u64(),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn dynamic_w4_reproduces_legacy_synthetic_shape() {
+        let descriptors = descriptors(&[1; 8]);
+        let direct = descriptor_refs(&descriptors);
+        let schedule = parallel_copy_schedule(&direct, 4).expect("W4 schedule");
+        assert_eq!(schedule.cuts, [2, 4, 6]);
+        assert_eq!(schedule.partitions.len(), 4);
+        assert_eq!(
+            schedule
+                .partitions
+                .iter()
+                .map(|partition| partition.end - partition.start)
+                .collect::<Vec<_>>(),
+            [2, 2, 2, 2]
+        );
+    }
+
+    #[test]
+    fn schedule_validation_rejects_structural_and_accounting_drift() {
+        let descriptors = descriptors(&[1, 2, 3, 4, 5, 6]);
+        let direct = descriptor_refs(&descriptors);
+        let schedule = parallel_copy_schedule(&direct, 2).expect("schedule");
+
+        let mut drifted = schedule.clone();
+        drifted.cuts.clear();
+        assert!(validate_parallel_copy_schedule(&drifted, &direct, 2).is_err());
+
+        let mut drifted = schedule.clone();
+        drifted.partitions.pop();
+        assert!(validate_parallel_copy_schedule(&drifted, &direct, 2).is_err());
+
+        let mut drifted = schedule.clone();
+        drifted.cuts[0] = 0;
+        assert!(validate_parallel_copy_schedule(&drifted, &direct, 2).is_err());
+
+        let mut drifted = schedule.clone();
+        drifted.partitions[1].start += 1;
+        assert!(validate_parallel_copy_schedule(&drifted, &direct, 2).is_err());
+
+        let mut drifted = schedule.clone();
+        drifted.partitions[1].start -= 1;
+        assert!(validate_parallel_copy_schedule(&drifted, &direct, 2).is_err());
+
+        let mut drifted = schedule.clone();
+        drifted.sorted_request_indices[0] = drifted.sorted_request_indices[1];
+        assert!(validate_parallel_copy_schedule(&drifted, &direct, 2).is_err());
+
+        let mut drifted = schedule;
+        drifted.partitions[0].bytes += 1;
+        assert!(validate_parallel_copy_schedule(&drifted, &direct, 2).is_err());
+    }
+
+    #[test]
+    fn non_default_execution_scope_is_a3b_parallel_pread_only() {
+        for workers in ALLOWED_DIAGNOSTIC_WORKERS {
+            assert!(
+                validate_worker_scope(
+                    workers,
+                    false,
+                    Some(ArenaFloorArm::ParallelPread),
+                    Some(FloorProfileId::A3bQ4kmV1),
+                )
+                .is_ok()
+            );
+        }
+
+        for workers in ALLOWED_DIAGNOSTIC_WORKERS
+            .into_iter()
+            .filter(|&workers| workers != FROZEN_PARALLEL_COPY_WORKERS)
+        {
+            for arm in [
+                ArenaFloorArm::Copied,
+                ArenaFloorArm::ParallelCopied,
+                ArenaFloorArm::ArenaSerial,
+                ArenaFloorArm::ArenaFour,
+            ] {
+                assert!(
+                    validate_worker_scope(
+                        workers,
+                        false,
+                        Some(arm),
+                        Some(FloorProfileId::A3bQ4kmV1),
+                    )
+                    .is_err()
+                );
+            }
+            assert!(
+                validate_worker_scope(
+                    workers,
+                    false,
+                    Some(ArenaFloorArm::ParallelPread),
+                    Some(FloorProfileId::Dense27bQ4kmV1),
+                )
+                .is_err()
+            );
+            assert!(validate_worker_scope(workers, false, None, None).is_err());
+        }
+
+        for arm in [
+            ArenaFloorArm::Copied,
+            ArenaFloorArm::ParallelCopied,
+            ArenaFloorArm::ParallelPread,
+            ArenaFloorArm::ArenaSerial,
+            ArenaFloorArm::ArenaFour,
+        ] {
+            assert!(
+                validate_worker_scope(
+                    FROZEN_PARALLEL_COPY_WORKERS,
+                    false,
+                    Some(arm),
+                    Some(FloorProfileId::Dense27bQ4kmV1),
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn non_default_describe_scope_requires_authenticated_a3b_geometry() {
+        for workers in ALLOWED_DIAGNOSTIC_WORKERS {
+            assert!(
+                validate_describe_worker_scope(workers, Some(FloorProfileId::A3bQ4kmV1)).is_ok()
+            );
+        }
+
+        for workers in ALLOWED_DIAGNOSTIC_WORKERS
+            .into_iter()
+            .filter(|&workers| workers != FROZEN_PARALLEL_COPY_WORKERS)
+        {
+            assert!(
+                validate_describe_worker_scope(workers, Some(FloorProfileId::Dense27bQ4kmV1))
+                    .is_err()
+            );
+            assert!(validate_describe_worker_scope(workers, None).is_err());
+        }
+
+        assert!(
+            validate_describe_worker_scope(
+                FROZEN_PARALLEL_COPY_WORKERS,
+                Some(FloorProfileId::Dense27bQ4kmV1),
+            )
+            .is_ok()
+        );
+        assert!(validate_describe_worker_scope(FROZEN_PARALLEL_COPY_WORKERS, None).is_ok());
     }
 }

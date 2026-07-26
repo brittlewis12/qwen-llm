@@ -885,20 +885,19 @@ gate and product observation must be fresh, and all experiment and product-
 authority limits remain frozen. Any v0.640 result exhausts ordinal 2 and grants
 no successor authorization.
 
-1. **Real-27B deferred-restore product transfer**: preregister and execute only
-   the newly authorized v0.640 ordinal-2 mode correction. Authenticate v0.639,
-   accept exact safe executable modes `{0700,0755}`, and change no experiment
-   term. Use six fresh `AB/BA/BA/AB/AB/BA` pairs, the same completed
-   `582,854,188`-byte checkpoint, unique seeded stores, and explicit `decode`
-   versus `deferred-restore`. Require at least 250 ms A-minus-B in every pair for
-   both complete publication and externally measured final-stdout-flush to
-   clean-process-exit. Preserve exact response and checkpoint identity, topology,
-   zero residue/eviction, and pressure/resource gates. Only after the performance
-   decision passes, retain one B blob for unscored adversarial restore and
-   continuation. This can authorize at most the exact explicit opt-in 27B
-   surface, never default or automatic use. Belief high on the removed wall,
-   medium-high on product transfer, difficulty M.
-2. **A3B direct-pread worker screen**: only if cache-warm process-cold population
+v0.640 executes that fresh ordinal-2 packet and seals `GO`. All 12 scored children
+and the unscored restore are valid. Per-pair publication savings are
+`275997-294254 us`; external final-stdout-to-clean-exit savings are
+`277629-299776 us`. Every pair clears both 250 ms gates, with descriptive medians
+`284821.0/290482.5 us`. The restore hits the unchanged checkpoint at `6500/6499`,
+publishes nothing, and reports no corruption. This banks only force-only use of
+the existing explicit `QWEN_CHECKPOINT_STAGED_INTEGRITY=deferred-restore` control
+for the exact tested Qwen3.6-27B-Q4_K_M surface. `decode` remains default; no
+automatic, other-model, other-shape, retry, or successor authority exists. The
+external endpoint is a post-response publication/exit tail, not TTFT or complete
+request latency.
+
+1. **A3B direct-pread worker screen**: only if cache-warm process-cold population
    remains material in deployment. Sweep `W={1,2,4,6,8,12}` on authenticated A3B
    inventory with the target file fully resident, counterbalanced, reporting
    `ready_us` decomposition and total CPU without QoS or chunk changes. The
@@ -906,14 +905,14 @@ no successor authorization.
    against the current ~532 ms ready wall, not an MDE. A miss closes cache-warm
    worker tuning only. A winner must separately beat W=4 target-file-cold before
    promotion; QoS remains untested. Difficulty S-M.
-3. **Transient mmap-source to independent-Shared blit floor**: compare current
+2. **Transient mmap-source to independent-Shared blit floor**: compare current
    direct destination pread with a transient retained source and 733 independent
    Shared destinations. Stop below `112 ms` ready-wall saving and exclude
    `StorageModePrivate`, sidecar format, and loaded-policy changes. The threshold
    is inherited from v0.619-v0.620 as a portfolio gate, not a measured blit MDE.
    v0.635 does not price this population primitive: it changes destination length,
    not source or copy mechanism. Belief medium, difficulty M.
-4. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
+3. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
    materialization idea with named production-grid ablations: A production; B
    deterministic initialized tile writes with dequant ALU removed but quant loads
    kept observably live; C removes those global loads; D is included only if a
@@ -926,22 +925,22 @@ no successor authorization.
    packing or generic no-dequant work. `<=14.7 TFLOP/s` MMA-only closes the lane;
    any faster result still needs a named charged `>=1.133x` gate/up prediction.
    Information value high, payoff belief unknown, difficulty S-M.
-5. **Production GPU argmax contract**: three product paths still copy 993,280
+4. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes and scan 248,320 logits on CPU. Reconcile highest-index CPU ties and NaN
    ordering with lowest-finite-index GPU semantics, then wire all call sites
    behind an explicit low-complexity 1% gate. Existing MoE gain is `1.0-1.5%`
    and dense is neutral. Belief high on small work removal, difficulty S-M.
-6. **A10B cold residency plus split-copy floor**: proceed only if the heavy
+5. **A10B cold residency plus split-copy floor**: proceed only if the heavy
    anchor remains deployment-relevant. First adjudicate the bit-exact native
    embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
    three-shard topology-preserving population floor. Belief high on memory,
    medium on copy wall, difficulty M-L.
-7. **Grammar run and admissible-row oracle**: replay real structured traces and
+6. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
    `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
    positive at current N8 cost. Contract-exact, belief medium-low until traces
    exist, difficulty S oracle/M product.
-8. **High-ceiling structural options**: true-long attention needs a source-free
+7. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -1005,28 +1004,25 @@ broad force-only retained correctness, and v0.596 as the closure of current
 file-backed A3B for broad warm use. Persistent, server, MTP, storage-cold, and
 automatic retained use stay copied without separate evidence.
 
-1. Preregister and run only the ordinal-2 v0.640 executable-mode repair
-   independently authorized by this post-v0.639 PERF certification. Rerun every
-   gate; import no v0.639 gate result or gate/scored timing or performance
-   observation into v0.640 validity or decision. Keep
-   final-response-flush-to-exit external, preserve every record/response gate, and
-   run the unscored restore only after the performance decision passes.
-2. Run the A3B resident worker screen only if cache-warm population still matters.
+v0.640 banks exact-27B deferred restore behind its existing explicit environment
+control. It is no longer an active experiment; keep `decode` as the default.
+
+1. Run the A3B resident worker screen only if cache-warm population still matters.
    A warm miss closes only that regime; a winner needs a separate storage-cold
    W=4 comparison. QoS remains independent and untested.
-3. Run the transient-source Shared-destination blit floor as an independent
+2. Run the transient-source Shared-destination blit floor as an independent
    population-primitive test. Keep Private storage, sidecar format, and
    write-combined destinations separate.
-4. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
+3. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
    hardened Q4 ladder before any new dense-prefill representation. Treat a low
    MMA-only ceiling as a valuable closure.
-5. Decide whether A10B is a current deployment target. If yes, its native-
+4. Decide whether A10B is a current deployment target. If yes, its native-
    embedding/split-copy floor moves ahead of GPU argmax; otherwise reconcile
    argmax semantics first, then run grammar traces.
-6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
+5. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
-7. Do not resume the closed page-rounded image route, broad topology attribution,
+6. Do not resume the closed page-rounded image route, broad topology attribution,
    generic command-graph or compiler work, retained-view retunes, broad external
    drafting, matrix/compressed attention, sparse retrieval, routed-tail work,
    generic packed GDN, mixed quant, broad prompt lookup, or local retuning without

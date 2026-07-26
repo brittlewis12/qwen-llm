@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-26 - v0.640 Real-27B Deferred-Restore Product Transfer
+
+Status: sealed `GO` with authority limited to
+`force-only-exact-qwen3.6-27b-q4_k_m-deferred-restore`. Default, automatic,
+other-model, other-shape, retry, and successor authority are all false.
+
+- The complete ordinal-2 packet has 112 private files and 110 inventory members,
+  four fresh successful gates, 12 valid sole-attempt scored children in frozen
+  `AB BA BA AB AB BA` order, and one valid unscored restore. No v0.639 gate,
+  timing, row, or performance result contributes to the decision.
+- Per-pair A-minus-B complete-publication savings are
+  `290207/294254/283756/285106/284536/275997 us`; external final-stdout-observed
+  through clean exact-PID exit savings are
+  `292417/299776/299494/278044/288548/277629 us`. Every value clears the inclusive
+  `250000 us` gate. Descriptive medians are `284821.0 us` publication and
+  `290482.5 us` external.
+- Every scored child emits exact eight-byte `<think>\n` stdout, publishes the frozen
+  `582,854,188`-byte SHA-256/BLAKE3 checkpoint with mode `0600`, one final link,
+  zero residue or eviction, and preserves the exact model, input, binary, store,
+  host, pressure, and process contracts. Swapout, swap-occupancy, pageout, and
+  compression growth are zero; `ru_nswap=0` and `ru_inblock=0` throughout.
+- The unscored pair-1 B restore is valid: identity-cache hit, `hashed_bytes=0`,
+  one candidate, `matched=6500`, `restored=6499`, no corruption or publication,
+  and `330.6 ms` restore telemetry. Blob device/inode, size, mode, link count,
+  digest, and topology are unchanged before and after restore. The sealed private
+  candidate has the same bytes and encoder trailer; the live work root is removed.
+- This certifies the existing explicit
+  `QWEN_CHECKPOINT_STAGED_INTEGRITY=deferred-restore` control only for the exact
+  Qwen3.6-27B-Q4_K_M surface. Keep `decode` as the default. “External saving” is
+  the post-response publication/exit tail, not TTFT, full request latency, or
+  generation throughput. Ordinal 2 is exhausted and grants no successor.
+
+Artifact:
+`target/profiles/v0640-checkpoint-deferred-restore-product-mode-repair-p1/`.
+Execution: `c3a6baf`; implementation: `3d59d94`. Decision/inventory/completion/
+attempts/restore seals: `e0ff0fa3...` / `3ab606b5...` / `667a6c79...` /
+`dd1610ac...` / `c30b839b...`. Independent adversarial review: `cx` session
+`019f9c3c-a899-7380-b84b-6274ebe7b5bf`.
+
 ## 2026-07-26 - v0.638-v0.639 Product-Packet Contract Defects
 
 Status: v0.638 fails before packet reservation; v0.639 is sealed

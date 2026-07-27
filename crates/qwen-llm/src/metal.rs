@@ -30,7 +30,7 @@
 
 use block2::RcBlock;
 use memmap2::Mmap;
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSRange, NSString, NSURL};
 use objc2_metal::{
@@ -47,8 +47,10 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+
+use crate::gguf::GgufFile;
 
 const TASK_VM_INFO: i32 = 22;
 
@@ -167,6 +169,8 @@ pub enum MetalError {
     NoDevice,
     #[error("could not create command queue")]
     NoQueue,
+    #[error("could not create blit command encoder")]
+    NoBlitEncoder,
     #[error("kernels.metallib is empty (no .metal sources compiled yet)")]
     EmptyLibrary,
     #[error("could not load embedded library: {0}")]
@@ -846,6 +850,56 @@ impl MetalContext {
             required_alignment,
             |_pointer, _length| {},
         )
+    }
+
+    #[doc(hidden)]
+    pub fn diagnostic_gguf_blit_source_window(
+        &self,
+        gguf: &GgufFile,
+        window: &RetainedStorageWindow,
+        required_alignment: usize,
+    ) -> Result<DiagnosticGgufBlitSourceWindow, MetalError> {
+        let mmap = gguf.retained_shard_mmap(window.shard_idx).ok_or_else(|| {
+            MetalError::GgufNoCopy(format!(
+                "diagnostic blit source shard {} is unavailable",
+                window.shard_idx
+            ))
+        })?;
+        let mmap_offset = usize::try_from(window.mmap_offset).map_err(|_| {
+            MetalError::GgufNoCopy(format!(
+                "diagnostic blit source offset {} does not fit usize",
+                window.mmap_offset
+            ))
+        })?;
+        let geometry = GgufBackingGeometry::new_window(
+            window.shard_idx,
+            mmap.len(),
+            mmap_offset,
+            window.length,
+            host_page_size()?,
+            required_alignment,
+        )?;
+        // SAFETY: geometry construction proved the nonempty window starts within
+        // this retained mmap.
+        let expected_pointer = unsafe { mmap.as_ptr().add(mmap_offset) } as usize;
+        let expected_length = window.length;
+        let deallocator_calls = Arc::new(AtomicUsize::new(0));
+        let deallocator_mismatches = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&deallocator_calls);
+        let mismatches = Arc::clone(&deallocator_mismatches);
+        let backing =
+            self.gguf_no_copy_geometry_with_observer(mmap, geometry, move |pointer, length| {
+                if pointer.as_ptr() as usize != expected_pointer || length != expected_length {
+                    mismatches.fetch_add(1, Ordering::Relaxed);
+                }
+                calls.fetch_add(1, Ordering::Release);
+            })?;
+        let probe = DiagnosticGgufBlitReleaseProbe {
+            weak: Weak::from_retained(&backing.buffer),
+            deallocator_calls,
+            deallocator_mismatches,
+        };
+        Ok(DiagnosticGgufBlitSourceWindow { backing, probe })
     }
 
     fn gguf_no_copy_backing_with_observer<F>(
@@ -1717,6 +1771,130 @@ impl MetalGgufBacking {
     }
 }
 
+#[doc(hidden)]
+pub struct DiagnosticGgufBlitSourceWindow {
+    backing: MetalGgufBacking,
+    probe: DiagnosticGgufBlitReleaseProbe,
+}
+
+impl DiagnosticGgufBlitSourceWindow {
+    #[doc(hidden)]
+    pub fn release_probe(&self) -> DiagnosticGgufBlitReleaseProbe {
+        self.probe.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn shard_idx(&self) -> usize {
+        self.backing.geometry.shard_idx
+    }
+
+    #[doc(hidden)]
+    pub fn mmap_offset(&self) -> u64 {
+        self.backing.geometry.mmap_offset() as u64
+    }
+
+    #[doc(hidden)]
+    pub fn exposed_len(&self) -> usize {
+        self.backing.exposed_len()
+    }
+
+    #[doc(hidden)]
+    pub fn encode_copy_to(
+        &self,
+        encoder: &BlitEncoder,
+        shard_idx: usize,
+        absolute_shard_offset: u64,
+        destination: &Buffer,
+        destination_offset: u64,
+        length: u64,
+    ) -> Result<(), MetalError> {
+        if shard_idx != self.shard_idx() {
+            return Err(MetalError::GgufNoCopy(format!(
+                "diagnostic blit source shard mismatch: expected {}, got {shard_idx}",
+                self.shard_idx()
+            )));
+        }
+        let source_offset = absolute_shard_offset
+            .checked_sub(self.mmap_offset())
+            .ok_or_else(|| {
+                MetalError::GgufNoCopy(format!(
+                    "diagnostic blit source offset {absolute_shard_offset} precedes window {}",
+                    self.mmap_offset()
+                ))
+            })?;
+        let source_end = source_offset.checked_add(length).ok_or_else(|| {
+            MetalError::GgufNoCopy("diagnostic blit source endpoint overflow".to_string())
+        })?;
+        let destination_end = destination_offset.checked_add(length).ok_or_else(|| {
+            MetalError::GgufNoCopy("diagnostic blit destination endpoint overflow".to_string())
+        })?;
+        if source_end > self.exposed_len() as u64 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "diagnostic blit source endpoint {source_end} exceeds window length {}",
+                self.exposed_len()
+            )));
+        }
+        if destination_end > destination.length() as u64 {
+            return Err(MetalError::GgufNoCopy(format!(
+                "diagnostic blit destination endpoint {destination_end} exceeds length {}",
+                destination.length()
+            )));
+        }
+        if Retained::as_ptr(&self.backing.buffer) == Retained::as_ptr(destination) {
+            return Err(MetalError::GgufNoCopy(
+                "diagnostic blit source and destination are the same resource".to_string(),
+            ));
+        }
+        usize::try_from(source_offset).map_err(|_| {
+            MetalError::GgufNoCopy("diagnostic blit source offset does not fit usize".to_string())
+        })?;
+        usize::try_from(destination_offset).map_err(|_| {
+            MetalError::GgufNoCopy(
+                "diagnostic blit destination offset does not fit usize".to_string(),
+            )
+        })?;
+        usize::try_from(length).map_err(|_| {
+            MetalError::GgufNoCopy("diagnostic blit length does not fit usize".to_string())
+        })?;
+        encoder.copy_buffer(
+            &self.backing.buffer,
+            source_offset,
+            destination,
+            destination_offset,
+            length,
+        );
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct DiagnosticGgufBlitReleaseProbe {
+    weak: Weak<ProtocolObject<dyn MTLBuffer>>,
+    deallocator_calls: Arc<AtomicUsize>,
+    deallocator_mismatches: Arc<AtomicUsize>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticGgufBlitReleaseReport {
+    pub source_alive: bool,
+    pub deallocator_calls: usize,
+    pub deallocator_mismatches: usize,
+}
+
+impl DiagnosticGgufBlitReleaseProbe {
+    #[doc(hidden)]
+    pub fn report(&self) -> DiagnosticGgufBlitReleaseReport {
+        let deallocator_calls = self.deallocator_calls.load(Ordering::Acquire);
+        DiagnosticGgufBlitReleaseReport {
+            source_alive: self.weak.load().is_some(),
+            deallocator_calls,
+            deallocator_mismatches: self.deallocator_mismatches.load(Ordering::Relaxed),
+        }
+    }
+}
+
 fn classify_gguf_backing(
     desc: &TensorDesc,
     geometry: GgufBackingGeometry,
@@ -2340,9 +2518,15 @@ pub struct BlitEncoder {
 }
 
 impl BlitEncoder {
+    pub fn try_begin(
+        cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    ) -> Result<Self, MetalError> {
+        let raw = cmd.blitCommandEncoder().ok_or(MetalError::NoBlitEncoder)?;
+        Ok(Self { raw })
+    }
+
     pub fn begin(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
-        let raw = cmd.blitCommandEncoder().expect("blit encoder");
-        Self { raw }
+        Self::try_begin(cmd).expect("blit encoder")
     }
 
     pub fn end(self) {
@@ -19710,7 +19894,7 @@ mod tests {
 
         let callback_calls = Arc::new(AtomicUsize::new(0));
         let callback_mismatches = Arc::new(AtomicUsize::new(0));
-        let weak = objc2::rc::autoreleasepool(|_| {
+        let (weak, source_probe) = objc2::rc::autoreleasepool(|_| {
             let file = std::fs::File::open(&path).expect("open mmap fixture");
             // SAFETY: the test retains the immutable file and does not mutate
             // or truncate it while the mapping exists.
@@ -19735,14 +19919,21 @@ mod tests {
                     },
                 )
                 .expect("read-only no-copy backing");
-            assert_eq!(backing.page_size(), page_size);
-            assert_eq!(backing.mapped_len(), bytes.len());
-            assert_eq!(backing.exposed_len(), bytes.len());
+            let probe = DiagnosticGgufBlitReleaseProbe {
+                weak: Weak::from_retained(&backing.buffer),
+                deallocator_calls: Arc::clone(&callback_calls),
+                deallocator_mismatches: Arc::clone(&callback_mismatches),
+            };
+            let source = DiagnosticGgufBlitSourceWindow { backing, probe };
+            let source_probe = source.release_probe();
+            assert_eq!(source.backing.page_size(), page_size);
+            assert_eq!(source.backing.mapped_len(), bytes.len());
+            assert_eq!(source.exposed_len(), bytes.len());
             assert_eq!(
-                backing.buffer.contents().as_ptr(),
+                source.backing.buffer.contents().as_ptr(),
                 mmap.as_ptr().cast_mut().cast::<c_void>()
             );
-            let prefault = backing.prefault_read();
+            let prefault = source.backing.prefault_read();
             assert_eq!(prefault.page_count, 2);
             assert_eq!(prefault.covered_bytes, bytes.len());
             let expected_checksum =
@@ -19759,17 +19950,27 @@ mod tests {
                 data_offset: 32,
                 n_bytes: (weights.len() * 4) as u64,
             };
-            let (eligibility, tensor) = backing.tensor(&desc).expect("tensor view");
+            let (eligibility, tensor) = source.backing.tensor(&desc).expect("tensor view");
             assert_eq!(eligibility, GgufBackingEligibility::Eligible);
             let tensor = tensor.expect("eligible tensor");
             assert_eq!(tensor.offset, 32);
-            drop(backing);
-            assert!(weak.upgrade().is_some());
 
             let dst = MetalTensor::zeros_f32(&ctx, vec![16]).expect("destination");
             let command = ctx.queue.commandBuffer().expect("command buffer");
             let blit = BlitEncoder::begin(&command);
-            blit.copy_buffer(&tensor.buffer, tensor.offset, &dst.buffer, dst.offset, 64);
+            assert!(
+                source
+                    .encode_copy_to(&blit, 1, 32, &dst.buffer, dst.offset, 64)
+                    .is_err()
+            );
+            assert!(
+                source
+                    .encode_copy_to(&blit, 0, bytes.len() as u64, &dst.buffer, dst.offset, 64)
+                    .is_err()
+            );
+            source
+                .encode_copy_to(&blit, 0, 32, &dst.buffer, dst.offset, 64)
+                .expect("diagnostic source blit");
             blit.end();
             command.commit();
             command.waitUntilCompleted();
@@ -19778,6 +19979,8 @@ mod tests {
                 std::slice::from_raw_parts(dst.buffer.contents().as_ptr().cast::<u8>(), 64)
             };
             assert_eq!(got, &bytes[32..96]);
+            drop(source);
+            assert!(weak.upgrade().is_some());
 
             let x: Vec<f32> = (0..n_in).map(|index| index as f32 * 0.02 - 0.3).collect();
             let expected = crate::forward::mat_vec_pub(&weights, n_in, n_out, &x);
@@ -19806,7 +20009,7 @@ mod tests {
                 .map(|(actual, expected)| (actual - expected).abs())
                 .fold(0.0f32, f32::max);
             assert!(max_abs < 1e-5, "nonzero-offset matvec max error {max_abs}");
-            weak
+            (weak, source_probe)
         });
         assert!(
             weak.upgrade().is_none(),
@@ -19814,6 +20017,125 @@ mod tests {
         );
         assert_eq!(callback_calls.load(Ordering::Relaxed), 1);
         assert_eq!(callback_mismatches.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            source_probe.report(),
+            DiagnosticGgufBlitReleaseReport {
+                source_alive: false,
+                deallocator_calls: 1,
+                deallocator_mismatches: 0,
+            }
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn diagnostic_blit_sources_release_after_completed_command() {
+        use std::io::Write;
+
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        let page_size = host_page_size().expect("host page size");
+        let bytes = (0..page_size * 2)
+            .map(|index| index.wrapping_mul(31) as u8)
+            .collect::<Vec<_>>();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "qwen-metal-diagnostic-blit-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::File::create(&path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .expect("write diagnostic blit fixture");
+
+        let (probe, mmap_weak, staging_weak, window_out, staging_out) =
+            objc2::rc::autoreleasepool(|_| {
+                let file = std::fs::File::open(&path).expect("open diagnostic blit fixture");
+                // SAFETY: the fixture remains immutable and untruncated through
+                // command completion and source release.
+                let mmap = Arc::new(unsafe { Mmap::map(&file).expect("map fixture") });
+                let mmap_weak = Arc::downgrade(&mmap);
+                let geometry =
+                    GgufBackingGeometry::new_window(0, mmap.len(), 0, mmap.len(), page_size, 32)
+                        .expect("diagnostic geometry");
+                let calls = Arc::new(AtomicUsize::new(0));
+                let mismatches = Arc::new(AtomicUsize::new(0));
+                let observed_calls = Arc::clone(&calls);
+                let observed_mismatches = Arc::clone(&mismatches);
+                let expected_pointer = mmap.as_ptr() as usize;
+                let expected_length = mmap.len();
+                let backing = ctx
+                    .gguf_no_copy_geometry_with_observer(
+                        Arc::clone(&mmap),
+                        geometry,
+                        move |pointer, length| {
+                            if pointer.as_ptr() as usize != expected_pointer
+                                || length != expected_length
+                            {
+                                observed_mismatches.fetch_add(1, Ordering::Relaxed);
+                            }
+                            observed_calls.fetch_add(1, Ordering::Release);
+                        },
+                    )
+                    .expect("diagnostic source backing");
+                let probe = DiagnosticGgufBlitReleaseProbe {
+                    weak: Weak::from_retained(&backing.buffer),
+                    deallocator_calls: calls,
+                    deallocator_mismatches: mismatches,
+                };
+                let source = DiagnosticGgufBlitSourceWindow {
+                    backing,
+                    probe: probe.clone(),
+                };
+                drop(mmap);
+
+                let staging = ctx.buffer_from(&bytes[96..160]).expect("staging source");
+                let staging_weak = Weak::from_retained(&staging);
+                let window_out = ctx.buffer_uninit(64).expect("window destination");
+                let staging_out = ctx.buffer_uninit(64).expect("staging destination");
+                let command = ctx.queue.commandBuffer().expect("diagnostic command");
+                assert!(command.retainedReferences());
+                let blit = BlitEncoder::try_begin(&command).expect("diagnostic blit encoder");
+                source
+                    .encode_copy_to(&blit, 0, 32, &window_out, 0, 64)
+                    .expect("window copy");
+                blit.copy_buffer(&staging, 0, &staging_out, 0, 64);
+                blit.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert_eq!(
+                    command.status(),
+                    objc2_metal::MTLCommandBufferStatus::Completed
+                );
+                assert!(command.error().is_none());
+                drop(command);
+                drop(staging);
+                drop(source);
+                (probe, mmap_weak, staging_weak, window_out, staging_out)
+            });
+
+        assert_eq!(
+            probe.report(),
+            DiagnosticGgufBlitReleaseReport {
+                source_alive: false,
+                deallocator_calls: 1,
+                deallocator_mismatches: 0,
+            }
+        );
+        assert!(mmap_weak.upgrade().is_none());
+        assert!(staging_weak.load().is_none());
+        let window_got =
+            unsafe { std::slice::from_raw_parts(window_out.contents().as_ptr().cast::<u8>(), 64) };
+        let staging_got =
+            unsafe { std::slice::from_raw_parts(staging_out.contents().as_ptr().cast::<u8>(), 64) };
+        assert_eq!(window_got, &bytes[32..96]);
+        assert_eq!(staging_got, &bytes[96..160]);
         let _ = std::fs::remove_file(path);
     }
 

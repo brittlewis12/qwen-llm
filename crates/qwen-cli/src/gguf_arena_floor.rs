@@ -1,14 +1,22 @@
 use crate::OutputFormat;
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
-use objc2::rc::Retained;
+use objc2::{
+    rc::{Retained, Weak, autoreleasepool},
+    runtime::ProtocolObject,
+};
 use objc2_metal::{
-    MTLBuffer, MTLCPUCacheMode, MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
+    MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
+    MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
 };
 use qwen_llm::{
     gguf::GgufFile,
     loader::Model,
-    metal::{Buffer, MetalContext, RetainedStorageDisposition, host_page_size_bytes},
+    metal::{
+        BlitEncoder, Buffer, DiagnosticGgufBlitReleaseProbe, MetalContext,
+        RetainedStorageDisposition, RetainedStorageFallback, RetainedStoragePlan,
+        host_page_size_bytes, plan_retained_storage,
+    },
     metal_forward::{
         ModelWeightStorageKind, gguf_descriptor_layout_digest,
         model_weight_storage_inventory_digest, model_weight_storage_requests,
@@ -30,6 +38,14 @@ const EXPECTED_MAX_BUFFER_LENGTH: usize = 77_309_411_328;
 const FROZEN_PARALLEL_COPY_WORKERS: usize = 4;
 const PARALLEL_COPY_ALGORITHM: &str = "minimax-contiguous-v1";
 const ALLOWED_DIAGNOSTIC_WORKERS: [usize; 6] = [1, 2, 4, 6, 8, 12];
+const A3B_BLIT_PLAN_DIGEST: &str =
+    "fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af";
+const A3B_BLIT_WINDOW_OFFSET: u64 = 10_977_280;
+const A3B_BLIT_WINDOW_BYTES: usize = 22_123_544_576;
+const A3B_BLIT_WINDOW_LOGICAL_BYTES: u64 = 22_123_530_752;
+const A3B_BLIT_WINDOW_GAP_BYTES: u64 = 13_824;
+const A3B_BLIT_FALLBACK_REQUEST: usize = 721;
+const A3B_BLIT_FALLBACK_BYTES: u64 = 8_192;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, ValueEnum)]
 enum FloorProfileId {
@@ -299,6 +315,7 @@ enum ArenaFloorArm {
     Copied,
     ParallelCopied,
     ParallelPread,
+    TransientMmapBlit,
     ArenaSerial,
     ArenaFour,
 }
@@ -309,6 +326,7 @@ impl ArenaFloorArm {
             Self::Copied => "copied",
             Self::ParallelCopied => "parallel-copied",
             Self::ParallelPread => "parallel-pread",
+            Self::TransientMmapBlit => "transient-mmap-blit",
             Self::ArenaSerial => "arena-serial",
             Self::ArenaFour => "arena-four",
         }
@@ -362,6 +380,14 @@ fn validate_worker_scope(
 ) -> Result<()> {
     if !ALLOWED_DIAGNOSTIC_WORKERS.contains(&workers) {
         return Err(anyhow!("unsupported diagnostic worker count {workers}"));
+    }
+    if !describe
+        && arm == Some(ArenaFloorArm::TransientMmapBlit)
+        && profile != Some(FloorProfileId::A3bQ4kmV1)
+    {
+        return Err(anyhow!(
+            "transient mmap-blit requires --profile a3b-q4km-v1"
+        ));
     }
     if workers == FROZEN_PARALLEL_COPY_WORKERS || describe {
         return Ok(());
@@ -420,10 +446,45 @@ struct Materialized {
     allocation_wall: Option<Duration>,
     source_resolution_wall: Option<Duration>,
     copy_wall: Option<Duration>,
+    source_release_wall: Option<Duration>,
     binding_wall: Duration,
     worker_count: usize,
     schedule: Option<ParallelCopySchedule>,
+    blit_population: Option<BlitPopulation>,
     ready_wall: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct BlitPopulation {
+    order_count: usize,
+    order_first_request: usize,
+    order_last_request: usize,
+    source_window_count: usize,
+    source_window_bytes: u64,
+    window_blit_count: usize,
+    window_blit_bytes: u64,
+    source_window_gap_bytes: u64,
+    fallback_source_count: usize,
+    fallback_source_bytes: u64,
+    cpu_staging_copy_bytes: u64,
+    blit_count: usize,
+    blit_bytes: u64,
+    command_buffer_count: usize,
+    blit_encoder_count: usize,
+    commit_count: usize,
+    wait_count: usize,
+    command_error_count: usize,
+    source_window_deallocator_calls: usize,
+    source_window_deallocator_mismatches: usize,
+    source_buffers_alive: usize,
+    retained_references: bool,
+    command_status: MTLCommandBufferStatus,
+    gpu_start_time: Option<f64>,
+    gpu_end_time: Option<f64>,
+    gpu_wall_ms: Option<f64>,
+    allocated_after_destinations: u64,
+    allocated_with_sources: u64,
+    allocated_after_source_release: u64,
 }
 
 struct Correctness {
@@ -587,12 +648,17 @@ fn minimax_partition_cuts(lengths: &[u64], workers: usize) -> Result<Vec<usize>>
     Ok(cuts)
 }
 
-fn parallel_copy_schedule(direct: &[&TensorDesc], workers: usize) -> Result<ParallelCopySchedule> {
-    let mut sorted_request_indices = (0..direct.len()).collect::<Vec<_>>();
-    sorted_request_indices.sort_by_key(|&request_index| {
+fn source_order(direct: &[&TensorDesc]) -> Vec<usize> {
+    let mut request_indices = (0..direct.len()).collect::<Vec<_>>();
+    request_indices.sort_by_key(|&request_index| {
         let desc = direct[request_index];
         (desc.shard_idx, desc.data_offset, request_index)
     });
+    request_indices
+}
+
+fn parallel_copy_schedule(direct: &[&TensorDesc], workers: usize) -> Result<ParallelCopySchedule> {
+    let sorted_request_indices = source_order(direct);
     let lengths = sorted_request_indices
         .iter()
         .map(|&request_index| direct[request_index].n_bytes)
@@ -650,11 +716,7 @@ fn validate_parallel_copy_schedule(
         ));
     }
 
-    let mut expected_order = (0..direct.len()).collect::<Vec<_>>();
-    expected_order.sort_by_key(|&request_index| {
-        let desc = direct[request_index];
-        (desc.shard_idx, desc.data_offset, request_index)
-    });
+    let expected_order = source_order(direct);
     if schedule.sorted_request_indices != expected_order {
         return Err(anyhow!(
             "parallel-copy schedule is not the deterministic request permutation"
@@ -745,11 +807,7 @@ fn frozen_parallel_copy_schedule(
     if direct.len() != profile.request_count || direct.iter().any(|desc| desc.n_bytes == 0) {
         return Err(anyhow!("floor profile request count or length drifted"));
     }
-    let mut sorted_request_indices = (0..direct.len()).collect::<Vec<_>>();
-    sorted_request_indices.sort_by_key(|&request_index| {
-        let desc = direct[request_index];
-        (desc.shard_idx, desc.data_offset, request_index)
-    });
+    let sorted_request_indices = source_order(direct);
     let mut permutation = sorted_request_indices.clone();
     permutation.sort_unstable();
     if permutation.iter().copied().ne(0..direct.len()) {
@@ -1204,9 +1262,11 @@ fn materialize_copied(
         allocation_wall: None,
         source_resolution_wall: None,
         copy_wall: None,
+        source_release_wall: None,
         binding_wall,
         worker_count: 0,
         schedule: None,
+        blit_population: None,
         ready_wall,
     })
 }
@@ -1345,9 +1405,11 @@ fn materialize_parallel_copied(
         allocation_wall: Some(allocation_wall),
         source_resolution_wall: Some(source_resolution_wall),
         copy_wall: Some(copy_wall),
+        source_release_wall: None,
         binding_wall,
         worker_count: schedule.partitions.len(),
         schedule: Some(schedule.clone()),
+        blit_population: None,
         ready_wall,
     })
 }
@@ -1481,9 +1543,376 @@ fn materialize_parallel_pread(
         allocation_wall: Some(allocation_wall),
         source_resolution_wall: Some(source_resolution_wall),
         copy_wall: Some(copy_wall),
+        source_release_wall: None,
         binding_wall,
         worker_count: schedule.partitions.len(),
         schedule: Some(schedule.clone()),
+        blit_population: None,
+        ready_wall,
+    })
+}
+
+fn validate_transient_mmap_blit_plan(
+    profile: &FloorProfile,
+    direct: &[&TensorDesc],
+    plan: &RetainedStoragePlan,
+) -> Result<()> {
+    if profile.id != FloorProfileId::A3bQ4kmV1
+        || retained_storage_plan_digest(plan) != A3B_BLIT_PLAN_DIGEST
+        || plan.page_size != EXPECTED_PAGE_SIZE
+        || plan.max_buffer_length != EXPECTED_MAX_BUFFER_LENGTH
+        || plan.required_alignment != REQUIRED_ALIGNMENT
+        || plan.windows.len() != 1
+        || plan.entries.len() != direct.len()
+        || plan.unique_view_bytes != A3B_BLIT_WINDOW_LOGICAL_BYTES
+        || plan.logical_view_bytes != A3B_BLIT_WINDOW_LOGICAL_BYTES
+        || plan.unique_fallback_bytes != A3B_BLIT_FALLBACK_BYTES
+        || plan.alias_bytes != 0
+    {
+        return Err(anyhow!("transient mmap-blit plan identity drifted"));
+    }
+    let window = &plan.windows[0];
+    let window_gap_bytes = (window.length as u64)
+        .checked_sub(plan.unique_view_bytes)
+        .ok_or_else(|| anyhow!("transient mmap-blit window byte accounting underflow"))?;
+    if window.shard_idx != 0
+        || window.mmap_offset != A3B_BLIT_WINDOW_OFFSET
+        || window.length != A3B_BLIT_WINDOW_BYTES
+        || window_gap_bytes != A3B_BLIT_WINDOW_GAP_BYTES
+    {
+        return Err(anyhow!("transient mmap-blit source window drifted"));
+    }
+
+    let mut view_count = 0usize;
+    let mut view_bytes = 0u64;
+    let mut fallback_count = 0usize;
+    for (request_index, (entry, desc)) in plan.entries.iter().zip(direct).enumerate() {
+        if entry.request_index != request_index
+            || entry.name != desc.name
+            || entry.shard_idx != desc.shard_idx
+            || entry.data_offset != desc.data_offset
+            || entry.n_bytes != desc.n_bytes
+        {
+            return Err(anyhow!(
+                "transient mmap-blit entry {request_index} identity drifted"
+            ));
+        }
+        match entry.disposition {
+            RetainedStorageDisposition::View {
+                window_index,
+                buffer_offset,
+            } => {
+                if window_index != 0
+                    || buffer_offset
+                        != desc
+                            .data_offset
+                            .checked_sub(window.mmap_offset)
+                            .ok_or_else(|| anyhow!("transient mmap-blit view underflow"))?
+                {
+                    return Err(anyhow!("transient mmap-blit view {request_index} drifted"));
+                }
+                view_count += 1;
+                view_bytes = view_bytes
+                    .checked_add(desc.n_bytes)
+                    .ok_or_else(|| anyhow!("transient mmap-blit view bytes overflow"))?;
+            }
+            RetainedStorageDisposition::CopyFallback { reason } => {
+                if request_index != A3B_BLIT_FALLBACK_REQUEST
+                    || reason != RetainedStorageFallback::FinalPartialPage
+                    || desc.n_bytes != A3B_BLIT_FALLBACK_BYTES
+                {
+                    return Err(anyhow!(
+                        "transient mmap-blit fallback {request_index} drifted"
+                    ));
+                }
+                fallback_count += 1;
+            }
+            RetainedStorageDisposition::Alias { .. } => {
+                return Err(anyhow!("transient mmap-blit aliases are unsupported"));
+            }
+        }
+    }
+    if view_count != 732 || view_bytes != A3B_BLIT_WINDOW_LOGICAL_BYTES || fallback_count != 1 {
+        return Err(anyhow!("transient mmap-blit plan accounting drifted"));
+    }
+    Ok(())
+}
+
+fn materialize_transient_mmap_blit(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    direct: &[&TensorDesc],
+    blit_order: &[usize],
+    plan: &RetainedStoragePlan,
+    profile: &FloorProfile,
+) -> Result<Materialized> {
+    validate_transient_mmap_blit_plan(profile, direct, plan)?;
+    if blit_order != source_order(direct)
+        || blit_order.first().copied() != Some(2)
+        || blit_order.last().copied() != Some(A3B_BLIT_FALLBACK_REQUEST)
+    {
+        return Err(anyhow!("transient mmap-blit source order drifted"));
+    }
+
+    let ready_started = Instant::now();
+    let allocation_started = ready_started;
+    let resources = allocate_copied_resources(ctx, direct)?;
+    let allocation_finished = Instant::now();
+    validate_copied_destinations(&resources, direct, "transient mmap-blit")?;
+    let allocated_after_destinations = ctx.current_allocated_size();
+
+    let (
+        source_finished,
+        copy_finished,
+        window_probes,
+        fallback_weaks,
+        retained_references,
+        command_status,
+        gpu_start_time,
+        gpu_end_time,
+        gpu_wall_ms,
+        allocated_with_sources,
+    ) = autoreleasepool(|_| -> Result<_> {
+        let mut source_windows = Vec::with_capacity(plan.windows.len());
+        for window in &plan.windows {
+            source_windows.push(ctx.diagnostic_gguf_blit_source_window(
+                gguf,
+                window,
+                plan.required_alignment,
+            )?);
+        }
+        let window_probes = source_windows
+            .iter()
+            .map(|window| window.release_probe())
+            .collect::<Vec<DiagnosticGgufBlitReleaseProbe>>();
+
+        let mut fallback_sources = std::iter::repeat_with(|| None)
+            .take(direct.len())
+            .collect::<Vec<Option<Buffer>>>();
+        for entry in &plan.entries {
+            if matches!(
+                entry.disposition,
+                RetainedStorageDisposition::CopyFallback { .. }
+            ) {
+                let desc = direct[entry.request_index];
+                fallback_sources[entry.request_index] =
+                    Some(ctx.buffer_from(gguf.try_slice(desc)?)?);
+            }
+        }
+        let fallback_weaks = fallback_sources
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(Weak::from_retained)
+            .collect::<Vec<Weak<ProtocolObject<dyn MTLBuffer>>>>();
+        if fallback_weaks.len() != 1 {
+            return Err(anyhow!("transient mmap-blit fallback source count drifted"));
+        }
+        let source_finished = Instant::now();
+        let allocated_with_sources = ctx.current_allocated_size();
+
+        let command = ctx
+            .queue
+            .commandBuffer()
+            .context("transient mmap-blit command buffer")?;
+        let retained_references = command.retainedReferences();
+        if !retained_references {
+            return Err(anyhow!(
+                "transient mmap-blit command buffer does not retain references"
+            ));
+        }
+        let blit = BlitEncoder::try_begin(&command).context("transient mmap-blit encoder")?;
+        let encode_result = (|| -> Result<()> {
+            for &request_index in blit_order {
+                let desc = direct[request_index];
+                let destination = &resources[request_index];
+                match plan.entries[request_index].disposition {
+                    RetainedStorageDisposition::View { window_index, .. } => {
+                        source_windows[window_index].encode_copy_to(
+                            &blit,
+                            desc.shard_idx,
+                            desc.data_offset,
+                            destination,
+                            0,
+                            desc.n_bytes,
+                        )?;
+                    }
+                    RetainedStorageDisposition::CopyFallback { .. } => {
+                        let source = fallback_sources[request_index].as_ref().ok_or_else(|| {
+                            anyhow!("transient mmap-blit fallback source is missing")
+                        })?;
+                        if Retained::as_ptr(source) == Retained::as_ptr(destination)
+                            || source.length() as u64 != desc.n_bytes
+                            || destination.length() as u64 != desc.n_bytes
+                        {
+                            return Err(anyhow!(
+                                "transient mmap-blit fallback resource {request_index} drifted"
+                            ));
+                        }
+                        blit.copy_buffer(source, 0, destination, 0, desc.n_bytes);
+                    }
+                    RetainedStorageDisposition::Alias { .. } => unreachable!(),
+                }
+            }
+            Ok(())
+        })();
+        blit.end();
+        encode_result?;
+        command.commit();
+        command.waitUntilCompleted();
+        let command_status = command.status();
+        let command_error = command.error();
+        if command_status != MTLCommandBufferStatus::Completed || command_error.is_some() {
+            return Err(anyhow!(
+                "transient mmap-blit command failed: status={command_status:?} error={command_error:?}"
+            ));
+        }
+        let gpu_start = command.GPUStartTime();
+        let gpu_end = command.GPUEndTime();
+        let (gpu_start_time, gpu_end_time, gpu_wall_ms) = if gpu_start.is_finite()
+            && gpu_end.is_finite()
+            && gpu_start > 0.0
+            && gpu_end > gpu_start
+        {
+            (
+                Some(gpu_start),
+                Some(gpu_end),
+                Some((gpu_end - gpu_start) * 1e3),
+            )
+        } else {
+            (None, None, None)
+        };
+        let copy_finished = Instant::now();
+        drop(command);
+        drop(fallback_sources);
+        drop(source_windows);
+        Ok((
+            source_finished,
+            copy_finished,
+            window_probes,
+            fallback_weaks,
+            retained_references,
+            command_status,
+            gpu_start_time,
+            gpu_end_time,
+            gpu_wall_ms,
+            allocated_with_sources,
+        ))
+    })?;
+
+    let mut source_window_deallocator_calls = 0usize;
+    let mut source_window_deallocator_mismatches = 0usize;
+    let mut source_buffers_alive = 0usize;
+    for probe in window_probes {
+        let report = probe.report();
+        source_window_deallocator_calls += report.deallocator_calls;
+        source_window_deallocator_mismatches += report.deallocator_mismatches;
+        source_buffers_alive += usize::from(report.source_alive);
+    }
+    source_buffers_alive += fallback_weaks
+        .iter()
+        .filter(|weak| weak.load().is_some())
+        .count();
+    if source_window_deallocator_calls != 1
+        || source_window_deallocator_mismatches != 0
+        || source_buffers_alive != 0
+    {
+        return Err(anyhow!(
+            "transient mmap-blit source release failed: calls={source_window_deallocator_calls} mismatches={source_window_deallocator_mismatches} alive={source_buffers_alive}"
+        ));
+    }
+    let source_release_finished = Instant::now();
+    let allocated_after_source_release = ctx.current_allocated_size();
+
+    let bindings = build_copied_bindings(profile, direct, &resources)?;
+    let binding_finished = Instant::now();
+    let allocation_wall = allocation_finished.duration_since(allocation_started);
+    let source_resolution_wall = source_finished.duration_since(allocation_finished);
+    let copy_wall = copy_finished.duration_since(source_finished);
+    let source_release_wall = source_release_finished.duration_since(copy_finished);
+    let binding_wall = binding_finished.duration_since(source_release_finished);
+    let ready_wall = binding_finished.duration_since(ready_started);
+    let phase_wall = allocation_wall
+        .checked_add(source_resolution_wall)
+        .and_then(|value| value.checked_add(copy_wall))
+        .and_then(|value| value.checked_add(source_release_wall))
+        .and_then(|value| value.checked_add(binding_wall))
+        .ok_or_else(|| anyhow!("transient mmap-blit phase duration overflow"))?;
+    if ready_wall.as_micros().abs_diff(phase_wall.as_micros()) > 4 {
+        return Err(anyhow!(
+            "transient mmap-blit phase timing does not reconcile"
+        ));
+    }
+
+    let source_window_bytes = plan.windows.iter().try_fold(0u64, |total, window| {
+        total
+            .checked_add(window.length as u64)
+            .ok_or_else(|| anyhow!("transient mmap-blit source window bytes overflow"))
+    })?;
+    let window_blit_count = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
+        .count();
+    let fallback_source_count = plan
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.disposition,
+                RetainedStorageDisposition::CopyFallback { .. }
+            )
+        })
+        .count();
+    let blit_bytes = direct.iter().try_fold(0u64, |total, desc| {
+        total
+            .checked_add(desc.n_bytes)
+            .ok_or_else(|| anyhow!("transient mmap-blit total bytes overflow"))
+    })?;
+    let source_window_gap_bytes = source_window_bytes
+        .checked_sub(plan.unique_view_bytes)
+        .ok_or_else(|| anyhow!("transient mmap-blit source window gap underflow"))?;
+
+    Ok(Materialized {
+        resources,
+        bindings,
+        allocation_wall: Some(allocation_wall),
+        source_resolution_wall: Some(source_resolution_wall),
+        copy_wall: Some(copy_wall),
+        source_release_wall: Some(source_release_wall),
+        binding_wall,
+        worker_count: 0,
+        schedule: None,
+        blit_population: Some(BlitPopulation {
+            order_count: blit_order.len(),
+            order_first_request: blit_order[0],
+            order_last_request: *blit_order.last().expect("blit order is nonempty"),
+            source_window_count: plan.windows.len(),
+            source_window_bytes,
+            window_blit_count,
+            window_blit_bytes: plan.logical_view_bytes,
+            source_window_gap_bytes,
+            fallback_source_count,
+            fallback_source_bytes: plan.unique_fallback_bytes,
+            cpu_staging_copy_bytes: plan.unique_fallback_bytes,
+            blit_count: blit_order.len(),
+            blit_bytes,
+            command_buffer_count: 1,
+            blit_encoder_count: 1,
+            commit_count: 1,
+            wait_count: 1,
+            command_error_count: 0,
+            source_window_deallocator_calls,
+            source_window_deallocator_mismatches,
+            source_buffers_alive,
+            retained_references,
+            command_status,
+            gpu_start_time,
+            gpu_end_time,
+            gpu_wall_ms,
+            allocated_after_destinations,
+            allocated_with_sources,
+            allocated_after_source_release,
+        }),
         ready_wall,
     })
 }
@@ -1751,7 +2180,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         .ok_or_else(|| anyhow!("materialization arm is required"))?;
     if matches!(arm, ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour) {
         return Err(anyhow!(
-            "arena materialization arms are retired; use copied, parallel-copied, or parallel-pread"
+            "arena materialization arms are retired; use copied, parallel-copied, parallel-pread, or transient-mmap-blit"
         ));
     }
     if std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some() {
@@ -1776,33 +2205,77 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             profile_id.label()
         ));
     }
-    let parallel_schedule = parallel_copy_schedule(&direct, args.workers)?;
-    if args.workers == FROZEN_PARALLEL_COPY_WORKERS && parallel_schedule != frozen_parallel_schedule
-    {
+    validate_source_endpoints(&gguf, &direct)?;
+    if arm == ArenaFloorArm::TransientMmapBlit && profile.id != FloorProfileId::A3bQ4kmV1 {
         return Err(anyhow!(
-            "dynamic W4 schedule does not reproduce the frozen floor schedule"
+            "transient mmap-blit is diagnostic-only for a3b-q4km-v1"
         ));
     }
-    validate_source_endpoints(&gguf, &direct)?;
+    let parallel_schedule = if arm.uses_parallel_schedule() {
+        let schedule = parallel_copy_schedule(&direct, args.workers)?;
+        if args.workers == FROZEN_PARALLEL_COPY_WORKERS && schedule != frozen_parallel_schedule {
+            return Err(anyhow!(
+                "dynamic W4 schedule does not reproduce the frozen floor schedule"
+            ));
+        }
+        Some(schedule)
+    } else {
+        None
+    };
+    let transient_blit_plan = if arm == ArenaFloorArm::TransientMmapBlit {
+        let plan = plan_retained_storage(
+            &gguf.shard_mapped_lengths(),
+            &direct,
+            page_size,
+            max_buffer_length,
+            REQUIRED_ALIGNMENT,
+        )?;
+        validate_transient_mmap_blit_plan(profile, &direct, &plan)?;
+        Some(plan)
+    } else {
+        None
+    };
+    let blit_order = (arm == ArenaFloorArm::TransientMmapBlit).then(|| source_order(&direct));
 
     let allocated_before = ctx.current_allocated_size();
     let usage_before = capture_usage()?;
     let proc_before = capture_proc_usage()?;
     let materialized = match arm {
         ArenaFloorArm::Copied => materialize_copied(&ctx, &gguf, &direct, profile)?,
-        ArenaFloorArm::ParallelCopied => {
-            materialize_parallel_copied(&ctx, &gguf, &direct, &parallel_schedule, profile)?
-        }
-        ArenaFloorArm::ParallelPread => {
-            materialize_parallel_pread(&ctx, &gguf, &direct, &parallel_schedule, profile)?
-        }
+        ArenaFloorArm::ParallelCopied => materialize_parallel_copied(
+            &ctx,
+            &gguf,
+            &direct,
+            parallel_schedule
+                .as_ref()
+                .expect("parallel-copy arm has a schedule"),
+            profile,
+        )?,
+        ArenaFloorArm::ParallelPread => materialize_parallel_pread(
+            &ctx,
+            &gguf,
+            &direct,
+            parallel_schedule
+                .as_ref()
+                .expect("parallel-pread arm has a schedule"),
+            profile,
+        )?,
+        ArenaFloorArm::TransientMmapBlit => materialize_transient_mmap_blit(
+            &ctx,
+            &gguf,
+            &direct,
+            blit_order.as_deref().expect("blit arm has an order"),
+            transient_blit_plan.as_ref().expect("blit arm has a plan"),
+            profile,
+        )?,
         ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour => unreachable!(),
     };
     let ready_wall = materialized.ready_wall;
     let usage_after = capture_usage()?;
     let proc_after = capture_proc_usage()?;
     let allocated_ready = ctx.current_allocated_size();
-    if (arm.uses_parallel_schedule() && materialized.schedule.as_ref() != Some(&parallel_schedule))
+    if (arm.uses_parallel_schedule()
+        && materialized.schedule.as_ref() != parallel_schedule.as_ref())
         || (!arm.uses_parallel_schedule() && materialized.schedule.is_some())
     {
         return Err(anyhow!("materialized parallel-population schedule drifted"));
@@ -1833,7 +2306,17 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         || timer_minor_faults < 0
         || timer_major_faults < 0
     {
-        return Err(anyhow!("getrusage counter regressed"));
+        return Err(anyhow!(
+            "getrusage counter regressed: user={}..{} system={}..{} minor={}..{} major={}..{}",
+            usage_before.user_time_us,
+            usage_after.user_time_us,
+            usage_before.system_time_us,
+            usage_after.system_time_us,
+            usage_before.minor_faults,
+            usage_after.minor_faults,
+            usage_before.major_faults,
+            usage_after.major_faults,
+        ));
     }
     let ready_us = duration_us(ready_wall)?;
     if ready_us == 0 {
@@ -1863,15 +2346,20 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     let correctness = verify_materialized(&gguf, &direct, &materialized, profile)?;
     let resource_count = materialized.resources.len();
     let binding_count = materialized.bindings.len();
+    let blit_population = materialized.blit_population;
     let unattributed_wall = match (
         materialized.allocation_wall,
         materialized.source_resolution_wall,
         materialized.copy_wall,
+        materialized.source_release_wall,
     ) {
-        (Some(allocation), Some(source_resolution), Some(copy)) => {
+        (Some(allocation), Some(source_resolution), Some(copy), source_release) => {
             let accounted = allocation
                 .checked_add(source_resolution)
                 .and_then(|value| value.checked_add(copy))
+                .and_then(|value| {
+                    source_release.map_or(Some(value), |release| value.checked_add(release))
+                })
                 .and_then(|value| value.checked_add(materialized.binding_wall))
                 .ok_or_else(|| anyhow!("subinterval duration overflow"))?;
             Some(
@@ -1880,12 +2368,13 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
                     .ok_or_else(|| anyhow!("subintervals exceed ready wall"))?,
             )
         }
-        (None, None, None) => None,
+        (None, None, None, None) => None,
         _ => return Err(anyhow!("partial subinterval timing is invalid")),
     };
     let allocation_wall = materialized.allocation_wall.map(duration_ms);
     let source_resolution_wall = materialized.source_resolution_wall.map(duration_ms);
     let copy_wall = materialized.copy_wall.map(duration_ms);
+    let source_release_wall = materialized.source_release_wall.map(duration_ms);
     let binding_wall = duration_ms(materialized.binding_wall);
     let allocation_us = materialized.allocation_wall.map(duration_us).transpose()?;
     let source_resolution_us = materialized
@@ -1893,6 +2382,10 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         .map(duration_us)
         .transpose()?;
     let copy_us = materialized.copy_wall.map(duration_us).transpose()?;
+    let source_release_us = materialized
+        .source_release_wall
+        .map(duration_us)
+        .transpose()?;
     let binding_us = duration_us(materialized.binding_wall)?;
     let unattributed_us = unattributed_wall.map(duration_us).transpose()?;
     let worker_count = materialized.worker_count;
@@ -1912,7 +2405,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "observed_cpu_cache": "default_cache",
         "observed_hazard_tracking": "tracked",
     });
-    let timing_json = json!({
+    let mut timing_json = json!({
         "ready_wall_ms": duration_ms(ready_wall),
         "ready_us": ready_us,
         "allocation_wall_ms": allocation_wall,
@@ -1929,6 +2422,13 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "teardown_wall_ms": duration_ms(teardown_wall),
         "teardown_us": duration_us(teardown_wall)?,
     });
+    if let (Some(wall_ms), Some(wall_us)) = (source_release_wall, source_release_us) {
+        let timing = timing_json
+            .as_object_mut()
+            .expect("timing JSON is an object");
+        timing.insert("source_release_wall_ms".to_string(), json!(wall_ms));
+        timing.insert("source_release_us".to_string(), json!(wall_us));
+    }
     let rusage_json = json!({
         "timer_minor_faults": timer_minor_faults,
         "timer_major_faults": timer_major_faults,
@@ -1943,7 +2443,67 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "billed_energy_delta_raw": proc_billed_energy,
         "serviced_energy_delta_raw": proc_serviced_energy,
     });
-    let row = json!({
+    let blit_population_json = blit_population.map(|blit| {
+        json!({
+            "schema_version": 1,
+            "order": {
+                "algorithm": "shard-offset-request-v1",
+                "count": blit.order_count,
+                "first_request_index": blit.order_first_request,
+                "last_request_index": blit.order_last_request,
+            },
+            "sources": {
+                "window_count": blit.source_window_count,
+                "window_bytes": blit.source_window_bytes,
+                "window_gap_bytes": blit.source_window_gap_bytes,
+                "fallback_count": blit.fallback_source_count,
+                "fallback_bytes": blit.fallback_source_bytes,
+                "cpu_staging_copy_bytes": blit.cpu_staging_copy_bytes,
+            },
+            "copies": {
+                "window_count": blit.window_blit_count,
+                "window_bytes": blit.window_blit_bytes,
+                "total_count": blit.blit_count,
+                "total_bytes": blit.blit_bytes,
+            },
+            "command": {
+                "buffer_count": blit.command_buffer_count,
+                "encoder_count": blit.blit_encoder_count,
+                "commit_count": blit.commit_count,
+                "wait_count": blit.wait_count,
+                "error_count": blit.command_error_count,
+                "status": if blit.command_status == MTLCommandBufferStatus::Completed {
+                    "completed"
+                } else {
+                    "unexpected"
+                },
+                "status_code": blit.command_status.0,
+                "retained_references": blit.retained_references,
+                "gpu_start_time": blit.gpu_start_time,
+                "gpu_end_time": blit.gpu_end_time,
+                "gpu_wall_ms": blit.gpu_wall_ms,
+            },
+            "release": {
+                "window_deallocator_calls": blit.source_window_deallocator_calls,
+                "window_deallocator_mismatches": blit.source_window_deallocator_mismatches,
+                "source_buffers_alive": blit.source_buffers_alive,
+                "allocated_after_destinations": blit.allocated_after_destinations,
+                "allocated_with_sources": blit.allocated_with_sources,
+                "allocated_after_source_release": blit.allocated_after_source_release,
+            },
+        })
+    });
+    let reported_parallel_schedule = if arm == ArenaFloorArm::TransientMmapBlit {
+        None
+    } else {
+        parallel_schedule
+            .as_ref()
+            .or(Some(&frozen_parallel_schedule))
+    };
+    let parallel_copy_schedule_json = reported_parallel_schedule
+        .map(|schedule| parallel_copy_schedule_json(schedule, &direct))
+        .transpose()?;
+    let mut row = json!({
         "schema_version": 2,
         "arm": arm.label(),
         "profile": profile.id.label(),
@@ -1969,7 +2529,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "logical_copy_bytes": logical_copy_bytes,
         "physical_copy_bytes": physical_bytes,
         "resource_modes": resource_modes_json,
-        "parallel_copy_schedule": parallel_copy_schedule_json(&parallel_schedule, &direct)?,
+        "parallel_copy_schedule": parallel_copy_schedule_json,
         "timing": timing_json,
         "throughput": {
             "ready_gbps_decimal": ready_gbps,
@@ -1990,6 +2550,11 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "worker_count": worker_count,
         "build_identity": build_identity,
     });
+    if let Some(blit_population_json) = blit_population_json {
+        row.as_object_mut()
+            .expect("floor row JSON is an object")
+            .insert("blit_population".to_string(), blit_population_json);
+    }
     match args.output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&row)?),
         OutputFormat::Text => {
@@ -2008,7 +2573,7 @@ mod tests {
     use super::{
         ALLOWED_DIAGNOSTIC_WORKERS, ArenaFloorArm, FROZEN_PARALLEL_COPY_WORKERS, FloorProfileId,
         GgufArenaFloorArgs, PARALLEL_COPY_ALGORITHM, minimax_partition_cuts,
-        parallel_copy_schedule, parallel_copy_schedule_json, parse_worker_count,
+        parallel_copy_schedule, parallel_copy_schedule_json, parse_worker_count, source_order,
         validate_describe_worker_scope, validate_parallel_copy_schedule, validate_worker_scope,
     };
     use clap::Parser;
@@ -2085,6 +2650,31 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn transient_mmap_blit_parser_and_scope_are_a3b_only() {
+        let args = GgufArenaFloorArgs::try_parse_from([
+            "qwen",
+            "--model",
+            "fixture.gguf",
+            "--profile",
+            "a3b-q4km-v1",
+            "--arm",
+            "transient-mmap-blit",
+        ])
+        .expect("transient mmap-blit arguments");
+        assert_eq!(args.arm, Some(ArenaFloorArm::TransientMmapBlit));
+        assert!(validate_worker_scope(args.workers, args.describe, args.arm, args.profile).is_ok());
+        assert!(
+            validate_worker_scope(
+                args.workers,
+                false,
+                args.arm,
+                Some(FloorProfileId::Dense27bQ4kmV1),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2176,6 +2766,21 @@ mod tests {
     }
 
     #[test]
+    fn source_order_is_shard_offset_then_request_index() {
+        let mut descriptors = descriptors(&[4, 4, 4, 4]);
+        descriptors[0].shard_idx = 1;
+        descriptors[0].data_offset = 0;
+        descriptors[1].shard_idx = 0;
+        descriptors[1].data_offset = 100;
+        descriptors[2].shard_idx = 0;
+        descriptors[2].data_offset = 50;
+        descriptors[3].shard_idx = 0;
+        descriptors[3].data_offset = 100;
+        let direct = descriptor_refs(&descriptors);
+        assert_eq!(source_order(&direct), [2, 1, 3, 0]);
+    }
+
+    #[test]
     fn schedule_validation_rejects_structural_and_accounting_drift() {
         let descriptors = descriptors(&[1, 2, 3, 4, 5, 6]);
         let direct = descriptor_refs(&descriptors);
@@ -2231,6 +2836,7 @@ mod tests {
             for arm in [
                 ArenaFloorArm::Copied,
                 ArenaFloorArm::ParallelCopied,
+                ArenaFloorArm::TransientMmapBlit,
                 ArenaFloorArm::ArenaSerial,
                 ArenaFloorArm::ArenaFour,
             ] {
@@ -2255,6 +2861,34 @@ mod tests {
             );
             assert!(validate_worker_scope(workers, false, None, None).is_err());
         }
+
+        assert!(
+            validate_worker_scope(
+                FROZEN_PARALLEL_COPY_WORKERS,
+                false,
+                Some(ArenaFloorArm::TransientMmapBlit),
+                Some(FloorProfileId::A3bQ4kmV1),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_worker_scope(
+                FROZEN_PARALLEL_COPY_WORKERS,
+                false,
+                Some(ArenaFloorArm::TransientMmapBlit),
+                Some(FloorProfileId::Dense27bQ4kmV1),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_worker_scope(
+                FROZEN_PARALLEL_COPY_WORKERS,
+                false,
+                Some(ArenaFloorArm::TransientMmapBlit),
+                None,
+            )
+            .is_err()
+        );
 
         for arm in [
             ArenaFloorArm::Copied,

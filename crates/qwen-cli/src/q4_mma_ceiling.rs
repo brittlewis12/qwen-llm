@@ -5,8 +5,9 @@ use qwen_llm::{
     gguf::GgufFile,
     loader::Model,
     metal::{
-        KernelEncoder, MetalContext, MetalTensor, Q4MatMatMmaCeilingArm, encode_fill_f32,
-        encode_mat_mat_q4_k_f32, encode_mat_mat_q4_k_mma_ceiling,
+        KernelEncoder, MetalContext, MetalTensor, Q4MatMatMmaCeilingArm, Q4MatMatNoDequantArm,
+        encode_fill_f32, encode_mat_mat_q4_k_f32, encode_mat_mat_q4_k_mma_ceiling,
+        encode_mat_mat_q4_k_no_dequant,
     },
     model::ArchKind,
     tensor::GgmlType,
@@ -33,10 +34,10 @@ pub struct Q4MmaCeilingArgs {
     /// Untimed warmup dispatches per arm.
     #[arg(long, default_value = "12")]
     warmups: usize,
-    /// Repetitions of all six three-arm permutations (six samples/arm each).
-    #[arg(long, default_value = "10")]
-    permutation_repeats: usize,
-    /// Runtime operand nonce for the synthetic MMA arms.
+    /// Repetitions of the ten-sequence Williams design (ten samples/arm each).
+    #[arg(long, default_value = "6")]
+    sequence_repeats: usize,
+    /// Runtime operand nonce for the synthetic attribution arms.
     #[arg(long, default_value = "1")]
     nonce: u32,
 }
@@ -44,6 +45,8 @@ pub struct Q4MmaCeilingArgs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
     Production,
+    SourceSegmentsLiveNoDequant,
+    NoSourceNoDequant,
     MmaOnly,
     MmaOnlyTgm8,
 }
@@ -52,28 +55,95 @@ impl Arm {
     fn label(self) -> &'static str {
         match self {
             Self::Production => "a_production",
+            Self::SourceSegmentsLiveNoDequant => "b_source_segments_live_no_dequant",
+            Self::NoSourceNoDequant => "c_no_source_no_dequant",
             Self::MmaOnly => "e0_mma_only",
             Self::MmaOnlyTgm8 => "e8_mma_only_tgm8_cap_matched",
         }
     }
 }
 
-const PERMUTATIONS: [[Arm; 3]; 6] = [
-    [Arm::Production, Arm::MmaOnly, Arm::MmaOnlyTgm8],
-    [Arm::Production, Arm::MmaOnlyTgm8, Arm::MmaOnly],
-    [Arm::MmaOnly, Arm::Production, Arm::MmaOnlyTgm8],
-    [Arm::MmaOnly, Arm::MmaOnlyTgm8, Arm::Production],
-    [Arm::MmaOnlyTgm8, Arm::Production, Arm::MmaOnly],
-    [Arm::MmaOnlyTgm8, Arm::MmaOnly, Arm::Production],
+const SEQUENCES: [[Arm; 5]; 10] = [
+    [
+        Arm::Production,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::MmaOnlyTgm8,
+        Arm::NoSourceNoDequant,
+        Arm::MmaOnly,
+    ],
+    [
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::NoSourceNoDequant,
+        Arm::Production,
+        Arm::MmaOnly,
+        Arm::MmaOnlyTgm8,
+    ],
+    [
+        Arm::NoSourceNoDequant,
+        Arm::MmaOnly,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::MmaOnlyTgm8,
+        Arm::Production,
+    ],
+    [
+        Arm::MmaOnly,
+        Arm::MmaOnlyTgm8,
+        Arm::NoSourceNoDequant,
+        Arm::Production,
+        Arm::SourceSegmentsLiveNoDequant,
+    ],
+    [
+        Arm::MmaOnlyTgm8,
+        Arm::Production,
+        Arm::MmaOnly,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::NoSourceNoDequant,
+    ],
+    [
+        Arm::MmaOnly,
+        Arm::NoSourceNoDequant,
+        Arm::MmaOnlyTgm8,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::Production,
+    ],
+    [
+        Arm::MmaOnlyTgm8,
+        Arm::MmaOnly,
+        Arm::Production,
+        Arm::NoSourceNoDequant,
+        Arm::SourceSegmentsLiveNoDequant,
+    ],
+    [
+        Arm::Production,
+        Arm::MmaOnlyTgm8,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::MmaOnly,
+        Arm::NoSourceNoDequant,
+    ],
+    [
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::Production,
+        Arm::NoSourceNoDequant,
+        Arm::MmaOnlyTgm8,
+        Arm::MmaOnly,
+    ],
+    [
+        Arm::NoSourceNoDequant,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::MmaOnly,
+        Arm::Production,
+        Arm::MmaOnlyTgm8,
+    ],
 ];
 
 #[derive(Debug, Serialize)]
 struct Sample {
     ordinal: usize,
     repeat: usize,
-    permutation: usize,
+    sequence: usize,
     position: usize,
-    predecessor: Option<&'static str>,
+    dispatch_predecessor: &'static str,
+    sequence_wash_in: bool,
     arm: &'static str,
     gpu_ms: f64,
     wall_ms: f64,
@@ -91,6 +161,24 @@ fn encode_arm(
 ) -> Result<()> {
     match arm {
         Arm::Production => encode_mat_mat_q4_k_f32(ctx, enc, weight, x, y, N_IN, N_OUT, N_QUERY)?,
+        Arm::SourceSegmentsLiveNoDequant => encode_mat_mat_q4_k_no_dequant(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            Q4MatMatNoDequantArm::SourceSegmentsLive,
+            nonce,
+        )?,
+        Arm::NoSourceNoDequant => encode_mat_mat_q4_k_no_dequant(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            Q4MatMatNoDequantArm::NoSource,
+            nonce,
+        )?,
         Arm::MmaOnly => {
             encode_mat_mat_q4_k_mma_ceiling(ctx, enc, y, Q4MatMatMmaCeilingArm::Pure, nonce)?
         }
@@ -144,6 +232,24 @@ fn run_dispatch(
     Ok((gpu_ms, wall_ms))
 }
 
+fn fill_tensor(ctx: &MetalContext, tensor: &MetalTensor, value: f32) -> Result<()> {
+    let cmd = ctx
+        .queue
+        .commandBuffer()
+        .context("q4 attribution fill command buffer")?;
+    let enc = KernelEncoder::begin(&cmd);
+    encode_fill_f32(ctx, &enc, tensor, value)?;
+    enc.end();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+    let status = cmd.status();
+    let error = cmd.error();
+    if status != MTLCommandBufferStatus::Completed || error.is_some() {
+        bail!("fill command failed: status={status:?} error={error:?}");
+    }
+    Ok(())
+}
+
 fn read_output(y: &MetalTensor) -> Vec<f32> {
     let n = N_QUERY * N_OUT;
     unsafe {
@@ -186,6 +292,29 @@ fn expected_mma_value(nonce: u32, output_row: usize, query_row: usize) -> f32 {
     N_IN as f32 * (a_base * a_index as f32) * (b_base * b_index as f32)
 }
 
+fn expected_no_dequant_value(nonce: u32, activation: f32) -> f32 {
+    let a_base = (1 + (nonce & 1)) as f32 / 256.0;
+    84_480.0 * a_base * activation
+}
+
+fn validate_constant_output(values: &[f32], expected: f32, arm: Arm) -> Result<()> {
+    if values.len() != N_QUERY * N_OUT {
+        bail!("{} returned {} values", arm.label(), values.len());
+    }
+    if let Some(index) = values
+        .iter()
+        .position(|value| value.to_bits() != expected.to_bits())
+    {
+        bail!(
+            "{} mismatch at output index {index}: {:?} != {:?}",
+            arm.label(),
+            values[index],
+            expected
+        );
+    }
+    Ok(())
+}
+
 fn validate_mma_output(values: &[f32], nonce: u32, arm: Arm) -> Result<()> {
     if values.len() != N_QUERY * N_OUT {
         bail!("{} returned {} values", arm.label(), values.len());
@@ -216,10 +345,28 @@ fn validate_mma_pair(
     run_dispatch(ctx, Arm::MmaOnly, weight, x, y, nonce, true)?;
     let e0 = read_output(y);
     validate_mma_output(&e0, nonce, Arm::MmaOnly)?;
+    run_dispatch(ctx, Arm::MmaOnly, weight, x, y, nonce, true)?;
+    let e0_repeat = read_output(y);
+    if let Some(index) = e0
+        .iter()
+        .zip(&e0_repeat)
+        .position(|(a, b)| a.to_bits() != b.to_bits())
+    {
+        bail!("E0 is not repeatable at output index {index}");
+    }
 
     run_dispatch(ctx, Arm::MmaOnlyTgm8, weight, x, y, nonce, true)?;
     let e8 = read_output(y);
     validate_mma_output(&e8, nonce, Arm::MmaOnlyTgm8)?;
+    run_dispatch(ctx, Arm::MmaOnlyTgm8, weight, x, y, nonce, true)?;
+    let e8_repeat = read_output(y);
+    if let Some(index) = e8
+        .iter()
+        .zip(&e8_repeat)
+        .position(|(a, b)| a.to_bits() != b.to_bits())
+    {
+        bail!("E8 is not repeatable at output index {index}");
+    }
     if let Some(index) = e0
         .iter()
         .zip(&e8)
@@ -228,6 +375,66 @@ fn validate_mma_pair(
         bail!("E0/E8 differ at output index {index} for nonce {nonce}");
     }
     Ok(e0)
+}
+
+fn validate_no_dequant_pair(
+    ctx: &MetalContext,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    nonce: u32,
+    activation: f32,
+) -> Result<Vec<f32>> {
+    let expected = expected_no_dequant_value(nonce, activation);
+    run_dispatch(
+        ctx,
+        Arm::SourceSegmentsLiveNoDequant,
+        weight,
+        x,
+        y,
+        nonce,
+        true,
+    )?;
+    let b = read_output(y);
+    validate_constant_output(&b, expected, Arm::SourceSegmentsLiveNoDequant)?;
+    run_dispatch(
+        ctx,
+        Arm::SourceSegmentsLiveNoDequant,
+        weight,
+        x,
+        y,
+        nonce,
+        true,
+    )?;
+    let b_repeat = read_output(y);
+    if let Some(index) = b
+        .iter()
+        .zip(&b_repeat)
+        .position(|(a, b)| a.to_bits() != b.to_bits())
+    {
+        bail!("B is not repeatable at output index {index}");
+    }
+
+    run_dispatch(ctx, Arm::NoSourceNoDequant, weight, x, y, nonce, true)?;
+    let c = read_output(y);
+    validate_constant_output(&c, expected, Arm::NoSourceNoDequant)?;
+    if let Some(index) = b
+        .iter()
+        .zip(&c)
+        .position(|(a, b)| a.to_bits() != b.to_bits())
+    {
+        bail!("B/C differ at output index {index}");
+    }
+    run_dispatch(ctx, Arm::NoSourceNoDequant, weight, x, y, nonce, true)?;
+    let c_repeat = read_output(y);
+    if let Some(index) = c
+        .iter()
+        .zip(&c_repeat)
+        .position(|(a, b)| a.to_bits() != b.to_bits())
+    {
+        bail!("C is not repeatable at output index {index}");
+    }
+    Ok(b)
 }
 
 fn validate_outputs(
@@ -255,6 +462,20 @@ fn validate_outputs(
         bail!("production output is not repeatable at index {index}");
     }
 
+    let bc = validate_no_dequant_pair(ctx, weight, x, y, nonce, 1.0)?;
+    let bc_alternate_nonce = nonce ^ 1;
+    let bc_alternate = validate_no_dequant_pair(ctx, weight, x, y, bc_alternate_nonce, 1.0)?;
+    if bc
+        .iter()
+        .zip(&bc_alternate)
+        .all(|(a, b)| a.to_bits() == b.to_bits())
+    {
+        bail!("nonce bit 0 did not change B/C output");
+    }
+    fill_tensor(ctx, x, 0.5)?;
+    validate_no_dequant_pair(ctx, weight, x, y, nonce, 0.5)?;
+    fill_tensor(ctx, x, 1.0)?;
+
     let e0 = validate_mma_pair(ctx, weight, x, y, nonce)?;
     let alternate_a_nonce = nonce ^ 1;
     let alternate_a = validate_mma_pair(ctx, weight, x, y, alternate_a_nonce)?;
@@ -280,9 +501,18 @@ fn validate_outputs(
         "production_nonzero": true,
         "production_repeat_bit_exact": true,
         "production_sha256": sha256_f32(&production),
+        "b_exact_analytic": true,
+        "c_exact_analytic": true,
+        "b_c_bit_exact": true,
+        "b_c_repeat_bit_exact": true,
+        "b_c_alternate_nonce": bc_alternate_nonce,
+        "b_c_nonce_changes_output": true,
+        "b_c_half_activation_exact": true,
+        "timed_activation_restored_to_one": true,
         "e0_exact_analytic": true,
         "e8_exact_analytic": true,
         "e0_e8_bit_exact": true,
+        "e_repeat_bit_exact": true,
         "nonce": nonce,
         "meaningful_nonce_bits": [0, 1],
         "alternate_a_nonce": alternate_a_nonce,
@@ -355,8 +585,8 @@ fn pipeline_row(ctx: &MetalContext, kernel: &str, dynamic_tgm_bytes: usize) -> R
 }
 
 pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
-    if args.warmups < 12 || args.permutation_repeats < 10 {
-        bail!("canonical floor requires warmups >= 12 and permutation_repeats >= 10");
+    if args.warmups != 12 || args.sequence_repeats != 6 {
+        bail!("canonical floor requires warmups=12 and sequence_repeats=6");
     }
     let n64_env = std::env::var("QWEN_MATMAT_Q4_K_N64").ok();
     if matches!(
@@ -404,11 +634,11 @@ pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
         vec![N_IN as u64, N_OUT as u64],
         GgmlType::Q4_K,
     )?;
-    let x = MetalTensor::zeros_f32(&ctx, vec![(N_QUERY * N_IN) as u64])?;
+    let x = MetalTensor::zeros_f32(&ctx, vec![N_QUERY as u64, N_IN as u64])?;
     let output_elements = N_QUERY * N_OUT;
     let y_storage =
         MetalTensor::zeros_f32(&ctx, vec![(output_elements + 2 * GUARD_ELEMENTS) as u64])?;
-    let y = y_storage.view_subrange(GUARD_ELEMENTS as u64, vec![output_elements as u64]);
+    let y = y_storage.view_subrange(GUARD_ELEMENTS as u64, vec![N_QUERY as u64, N_OUT as u64]);
 
     let init_cmd = ctx
         .queue
@@ -430,7 +660,13 @@ pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
     let validation = validate_outputs(&ctx, &weight, &x, &y, args.nonce)?;
     validate_guards(&y_storage)?;
 
-    let warmup_order = [Arm::Production, Arm::MmaOnly, Arm::MmaOnlyTgm8];
+    let warmup_order = [
+        Arm::Production,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::NoSourceNoDequant,
+        Arm::MmaOnly,
+        Arm::MmaOnlyTgm8,
+    ];
     for index in 0..args.warmups {
         for offset in 0..warmup_order.len() {
             let arm = warmup_order[(index + offset) % warmup_order.len()];
@@ -438,27 +674,29 @@ pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
         }
     }
 
-    let mut samples = Vec::with_capacity(args.permutation_repeats * PERMUTATIONS.len() * 3);
-    let mut previous_arm = None;
-    for repeat in 0..args.permutation_repeats {
-        for block in 0..PERMUTATIONS.len() {
-            let permutation = (block + repeat) % PERMUTATIONS.len();
-            let order = &PERMUTATIONS[permutation];
+    let mut samples = Vec::with_capacity(args.sequence_repeats * SEQUENCES.len() * 5);
+    for repeat in 0..args.sequence_repeats {
+        for block in 0..SEQUENCES.len() {
+            let sequence = (block + repeat) % SEQUENCES.len();
+            let order = &SEQUENCES[sequence];
+            run_dispatch(&ctx, order[0], &weight, &x, &y, args.nonce, false)?;
+            let mut previous_arm = order[0];
             for (position, &arm) in order.iter().enumerate() {
                 let (gpu_ms, wall_ms) =
                     run_dispatch(&ctx, arm, &weight, &x, &y, args.nonce, false)?;
                 samples.push(Sample {
                     ordinal: samples.len() + 1,
                     repeat: repeat + 1,
-                    permutation: permutation + 1,
+                    sequence: sequence + 1,
                     position: position + 1,
-                    predecessor: previous_arm.map(Arm::label),
+                    dispatch_predecessor: previous_arm.label(),
+                    sequence_wash_in: position == 0,
                     arm: arm.label(),
                     gpu_ms,
                     wall_ms,
                     nominal_tflops: NOMINAL_FLOPS / (gpu_ms * 1e9),
                 });
-                previous_arm = Some(arm);
+                previous_arm = arm;
             }
         }
     }
@@ -466,26 +704,42 @@ pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
 
     let metadata =
         std::fs::metadata(&args.model).with_context(|| format!("stat {}", args.model.display()))?;
-    let arms = [Arm::Production, Arm::MmaOnly, Arm::MmaOnlyTgm8];
+    let arms = [
+        Arm::Production,
+        Arm::SourceSegmentsLiveNoDequant,
+        Arm::NoSourceNoDequant,
+        Arm::MmaOnly,
+        Arm::MmaOnlyTgm8,
+    ];
     let summaries: Vec<Value> = arms
         .iter()
         .copied()
         .map(|arm| summarize(&samples, arm))
         .collect();
-    let permutations: Vec<Vec<&str>> = PERMUTATIONS
+    let sequences: Vec<Vec<&str>> = SEQUENCES
         .iter()
         .map(|order| order.iter().map(|arm| arm.label()).collect())
         .collect();
     let pipeline_rows = vec![
         pipeline_row(&ctx, "kernel_mat_mat_q4_K_f32_n64", 8192)?,
+        pipeline_row(
+            &ctx,
+            "kernel_mat_mat_q4_K_f32_n64_source_segments_live_no_dequant",
+            8192,
+        )?,
+        pipeline_row(
+            &ctx,
+            "kernel_mat_mat_q4_K_f32_n64_no_source_no_dequant",
+            8192,
+        )?,
         pipeline_row(&ctx, "kernel_mat_mat_q4_K_f32_n64_mma_ceiling", 0)?,
         pipeline_row(&ctx, "kernel_mat_mat_q4_K_f32_n64_mma_ceiling_tgm8", 8192)?,
     ];
 
     let row = json!({
-        "schema_version": 1,
-        "test": "q4_mma_ceiling",
-        "claim_scope": "production-grid synthetic MMA ceiling; no production authority",
+        "schema_version": 2,
+        "test": "q4_matmat_attribution",
+        "claim_scope": "production-grid synthetic attribution bounds; no production authority",
         "device": ctx.describe(),
         "build_identity": build_identity,
         "model": {
@@ -523,6 +777,17 @@ pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
                 "dynamic_tgm_bytes": 8192,
             },
             {
+                "label": Arm::SourceSegmentsLiveNoDequant.label(),
+                "kernel": "kernel_mat_mat_q4_K_f32_n64_source_segments_live_no_dequant",
+                "dynamic_tgm_bytes": 8192,
+                "qualification": "two aligned volatile source-segment proxies; not exact production load timing",
+            },
+            {
+                "label": Arm::NoSourceNoDequant.label(),
+                "kernel": "kernel_mat_mat_q4_K_f32_n64_no_source_no_dequant",
+                "dynamic_tgm_bytes": 8192,
+            },
+            {
                 "label": Arm::MmaOnly.label(),
                 "kernel": "kernel_mat_mat_q4_K_f32_n64_mma_ceiling",
                 "dynamic_tgm_bytes": 0,
@@ -537,10 +802,11 @@ pub fn run(args: Q4MmaCeilingArgs, build_identity: Value) -> Result<()> {
         "pipeline_reflection": pipeline_rows,
         "measurement": {
             "warmups_per_arm": args.warmups,
-            "permutation_repeats": args.permutation_repeats,
-            "samples_per_arm": args.permutation_repeats * PERMUTATIONS.len(),
-            "permutations": permutations,
-            "permutation_order": "all six permutations, rotated by repeat",
+            "sequence_repeats": args.sequence_repeats,
+            "samples_per_arm": args.sequence_repeats * SEQUENCES.len(),
+            "sequences": sequences,
+            "sequence_order": "ten-sequence Williams design, rotated by repeat",
+            "unscored_wash_in": "one first-arm dispatch before every sequence",
             "nonce": args.nonce,
             "qwen_matmat_q4_k_n64_env": n64_env,
             "one_dispatch_per_command_buffer": true,
@@ -567,10 +833,19 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn permutations_balance_position_and_predecessor() {
+    fn williams_sequences_balance_position_and_predecessor() {
+        let arms = [
+            Arm::Production,
+            Arm::SourceSegmentsLiveNoDequant,
+            Arm::NoSourceNoDequant,
+            Arm::MmaOnly,
+            Arm::MmaOnlyTgm8,
+        ];
         let mut positions = BTreeMap::new();
         let mut predecessors = BTreeMap::new();
-        for order in PERMUTATIONS {
+        let mut first = BTreeMap::new();
+        for order in SEQUENCES {
+            *first.entry(order[0].label()).or_insert(0usize) += 1;
             for (position, arm) in order.into_iter().enumerate() {
                 *positions.entry((arm.label(), position)).or_insert(0usize) += 1;
                 if position > 0 {
@@ -580,13 +855,14 @@ mod tests {
                 }
             }
         }
-        for arm in [Arm::Production, Arm::MmaOnly, Arm::MmaOnlyTgm8] {
-            for position in 0..3 {
+        for arm in arms {
+            assert_eq!(first[arm.label()], 2);
+            for position in 0..5 {
                 assert_eq!(positions[&(arm.label(), position)], 2);
             }
         }
-        for predecessor in [Arm::Production, Arm::MmaOnly, Arm::MmaOnlyTgm8] {
-            for arm in [Arm::Production, Arm::MmaOnly, Arm::MmaOnlyTgm8] {
+        for predecessor in arms {
+            for arm in arms {
                 if predecessor != arm {
                     assert_eq!(predecessors[&(predecessor.label(), arm.label())], 2);
                 }
@@ -610,5 +886,8 @@ mod tests {
             expected_mma_value(1, 0, 0).to_bits(),
             expected_mma_value(1 ^ 1, 0, 0).to_bits()
         );
+        assert_eq!(expected_no_dequant_value(0, 1.0), 330.0);
+        assert_eq!(expected_no_dequant_value(1, 1.0), 660.0);
+        assert_eq!(expected_no_dequant_value(1, 0.5), 330.0);
     }
 }

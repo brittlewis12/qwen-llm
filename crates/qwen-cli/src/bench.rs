@@ -503,7 +503,7 @@ enum Cmd {
     MoeBatchSweep(MoeBatchSweepArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
-    /// Bound the production-grid Q4_K N64 schedule with synthetic MMA-only arms.
+    /// Attribute the production-grid Q4_K N64 schedule with synthetic bounds.
     Q4MmaCeiling(q4_mma_ceiling::Q4MmaCeilingArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),

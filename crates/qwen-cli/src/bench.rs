@@ -20,6 +20,7 @@ mod attn_capture;
 mod attn_stage_floor;
 mod gguf_arena_floor;
 mod messages;
+mod q4_mma_ceiling;
 #[path = "../source_identity.rs"]
 mod source_identity;
 
@@ -502,6 +503,8 @@ enum Cmd {
     MoeBatchSweep(MoeBatchSweepArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
+    /// Bound the production-grid Q4_K N64 schedule with synthetic MMA-only arms.
+    Q4MmaCeiling(q4_mma_ceiling::Q4MmaCeilingArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),
     /// Report Metal compute-pipeline resource hints for hot kernels.
@@ -2755,6 +2758,9 @@ fn main() -> Result<()> {
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
         Cmd::Roofline(a) => run_roofline(a),
+        Cmd::Q4MmaCeiling(a) => {
+            q4_mma_ceiling::run(a, serde_json::to_value(recorded_build_identity())?)
+        }
         Cmd::MetalCounters(a) => run_metal_counters(a),
         Cmd::MetalPipelines(a) => run_metal_pipelines(a),
         Cmd::TopologyProbe(a) => run_topology_probe(a),

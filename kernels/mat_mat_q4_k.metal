@@ -711,6 +711,92 @@ kernel void kernel_mat_mat_q4_K_f32_n64(
 }
 
 // =============================================================================
+// Bench-only N64 MMA ceilings.
+//
+// These kernels preserve the production N64 grid, simdgroup topology, K loop,
+// half-input/float-accumulator MMA shape, and direct stores while removing all
+// source traffic. No production selector names these diagnostic entry points.
+// The pure arm has no threadgroup-memory argument. The tgm8 arm makes both ends
+// of an 8192-byte dynamic allocation live once before entering the shared MMA
+// core; it matches the production TGM capacity constraint, not its occupancy.
+
+inline half q4_k_n64_mma_a_base(constant uint & nonce) {
+    return (half)((float)(1u + (nonce & 1u)) * (1.0f / 256.0f));
+}
+
+inline half q4_k_n64_mma_b_base(constant uint & nonce) {
+    return (half)((float)(1u + ((nonce >> 1) & 1u)) * (1.0f / 256.0f));
+}
+
+__attribute__((always_inline)) inline void mat_mat_q4_K_f32_n64_mma_ceiling_core(
+        constant mat_mat_q4k_args & args,
+        device float              * dst,
+        half                        a_base,
+        half                        b_base,
+        uint3                       tgpig,
+        ushort                      sgitg) {
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_SPECIAL_N64;
+
+    simdgroup_half8x8  ma[4];
+    simdgroup_half8x8  mb[2];
+    simdgroup_float8x8 mc[8];
+
+    FOR_UNROLL (short i = 0; i < 4; ++i) {
+        ma[i] = make_filled_simdgroup_matrix<half, 8>(a_base * (half)(i + 1));
+    }
+    FOR_UNROLL (short i = 0; i < 2; ++i) {
+        mb[i] = make_filled_simdgroup_matrix<half, 8>(b_base * (half)(i + 1));
+    }
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        FOR_UNROLL (short ik = 0; ik < NK_MM / 8; ++ik) {
+            FOR_UNROLL (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+        }
+    }
+
+    device float * C = dst + (r0 + 32 * (sgitg & 1))
+                           + (r1 + 16 * (sgitg >> 1)) * args.M;
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * args.M * (i / 4),
+                        args.M, 0, false);
+    }
+}
+
+kernel void kernel_mat_mat_q4_K_f32_n64_mma_ceiling(
+        constant mat_mat_q4k_args & args  [[buffer(0)]],
+        device float              * dst   [[buffer(3)]],
+        constant uint             & nonce [[buffer(4)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    mat_mat_q4_K_f32_n64_mma_ceiling_core(
+        args, dst, q4_k_n64_mma_a_base(nonce), q4_k_n64_mma_b_base(nonce),
+        tgpig, sgitg);
+}
+
+kernel void kernel_mat_mat_q4_K_f32_n64_mma_ceiling_tgm8(
+        constant mat_mat_q4k_args & args  [[buffer(0)]],
+        device float              * dst   [[buffer(3)]],
+        constant uint             & nonce [[buffer(4)]],
+        threadgroup half          * pad   [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    if (tiitg == 0) {
+        pad[0] = q4_k_n64_mma_a_base(nonce);
+        pad[4095] = q4_k_n64_mma_b_base(nonce);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    mat_mat_q4_K_f32_n64_mma_ceiling_core(
+        args, dst, pad[0], pad[4095], tgpig, sgitg);
+}
+
+// =============================================================================
 // kernel_mat_mat_q4_K_f32_n16_v2 — H5.6 M2a skinny-N retune.
 //
 // v0.443 accounting: the n16 kernel above (and the generic tile) runs
@@ -920,4 +1006,3 @@ kernel void kernel_mat_mat_q4_K_f32_n16_v2(
         }
     }
 }
-

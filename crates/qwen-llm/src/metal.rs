@@ -5663,6 +5663,127 @@ pub fn encode_mat_mat_q4_k_f32(
     Ok(())
 }
 
+/// Bench-only production-grid Q4_K N64 MMA ceiling arms.
+///
+/// These are not model-forward implementations. They retain the exact v0.606
+/// `[5120, 17408] x N=1024` grid, MMA count, FP32 accumulators, and stores while
+/// removing all weight and activation traffic. `Tgm8CapMatched` makes both ends
+/// of an 8192-byte dynamic threadgroup allocation live once before the MMA loop;
+/// it matches that capacity constraint, not production occupancy.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Q4MatMatMmaCeilingArm {
+    Pure,
+    Tgm8CapMatched,
+}
+
+impl Q4MatMatMmaCeilingArm {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pure => "e0_mma_only",
+            Self::Tgm8CapMatched => "e8_mma_only_tgm8_cap_matched",
+        }
+    }
+
+    fn kernel_name(self) -> &'static str {
+        match self {
+            Self::Pure => "kernel_mat_mat_q4_K_f32_n64_mma_ceiling",
+            Self::Tgm8CapMatched => "kernel_mat_mat_q4_K_f32_n64_mma_ceiling_tgm8",
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn encode_mat_mat_q4_k_mma_ceiling(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    y: &MetalTensor,
+    arm: Q4MatMatMmaCeilingArm,
+    nonce: u32,
+) -> Result<(), MetalError> {
+    const N_IN: usize = 5120;
+    const N_OUT: usize = 17408;
+    const N_QUERY: usize = 1024;
+
+    if y.dtype != GgmlType::F32 || !y.is_writable() {
+        return Err(MetalError::BadShape {
+            kernel: arm.kernel_name(),
+            detail: format!(
+                "y must be writable F32, got dtype={:?} provenance={:?}",
+                y.dtype,
+                y.provenance()
+            ),
+        });
+    }
+    if y.n_elements() as usize != N_QUERY * N_OUT {
+        return Err(MetalError::BadShape {
+            kernel: arm.kernel_name(),
+            detail: format!(
+                "y.n_elements={} != fixed n_query*n_out={}",
+                y.n_elements(),
+                N_QUERY * N_OUT
+            ),
+        });
+    }
+    let y_end = y
+        .offset
+        .checked_add(y.n_bytes())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: arm.kernel_name(),
+            detail: "y byte range overflows u64".to_string(),
+        })?;
+    if y_end > y.buffer.length() as u64 {
+        return Err(MetalError::BadShape {
+            kernel: arm.kernel_name(),
+            detail: format!(
+                "y byte end {y_end} exceeds buffer length {}",
+                y.buffer.length()
+            ),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+
+    let pso = ctx.pipeline(arm.kernel_name())?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: N_OUT as u32,
+            n: N_QUERY as u32,
+            k: N_IN as u32,
+            nb01: ((N_IN / 256) * 144) as u32,
+            stride_b: N_IN as u32,
+        },
+    );
+    enc.set_tensor(3, y);
+    enc.set_bytes(4, &nonce);
+    if arm == Q4MatMatMmaCeilingArm::Tgm8CapMatched {
+        enc.set_threadgroup_memory(0, 8192);
+    }
+    enc.dispatch(
+        MTLSize {
+            width: N_QUERY / 64,
+            height: N_OUT / 64,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Fused SwiGLU FFN dispatch for Q4_K weights.
 ///
 /// Replaces the 3-dispatch sequence:

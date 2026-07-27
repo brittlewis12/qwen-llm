@@ -907,14 +907,16 @@ cache-warm worker-count tuning without W5/W7, QoS, relaxed-CPU, storage-cold, Au
 or production authority. The next independently justified candidate changes the
 population primitive rather than buying wall time with more CPU.
 
-1. **Transient mmap-source to independent-Shared blit floor**: compare current
-   direct destination pread with a transient retained source and 733 independent
-   Shared destinations. Stop below `112 ms` ready-wall saving and exclude
-   `StorageModePrivate`, sidecar format, and loaded-policy changes. The threshold
-   is inherited from v0.619-v0.620 as a portfolio gate, not a measured blit MDE.
-   v0.635 does not price this population primitive: it changes destination length,
-   not source or copy mechanism. Belief medium, difficulty M.
-2. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
+v0.643 tests that next population primitive and seals inconclusive at P1 B after
+one timer-local major fault. No scoring or successor is authorized. The bounded
+prefix is directionally poor: A/B ready walls are `530.984/542.067 ms`, while B's
+`90.627 ms` GPU interval sits inside `538.971 ms` of copy wall. The clean source-
+lifetime proof and complete residency do not attribute the fault or the remaining
+`448.344 ms`. Close this transient-source Shared-destination floor. Any reopen
+requires a changed, independently justified diagnostic premise that attributes
+major faults and separates command encoding, queueing, and GPU execution.
+
+1. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
    materialization idea with named production-grid ablations: A production; B
    deterministic initialized tile writes with dequant ALU removed but quant loads
    kept observably live; C removes those global loads; D is included only if a
@@ -927,22 +929,22 @@ population primitive rather than buying wall time with more CPU.
    packing or generic no-dequant work. `<=14.7 TFLOP/s` MMA-only closes the lane;
    any faster result still needs a named charged `>=1.133x` gate/up prediction.
    Information value high, payoff belief unknown, difficulty S-M.
-3. **Production GPU argmax contract**: three product paths still copy 993,280
+2. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes and scan 248,320 logits on CPU. Reconcile highest-index CPU ties and NaN
    ordering with lowest-finite-index GPU semantics, then wire all call sites
    behind an explicit low-complexity 1% gate. Existing MoE gain is `1.0-1.5%`
    and dense is neutral. Belief high on small work removal, difficulty S-M.
-4. **A10B cold residency plus split-copy floor**: proceed only if the heavy
+3. **A10B cold residency plus split-copy floor**: proceed only if the heavy
    anchor remains deployment-relevant. First adjudicate the bit-exact native
    embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
    three-shard topology-preserving population floor. Belief high on memory,
    medium on copy wall, difficulty M-L.
-5. **Grammar run and admissible-row oracle**: replay real structured traces and
+4. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
    `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
    positive at current N8 cost. Contract-exact, belief medium-low until traces
    exist, difficulty S oracle/M product.
-6. **High-ceiling structural options**: true-long attention needs a source-free
+5. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -1009,19 +1011,17 @@ automatic retained use stay copied without separate evidence.
 v0.640 banks exact-27B deferred restore behind its existing explicit environment
 control. It is no longer an active experiment; keep `decode` as the default.
 
-1. Run the transient-source Shared-destination blit floor as an independent
-   population-primitive test. Keep Private storage, sidecar format, and
-   write-combined destinations separate.
-2. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
+1. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
    hardened Q4 ladder before any new dense-prefill representation. Treat a low
    MMA-only ceiling as a valuable closure.
-3. Decide whether A10B is a current deployment target. If yes, its native-
+2. Decide whether A10B is a current deployment target. If yes, its native-
    embedding/split-copy floor moves ahead of GPU argmax; otherwise reconcile
    argmax semantics first, then run grammar traces.
-4. Keep prompt reduction explicitly input-changing. Keep true-long attention,
+3. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
-5. Do not resume the closed page-rounded image route, broad topology attribution,
+4. Do not resume the closed page-rounded image route, transient mmap-source
+   Shared-destination blits, broad topology attribution,
    generic command-graph or compiler work, retained-view retunes, broad external
    drafting, matrix/compressed attention, sparse retrieval, routed-tail work,
    generic packed GDN, mixed quant, broad prompt lookup, or local retuning without
@@ -1055,7 +1055,12 @@ control. It is no longer an active experiment; keep `decode` as the default.
   direct-pread Auto population and redundant-prefetch suppression. v0.642 measures
   the cache-warm worker-count knee: W6/W8 clear the 60 ms wall gate but fail the
   frozen CPU guard, so that tuning is closed with no storage-cold successor or
-  production authority. v0.603 clears the dense-27B same-topology floor;
+  production authority. v0.643 then stops its changed transient mmap-source blit
+  floor inconclusive on one timer-local major fault at P1 B. Its bounded row is
+  slower and exposes `448.344 ms` outside reported GPU execution, but authorizes
+  neither a mechanism miss nor causal fault attribution. Reopen only with a
+  changed diagnostic premise that independently measures those terms. v0.603
+  clears the dense-27B same-topology floor;
   v0.626-v0.627 add exact full state and cache-warm fresh transfer under direct
   pread; v0.628-v0.629 clear default-ColdOnly target-file-cold composition.
   v0.630-v0.634 close dense explicit force admission. The terminal packet is

@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-27 - v0.643 A3B Transient Mmap-Blit Inconclusive
+
+Status: sealed `inconclusive` with `authority=none`, two of 12 sole attempts,
+zero scoring, and `successor_authorization=none`. The current transient
+mmap-source to independent-Shared-destination mechanism-floor premise is closed.
+
+- The packet executes exactly P1 A then B and stops after B reports
+  `timer_major_faults=1`. Both children exit zero, authenticate and exactly reap
+  their process groups, preserve complete source residency, pass correctness and
+  topology contracts, and show no fatal host/VM/resource/signal defect. No retry,
+  replacement, P2 conditioning, or inspection break occurs.
+- A W4 pread reports `ready=530.984 ms`, `copy=528.360 ms`, timer-local CPU
+  `2098.103 ms`, and zero timer-major faults. B reports `ready=542.067 ms`,
+  `copy=538.971 ms`, timer-local CPU `451.027 ms`, and one timer-major fault.
+  The bounded P1 delta is `A-B=-11.083 ms`; B/A ready is `1.020873x`, CPU
+  `0.214969x`, RSS `1.000103x`, and footprint `1.008000x`. These are descriptive
+  single-pair observations, not a mechanism miss, median, or order effect.
+- B's source-lifetime proof is clean: retained references, one exact mmap-window
+  deallocator call, zero geometry mismatches, and zero live source buffers. Its
+  allocation counter drops by the source-window size, but that remains telemetry.
+- B's GPU interval is `90.627 ms` inside a `538.971 ms` copy phase, leaving
+  `448.344 ms` outside reported GPU execution. Encoding, driver/submission,
+  queueing, synchronization, completion, and coherence/residency handling remain
+  coupled; whole-ready CPU cannot be subtracted as an independent term.
+- The single timer-local major fault is unattributed. Full mincore residency and
+  zero VM/pageout/block-input changes do not localize it, and it does not prove
+  that transient source wiring intrinsically faults. It invalidates B, stops the
+  packet, and forbids scoring.
+- Close this exact population premise without a retry or relaxed fault gate. A
+  reopen requires an independently justified changed diagnostic premise with
+  explicit fault attribution and command/queue/GPU interval decomposition.
+  Private storage, sidecar images, and production policy remain separate.
+
+Artifact: `target/profiles/v0643-a3b-transient-mmap-blit-floor-p1/`. Source:
+`e69df14`; implementation: `d859345`. Decision/inventory/completion/attempts/
+lifecycle seals: `43c24861...` / `fa86d923...` / `68e88f40...` /
+`ba3db094...` / `5ba3fc38...`. Independent adversarial review: `cx` session
+`019fa4ab-3694-71d2-b975-3f3173454ce0`.
+
 ## 2026-07-26 - v0.642 A3B Pread Worker Screen KILL
 
 Status: sealed valid `warm-worker-screen-miss` / `KILL` with `authority=none`,

@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-26 - v0.642 A3B Pread Worker Screen KILL
+
+Status: sealed valid `warm-worker-screen-miss` / `KILL` with `authority=none`,
+36/36 valid sole attempts, no winner, and `successor_authorization=none`.
+Cache-warm A3B destination-pread worker-count tuning is closed.
+
+- The complete six-row Williams packet executes each `W={1,2,4,6,8,12}` once
+  in every position with no retry, replacement, pooling, resume, or signal event.
+  All children preserve full model residency, zero block input/swaps/timer-major
+  faults, clean fatal VM/host gates, exact schedules and Shared topology, and
+  verify all 733 resources and all `22,123,538,944` payload bytes. The constant 89
+  whole-process major faults remain retained advisory evidence only.
+- Median ready walls for W1/W2/W4/W6/W8/W12 are
+  `1522.365/887.581/534.123/403.471/405.615/626.194 ms`; median throughput is
+  `14.53/24.93/41.42/54.83/54.54/35.33 GB/s`. The unchanged work/topology scales
+  usefully through about six workers, plateaus at eight, and reverses at twelve.
+- Relative to paired W4, W6 has `D=130500.5 us`, before/after-W4 medians
+  `125992/132398 us`, and wins 6/6. W8 has `D=128508 us`, before/after
+  `130872/126144 us`, and also wins 6/6. Both clear every wall gate.
+- Neither qualifies: paired median timer-local CPU is `1.1237615x` for W6 and
+  `1.5036309x` for W8 versus the inclusive `<=1.10x` guard. W6's row-5
+  `1.2867305x` excursion is not the cause; its two center ratios are
+  `1.1237384/1.1237847`. W12 is both slower (`D=-92071.5 us`) and
+  `3.4739335x` CPU. W1/W2 are slower by `987478.5/350152.5 us`.
+- This establishes a concurrency knee, not its specific kernel/VM/memory-system
+  cause. It authorizes no W5/W7 probe, CPU-policy relaxation, QoS experiment,
+  cache-cold transfer, Auto change, or production winner. The wall gain is real
+  and recorded; the frozen portfolio gate rejects buying it with the measured CPU.
+- The independently justified next population candidate is the transient
+  mmap-source to 733 independent Shared-destination blit floor. It targets the
+  population primitive and CPU burden rather than reopening worker count.
+
+Artifact:
+`target/profiles/v0642-a3b-pread-worker-screen-fault-repair-p1/`. Source:
+`e724855`; implementation: `1b8dd17`. Decision/inventory/completion/attempts/
+lifecycle seals: `32ef0487...` / `13e2c372...` / `1f316553...` /
+`4b717758...` / `b4a99b8a...`. Independent adversarial review: `cx` session
+`019f9f74-2a70-7010-98ea-04cda6bba951`.
+
 ## 2026-07-26 - v0.641 A3B Pread Worker Screen Inconclusive
 
 Status: sealed `inconclusive` with `authority=none`, one invalid W1 child, zero

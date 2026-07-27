@@ -711,14 +711,13 @@ kernel void kernel_mat_mat_q4_K_f32_n64(
 }
 
 // =============================================================================
-// Bench-only N64 MMA ceilings.
+// Bench-only N64 no-dequant attribution arms.
 //
-// These kernels preserve the production N64 grid, simdgroup topology, K loop,
-// half-input/float-accumulator MMA shape, and direct stores while removing all
-// source traffic. No production selector names these diagnostic entry points.
-// The pure arm has no threadgroup-memory argument. The tgm8 arm makes both ends
-// of an 8192-byte dynamic allocation live once before entering the shared MMA
-// core; it matches the production TGM capacity constraint, not its occupancy.
+// Both arms preserve production activation traffic, threadgroup staging,
+// barriers, simdgroup loads, MMA shape, accumulators, and stores. The source-
+// live arm replaces dequantization with volatile reads of the two aligned
+// 16-byte source segments each dequant call logically needs. The no-source arm
+// removes those reads. Both stage the same runtime-derived finite A tile.
 
 inline half q4_k_n64_mma_a_base(constant uint & nonce) {
     return (half)((float)(1u + (nonce & 1u)) * (1.0f / 256.0f));
@@ -727,6 +726,176 @@ inline half q4_k_n64_mma_a_base(constant uint & nonce) {
 inline half q4_k_n64_mma_b_base(constant uint & nonce) {
     return (half)((float)(1u + ((nonce >> 1) & 1u)) * (1.0f / 256.0f));
 }
+
+__attribute__((always_inline)) inline void q4_k_touch_source_segments(
+        device const uchar * x_ptr,
+        short                il) {
+    const short q_offset = 16 + (il / 4) * 32 + 16 * (il & 1);
+    device const volatile uint4 * header_ptr =
+        reinterpret_cast<device const volatile uint4 *>(x_ptr);
+    device const volatile uint4 * q_ptr =
+        reinterpret_cast<device const volatile uint4 *>(x_ptr + q_offset);
+    const uint4 header_live = header_ptr[0];
+    const uint4 q_live = q_ptr[0];
+    (void)header_live;
+    (void)q_live;
+}
+
+template <bool TouchSource>
+__attribute__((always_inline)) inline void mat_mat_q4_K_f32_n64_no_dequant_core(
+        constant mat_mat_q4k_args & args,
+        device const uchar        * srcA,
+        device const float        * srcB,
+        device float              * dst,
+        constant uint             & nonce,
+        threadgroup uchar         * shmem,
+        uint3                       tgpig,
+        ushort                      tiitg,
+        ushort                      sgitg) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const int r0 = tgpig.y * NR0_MM;
+    const int r1 = tgpig.x * NR1_SPECIAL_N64;
+
+    const bool load_a = tiitg < N_THREADS_MM;
+    const short a_t = (short)(tiitg & (N_THREADS_MM - 1));
+    const short lr0 = a_t / NL0_MM;
+    const short il0 = a_t % NL0_MM;
+    short il = il0;
+
+    const short lr1 = (short)tiitg / NL1_MM;
+    const short iy = 8 * (tiitg % NL1_MM);
+
+    const short offset1 = il0 / Q4K_NL;
+    device const uchar * x_ptr = srcA + (ulong)args.nb01 * (r0 + lr0)
+                                       + (ulong)offset1 * Q4K_BYTES;
+    device const float * y_ptr = srcB + (ulong)args.stride_b * (r1 + lr1)
+                                       + (ulong)iy;
+
+    simdgroup_half8x8  ma[4];
+    simdgroup_half8x8  mb[2];
+    simdgroup_float8x8 mc[8];
+
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    const half a_base = q4_k_n64_mma_a_base(nonce);
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
+        half4x4 temp_a;
+        if (load_a) {
+            if (TouchSource) {
+                q4_k_touch_source_segments(x_ptr, il);
+            }
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
+                temp_a[i / 4][i % 4] =
+                    a_base * (half)(1 + i + 16 * il0);
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (load_a) {
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (a_t / NL0_MM) / 8;
+                const short lx = (a_t / NL0_MM) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
+            }
+        }
+
+        {
+            const short sx = (tiitg % NL1_MM);
+            const short sy = (tiitg / NL1_MM) / 8;
+            const short ly = (tiitg / NL1_MM) % 8;
+            const short ib = 8 * sx + sy;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        il = (il + 2 < Q4K_NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2)
+                  ? x_ptr + Q4K_BYTES * ((2 + Q4K_NL - 1) / Q4K_NL)
+                  : x_ptr;
+        y_ptr += NK_MM;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = (sa + 4 * 64 * (sgitg & 1));
+        threadgroup const half * lsmb = (sb + 2 * 64 * (sgitg >> 1));
+
+        FOR_UNROLL (short ik = 0; ik < NK_MM / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+
+            lsma += 8 * 64;
+            lsmb += 8 * 64;
+        }
+    }
+
+    device float * C = dst + (r0 + 32 * (sgitg & 1))
+                           + (r1 + 16 * (sgitg >> 1)) * args.M;
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * args.M * (i / 4),
+                        args.M, 0, false);
+    }
+}
+
+kernel void kernel_mat_mat_q4_K_f32_n64_source_segments_live_no_dequant(
+        constant mat_mat_q4k_args & args   [[buffer(0)]],
+        device const uchar        * srcA   [[buffer(1)]],
+        device const float        * srcB   [[buffer(2)]],
+        device float              * dst    [[buffer(3)]],
+        constant uint             & nonce  [[buffer(4)]],
+        threadgroup uchar         * shmem  [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    mat_mat_q4_K_f32_n64_no_dequant_core<true>(
+        args, srcA, srcB, dst, nonce, shmem, tgpig, tiitg, sgitg);
+}
+
+kernel void kernel_mat_mat_q4_K_f32_n64_no_source_no_dequant(
+        constant mat_mat_q4k_args & args   [[buffer(0)]],
+        device const uchar        * srcA   [[buffer(1)]],
+        device const float        * srcB   [[buffer(2)]],
+        device float              * dst    [[buffer(3)]],
+        constant uint             & nonce  [[buffer(4)]],
+        threadgroup uchar         * shmem  [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    mat_mat_q4_K_f32_n64_no_dequant_core<false>(
+        args, srcA, srcB, dst, nonce, shmem, tgpig, tiitg, sgitg);
+}
+
+// =============================================================================
+// Bench-only N64 MMA ceilings.
+//
+// These kernels preserve the production N64 grid, simdgroup topology, K loop,
+// half-input/float-accumulator MMA shape, and direct stores while removing all
+// source traffic. No production selector names these diagnostic entry points.
+// The pure arm has no threadgroup-memory argument. The tgm8 arm makes both ends
+// of an 8192-byte dynamic allocation live once before entering the shared MMA
+// core; it matches the production TGM capacity constraint, not its occupancy.
 
 __attribute__((always_inline)) inline void mat_mat_q4_K_f32_n64_mma_ceiling_core(
         constant mat_mat_q4k_args & args,

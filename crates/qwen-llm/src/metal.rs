@@ -5784,6 +5784,148 @@ pub fn encode_mat_mat_q4_k_mma_ceiling(
     Ok(())
 }
 
+/// Bench-only production-grid Q4_K N64 no-dequant attribution arms.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Q4MatMatNoDequantArm {
+    SourceSegmentsLive,
+    NoSource,
+}
+
+impl Q4MatMatNoDequantArm {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SourceSegmentsLive => "b_source_segments_live_no_dequant",
+            Self::NoSource => "c_no_source_no_dequant",
+        }
+    }
+
+    fn kernel_name(self) -> &'static str {
+        match self {
+            Self::SourceSegmentsLive => {
+                "kernel_mat_mat_q4_K_f32_n64_source_segments_live_no_dequant"
+            }
+            Self::NoSource => "kernel_mat_mat_q4_K_f32_n64_no_source_no_dequant",
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn encode_mat_mat_q4_k_no_dequant(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    arm: Q4MatMatNoDequantArm,
+    nonce: u32,
+) -> Result<(), MetalError> {
+    const N_IN: usize = 5120;
+    const N_OUT: usize = 17408;
+    const N_QUERY: usize = 1024;
+
+    if weight.dtype != GgmlType::Q4_K
+        || weight.shape.as_slice() != [N_IN as u64, N_OUT as u64]
+        || weight.offset % 16 != 0
+    {
+        return Err(MetalError::BadShape {
+            kernel: arm.kernel_name(),
+            detail: format!(
+                "weight must be aligned Q4_K [{N_IN},{N_OUT}], got dtype={:?} shape={:?} offset={}",
+                weight.dtype, weight.shape, weight.offset
+            ),
+        });
+    }
+    if x.dtype != GgmlType::F32
+        || x.shape.as_slice() != [N_QUERY as u64, N_IN as u64]
+        || x.offset % 16 != 0
+    {
+        return Err(MetalError::BadShape {
+            kernel: arm.kernel_name(),
+            detail: format!(
+                "x must be 16-byte-aligned F32 [{N_QUERY},{N_IN}], got dtype={:?} shape={:?} offset={}",
+                x.dtype, x.shape, x.offset
+            ),
+        });
+    }
+    if y.dtype != GgmlType::F32
+        || !y.is_writable()
+        || y.shape.as_slice() != [N_QUERY as u64, N_OUT as u64]
+        || y.offset % 4 != 0
+    {
+        return Err(MetalError::BadShape {
+            kernel: arm.kernel_name(),
+            detail: format!(
+                "y must be aligned writable F32 [{N_QUERY},{N_OUT}], got dtype={:?} shape={:?} offset={} provenance={:?}",
+                y.dtype,
+                y.shape,
+                y.offset,
+                y.provenance()
+            ),
+        });
+    }
+    for (label, tensor) in [("weight", weight), ("x", x), ("y", y)] {
+        let end =
+            tensor
+                .offset
+                .checked_add(tensor.n_bytes())
+                .ok_or_else(|| MetalError::BadShape {
+                    kernel: arm.kernel_name(),
+                    detail: format!("{label} byte range overflows u64"),
+                })?;
+        if end > tensor.buffer.length() as u64 {
+            return Err(MetalError::BadShape {
+                kernel: arm.kernel_name(),
+                detail: format!(
+                    "{label} byte end {end} exceeds buffer length {}",
+                    tensor.buffer.length()
+                ),
+            });
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+
+    let pso = ctx.pipeline(arm.kernel_name())?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: N_OUT as u32,
+            n: N_QUERY as u32,
+            k: N_IN as u32,
+            nb01: ((N_IN / 256) * 144) as u32,
+            stride_b: N_IN as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_bytes(4, &nonce);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: N_QUERY / 64,
+            height: N_OUT / 64,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Fused SwiGLU FFN dispatch for Q4_K weights.
 ///
 /// Replaces the 3-dispatch sequence:

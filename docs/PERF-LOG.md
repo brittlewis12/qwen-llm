@@ -6,6 +6,53 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-27 - v0.644 Dense-Q4 Source/Dequant Attribution Closure
+
+Status: sealed `CLOSE_TESTED_BC_ABLATION_LANE` with `authority=closure-only`.
+The semantic source/dequant designs represented by the tested N64 organization
+are closed; no production, default, implementation, retry, or successor authority
+follows.
+
+- The one-shot packet completes with 66 inventoried artifacts, no failure file,
+  exact clean source/build/runtime `a02cc49`, unchanged pre/post model and binary
+  hashes, valid static/correctness/guard gates, and three identical quiet snapshots:
+  96% free memory, no competitors, and no thermal or performance warning.
+- Fresh production A is healthy at `13.807170 ms` / `13.220385` nominal TFLOP/s
+  from mean GPU time, or `0.999881665x` v0.606's `13.22195` anchor. B/C/E0/E8
+  means are `13.285232/12.901128/11.624201/11.485678 ms`.
+- Sixty complete five-arm blocks give A/B `1.039287`
+  (`1.039099-1.039475`), B/C `1.029773` (`1.029608-1.029938`), and A/C
+  `1.070230` (`1.070054-1.070405`). Achieved relative resolution is
+  `0.01796-0.02370%` across all five contrasts, far inside the frozen `0.5%`
+  gate.
+- Both `UCB(A/B)=1.039475` and `UCB(A/C)=1.070405` remain below the charged
+  `1.132304x` primitive gate. Under the frozen `f=0.4075395` gate/up share, A/B
+  and A/C project only `1.01565x/1.02748x` ideal whole-prefill movement versus
+  the required `1.05x`.
+- B's two aligned volatile source reads have dead results. A/B therefore bounds
+  the complete synthetic intervention, not exact dequant cost. B/C proves those
+  transaction proxies are material in this organization, not that production
+  source traffic costs exactly `2.98%`; production dependencies, cache/DRAM
+  service, overlap, CSE, and critical-path placement differ.
+- C/E0 and C/E8 are `1.109851x/1.123236x`, but these arms jointly change
+  activation traffic, staging, barriers, and simdgroup-load organization. E8 is
+  about `1.01206x` faster than E0 despite adding a live TGM endpoint and barrier.
+  Do not add non-isomorphic deltas, infer a barrier/TGM benefit, or chase E
+  direction.
+- Close local semantic dequant and combined source/dequant designs represented by
+  the tested N64 organization. Exact source timing, representation changes, and a
+  changed work unit/topology remain untested. Reopen only for a named race-free
+  real-Q4 design with complete charged costs and a conservative `>=1.133x`
+  primitive prediction.
+
+Artifact: `target/profiles/v0644-q4-matmat-attribution-p1/`. Preregistration:
+`a02cc49`; B/C implementation: `01eac75`; E implementation: `2a7d0a8`.
+Decision/inventory/raw SHA-256 prefixes: `74ea5ad1...` / `ad1e5be6...` /
+`0e74114d...`.
+Independent adversarial design/result review: `cx` sessions
+`019fa525-99fa-7c41-81fe-5f8d1f5c0505` and
+`019fa539-9003-7062-946b-2f278b75125c`.
+
 ## 2026-07-27 - v0.643 A3B Transient Mmap-Blit Inconclusive
 
 Status: sealed `inconclusive` with `authority=none`, two of 12 sole attempts,

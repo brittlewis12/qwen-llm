@@ -91,8 +91,9 @@ Decision rules:
 - Never run performance benchmarks in parallel.
 - Treat llama.cpp parity as a floor, not the endpoint. Carry qwen/lcpp and
   qwen/roofline comparisons where each is meaningful.
-- Current M4 Max anchors are `474 GB/s` stream, `~12.5-12.8 nominal TFLOP/s`
-  Q4_K mat-mat through our dispatcher, and `3.03 TFLOP/s` scalar FMA sanity.
+- Current M4 Max anchors are `474 GB/s` stream, `~12.5-13.3 nominal TFLOP/s`
+  production Q4_K mat-mat across measured shapes, and `3.03 TFLOP/s` scalar FMA
+  sanity. v0.644's `15.70-15.89` synthetic E controls are not a silicon ceiling.
 - Use the repo-pinned llama.cpp lock at `scripts/bench/llama-cpp.lock.json`.
 - Treat battery or thermal/performance warnings as benchmark confounds.
 - Keep dense 27B in analysis while optimizing MoE.
@@ -916,35 +917,33 @@ lifetime proof and complete residency do not attribute the fault or the remainin
 requires a changed, independently justified diagnostic premise that attributes
 major faults and separates command encoding, queueing, and GPU execution.
 
-1. **Production-Q4 no-op attribution ladder**: replace the withdrawn Q4-to-F16
-   materialization idea with named production-grid ablations: A production; B
-   deterministic initialized tile writes with dequant ALU removed but quant loads
-   kept observably live; C removes those global loads; D is included only if a
-   race-free initialized replacement can remove the production barriers without
-   changing another intended term; E is initialized MMA-only with the same grid,
-   K-loop, half-to-float MMA family, accumulator, and stores. Inspect generated
-   code so DCE or undefined values cannot manufacture a ceiling. These non-
-   isomorphic arms bound terms; they are not additive attribution. This is the
-   actual-shape decomposition left open by v0.606, not a reopening of activation
-   packing or generic no-dequant work. `<=14.7 TFLOP/s` MMA-only closes the lane;
-   any faster result still needs a named charged `>=1.133x` gate/up prediction.
-   Information value high, payoff belief unknown, difficulty S-M.
-2. **Production GPU argmax contract**: three product paths still copy 993,280
+v0.644 completes the production-Q4 attribution ladder and seals
+`CLOSE_TESTED_BC_ABLATION_LANE`. Fresh A is healthy at `13.220385` nominal
+TFLOP/s. Sixty paired blocks give A/B `1.039287` (`1.039099-1.039475`), B/C
+`1.029773` (`1.029608-1.029938`), and A/C `1.070230`
+(`1.070054-1.070405`). Both charged upper bounds remain below `1.132304`; A/C
+projects only `1.02748x` ideal whole-prefill movement. B's dead volatile loads are
+transaction proxies, not exact source timing, while C/E jointly change activation
+traffic, staging, barriers, and simdgroup-load organization. Close the tested
+same-work-unit source/dequant lane. Do not chase E0/E8 direction or another local
+ablation.
+
+1. **Production GPU argmax contract**: three product paths still copy 993,280
    bytes and scan 248,320 logits on CPU. Reconcile highest-index CPU ties and NaN
    ordering with lowest-finite-index GPU semantics, then wire all call sites
    behind an explicit low-complexity 1% gate. Existing MoE gain is `1.0-1.5%`
    and dense is neutral. Belief high on small work removal, difficulty S-M.
-3. **A10B cold residency plus split-copy floor**: proceed only if the heavy
+2. **A10B cold residency plus split-copy floor**: proceed only if the heavy
    anchor remains deployment-relevant. First adjudicate the bit-exact native
    embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
    three-shard topology-preserving population floor. Belief high on memory,
    medium on copy wall, difficulty M-L.
-4. **Grammar run and admissible-row oracle**: replay real structured traces and
+3. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
    `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
    positive at current N8 cost. Contract-exact, belief medium-low until traces
    exist, difficulty S oracle/M product.
-5. **High-ceiling structural options**: true-long attention needs a source-free
+4. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -989,9 +988,11 @@ retained footprint reduction; the force-only A3B result leaves RSS/footprint fla
 
 Dense fresh-TTFT truth: no current exact branch has a credible material gain band
 for large dense prefill. Current packed compute is near the measured mat-mat
-anchor. Material movement requires a new GDN work unit, fewer prompt/model bytes,
-or a model/input/precision tradeoff; another ordinary projection retune is not an
-active expectation.
+anchor. v0.644 bounds complete source/dequant removal represented by the current
+N64 organization at only `1.070405x` primitive / about `1.02754x` ideal whole
+prefill. Material movement requires a new GDN work unit, fewer prompt/model bytes,
+a representation or ownership-changing projection work unit, or a model, input,
+or precision tradeoff; another ordinary projection retune is not active.
 
 The ranking reflects the current process-cold deployment mix while retaining
 model-ready TTFT, warm decode, breadth, probability, and engineering cost. It does
@@ -1011,9 +1012,8 @@ automatic retained use stay copied without separate evidence.
 v0.640 banks exact-27B deferred restore behind its existing explicit environment
 control. It is no longer an active experiment; keep `decode` as the default.
 
-1. Document the v0.606 gate arithmetic, then run the DCE/undefined-behavior-
-   hardened Q4 ladder before any new dense-prefill representation. Treat a low
-   MMA-only ceiling as a valuable closure.
+1. v0.644 closes the tested Q4 ladder. Do not schedule B/C widening, E-arm
+   diagnosis, P4096 replication, or a local source/dequant implementation.
 2. Decide whether A10B is a current deployment target. If yes, its native-
    embedding/split-copy floor moves ahead of GPU argmax; otherwise reconcile
    argmax semantics first, then run grammar traces.
@@ -1086,11 +1086,14 @@ control. It is no longer an active experiment; keep `decode` as the default.
   grid, loop counts, initialized inputs, half-to-float MMA family,
   accumulation/store observability, and every instruction not intentionally
   removed by that named arm. Reject DCE, races, or undefined-value shortcuts.
-  Close exact dense-prefill kernel work if the MMA-only arm is no better than
-  `14.7 TFLOP/s`: that is only about `1.11x` over v0.606's `13.22195 TFLOP/s`,
-  below the measured `1.133x` charged gate/up requirement. Above that ceiling, a
-  named race-free arm plus all charged costs must still predict `>=1.133x`
-  before implementation; do not add non-isomorphic deltas as if independent.
+  v0.644 measures A/B/C at `13.807170/13.285232/12.901128 ms`. The simultaneous
+  A/B and A/C upper bounds are only `1.039475/1.070405`, both below the
+  `1.132304x` charged gate. Close semantic dequant and combined source/dequant
+  designs represented by this N64 organization. B's volatile reads are dead-result
+  transaction proxies; C/E is a non-isomorphic residual, and E8>E0 is not causal
+  evidence for TGM or barriers. Reopen only for a named race-free real-Q4 design
+  that changes representation or work-unit/topology, includes complete source,
+  activation, staging, and store costs, and conservatively predicts `>=1.133x`.
 - **Grammar fast-forward**: count uniquely admissible tokenizer-token runs, not
   characters, grammar transitions, or isolated singleton positions. Charge grammar
   scanning and use measured terminal-head-only packed state cost. Require

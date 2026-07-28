@@ -16060,6 +16060,7 @@ mod tests {
             full_snapshot.gdn_state_arena,
             greedy_snapshot.gdn_state_arena
         );
+        eprintln!("[greedy-chain-{label}] exact-state PASS");
     }
 
     fn run_concurrent_gdn_moe_equivalence(
@@ -16537,8 +16538,8 @@ mod tests {
     #[test]
     fn metal_exact_greedy_chain_matches_full_logits_dense() {
         run_exact_greedy_chain_equivalence(
-            "/Users/tito/models/Qwen3.5-0.8B.F32.gguf",
-            "dense-0p8b",
+            "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+            "dense-27b",
         );
     }
 

@@ -6,6 +6,52 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-27 - v0.645 Exact GPU Greedy Product Inconclusive
+
+Status: sealed `INCONCLUSIVE_RESOLUTION` with `authority=none`. No default
+admission follows. The valid A3B secondary result authorizes only a changed-
+endpoint successor; dense requires a changed measurement organization.
+
+- The one-shot packet completes with 229 verified artifacts, exact clean
+  source/build/runtime `a18c2f9`, unchanged opening/final binary, source, prompt,
+  and model identities, 39 clean host snapshots, both exact-state PASS markers,
+  and byte-identical A/B product output on both exact assets. Every one of 160
+  JSONL rows preserves 419 prompt tokens, 128 selected tokens, 127 transitions,
+  zero cache state, and the frozen policy telemetry.
+- The mechanical verdict is correct. Dense transition log-SD is `0.0628242`, so
+  the frozen formula requires 247 pairs versus the cap of 16. A3B also misses the
+  preregistered transition efficacy gate: `S=0.993087`, one-sided 95% interval
+  `0.990900-0.995278`.
+- That primary endpoint was structurally incomplete for the product mechanism.
+  `transition_ms` includes B's GPU reducer but excludes A's following CPU
+  vocabulary scan. Full `decode_ms/token` includes both and gives A3B
+  `S=1.085807`, interval `1.083085-1.088536`, with all eight pair ratios in
+  `1.078214-1.090679`. Prefill and TTFT remain essentially neutral at
+  `0.998713x/0.998771x`.
+- The measured residual outside transitions is `0.7868-0.8715 ms/token` for A
+  versus `0.0065-0.0076 ms/token` for B. This residual also contains callback and
+  loop work, so it is not a pure sampler timer; raw rows preserve the same
+  separation. B's transition itself costs about `0.063 ms/token` more, while
+  removing the host-side work saves about `0.848 ms/token` and nets roughly
+  `0.784 ms/token`.
+- Dense is temporally confounded, not falsified. Its first `ABBA` block places B
+  in the center of a nonlinear whole-session slowdown: pair-0/1 prefill ratios
+  are `0.8654/0.9562`, transition `0.8443/0.9199`, and decode `0.8623/0.9375`.
+  The final six decode ratios are `1.0055-1.0516` with an informative post-hoc
+  geometric mean near `1.0319`, but dropping the opening block is forbidden and
+  carries no authority.
+- Next: one A3B-only exact-identity packet with full decode wall as the frozen
+  primary, fixed eight fresh-process pairs, and no reuse of P1 observations.
+  Dense needs a same-loaded-model explicit-policy diagnostic with symmetric
+  sustained preconditioning and faster alternation before another product
+  packet. Do not combine the two successors.
+
+Artifact: `target/profiles/v0645-gpu-greedy-product-p1/`. Preregistration:
+`a18c2f9`; implementation/state gates: `252e790` / `a167ed7` / `7add76d`.
+Decision/inventory SHA-256 prefixes: `b3111bab...` / `617e503e...`. Independent
+adversarial design/result review: `cx` session
+`019fa61e-4b7e-7580-8e0f-50bfea054e3a`.
+
 ## 2026-07-27 - v0.644 Dense-Q4 Source/Dequant Attribution Closure
 
 Status: sealed `CLOSE_TESTED_BC_ABLATION_LANE` with `authority=closure-only`.

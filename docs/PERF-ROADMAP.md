@@ -928,22 +928,37 @@ traffic, staging, barriers, and simdgroup-load organization. Close the tested
 same-work-unit source/dequant lane. Do not chase E0/E8 direction or another local
 ablation.
 
-1. **Production GPU argmax contract**: three product paths still copy 993,280
-   bytes and scan 248,320 logits on CPU. Reconcile highest-index CPU ties and NaN
-   ordering with lowest-finite-index GPU semantics, then wire all call sites
-   behind an explicit low-complexity 1% gate. Existing MoE gain is `1.0-1.5%`
-   and dense is neutral. Belief high on small work removal, difficulty S-M.
-2. **A10B cold residency plus split-copy floor**: proceed only if the heavy
+v0.645 seals valid `INCONCLUSIVE_RESOLUTION` with no default authority. Its
+preregistered transition timer includes the candidate GPU reducer but excludes
+the baseline's following CPU vocabulary scan, so it prices the replacement
+subpath rather than complete product work removal. The A3B secondary product wall
+is nevertheless exceptionally stable: decode/token `1.085807x`, one-sided 95%
+interval `1.083085-1.088536`, all eight pairs positive, exact output/state, and
+neutral prefill/TTFT. Dense is contaminated by a nonlinear opening whole-session
+hump; its final six decode ratios are informatively positive but non-authoritative.
+
+1. **A3B exact GPU greedy product endpoint**: run one independent exact-identity
+   successor with `decode_ms/generated_token` as the frozen primary, eight fixed
+   fresh-process ABBA pairs, and no v0.645 pooling. Require `>=1.01x`, lower bound
+   `>1.0`, exact output/state, and TTFT/prefill guards. A pass authorizes only the
+   A3B identity allowlist with `QWEN_GREEDY_GPU_ARGMAX=0` rollback. Measured prior
+   `1.086x`; belief high, difficulty S.
+2. **Dense GPU-greedy deconfounding**: load dense27 once, symmetrically warm both
+   explicit policies after neutral sustained preconditioning, and alternate full
+   128-token chains quickly enough to escape the v0.645 host-state curve. This is
+   diagnostic only; a later product packet remains required. Informative stable-
+   tail prior about `1.032x`, belief medium, difficulty S-M.
+3. **A10B cold residency plus split-copy floor**: proceed only if the heavy
    anchor remains deployment-relevant. First adjudicate the bit-exact native
    embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
    three-shard topology-preserving population floor. Belief high on memory,
    medium on copy wall, difficulty M-L.
-3. **Grammar run and admissible-row oracle**: replay real structured traces and
+4. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
    `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
    positive at current N8 cost. Contract-exact, belief medium-low until traces
    exist, difficulty S oracle/M product.
-4. **High-ceiling structural options**: true-long attention needs a source-free
+5. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different

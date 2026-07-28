@@ -968,12 +968,28 @@ authority. It separates bounded decode cleanup from the larger roadmap bets:
   amortization. At scale, prefer the already-green Q8 KV body; treat dense
   0.8B-F32 quantization as an oracle/benchmark fixture, not a micro-kernel win.
 
-1. **A3B exact GPU greedy product endpoint**: run one independent exact-identity
-   successor with `decode_ms/generated_token` as the frozen primary, eight fixed
-   fresh-process ABBA pairs, and no v0.645 pooling. Require `>=1.01x`, lower bound
-   `>1.0`, exact output/state, and TTFT/prefill guards. A pass authorizes only the
-   A3B identity allowlist with `QWEN_GREEDY_GPU_ARGMAX=0` rollback. Measured prior
-   `1.086x`; belief high, difficulty S.
+v0.648 seals `INVALID` after a process-classifier false positive and grants no
+authority or reusable timing. Its changed-predicate successor v0.649 seals
+valid `INCONCLUSIVE_CONTAMINATION`, also with no authority. Complete A3B decode
+again strongly favors exact GPU greedy (`1.090151x`, lower bound `1.061442`,
+8/8 pairs), as does first-use decode (`1.097558x`, lower bound `1.074309`), but
+steady prefill fails the frozen control at `0.957634x` and TTFT mirrors it.
+The middle-window disturbance affects both arms and only post-generation
+requests; all 16 request-zero prefills remain stable. Do not rescue the result.
+Absence is default-off at `15a7092`, while explicit `=1` retains the exact
+mechanism. The sharpened open question is now prior-generation carryover, not
+reducer efficacy or same-request prefill causality.
+
+1. **A3B GPU-greedy carryover discriminator**: in each fresh process, record a
+   pre-treatment request-zero prefill, execute one 128-token CPU-full-logit or
+   GPU-greedy generation, then record a one-token post-generation prefill
+   sentinel. Compare the within-process prefill delta under balanced order and
+   capture during-session CPU/GPU/power evidence. Diagnostic only: no pooling,
+   admission, default flip, or gate relaxation. If carryover is arm-specific,
+   keep the path explicit and attribute it; if only shared temporal drift
+   remains, authorize a new admission design whose contamination control is
+   structurally pre-treatment. Decode prior `1.090x`; belief high on efficacy,
+   medium on harmless carryover, difficulty S-M.
 2. **Dense GPU-greedy deconfounding**: load dense27 once, symmetrically warm both
    explicit policies after neutral sustained preconditioning, and alternate full
    128-token chains quickly enough to escape the v0.645 host-state curve. This is

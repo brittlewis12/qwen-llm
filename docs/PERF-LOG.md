@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-28 - v0.648/v0.649 GPU-Greedy Admission Inconclusive
+
+Status: v0.648 sealed `INVALID`; v0.649 sealed valid
+`INCONCLUSIVE_CONTAMINATION`. Both have `authority=none`. Exact GPU greedy
+remains explicit-only; absence is default-off at `15a7092`.
+
+- v0.648 consumed five complete pairs before its host predicate mistook
+  `opencode recall search qwen ...` query text for a `qwen` executable. The
+  sealed failure is valid, but no observation may be pooled. v0.649 changed
+  only executable/module-position classification and archive-before-validation
+  host evidence.
+- v0.649 verifies all 123 inventoried artifacts, clean source/build/runtime
+  `c359826`, the exact A3B state marker, fresh 16-token conformance, 80/80
+  schema-7 request rows, one token digest/text, 128 selected tokens, 127
+  transitions, token-limit stop, no terminal transition, and zero cache or
+  sampling surface.
+- Complete steady decode strongly repeats the v0.645 signal:
+  `S=1.090151`, one-sided 95% `1.061442-1.119637`, with all eight pairs
+  positive. First-use decode is `1.097558`, lower bound `1.074309`. The
+  transition-only diagnostic remains negative at `0.983009`; it still excludes
+  the baseline CPU vocabulary scan and is not the product endpoint.
+- The frozen contamination control fails: steady prefill is `0.957634`, below
+  `[0.97,1.03]`, and TTFT mirrors it at `0.957931`. Pairs 2-6 contain a
+  transient middle-window slowdown in both arms; pair 4 A spans `359-746 ms`,
+  B `313-540 ms`, and pair 5 B/A span `304-533/303-529 ms`. Pairs 0-1 and 7
+  sit near `304-310 ms`. No trimming, replacement, gate relaxation, or
+  attribution to OpenCode is allowed.
+- Request-zero prefill remains `367.9-377.9 ms` across every process. The
+  policy decision occurs only after prefill, and both arms CPU-select the first
+  token. A direct same-request prefill effect is impossible; later requests can
+  still carry policy-specific PSO, power, residency, or scheduling history.
+- Next is a diagnostic-only fresh-process carryover packet: measure request-zero
+  prefill, run one 128-token A or B generation, then measure a one-token
+  post-generation prefill sentinel. Compare within-process prefill change under
+  balanced arm order and add during-session utilization evidence. It has no
+  admission authority and uses no v0.648/v0.649 observation.
+
+Artifacts: `target/profiles/v0648-a3b-gpu-greedy-auto-p1/` and
+`target/profiles/v0649-a3b-gpu-greedy-auto-p1/`. Preregistrations/runners:
+`d007d04`, `18ac0eb`, `169103d`, `a44ed55`, and `c359826`. Independent design,
+runner, and result review: `cx` session
+`019fa9a8-c5c2-79f3-b643-943bd25cd0e2`.
+
 ## 2026-07-28 - v0.647 Raw-Q Middle-State Closure
 
 Status: sealed `CLOSED` with `authority=none`. This is a maintenance decision,

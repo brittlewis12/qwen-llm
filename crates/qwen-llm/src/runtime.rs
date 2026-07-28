@@ -977,11 +977,18 @@ impl LoadedModel {
         MetalForward::new(self.context(), &self.metal_model)
     }
 
+    /// Resolve the cheap metadata compatibility identity used by in-process
+    /// policy and RAM snapshot matching. This is not a content digest; durable
+    /// checkpoints must use [`Self::checkpoint_compatibility`] instead.
+    pub fn metadata_compatibility_ids(&self) -> (u64, u64) {
+        *self.identity_parts.get_or_init(|| {
+            snapshot_identity_parts(&self.gguf, self.metal_model.arch, &self.identity_shards)
+        })
+    }
+
     pub fn snapshot_identity(&self, sequence: &Sequence) -> Result<SnapshotIdentity, RuntimeError> {
         self.ensure_owns(sequence)?;
-        let &(model_id, tokenizer_id) = self.identity_parts.get_or_init(|| {
-            snapshot_identity_parts(&self.gguf, self.metal_model.arch, &self.identity_shards)
-        });
+        let (model_id, tokenizer_id) = self.metadata_compatibility_ids();
         Ok(sequence
             .metal_session()
             .snapshot_identity(model_id, tokenizer_id))

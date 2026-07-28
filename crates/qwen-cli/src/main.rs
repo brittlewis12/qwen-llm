@@ -36,22 +36,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CHECKPOINT_STAGED_INTEGRITY_ENV: &str = "QWEN_CHECKPOINT_STAGED_INTEGRITY";
 const GREEDY_GPU_ARGMAX_ENV: &str = "QWEN_GREEDY_GPU_ARGMAX";
-const GPU_GREEDY_A3B_MODEL_ID: u64 = 0xe602_4ce5_3109_fdf7;
-const GPU_GREEDY_A3B_TOKENIZER_ID: u64 = 0xa4b0_b26f_8a8c_9917;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GreedyGpuArgmaxMode {
-    Auto,
+    DefaultOff,
     ForceEnabled,
     ExplicitRollback,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct GreedyGpuModelPolicy {
-    mode: GreedyGpuArgmaxMode,
-    model_id: u64,
-    tokenizer_id: u64,
-    identity_resolution_ms: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,7 +52,7 @@ struct GreedyGpuDecision {
 
 fn parse_greedy_gpu_argmax_mode(value: Option<&OsStr>) -> GreedyGpuArgmaxMode {
     match value {
-        None => GreedyGpuArgmaxMode::Auto,
+        None => GreedyGpuArgmaxMode::DefaultOff,
         Some(value)
             if value
                 .to_str()
@@ -88,23 +78,12 @@ fn configured_greedy_gpu_argmax_mode() -> GreedyGpuArgmaxMode {
     })
 }
 
-fn greedy_gpu_model_policy(loaded: &LoadedModel) -> GreedyGpuModelPolicy {
-    let started = Instant::now();
-    let (model_id, tokenizer_id) = loaded.metadata_compatibility_ids();
-    GreedyGpuModelPolicy {
-        mode: configured_greedy_gpu_argmax_mode(),
-        model_id,
-        tokenizer_id,
-        identity_resolution_ms: started.elapsed().as_secs_f64() * 1e3,
-    }
-}
-
 fn resolve_greedy_gpu_decision(
-    policy: GreedyGpuModelPolicy,
+    mode: GreedyGpuArgmaxMode,
     sampling: SamplingConfig,
     prompt_lookup: bool,
 ) -> GreedyGpuDecision {
-    if policy.mode == GreedyGpuArgmaxMode::ExplicitRollback {
+    if mode == GreedyGpuArgmaxMode::ExplicitRollback {
         return GreedyGpuDecision {
             enabled: false,
             reason: "disabled_by_explicit_rollback",
@@ -116,24 +95,15 @@ fn resolve_greedy_gpu_decision(
             reason: "ineligible_request",
         };
     }
-    match policy.mode {
+    match mode {
         GreedyGpuArgmaxMode::ExplicitRollback => unreachable!("handled above"),
         GreedyGpuArgmaxMode::ForceEnabled => GreedyGpuDecision {
             enabled: true,
             reason: "force_enabled",
         },
-        GreedyGpuArgmaxMode::Auto
-            if policy.model_id == GPU_GREEDY_A3B_MODEL_ID
-                && policy.tokenizer_id == GPU_GREEDY_A3B_TOKENIZER_ID =>
-        {
-            GreedyGpuDecision {
-                enabled: true,
-                reason: "auto_metadata_a3b_v1",
-            }
-        }
-        GreedyGpuArgmaxMode::Auto => GreedyGpuDecision {
+        GreedyGpuArgmaxMode::DefaultOff => GreedyGpuDecision {
             enabled: false,
-            reason: "auto_identity_miss",
+            reason: "default_off",
         },
     }
 }
@@ -553,7 +523,6 @@ struct RequestTimingRow {
     runtime_identity_kind: &'static str,
     runtime_model_id: String,
     runtime_tokenizer_id: String,
-    greedy_gpu_identity_resolution_ms: f64,
     greedy_gpu_selection_reason: &'static str,
     request_start_unix_ms: u64,
     runtime_and_model_load_ms: f64,
@@ -784,10 +753,6 @@ struct RequestStatsRow {
     id: String,
     line: usize,
     model: String,
-    runtime_identity_kind: &'static str,
-    runtime_model_id: String,
-    runtime_tokenizer_id: String,
-    greedy_gpu_identity_resolution_ms: f64,
     greedy_gpu_selection_reason: &'static str,
     arrival_ms: u64,
     finish_ms: u64,
@@ -1806,7 +1771,7 @@ fn run_single_turn(
     if args.prompt_lookup {
         ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
     }
-    let greedy_gpu_policy = greedy_gpu_model_policy(&loaded);
+    let greedy_gpu_mode = configured_greedy_gpu_argmax_mode();
     let runtime_and_model_load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     if timing_enabled {
         loaded.context().set_pipeline_cache_metrics_enabled(true);
@@ -1868,7 +1833,7 @@ fn run_single_turn(
         &tokenizer,
         model_path,
         args,
-        greedy_gpu_policy,
+        greedy_gpu_mode,
         runtime_and_model_load_ms,
         process_model_ready_allocated,
         pair_id.as_deref(),
@@ -1930,7 +1895,7 @@ fn run_single_turn(
             &tokenizer,
             model_path,
             args,
-            greedy_gpu_policy,
+            greedy_gpu_mode,
             runtime_and_model_load_ms,
             process_model_ready_allocated,
             pair_id.as_deref(),
@@ -2019,7 +1984,7 @@ fn execute_single_turn_request(
     tokenizer: &Tokenizer,
     model_path: &Path,
     args: &Args,
-    greedy_gpu_policy: GreedyGpuModelPolicy,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
     runtime_and_model_load_ms: f64,
     process_model_ready_allocated: Option<u64>,
     pair_id: Option<&str>,
@@ -2245,7 +2210,7 @@ fn execute_single_turn_request(
     let sampling_config = cli_sampling_config(args)?;
     let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let greedy_gpu_decision =
-        resolve_greedy_gpu_decision(greedy_gpu_policy, sampling_config, args.prompt_lookup);
+        resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
     let (generation, prompt_lookup_stats) = if args.prompt_lookup {
         let result = generate_prompt_lookup(
@@ -2553,7 +2518,6 @@ fn execute_single_turn_request(
             runtime_identity_kind: "metadata_compatibility_v1",
             runtime_model_id: format!("{:016x}", model_identity.model_id),
             runtime_tokenizer_id: format!("{:016x}", model_identity.tokenizer_id),
-            greedy_gpu_identity_resolution_ms: greedy_gpu_policy.identity_resolution_ms,
             greedy_gpu_selection_reason: greedy_gpu_decision.reason,
             request_start_unix_ms,
             runtime_and_model_load_ms,
@@ -2649,7 +2613,7 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
     if args.prompt_lookup {
         ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
     }
-    let greedy_gpu_policy = greedy_gpu_model_policy(&loaded);
+    let greedy_gpu_mode = configured_greedy_gpu_argmax_mode();
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -2689,7 +2653,7 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
                 &tokenizer,
                 &prepared_request,
                 args,
-                greedy_gpu_policy,
+                greedy_gpu_mode,
             )
             .with_context(|| format!("run request {}", prepared_request.id))?;
 
@@ -2717,14 +2681,9 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
         discover_auto_cache_prefixes(&mut prepared, args.cache_prefix_auto_min_tokens);
 
         for prepared_request in &prepared {
-            let (output, stats) = run_jsonl_request(
-                &loaded,
-                &tokenizer,
-                prepared_request,
-                args,
-                greedy_gpu_policy,
-            )
-            .with_context(|| format!("run request {}", prepared_request.id))?;
+            let (output, stats) =
+                run_jsonl_request(&loaded, &tokenizer, prepared_request, args, greedy_gpu_mode)
+                    .with_context(|| format!("run request {}", prepared_request.id))?;
 
             serde_json::to_writer(&mut stdout, &output).context("write request output")?;
             writeln!(stdout)?;
@@ -2911,7 +2870,7 @@ fn run_jsonl_request(
     tokenizer: &Tokenizer,
     prepared: &PreparedJsonlRequest,
     args: &Args,
-    greedy_gpu_policy: GreedyGpuModelPolicy,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
 ) -> Result<(RequestOutput, RequestStatsRow)> {
     let request = &prepared.request;
     let id = &prepared.id;
@@ -3080,7 +3039,7 @@ fn run_jsonl_request(
     let sampling_config = prepared.sampling;
     let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
     let greedy_gpu_decision =
-        resolve_greedy_gpu_decision(greedy_gpu_policy, sampling_config, args.prompt_lookup);
+        resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let (generation, generated_text, prompt_lookup_stats) = if args.prompt_lookup {
         let (result, generated_text) = decode_prompt_lookup(
             loaded,
@@ -3139,10 +3098,6 @@ fn run_jsonl_request(
         id: id.to_string(),
         line: prepared.line,
         model: loaded.path().display().to_string(),
-        runtime_identity_kind: "metadata_compatibility_v1",
-        runtime_model_id: format!("{:016x}", greedy_gpu_policy.model_id),
-        runtime_tokenizer_id: format!("{:016x}", greedy_gpu_policy.tokenizer_id),
-        greedy_gpu_identity_resolution_ms: greedy_gpu_policy.identity_resolution_ms,
         greedy_gpu_selection_reason: greedy_gpu_decision.reason,
         arrival_ms,
         finish_ms,
@@ -5693,23 +5648,11 @@ mod tests {
     }
 
     #[test]
-    fn gpu_greedy_auto_policy_is_model_scoped_and_rollbackable() {
-        let policy = |mode, model_id, tokenizer_id| GreedyGpuModelPolicy {
-            mode,
-            model_id,
-            tokenizer_id,
-            identity_resolution_ms: 0.0,
-        };
+    fn gpu_greedy_policy_is_default_off_forceable_and_rollbackable() {
         let modes = [
-            GreedyGpuArgmaxMode::Auto,
+            GreedyGpuArgmaxMode::DefaultOff,
             GreedyGpuArgmaxMode::ForceEnabled,
             GreedyGpuArgmaxMode::ExplicitRollback,
-        ];
-        let identities = [
-            (GPU_GREEDY_A3B_MODEL_ID, GPU_GREEDY_A3B_TOKENIZER_ID),
-            (1, GPU_GREEDY_A3B_TOKENIZER_ID),
-            (GPU_GREEDY_A3B_MODEL_ID, 2),
-            (1, 2),
         ];
         let requests = [
             (SamplingConfig::default(), false),
@@ -5717,49 +5660,35 @@ mod tests {
             (SamplingConfig::default(), true),
         ];
         for mode in modes {
-            for (model_id, tokenizer_id) in identities {
-                for (sampling, prompt_lookup) in requests {
-                    let identity_matches = model_id == GPU_GREEDY_A3B_MODEL_ID
-                        && tokenizer_id == GPU_GREEDY_A3B_TOKENIZER_ID;
-                    let request_eligible = sampling.temperature == 0.0 && !prompt_lookup;
-                    let expected = if mode == GreedyGpuArgmaxMode::ExplicitRollback {
-                        GreedyGpuDecision {
-                            enabled: false,
-                            reason: "disabled_by_explicit_rollback",
-                        }
-                    } else if !request_eligible {
-                        GreedyGpuDecision {
-                            enabled: false,
-                            reason: "ineligible_request",
-                        }
-                    } else if mode == GreedyGpuArgmaxMode::ForceEnabled {
-                        GreedyGpuDecision {
-                            enabled: true,
-                            reason: "force_enabled",
-                        }
-                    } else if identity_matches {
-                        GreedyGpuDecision {
-                            enabled: true,
-                            reason: "auto_metadata_a3b_v1",
-                        }
-                    } else {
-                        GreedyGpuDecision {
-                            enabled: false,
-                            reason: "auto_identity_miss",
-                        }
-                    };
-                    assert_eq!(
-                        resolve_greedy_gpu_decision(
-                            policy(mode, model_id, tokenizer_id),
-                            sampling,
-                            prompt_lookup,
-                        ),
-                        expected,
-                        "mode={mode:?} model_id={model_id:x} tokenizer_id={tokenizer_id:x} \
-                         sampled={} prompt_lookup={prompt_lookup}",
-                        sampling.temperature > 0.0,
-                    );
-                }
+            for (sampling, prompt_lookup) in requests {
+                let request_eligible = sampling.temperature == 0.0 && !prompt_lookup;
+                let expected = if mode == GreedyGpuArgmaxMode::ExplicitRollback {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "disabled_by_explicit_rollback",
+                    }
+                } else if !request_eligible {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "ineligible_request",
+                    }
+                } else if mode == GreedyGpuArgmaxMode::ForceEnabled {
+                    GreedyGpuDecision {
+                        enabled: true,
+                        reason: "force_enabled",
+                    }
+                } else {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "default_off",
+                    }
+                };
+                assert_eq!(
+                    resolve_greedy_gpu_decision(mode, sampling, prompt_lookup),
+                    expected,
+                    "mode={mode:?} sampled={} prompt_lookup={prompt_lookup}",
+                    sampling.temperature > 0.0,
+                );
             }
         }
 
@@ -5777,7 +5706,7 @@ mod tests {
         }
         assert_eq!(
             parse_greedy_gpu_argmax_mode(None),
-            GreedyGpuArgmaxMode::Auto
+            GreedyGpuArgmaxMode::DefaultOff
         );
         for value in ["", "invalid", "True", "2"] {
             assert_eq!(

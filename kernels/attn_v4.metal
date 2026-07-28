@@ -2346,10 +2346,15 @@ kernel void kernel_attn_matrix_softmax_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     local_max = (tiisg < (ntg + 31) / 32) ? sh[tiisg] : -INFINITY;
     const float max_all = simd_max(local_max);
+    // The next reduction reuses `sh` for sums. Every lane must finish its
+    // read of the max partials before any simdgroup overwrites its slot.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float local_sum = 0.0f;
     for (uint p = tid; p < visible; p += ntg) {
-        local_sum += exp2(s[p] * args.scale - max_all);
+        const float e = exp2(s[p] * args.scale - max_all);
+        s[p] = e;
+        local_sum += e;
     }
     local_sum = simd_sum(local_sum);
     if (tiisg == 0) sh[sgitg] = local_sum;
@@ -2359,7 +2364,7 @@ kernel void kernel_attn_matrix_softmax_f32(
     const float inv_sum = sum_all > 0.0f ? 1.0f / sum_all : 0.0f;
 
     for (uint p = tid; p < args.n_pos; p += ntg) {
-        s[p] = (p < visible) ? exp2(s[p] * args.scale - max_all) * inv_sum : 0.0f;
+        s[p] = (p < visible) ? s[p] * inv_sum : 0.0f;
     }
 }
 

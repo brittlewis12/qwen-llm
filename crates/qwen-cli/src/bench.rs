@@ -51,12 +51,12 @@ use qwen_llm::{
         encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
         encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
         encode_fill_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
-        encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+        encode_mat_vec_f32_sigmoid, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
         encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_rms_norm_batched_f32,
         encode_rms_norm_mul_f32, encode_roofline_fma_f32, encode_roofline_stream_f32,
-        encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
+        encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive, encode_rope_neox_pair_f32,
         encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv,
         encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32, encode_sigmoid_mul_f32,
         encode_split_q_gate_f32, encode_touch_bytes_f32, host_page_size_bytes, kernel_trace_begin,
@@ -98,6 +98,13 @@ fn env_flag_enabled(name: &str) -> bool {
     matches!(
         std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
+fn env_flag_default_on(name: &str) -> bool {
+    !matches!(
+        std::env::var(name).as_deref(),
+        Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
     )
 }
 
@@ -4610,7 +4617,11 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
 
     let qkv_bytes: u64 = gdn_blocks.iter().map(|gb| gb.in_proj_qkv.n_bytes()).sum();
     let z_bytes: u64 = gdn_blocks.iter().map(|gb| gb.in_proj_z.n_bytes()).sum();
+    let beta_bytes: u64 = gdn_blocks.iter().map(|gb| gb.beta_proj.n_bytes()).sum();
     let out_bytes: u64 = gdn_blocks.iter().map(|gb| gb.out_proj.n_bytes()).sum();
+    let beta_f32 = gdn_blocks
+        .iter()
+        .all(|gb| gb.beta_proj.dtype == GgmlType::F32);
 
     println!(
         "[gdn-proj-micro] model={} layers={} h={} conv_dim={} v_dim={} tokens={} warmup={} iters={}",
@@ -4728,6 +4739,39 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
         Ok(())
     })?;
     report("qkv+z", "matmat_batch", qkv_bytes + z_bytes, wall, gpu);
+
+    if beta_f32 {
+        let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+            for _ in 0..tokens {
+                for gb in &gdn_blocks {
+                    encode_mat_vec_dispatch(&ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
+                    encode_sigmoid_f32(&ctx, enc, &s.gdn_b, &s.gdn_beta)?;
+                }
+            }
+            Ok(())
+        })?;
+        report("beta", "matvec+sigmoid", beta_bytes, wall, gpu);
+
+        let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
+            for _ in 0..tokens {
+                for gb in &gdn_blocks {
+                    encode_mat_vec_f32_sigmoid(
+                        &ctx,
+                        enc,
+                        &gb.beta_proj,
+                        &s.h,
+                        &s.gdn_beta,
+                        h,
+                        n_v,
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        report("beta", "matvec_sigmoid_fused", beta_bytes, wall, gpu);
+    } else {
+        println!("beta\tskipped\t{tokens}\t0.0000\t0.0000\t0.0000\t0.0000\t0.0");
+    }
 
     let (wall, gpu) = time_gpu_reps(&ctx, warmup, iters, |enc| {
         for _ in 0..tokens {
@@ -5326,11 +5370,24 @@ fn fill_gdn_replay_inputs(ctx: &MetalContext, sessions: &[MetalSession]) -> Resu
     for (slot, s) in sessions.iter().enumerate() {
         let v = 0.03125 + (slot as f32) * 0.0009765625;
         encode_fill_f32(ctx, &enc, &s.x, v)?;
+        for conv in &s.gdn_conv {
+            encode_fill_f32(ctx, &enc, conv, 0.0)?;
+        }
+        for state in &s.gdn_state {
+            encode_fill_f32(ctx, &enc, state, 0.0)?;
+        }
     }
     enc.end();
     cmd.commit();
     cmd.waitUntilCompleted();
     Ok(())
+}
+
+fn gdn_replay_beta_projection_fused(gb: &qwen_llm::metal_forward::MetalGdnBlock) -> bool {
+    env_flag_default_on("QWEN_DECODE_GDN_FUSED_BETA_PROJ")
+        && gb.beta_proj.dtype == GgmlType::F32
+        && !env_flag_enabled("QWEN_DECODE_GDN_NOOP_FRONT")
+        && !env_flag_enabled("QWEN_DECODE_GDN_NOOP_BETA")
 }
 
 fn read_f32_tensor(t: &MetalTensor) -> Vec<f32> {
@@ -5561,15 +5618,27 @@ fn encode_gdn_layer_replay(
     encode_mat_mat_dispatch(ctx, &enc, &gb.in_proj_z, &h_pack, &z_pack, h, v_dim, tokens)?;
 
     for (tok, s) in sessions.iter_mut().enumerate() {
-        encode_mat_vec_dispatch(
-            ctx,
-            &enc,
-            &gb.beta_proj,
-            &s.h,
-            &s.gdn_b,
-            h,
-            s.gdn_b.n_elements() as usize,
-        )?;
+        if gdn_replay_beta_projection_fused(gb) {
+            encode_mat_vec_f32_sigmoid(
+                ctx,
+                &enc,
+                &gb.beta_proj,
+                &s.h,
+                &s.gdn_beta,
+                h,
+                s.gdn_beta.n_elements() as usize,
+            )?;
+        } else {
+            encode_mat_vec_dispatch(
+                ctx,
+                &enc,
+                &gb.beta_proj,
+                &s.h,
+                &s.gdn_b,
+                h,
+                s.gdn_b.n_elements() as usize,
+            )?;
+        }
         encode_mat_vec_dispatch(
             ctx,
             &enc,
@@ -5579,7 +5648,9 @@ fn encode_gdn_layer_replay(
             h,
             s.gdn_a.n_elements() as usize,
         )?;
-        encode_sigmoid_f32(ctx, &enc, &s.gdn_b, &s.gdn_beta)?;
+        if !gdn_replay_beta_projection_fused(gb) {
+            encode_sigmoid_f32(ctx, &enc, &s.gdn_b, &s.gdn_beta)?;
+        }
         encode_gdn_decay_chain_f32(ctx, &enc, &s.gdn_a, &gb.dt_bias, &gb.a_log, &s.gdn_alpha)?;
 
         let qkv_row = scratch
@@ -6073,6 +6144,7 @@ fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Result<()> {
     );
     for &n_tokens in &tokens {
         let baseline = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+            fill_gdn_replay_inputs(&ctx, &baseline_sessions[..n_tokens])?;
             let enc = KernelEncoder::begin(cmd);
             encode_gdn_chain_baseline(
                 &ctx,
@@ -6085,6 +6157,7 @@ fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Result<()> {
             Ok(())
         })?;
         let replay = time_cmd_reps_stats(&ctx, warmup, iters, |cmd| {
+            fill_gdn_replay_inputs(&ctx, &replay_sessions[..n_tokens])?;
             encode_gdn_chain_replay(
                 &ctx,
                 &mf,
@@ -15502,38 +15575,59 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             },
             &mut phases,
         )?;
-        timed(
-            "rope Q",
-            &|enc| {
-                Ok(encode_rope_neox_f32(
-                    &mctx,
-                    enc,
-                    &s.attn_q_normed,
-                    n_q,
-                    head_dim,
-                    n_rot,
-                    position,
-                    arch.rope_theta,
-                )?)
-            },
-            &mut phases,
-        )?;
-        timed(
-            "rope K",
-            &|enc| {
-                Ok(encode_rope_neox_f32(
-                    &mctx,
-                    enc,
-                    &s.attn_k_normed,
-                    n_kv,
-                    head_dim,
-                    n_rot,
-                    position,
-                    arch.rope_theta,
-                )?)
-            },
-            &mut phases,
-        )?;
+        if env_flag_default_on("QWEN_DECODE_ROPE_PAIR") {
+            timed(
+                "rope Q+K (paired)",
+                &|enc| {
+                    Ok(encode_rope_neox_pair_f32(
+                        &mctx,
+                        enc,
+                        &s.attn_q_normed,
+                        &s.attn_k_normed,
+                        n_q,
+                        n_kv,
+                        head_dim,
+                        n_rot,
+                        position,
+                        arch.rope_theta,
+                    )?)
+                },
+                &mut phases,
+            )?;
+        } else {
+            timed(
+                "rope Q",
+                &|enc| {
+                    Ok(encode_rope_neox_f32(
+                        &mctx,
+                        enc,
+                        &s.attn_q_normed,
+                        n_q,
+                        head_dim,
+                        n_rot,
+                        position,
+                        arch.rope_theta,
+                    )?)
+                },
+                &mut phases,
+            )?;
+            timed(
+                "rope K",
+                &|enc| {
+                    Ok(encode_rope_neox_f32(
+                        &mctx,
+                        enc,
+                        &s.attn_k_normed,
+                        n_kv,
+                        head_dim,
+                        n_rot,
+                        position,
+                        arch.rope_theta,
+                    )?)
+                },
+                &mut phases,
+            )?;
+        }
         timed(
             "kv scatter (fused)",
             &|enc| match s.kv_k[attn_idx_in_session].dtype {

@@ -7985,7 +7985,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                                     &gdn_normed_pack_p,
                                     chunk_p * n_v_u,
                                     head_dim_u,
-                                    RMS_EPS,
+                                    RMS_EPS * head_dim_u as f32,
                                 )?;
                                 enc.end();
                                 flush_prefill_layer_phase(
@@ -21161,7 +21161,7 @@ mod tests {
                                         &normed_n,
                                         n_v_u,
                                         head_dim_u,
-                                        crate::metal_forward::RMS_EPS,
+                                        crate::metal_forward::RMS_EPS * head_dim_u as f32,
                                     )?;
                                 }
                                 Ok(())
@@ -21906,7 +21906,7 @@ mod tests {
                     &normed_n,
                     n_v,
                     head_dim,
-                    crate::metal_forward::RMS_EPS,
+                    crate::metal_forward::RMS_EPS * head_dim as f32,
                 )
                 .map_err(crate::metal_forward::MfError::from)
             });

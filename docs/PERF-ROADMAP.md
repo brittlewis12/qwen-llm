@@ -937,6 +937,37 @@ interval `1.083085-1.088536`, all eight pairs positive, exact output/state, and
 neutral prefill/TTFT. Dense is contaminated by a nonlinear opening whole-session
 hump; its final six decode ratios are informatively positive but non-authoritative.
 
+v0.646 is a sealed `INCONCLUSIVE` hybrid-GDN equivalence sweep with no default
+authority. It separates bounded decode cleanup from the larger roadmap bets:
+
+- F32 beta projection+sigmoid fusion is a repeatable but small dense-0.8B signal
+  (`+0.255%` wall, `+0.276%` GPU over balanced 20-round `tg128` packets). The
+  corrected A3B census removes 30 beta dispatches/token, but the post-fix GDN
+  replay does not close the local timing attribution. Keep it as cheap default-on
+  hygiene, not a strategic GDN branch.
+- Paired Q/K RoPE removes 10 corrected A3B dispatches/token and has a small 0.8B
+  wall signal (`+0.217%`), but the GPU interval crosses zero and the 27B dense
+  scale check is negative/noisy. Keep it below the warm promotion gate.
+- Grouped MoE finalization removes 37 corrected dispatches/token and gives a
+  balanced A3B decode signal of `+0.674%` wall / `+0.636%` GPU. The cooled repeat
+  remains positive but noisy; this is a bounded decode cleanup, not evidence that
+  the prompt grouped-MoE lane has reopened.
+- Raw-Q/qscale cancellation has no promotion signal on 0.8B, A3B, or dense 27B;
+  the non-winning middle-state implementation and `QWEN_DECODE_GDN_SKIP_Q_L2`
+  flag are deleted. Reopen only with the K-fold that removes the L2 preparation
+  dispatch and materialization. Output-scale folding, legacy attention
+  normalization folding, and cached softmax exponentials remain correctness-only
+  records until rollback-capable performance variants exist.
+- The direct GDN recurrence gate remains unmet: no one-layer all-in `>=20%`
+  result, no projected prefill `>=5%` result, and no production arm-to-arm
+  hidden/logit/token trace. Do not promote these algebraic leaves above the
+  existing prompt, residency, or structural execution branches.
+- The follow-up review re-ranks the next measurements away from isolated
+  micro-ops: accepted tokens per MTP/DFlash verify pass, command-buffer and
+  encoder counts for the wall-minus-GPU gap, and speculative-block GDN state
+  amortization. At scale, prefer the already-green Q8 KV body; treat dense
+  0.8B-F32 quantization as an oracle/benchmark fixture, not a micro-kernel win.
+
 1. **A3B exact GPU greedy product endpoint**: run one independent exact-identity
    successor with `decode_ms/generated_token` as the frozen primary, eight fixed
    fresh-process ABBA pairs, and no v0.645 pooling. Require `>=1.01x`, lower bound
@@ -1274,9 +1305,13 @@ for aggregate throughput.
   current greedy speed lever. Start with offline captured-logit probability replay;
   a proposer union must define one causal aggregate distribution rather than pack
   alternative branches into linear N8.
-- RoPE-table and GDN-exp hygiene remain below the warm gate. Keep only a causal
-  process-cold residency control for the unexplained first-prefill gap; do not infer
-  a residency program from the aggregate gap alone.
+- RoPE-table/GDN-exp hygiene and the v0.646 algebraic decode leaves remain below
+  the warm gate. Paired RoPE and beta fusion are bounded cleanup signals; the
+  raw-Q middle state is closed and deleted, and the exact epsilon/attention
+  rewrites still lack rollback-capable perf A/Bs. Keep only a causal process-cold
+  residency control
+  for the unexplained first-prefill gap; do not infer a residency program from
+  the aggregate gap alone.
 - Multi-request S8 replay, shared-prefix multi-query execution, independent
   streams, and paged attention remain in the secondary serving lane. Their
   serving evidence does not rank against serial BS=1.
@@ -4720,6 +4755,19 @@ Why it stays late:
   correctness-sensitive.
 - GPU argmax is already landed; dense gain is neutral within noise and MoE gain
   is modest but real.
+- v0.646 now prices the small exact decode leaves directly. F32 beta fusion is
+  about `+0.255%` wall / `+0.276%` GPU on dense 0.8B, while paired RoPE is only
+  a small wall signal with a zero-crossing GPU interval. The 27B dense guardrail
+  shows no material beta, RoPE, or raw-Q promotion signal. These are cleanup
+  candidates, not replacements for a new GDN work unit.
+- The raw-Q/RMSNorm cancellation is closed and deleted after review across 0.8B,
+  A3B, and 27B. The exact output-scale epsilon fold remains correctness-aligned
+  but has no rollback-capable performance record. Reopen raw-Q only with the
+  K-fold that removes the preparation work; keep both below the strategic queue.
+- The grouped MoE finalizer is a separate decode-only bounded cleanup: corrected
+  census topology is `851 -> 814` dispatches/token and balanced A3B timing is
+  `+0.674%` wall / `+0.636%` GPU. It does not reopen the prompt grouped-MoE
+  branch, and it still needs production equivalence traces before promotion.
 
 Acceptance gates:
 

@@ -3,7 +3,10 @@
 // One step of the per-V-head delta-rule recurrence:
 //
 //     S ← exp(g) · S + β · (v − exp(g) · (S · k)) ⊗ k
-//     o = S · q · (1/√head_dim)
+//     o = S · q
+//
+// The usual 1/√head_dim factor is folded into the following RMSNormGated
+// epsilon, so this kernel deliberately emits the unscaled S·q value.
 //
 // where S ∈ R^{head_dim × head_dim} is the per-head SSM state, indexed
 // as S[dv, dk]; k, v, q are length-head_dim vectors per head; g and β
@@ -122,7 +125,7 @@ kernel void kernel_gdn_step_f32(
 
     // (6) Write the (one) output element + state row back.
     if (tiisg == 0) {
-        out[(ulong)hi * HEAD_DIM + dv] = o * (1.0f / sqrt((float)HEAD_DIM));
+        out[(ulong)hi * HEAD_DIM + dv] = o;
     }
     for (ushort j = 0; j < DKS_PER_LANE; ++j) {
         s_row[dk_base + j] = s_reg[j];
@@ -188,7 +191,7 @@ kernel void kernel_gdn_step_decay_f32(
     const float o = simd_sum(o_partial);
 
     if (tiisg == 0) {
-        out[(ulong)hi * HEAD_DIM + dv] = o * (1.0f / sqrt((float)HEAD_DIM));
+        out[(ulong)hi * HEAD_DIM + dv] = o;
     }
     for (ushort j = 0; j < DKS_PER_LANE; ++j) {
         s_row[dk_base + j] = s_reg[j];
@@ -224,7 +227,6 @@ kernel void kernel_gdn_step_decay_packed_f32(
     const ulong v_stride = (ulong)args.n_v_heads * HEAD_DIM;
     const ulong head_stride = (ulong)args.n_v_heads;
     const ulong hv_off = (ulong)hi * HEAD_DIM + dv;
-    const float scale = 1.0f / sqrt((float)HEAD_DIM);
 
     device const float * q_lane = q_pack + (ulong)hk * HEAD_DIM + dk_base;
     device const float * k_lane = k_pack + (ulong)hk * HEAD_DIM + dk_base;
@@ -263,7 +265,7 @@ kernel void kernel_gdn_step_decay_packed_f32(
         }
         const float o = simd_sum(o_partial);
         if (tiisg == 0) {
-            *out_t = o * scale;
+            *out_t = o;
         }
 
         q_lane += qk_stride;
@@ -309,7 +311,6 @@ kernel void kernel_gdn_step_decay_packed_nsg4_f32(
     const ulong v_stride = (ulong)args.n_v_heads * HEAD_DIM;
     const ulong head_stride = (ulong)args.n_v_heads;
     const ulong hv_off = (ulong)hi * HEAD_DIM + dv;
-    const float scale = 1.0f / sqrt((float)HEAD_DIM);
 
     device const float * q_lane = q_pack + (ulong)hk * HEAD_DIM + dk_base;
     device const float * k_lane = k_pack + (ulong)hk * HEAD_DIM + dk_base;
@@ -348,7 +349,7 @@ kernel void kernel_gdn_step_decay_packed_nsg4_f32(
         }
         const float o = simd_sum(o_partial);
         if (lane == 0) {
-            *out_t = o * scale;
+            *out_t = o;
         }
 
         q_lane += qk_stride;

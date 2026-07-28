@@ -6,6 +6,87 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-28 - v0.647 Raw-Q Middle-State Closure
+
+Status: sealed `CLOSED` with `authority=none`. This is a maintenance decision,
+not a performance promotion.
+
+- The adversarial review correctly identified that the raw-Q qscale variant
+  retained the full L2 dispatch and still read Q to compute its denominator. It
+  only removed the normalized-Q write, so it could not realize the proposed
+  win; the 0.8B, A3B, and 27B measurements supplied no promotion signal.
+- Removed `QWEN_DECODE_GDN_SKIP_Q_L2`, its qscale/qnorm Metal kernels and
+  encoders, the scratch denominator buffer, the correctness test, and the A/B
+  harness arm. The ordinary normalized Q/K path and exact output-scale/
+  RMS-epsilon fold remain unchanged.
+- Reopen only as a new experiment implementing the K-fold (`beta*rn` and
+  `beta*g*rn^2`) that removes the preparation dispatch and K/Q materialization;
+  do not revive the deleted middle state. Historical raw-Q timings remain in
+  the v0.646 packet and are explicitly non-authoritative.
+- Updated the CPU oracle header to describe tolerance-based validation where
+  finite-epsilon algebraic folds change rounding; it no longer promises a
+  blanket bit-exact llama-cli match.
+
+Record: `docs/bench/2026-07-27-hybrid-gdn-equivalence-certification.md` and
+`target/profiles/hybrid-gdn-ab/` contain the historical evidence. The existing
+v0.646 entry is retained as an append-only measurement record.
+
+## 2026-07-28 - v0.646 Hybrid GDN Equivalence Sweep
+
+Status: sealed `INCONCLUSIVE` with `authority=none`. This packet records
+causal/structural evidence and no production promotion. No optimization clears
+the full equivalence-plus-cooldown certification gate.
+
+- The sweep added exact GDN output-scale/RMS-epsilon folding, guarded raw-Q
+  qscale elimination, F32 beta projection+sigmoid fusion, paired Q/K RoPE,
+  grouped MoE finalization, softmax/attention algebraic cleanup, and correctness
+  barriers. Correctness coverage is green, including the A3B concurrent GDN/MoE
+  path and adversarial raw-Q norms.
+- The first `cx` audit found two measurement defects: stage profiling applied a
+  second beta sigmoid after fused production projection, and GDN replay ignored
+  fused beta while carrying recurrent state across samples. Both are fixed.
+  The harness now resets replay state, records inherited `QWEN_*` variables,
+  rejects identical `BASE_*` controls, and uses seeded balanced arm rotations.
+- Balanced 20-round dense 0.8B `tg128` packets show beta fusion at
+  `963.700 -> 961.250 ms` wall and `915.665 -> 913.140 ms` GPU: `+0.255%`
+  wall and `+0.276%` GPU, with both bootstrap intervals excluding zero. Paired
+  RoPE is `954.290 -> 952.215 ms` wall (`+0.217%`) but its GPU interval crosses
+  zero.
+- Balanced 20-round A3B grouped-finalizer timing is `1186.480 -> 1178.465 ms`
+  wall and `1107.350 -> 1100.305 ms` GPU: `+0.674%/+0.636%`. Corrected census
+  topology is `851 -> 814` dispatches/token, replacing 40 shared-accumulation
+  plus 37 weighted-sum dispatches with 37 grouped plus 3 shared dispatches.
+  A 300-second cooldown repeat remains positive but has large outliers; it is
+  supporting evidence, not certification.
+- The corrected A3B census also records beta `881 -> 851` and paired RoPE
+  `861 -> 851` dispatches/token. These are structural facts; beta's corrected
+  post-fix GDN replay is only `0.343415 -> 0.341970 ms/GPU-token`, CI crossing
+  zero, so local beta attribution is not closed.
+- The dense 27B Q4_K_XL scale check does not produce a material promotion signal:
+  beta mean `+0.435%` wall with a zero-crossing interval, paired RoPE `-0.624%`,
+  and raw-Q `-1.284%`, all with high variance. Raw-Q is rejected for promotion
+  on 0.8B, A3B, and 27B.
+- Source-only output-scale folding, legacy attention normalization folding, and
+  cached softmax exponentials pass correctness coverage but have no rollback-
+  capable performance A/B. Keep them uncredited until source/pipeline variants
+  exist.
+- Full validation after the fixes: `312 passed, 0 failed, 135 ignored`; targeted
+  Metal correctness tests and workspace test compilation pass. `cargo fmt --check`
+  still reports only the two pre-existing unrelated formatting diffs.
+
+Decision: keep beta and grouped finalizer as promising bounded decode cleanup,
+paired RoPE as below-noise/guardrail work, and raw-Q off. Do not promote any of
+these as a roadmap-level win without a production arm-to-arm hidden/logit/token
+trace and a clean post-cooldown repeat.
+
+Artifacts: `docs/bench/2026-07-27-hybrid-gdn-equivalence-certification.md`,
+`target/profiles/hybrid-gdn-ab/`, `target/profiles/dispatch-census/`,
+`target/profiles/phase-a3b-*-corrected.log`. Dirty build commit:
+`18ef0e975`; current build source state:
+`git-source-sha256-v2:7725582d3f8a469f8e394967ae583ccac72e4747c671794720b6bbd8bdc7a6eb`.
+Independent adversarial review: `cx` session `019fa6ed-87ac-7a13-9784-16ff96d368c7`
+and its resumed fixed-packet review.
+
 ## 2026-07-27 - v0.645 Exact GPU Greedy Product Inconclusive
 
 Status: sealed `INCONCLUSIVE_RESOLUTION` with `authority=none`. No default

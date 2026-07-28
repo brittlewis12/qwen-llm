@@ -50,6 +50,51 @@ kernel void kernel_rope_neox_f32(
     buf[base + i + half_rot] = a * s + b * c;
 }
 
+// Q and K use the same position and frequency table. Process both in one
+// dispatch; for the shared head prefix, calculate sin/cos once and apply it
+// to both buffers. Heads beyond the shorter tensor still execute normally.
+struct rope_pair_args {
+    uint  n_q_heads;
+    uint  n_k_heads;
+    uint  head_dim;
+    uint  n_rot;
+    uint  position;
+    float theta_base;
+};
+
+kernel void kernel_rope_neox_pair_f32(
+        constant rope_pair_args & args [[buffer(0)]],
+        device float * q              [[buffer(1)]],
+        device float * k              [[buffer(2)]],
+        uint tid [[thread_position_in_grid]]) {
+    const uint half_rot = args.n_rot / 2u;
+    const uint n_heads = max(args.n_q_heads, args.n_k_heads);
+    const uint total_pairs = n_heads * half_rot;
+    if (tid >= total_pairs) return;
+
+    const uint hi = tid / half_rot;
+    const uint i = tid % half_rot;
+    const float exponent = float(2u * i) / float(args.n_rot);
+    const float freq = float(args.position) / pow(args.theta_base, exponent);
+    const float c = cos(freq);
+    const float s = sin(freq);
+
+    if (hi < args.n_q_heads) {
+        const uint base = hi * args.head_dim;
+        const float a = q[base + i];
+        const float b = q[base + i + half_rot];
+        q[base + i] = a * c - b * s;
+        q[base + i + half_rot] = a * s + b * c;
+    }
+    if (hi < args.n_k_heads) {
+        const uint base = hi * args.head_dim;
+        const float a = k[base + i];
+        const float b = k[base + i + half_rot];
+        k[base + i] = a * c - b * s;
+        k[base + i + half_rot] = a * s + b * c;
+    }
+}
+
 struct rope_packed_args {
     uint  n_tokens;
     uint  n_heads;

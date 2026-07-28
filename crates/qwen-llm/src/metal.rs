@@ -2861,6 +2861,80 @@ pub fn encode_mat_vec_f32(
     Ok(())
 }
 
+/// F32 mat-vec followed by sigmoid, kept fused for small GDN beta
+/// projections. The input weights and activation must both be F32.
+pub fn encode_mat_vec_f32_sigmoid(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::F32 || x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_f32_sigmoid",
+            detail: format!(
+                "weight/x/y expected F32, got {:?}/{:?}/{:?}",
+                weight.dtype, x.dtype, y.dtype
+            ),
+        });
+    }
+    if x.n_elements() as usize != n_in || y.n_elements() as usize != n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_f32_sigmoid",
+            detail: format!(
+                "x/y expected {n_in}/{n_out} elements, got {}/{}",
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    if weight.n_elements() as usize != n_in * n_out {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_f32_sigmoid",
+            detail: format!(
+                "weight expected {} elements, got {}",
+                n_in * n_out,
+                weight.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_vec_f32_f32_sigmoid")?;
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(4),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 4 * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_mat_vec_16bit_weight_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -10724,14 +10798,15 @@ pub fn encode_moe_grouped_finalizer_f32(
     enc.set_tensor(3, shared_gate);
     enc.set_tensor(4, shared_out);
     enc.set_tensor(5, x_pack);
+    const THREADS_PER_TG: usize = 64;
     enc.dispatch(
         MTLSize {
-            width: n_out.div_ceil(2),
+            width: n_out.div_ceil(THREADS_PER_TG),
             height: n_tokens,
             depth: 1,
         },
         MTLSize {
-            width: 64,
+            width: THREADS_PER_TG,
             height: 1,
             depth: 1,
         },
@@ -17591,6 +17666,93 @@ pub fn encode_rope_neox_f32(
     Ok(())
 }
 
+/// In-place NEOX RoPE for Q and K using one dispatch. Both tensors share the
+/// same position/frequency calculation; the shorter head set is handled by
+/// the same threads that rotate the common prefix.
+pub fn encode_rope_neox_pair_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k: &MetalTensor,
+    n_q_heads: usize,
+    n_k_heads: usize,
+    head_dim: usize,
+    n_rot: usize,
+    position: u32,
+    theta_base: f32,
+) -> Result<(), MetalError> {
+    let q_want = n_q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "rope_neox_pair",
+            detail: "q head shape overflow".into(),
+        })?;
+    let k_want = n_k_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "rope_neox_pair",
+            detail: "k head shape overflow".into(),
+        })?;
+    if q.n_elements() as usize != q_want || k.n_elements() as usize != k_want {
+        return Err(MetalError::BadShape {
+            kernel: "rope_neox_pair",
+            detail: format!(
+                "q/k expected {q_want}/{k_want} elements, got {}/{}",
+                q.n_elements(),
+                k.n_elements()
+            ),
+        });
+    }
+    if n_rot % 2 != 0 || n_rot > head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rope_neox_pair",
+            detail: format!("n_rot={n_rot} must be even and <= head_dim={head_dim}"),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_k_heads: u32,
+        head_dim: u32,
+        n_rot: u32,
+        position: u32,
+        theta_base: f32,
+    }
+    let pso = ctx.pipeline("kernel_rope_neox_pair_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_q_heads: n_q_heads as u32,
+            n_k_heads: n_k_heads as u32,
+            head_dim: head_dim as u32,
+            n_rot: n_rot as u32,
+            position,
+            theta_base,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k);
+
+    let total_pairs = n_q_heads.max(n_k_heads) * (n_rot / 2);
+    let tg_threads = 64usize;
+    enc.dispatch(
+        MTLSize {
+            width: total_pairs.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_rope_neox_f32_packed_consecutive(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -18013,7 +18175,10 @@ pub fn encode_rmsnorm_gated_f32(
 ///   * inner:  s_k = S · k
 ///   * delta:  Δ = (v − s_k) · β
 ///   * update: S += Δ ⊗ k
-///   * output: o = (S · q) / √head_dim
+///   * output: o = S · q
+///
+/// The usual `1 / √head_dim` factor is folded exactly into the following
+/// RMSNormGated epsilon, so this kernel leaves the output unscaled.
 ///
 /// All in one kernel, with S held in registers across the (decay → inner
 /// → update → output) sequence. State is read from / written back to
@@ -18125,6 +18290,7 @@ pub fn encode_gdn_step_f32(
 }
 
 /// GDN recurrence variant that takes precomputed `decay = exp(g)`.
+/// Output is unscaled; `1 / sqrt(head_dim)` is folded into RMSNormGated.
 pub fn encode_gdn_step_decay_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -19866,6 +20032,23 @@ pub fn mat_vec_trellis3_f32_readback_for_test(
 mod tests {
     use super::*;
 
+    fn metal_test_context() -> Option<MetalContext> {
+        match MetalContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(MetalError::EmptyLibrary | MetalError::NoDevice) => {
+                let required = matches!(
+                    std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
+                    Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+                );
+                if required {
+                    panic!("Metal is required but unavailable");
+                }
+                None
+            }
+            Err(error) => panic!("Metal context: {error}"),
+        }
+    }
+
     #[test]
     fn owned_weight_view_is_read_only_and_bounds_checked() {
         let ctx = match MetalContext::new() {
@@ -21166,6 +21349,131 @@ mod tests {
             eprintln!("[mat_vec n_in={n_in} n_out={n_out}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-3);
         }
+    }
+
+    #[test]
+    fn mat_vec_f32_sigmoid_matches_cpu() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let n_in = 512usize;
+        let n_out = 48usize;
+        let w: Vec<f32> = (0..n_in * n_out)
+            .map(|i| ((i % 29) as f32 - 14.0) * 2e-3)
+            .collect();
+        let x: Vec<f32> = (0..n_in).map(|i| ((i % 17) as f32 - 8.0) * 3e-2).collect();
+        let mat = crate::forward::mat_vec_pub(&w, n_in, n_out, &x);
+        let cpu: Vec<f32> = mat.into_iter().map(|v| 1.0 / (1.0 + (-v).exp())).collect();
+        let w_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&w),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let y_t = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_mat_vec_f32_sigmoid(&ctx, enc, &w_t, &x_t, &y_t, n_in, n_out)
+        })
+        .unwrap();
+        let gpu = read_back_f32(&y_t.buffer, n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(cpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(max_abs < 1e-5, "fused beta sigmoid drift {max_abs}");
+    }
+
+    #[test]
+    fn moe_grouped_finalizer_matches_cpu() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let n_out = 512usize;
+        let topk = 4usize;
+        let n_tokens = 2usize;
+        let expert_out: Vec<f32> = (0..n_tokens * topk * n_out)
+            .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
+            .collect();
+        let weights: Vec<f32> = (0..n_tokens * topk)
+            .map(|i| 0.1 + (i % topk) as f32 * 0.1)
+            .collect();
+        let shared_gate = vec![0.65f32, 0.35];
+        let shared_out: Vec<f32> = (0..n_tokens * n_out)
+            .map(|i| ((i % 17) as f32 - 8.0) * 2e-2)
+            .collect();
+        let x_init: Vec<f32> = (0..n_tokens * n_out)
+            .map(|i| ((i % 13) as f32 - 6.0) * 3e-2)
+            .collect();
+        let expected: Vec<f32> = (0..n_tokens * n_out)
+            .map(|i| {
+                let token = i / n_out;
+                let routed: f32 = (0..topk)
+                    .map(|slot| {
+                        weights[token * topk + slot]
+                            * expert_out[(token * topk + slot) * n_out + i % n_out]
+                    })
+                    .sum();
+                x_init[i] + routed + shared_gate[token] * shared_out[i]
+            })
+            .collect();
+
+        let expert_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&expert_out),
+            vec![(n_tokens * topk * n_out) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let weights_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&weights),
+            vec![(n_tokens * topk) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gate_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&shared_gate),
+            vec![n_tokens as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let shared_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&shared_out),
+            vec![(n_tokens * n_out) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x_init),
+            vec![(n_tokens * n_out) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_moe_grouped_finalizer_f32(
+                &ctx, enc, &expert_t, &weights_t, &gate_t, &shared_t, &x_t, n_out, topk, n_tokens,
+            )
+        })
+        .unwrap();
+        let gpu = read_back_f32(&x_t.buffer, n_tokens * n_out);
+        let max_abs = gpu
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(max_abs < 1e-6, "grouped finalizer drift {max_abs}");
     }
 
     #[test]
@@ -26011,10 +26319,8 @@ mod tests {
 
     #[test]
     fn softmax_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         // Cover small (one warp) to large (multi-warp reduce) shapes.
         for &n in &[16usize, 256, 4096, 32768] {
@@ -26446,6 +26752,64 @@ mod tests {
     }
 
     #[test]
+    fn rope_neox_pair_matches_cpu() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let head_dim = 256;
+        let n_rot = 64;
+        let theta_base = 10_000_000.0f32;
+        for &(n_q, n_k, position) in &[(24usize, 4usize, 0u32), (8, 8, 37)] {
+            let q_len = n_q * head_dim;
+            let k_len = n_k * head_dim;
+            let q_init: Vec<f32> = (0..q_len).map(|i| ((i % 19) as f32 - 9.0) * 0.05).collect();
+            let k_init: Vec<f32> = (0..k_len)
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.04)
+                .collect();
+            let mut q_cpu = q_init.clone();
+            let mut k_cpu = k_init.clone();
+            rope_neox_cpu_ref(&mut q_cpu, n_q, head_dim, n_rot, position, theta_base);
+            rope_neox_cpu_ref(&mut k_cpu, n_k, head_dim, n_rot, position, theta_base);
+
+            let q_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q_init),
+                vec![q_len as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let k_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&k_init),
+                vec![k_len as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_rope_neox_pair_f32(
+                    &ctx, enc, &q_t, &k_t, n_q, n_k, head_dim, n_rot, position, theta_base,
+                )
+            })
+            .unwrap();
+
+            let q_gpu = read_back_f32(&q_t.buffer, q_len);
+            let k_gpu = read_back_f32(&k_t.buffer, k_len);
+            let q_max = q_gpu
+                .iter()
+                .zip(q_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let k_max = k_gpu
+                .iter()
+                .zip(k_cpu.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(q_max < 1e-5, "rope pair Q drift: {q_max}");
+            assert!(k_max < 1e-5, "rope pair K drift: {k_max}");
+        }
+    }
+
+    #[test]
     fn rope_neox_packed_consecutive_matches_cpu() {
         let ctx = match MetalContext::new() {
             Ok(c) => c,
@@ -26646,10 +27010,8 @@ mod tests {
 
     #[test]
     fn rmsnorm_gated_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         for &(n_heads, head_dim) in &[(16usize, 128usize), (48, 128)] {
             let total = n_heads * head_dim;
@@ -26716,7 +27078,6 @@ mod tests {
         hd: usize,
     ) -> Vec<f32> {
         let mut out = vec![0.0f32; n_v * hd];
-        let scale = 1.0 / (hd as f32).sqrt();
         for hi in 0..n_v {
             let hk = hi % n_k;
             let s_off = hi * hd * hd;
@@ -26746,13 +27107,14 @@ mod tests {
                     state[s_off + dv * hd + dk] += coeff * k_h[dk];
                 }
             }
-            // Output: o[dv] = (sum_dk S[dv,dk] * q[dk]) * scale
+            // Output is unscaled; the production GDN path folds the
+            // 1/sqrt(head_dim) factor into RMSNormGated epsilon.
             for dv in 0..hd {
                 let mut s = 0.0f32;
                 for dk in 0..hd {
                     s += state[s_off + dv * hd + dk] * q_h[dk];
                 }
-                out[hi * hd + dv] = s * scale;
+                out[hi * hd + dv] = s;
             }
         }
         out
@@ -26760,10 +27122,8 @@ mod tests {
 
     #[test]
     fn gdn_step_matches_cpu() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         // Cover both Qwen3.5/3.6 sizes:
         //   0.8B: n_v_heads = 16, head_dim = 128
@@ -27080,10 +27440,8 @@ mod tests {
     /// fails deterministically instead of 50%-of-suite-runs.
     #[test]
     fn attn_v4_partials_fully_written_nan_prime() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         let hd = 256usize;
         // The observed failing config plus its close neighbors.
@@ -27203,10 +27561,8 @@ mod tests {
     /// completely different reduction orderings).
     #[test]
     fn attn_v4_matches_naive_f16kv() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         let hd = 256usize;
         // Cover the currently-supported specializations:
@@ -27416,10 +27772,8 @@ mod tests {
     /// skipped KQV K-tiles multiply exact-zero probs.
     #[test]
     fn attn_matrix_path_matches_cpu_reference() {
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         let hd = 256usize;
         // (n_q, n_kv): G4 small dense, G6 27B, G8 A3B, G16 A10B.

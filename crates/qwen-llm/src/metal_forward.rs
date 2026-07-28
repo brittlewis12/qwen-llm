@@ -39,20 +39,21 @@ use crate::metal::{
     encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
     encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
     encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
-    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
-    encode_moe_down_bf16_f32, encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32,
-    encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    encode_mat_vec_f32_sigmoid, encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32,
+    encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32, encode_moe_down_f32_f32,
+    encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q4_K_f32,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
-    encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32, encode_moe_mat_vec_iq3_s_f32,
-    encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32, encode_moe_shared_accum_resid_f32,
-    encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_s_f32_fast, encode_moe_swiglu_iq3_xxs_f32,
+    encode_moe_grouped_finalizer_f32, encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32,
+    encode_moe_mat_vec_iq3_s_f32, encode_moe_mat_vec_iq3_xxs_f32, encode_moe_mat_vec_q5_K_f32,
+    encode_moe_shared_accum_resid_f32, encode_moe_swiglu_iq3_s_f32,
+    encode_moe_swiglu_iq3_s_f32_fast, encode_moe_swiglu_iq3_xxs_f32,
     encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_q4_K_f32, encode_moe_swiglu_q6_K_f32,
     encode_moe_swiglu_q8_0_f32, encode_moe_weighted_sum_f32, encode_mul_f32,
     encode_residual_rms_norm_mul_f32, encode_rms_norm_batched_f32,
     encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
-    encode_rope_neox_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_rope_neox_f32, encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
     encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
     encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
@@ -220,10 +221,19 @@ crate::env_flag!(default_on decode_moe_q5_down_fused_enabled, "QWEN_DECODE_MOE_Q
 crate::env_flag!(default_on decode_moe_iq4_down_fast_enabled, "QWEN_DECODE_MOE_IQ4_DOWN_FAST");
 crate::env_flag!(default_on decode_moe_q5_down_k512_r2_enabled, "QWEN_DECODE_MOE_Q5_DOWN_K512_R2");
 crate::env_flag!(default_on decode_moe_fused_finalizer_enabled, "QWEN_DECODE_MOE_FUSED_FINALIZER");
+crate::env_flag!(default_on decode_moe_grouped_finalizer_enabled, "QWEN_DECODE_MOE_GROUPED_FINALIZER");
 crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
 crate::env_flag!(default_off moe_router_f16_enabled, "QWEN_MOE_ROUTER_F16");
 crate::env_flag!(default_off decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
 crate::env_flag!(default_off decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
+crate::env_flag!(default_on decode_gdn_fused_beta_proj_enabled, "QWEN_DECODE_GDN_FUSED_BETA_PROJ");
+crate::env_flag!(default_on decode_rope_pair_enabled, "QWEN_DECODE_ROPE_PAIR");
+
+fn gdn_beta_projection_fused(gb: &MetalGdnBlock) -> bool {
+    decode_gdn_fused_beta_proj_enabled()
+        && gb.beta_proj.dtype == GgmlType::F32
+        && !decode_gdn_noop_beta_enabled()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeQuantEmbeddingMode {
@@ -4941,7 +4951,6 @@ pub struct MetalSession {
     pub gdn_k_norm: MetalTensor, // n_k * head_dim — l2-normed
     pub gdn_out: MetalTensor,    // n_v * head_dim — recurrence output
     pub gdn_normed: MetalTensor, // n_v * head_dim — RMSNormGated output
-    pub gdn_proj: MetalTensor,   // hidden_size — out_proj output
     pub mixer_out: MetalTensor,  // hidden_size — mixer output (GDN or attn)
 
     // Attention scratch.
@@ -4952,7 +4961,6 @@ pub struct MetalSession {
     pub attn_k_now: MetalTensor,    // kv_dim — current step K
     pub attn_v_now: MetalTensor,    // kv_dim — current step V
     pub attn_k_normed: MetalTensor, // kv_dim
-    pub attn_scores: MetalTensor,   // capacity_tokens — scores for current step
     pub attn_o: MetalTensor,        // q_dim — attention output
     // v4 flash-attn split-K partials. Sized for ATTN_V4_MAX_NWG; the
     // dispatcher passes the chosen NWG ≤ this value.
@@ -5112,7 +5120,6 @@ impl MetalSession {
             gdn_k_norm: MetalTensor::zeros_f32(ctx, vec![k_dim])?,
             gdn_out: MetalTensor::zeros_f32(ctx, vec![v_dim])?,
             gdn_normed: MetalTensor::zeros_f32(ctx, vec![v_dim])?,
-            gdn_proj: MetalTensor::zeros_f32(ctx, vec![h])?,
             mixer_out: MetalTensor::zeros_f32(ctx, vec![h])?,
             attn_q_full: MetalTensor::zeros_f32(ctx, vec![attn_q_full_elems])?,
             attn_q: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
@@ -5121,7 +5128,6 @@ impl MetalSession {
             attn_k_now: MetalTensor::zeros_f32(ctx, vec![kv_dim])?,
             attn_v_now: MetalTensor::zeros_f32(ctx, vec![kv_dim])?,
             attn_k_normed: MetalTensor::zeros_f32(ctx, vec![kv_dim])?,
-            attn_scores: MetalTensor::zeros_f32(ctx, vec![kv_capacity as u64])?,
             attn_o: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             // v4 partials: n_kv * NWG_max * GROUP * head_dim (and *2 for ml).
             attn_v4_o_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_o_partial_elems])?,
@@ -6722,17 +6728,35 @@ impl<'a> MetalForward<'a> {
             false,
         )?;
         if routed_weighted_sum_is_pending {
-            encode_moe_weighted_sum_f32(
-                self.ctx,
-                &enc,
-                &moe_expert_out,
-                &topk_w,
-                &session.mixer_out,
-                h,
-                topk,
-            )?;
+            if decode_moe_grouped_finalizer_enabled() {
+                let shared_out = session.ffn_out.view_subrange(0, vec![h as u64]);
+                encode_moe_grouped_finalizer_f32(
+                    self.ctx,
+                    &enc,
+                    &moe_expert_out,
+                    &topk_w,
+                    &session.moe_shared_gate,
+                    &shared_out,
+                    &session.x,
+                    h,
+                    topk,
+                    1,
+                )?;
+            } else {
+                encode_moe_weighted_sum_f32(
+                    self.ctx,
+                    &enc,
+                    &moe_expert_out,
+                    &topk_w,
+                    &session.mixer_out,
+                    h,
+                    topk,
+                )?;
+                self.encode_moe_final_residual_gpu(&enc, session)?;
+            }
+        } else {
+            self.encode_moe_final_residual_gpu(&enc, session)?;
         }
-        self.encode_moe_final_residual_gpu(&enc, session)?;
         enc.end();
         Ok(())
     }
@@ -7825,7 +7849,14 @@ impl<'a> MetalForward<'a> {
                                 }),
                                 false,
                             )?;
-                            encode_sigmoid_f32(self.ctx, &enc, &session.gdn_b, &session.gdn_beta)?;
+                            if !gdn_beta_projection_fused(g) {
+                                encode_sigmoid_f32(
+                                    self.ctx,
+                                    &enc,
+                                    &session.gdn_b,
+                                    &session.gdn_beta,
+                                )?;
+                            }
                             encode_gdn_decay_chain_f32(
                                 self.ctx,
                                 &enc,
@@ -10175,6 +10206,16 @@ impl<'a> MetalForward<'a> {
                             let enc = KernelEncoder::begin(&cmd);
                             if decode_gdn_noop_beta_enabled() {
                                 encode_fill_f32(self.ctx, &enc, &session.gdn_b, 0.0)?;
+                            } else if gdn_beta_projection_fused(g) {
+                                encode_mat_vec_f32_sigmoid(
+                                    self.ctx,
+                                    &enc,
+                                    &g.beta_proj,
+                                    &session.h,
+                                    &session.gdn_beta,
+                                    h,
+                                    n_v,
+                                )?;
                             } else {
                                 encode_mat_vec_dispatch(
                                     self.ctx,
@@ -10225,7 +10266,9 @@ impl<'a> MetalForward<'a> {
                     {
                         let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                         let enc = KernelEncoder::begin(&cmd);
-                        encode_sigmoid_f32(self.ctx, &enc, &session.gdn_b, &session.gdn_beta)?;
+                        if !gdn_beta_projection_fused(g) {
+                            encode_sigmoid_f32(self.ctx, &enc, &session.gdn_b, &session.gdn_beta)?;
+                        }
                         encode_gdn_decay_chain_f32(
                             self.ctx,
                             &enc,
@@ -10261,7 +10304,6 @@ impl<'a> MetalForward<'a> {
                                 (2 * n_k * head_dim) as u64,
                                 vec![(n_v * head_dim) as u64],
                             );
-
                             let cmd = self.ctx.queue.commandBuffer().expect("cmd");
                             let enc = KernelEncoder::begin(&cmd);
                             encode_ssm_conv_silu_f32(
@@ -10335,7 +10377,7 @@ impl<'a> MetalForward<'a> {
                                 &gdn_normed,
                                 n_v,
                                 head_dim,
-                                RMS_EPS,
+                                RMS_EPS * head_dim as f32,
                             )?;
                             enc.end();
                             cmd.commit();
@@ -11049,6 +11091,8 @@ impl<'a> MetalForward<'a> {
         }
         if decode_gdn_noop_beta_enabled() {
             encode_fill_f32(self.ctx, enc, &s.gdn_b, 0.0)?;
+        } else if gdn_beta_projection_fused(gb) {
+            encode_mat_vec_f32_sigmoid(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_beta, h, n_v)?;
         } else {
             encode_mat_vec_dispatch(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
         }
@@ -11076,7 +11120,9 @@ impl<'a> MetalForward<'a> {
         let gdn_beta = s.gdn_beta.clone();
         let gdn_normed = s.gdn_normed.clone();
 
-        encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
+        if !gdn_beta_projection_fused(gb) {
+            encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
+        }
         encode_gdn_decay_chain_f32(
             self.ctx,
             enc,
@@ -11200,26 +11246,41 @@ impl<'a> MetalForward<'a> {
             head_dim,
             RMS_EPS,
         )?;
-        encode_rope_neox_f32(
-            self.ctx,
-            enc,
-            &s.attn_q_normed,
-            n_q,
-            head_dim,
-            n_rot,
-            position,
-            arch.rope_theta,
-        )?;
-        encode_rope_neox_f32(
-            self.ctx,
-            enc,
-            &s.attn_k_normed,
-            n_kv,
-            head_dim,
-            n_rot,
-            position,
-            arch.rope_theta,
-        )?;
+        if decode_rope_pair_enabled() {
+            encode_rope_neox_pair_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_normed,
+                &s.attn_k_normed,
+                n_q,
+                n_kv,
+                head_dim,
+                n_rot,
+                position,
+                arch.rope_theta,
+            )?;
+        } else {
+            encode_rope_neox_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_normed,
+                n_q,
+                head_dim,
+                n_rot,
+                position,
+                arch.rope_theta,
+            )?;
+            encode_rope_neox_f32(
+                self.ctx,
+                enc,
+                &s.attn_k_normed,
+                n_kv,
+                head_dim,
+                n_rot,
+                position,
+                arch.rope_theta,
+            )?;
+        }
         let kv_dst_off = usize::try_from(checked_u64_mul(
             position as u64,
             kv_dim as u64,
@@ -11353,8 +11414,11 @@ impl<'a> MetalForward<'a> {
             // z projection.
             encode_mat_vec_dispatch(self.ctx, enc, &gb.in_proj_z, &s.h, &s.gdn_z, h, v_dim)?;
         }
+        let fuse_beta_proj = gdn_beta_projection_fused(gb);
         if decode_gdn_noop_beta_enabled() {
             encode_fill_f32(self.ctx, enc, &s.gdn_b, 0.0)?;
+        } else if fuse_beta_proj {
+            encode_mat_vec_f32_sigmoid(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_beta, h, n_v)?;
         } else {
             // beta source projection.
             encode_mat_vec_dispatch(self.ctx, enc, &gb.beta_proj, &s.h, &s.gdn_b, h, n_v)?;
@@ -11365,7 +11429,9 @@ impl<'a> MetalForward<'a> {
             // α source projection.
             encode_mat_vec_dispatch(self.ctx, enc, &gb.alpha_proj, &s.h, &s.gdn_a, h, n_v)?;
         }
-        encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
+        if !fuse_beta_proj {
+            encode_sigmoid_f32(self.ctx, enc, &s.gdn_b, &s.gdn_beta)?;
+        }
         // Decay-chain fusion: gdn_alpha stores exp(softplus(gdn_a + dt_bias) * a_log).
         // Replaces add_inplace + softplus + mul + per-row exp with one
         // per-head fused kernel.
@@ -11406,7 +11472,6 @@ impl<'a> MetalForward<'a> {
             .gdn_qkv_conv
             .view_subrange((2 * n_k * head_dim) as u64, vec![v_dim as u64]);
 
-        // Per-head L2-norm of Q and K.
         if decode_gdn_pair_l2_enabled() {
             encode_l2_norm_pair_batched_f32(
                 self.ctx,
@@ -11466,7 +11531,7 @@ impl<'a> MetalForward<'a> {
             &s.gdn_normed,
             n_v,
             head_dim,
-            RMS_EPS,
+            RMS_EPS * head_dim as f32,
         )?;
 
         // Output projection: [v_dim, hidden] → mixer_out.
@@ -11599,7 +11664,7 @@ impl<'a> MetalForward<'a> {
             gdn_normed_out,
             n_v,
             head_dim,
-            RMS_EPS,
+            RMS_EPS * head_dim as f32,
         )?;
         Ok(())
     }
@@ -11681,26 +11746,41 @@ impl<'a> MetalForward<'a> {
         )?;
 
         // (6) Partial RoPE on Q (in `attn_q_normed`) and K (in `attn_k_normed`).
-        encode_rope_neox_f32(
-            self.ctx,
-            enc,
-            &s.attn_q_normed,
-            n_q,
-            head_dim,
-            n_rot,
-            position,
-            arch.rope_theta,
-        )?;
-        encode_rope_neox_f32(
-            self.ctx,
-            enc,
-            &s.attn_k_normed,
-            n_kv,
-            head_dim,
-            n_rot,
-            position,
-            arch.rope_theta,
-        )?;
+        if decode_rope_pair_enabled() {
+            encode_rope_neox_pair_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_normed,
+                &s.attn_k_normed,
+                n_q,
+                n_kv,
+                head_dim,
+                n_rot,
+                position,
+                arch.rope_theta,
+            )?;
+        } else {
+            encode_rope_neox_f32(
+                self.ctx,
+                enc,
+                &s.attn_q_normed,
+                n_q,
+                head_dim,
+                n_rot,
+                position,
+                arch.rope_theta,
+            )?;
+            encode_rope_neox_f32(
+                self.ctx,
+                enc,
+                &s.attn_k_normed,
+                n_kv,
+                head_dim,
+                n_rot,
+                position,
+                arch.rope_theta,
+            )?;
+        }
 
         // (7) KV cache append. v1 enforces strict-monotonic-from-zero;
         // we copy K and V at slot `position` directly via copy_offset
@@ -13169,6 +13249,23 @@ mod tests {
     use crate::forward::Forward;
     use crate::gguf::GgufFile;
     use crate::loader::Model;
+
+    fn metal_test_context() -> Option<MetalContext> {
+        match MetalContext::new() {
+            Ok(ctx) => Some(ctx),
+            Err(MetalError::EmptyLibrary | MetalError::NoDevice) => {
+                let required = matches!(
+                    std::env::var("QWEN_REQUIRE_METAL_TESTS").as_deref(),
+                    Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+                );
+                if required {
+                    panic!("Metal is required but unavailable");
+                }
+                None
+            }
+            Err(error) => panic!("Metal context: {error}"),
+        }
+    }
 
     fn snapshot_validation_fixture() -> SessionSnapshot {
         SessionSnapshot {
@@ -15887,10 +15984,8 @@ mod tests {
             eprintln!("[argmax-chain-{label}] skipped — fixture missing");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         let g = GgufFile::open(model_path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
@@ -16151,10 +16246,8 @@ mod tests {
             eprintln!("[metal-gdn] skipped — model missing");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
@@ -17783,7 +17876,7 @@ mod tests {
                     &s.gdn_normed,
                     n_v,
                     head_dim,
-                    RMS_EPS,
+                    RMS_EPS * head_dim as f32,
                 )
                 .map_err(MfError::from)
             },
@@ -19237,10 +19330,8 @@ mod tests {
             eprintln!("[metal-attn] skipped — model missing");
             return;
         }
-        let ctx = match MetalContext::new() {
-            Ok(c) => c,
-            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
-            Err(e) => panic!("init failed: {e}"),
+        let Some(ctx) = metal_test_context() else {
+            return;
         };
         let g = GgufFile::open(path).expect("open");
         let m = Model::from_gguf(&g).expect("load");
@@ -19658,13 +19749,12 @@ mod tests {
                     state.ssm[0][s_off + dv * head_dim + dk] += coeff * k_h[dk];
                 }
             }
-            let scale = 1.0 / (head_dim as f32).sqrt();
             for dv in 0..head_dim {
                 let mut sm = 0.0f32;
                 for dk in 0..head_dim {
                     sm += state.ssm[0][s_off + dv * head_dim + dk] * q_h[dk];
                 }
-                o[hi * head_dim + dv] = sm * scale;
+                o[hi * head_dim + dv] = sm;
             }
         }
 
@@ -19673,8 +19763,11 @@ mod tests {
         let mut gated = vec![0.0f32; v_dim];
         for hi in 0..n_v {
             let off = hi * head_dim;
-            let normed =
-                crate::forward::rms_norm_pub(&o[off..off + head_dim], &norm_w, super::RMS_EPS);
+            let normed = crate::forward::rms_norm_pub(
+                &o[off..off + head_dim],
+                &norm_w,
+                super::RMS_EPS * head_dim as f32,
+            );
             for i in 0..head_dim {
                 let zi = z[off + i];
                 let silu_z = zi / (1.0 + (-zi).exp());

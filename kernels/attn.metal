@@ -252,7 +252,8 @@ kernel void kernel_attn_decode_f16kv(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Pass 2: softmax (identical to F32 path; scores are already F32).
+    // Pass 2: exp-shifted softmax numerators (scores remain unnormalized;
+    // the final inverse sum is folded into the V output below).
     float local_max = -INFINITY;
     for (uint p = tpitg; p < args.n_pos; p += ntg) local_max = max(local_max, scores[p]);
     local_max = simd_max(local_max);
@@ -260,6 +261,7 @@ kernel void kernel_attn_decode_f16kv(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     local_max = (tiisg < (ntg + 31) / 32) ? shred[tiisg] : -INFINITY;
     local_max = simd_max(local_max);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float local_sum = 0.0f;
     for (uint p = tpitg; p < args.n_pos; p += ntg) {
@@ -274,10 +276,8 @@ kernel void kernel_attn_decode_f16kv(
     local_sum = simd_sum(local_sum);
 
     const float inv_sum = 1.0f / local_sum;
-    for (uint p = tpitg; p < args.n_pos; p += ntg) scores[p] *= inv_sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Pass 3: out[d] = sum_p scores[p] * float(v_cache[p, kvh, d]).
+    // Pass 3: out[d] = inv_sum * sum_p scores[p] * float(v_cache[p, kvh, d]).
     for (uint d = tpitg; d < args.head_dim; d += ntg) {
         float acc = 0.0f;
         for (uint p = 0; p < args.n_pos; ++p) {
@@ -287,7 +287,7 @@ kernel void kernel_attn_decode_f16kv(
                 + d
             ];
         }
-        out_h[d] = acc;
+        out_h[d] = acc * inv_sum;
     }
 }
 
@@ -337,8 +337,10 @@ kernel void kernel_attn_decode_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     local_max = (tiisg < (ntg + 31) / 32) ? shred[tiisg] : -INFINITY;
     local_max = simd_max(local_max);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // (b) Subtract max, exp, sum.
+    // (b) Subtract max, exp, sum. Keep the numerators in the score buffer;
+    // normalization is folded into the final V reduction.
     float local_sum = 0.0f;
     for (uint p = tpitg; p < args.n_pos; p += ntg) {
         const float e = exp(scores[p] - local_max);
@@ -352,12 +354,8 @@ kernel void kernel_attn_decode_f32(
     local_sum = simd_sum(local_sum);
 
     const float inv_sum = 1.0f / local_sum;
-    for (uint p = tpitg; p < args.n_pos; p += ntg) {
-        scores[p] *= inv_sum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // ---- Pass 3: out[d] = sum_p scores[p] * v_cache[p, kvh, d] ----
+    // ---- Pass 3: out[d] = inv_sum * sum_p scores[p] * v_cache[p, kvh, d] ----
     //
     // Each thread owns a stride-`ntg` subset of dims. For each owned dim,
     // it accumulates in a REGISTER across all positions. Critical: each
@@ -382,6 +380,6 @@ kernel void kernel_attn_decode_f32(
                 + d
             ];
         }
-        out_h[d] = acc;
+        out_h[d] = acc * inv_sum;
     }
 }

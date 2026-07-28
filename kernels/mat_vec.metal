@@ -634,6 +634,41 @@ kernel void kernel_mat_vec_f32_f32(
     }
 }
 
+// F32 mat-vec with a sigmoid epilogue. GDN beta projections are small F32
+// rows and always consume sigmoid(beta) immediately, so keeping the
+// accumulator live removes the intermediate beta-source store and dispatch.
+kernel void kernel_mat_vec_f32_f32_sigmoid(
+        constant mat_vec_args & args   [[buffer(0)]],
+        device const float    * weight [[buffer(1)]],
+        device const float    * x      [[buffer(2)]],
+        device       float    * y      [[buffer(3)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint row = tgpig * MAT_VEC_ROWS_PER_TG + sgitg;
+    if (row >= args.n_out) return;
+
+    const uint n_in_v4 = args.n_in / 4;
+    device const float4 * w4 = (device const float4 *)(weight + row * args.n_in);
+    device const float4 * x4 = (device const float4 *)x;
+
+    float sum = 0.0f;
+    for (uint i = tiisg; i < n_in_v4; i += 32) {
+        const float4 a = w4[i];
+        const float4 b = x4[i];
+        sum += a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    }
+    const uint tail_start = n_in_v4 * 4;
+    for (uint i = tail_start + tiisg; i < args.n_in; i += 32) {
+        sum += weight[row * args.n_in + i] * x[i];
+    }
+
+    sum = simd_sum(sum);
+    if (tiisg == 0) {
+        y[row] = 1.0f / (1.0f + exp(-sum));
+    }
+}
+
 kernel void kernel_mat_vec_f32_f32_lcpp_r2(
         constant mat_vec_args & args   [[buffer(0)]],
         device const float    * weight [[buffer(1)]],

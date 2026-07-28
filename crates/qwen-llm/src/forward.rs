@@ -1,7 +1,8 @@
 //! CPU reference forward pass for Qwen3.5/3.6.
 //!
-//! Goal: bit-exact (or near-bit-exact, mod fp non-associativity) match
-//! against `llama-cli` on `Qwen3.5-0.8B.F32.gguf`. This is the oracle
+//! Goal: numerical/near-bit-exact match against `llama-cli` on
+//! `Qwen3.5-0.8B.F32.gguf`. Algebraic folds that alter finite-epsilon
+//! rounding are validated with explicit tolerances; this remains the oracle
 //! against which every Metal kernel is later validated.
 //!
 //! Performance is **explicitly not a concern here**. Naive triple-loop
@@ -999,32 +1000,22 @@ impl<'a> Forward<'a> {
         // conv buffer holds (kernel-1) past time steps, contiguous as
         // [t0_ch0, t0_ch1, ..., t0_chN-1, t1_ch0, ...].
         let kmin1 = conv_kernel - 1;
-        let mut conv_input_t = vec![0.0f32; conv_kernel * conv_dim];
-        // First (kernel-1) rows are the past.
-        for t in 0..kmin1 {
-            let src = &conv[t * conv_dim..(t + 1) * conv_dim];
-            conv_input_t[t * conv_dim..(t + 1) * conv_dim].copy_from_slice(src);
-        }
-        // Last row is current qkv.
-        conv_input_t[kmin1 * conv_dim..].copy_from_slice(&qkv);
-
-        // Convolve along time axis. Input `conv_input_t` is `[kernel, conv_dim]`
-        // row-major over time (each time slice is one full conv_dim row);
-        // weight `conv_w` is `[conv_dim, kernel]` (channel-blocked).
+        // Convolve directly from the retained rows plus the current
+        // projection, without materializing the equivalent K-row temporary.
         let mut conv_out = vec![0.0f32; conv_dim];
         for c in 0..conv_dim {
             let mut s = 0.0f32;
             for k in 0..conv_kernel {
-                s += conv_w[c * conv_kernel + k] * conv_input_t[k * conv_dim + c];
+                let x = if k < kmin1 {
+                    conv[k * conv_dim + c]
+                } else {
+                    qkv[c]
+                };
+                s += conv_w[c * conv_kernel + k] * x;
             }
             conv_out[c] = silu(s);
         }
         // Update conv buffer: drop the oldest row, slide.
-        for t in 0..kmin1 - 1 {
-            let (left, right) = conv.split_at_mut((t + 1) * conv_dim);
-            let _ = (left, right);
-        }
-        // Simpler: rotate.
         for t in 0..kmin1 - 1 {
             let next = (t + 1) * conv_dim;
             let cur = t * conv_dim;
@@ -1053,34 +1044,9 @@ impl<'a> Forward<'a> {
             l2_norm_in_place(&mut k_full[hi * head_dim..(hi + 1) * head_dim], RMS_EPS);
         }
 
-        // Repeat Q/K from n_k heads to n_v heads (3:1 in 27B, 1:1 in 0.8B).
-        // ggml_repeat_4d tiles heads as [h0,h1,...,h_{nk-1}, h0,h1,...] —
-        // i.e. `src_h = hi % n_k`, NOT `hi / head_ratio`. The latter would
-        // give [h0,h0,h0,h1,h1,h1,...] which is wrong for ggml's repeat.
-        // For the 0.8B with n_v == n_k, both reduce to identity; for 27B
-        // (n_v=48, n_k=16), this matters.
-        let q = if n_v == n_k {
-            q_full.clone()
-        } else {
-            let mut out = vec![0.0f32; n_v * head_dim];
-            for hi in 0..n_v {
-                let src_h = hi % n_k;
-                out[hi * head_dim..(hi + 1) * head_dim]
-                    .copy_from_slice(&q_full[src_h * head_dim..(src_h + 1) * head_dim]);
-            }
-            out
-        };
-        let k = if n_v == n_k {
-            k_full.clone()
-        } else {
-            let mut out = vec![0.0f32; n_v * head_dim];
-            for hi in 0..n_v {
-                let src_h = hi % n_k;
-                out[hi * head_dim..(hi + 1) * head_dim]
-                    .copy_from_slice(&k_full[src_h * head_dim..(src_h + 1) * head_dim]);
-            }
-            out
-        };
+        // ggml_repeat_4d tiles Q/K heads as [h0, h1, ..., h_{n_k-1}, h0,
+        // h1, ...]. Keep that mapping as an index in the recurrence instead
+        // of materializing repeated vectors.
 
         // Delta-net recurrence: per V-head, state ∈ R^{head_dim x head_dim}.
         // S_new = exp(g) * S - exp(g) * (k ⊗ k^T) * S * β + β * (v ⊗ k)
@@ -1093,8 +1059,9 @@ impl<'a> Forward<'a> {
         let mut o = vec![0.0f32; n_v * head_dim];
         for hi in 0..n_v {
             let s_off = hi * head_dim * head_dim;
-            let q_h = &q[hi * head_dim..(hi + 1) * head_dim];
-            let k_h = &k[hi * head_dim..(hi + 1) * head_dim];
+            let hk = hi % n_k;
+            let q_h = &q_full[hk * head_dim..(hk + 1) * head_dim];
+            let k_h = &k_full[hk * head_dim..(hk + 1) * head_dim];
             let v_h = &v_full[hi * head_dim..(hi + 1) * head_dim];
             let g_h = g[hi].exp();
             let b_h = beta[hi];
@@ -1117,17 +1084,15 @@ impl<'a> Forward<'a> {
                     ssm[idx] = g_h * ssm[idx] + coeff * k_h[dk];
                 }
             }
-            // Output: o[dv] = (sum_dk S[dv, dk] * q[dk]) / sqrt(head_dim)
-            // The `1/sqrt(S_v)` scale matches ggml-cpu/ops.cpp gated_delta_net
-            // (line 10551: `attn_data[j] = sum * scale` with `scale = 1/sqrtf(S_v)`).
+            // Output is left unscaled. The exact 1/sqrt(head_dim) factor is
+            // folded into the following RMSNorm epsilon.
             let o_h = &mut o[hi * head_dim..(hi + 1) * head_dim];
-            let scale = 1.0f32 / (head_dim as f32).sqrt();
             for dv in 0..head_dim {
                 let mut s = 0.0f32;
                 for dk in 0..head_dim {
                     s += ssm[s_off + dv * head_dim + dk] * q_h[dk];
                 }
-                o_h[dv] = s * scale;
+                o_h[dv] = s;
             }
         }
 
@@ -1136,7 +1101,7 @@ impl<'a> Forward<'a> {
         let mut gated_out = vec![0.0f32; n_v * head_dim];
         for hi in 0..n_v {
             let s = hi * head_dim;
-            let normed = rms_norm(&o[s..s + head_dim], &norm_w, RMS_EPS);
+            let normed = rms_norm(&o[s..s + head_dim], &norm_w, RMS_EPS * head_dim as f32);
             for i in 0..head_dim {
                 gated_out[s + i] = normed[i] * silu(z[s + i]);
             }
@@ -1429,6 +1394,26 @@ mod tests {
         softmax_in_place(&mut sm);
         let total: f32 = sm.iter().sum();
         assert!((total - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn gdn_output_scale_folds_into_rms_epsilon() {
+        let head_dim = 128usize;
+        let eps = 1e-6f32;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let x: Vec<f32> = (0..head_dim)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.07)
+            .collect();
+        let weight: Vec<f32> = (0..head_dim).map(|i| 0.5 + (i % 7) as f32 * 0.1).collect();
+        let scaled: Vec<f32> = x.iter().map(|v| *v * scale).collect();
+        let old = rms_norm(&scaled, &weight, eps);
+        let folded = rms_norm(&x, &weight, eps * head_dim as f32);
+        let max_abs = old
+            .iter()
+            .zip(folded.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_abs < 2e-6, "scale-fold drift {max_abs}");
     }
 
     #[test]

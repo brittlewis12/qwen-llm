@@ -317,11 +317,14 @@ kernel void kernel_softmax_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     m = (tiisg < (ntg + 31) / 32) ? shmem[tiisg] : -INFINITY;
     m = simd_max(m);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Pass 2: sum of exp(x - m).
     float s = 0.0f;
     for (uint i = tpitg; i < args.n; i += ntg) {
-        s += exp(x[i] - m);
+        const float e = exp(x[i] - m);
+        x[i] = e;
+        s += e;
     }
     s = simd_sum(s);
     if (tiisg == 0) shmem[sgitg] = s;
@@ -333,7 +336,7 @@ kernel void kernel_softmax_f32(
 
     // Pass 3: write normalized.
     for (uint i = tpitg; i < args.n; i += ntg) {
-        x[i] = exp(x[i] - m) * inv;
+        x[i] *= inv;
     }
 }
 

@@ -15956,6 +15956,112 @@ mod tests {
         );
     }
 
+    fn run_exact_greedy_chain_equivalence(model_path: &str, label: &str) {
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("[greedy-chain-{label}] skipped - fixture missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = GgufFile::open(model_path).expect("open");
+        let m = Model::from_gguf(&g).expect("load");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let tok = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
+        let mut prompt = tok
+            .encode("The quick brown fox jumps over the lazy dog", false)
+            .expect("tokenize");
+        prompt.truncate(prompt.len().min(4));
+        assert!(!prompt.is_empty(), "tokenizer returned empty prompt");
+
+        let select = |logits: &[f32]| {
+            let mut sampler =
+                crate::sampling::Sampler::new(crate::sampling::SamplingConfig::default())
+                    .expect("greedy sampler");
+            sampler.sample(logits).expect("valid logits").token
+        };
+        let mf = MetalForward::new(&ctx, &mm);
+        let capacity = prompt.len() + 8;
+        let mut full = MetalSession::fresh(&ctx, &mm, capacity).expect("full session");
+        let mut greedy = MetalSession::fresh(&ctx, &mm, capacity).expect("greedy session");
+        let mut consumed = Vec::new();
+        let mut full_logits = Vec::new();
+
+        for (position, &token) in prompt.iter().enumerate() {
+            full_logits = mf
+                .single_token(token, position as u32, &mut full)
+                .expect("full prompt step");
+            let selected = mf
+                .single_token_greedy(token, position as u32, &mut greedy)
+                .expect("greedy prompt step")
+                .into_token()
+                .expect("finite greedy prompt logits");
+            assert_eq!(
+                selected,
+                select(&full_logits),
+                "[greedy-chain-{label}] prompt selection at {position}"
+            );
+            consumed.push(token);
+        }
+
+        for step in 0..4 {
+            let token = select(&full_logits);
+            let position = consumed.len() as u32;
+            full_logits = mf
+                .single_token(token, position, &mut full)
+                .expect("full generation step");
+            let selected = mf
+                .single_token_greedy(token, position, &mut greedy)
+                .expect("greedy generation step")
+                .into_token()
+                .expect("finite greedy generation logits");
+            assert_eq!(
+                selected,
+                select(&full_logits),
+                "[greedy-chain-{label}] generation selection at {step}"
+            );
+            consumed.push(token);
+        }
+
+        let token = select(&full_logits);
+        let position = consumed.len() as u32;
+        let full_continuation = mf
+            .single_token(token, position, &mut full)
+            .expect("full continuation");
+        let greedy_continuation = mf
+            .single_token(token, position, &mut greedy)
+            .expect("greedy continuation");
+        consumed.push(token);
+        assert!(
+            full_continuation
+                .iter()
+                .zip(&greedy_continuation)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "[greedy-chain-{label}] continuation logits differ"
+        );
+
+        let identity = full.snapshot_identity(1, 2);
+        let full_snapshot = full
+            .snapshot(identity.clone(), consumed.clone(), None)
+            .expect("full snapshot");
+        let greedy_snapshot = greedy
+            .snapshot(identity, consumed, None)
+            .expect("greedy snapshot");
+        assert_eq!(full_snapshot.identity, greedy_snapshot.identity);
+        assert_eq!(full_snapshot.prefix_tokens, greedy_snapshot.prefix_tokens);
+        assert_eq!(full_snapshot.pending_token, greedy_snapshot.pending_token);
+        assert_eq!(full_snapshot.kv_n_pos, greedy_snapshot.kv_n_pos);
+        assert_eq!(full_snapshot.kv_k_arena, greedy_snapshot.kv_k_arena);
+        assert_eq!(full_snapshot.kv_v_arena, greedy_snapshot.kv_v_arena);
+        assert_eq!(full_snapshot.gdn_conv_arena, greedy_snapshot.gdn_conv_arena);
+        assert_eq!(
+            full_snapshot.gdn_state_arena,
+            greedy_snapshot.gdn_state_arena
+        );
+    }
+
     fn run_concurrent_gdn_moe_equivalence(
         model_path: &str,
         label: &str,
@@ -16425,6 +16531,22 @@ mod tests {
             "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
             "moe-a3b",
             0.995,
+        );
+    }
+
+    #[test]
+    fn metal_exact_greedy_chain_matches_full_logits_dense() {
+        run_exact_greedy_chain_equivalence(
+            "/Users/tito/models/Qwen3.5-0.8B.F32.gguf",
+            "dense-0p8b",
+        );
+    }
+
+    #[test]
+    fn metal_exact_greedy_chain_matches_full_logits_moe() {
+        run_exact_greedy_chain_equivalence(
+            "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            "moe-a3b",
         );
     }
 

@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-28 - v0.650 A3B GPU-Greedy Immediate-Carryover Diagnostic
+
+Status: sealed `NO_MATERIAL_CARRYOVER_AT_3_PERCENT` with
+`authority=diagnostic-only`. Product admission is forbidden; exact GPU greedy
+remains default-off and explicit-only.
+
+- The one-shot packet verifies all 254 inventoried artifacts, clean
+  source/build/runtime `114c181`, exact A3B state, fresh 16-token conformance,
+  16 fixed pairs, 32 fresh arm processes, and 64 schema-7 request rows. Every
+  treatment executes 128 selected tokens and 127 transitions; every immediate
+  sentinel selects one token and executes zero transitions.
+- Baseline treatment prefill is balanced: geometric A/B `Q=0.997323709`, inside
+  the frozen inclusive `[0.97,1.03]` gate. The normalized post-generation
+  carryover estimate is `C=0.996884934`; its separate one-sided 95% bounds are
+  `0.993413698` and `1.000368299`. The upper bound is strictly below the frozen
+  `1.03` harm threshold.
+- All 16 paired carryover ratios, `carry_B/carry_A`, are below `1.011`.
+  Treatment and sentinel token digests/text are identical across every arm and
+  process. Policy, stop, terminal-transition, cache, prompt-lookup, and sampling
+  gates all pass.
+- Under the frozen paired-log one-sided t rule, this excludes a reproducible
+  immediate `>=3%` relative prefill penalty after one 128-token exact-GPU-greedy
+  generation on the frozen A3B cell. It does not establish zero effect,
+  cumulative or concurrent performance non-regression, automatic-selector
+  admission, or transfer to another prompt, model, quantization, or cache shape.
+- The result materially weakens the proposed immediate-carryover explanation
+  for v0.649's bilateral middle-window prefill slowdown. It does not rescue
+  v0.649 or identify the disturbance. Descriptively only, v0.650 repeats the
+  paired treatment decode-ms/token A/B geometric ratio `1.081378`, with 16/16
+  ratios above one. Decode was outside this packet's decision and grants no
+  authority.
+- Close this exact-cell immediate one-generation carryover branch. If automatic
+  admission remains desirable, preregister and then commit a candidate restoring
+  only the metadata-scoped A3B absent-environment selector for measurement. Run
+  A with explicit `=0` and B absent, require auto-selection telemetry, and use a
+  structurally pre-treatment sentinel plus a final cumulative-history sentinel.
+  The candidate commit grants no admission and must not remain the product
+  default after a failed or inconclusive packet. Do not pool v0.648-v0.650.
+
+Artifact: `target/profiles/v0650-a3b-gpu-greedy-carryover-p1/`.
+Preregistration/runner: `371d1e9` / `114c181`. Independent design, runner, and
+result review: `cx` session `019fa9a8-c5c2-79f3-b643-943bd25cd0e2`.
+
 ## 2026-07-28 - v0.648/v0.649 GPU-Greedy Admission Inconclusive
 
 Status: v0.648 sealed `INVALID`; v0.649 sealed valid

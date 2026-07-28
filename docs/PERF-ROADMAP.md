@@ -977,19 +977,36 @@ steady prefill fails the frozen control at `0.957634x` and TTFT mirrors it.
 The middle-window disturbance affects both arms and only post-generation
 requests; all 16 request-zero prefills remain stable. Do not rescue the result.
 Absence is default-off at `15a7092`, while explicit `=1` retains the exact
-mechanism. The sharpened open question is now prior-generation carryover, not
-reducer efficacy or same-request prefill causality.
+mechanism. That sharpened the remaining question to prior-generation carryover,
+not reducer efficacy or same-request prefill causality.
 
-1. **A3B GPU-greedy carryover discriminator**: in each fresh process, record a
-   pre-treatment request-zero prefill, execute one 128-token CPU-full-logit or
-   GPU-greedy generation, then record a one-token post-generation prefill
-   sentinel. Compare the within-process prefill delta under balanced order and
-   capture during-session CPU/GPU/power evidence. Diagnostic only: no pooling,
-   admission, default flip, or gate relaxation. If carryover is arm-specific,
-   keep the path explicit and attribute it; if only shared temporal drift
-   remains, authorize a new admission design whose contamination control is
-   structurally pre-treatment. Decode prior `1.090x`; belief high on efficacy,
-   medium on harmless carryover, difficulty S-M.
+v0.650 closes the immediate one-generation carryover hypothesis in its exact
+A3B cell. Sixteen fresh-process pairs give balanced treatment prefill
+`Q=0.997324`, normalized carryover `C=0.996885`, and a one-sided 95% upper bound
+of `1.000368`, strictly below the frozen `1.03` harm threshold. Exact state,
+fresh conformance, token digests, terminal semantics, cache isolation, host
+validity, and all 254 inventoried artifacts pass. This is diagnostic-only: it
+does not rescue v0.649, prove the source of its bilateral disturbance, authorize
+automatic selection, or cover cumulative/concurrent workloads. Descriptively,
+the paired treatment decode-ms/token A/B geometric ratio is `1.081378`, with
+16/16 ratios above one, but decode was outside the decision. Stop this exact-cell
+immediate one-generation branch unless a materially different cumulative or
+concurrent workload supplies a new premise.
+
+1. **A3B exact-GPU-greedy automatic-admission decision**: if product admission
+   remains desirable, preregister and then commit a candidate restoring only the
+   metadata-scoped A3B absent-environment selector for measurement. Run A with
+   explicit `=0` and B absent, requiring auto-selection telemetry. Put a
+   zero-transition sentinel structurally before generation, retain the frozen
+   product decode block, and add a final sentinel to expose cumulative history.
+   Preserve exact state/output/terminal/cache and cold-boundary gates. Reuse only
+   the already-produced `metadata_compatibility_v1` identity comparison; add no
+   checkpoint-content hash or startup identity I/O. Do not pool v0.648-v0.650.
+   The candidate commit grants no admission and must be rolled back after a
+   failed or inconclusive packet. Decode belief high; immediate `>=3%` carryover
+   is high-confidence closed for this exact one-generation cell; cumulative and
+   concurrent policy risk is unresolved/medium. Difficulty S-M implementation/M
+   evidence.
 2. **Dense GPU-greedy deconfounding**: load dense27 once, symmetrically warm both
    explicit policies after neutral sustained preconditioning, and alternate full
    128-token chains quickly enough to escape the v0.645 host-state curve. This is
@@ -1074,15 +1091,20 @@ automatic retained use stay copied without separate evidence.
 v0.640 banks exact-27B deferred restore behind its existing explicit environment
 control. It is no longer an active experiment; keep `decode` as the default.
 
-1. v0.644 closes the tested Q4 ladder. Do not schedule B/C widening, E-arm
+1. v0.650 closes immediate one-generation GPU-greedy carryover at the 3% harm
+   threshold. If automatic A3B admission remains desired, preregister, build, and
+   measure the actual absent-environment selector once under the independent
+   pre-treatment design above; otherwise retain explicit `=1` and stop.
+2. v0.644 closes the tested Q4 ladder. Do not schedule B/C widening, E-arm
    diagnosis, P4096 replication, or a local source/dequant implementation.
-2. Decide whether A10B is a current deployment target. If yes, its native-
-   embedding/split-copy floor moves ahead of GPU argmax; otherwise reconcile
-   argmax semantics first, then run grammar traces.
-3. Keep prompt reduction explicitly input-changing. Keep true-long attention,
+3. Decide whether A10B is a current deployment target. If yes, its native-
+   embedding/split-copy floor moves ahead of dense GPU argmax; otherwise run the
+   grammar trace oracle after A3B admission is either completed or explicitly
+   declined.
+4. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
-4. Do not resume the closed page-rounded image route, transient mmap-source
+5. Do not resume the closed page-rounded image route, transient mmap-source
    Shared-destination blits, broad topology attribution,
    generic command-graph or compiler work, retained-view retunes, broad external
    drafting, matrix/compressed attention, sparse retrieval, routed-tail work,

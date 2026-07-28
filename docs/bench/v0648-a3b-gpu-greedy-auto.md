@@ -37,10 +37,14 @@ The frozen modes and reasons are:
 | Environment | Model/request | Result | Reason |
 | --- | --- | --- | --- |
 | explicit falsy | any | CPU full logits | `disabled_by_explicit_rollback` |
+| present invalid/non-Unicode | any | CPU full logits | `disabled_by_explicit_rollback` |
 | explicit truthy | supported greedy request | exact GPU reducer | `force_enabled` |
 | absent | admitted identity, temp 0, no prompt lookup | exact GPU reducer | `auto_metadata_a3b_v1` |
 | absent | other identity | CPU full logits | `auto_identity_miss` |
 | any | sampling or prompt lookup | existing non-GPU policy | `ineligible_request` |
+
+Explicit rollback takes telemetry precedence over request ineligibility. Only
+true absence selects Auto; every unrecognized present value fails closed.
 
 An automatic decision must never inherit eligibility from the first model
 examined in a process. Unit tests must cover every mode/identity/request cell

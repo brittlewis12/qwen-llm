@@ -34,14 +34,14 @@ use crate::metal::{
     Buffer, GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking,
     MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer, RetainedStorageDisposition,
     RetainedStorageFallback, RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c,
-    encode_add_inplace_f32, encode_argmax_f32, encode_attn_decode_f16kv_f32,
-    encode_attn_decode_v4_f32, encode_axpy_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
-    encode_ffn_swiglu_q4_K_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32, encode_mat_vec_q4_k_f32,
-    encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32,
-    encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
-    encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
+    encode_add_inplace_f32, encode_argmax_f32, encode_argmax_f32_greedy,
+    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_f32,
+    encode_axpy_scalar_f32, encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
+    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
+    encode_moe_down_bf16_f32, encode_moe_down_f32_f32, encode_moe_down_iq4_xs_f32,
+    encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
@@ -60,6 +60,7 @@ use crate::metal::{
     plan_retained_storage,
 };
 use crate::model::{Arch, ArchKind};
+use crate::sampling::GreedySelection;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use sha2::{Digest, Sha256};
@@ -1194,6 +1195,31 @@ pub enum MfError {
     LoadPolicy(String),
     #[error("snapshot validation: {0}")]
     Snapshot(#[from] SnapshotValidationError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArgmaxReduction {
+    SpeculativeLowest,
+    GreedyTotal,
+}
+
+fn encode_argmax_reduction(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    output: &MetalTensor,
+    n_rows: usize,
+    vocab: usize,
+    reduction: ArgmaxReduction,
+) -> Result<(), MetalError> {
+    match reduction {
+        ArgmaxReduction::SpeculativeLowest => {
+            encode_argmax_f32(ctx, enc, logits, output, n_rows, vocab)
+        }
+        ArgmaxReduction::GreedyTotal => {
+            encode_argmax_f32_greedy(ctx, enc, logits, output, n_rows, vocab)
+        }
+    }
 }
 
 /// All weight tensors, resident as `MetalTensor`s. Loaded once at session
@@ -7141,6 +7167,21 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(i32, TokenProfile), MfError> {
+        self.single_token_argmax_profiled_concurrent_gdn_dense_with_reduction(
+            token_id,
+            position,
+            session,
+            ArgmaxReduction::SpeculativeLowest,
+        )
+    }
+
+    fn single_token_argmax_profiled_concurrent_gdn_dense_with_reduction(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        reduction: ArgmaxReduction,
+    ) -> Result<(i32, TokenProfile), MfError> {
         let arch = &self.model.arch;
         if arch.kind != ArchKind::Dense {
             return Err(MfError::UnsupportedMoe);
@@ -7242,13 +7283,14 @@ impl<'a> MetalForward<'a> {
                 h,
                 arch.vocab_size as usize,
             )?;
-            encode_argmax_f32(
+            encode_argmax_reduction(
                 self.ctx,
                 &enc,
                 &session.logits,
                 &argmax_tok,
                 1,
                 arch.vocab_size as usize,
+                reduction,
             )?;
             enc.end();
         }
@@ -7463,6 +7505,21 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(i32, TokenProfile), MfError> {
+        self.single_token_argmax_profiled_concurrent_gdn_moe_with_reduction(
+            token_id,
+            position,
+            session,
+            ArgmaxReduction::SpeculativeLowest,
+        )
+    }
+
+    fn single_token_argmax_profiled_concurrent_gdn_moe_with_reduction(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        reduction: ArgmaxReduction,
+    ) -> Result<(i32, TokenProfile), MfError> {
         let arch = &self.model.arch;
         if arch.kind != ArchKind::Moe {
             return Err(MfError::UnsupportedMoe);
@@ -7610,13 +7667,14 @@ impl<'a> MetalForward<'a> {
                 h,
                 arch.vocab_size as usize,
             )?;
-            encode_argmax_f32(
+            encode_argmax_reduction(
                 self.ctx,
                 &enc,
                 &session.logits,
                 &argmax_tok,
                 1,
                 arch.vocab_size as usize,
+                reduction,
             )?;
             enc.end();
         }
@@ -8505,11 +8563,27 @@ impl<'a> MetalForward<'a> {
         Ok(argmax)
     }
 
+    pub fn single_token_greedy(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<GreedySelection, MfError> {
+        let (raw, _) = self.single_token_reduced_profiled(
+            token_id,
+            position,
+            session,
+            ArgmaxReduction::GreedyTotal,
+        )?;
+        Ok(GreedySelection::from_encoded(raw))
+    }
+
     fn single_token_argmax_profiled_dense_serial(
         &self,
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
+        reduction: ArgmaxReduction,
     ) -> Result<(i32, TokenProfile), MfError> {
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
@@ -8528,7 +8602,14 @@ impl<'a> MetalForward<'a> {
         let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
         let enc = KernelEncoder::begin(&cmd_buf);
 
-        self.encode_single_token_argmax_dense(&enc, position, session, &ids_buf, &argmax_tok)?;
+        self.encode_single_token_argmax_dense_with_reduction(
+            &enc,
+            position,
+            session,
+            &ids_buf,
+            &argmax_tok,
+            reduction,
+        )?;
 
         enc.end();
         let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
@@ -8563,18 +8644,36 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(i32, TokenProfile), MfError> {
+        self.single_token_reduced_profiled(
+            token_id,
+            position,
+            session,
+            ArgmaxReduction::SpeculativeLowest,
+        )
+    }
+
+    fn single_token_reduced_profiled(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        reduction: ArgmaxReduction,
+    ) -> Result<(i32, TokenProfile), MfError> {
         if self.model.arch.kind == ArchKind::Moe {
             return if concurrent_gdn_moe_decode_enabled() {
-                self.single_token_argmax_profiled_concurrent_gdn_moe(token_id, position, session)
+                self.single_token_argmax_profiled_concurrent_gdn_moe_with_reduction(
+                    token_id, position, session, reduction,
+                )
             } else {
-                self.single_token_argmax_profiled_moe(token_id, position, session)
+                self.single_token_argmax_profiled_moe(token_id, position, session, reduction)
             };
         }
         if concurrent_gdn_dense_decode_enabled() {
-            return self
-                .single_token_argmax_profiled_concurrent_gdn_dense(token_id, position, session);
+            return self.single_token_argmax_profiled_concurrent_gdn_dense_with_reduction(
+                token_id, position, session, reduction,
+            );
         }
-        self.single_token_argmax_profiled_dense_serial(token_id, position, session)
+        self.single_token_argmax_profiled_dense_serial(token_id, position, session, reduction)
     }
 
     pub fn encode_single_token_argmax(
@@ -8585,11 +8684,33 @@ impl<'a> MetalForward<'a> {
         ids_buf: &MetalTensor,
         argmax_tok: &MetalTensor,
     ) -> Result<(), MfError> {
+        self.encode_single_token_argmax_with_reduction(
+            enc,
+            position,
+            session,
+            ids_buf,
+            argmax_tok,
+            ArgmaxReduction::SpeculativeLowest,
+        )
+    }
+
+    fn encode_single_token_argmax_with_reduction(
+        &self,
+        enc: &KernelEncoder,
+        position: u32,
+        session: &mut MetalSession,
+        ids_buf: &MetalTensor,
+        argmax_tok: &MetalTensor,
+        reduction: ArgmaxReduction,
+    ) -> Result<(), MfError> {
         if self.model.arch.kind == ArchKind::Moe {
-            return self
-                .encode_single_token_argmax_moe(enc, position, session, ids_buf, argmax_tok);
+            return self.encode_single_token_argmax_moe_with_reduction(
+                enc, position, session, ids_buf, argmax_tok, reduction,
+            );
         }
-        self.encode_single_token_argmax_dense(enc, position, session, ids_buf, argmax_tok)
+        self.encode_single_token_argmax_dense_with_reduction(
+            enc, position, session, ids_buf, argmax_tok, reduction,
+        )
     }
 
     pub fn encode_single_token_argmax_dense(
@@ -8599,6 +8720,25 @@ impl<'a> MetalForward<'a> {
         session: &mut MetalSession,
         ids_buf: &MetalTensor,
         argmax_tok: &MetalTensor,
+    ) -> Result<(), MfError> {
+        self.encode_single_token_argmax_dense_with_reduction(
+            enc,
+            position,
+            session,
+            ids_buf,
+            argmax_tok,
+            ArgmaxReduction::SpeculativeLowest,
+        )
+    }
+
+    fn encode_single_token_argmax_dense_with_reduction(
+        &self,
+        enc: &KernelEncoder,
+        position: u32,
+        session: &mut MetalSession,
+        ids_buf: &MetalTensor,
+        argmax_tok: &MetalTensor,
+        reduction: ArgmaxReduction,
     ) -> Result<(), MfError> {
         let arch = &self.model.arch;
 
@@ -8643,24 +8783,26 @@ impl<'a> MetalForward<'a> {
             arch.hidden_size as usize,
             arch.vocab_size as usize,
         )?;
-        encode_argmax_f32(
+        encode_argmax_reduction(
             self.ctx,
             enc,
             &session.logits,
             argmax_tok,
             1,
             arch.vocab_size as usize,
+            reduction,
         )?;
         Ok(())
     }
 
-    fn encode_single_token_argmax_moe(
+    fn encode_single_token_argmax_moe_with_reduction(
         &self,
         enc: &KernelEncoder,
         position: u32,
         session: &mut MetalSession,
         ids_buf: &MetalTensor,
         argmax_tok: &MetalTensor,
+        reduction: ArgmaxReduction,
     ) -> Result<(), MfError> {
         let arch = &self.model.arch;
         let h = arch.hidden_size as usize;
@@ -8710,13 +8852,14 @@ impl<'a> MetalForward<'a> {
             h,
             arch.vocab_size as usize,
         )?;
-        encode_argmax_f32(
+        encode_argmax_reduction(
             self.ctx,
             enc,
             &session.logits,
             argmax_tok,
             1,
             arch.vocab_size as usize,
+            reduction,
         )?;
         Ok(())
     }
@@ -8821,6 +8964,7 @@ impl<'a> MetalForward<'a> {
         token_id: i32,
         position: u32,
         session: &mut MetalSession,
+        reduction: ArgmaxReduction,
     ) -> Result<(i32, TokenProfile), MfError> {
         let arch = &self.model.arch;
         if token_id < 0 || (token_id as u32) >= arch.vocab_size {
@@ -8839,7 +8983,14 @@ impl<'a> MetalForward<'a> {
         let t_encode = std::time::Instant::now();
         let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
         let enc = KernelEncoder::begin(&cmd_buf);
-        self.encode_single_token_argmax_moe(&enc, position, session, &ids_buf, &argmax_tok)?;
+        self.encode_single_token_argmax_moe_with_reduction(
+            &enc,
+            position,
+            session,
+            &ids_buf,
+            &argmax_tok,
+            reduction,
+        )?;
         enc.end();
         let cpu_encode_ms = t_encode.elapsed().as_secs_f64() * 1e3;
 
@@ -16097,7 +16248,12 @@ mod tests {
         let mut s_conc_argmax =
             MetalSession::fresh(&ctx, &mm, 256).expect("session-concurrent-argmax");
         let (serial_argmax, _) = mf
-            .single_token_argmax_profiled_dense_serial(ids[0], 0, &mut s_serial_argmax)
+            .single_token_argmax_profiled_dense_serial(
+                ids[0],
+                0,
+                &mut s_serial_argmax,
+                ArgmaxReduction::SpeculativeLowest,
+            )
             .expect("serial argmax");
         let (concurrent_argmax, _) = mf
             .single_token_argmax_profiled_concurrent_gdn_dense(ids[0], 0, &mut s_conc_argmax)

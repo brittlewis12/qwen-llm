@@ -12694,6 +12694,117 @@ pub fn encode_argmax_f32(
     Ok(())
 }
 
+/// GPU-side greedy selection matching the sampler's `f32::total_cmp` order.
+/// Equal bit patterns choose the highest token id. Any NaN is encoded as the
+/// negative value `~token_id`, with the lowest NaN token taking precedence.
+pub fn encode_argmax_f32_greedy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    n_rows: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    if n_rows == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_greedy",
+            detail: "n_rows must be >= 1".to_string(),
+        });
+    }
+    if n == 0 || n > i32::MAX as usize {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_greedy",
+            detail: format!("row length {n} must be in 1..=i32::MAX"),
+        });
+    }
+    let expected = n_rows.checked_mul(n).ok_or_else(|| MetalError::BadShape {
+        kernel: "argmax_greedy",
+        detail: format!("n_rows*n overflows usize: {n_rows}*{n}"),
+    })?;
+    if x.n_elements() as usize != expected {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_greedy",
+            detail: format!("x.n_elements={} != n_rows*n={expected}", x.n_elements()),
+        });
+    }
+    if out_idx.n_elements() as usize != n_rows {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_greedy",
+            detail: format!(
+                "out_idx.n_elements={} != n_rows={n_rows}",
+                out_idx.n_elements(),
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_argmax_f32_greedy")?;
+    let simd_width = pso.threadExecutionWidth();
+    if simd_width == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_greedy",
+            detail: "pipeline reported zero thread execution width".to_string(),
+        });
+    }
+    let max_tg_threads = pso
+        .maxTotalThreadsPerThreadgroup()
+        .min(simd_width.saturating_mul(simd_width));
+    let tg_threads = (max_tg_threads / simd_width) * simd_width;
+    if tg_threads == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_greedy",
+            detail: format!(
+                "pipeline max threadgroup width {max_tg_threads} is below SIMD width {simd_width}"
+            ),
+        });
+    }
+    let n_simdgroups = tg_threads / simd_width;
+    if n_simdgroups > simd_width {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_greedy",
+            detail: format!(
+                "{n_simdgroups} simdgroups exceed one {simd_width}-lane reduction group"
+            ),
+        });
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        stride_x: u32,
+        n_simdgroups: u32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            stride_x: n as u32,
+            n_simdgroups: n_simdgroups as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, out_idx);
+
+    let partial_bytes = (n_simdgroups * std::mem::size_of::<u32>()).max(32);
+    enc.set_threadgroup_memory(0, partial_bytes);
+    enc.set_threadgroup_memory(1, partial_bytes);
+    enc.set_threadgroup_memory(2, partial_bytes);
+    enc.dispatch(
+        MTLSize {
+            width: n_rows,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// L2 norm: y = x / max(||x||, eps). Per-vector. ggml semantics (NOT
 /// `1/sqrt(sum+eps)` — that's RMSNorm).
 pub fn encode_l2_norm_f32(
@@ -29138,6 +29249,147 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn greedy_total_order_key(bits: u32) -> Option<u32> {
+        ((bits & 0x7fff_ffff) <= 0x7f80_0000).then(|| {
+            if bits & 0x8000_0000 != 0 {
+                !bits
+            } else {
+                bits ^ 0x8000_0000
+            }
+        })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn greedy_total_order_key_matches_f32_total_cmp(a_bits: u32, b_bits: u32) {
+            let Some(a_key) = greedy_total_order_key(a_bits) else {
+                return Ok(());
+            };
+            let Some(b_key) = greedy_total_order_key(b_bits) else {
+                return Ok(());
+            };
+            let a = f32::from_bits(a_bits);
+            let b = f32::from_bits(b_bits);
+            proptest::prop_assert_eq!(a_key.cmp(&b_key), a.total_cmp(&b));
+        }
+    }
+
+    #[test]
+    fn greedy_argmax_matches_sampler_total_order_contract() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> Vec<i32> {
+            assert_eq!(x.len(), n_rows * n);
+            let xt = MetalTensor {
+                buffer: ctx.buffer_from(x).expect("input buffer"),
+                offset: 0,
+                shape: vec![n_rows as u64, n as u64],
+                dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            let ot = MetalTensor {
+                buffer: ctx.buffer_uninit(n_rows * 4).expect("output buffer"),
+                offset: 0,
+                shape: vec![n_rows as u64],
+                dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            let cmd = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_f32_greedy(ctx, &enc, &xt, &ot, n_rows, n).expect("encode greedy argmax");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            unsafe {
+                let ptr = ot.buffer.contents().as_ptr() as *const i32;
+                (0..n_rows).map(|row| *ptr.add(row)).collect()
+            }
+        }
+
+        fn cpu(row: &[f32]) -> i32 {
+            if let Some(token) = row.iter().position(|value| value.is_nan()) {
+                return !(token as i32);
+            }
+            let mut best = 0usize;
+            for token in 1..row.len() {
+                if row[token].total_cmp(&row[best]) != std::cmp::Ordering::Less {
+                    best = token;
+                }
+            }
+            best as i32
+        }
+
+        let rows = [
+            [1.0, 4.0, 2.0, 3.0, -1.0, -2.0, -3.0, -4.0],
+            [5.0, 1.0, 5.0, 0.0, 5.0, 2.0, 5.0, 3.0],
+            [-0.0, 0.0, -0.0, -1.0, -2.0, -3.0, -4.0, -5.0],
+            [
+                f32::INFINITY,
+                1.0,
+                f32::INFINITY,
+                0.0,
+                -1.0,
+                -2.0,
+                -3.0,
+                -4.0,
+            ],
+            [f32::NEG_INFINITY; 8],
+            [0.0, f32::NAN, 2.0, f32::NAN, 4.0, 5.0, 6.0, 7.0],
+            [f32::NAN; 8],
+            [
+                f32::from_bits(1),
+                -f32::from_bits(1),
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                2.0,
+                -2.0,
+            ],
+        ];
+        let flat: Vec<f32> = rows.into_iter().flatten().collect();
+        let got = run(&ctx, &flat, rows.len(), rows[0].len());
+        let expected: Vec<i32> = flat.chunks(rows[0].len()).map(cpu).collect();
+        assert_eq!(got, expected);
+        assert_eq!(got[1], 6, "finite ties choose the highest token id");
+        assert_eq!(got[2], 1, "+0 outranks -0 under total_cmp");
+        assert_eq!(got[4], 7, "equal -inf chooses the highest token id");
+        assert_eq!(got[5], !1, "lowest NaN token is encoded");
+        assert_eq!(got[6], !0, "all-NaN row reports token zero");
+
+        for n in [1usize, 31, 32, 33, 1023, 1025] {
+            let mut row = vec![-1.0f32; n];
+            row[n / 2] = 3.0;
+            row[n - 1] = 3.0;
+            assert_eq!(
+                run(&ctx, &row, 1, n),
+                vec![(n - 1) as i32],
+                "boundary row length {n}"
+            );
+        }
+
+        let mut wide = vec![0.0f32; 4096];
+        wide[100] = 9.0;
+        wide[2500] = 9.0;
+        wide[3999] = 9.0;
+        assert_eq!(run(&ctx, &wide, 1, wide.len()), vec![3999]);
+        wide[2500] = f32::NAN;
+        wide[100] = f32::NAN;
+        assert_eq!(run(&ctx, &wide, 1, wide.len()), vec![!100]);
+
+        let mut vocab = vec![0.0f32; 248_320];
+        let mut state = 0xc0ffeeu32;
+        for value in &mut vocab {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            *value = (state as i32) as f32 * 1e-9;
+        }
+        assert_eq!(run(&ctx, &vocab, 1, vocab.len()), vec![cpu(&vocab)]);
     }
 
     /// H5.3a GPU argmax — bit-exact match to CPU argmax with lowest-index

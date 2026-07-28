@@ -74,6 +74,31 @@ pub struct SampledToken {
     pub candidate_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GreedySelection {
+    Token(i32),
+    NanLogit { token: usize },
+}
+
+impl GreedySelection {
+    pub(crate) fn from_encoded(raw: i32) -> Self {
+        if raw >= 0 {
+            Self::Token(raw)
+        } else {
+            Self::NanLogit {
+                token: (!raw) as usize,
+            }
+        }
+    }
+
+    pub fn into_token(self) -> Result<i32, SamplingError> {
+        match self {
+            Self::Token(token) => Ok(token),
+            Self::NanLogit { token } => Err(SamplingError::NanLogit { token }),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SamplingError {
     #[error("sampling requires a non-empty logits row")]
@@ -358,6 +383,27 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn greedy_selection_decodes_tokens_and_nan_indices() {
+        assert_eq!(
+            GreedySelection::from_encoded(42),
+            GreedySelection::Token(42)
+        );
+        assert_eq!(
+            GreedySelection::from_encoded(-1),
+            GreedySelection::NanLogit { token: 0 }
+        );
+        assert_eq!(
+            GreedySelection::from_encoded(-248_320),
+            GreedySelection::NanLogit { token: 248_319 }
+        );
+        assert_eq!(GreedySelection::Token(7).into_token().unwrap(), 7);
+        assert_eq!(
+            GreedySelection::NanLogit { token: 9 }.into_token(),
+            Err(SamplingError::NanLogit { token: 9 })
+        );
+    }
 
     fn sampler(config: SamplingConfig) -> Sampler {
         Sampler::new(config).expect("valid sampler")

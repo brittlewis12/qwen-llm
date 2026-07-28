@@ -1001,3 +1001,71 @@ kernel void kernel_argmax_f32(
         }
     }
 }
+
+// Production-greedy argmax matching Rust f32::total_cmp for every non-NaN
+// bit pattern. Any NaN wins over a token result and is encoded as ~token_id,
+// allowing the host to report the lowest offending index without reading the
+// logits row. The input is intentionally loaded as uint so -ffast-math cannot
+// weaken NaN detection or signed-zero ordering.
+struct greedy_argmax_args {
+    uint n;
+    uint stride_x;
+    uint n_simdgroups;
+};
+
+kernel void kernel_argmax_f32_greedy(
+        constant greedy_argmax_args & args [[buffer(0)]],
+        device const uint          * x_bits   [[buffer(1)]],
+        device       int           * out_idx  [[buffer(2)]],
+        threadgroup  uint          * sh_key   [[threadgroup(0)]],
+        threadgroup  uint          * sh_idx   [[threadgroup(1)]],
+        threadgroup  uint          * sh_nan   [[threadgroup(2)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        uint   tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint   ntg   [[threads_per_threadgroup]]) {
+    const uint row = tgpig;
+    device const uint * row_bits = x_bits + (ulong)row * args.stride_x;
+
+    uint best_key = 0;
+    uint best_idx = 0;
+    uint first_nan = UINT_MAX;
+    for (uint i = tpitg; i < args.n; i += ntg) {
+        const uint bits = row_bits[i];
+        const uint abs_bits = bits & 0x7fffffffu;
+        if (abs_bits > 0x7f800000u) {
+            first_nan = min(first_nan, i);
+            continue;
+        }
+
+        const uint key = (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
+        if (key > best_key || (key == best_key && i > best_idx)) {
+            best_key = key;
+            best_idx = i;
+        }
+    }
+
+    const uint lane_key = simd_max(best_key);
+    const uint lane_idx = simd_max(best_key == lane_key ? best_idx : 0u);
+    const uint lane_nan = simd_min(first_nan);
+    if (tiisg == 0) {
+        sh_key[sgitg] = lane_key;
+        sh_idx[sgitg] = lane_idx;
+        sh_nan[sgitg] = lane_nan;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        const bool active = tiisg < args.n_simdgroups;
+        const uint group_key = active ? sh_key[tiisg] : 0u;
+        const uint group_idx = active ? sh_idx[tiisg] : 0u;
+        const uint group_nan = active ? sh_nan[tiisg] : UINT_MAX;
+        const uint global_key = simd_max(group_key);
+        const uint global_idx = simd_max(group_key == global_key ? group_idx : 0u);
+        const uint global_nan = simd_min(group_nan);
+        if (tiisg == 0) {
+            out_idx[row] = global_nan == UINT_MAX ? int(global_idx) : ~int(global_nan);
+        }
+    }
+}

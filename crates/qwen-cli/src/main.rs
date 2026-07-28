@@ -23,7 +23,7 @@ use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PreparedCheckpoint, Runtime, RuntimeError, Sequence,
     SequenceConfig,
 };
-use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
+use qwen_llm::sampling::{GreedySelection, SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -33,6 +33,7 @@ use std::str::FromStr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CHECKPOINT_STAGED_INTEGRITY_ENV: &str = "QWEN_CHECKPOINT_STAGED_INTEGRITY";
+qwen_llm::env_flag!(default_off greedy_gpu_argmax_enabled, "QWEN_GREEDY_GPU_ARGMAX");
 
 #[derive(Parser, Debug)]
 #[command(name = "qwen", version, about = "qwen-llm inference CLI")]
@@ -915,6 +916,34 @@ fn validate_sampling_decode_policy(config: SamplingConfig, prompt_lookup: bool) 
         "--prompt-lookup currently requires greedy decoding (--temp 0)"
     );
     Ok(())
+}
+
+fn decode_policy_label(
+    config: SamplingConfig,
+    prompt_lookup: bool,
+    gpu_greedy: bool,
+) -> &'static str {
+    if prompt_lookup {
+        "prompt_lookup_l8_d7_target_n8"
+    } else if config.temperature > 0.0 {
+        "sampled_cpu"
+    } else if gpu_greedy {
+        "greedy_gpu_argmax"
+    } else {
+        "greedy_argmax"
+    }
+}
+
+fn jsonl_decode_policy_label(
+    config: SamplingConfig,
+    prompt_lookup: bool,
+    gpu_greedy: bool,
+) -> Option<&'static str> {
+    if prompt_lookup || config.temperature > 0.0 || gpu_greedy {
+        Some(decode_policy_label(config, prompt_lookup, gpu_greedy))
+    } else {
+        None
+    }
 }
 
 const AUTO_CHUNK_PROMPT_MIN: usize = 8192;
@@ -2099,6 +2128,8 @@ fn execute_single_turn_request(
         .context("load producer-declared stop tokens")?;
     let sampling_config = cli_sampling_config(args)?;
     let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
+    let use_gpu_greedy =
+        !args.prompt_lookup && sampling_config.temperature == 0.0 && greedy_gpu_argmax_enabled();
     let (generation, prompt_lookup_stats) = if args.prompt_lookup {
         let result = generate_prompt_lookup(
             loaded,
@@ -2124,36 +2155,59 @@ fn execute_single_turn_request(
         sequence = result.sequence;
         (result.generation, Some(result.stats))
     } else {
-        let generation = generate_serial(
-            logits,
-            args.tokens,
-            &stop_tokens,
-            &mut sampler,
-            |token| {
-                let callback_t0 = Instant::now();
-                write!(stdout, "{}", tokenizer.decode_piece(token))?;
-                stdout.flush().context("flush generated token")?;
-                if first_delivery_ms.is_none() {
-                    first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
-                    first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
-                    first_delivery_allocated =
-                        timing_enabled.then(|| loaded.context().current_allocated_size());
-                }
-                Ok(())
-            },
-            |token| {
-                let position = sequence.position();
-                let next = forward
-                    .single_token(
-                        token,
-                        u32::try_from(position).context("position does not fit u32")?,
-                        unsafe { sequence.metal_session_mut() },
-                    )
-                    .context("decode token")?;
-                sequence.advance_by(1)?;
-                Ok(next)
-            },
-        )?;
+        let mut on_token = |token| {
+            let callback_t0 = Instant::now();
+            write!(stdout, "{}", tokenizer.decode_piece(token))?;
+            stdout.flush().context("flush generated token")?;
+            if first_delivery_ms.is_none() {
+                first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
+                first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
+                first_delivery_allocated =
+                    timing_enabled.then(|| loaded.context().current_allocated_size());
+            }
+            Ok(())
+        };
+        let generation = if use_gpu_greedy {
+            generate_gpu_greedy(
+                logits,
+                args.tokens,
+                &stop_tokens,
+                &mut sampler,
+                &mut on_token,
+                |token| {
+                    let position = sequence.position();
+                    let next = forward
+                        .single_token_greedy(
+                            token,
+                            u32::try_from(position).context("position does not fit u32")?,
+                            unsafe { sequence.metal_session_mut() },
+                        )
+                        .context("decode token with GPU greedy selection")?;
+                    sequence.advance_by(1)?;
+                    Ok(next)
+                },
+            )?
+        } else {
+            generate_serial(
+                logits,
+                args.tokens,
+                &stop_tokens,
+                &mut sampler,
+                &mut on_token,
+                |token| {
+                    let position = sequence.position();
+                    let next = forward
+                        .single_token(
+                            token,
+                            u32::try_from(position).context("position does not fit u32")?,
+                            unsafe { sequence.metal_session_mut() },
+                        )
+                        .context("decode token")?;
+                    sequence.advance_by(1)?;
+                    Ok(next)
+                },
+            )?
+        };
         (generation, None)
     };
     let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
@@ -2392,13 +2446,7 @@ fn execute_single_turn_request(
             requested_tokens: args.tokens,
             generated_tokens: generated.len(),
             stop_reason,
-            decode_policy: if args.prompt_lookup {
-                "prompt_lookup_l8_d7_target_n8"
-            } else if sampling_config.temperature > 0.0 {
-                "sampled_cpu"
-            } else {
-                "greedy_argmax"
-            },
+            decode_policy: decode_policy_label(sampling_config, args.prompt_lookup, use_gpu_greedy),
             sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
             terminal_token_target_transition_consumed: false,
             no_special_tokens: !prompt_add_special_tokens(args, prompt_source),
@@ -2959,13 +3007,13 @@ fn run_jsonl_request(
         prompt_hash,
         requested_tokens: n_generate,
         generated_tokens: generated.len(),
-        decode_policy: if args.prompt_lookup {
-            Some("prompt_lookup_l8_d7_target_n8")
-        } else if sampling_config.temperature > 0.0 {
-            Some("sampled_cpu")
-        } else {
-            None
-        },
+        decode_policy: jsonl_decode_policy_label(
+            sampling_config,
+            args.prompt_lookup,
+            !args.prompt_lookup
+                && sampling_config.temperature == 0.0
+                && greedy_gpu_argmax_enabled(),
+        ),
         sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
         cache_prefix_tokens,
         cache_prefix_source: cache_prefix_source.as_str().to_string(),
@@ -3069,16 +3117,76 @@ struct GenerationResult {
 }
 
 fn generate_serial<OnToken, Transition>(
-    mut logits: Vec<f32>,
+    logits: Vec<f32>,
     max_tokens: usize,
     stop_tokens: &[i32],
     sampler: &mut Sampler,
-    mut on_token: OnToken,
-    mut transition: Transition,
+    on_token: OnToken,
+    transition: Transition,
 ) -> Result<GenerationResult>
 where
     OnToken: FnMut(i32) -> Result<()>,
     Transition: FnMut(i32) -> Result<Vec<f32>>,
+{
+    generate_serial_state(
+        logits,
+        max_tokens,
+        stop_tokens,
+        |logits| Ok(sampler.sample(logits)?.token),
+        on_token,
+        transition,
+    )
+}
+
+#[derive(Debug)]
+enum GreedyDecodeState {
+    PromptLogits(Vec<f32>),
+    Device(GreedySelection),
+}
+
+fn generate_gpu_greedy<OnToken, Transition>(
+    logits: Vec<f32>,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    sampler: &mut Sampler,
+    on_token: OnToken,
+    mut transition: Transition,
+) -> Result<GenerationResult>
+where
+    OnToken: FnMut(i32) -> Result<()>,
+    Transition: FnMut(i32) -> Result<GreedySelection>,
+{
+    ensure!(
+        sampler.config().temperature == 0.0,
+        "GPU greedy generation requires temperature zero"
+    );
+    generate_serial_state(
+        GreedyDecodeState::PromptLogits(logits),
+        max_tokens,
+        stop_tokens,
+        |state| match state {
+            GreedyDecodeState::PromptLogits(logits) => Ok(sampler.sample(logits)?.token),
+            GreedyDecodeState::Device(selection) => {
+                selection.into_token().map_err(anyhow::Error::new)
+            }
+        },
+        on_token,
+        |token| transition(token).map(GreedyDecodeState::Device),
+    )
+}
+
+fn generate_serial_state<State, Select, OnToken, Transition>(
+    mut state: State,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    mut select: Select,
+    mut on_token: OnToken,
+    mut transition: Transition,
+) -> Result<GenerationResult>
+where
+    Select: FnMut(&State) -> Result<i32>,
+    OnToken: FnMut(i32) -> Result<()>,
+    Transition: FnMut(i32) -> Result<State>,
 {
     ensure!(max_tokens > 0, "max_tokens must be >= 1");
     let wall_t0 = Instant::now();
@@ -3093,7 +3201,7 @@ where
 
     while tokens.len() < max_tokens {
         let selection_t0 = Instant::now();
-        let token = sampler.sample(&logits)?.token;
+        let token = select(&state)?;
         first_token_selection_ms.get_or_insert_with(|| selection_t0.elapsed().as_secs_f64() * 1e3);
         first_token_ready_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
         tokens.push(token);
@@ -3110,7 +3218,7 @@ where
         }
 
         let transition_t0 = Instant::now();
-        logits = transition(token)?;
+        state = transition(token)?;
         let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
         transition_ms += elapsed_ms;
         first_transition_ms.get_or_insert(elapsed_ms);
@@ -3400,28 +3508,51 @@ fn decode_serial(
 ) -> Result<(GenerationResult, String)> {
     sequence.check_position(start_position)?;
     let mut generated_text = String::new();
-    let generation = generate_serial(
-        logits,
-        max_tokens,
-        stop_tokens,
-        sampler,
-        |token| {
-            generated_text.push_str(&tokenizer.decode_piece(token));
-            Ok(())
-        },
-        |token| {
-            let position = sequence.position();
-            let next = forward
-                .single_token(
-                    token,
-                    u32::try_from(position).context("position does not fit u32")?,
-                    unsafe { sequence.metal_session_mut() },
-                )
-                .context("decode token")?;
-            sequence.advance_by(1)?;
-            Ok(next)
-        },
-    )?;
+    let mut on_token = |token| {
+        generated_text.push_str(&tokenizer.decode_piece(token));
+        Ok(())
+    };
+    let generation = if sampler.config().temperature == 0.0 && greedy_gpu_argmax_enabled() {
+        generate_gpu_greedy(
+            logits,
+            max_tokens,
+            stop_tokens,
+            sampler,
+            &mut on_token,
+            |token| {
+                let position = sequence.position();
+                let next = forward
+                    .single_token_greedy(
+                        token,
+                        u32::try_from(position).context("position does not fit u32")?,
+                        unsafe { sequence.metal_session_mut() },
+                    )
+                    .context("decode token with GPU greedy selection")?;
+                sequence.advance_by(1)?;
+                Ok(next)
+            },
+        )?
+    } else {
+        generate_serial(
+            logits,
+            max_tokens,
+            stop_tokens,
+            sampler,
+            &mut on_token,
+            |token| {
+                let position = sequence.position();
+                let next = forward
+                    .single_token(
+                        token,
+                        u32::try_from(position).context("position does not fit u32")?,
+                        unsafe { sequence.metal_session_mut() },
+                    )
+                    .context("decode token")?;
+                sequence.advance_by(1)?;
+                Ok(next)
+            },
+        )?
+    };
     Ok((generation, generated_text))
 }
 
@@ -3773,7 +3904,7 @@ fn print_model_info(model_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5237,6 +5368,166 @@ mod tests {
                 "transition:2",
                 "token:0",
             ]
+        );
+    }
+
+    #[test]
+    fn gpu_greedy_generation_shares_terminal_and_callback_ordering() {
+        let events = RefCell::new(Vec::new());
+        let mut sampler = Sampler::new(SamplingConfig::default()).unwrap();
+        let generation = generate_gpu_greedy(
+            logits_with_argmax(1),
+            3,
+            &[],
+            &mut sampler,
+            |token| {
+                events.borrow_mut().push(format!("token:{token}"));
+                Ok(())
+            },
+            |token| {
+                events.borrow_mut().push(format!("transition:{token}"));
+                Ok(GreedySelection::Token(match token {
+                    1 => 2,
+                    2 => 0,
+                    _ => panic!("unexpected transition token {token}"),
+                }))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(generation.tokens, [1, 2, 0]);
+        assert_eq!(generation.transitions, 2);
+        assert_eq!(generation.stop_reason, StopReason::TokenLimit);
+        assert_eq!(sampler.draws(), 0);
+        assert_eq!(
+            events.into_inner(),
+            [
+                "token:1",
+                "transition:1",
+                "token:2",
+                "transition:2",
+                "token:0",
+            ]
+        );
+    }
+
+    #[test]
+    fn gpu_greedy_nan_is_reported_after_the_committed_transition() {
+        let events = RefCell::new(Vec::new());
+        let position = Cell::new(10usize);
+        let mut sampler = Sampler::new(SamplingConfig::default()).unwrap();
+        let error = generate_gpu_greedy(
+            logits_with_argmax(1),
+            3,
+            &[],
+            &mut sampler,
+            |token| {
+                events.borrow_mut().push(format!("token:{token}"));
+                Ok(())
+            },
+            |token| {
+                events.borrow_mut().push(format!("transition:{token}"));
+                position.set(position.get() + 1);
+                Ok(GreedySelection::NanLogit { token: 7 })
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("logit at token 7 is NaN"));
+        assert_eq!(events.into_inner(), ["token:1", "transition:1"]);
+        assert_eq!(position.get(), 11, "the completed forward advances state");
+        assert_eq!(sampler.draws(), 0);
+    }
+
+    #[test]
+    fn gpu_greedy_preserves_terminal_and_failure_boundaries() {
+        for (max_tokens, stop_tokens, expected_reason) in [
+            (1, Vec::new(), StopReason::TokenLimit),
+            (3, vec![1], StopReason::Eos),
+        ] {
+            let callbacks = Cell::new(0usize);
+            let transitions = Cell::new(0usize);
+            let mut sampler = Sampler::new(SamplingConfig::default()).unwrap();
+            let generation = generate_gpu_greedy(
+                logits_with_argmax(1),
+                max_tokens,
+                &stop_tokens,
+                &mut sampler,
+                |_| {
+                    callbacks.set(callbacks.get() + 1);
+                    Ok(())
+                },
+                |_| {
+                    transitions.set(transitions.get() + 1);
+                    Ok(GreedySelection::Token(2))
+                },
+            )
+            .unwrap();
+            assert_eq!(generation.tokens, [1]);
+            assert_eq!(generation.stop_reason, expected_reason);
+            assert_eq!(generation.transitions, 0);
+            assert_eq!(transitions.get(), 0);
+            assert_eq!(
+                callbacks.get(),
+                usize::from(expected_reason == StopReason::TokenLimit)
+            );
+        }
+
+        let transitions = Cell::new(0usize);
+        let mut sampler = Sampler::new(SamplingConfig::default()).unwrap();
+        let callback_error = generate_gpu_greedy(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut sampler,
+            |_| Err(anyhow!("callback failed")),
+            |_| {
+                transitions.set(transitions.get() + 1);
+                Ok(GreedySelection::Token(2))
+            },
+        )
+        .unwrap_err();
+        assert!(callback_error.to_string().contains("callback failed"));
+        assert_eq!(transitions.get(), 0);
+
+        let callbacks = Cell::new(0usize);
+        let mut sampler = Sampler::new(SamplingConfig::default()).unwrap();
+        let transition_error = generate_gpu_greedy(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut sampler,
+            |_| {
+                callbacks.set(callbacks.get() + 1);
+                Ok(())
+            },
+            |_| Err(anyhow!("transition failed")),
+        )
+        .unwrap_err();
+        assert!(transition_error.to_string().contains("transition failed"));
+        assert_eq!(callbacks.get(), 1);
+    }
+
+    #[test]
+    fn decode_policy_labels_name_selection_residency() {
+        let greedy = SamplingConfig::default();
+        assert_eq!(decode_policy_label(greedy, false, false), "greedy_argmax");
+        assert_eq!(
+            decode_policy_label(greedy, false, true),
+            "greedy_gpu_argmax"
+        );
+        assert_eq!(
+            decode_policy_label(greedy, true, true),
+            "prompt_lookup_l8_d7_target_n8"
+        );
+        assert_eq!(
+            decode_policy_label(SamplingConfig::qwen_chat(7), false, false),
+            "sampled_cpu"
+        );
+        assert_eq!(jsonl_decode_policy_label(greedy, false, false), None);
+        assert_eq!(
+            jsonl_decode_policy_label(greedy, false, true),
+            Some("greedy_gpu_argmax")
         );
     }
 

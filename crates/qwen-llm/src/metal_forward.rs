@@ -1256,6 +1256,22 @@ pub(crate) struct MetalModelLoadOptions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RealizedAutoLoadMarker {
+    DisposableA3bQ4kmV1PreadLogicalExactRetainedPlanV1,
+}
+
+impl RealizedAutoLoadMarker {
+    /// Stable external spelling for policy telemetry and sealed packets.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DisposableA3bQ4kmV1PreadLogicalExactRetainedPlanV1 => {
+                "disposable-a3b-q4km-v1-pread-logical-exact-retained-plan-v1"
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MetalLoadPrefetchAdvice {
     PreserveConfiguredPolicy,
     SuppressColdOnlyAuthenticatedA3bDirectPread,
@@ -1298,7 +1314,7 @@ enum PreparedAutoSelection {
 }
 
 impl PreparedAutoSelection {
-    fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
+    fn realized_auto_load_marker_candidate(&self) -> Option<RealizedAutoLoadMarker> {
         match self {
             Self::Selected(prepared)
                 if prepared.profile.id == ParallelCopyProfileId::A3bQ4kmV1
@@ -1306,11 +1322,17 @@ impl PreparedAutoSelection {
                     && prepared.destination_length == ParallelDestinationLength::LogicalExact
                     && matches!(&prepared._proof, PreparedParallelCopyProof::A3bRetainedPlan) =>
             {
-                MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread
+                Some(RealizedAutoLoadMarker::DisposableA3bQ4kmV1PreadLogicalExactRetainedPlanV1)
             }
-            Self::NotEligible | Self::NoMatch | Self::Selected(_) => {
-                MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
-            }
+            Self::NotEligible | Self::NoMatch | Self::Selected(_) => None,
+        }
+    }
+
+    fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
+        if self.realized_auto_load_marker_candidate().is_some() {
+            MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread
+        } else {
+            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
         }
     }
 }
@@ -1328,6 +1350,10 @@ pub(crate) struct PreparedMetalModelLoad<'ctx, 'gguf, 'model> {
 impl PreparedMetalModelLoad<'_, '_, '_> {
     pub(crate) fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
         self.auto.prefetch_advice()
+    }
+
+    pub(crate) fn realized_auto_load_marker_candidate(&self) -> Option<RealizedAutoLoadMarker> {
+        self.auto.realized_auto_load_marker_candidate()
     }
 }
 
@@ -13947,6 +13973,69 @@ mod tests {
             PreparedAutoSelection::NotEligible.prefetch_advice(),
             MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
         );
+    }
+
+    #[test]
+    fn realized_auto_load_marker_candidate_is_exact_and_versioned() {
+        let selected = |profile: &'static ParallelCopyProfile,
+                        population: ParallelPopulationMethod,
+                        destination_length: ParallelDestinationLength,
+                        proof: PreparedParallelCopyProof| {
+            PreparedAutoSelection::Selected(PreparedParallelCopiedProfile {
+                profile,
+                population,
+                destination_length,
+                expected_identities: Vec::new(),
+                sorted_request_indices: Vec::new(),
+                _proof: proof,
+            })
+        };
+        let marker = RealizedAutoLoadMarker::DisposableA3bQ4kmV1PreadLogicalExactRetainedPlanV1;
+        assert_eq!(
+            selected(
+                &A3B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::Pread,
+                ParallelDestinationLength::LogicalExact,
+                PreparedParallelCopyProof::A3bRetainedPlan,
+            )
+            .realized_auto_load_marker_candidate(),
+            Some(marker)
+        );
+        assert_eq!(
+            marker.label(),
+            "disposable-a3b-q4km-v1-pread-logical-exact-retained-plan-v1"
+        );
+
+        for selection in [
+            selected(
+                &DENSE27B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::Pread,
+                ParallelDestinationLength::LogicalExact,
+                PreparedParallelCopyProof::A3bRetainedPlan,
+            ),
+            selected(
+                &A3B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::MmapCopy,
+                ParallelDestinationLength::LogicalExact,
+                PreparedParallelCopyProof::A3bRetainedPlan,
+            ),
+            selected(
+                &A3B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::Pread,
+                ParallelDestinationLength::PageRounded16K,
+                PreparedParallelCopyProof::A3bRetainedPlan,
+            ),
+            selected(
+                &A3B_PARALLEL_COPY_PROFILE,
+                ParallelPopulationMethod::Pread,
+                ParallelDestinationLength::LogicalExact,
+                PreparedParallelCopyProof::DensePlannerFree,
+            ),
+            PreparedAutoSelection::NoMatch,
+            PreparedAutoSelection::NotEligible,
+        ] {
+            assert_eq!(selection.realized_auto_load_marker_candidate(), None);
+        }
     }
 
     #[test]

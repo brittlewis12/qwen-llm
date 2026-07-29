@@ -20,7 +20,7 @@ use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
 use crate::metal_forward::{
     MetalForward, MetalLoadPrefetchAdvice, MetalModel, MetalModelLoadOptions, MetalSession,
-    MfError, RealizedAutoLoadMarker, SessionSnapshot, SnapshotIdentity, SnapshotValidationError,
+    MfError, SessionSnapshot, SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
 use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
@@ -171,7 +171,6 @@ impl Runtime {
             intent.metal_options(),
         )?;
         let prefetch_outcome = apply_prefetch_policy(&gguf, &config, prepared.prefetch_advice());
-        let realized_auto_load_marker_candidate = prepared.realized_auto_load_marker_candidate();
         let identity_shards = snapshot_shard_identity_inputs(&gguf);
         let metal_model = MetalModel::load_prepared(prepared)?;
         Ok(LoadedModel {
@@ -184,7 +183,6 @@ impl Runtime {
             prefix_cache: Mutex::new(PrefixCache::with_max_bytes(config.prefix_cache_max_bytes)),
             owner: Arc::new(ModelOwnerToken),
             prefetch_outcome,
-            realized_auto_load_marker: realized_auto_load_marker_candidate,
         })
     }
 }
@@ -911,7 +909,6 @@ pub struct LoadedModel {
     prefix_cache: Mutex<PrefixCache>,
     owner: Arc<ModelOwnerToken>,
     prefetch_outcome: PrefetchOutcome,
-    realized_auto_load_marker: Option<RealizedAutoLoadMarker>,
 }
 
 impl LoadedModel {
@@ -930,11 +927,6 @@ impl LoadedModel {
     /// empty `shards` vec and zero `total_wall`.
     pub fn prefetch_outcome(&self) -> &PrefetchOutcome {
         &self.prefetch_outcome
-    }
-
-    /// Narrow realized profile selected by the disposable automatic loader.
-    pub fn realized_auto_load_marker(&self) -> Option<RealizedAutoLoadMarker> {
-        self.realized_auto_load_marker
     }
 
     /// Resident Metal weights.

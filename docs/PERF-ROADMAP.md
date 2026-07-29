@@ -993,20 +993,31 @@ the paired treatment decode-ms/token A/B geometric ratio is `1.081378`, with
 immediate one-generation branch unless a materially different cumulative or
 concurrent workload supplies a new premise.
 
-1. **A3B exact-GPU-greedy automatic-admission decision**: if product admission
-   remains desirable, preregister and then commit a candidate restoring only the
-   metadata-scoped A3B absent-environment selector for measurement. Run A with
-   explicit `=0` and B absent, requiring auto-selection telemetry. Put a
-   zero-transition sentinel structurally before generation, retain the frozen
-   product decode block, and add a final sentinel to expose cumulative history.
-   Preserve exact state/output/terminal/cache and cold-boundary gates. Reuse only
-   the already-produced `metadata_compatibility_v1` identity comparison; add no
-   checkpoint-content hash or startup identity I/O. Do not pool v0.648-v0.650.
-   The candidate commit grants no admission and must be rolled back after a
-   failed or inconclusive packet. Decode belief high; immediate `>=3%` carryover
-   is high-confidence closed for this exact one-generation cell; cumulative and
-   concurrent policy risk is unresolved/medium. Difficulty S-M implementation/M
-   evidence.
+v0.651 attempts the bounded fresh one-shot admission decision and seals `INVALID`
+before scoring. Pure policy/profile and exact-state gates pass. Artifact
+inspection shows identical N128 A/B output and correct policy/profile telemetry;
+the formal pair comparison does not execute. The runner rejects B's legitimate
+`capacity_validation_ms=0.0` because it mistakenly assigns
+`capacity_validation_ms` a strict-positive domain. There are zero scored
+attempts and no admission evidence. The packet is consumed and cannot be
+repaired or retried; it does not rewrite v0.648-v0.650. Mandatory rollback
+`0927937` restores absence to default-off and removes the unadmitted selector.
+Any independent successor must use a new preregistration and artifact root,
+test zero-valued timing fields before acquisition, and pool no v0.651
+observation.
+
+1. **A3B exact-GPU-greedy product decision, one independent successor at most**:
+   non-authorizing correctness observations and repeated descriptive/diagnostic
+   `~1.08-1.09x` complete-generation signals keep this high in the leverage
+   ranking, but they are not pooled admission authority. Four non-admitting
+   packets make decision throughput part of its cost. Proceed only with a simpler
+   successor whose validators distinguish finite `>=0` bookkeeping timers from
+   strictly positive work-spanning endpoints and whose zero-valued fixtures are
+   pure-tested before the one-shot run. Restore only the exact disposable A3B
+   selector after preregistration, grant no candidate authority, and commit
+   default-off after any non-GO. Otherwise stop at explicit `=1`. Belief high on
+   decode efficacy, medium on complete product admission; difficulty S
+   implementation/M evidence.
 2. **Dense GPU-greedy deconfounding**: load dense27 once, symmetrically warm both
    explicit policies after neutral sustained preconditioning, and alternate full
    128-token chains quickly enough to escape the v0.645 host-state curve. This is
@@ -1092,9 +1103,10 @@ v0.640 banks exact-27B deferred restore behind its existing explicit environment
 control. It is no longer an active experiment; keep `decode` as the default.
 
 1. v0.650 closes immediate one-generation GPU-greedy carryover at the 3% harm
-   threshold. If automatic A3B admission remains desired, preregister, build, and
-   measure the actual absent-environment selector once under the independent
-   pre-treatment design above; otherwise retain explicit `=1` and stop.
+   threshold; v0.651 consumes its admission packet on a harness-domain error
+   before scoring and rolls the candidate back at `0927937`. Fund at most one
+   independent, zero-domain-tested successor under the contract above; otherwise
+   retain explicit `=1` and stop.
 2. v0.644 closes the tested Q4 ladder. Do not schedule B/C widening, E-arm
    diagnosis, P4096 replication, or a local source/dequant implementation.
 3. Decide whether A10B is a current deployment target. If yes, its native-

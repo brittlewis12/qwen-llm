@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-28 - v0.651 A3B One-Shot GPU-Greedy Admission Invalid
+
+Status: sealed `INVALID` with `authority=none`; the one-shot packet is consumed.
+Absent-environment GPU greedy is restored to default-off at `0927937`.
+
+- All 75 inventoried artifacts and both completion hashes verify. The packet
+  launched nine complete unscored children: build, the 56-test CLI suite, four
+  pure profile-coupling tests, exact-state, and the N128 A/B conformance pair.
+  Every child exited zero under clean source/build/runtime `719fa6c`; all 20 host
+  snapshots report 96% free memory with no inference competitor or warning.
+- The pure tests and exact A3B state marker pass. The conformance processes emit
+  identical 612-byte stdout and generated-token digests, 128 selected tokens,
+  127 transitions, token-limit stop, and
+  `terminal_token_target_transition_consumed=false`, meaning no target transition
+  follows the final selected token. A reports explicit rollback/CPU greedy; B
+  reports the exact disposable Auto profile and automatic GPU greedy.
+- Formal conformance stops during B timing-row validation, before B loader/output
+  validation and the formal A/B comparison, because the runner incorrectly
+  assigns `capacity_validation_ms` a strict-positive domain. Its `0.0` is a
+  legitimate sub-resolution `Instant` result; subsequent allocation, prefill,
+  generation, output, request/terminal telemetry, host capture, and model
+  identity all complete.
+- There are zero scored attempts. JSONL, no-profile, N512, acquisition,
+  packet-end, and final-identity stages never begin. The one ordered A/B pair is
+  descriptive only and is visibly PSO/order-confounded; it grants no performance
+  estimate, product admission, pooling, repair, or retry authority.
+- Timing validators must encode each field's mathematical domain. Work-spanning
+  endpoints may require `>0`; sub-resolution bookkeeping timers require finite
+  `>=0`, with an explicit zero-valued validator self-test.
+- After sealing, the mandatory rollback removes the unadmitted GPU-greedy
+  auto-selection coupling and its realized-profile marker while preserving
+  explicit `=0` rollback and `=1` force. Release binaries were then rebuilt from
+  clean `0927937` and reported matching build/runtime identity. This rebuild is
+  post-packet operational evidence, not part of the sealed inventory.
+
+Artifact: `target/profiles/v0651-a3b-one-shot-gpu-greedy-auto-p1/`.
+Preregistration/implementation/runner/rollback: `0ee75e2`, `791c328`, `719fa6c`,
+and `0927937`. Independent runner and result certification: `cx` session
+`019fa9a8-c5c2-79f3-b643-943bd25cd0e2`.
+
 ## 2026-07-28 - v0.650 A3B GPU-Greedy Immediate-Carryover Diagnostic
 
 Status: sealed `NO_MATERIAL_CARRYOVER_AT_3_PERCENT` with

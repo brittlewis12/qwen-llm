@@ -96,6 +96,9 @@ Decision rules:
   sanity. v0.644's `15.70-15.89` synthetic E controls are not a silicon ceiling.
 - Use the repo-pinned llama.cpp lock at `scripts/bench/llama-cpp.lock.json`.
 - Treat battery or thermal/performance warnings as benchmark confounds.
+- Do not treat process-wide major faults as a generic cache-warm invalidity
+  predicate. Require a causal I/O contract such as block-input operations,
+  explicit physical-read/residency evidence, or arm-symmetric warm-up.
 - Keep dense 27B in analysis while optimizing MoE.
 - Use limiter captures for kernel-shape claims and untraced runs for throughput.
 - Treat `prefill_chunk=1024` as a safe cap, not a universal long-prompt optimum.
@@ -1006,39 +1009,46 @@ Any independent successor must use a new preregistration and artifact root,
 test zero-valued timing fields before acquisition, and pool no v0.651
 observation.
 
-1. **A3B exact-GPU-greedy product decision, one independent successor at most**:
-   non-authorizing correctness observations and repeated descriptive/diagnostic
-   `~1.08-1.09x` complete-generation signals keep this high in the leverage
-   ranking, but they are not pooled admission authority. Four non-admitting
-   packets make decision throughput part of its cost. Proceed only with a simpler
-   successor whose validators distinguish finite `>=0` bookkeeping timers from
-   strictly positive work-spanning endpoints and whose zero-valued fixtures are
-   pure-tested before the one-shot run. Restore only the exact disposable A3B
-   selector after preregistration, grant no candidate authority, and commit
-   default-off after any non-GO. Otherwise stop at explicit `=1`. Belief high on
-   decode efficacy, medium on complete product admission; difficulty S
-   implementation/M evidence.
-2. **Dense GPU-greedy deconfounding**: load dense27 once, symmetrically warm both
-   explicit policies after neutral sustained preconditioning, and alternate full
-   128-token chains quickly enough to escape the v0.645 host-state curve. This is
-   diagnostic only; a later product packet remains required. Informative stable-
-   tail prior about `1.032x`, belief medium, difficulty S-M.
-3. **A10B cold residency plus split-copy floor**: proceed only if the heavy
+v0.652 consumes that one independent successor and seals `INVALID` before formal
+N128 conformance. Its first A process exits zero with coherent output, policy,
+profile, timing, and request telemetry, but exact rusage reports 24 major faults
+with zero block-input operations. There are zero scored attempts and no
+admission evidence. The process-wide fault counter is unphased and cannot
+attribute I/O or policy causality. The same first-A count appears descriptively in
+v0.651, while v0.652 exact-state records 27; none may be pooled or used to rescue
+the packet. This repeats the validity-design mismatch exposed by v0.628: a
+blanket process-wide zero-fault gate substitutes for cell-specific cache/I/O
+evidence. The frozen gate correctly seals `INVALID`; it does not prove
+target-file page-in or localize an engine phase. Terminal rollback `88ec2dd`
+restores default-off. The preregistered stopping rule closes
+automatic A3B GPU-greedy admission permanently under the current mechanism;
+retain explicit `=1` and do not create a v0.653 A3B automatic-admission
+successor.
+
+1. **Choose the remaining cold/product branch explicitly**: if A10B is a current
+   deployment target, run its native-embedding residency decision and
+   three-shard split-copy floor. Otherwise run the grammar forced-run/admissible-
+   row trace oracle below. Do not spend another packet on this A3B automatic-
+   admission mechanism.
+2. **A10B cold residency plus split-copy floor**: proceed only if the heavy
    anchor remains deployment-relevant. First adjudicate the bit-exact native
    embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
    three-shard topology-preserving population floor. Belief high on memory,
    medium on copy wall, difficulty M-L.
-4. **Grammar run and admissible-row oracle**: replay real structured traces and
+3. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
    `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
    positive at current N8 cost. Contract-exact, belief medium-low until traces
    exist, difficulty S oracle/M product.
-5. **High-ceiling structural options**: true-long attention needs a source-free
+4. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
    serial-state-preserving organization. Keep all three behind their existing
    source-free oracle and whole-token gates. Prize high, belief low-medium.
+Dense GPU-greedy deconfounding remains a separate diagnostic-only question that
+v0.652 neither answers nor closes; it is intentionally deprioritized below the
+active queue on leverage.
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
 allocation removal under the same latency gate; typed metadata retains only an
@@ -1102,17 +1112,14 @@ automatic retained use stay copied without separate evidence.
 v0.640 banks exact-27B deferred restore behind its existing explicit environment
 control. It is no longer an active experiment; keep `decode` as the default.
 
-1. v0.650 closes immediate one-generation GPU-greedy carryover at the 3% harm
-   threshold; v0.651 consumes its admission packet on a harness-domain error
-   before scoring and rolls the candidate back at `0927937`. Fund at most one
-   independent, zero-domain-tested successor under the contract above; otherwise
-   retain explicit `=1` and stop.
+1. v0.652 consumes the final independent GPU-greedy admission packet before
+   scoring and closes the branch under its terminal stopping rule. Keep absence
+   default-off at `88ec2dd`, retain explicit `=1`, and schedule no v0.653 A3B
+   automatic-admission successor.
 2. v0.644 closes the tested Q4 ladder. Do not schedule B/C widening, E-arm
    diagnosis, P4096 replication, or a local source/dequant implementation.
 3. Decide whether A10B is a current deployment target. If yes, its native-
-   embedding/split-copy floor moves ahead of dense GPU argmax; otherwise run the
-   grammar trace oracle after A3B admission is either completed or explicitly
-   declined.
+   embedding/split-copy floor is next; otherwise run the grammar trace oracle.
 4. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.

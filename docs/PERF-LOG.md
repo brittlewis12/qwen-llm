@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-28 - v0.652 Final A3B GPU-Greedy Admission Invalid
+
+Status: sealed `INVALID` with `authority=none`; the final admission packet is
+consumed and the automatic-admission branch is closed. Absent-environment GPU
+greedy is default-off at `88ec2dd`; explicit `=1` remains available.
+
+- All 67 inventoried artifacts and both completion hashes verify. The packet
+  launched eight complete unscored children: build, the 56-test CLI suite, four
+  pure profile-coupling tests, exact-state, and N128 conformance A. Every child
+  exited zero under clean source/build/runtime `bf0dba3`; host evidence remains
+  valid at 95-96% free memory with no competitor or warning.
+- The pure policy/profile tests and exact A3B state gate pass. Conformance A
+  completes 128 selected tokens and 127 transitions with the expected explicit
+  rollback/CPU-greedy policy, exact A3B pread profile, token-limit stop, output
+  digest `ef4a517b...8b5e`, and stdout digest `49c32498...befc0`.
+- The runner rejects A before timing-row/load/output acceptance or N128 reference
+  creation because exact child rusage is `ru_majflt=24`, despite
+  `ru_inblock=0`. No B, JSONL, no-profile, N512, reference, pair, attempt,
+  scored, packet-end, or final-identity artifact exists. There is no effect
+  estimate, paired comparison, contamination assessment, or product authority.
+- The fault counter is process-wide and unphased. It does not identify model
+  loading, executable paging, Metal mappings, prefill, CPU greedy, decode, or
+  teardown. v0.651's first A also records exactly 24 major faults with zero block
+  input, its second B records zero, and v0.652's exact-state child records 27.
+  Those observations are descriptive and cannot be pooled to rescue v0.652.
+- v0.652 repeats the validity-design mismatch exposed by v0.628: a blanket
+  process-wide zero-fault gate substitutes for cell-specific cache/I/O evidence.
+  The frozen gate correctly seals `INVALID`, but 24 major faults with zero block
+  input do not prove target-file page-in or localize an engine phase. Future
+  packets should gate the named I/O condition using matching block-input,
+  physical-read/residency, or symmetric-conditioning evidence.
+- The preregistered stopping rule permits no v0.653 A3B GPU-greedy
+  automatic-admission successor, repair, retry, or rescue.
+  Commit `88ec2dd` restores the three candidate files exactly to preregistration
+  state; the 52-test default-off suite and workspace check pass. Release binaries
+  were rebuilt from clean `88ec2dd` with matching build/runtime/source identity.
+
+Artifact: `target/profiles/v0652-a3b-one-shot-gpu-greedy-final-p1/`.
+Preregistration/candidate/runner/rollback: `44378d9`, `feba893`, `bf0dba3`, and
+`88ec2dd`. Independent design, runner, and result certification: `cx` session
+`019fa9a8-c5c2-79f3-b643-943bd25cd0e2`.
+
 ## 2026-07-28 - v0.651 A3B One-Shot GPU-Greedy Admission Invalid
 
 Status: sealed `INVALID` with `authority=none`; the one-shot packet is consumed.

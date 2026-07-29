@@ -16,9 +16,7 @@ use qwen_llm::metal_dflash::{
     PrefillScratchOverlayStats, PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
     plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
-use qwen_llm::metal_forward::{
-    MetalForward, MfError, RealizedAutoLoadMarker, SnapshotValidationError,
-};
+use qwen_llm::metal_forward::{MetalForward, MfError, SnapshotValidationError};
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::runtime::{
@@ -41,7 +39,7 @@ const GREEDY_GPU_ARGMAX_ENV: &str = "QWEN_GREEDY_GPU_ARGMAX";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GreedyGpuArgmaxMode {
-    AbsentAutoPolicy,
+    DefaultOff,
     ForceEnabled,
     ExplicitRollback,
 }
@@ -52,41 +50,9 @@ struct GreedyGpuDecision {
     reason: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GreedyGpuRequestScope {
-    OrdinarySingleTurn,
-    ReusableJsonl,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GreedyGpuLoadProfile {
-    Missing,
-    Realized(RealizedAutoLoadMarker),
-    #[cfg(test)]
-    Wrong,
-    #[cfg(test)]
-    Future,
-}
-
-impl From<Option<RealizedAutoLoadMarker>> for GreedyGpuLoadProfile {
-    fn from(marker: Option<RealizedAutoLoadMarker>) -> Self {
-        marker.map_or(Self::Missing, Self::Realized)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct GreedyGpuRequestContext {
-    scope: GreedyGpuRequestScope,
-    request_index: usize,
-    warm_followup_requested: bool,
-    durable_store_configured: bool,
-    requested_tokens: usize,
-    load_profile: GreedyGpuLoadProfile,
-}
-
 fn parse_greedy_gpu_argmax_mode(value: Option<&OsStr>) -> GreedyGpuArgmaxMode {
     match value {
-        None => GreedyGpuArgmaxMode::AbsentAutoPolicy,
+        None => GreedyGpuArgmaxMode::DefaultOff,
         Some(value)
             if value
                 .to_str()
@@ -116,7 +82,6 @@ fn resolve_greedy_gpu_decision(
     mode: GreedyGpuArgmaxMode,
     sampling: SamplingConfig,
     prompt_lookup: bool,
-    context: GreedyGpuRequestContext,
 ) -> GreedyGpuDecision {
     if mode == GreedyGpuArgmaxMode::ExplicitRollback {
         return GreedyGpuDecision {
@@ -136,52 +101,10 @@ fn resolve_greedy_gpu_decision(
             enabled: true,
             reason: "force_enabled",
         },
-        GreedyGpuArgmaxMode::AbsentAutoPolicy => {
-            if context.scope == GreedyGpuRequestScope::ReusableJsonl {
-                return GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off_reusable_path",
-                };
-            }
-            if context.warm_followup_requested {
-                return GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off_warm_followup_requested",
-                };
-            }
-            if context.durable_store_configured {
-                return GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off_durable_store_configured",
-                };
-            }
-            if context.request_index != 0 {
-                return GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off_request_index_not_zero",
-                };
-            }
-            if !(128..=512).contains(&context.requested_tokens) {
-                return GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off_requested_tokens_outside_128_512",
-                };
-            }
-            if context.load_profile
-                != GreedyGpuLoadProfile::Realized(
-                    RealizedAutoLoadMarker::DisposableA3bQ4kmV1PreadLogicalExactRetainedPlanV1,
-                )
-            {
-                return GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off_no_disposable_profile",
-                };
-            }
-            GreedyGpuDecision {
-                enabled: true,
-                reason: "auto_disposable_a3b_q4km_v1",
-            }
-        }
+        GreedyGpuArgmaxMode::DefaultOff => GreedyGpuDecision {
+            enabled: false,
+            reason: "default_off",
+        },
     }
 }
 
@@ -2286,19 +2209,8 @@ fn execute_single_turn_request(
         .context("load producer-declared stop tokens")?;
     let sampling_config = cli_sampling_config(args)?;
     let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
-    let greedy_gpu_decision = resolve_greedy_gpu_decision(
-        greedy_gpu_mode,
-        sampling_config,
-        args.prompt_lookup,
-        GreedyGpuRequestContext {
-            scope: GreedyGpuRequestScope::OrdinarySingleTurn,
-            request_index,
-            warm_followup_requested: args.request_timing_warm_followup,
-            durable_store_configured: durable_store.is_some(),
-            requested_tokens: args.tokens,
-            load_profile: loaded.realized_auto_load_marker().into(),
-        },
-    );
+    let greedy_gpu_decision =
+        resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
     let (generation, prompt_lookup_stats) = if args.prompt_lookup {
         let result = generate_prompt_lookup(
@@ -3126,19 +3038,8 @@ fn run_jsonl_request(
         .context("load producer-declared stop tokens")?;
     let sampling_config = prepared.sampling;
     let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
-    let greedy_gpu_decision = resolve_greedy_gpu_decision(
-        greedy_gpu_mode,
-        sampling_config,
-        args.prompt_lookup,
-        GreedyGpuRequestContext {
-            scope: GreedyGpuRequestScope::ReusableJsonl,
-            request_index: 0,
-            warm_followup_requested: false,
-            durable_store_configured: false,
-            requested_tokens: n_generate,
-            load_profile: loaded.realized_auto_load_marker().into(),
-        },
-    );
+    let greedy_gpu_decision =
+        resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let (generation, generated_text, prompt_lookup_stats) = if args.prompt_lookup {
         let (result, generated_text) = decode_prompt_lookup(
             loaded,
@@ -5747,7 +5648,50 @@ mod tests {
     }
 
     #[test]
-    fn greedy_gpu_env_parsing_preserves_absent_force_and_rollback_states() {
+    fn gpu_greedy_policy_is_default_off_forceable_and_rollbackable() {
+        let modes = [
+            GreedyGpuArgmaxMode::DefaultOff,
+            GreedyGpuArgmaxMode::ForceEnabled,
+            GreedyGpuArgmaxMode::ExplicitRollback,
+        ];
+        let requests = [
+            (SamplingConfig::default(), false),
+            (SamplingConfig::qwen_chat(7), false),
+            (SamplingConfig::default(), true),
+        ];
+        for mode in modes {
+            for (sampling, prompt_lookup) in requests {
+                let request_eligible = sampling.temperature == 0.0 && !prompt_lookup;
+                let expected = if mode == GreedyGpuArgmaxMode::ExplicitRollback {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "disabled_by_explicit_rollback",
+                    }
+                } else if !request_eligible {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "ineligible_request",
+                    }
+                } else if mode == GreedyGpuArgmaxMode::ForceEnabled {
+                    GreedyGpuDecision {
+                        enabled: true,
+                        reason: "force_enabled",
+                    }
+                } else {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "default_off",
+                    }
+                };
+                assert_eq!(
+                    resolve_greedy_gpu_decision(mode, sampling, prompt_lookup),
+                    expected,
+                    "mode={mode:?} sampled={} prompt_lookup={prompt_lookup}",
+                    sampling.temperature > 0.0,
+                );
+            }
+        }
+
         for value in ["1", "true", "TRUE", "yes", "YES"] {
             assert_eq!(
                 parse_greedy_gpu_argmax_mode(Some(OsStr::new(value))),
@@ -5762,7 +5706,7 @@ mod tests {
         }
         assert_eq!(
             parse_greedy_gpu_argmax_mode(None),
-            GreedyGpuArgmaxMode::AbsentAutoPolicy
+            GreedyGpuArgmaxMode::DefaultOff
         );
         for value in ["", "invalid", "True", "2"] {
             assert_eq!(
@@ -5775,193 +5719,6 @@ mod tests {
         assert_eq!(
             parse_greedy_gpu_argmax_mode(Some(&non_unicode)),
             GreedyGpuArgmaxMode::ExplicitRollback
-        );
-    }
-
-    fn exact_greedy_gpu_context() -> GreedyGpuRequestContext {
-        GreedyGpuRequestContext {
-            scope: GreedyGpuRequestScope::OrdinarySingleTurn,
-            request_index: 0,
-            warm_followup_requested: false,
-            durable_store_configured: false,
-            requested_tokens: 128,
-            load_profile: GreedyGpuLoadProfile::Realized(
-                RealizedAutoLoadMarker::DisposableA3bQ4kmV1PreadLogicalExactRetainedPlanV1,
-            ),
-        }
-    }
-
-    fn greedy_gpu_decision(
-        mode: GreedyGpuArgmaxMode,
-        sampling: SamplingConfig,
-        prompt_lookup: bool,
-        context: GreedyGpuRequestContext,
-    ) -> GreedyGpuDecision {
-        resolve_greedy_gpu_decision(mode, sampling, prompt_lookup, context)
-    }
-
-    #[test]
-    fn absent_gpu_greedy_requires_exact_realized_marker() {
-        let expected_auto = GreedyGpuDecision {
-            enabled: true,
-            reason: "auto_disposable_a3b_q4km_v1",
-        };
-        assert_eq!(
-            greedy_gpu_decision(
-                GreedyGpuArgmaxMode::AbsentAutoPolicy,
-                SamplingConfig::default(),
-                false,
-                exact_greedy_gpu_context(),
-            ),
-            expected_auto
-        );
-
-        for load_profile in [
-            GreedyGpuLoadProfile::Missing,
-            GreedyGpuLoadProfile::Wrong,
-            GreedyGpuLoadProfile::Future,
-        ] {
-            assert_eq!(
-                greedy_gpu_decision(
-                    GreedyGpuArgmaxMode::AbsentAutoPolicy,
-                    SamplingConfig::default(),
-                    false,
-                    GreedyGpuRequestContext {
-                        load_profile,
-                        ..exact_greedy_gpu_context()
-                    },
-                ),
-                GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off_no_disposable_profile",
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn absent_gpu_greedy_is_narrowly_scoped() {
-        let cases = [
-            (
-                GreedyGpuRequestContext {
-                    scope: GreedyGpuRequestScope::ReusableJsonl,
-                    ..exact_greedy_gpu_context()
-                },
-                "default_off_reusable_path",
-            ),
-            (
-                GreedyGpuRequestContext {
-                    warm_followup_requested: true,
-                    ..exact_greedy_gpu_context()
-                },
-                "default_off_warm_followup_requested",
-            ),
-            (
-                GreedyGpuRequestContext {
-                    durable_store_configured: true,
-                    ..exact_greedy_gpu_context()
-                },
-                "default_off_durable_store_configured",
-            ),
-            (
-                GreedyGpuRequestContext {
-                    request_index: 1,
-                    ..exact_greedy_gpu_context()
-                },
-                "default_off_request_index_not_zero",
-            ),
-        ];
-        for (context, reason) in cases {
-            assert_eq!(
-                greedy_gpu_decision(
-                    GreedyGpuArgmaxMode::AbsentAutoPolicy,
-                    SamplingConfig::default(),
-                    false,
-                    context,
-                ),
-                GreedyGpuDecision {
-                    enabled: false,
-                    reason,
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn absent_gpu_greedy_enforces_requested_token_envelope() {
-        for (requested_tokens, enabled) in [(127, false), (128, true), (512, true), (513, false)] {
-            let decision = greedy_gpu_decision(
-                GreedyGpuArgmaxMode::AbsentAutoPolicy,
-                SamplingConfig::default(),
-                false,
-                GreedyGpuRequestContext {
-                    requested_tokens,
-                    ..exact_greedy_gpu_context()
-                },
-            );
-            assert_eq!(decision.enabled, enabled);
-            assert_eq!(
-                decision.reason,
-                if enabled {
-                    "auto_disposable_a3b_q4km_v1"
-                } else {
-                    "default_off_requested_tokens_outside_128_512"
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn gpu_greedy_precedence_is_rollback_then_request_eligibility_then_force() {
-        let exact = exact_greedy_gpu_context();
-        assert_eq!(
-            greedy_gpu_decision(
-                GreedyGpuArgmaxMode::ExplicitRollback,
-                SamplingConfig::qwen_chat(7),
-                true,
-                exact,
-            ),
-            GreedyGpuDecision {
-                enabled: false,
-                reason: "disabled_by_explicit_rollback",
-            }
-        );
-        for mode in [
-            GreedyGpuArgmaxMode::AbsentAutoPolicy,
-            GreedyGpuArgmaxMode::ForceEnabled,
-        ] {
-            for (sampling, prompt_lookup) in [
-                (SamplingConfig::qwen_chat(7), false),
-                (SamplingConfig::default(), true),
-            ] {
-                assert_eq!(
-                    greedy_gpu_decision(mode, sampling, prompt_lookup, exact),
-                    GreedyGpuDecision {
-                        enabled: false,
-                        reason: "ineligible_request",
-                    }
-                );
-            }
-        }
-        assert_eq!(
-            greedy_gpu_decision(
-                GreedyGpuArgmaxMode::ForceEnabled,
-                SamplingConfig::default(),
-                false,
-                GreedyGpuRequestContext {
-                    scope: GreedyGpuRequestScope::ReusableJsonl,
-                    request_index: 1,
-                    warm_followup_requested: true,
-                    durable_store_configured: true,
-                    requested_tokens: 1,
-                    load_profile: GreedyGpuLoadProfile::Missing,
-                    ..exact
-                },
-            ),
-            GreedyGpuDecision {
-                enabled: true,
-                reason: "force_enabled",
-            }
         );
     }
 

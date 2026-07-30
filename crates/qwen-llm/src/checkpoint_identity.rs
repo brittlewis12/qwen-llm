@@ -42,13 +42,13 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct SourceStamp {
-    dev: u64,
-    ino: u64,
-    size: u64,
-    mtime_sec: i64,
-    mtime_nsec: i64,
-    ctime_sec: i64,
-    ctime_nsec: i64,
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) size: u64,
+    pub(crate) mtime_sec: i64,
+    pub(crate) mtime_nsec: i64,
+    pub(crate) ctime_sec: i64,
+    pub(crate) ctime_nsec: i64,
 }
 
 impl SourceStamp {

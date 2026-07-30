@@ -1,10 +1,11 @@
 # v0.653 A10B Topology-Preserving Parallel-Pread Floor
 
-Status: profile freeze. The sole stage-0 metadata describe is complete. This
-revision binds its content digest, the exact A10B profile, the literal W4
-schedule, and the sole ABBA packet. It authorizes implementation and review of
-the frozen measurement seams, but no payload observation may precede a clean
-implementation commit and separate pre-run review against this contract.
+Status: implementation preregistration. The sole stage-0 metadata describe and
+exact profile freeze are complete. The implementation now admits only the exact
+A10B copied and W4 parallel-pread arms and adds the frozen counter, headroom,
+descriptor-stamp, allocation, and no-GPU-command seals. No payload observation
+may precede a clean implementation commit, sealed runner, and separate pre-run
+review against this contract.
 
 ## Intent
 
@@ -156,11 +157,21 @@ The describe-time raw memory signals were recommended working set
 the API's omitted-limit value, not a positive finite budget. It does not replace
 the packet's fresh parent and in-child headroom checks.
 
-The committed profile makes this exact metadata/schedule recognizable, but the
-current force-native materialization prohibition remains intact. The next
-implementation must narrow admission to profile `a10b-q4xl-v1`, arms `copied`
-and `parallel-pread`, and W4 only; no other profile or production selector gains
-authority from this freeze.
+The implementation recognizes this exact metadata and admits force-native
+materialization only for profile `a10b-q4xl-v1`, arms `copied` and
+`parallel-pread`, and W4. Production-auto A10B, forced A3B/dense, every other
+A10B arm, and every non-W4 A10B request fail before payload allocation. No
+runtime loader or production native-embedding selector changes.
+
+Authenticated A10B rows require JSON output and use schema 3; existing A3B and
+dense materialization rows retain their exact schema-2 projection and timing
+boundary. A10B rows report the actual embedding policy and selection, in-child
+memory admission and zero-sentinel semantics, retained descriptor stamps before
+timing and after verification, timer-local block input and swap deltas, all
+three Metal allocation snapshots, endpoint
+`host-population/no-GPU-command`, and implementation seal
+`gguf-arena-floor-copied-pread-v1`. The A10B parallel-pread arm is driven by the
+literal frozen schedule; dynamic minimax output is equality-only diagnosis.
 
 ## Arms
 

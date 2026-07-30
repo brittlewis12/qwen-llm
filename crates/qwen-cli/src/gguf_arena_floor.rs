@@ -10,12 +10,13 @@ use objc2_metal::{
     MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
 };
 use qwen_llm::{
-    gguf::GgufFile,
+    gguf::{GgufFile, GgufShardStamp},
     loader::Model,
     metal::{
-        BlitEncoder, Buffer, DiagnosticGgufBlitReleaseProbe, MetalContext, MetalMemorySignals,
-        RetainedStorageDisposition, RetainedStorageFallback, RetainedStoragePlan,
-        host_page_size_bytes, plan_retained_storage,
+        BlitEncoder, Buffer, DiagnosticGgufBlitReleaseProbe, MetalContext, MetalMemoryAdmission,
+        MetalMemorySignals, RetainedStorageDisposition, RetainedStorageFallback,
+        RetainedStoragePlan, evaluate_metal_memory_admission, host_page_size_bytes,
+        plan_retained_storage,
     },
     metal_forward::{
         ModelWeightStorageKind, gguf_descriptor_layout_digest,
@@ -37,6 +38,9 @@ const EXPECTED_PAGE_SIZE: usize = 16_384;
 const EXPECTED_MAX_BUFFER_LENGTH: usize = 77_309_411_328;
 const FROZEN_PARALLEL_COPY_WORKERS: usize = 4;
 const PARALLEL_COPY_ALGORITHM: &str = "minimax-contiguous-v1";
+const A10B_REQUIRED_HEADROOM_BYTES: u64 = 85_608_931_328;
+const HOST_POPULATION_ENDPOINT: &str = "host-population/no-GPU-command";
+const HOST_POPULATION_NO_GPU_SEAL: &str = "gguf-arena-floor-copied-pread-v1";
 const ALLOWED_DIAGNOSTIC_WORKERS: [usize; 6] = [1, 2, 4, 6, 8, 12];
 const A3B_BLIT_PLAN_DIGEST: &str =
     "fa2685e223ad8ea6271c6061041fe8d996b4e6cc70e060588b750732577c92af";
@@ -136,6 +140,47 @@ fn memory_signals_json(signals: MetalMemorySignals) -> Value {
     })
 }
 
+fn memory_admission_json(admission: MetalMemoryAdmission) -> Value {
+    json!({
+        "admitted": admission.admitted,
+        "reason": admission.reason.as_str(),
+        "required_bytes": admission.required_bytes,
+        "scratch_upper_bytes": admission.scratch_upper_bytes,
+        "reserve_bytes": admission.reserve_bytes,
+        "allow_zero_process_budget": true,
+        "zero_process_budget_semantics": "omitted-limit-sentinel",
+        "working_set_headroom_bytes": admission.working_set_headroom_bytes,
+        "signals": memory_signals_json(admission.signals),
+    })
+}
+
+fn shard_stamps_json(stamps: &[GgufShardStamp]) -> Result<Value> {
+    stamps
+        .iter()
+        .map(|stamp| {
+            let path = stamp.path.to_str().ok_or_else(|| {
+                anyhow!("retained GGUF shard {} path is not UTF-8", stamp.shard_idx)
+            })?;
+            Ok(json!({
+                "shard_idx": stamp.shard_idx,
+                "path": path,
+                "device": stamp.device,
+                "inode": stamp.inode,
+                "size": stamp.size,
+                "mtime_sec": stamp.mtime_sec,
+                "mtime_nsec": stamp.mtime_nsec,
+                "ctime_sec": stamp.ctime_sec,
+                "ctime_nsec": stamp.ctime_nsec,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Value::Array)
+}
+
+fn allocation_drop_is_valid(before: u64, after_drop: u64) -> bool {
+    after_drop <= before
+}
+
 #[derive(Clone, Copy)]
 struct ScheduleIdentity {
     request_index: usize,
@@ -151,6 +196,7 @@ struct ScheduleBoundary {
     last: ScheduleIdentity,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FloorProfileStage {
     MaterializationAdmitted,
@@ -435,8 +481,8 @@ const FLOOR_PROFILES: [FloorProfile; 3] = [
     },
     FloorProfile {
         id: FloorProfileId::A10bQ4xlV1,
-        stage: FloorProfileStage::MetadataOnly,
-        allowed_arms: &[],
+        stage: FloorProfileStage::MaterializationAdmitted,
+        allowed_arms: &[ArenaFloorArm::Copied, ArenaFloorArm::ParallelPread],
         architecture: "qwen35moe",
         arch: A10B_ARCH,
         tied_embeddings: false,
@@ -637,14 +683,153 @@ fn validate_worker_scope(
 fn validate_embedding_policy_scope(
     describe: bool,
     embedding_policy: FloorEmbeddingPolicy,
+    profile: Option<FloorProfileId>,
+    arm: Option<ArenaFloorArm>,
+    workers: usize,
 ) -> Result<()> {
-    if !describe && embedding_policy == FloorEmbeddingPolicy::ForceNativeIfSupported {
+    if describe {
+        return Ok(());
+    }
+    match embedding_policy {
+        FloorEmbeddingPolicy::ProductionAuto if profile != Some(FloorProfileId::A10bQ4xlV1) => {
+            Ok(())
+        }
+        FloorEmbeddingPolicy::ForceNativeIfSupported
+            if profile == Some(FloorProfileId::A10bQ4xlV1)
+                && matches!(
+                    arm,
+                    Some(ArenaFloorArm::Copied | ArenaFloorArm::ParallelPread)
+                )
+                && workers == FROZEN_PARALLEL_COPY_WORKERS =>
+        {
+            Ok(())
+        }
+        FloorEmbeddingPolicy::ProductionAuto => Err(anyhow!(
+            "a10b-q4xl-v1 materialization requires force-native-if-supported"
+        )),
+        FloorEmbeddingPolicy::ForceNativeIfSupported => Err(anyhow!(
+            "force-native-if-supported materialization is admitted only for a10b-q4xl-v1 copied or parallel-pread at W4"
+        )),
+    }
+}
+
+fn uses_a10b_execution_schema(profile: FloorProfileId) -> bool {
+    profile == FloorProfileId::A10bQ4xlV1
+}
+
+fn validate_output_scope(
+    describe: bool,
+    profile: Option<FloorProfileId>,
+    output: OutputFormat,
+) -> Result<()> {
+    if !describe && profile == Some(FloorProfileId::A10bQ4xlV1) && output != OutputFormat::Json {
         Err(anyhow!(
-            "force-native-if-supported materialization requires a separately reviewed profile admission"
+            "a10b-q4xl-v1 materialization requires --output json"
         ))
     } else {
         Ok(())
     }
+}
+
+const LEGACY_EXECUTION_KEYS: &[&str] = &[
+    "schema_version",
+    "arm",
+    "profile",
+    "model",
+    "architecture",
+    "architecture_tuple",
+    "tied_embeddings",
+    "mtp_present",
+    "shard_mapped_lengths",
+    "descriptor_layout_digest",
+    "inventory_digest",
+    "native_quant_embedding",
+    "native_quant_embedding_supported",
+    "native_quant_embedding_selection",
+    "page_size",
+    "required_alignment",
+    "max_buffer_length",
+    "device_name",
+    "unified_memory",
+    "request_count",
+    "resource_count",
+    "binding_count",
+    "logical_copy_bytes",
+    "physical_copy_bytes",
+    "resource_modes",
+    "parallel_copy_schedule",
+    "timing",
+    "throughput",
+    "rusage",
+    "proc_rusage_v4",
+    "metal_allocated_bytes",
+    "correctness",
+    "worker_count",
+    "build_identity",
+];
+const A10B_EXECUTION_EXTRA_KEYS: &[&str] = &[
+    "embedding_policy",
+    "memory_admission",
+    "retained_shard_stamps",
+    "endpoint",
+    "implementation_seal",
+];
+const LEGACY_RUSAGE_KEYS: &[&str] = &[
+    "timer_minor_faults",
+    "timer_major_faults",
+    "user_cpu_us",
+    "system_cpu_us",
+    "total_cpu_us",
+    "cpu_per_wall",
+];
+const A10B_RUSAGE_EXTRA_KEYS: &[&str] = &["timer_block_inputs", "timer_swaps"];
+const LEGACY_METAL_ALLOCATION_KEYS: &[&str] = &["before", "ready", "after_drop"];
+const A10B_METAL_ALLOCATION_EXTRA_KEYS: &[&str] = &["drop_valid"];
+
+fn validate_json_object_keys(value: &Value, expected: &HashSet<&str>, label: &str) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("{label} is not a JSON object"))?;
+    let actual = object.keys().map(String::as_str).collect::<HashSet<_>>();
+    if actual != *expected {
+        return Err(anyhow!("{label} key set drifted"));
+    }
+    Ok(())
+}
+
+fn validate_execution_row_projection(
+    row: &Value,
+    profile: FloorProfileId,
+    arm: ArenaFloorArm,
+) -> Result<()> {
+    let a10b = uses_a10b_execution_schema(profile);
+    let mut top_level = LEGACY_EXECUTION_KEYS
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    if a10b {
+        top_level.extend(A10B_EXECUTION_EXTRA_KEYS.iter().copied());
+    }
+    if arm == ArenaFloorArm::TransientMmapBlit {
+        top_level.insert("blit_population");
+    }
+    validate_json_object_keys(row, &top_level, "execution row")?;
+    let expected_schema = if a10b { 3 } else { 2 };
+    if row["schema_version"] != expected_schema {
+        return Err(anyhow!("execution schema version drifted"));
+    }
+
+    let mut rusage = LEGACY_RUSAGE_KEYS.iter().copied().collect::<HashSet<_>>();
+    let mut metal = LEGACY_METAL_ALLOCATION_KEYS
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    if a10b {
+        rusage.extend(A10B_RUSAGE_EXTRA_KEYS.iter().copied());
+        metal.extend(A10B_METAL_ALLOCATION_EXTRA_KEYS.iter().copied());
+    }
+    validate_json_object_keys(&row["rusage"], &rusage, "rusage")?;
+    validate_json_object_keys(&row["metal_allocated_bytes"], &metal, "Metal allocation")
 }
 
 fn validate_describe_worker_scope(
@@ -666,6 +851,8 @@ fn validate_describe_worker_scope(
 struct Usage {
     minor_faults: i64,
     major_faults: i64,
+    block_inputs: i64,
+    swaps: i64,
     user_time_us: i64,
     system_time_us: i64,
 }
@@ -777,6 +964,8 @@ fn capture_usage() -> Result<Usage> {
     Ok(Usage {
         minor_faults: usage.ru_minflt,
         major_faults: usage.ru_majflt,
+        block_inputs: usage.ru_inblock,
+        swaps: usage.ru_nswap,
         user_time_us: timeval_us(usage.ru_utime)?,
         system_time_us: timeval_us(usage.ru_stime)?,
     })
@@ -1478,8 +1667,9 @@ fn materialize_copied(
     gguf: &GgufFile,
     direct: &[&TensorDesc],
     profile: &FloorProfile,
+    ready_started: Option<Instant>,
 ) -> Result<Materialized> {
-    let ready_started = Instant::now();
+    let ready_started = ready_started.unwrap_or_else(Instant::now);
     let mut resources = Vec::with_capacity(direct.len());
     for desc in direct {
         resources.push(ctx.buffer_from(gguf.try_slice(desc)?)?);
@@ -1523,11 +1713,12 @@ fn materialize_parallel_copied(
     direct: &[&TensorDesc],
     schedule: &ParallelCopySchedule,
     profile: &FloorProfile,
+    ready_started: Option<Instant>,
 ) -> Result<Materialized> {
     if schedule.partitions.len() != FROZEN_PARALLEL_COPY_WORKERS {
         return Err(anyhow!("parallel-copy materialization is frozen at W4"));
     }
-    let ready_started = Instant::now();
+    let ready_started = ready_started.unwrap_or_else(Instant::now);
     let allocation_started = ready_started;
     let mut resources = allocate_copied_resources(ctx, direct)?;
     let allocation_finished = Instant::now();
@@ -1666,6 +1857,7 @@ fn materialize_parallel_pread(
     direct: &[&TensorDesc],
     schedule: &ParallelCopySchedule,
     profile: &FloorProfile,
+    ready_started: Option<Instant>,
 ) -> Result<Materialized> {
     let workers = schedule.partitions.len();
     if workers != FROZEN_PARALLEL_COPY_WORKERS {
@@ -1674,7 +1866,7 @@ fn materialize_parallel_pread(
             return Err(anyhow!("parallel-pread dynamic schedule proof drifted"));
         }
     }
-    let ready_started = Instant::now();
+    let ready_started = ready_started.unwrap_or_else(Instant::now);
     let allocation_started = ready_started;
     let mut resources = allocate_copied_resources(ctx, direct)?;
     let allocation_finished = Instant::now();
@@ -1891,6 +2083,7 @@ fn materialize_transient_mmap_blit(
     blit_order: &[usize],
     plan: &RetainedStoragePlan,
     profile: &FloorProfile,
+    ready_started: Option<Instant>,
 ) -> Result<Materialized> {
     validate_transient_mmap_blit_plan(profile, direct, plan)?;
     if blit_order != source_order(direct)
@@ -1900,7 +2093,7 @@ fn materialize_transient_mmap_blit(
         return Err(anyhow!("transient mmap-blit source order drifted"));
     }
 
-    let ready_started = Instant::now();
+    let ready_started = ready_started.unwrap_or_else(Instant::now);
     let allocation_started = ready_started;
     let resources = allocate_copied_resources(ctx, direct)?;
     let allocation_finished = Instant::now();
@@ -2215,7 +2408,14 @@ fn verify_materialized(
 
 pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()> {
     validate_worker_scope(args.workers, args.describe, args.arm, args.profile)?;
-    validate_embedding_policy_scope(args.describe, args.embedding_policy)?;
+    validate_output_scope(args.describe, args.profile, args.output)?;
+    validate_embedding_policy_scope(
+        args.describe,
+        args.embedding_policy,
+        args.profile,
+        args.arm,
+        args.workers,
+    )?;
     let embedding_environment_present = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some();
     validate_embedding_environment(args.embedding_policy, embedding_environment_present)?;
     let gguf = GgufFile::open(&args.model).context("open GGUF")?;
@@ -2379,7 +2579,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             .map(profile_materialization_supported)
             .unwrap_or(false);
         let computed_schedule_json = parallel_copy_schedule_json(&computed_schedule, &direct)?;
-        let usage_capability_json = json!({
+        let mut usage_capability_json = json!({
             "getrusage": true,
             "proc_pid_rusage_v4": true,
             "sample_minor_faults": usage_capability.minor_faults,
@@ -2389,6 +2589,19 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "sample_billed_energy_raw": proc_capability.billed_energy,
             "sample_serviced_energy_raw": proc_capability.serviced_energy,
         });
+        if matched_profile.is_some_and(|profile| uses_a10b_execution_schema(profile.id)) {
+            let capability = usage_capability_json
+                .as_object_mut()
+                .expect("usage capability JSON is an object");
+            capability.insert(
+                "sample_block_inputs_raw".to_string(),
+                json!(usage_capability.block_inputs),
+            );
+            capability.insert(
+                "sample_swaps_raw".to_string(),
+                json!(usage_capability.swaps),
+            );
+        }
         let row = json!({
             "schema_version": 2,
             "mode": "describe",
@@ -2477,13 +2690,22 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         ));
     }
     let parallel_schedule = if arm.uses_parallel_schedule() {
-        let schedule = parallel_copy_schedule(&direct, args.workers)?;
-        if args.workers == FROZEN_PARALLEL_COPY_WORKERS && schedule != frozen_parallel_schedule {
+        let diagnostic_schedule = parallel_copy_schedule(&direct, args.workers)?;
+        if args.workers == FROZEN_PARALLEL_COPY_WORKERS
+            && diagnostic_schedule != frozen_parallel_schedule
+        {
             return Err(anyhow!(
                 "dynamic W4 schedule does not reproduce the frozen floor schedule"
             ));
         }
-        Some(schedule)
+        if profile.id == FloorProfileId::A10bQ4xlV1 {
+            if args.workers != FROZEN_PARALLEL_COPY_WORKERS {
+                return Err(anyhow!("A10B materialization is frozen at W4"));
+            }
+            Some(frozen_parallel_schedule.clone())
+        } else {
+            Some(diagnostic_schedule)
+        }
     } else {
         None
     };
@@ -2502,11 +2724,35 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     };
     let blit_order = (arm == ArenaFloorArm::TransientMmapBlit).then(|| source_order(&direct));
 
+    let uses_a10b_schema = uses_a10b_execution_schema(profile.id);
+    let source_stamps_before = if uses_a10b_schema {
+        Some(gguf.revalidate_retained_shard_stamps()?)
+    } else {
+        None
+    };
+    let memory_admission = if uses_a10b_schema {
+        let admission = evaluate_metal_memory_admission(
+            A10B_REQUIRED_HEADROOM_BYTES,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
+        if !admission.admitted {
+            return Err(anyhow!(
+                "A10B memory admission failed: {}",
+                admission.reason.as_str()
+            ));
+        }
+        Some(admission)
+    } else {
+        None
+    };
     let allocated_before = ctx.current_allocated_size();
     let usage_before = capture_usage()?;
     let proc_before = capture_proc_usage()?;
+    let ready_started = uses_a10b_schema.then(Instant::now);
     let materialized = match arm {
-        ArenaFloorArm::Copied => materialize_copied(&ctx, &gguf, &direct, profile)?,
+        ArenaFloorArm::Copied => materialize_copied(&ctx, &gguf, &direct, profile, ready_started)?,
         ArenaFloorArm::ParallelCopied => materialize_parallel_copied(
             &ctx,
             &gguf,
@@ -2515,6 +2761,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
                 .as_ref()
                 .expect("parallel-copy arm has a schedule"),
             profile,
+            ready_started,
         )?,
         ArenaFloorArm::ParallelPread => materialize_parallel_pread(
             &ctx,
@@ -2524,6 +2771,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
                 .as_ref()
                 .expect("parallel-pread arm has a schedule"),
             profile,
+            ready_started,
         )?,
         ArenaFloorArm::TransientMmapBlit => materialize_transient_mmap_blit(
             &ctx,
@@ -2532,6 +2780,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             blit_order.as_deref().expect("blit arm has an order"),
             transient_blit_plan.as_ref().expect("blit arm has a plan"),
             profile,
+            ready_started,
         )?,
         ArenaFloorArm::ArenaSerial | ArenaFloorArm::ArenaFour => unreachable!(),
     };
@@ -2565,6 +2814,14 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         .major_faults
         .checked_sub(usage_before.major_faults)
         .ok_or_else(|| anyhow!("major-fault delta overflow"))?;
+    let timer_block_inputs = usage_after
+        .block_inputs
+        .checked_sub(usage_before.block_inputs)
+        .ok_or_else(|| anyhow!("block-input delta overflow"))?;
+    let timer_swaps = usage_after
+        .swaps
+        .checked_sub(usage_before.swaps)
+        .ok_or_else(|| anyhow!("swap delta overflow"))?;
     if user_cpu_us < 0
         || system_cpu_us < 0
         || total_cpu_us < 0
@@ -2581,6 +2838,15 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             usage_after.minor_faults,
             usage_before.major_faults,
             usage_after.major_faults,
+        ));
+    }
+    if uses_a10b_schema && (timer_block_inputs < 0 || timer_swaps < 0) {
+        return Err(anyhow!(
+            "A10B getrusage counter regressed: inblock={}..{} nswap={}..{}",
+            usage_before.block_inputs,
+            usage_after.block_inputs,
+            usage_before.swaps,
+            usage_after.swaps,
         ));
     }
     let ready_us = duration_us(ready_wall)?;
@@ -2609,9 +2875,26 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     }
 
     let correctness = verify_materialized(&gguf, &direct, &materialized, profile)?;
+    let source_stamps_after = if let Some(before) = source_stamps_before.as_ref() {
+        let after = gguf.revalidate_retained_shard_stamps()?;
+        if &after != before {
+            return Err(anyhow!(
+                "retained GGUF shard stamps changed across materialization verification"
+            ));
+        }
+        Some(after)
+    } else {
+        None
+    };
     let resource_count = materialized.resources.len();
     let binding_count = materialized.bindings.len();
     let blit_population = materialized.blit_population;
+    if uses_a10b_schema
+        && (blit_population.is_some()
+            || !matches!(arm, ArenaFloorArm::Copied | ArenaFloorArm::ParallelPread))
+    {
+        return Err(anyhow!("A10B no-GPU-command implementation seal failed"));
+    }
     let unattributed_wall = match (
         materialized.allocation_wall,
         materialized.source_resolution_wall,
@@ -2658,6 +2941,12 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     drop(materialized);
     let teardown_wall = teardown_started.elapsed();
     let allocated_after_drop = ctx.current_allocated_size();
+    let allocation_drop_valid = allocation_drop_is_valid(allocated_before, allocated_after_drop);
+    if uses_a10b_schema && !allocation_drop_valid {
+        return Err(anyhow!(
+            "Metal allocation after drop {allocated_after_drop} exceeds baseline {allocated_before}"
+        ));
+    }
 
     let physical_bytes = logical_copy_bytes;
     let ready_gbps = physical_bytes as f64 / ready_wall.as_secs_f64() / 1e9;
@@ -2694,7 +2983,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         timing.insert("source_release_wall_ms".to_string(), json!(wall_ms));
         timing.insert("source_release_us".to_string(), json!(wall_us));
     }
-    let rusage_json = json!({
+    let mut rusage_json = json!({
         "timer_minor_faults": timer_minor_faults,
         "timer_major_faults": timer_major_faults,
         "user_cpu_us": user_cpu_us,
@@ -2702,6 +2991,13 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "total_cpu_us": total_cpu_us,
         "cpu_per_wall": cpu_per_wall,
     });
+    if uses_a10b_schema {
+        let rusage = rusage_json
+            .as_object_mut()
+            .expect("rusage JSON is an object");
+        rusage.insert("timer_block_inputs".to_string(), json!(timer_block_inputs));
+        rusage.insert("timer_swaps".to_string(), json!(timer_swaps));
+    }
     let proc_rusage_json = json!({
         "instructions_delta_raw": proc_instructions,
         "cycles_delta_raw": proc_cycles,
@@ -2768,6 +3064,22 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     let parallel_copy_schedule_json = reported_parallel_schedule
         .map(|schedule| parallel_copy_schedule_json(schedule, &direct))
         .transpose()?;
+    let source_stamps_report = if uses_a10b_schema {
+        Some(json!({
+            "before_timing": shard_stamps_json(
+                source_stamps_before
+                    .as_ref()
+                    .expect("A10B source stamps were captured before timing"),
+            )?,
+            "after_verification": shard_stamps_json(
+                source_stamps_after
+                    .as_ref()
+                    .expect("A10B source stamps were captured after verification"),
+            )?,
+        }))
+    } else {
+        None
+    };
     let mut row = json!({
         "schema_version": 2,
         "arm": arm.label(),
@@ -2815,11 +3127,49 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "worker_count": worker_count,
         "build_identity": build_identity,
     });
+    if uses_a10b_schema {
+        let row = row.as_object_mut().expect("floor row is an object");
+        row.insert("schema_version".to_string(), json!(3));
+        row.insert(
+            "embedding_policy".to_string(),
+            json!(args.embedding_policy.label()),
+        );
+        row.insert(
+            "native_quant_embedding_selection".to_string(),
+            json!(embedding_selection.label),
+        );
+        row.insert(
+            "memory_admission".to_string(),
+            memory_admission_json(
+                memory_admission.expect("A10B memory admission was captured before timing"),
+            ),
+        );
+        row.insert(
+            "retained_shard_stamps".to_string(),
+            source_stamps_report.expect("A10B source stamp report exists"),
+        );
+        row.get_mut("metal_allocated_bytes")
+            .and_then(Value::as_object_mut)
+            .expect("Metal allocation JSON is an object")
+            .insert("drop_valid".to_string(), json!(allocation_drop_valid));
+        row.insert("endpoint".to_string(), json!(HOST_POPULATION_ENDPOINT));
+        row.insert(
+            "implementation_seal".to_string(),
+            json!({
+                "schema_version": 1,
+                "seal": HOST_POPULATION_NO_GPU_SEAL,
+                "scope": ["materialize_copied", "materialize_parallel_pread"],
+                "no_gpu_command": true,
+                "build_identity_bound": true,
+            }),
+        );
+    }
     if let Some(blit_population_json) = blit_population_json {
         row.as_object_mut()
             .expect("floor row JSON is an object")
             .insert("blit_population".to_string(), blit_population_json);
     }
+    validate_execution_row_projection(&row, profile.id, arm)?;
     match args.output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&row)?),
         OutputFormat::Text => {
@@ -2836,18 +3186,25 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::{
-        A10B_ARCH, ALLOWED_DIAGNOSTIC_WORKERS, ArenaFloorArm, FLOOR_PROFILES,
-        FROZEN_PARALLEL_COPY_WORKERS, FloorEmbeddingPolicy, FloorProfileId, FloorProfileStage,
-        GgufArenaFloorArgs, PARALLEL_COPY_ALGORITHM, memory_signals_json, minimax_partition_cuts,
-        parallel_copy_schedule, parallel_copy_schedule_json, parse_worker_count,
-        profile_materialization_supported, resolve_embedding_selection, source_order,
-        validate_describe_worker_scope, validate_embedding_environment,
-        validate_embedding_policy_scope, validate_parallel_copy_schedule,
+        A10B_ARCH, A10B_EXECUTION_EXTRA_KEYS, A10B_METAL_ALLOCATION_EXTRA_KEYS,
+        A10B_REQUIRED_HEADROOM_BYTES, A10B_RUSAGE_EXTRA_KEYS, ALLOWED_DIAGNOSTIC_WORKERS,
+        ArenaFloorArm, FLOOR_PROFILES, FROZEN_PARALLEL_COPY_WORKERS, FloorEmbeddingPolicy,
+        FloorProfileId, FloorProfileStage, GgufArenaFloorArgs, LEGACY_EXECUTION_KEYS,
+        LEGACY_METAL_ALLOCATION_KEYS, LEGACY_RUSAGE_KEYS, PARALLEL_COPY_ALGORITHM,
+        allocation_drop_is_valid, memory_admission_json, memory_signals_json,
+        minimax_partition_cuts, parallel_copy_schedule, parallel_copy_schedule_json,
+        parse_worker_count, profile_materialization_supported, resolve_embedding_selection,
+        source_order, uses_a10b_execution_schema, validate_describe_worker_scope,
+        validate_embedding_environment, validate_embedding_policy_scope,
+        validate_execution_row_projection, validate_output_scope, validate_parallel_copy_schedule,
         validate_profile_materialization_arm, validate_worker_scope,
     };
+    use crate::OutputFormat;
     use clap::Parser;
-    use qwen_llm::metal::MetalMemorySignals;
+    use qwen_llm::metal::{MetalMemorySignals, evaluate_metal_memory_admission};
     use qwen_llm::tensor::{GgmlType, TensorDesc};
+    use serde_json::{Map, Value, json};
+    use std::collections::HashSet;
 
     fn descriptors(lengths: &[u64]) -> Vec<TensorDesc> {
         lengths
@@ -2923,7 +3280,7 @@ mod tests {
     }
 
     #[test]
-    fn embedding_policy_is_explicit_and_force_is_describe_only() {
+    fn embedding_policy_is_explicit_and_force_is_narrowly_admitted() {
         let default =
             GgufArenaFloorArgs::try_parse_from(["qwen", "--model", "fixture.gguf", "--describe"])
                 .expect("default embedding policy");
@@ -2945,11 +3302,22 @@ mod tests {
             forced.embedding_policy,
             FloorEmbeddingPolicy::ForceNativeIfSupported
         );
-        validate_embedding_policy_scope(true, forced.embedding_policy)
-            .expect("forced policy is valid for describe");
-        assert!(validate_embedding_policy_scope(false, forced.embedding_policy).is_err());
-        validate_embedding_policy_scope(false, FloorEmbeddingPolicy::ProductionAuto)
-            .expect("production policy remains valid for materialization");
+        validate_embedding_policy_scope(
+            true,
+            forced.embedding_policy,
+            None,
+            None,
+            FROZEN_PARALLEL_COPY_WORKERS,
+        )
+        .expect("forced policy is valid for describe");
+        validate_embedding_policy_scope(
+            false,
+            FloorEmbeddingPolicy::ProductionAuto,
+            Some(FloorProfileId::A3bQ4kmV1),
+            Some(ArenaFloorArm::Copied),
+            FROZEN_PARALLEL_COPY_WORKERS,
+        )
+        .expect("production policy remains valid for existing materialization");
 
         let materializing = GgufArenaFloorArgs::try_parse_from([
             "qwen",
@@ -2967,6 +3335,50 @@ mod tests {
             validate_embedding_policy_scope(
                 materializing.describe,
                 materializing.embedding_policy,
+                materializing.profile,
+                materializing.arm,
+                materializing.workers,
+            )
+            .is_err()
+        );
+
+        for arm in [ArenaFloorArm::Copied, ArenaFloorArm::ParallelPread] {
+            validate_embedding_policy_scope(
+                false,
+                FloorEmbeddingPolicy::ForceNativeIfSupported,
+                Some(FloorProfileId::A10bQ4xlV1),
+                Some(arm),
+                FROZEN_PARALLEL_COPY_WORKERS,
+            )
+            .expect("frozen A10B arm");
+        }
+        assert!(
+            validate_embedding_policy_scope(
+                false,
+                FloorEmbeddingPolicy::ProductionAuto,
+                Some(FloorProfileId::A10bQ4xlV1),
+                Some(ArenaFloorArm::Copied),
+                FROZEN_PARALLEL_COPY_WORKERS,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_embedding_policy_scope(
+                false,
+                FloorEmbeddingPolicy::ForceNativeIfSupported,
+                Some(FloorProfileId::A10bQ4xlV1),
+                Some(ArenaFloorArm::ParallelCopied),
+                FROZEN_PARALLEL_COPY_WORKERS,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_embedding_policy_scope(
+                false,
+                FloorEmbeddingPolicy::ForceNativeIfSupported,
+                Some(FloorProfileId::A10bQ4xlV1),
+                Some(ArenaFloorArm::Copied),
+                6,
             )
             .is_err()
         );
@@ -3032,15 +3444,74 @@ mod tests {
     }
 
     #[test]
-    fn a10b_profile_freezes_metadata_without_materialization_admission() {
+    fn a10b_memory_admission_is_inclusive_and_zero_sentinel_is_explicit() {
+        let signals = MetalMemorySignals {
+            recommended_max_bytes: A10B_REQUIRED_HEADROOM_BYTES + 40,
+            current_allocated_bytes: 40,
+            process_limit_remaining_bytes: Some(0),
+        };
+        let zero_sentinel =
+            evaluate_metal_memory_admission(A10B_REQUIRED_HEADROOM_BYTES, 0, signals, true);
+        assert!(zero_sentinel.admitted);
+        let report = memory_admission_json(zero_sentinel);
+        assert_eq!(report["required_bytes"], A10B_REQUIRED_HEADROOM_BYTES);
+        assert_eq!(report["allow_zero_process_budget"], true);
+        assert_eq!(
+            report["zero_process_budget_semantics"],
+            "omitted-limit-sentinel"
+        );
+
+        let exact_positive = evaluate_metal_memory_admission(
+            A10B_REQUIRED_HEADROOM_BYTES,
+            0,
+            MetalMemorySignals {
+                process_limit_remaining_bytes: Some(A10B_REQUIRED_HEADROOM_BYTES),
+                ..signals
+            },
+            true,
+        );
+        assert!(exact_positive.admitted);
+        for rejected in [
+            MetalMemorySignals {
+                process_limit_remaining_bytes: None,
+                ..signals
+            },
+            MetalMemorySignals {
+                process_limit_remaining_bytes: Some(A10B_REQUIRED_HEADROOM_BYTES - 1),
+                ..signals
+            },
+            MetalMemorySignals {
+                recommended_max_bytes: A10B_REQUIRED_HEADROOM_BYTES + 39,
+                ..signals
+            },
+        ] {
+            assert!(
+                !evaluate_metal_memory_admission(A10B_REQUIRED_HEADROOM_BYTES, 0, rejected, true,)
+                    .admitted
+            );
+        }
+    }
+
+    #[test]
+    fn allocation_drop_must_return_to_or_below_baseline() {
+        assert!(allocation_drop_is_valid(10, 9));
+        assert!(allocation_drop_is_valid(10, 10));
+        assert!(!allocation_drop_is_valid(10, 11));
+    }
+
+    #[test]
+    fn a10b_profile_admits_only_the_frozen_host_population_arms() {
         let profile = FLOOR_PROFILES
             .iter()
             .find(|profile| profile.id == FloorProfileId::A10bQ4xlV1)
             .expect("A10B floor profile");
         assert_eq!(profile.id.label(), "a10b-q4xl-v1");
-        assert_eq!(profile.stage, FloorProfileStage::MetadataOnly);
-        assert!(profile.allowed_arms.is_empty());
-        assert!(!profile_materialization_supported(profile));
+        assert_eq!(profile.stage, FloorProfileStage::MaterializationAdmitted);
+        assert_eq!(
+            profile.allowed_arms,
+            &[ArenaFloorArm::Copied, ArenaFloorArm::ParallelPread]
+        );
+        assert!(profile_materialization_supported(profile));
         assert_eq!(profile.arch, A10B_ARCH);
         assert_eq!(profile.request_count, 879);
         assert_eq!(profile.logical_copy_bytes, 77_018_996_736);
@@ -3050,20 +3521,160 @@ mod tests {
             profile.worker_bytes.iter().sum::<u64>(),
             profile.logical_copy_bytes
         );
-        assert!(
-            validate_embedding_policy_scope(false, FloorEmbeddingPolicy::ForceNativeIfSupported,)
-                .is_err()
-        );
+        for arm in [ArenaFloorArm::Copied, ArenaFloorArm::ParallelPread] {
+            validate_profile_materialization_arm(profile, arm).expect("admitted A10B arm");
+        }
         for arm in [
-            ArenaFloorArm::Copied,
             ArenaFloorArm::ParallelCopied,
-            ArenaFloorArm::ParallelPread,
             ArenaFloorArm::TransientMmapBlit,
             ArenaFloorArm::ArenaSerial,
             ArenaFloorArm::ArenaFour,
         ] {
             assert!(validate_profile_materialization_arm(profile, arm).is_err());
         }
+    }
+
+    #[test]
+    fn a10b_schema_and_json_requirement_do_not_change_legacy_profiles() {
+        assert!(uses_a10b_execution_schema(FloorProfileId::A10bQ4xlV1));
+        assert!(!uses_a10b_execution_schema(FloorProfileId::A3bQ4kmV1));
+        assert!(!uses_a10b_execution_schema(FloorProfileId::Dense27bQ4kmV1));
+
+        assert!(
+            validate_output_scope(false, Some(FloorProfileId::A10bQ4xlV1), OutputFormat::Text,)
+                .is_err()
+        );
+        validate_output_scope(false, Some(FloorProfileId::A10bQ4xlV1), OutputFormat::Json)
+            .expect("A10B JSON output");
+        for profile in [FloorProfileId::A3bQ4kmV1, FloorProfileId::Dense27bQ4kmV1] {
+            for output in [OutputFormat::Text, OutputFormat::Json] {
+                validate_output_scope(false, Some(profile), output)
+                    .expect("legacy output mode remains accepted");
+            }
+        }
+    }
+
+    #[test]
+    fn execution_row_projections_are_exact_and_fail_closed() {
+        let expected_legacy = [
+            "schema_version",
+            "arm",
+            "profile",
+            "model",
+            "architecture",
+            "architecture_tuple",
+            "tied_embeddings",
+            "mtp_present",
+            "shard_mapped_lengths",
+            "descriptor_layout_digest",
+            "inventory_digest",
+            "native_quant_embedding",
+            "native_quant_embedding_supported",
+            "native_quant_embedding_selection",
+            "page_size",
+            "required_alignment",
+            "max_buffer_length",
+            "device_name",
+            "unified_memory",
+            "request_count",
+            "resource_count",
+            "binding_count",
+            "logical_copy_bytes",
+            "physical_copy_bytes",
+            "resource_modes",
+            "parallel_copy_schedule",
+            "timing",
+            "throughput",
+            "rusage",
+            "proc_rusage_v4",
+            "metal_allocated_bytes",
+            "correctness",
+            "worker_count",
+            "build_identity",
+        ];
+        assert_eq!(
+            LEGACY_EXECUTION_KEYS
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            expected_legacy.into_iter().collect::<HashSet<_>>()
+        );
+        assert_eq!(
+            A10B_EXECUTION_EXTRA_KEYS,
+            &[
+                "embedding_policy",
+                "memory_admission",
+                "retained_shard_stamps",
+                "endpoint",
+                "implementation_seal",
+            ]
+        );
+
+        fn object_with_keys(keys: &[&str]) -> Value {
+            Value::Object(
+                keys.iter()
+                    .map(|&key| (key.to_string(), Value::Null))
+                    .collect::<Map<_, _>>(),
+            )
+        }
+
+        let mut legacy = object_with_keys(LEGACY_EXECUTION_KEYS);
+        legacy["schema_version"] = json!(2);
+        legacy["rusage"] = object_with_keys(LEGACY_RUSAGE_KEYS);
+        legacy["metal_allocated_bytes"] = object_with_keys(LEGACY_METAL_ALLOCATION_KEYS);
+        validate_execution_row_projection(
+            &legacy,
+            FloorProfileId::A3bQ4kmV1,
+            ArenaFloorArm::Copied,
+        )
+        .expect("legacy schema-2 projection");
+
+        let mut blit = legacy.clone();
+        blit.as_object_mut()
+            .expect("legacy row")
+            .insert("blit_population".to_string(), Value::Null);
+        validate_execution_row_projection(
+            &blit,
+            FloorProfileId::A3bQ4kmV1,
+            ArenaFloorArm::TransientMmapBlit,
+        )
+        .expect("legacy blit projection");
+
+        let mut a10b = legacy.clone();
+        a10b["schema_version"] = json!(3);
+        for key in A10B_EXECUTION_EXTRA_KEYS {
+            a10b.as_object_mut()
+                .expect("A10B row")
+                .insert((*key).to_string(), Value::Null);
+        }
+        for key in A10B_RUSAGE_EXTRA_KEYS {
+            a10b["rusage"]
+                .as_object_mut()
+                .expect("A10B rusage")
+                .insert((*key).to_string(), Value::Null);
+        }
+        for key in A10B_METAL_ALLOCATION_EXTRA_KEYS {
+            a10b["metal_allocated_bytes"]
+                .as_object_mut()
+                .expect("A10B Metal allocation")
+                .insert((*key).to_string(), Value::Null);
+        }
+        validate_execution_row_projection(
+            &a10b,
+            FloorProfileId::A10bQ4xlV1,
+            ArenaFloorArm::ParallelPread,
+        )
+        .expect("A10B schema-3 projection");
+
+        a10b.as_object_mut().expect("A10B row").remove("endpoint");
+        assert!(
+            validate_execution_row_projection(
+                &a10b,
+                FloorProfileId::A10bQ4xlV1,
+                ArenaFloorArm::ParallelPread,
+            )
+            .is_err()
+        );
     }
 
     #[test]

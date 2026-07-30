@@ -1091,10 +1091,13 @@ material in advance.
    `ce1b3ccfd67a1a5b8cdaf71050dfd9547ec4ca06f29559da1b4a19473a0cdef9`.
    The exact `a10b-q4xl-v1` profile binds inventory digest `b331c475...a4f8`,
    879 requests, `77,018,996,736` bytes, and literal W4 cuts
-   `[214,435,658]`; force-native materialization remains prohibited until the
-   separately reviewed implementation commit. The frozen ABBA floor grants no
-   native default, runtime loader, or product authority; a GO can authorize only
-   one separately preregistered force-only full-state/product pilot.
+   `[214,435,658]`. The implementation admits only exact-profile force-native
+   copied and W4 parallel-pread, with in-child headroom, retained-descriptor,
+   timer-local I/O/swap, allocation-drop, and no-GPU-command seals. Payload
+   timing remains prohibited until the implementation and sealed runner receive
+   separate pre-run review. The frozen ABBA floor grants no native default,
+   runtime loader, or product authority; a GO can authorize only one separately
+   preregistered force-only full-state/product pilot.
 
 3. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
@@ -1188,11 +1191,11 @@ control. It is no longer an active experiment; keep `decode` as the default.
    automatic-admission successor.
 2. v0.644 closes the tested Q4 ladder. Do not schedule B/C widening, E-arm
    diagnosis, P4096 replication, or a local source/dequant implementation.
-3. A10B is the selected deployment branch. v0.653 stage 0 and its exact profile
-   freeze are complete without payload timing. Implement and separately review
-   only the frozen copied-versus-W4-pread floor, then execute its sole ABBA
-   packet if every source, counter, headroom, and no-GPU-command seal holds.
-   Every non-GO disposition returns the active queue to the grammar trace oracle.
+3. A10B is the selected deployment branch. v0.653 stage 0, exact profile freeze,
+   and narrow child implementation are complete without payload timing. Seal and
+   separately review the sole ABBA runner, then execute only if every source,
+   counter, headroom, and no-GPU-command seal holds. Every non-GO disposition
+   returns the active queue to the grammar trace oracle.
 4. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.

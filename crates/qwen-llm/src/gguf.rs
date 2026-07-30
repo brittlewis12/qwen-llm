@@ -85,6 +85,19 @@ pub struct GgufShard {
     pub alignment: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GgufShardStamp {
+    pub shard_idx: usize,
+    pub path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub mtime_sec: i64,
+    pub mtime_nsec: i64,
+    pub ctime_sec: i64,
+    pub ctime_nsec: i64,
+}
+
 impl GgufShard {
     /// Length of the mapped file in bytes.
     pub fn mmap_len(&self) -> usize {
@@ -358,6 +371,37 @@ impl GgufFile {
             }
         }
         Ok(())
+    }
+
+    /// Revalidate and report the exact retained descriptor for every shard.
+    ///
+    /// This uses `fstat` through each retained `File`; it never re-resolves the
+    /// display path. The complete stamp must still match the stamp captured
+    /// while the GGUF was opened, and its size must match the live mmap.
+    pub fn revalidate_retained_shard_stamps(&self) -> Result<Vec<GgufShardStamp>, GgufError> {
+        self.shards
+            .iter()
+            .enumerate()
+            .map(|(shard_idx, shard)| {
+                let current = source_stamp(shard.file.as_ref()).map_err(GgufError::Io)?;
+                if current != shard.source_stamp || current.size != shard.mmap.len() as u64 {
+                    return Err(GgufError::Decode(format!(
+                        "retained GGUF shard {shard_idx} changed after load"
+                    )));
+                }
+                Ok(GgufShardStamp {
+                    shard_idx,
+                    path: shard.path.clone(),
+                    device: current.dev,
+                    inode: current.ino,
+                    size: current.size,
+                    mtime_sec: current.mtime_sec,
+                    mtime_nsec: current.mtime_nsec,
+                    ctime_sec: current.ctime_sec,
+                    ctime_nsec: current.ctime_nsec,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn slice(&self, desc: &TensorDesc) -> &[u8] {
@@ -1626,6 +1670,13 @@ mod tests {
         assert_eq!(g.tensors[0].name, "t");
         assert_eq!(g.tensors[0].shard_idx, 0);
         assert_eq!(g.shard_count(), 1);
+        let stamps = g
+            .revalidate_retained_shard_stamps()
+            .expect("retained shard stamp");
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].shard_idx, 0);
+        assert_eq!(stamps[0].path, path);
+        assert_eq!(stamps[0].size, bytes.len() as u64);
         let retained = g.retained_shard_mmap(0).expect("retained shard");
         drop(g);
         assert_eq!(&retained[..4], &GGUF_MAGIC.to_le_bytes());
@@ -1639,6 +1690,8 @@ mod tests {
         let replacement = path.with_extension("replacement.gguf");
         let g = GgufFile::open(&path).expect("minimal gguf should parse");
         let tensor = g.find("t").expect("tensor").clone();
+        g.revalidate_retained_shard_stamps()
+            .expect("original retained stamp");
 
         write_file(&replacement, &vec![0xA5; bytes.len()]);
         std::fs::rename(&replacement, &path).expect("replace path");
@@ -1648,6 +1701,11 @@ mod tests {
             .expect("read retained descriptor");
         assert_eq!(actual, g.try_slice(&tensor).expect("mapped tensor"));
         assert!(actual.iter().any(|&byte| byte != 0xA5));
+        assert!(matches!(
+            g.revalidate_retained_shard_stamps()
+                .expect_err("path replacement changes retained inode ctime"),
+            GgufError::Decode(_)
+        ));
 
         assert!(matches!(
             g.read_shard_exact_at(99, 0, &mut actual),
@@ -1658,6 +1716,27 @@ mod tests {
             Err(GgufError::Decode(_))
         ));
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn retained_shard_stamp_rejects_descriptor_truncation() {
+        let bytes = build_minimal_gguf();
+        let path = write_temp(&bytes);
+        let g = GgufFile::open(&path).expect("minimal gguf should parse");
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open source for truncation")
+            .set_len((bytes.len() - 1) as u64)
+            .expect("truncate source");
+        assert!(matches!(
+            g.revalidate_retained_shard_stamps(),
+            Err(GgufError::Decode(_))
+        ));
+
+        drop(g);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1693,6 +1772,14 @@ mod tests {
 
         let g = GgufFile::open(&first).expect("split gguf should parse");
         assert_eq!(g.shard_count(), 2);
+        let stamps = g
+            .revalidate_retained_shard_stamps()
+            .expect("split retained stamps");
+        assert_eq!(stamps.len(), 2);
+        assert_eq!(stamps[0].shard_idx, 0);
+        assert_eq!(stamps[0].path, first);
+        assert_eq!(stamps[1].shard_idx, 1);
+        assert_eq!(stamps[1].path, second);
         assert_eq!(g.tensors.len(), 2);
         let a = g.find("a").expect("a tensor");
         let b = g.find("b").expect("b tensor");

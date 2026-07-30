@@ -13,7 +13,7 @@ use qwen_llm::{
     gguf::GgufFile,
     loader::Model,
     metal::{
-        BlitEncoder, Buffer, DiagnosticGgufBlitReleaseProbe, MetalContext,
+        BlitEncoder, Buffer, DiagnosticGgufBlitReleaseProbe, MetalContext, MetalMemorySignals,
         RetainedStorageDisposition, RetainedStorageFallback, RetainedStoragePlan,
         host_page_size_bytes, plan_retained_storage,
     },
@@ -62,6 +62,75 @@ impl FloorProfileId {
             Self::Dense27bQ4kmV1 => "dense27b-q4km-v1",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum FloorEmbeddingPolicy {
+    #[value(name = "production-auto")]
+    ProductionAuto,
+    #[value(name = "force-native-if-supported")]
+    ForceNativeIfSupported,
+}
+
+impl FloorEmbeddingPolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ProductionAuto => "production-auto",
+            Self::ForceNativeIfSupported => "force-native-if-supported",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FloorEmbeddingSelection {
+    native: bool,
+    label: &'static str,
+}
+
+fn validate_embedding_environment(
+    embedding_policy: FloorEmbeddingPolicy,
+    environment_present: bool,
+) -> Result<()> {
+    if embedding_policy == FloorEmbeddingPolicy::ForceNativeIfSupported && environment_present {
+        Err(anyhow!(
+            "force-native-if-supported requires QWEN_NATIVE_QUANT_EMBED to be absent"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn resolve_embedding_selection(
+    embedding_policy: FloorEmbeddingPolicy,
+    native_supported: bool,
+    production_auto_enabled: bool,
+    environment_present: bool,
+) -> FloorEmbeddingSelection {
+    match embedding_policy {
+        FloorEmbeddingPolicy::ForceNativeIfSupported => FloorEmbeddingSelection {
+            native: native_supported,
+            label: "bench-force-native-if-supported",
+        },
+        FloorEmbeddingPolicy::ProductionAuto => FloorEmbeddingSelection {
+            native: production_auto_enabled,
+            label: if environment_present {
+                "environment-present-unadmitted"
+            } else {
+                "production-auto-promoted"
+            },
+        },
+    }
+}
+
+fn memory_signals_json(signals: MetalMemorySignals) -> Value {
+    json!({
+        "recommended_max_working_set_size": signals.recommended_max_bytes,
+        "current_allocated_size": signals.current_allocated_bytes,
+        "working_set_headroom_bytes": signals
+            .recommended_max_bytes
+            .checked_sub(signals.current_allocated_bytes),
+        "process_limit_remaining_bytes": signals.process_limit_remaining_bytes,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -351,6 +420,9 @@ pub(crate) struct GgufArenaFloorArgs {
     /// Emit authenticated geometry without touching payload bytes.
     #[arg(long)]
     describe: bool,
+    /// Token-embedding policy used to derive the direct request inventory.
+    #[arg(long, value_enum, default_value = "production-auto")]
+    embedding_policy: FloorEmbeddingPolicy,
     /// Diagnostic population workers: exactly one of 1, 2, 4, 6, 8, or 12.
     #[arg(long, default_value_t = FROZEN_PARALLEL_COPY_WORKERS, value_parser = parse_worker_count)]
     workers: usize,
@@ -398,6 +470,19 @@ fn validate_worker_scope(
         Err(anyhow!(
             "non-default --workers is diagnostic-only and requires --arm parallel-pread --profile a3b-q4km-v1 or authenticated A3B describe geometry"
         ))
+    }
+}
+
+fn validate_embedding_policy_scope(
+    describe: bool,
+    embedding_policy: FloorEmbeddingPolicy,
+) -> Result<()> {
+    if !describe && embedding_policy == FloorEmbeddingPolicy::ForceNativeIfSupported {
+        Err(anyhow!(
+            "force-native-if-supported is metadata-describe-only until an exact profile freeze"
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -1969,16 +2054,24 @@ fn verify_materialized(
 
 pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()> {
     validate_worker_scope(args.workers, args.describe, args.arm, args.profile)?;
+    validate_embedding_policy_scope(args.describe, args.embedding_policy)?;
+    let embedding_environment_present = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some();
+    validate_embedding_environment(args.embedding_policy, embedding_environment_present)?;
     let gguf = GgufFile::open(&args.model).context("open GGUF")?;
     let model = Model::from_gguf(&gguf).context("bind model")?;
     let native_embedding_supported = native_quant_embedding_storage_supported(&model);
-    let native_embedding = production_native_quant_embedding_storage_enabled(&model);
-    if !native_embedding {
+    let embedding_selection = resolve_embedding_selection(
+        args.embedding_policy,
+        native_embedding_supported,
+        production_native_quant_embedding_storage_enabled(&model),
+        embedding_environment_present,
+    );
+    if !embedding_selection.native {
         return Err(anyhow!(
-            "GGUF floor requires the production native embedding policy"
+            "GGUF floor embedding policy did not select native token storage"
         ));
     }
-    let requests = model_weight_storage_requests(&model, native_embedding, false)?;
+    let requests = model_weight_storage_requests(&model, embedding_selection.native, false)?;
     if requests
         .iter()
         .any(|request| request.kind != ModelWeightStorageKind::Direct)
@@ -2026,7 +2119,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     let facts = ProfileFacts {
         gguf: &gguf,
         model: &model,
-        native_embedding,
+        native_embedding: embedding_selection.native,
         direct: &direct,
         page_size,
         max_buffer_length,
@@ -2038,6 +2131,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
     };
 
     if args.describe {
+        let memory_signals = memory_signals_json(ctx.memory_signals());
         let usage_capability = capture_usage()?;
         let proc_capability = capture_proc_usage()?;
         let computed_schedule = parallel_copy_schedule(&direct, args.workers)?;
@@ -2121,7 +2215,6 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         validate_describe_worker_scope(args.workers, matched_profile.map(|profile| profile.id))?;
         let frozen_schedule = matching.first().map(|(_, schedule)| schedule);
         let computed_schedule_json = parallel_copy_schedule_json(&computed_schedule, &direct)?;
-        let embedding_environment_absent = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_none();
         let usage_capability_json = json!({
             "getrusage": true,
             "proc_pid_rusage_v4": true,
@@ -2137,19 +2230,16 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "mode": "describe",
             "model": args.model,
             "materialization_supported": matched_profile.is_some(),
-            "materialization_environment_admissible": embedding_environment_absent,
+            "materialization_environment_admissible": !embedding_environment_present,
             "matched_profile": matched_profile.map(|profile| profile.id.label()),
             "architecture": gguf.architecture(),
             "descriptor_layout_digest": descriptor_digest,
             "inventory_digest": inventory_digest,
             "retained_planner": planner_descriptive,
-            "native_quant_embedding": native_embedding,
+            "native_quant_embedding": embedding_selection.native,
             "native_quant_embedding_supported": native_embedding_supported,
-            "native_quant_embedding_selection": if embedding_environment_absent {
-                "production-auto-promoted"
-            } else {
-                "environment-present-unadmitted"
-            },
+            "embedding_policy": args.embedding_policy.label(),
+            "native_quant_embedding_selection": embedding_selection.label,
             "page_size": page_size,
             "required_alignment": REQUIRED_ALIGNMENT,
             "max_buffer_length": max_buffer_length,
@@ -2161,6 +2251,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "mtp_present": model.mtp.is_some(),
             "device_name": device_name,
             "unified_memory": unified_memory,
+            "memory_signals": memory_signals,
             "parallel_copy_schedule": computed_schedule_json.clone(),
             "computed_schedule": computed_schedule_json,
             "frozen_schedule": frozen_schedule.map(|schedule| {
@@ -2183,7 +2274,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "arena materialization arms are retired; use copied, parallel-copied, parallel-pread, or transient-mmap-blit"
         ));
     }
-    if std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some() {
+    if embedding_environment_present {
         return Err(anyhow!(
             "materialization profiles require QWEN_NATIVE_QUANT_EMBED to be absent"
         ));
@@ -2199,7 +2290,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         ));
     }
     let (profile, frozen_parallel_schedule) = matching.pop().expect("one profile match exists");
-    if !native_embedding_supported || !native_embedding || profile.id != profile_id {
+    if !native_embedding_supported || !embedding_selection.native || profile.id != profile_id {
         return Err(anyhow!(
             "requested floor profile {} does not match loaded geometry",
             profile_id.label()
@@ -2515,7 +2606,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         "shard_mapped_lengths": gguf.shard_mapped_lengths(),
         "descriptor_layout_digest": descriptor_digest,
         "inventory_digest": inventory_digest,
-        "native_quant_embedding": native_embedding,
+        "native_quant_embedding": embedding_selection.native,
         "native_quant_embedding_supported": native_embedding_supported,
         "native_quant_embedding_selection": "production-auto-promoted",
         "page_size": page_size,
@@ -2571,12 +2662,15 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOWED_DIAGNOSTIC_WORKERS, ArenaFloorArm, FROZEN_PARALLEL_COPY_WORKERS, FloorProfileId,
-        GgufArenaFloorArgs, PARALLEL_COPY_ALGORITHM, minimax_partition_cuts,
-        parallel_copy_schedule, parallel_copy_schedule_json, parse_worker_count, source_order,
-        validate_describe_worker_scope, validate_parallel_copy_schedule, validate_worker_scope,
+        ALLOWED_DIAGNOSTIC_WORKERS, ArenaFloorArm, FROZEN_PARALLEL_COPY_WORKERS,
+        FloorEmbeddingPolicy, FloorProfileId, GgufArenaFloorArgs, PARALLEL_COPY_ALGORITHM,
+        memory_signals_json, minimax_partition_cuts, parallel_copy_schedule,
+        parallel_copy_schedule_json, parse_worker_count, resolve_embedding_selection, source_order,
+        validate_describe_worker_scope, validate_embedding_environment,
+        validate_embedding_policy_scope, validate_parallel_copy_schedule, validate_worker_scope,
     };
     use clap::Parser;
+    use qwen_llm::metal::MetalMemorySignals;
     use qwen_llm::tensor::{GgmlType, TensorDesc};
 
     fn descriptors(lengths: &[u64]) -> Vec<TensorDesc> {
@@ -2650,6 +2744,115 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn embedding_policy_is_explicit_and_force_is_describe_only() {
+        let default =
+            GgufArenaFloorArgs::try_parse_from(["qwen", "--model", "fixture.gguf", "--describe"])
+                .expect("default embedding policy");
+        assert_eq!(
+            default.embedding_policy,
+            FloorEmbeddingPolicy::ProductionAuto
+        );
+
+        let forced = GgufArenaFloorArgs::try_parse_from([
+            "qwen",
+            "--model",
+            "fixture.gguf",
+            "--describe",
+            "--embedding-policy",
+            "force-native-if-supported",
+        ])
+        .expect("forced describe policy");
+        assert_eq!(
+            forced.embedding_policy,
+            FloorEmbeddingPolicy::ForceNativeIfSupported
+        );
+        validate_embedding_policy_scope(true, forced.embedding_policy)
+            .expect("forced policy is valid for describe");
+        assert!(validate_embedding_policy_scope(false, forced.embedding_policy).is_err());
+        validate_embedding_policy_scope(false, FloorEmbeddingPolicy::ProductionAuto)
+            .expect("production policy remains valid for materialization");
+
+        let materializing = GgufArenaFloorArgs::try_parse_from([
+            "qwen",
+            "--model",
+            "fixture.gguf",
+            "--profile",
+            "a3b-q4km-v1",
+            "--arm",
+            "copied",
+            "--embedding-policy",
+            "force-native-if-supported",
+        ])
+        .expect("parsed forced materialization");
+        assert!(
+            validate_embedding_policy_scope(
+                materializing.describe,
+                materializing.embedding_policy,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn embedding_environment_and_selection_are_fail_closed_and_stable() {
+        validate_embedding_environment(FloorEmbeddingPolicy::ForceNativeIfSupported, false)
+            .expect("absent environment");
+        assert!(
+            validate_embedding_environment(FloorEmbeddingPolicy::ForceNativeIfSupported, true)
+                .is_err()
+        );
+
+        let forced = resolve_embedding_selection(
+            FloorEmbeddingPolicy::ForceNativeIfSupported,
+            true,
+            false,
+            false,
+        );
+        assert!(forced.native);
+        assert_eq!(forced.label, "bench-force-native-if-supported");
+        assert!(
+            !resolve_embedding_selection(
+                FloorEmbeddingPolicy::ForceNativeIfSupported,
+                false,
+                true,
+                false,
+            )
+            .native
+        );
+
+        let production =
+            resolve_embedding_selection(FloorEmbeddingPolicy::ProductionAuto, true, true, false);
+        assert!(production.native);
+        assert_eq!(production.label, "production-auto-promoted");
+        assert_eq!(
+            resolve_embedding_selection(FloorEmbeddingPolicy::ProductionAuto, true, true, true,)
+                .label,
+            "environment-present-unadmitted"
+        );
+    }
+
+    #[test]
+    fn memory_signal_json_preserves_raw_optional_values() {
+        let with_zero_limit = memory_signals_json(MetalMemorySignals {
+            recommended_max_bytes: 100,
+            current_allocated_bytes: 40,
+            process_limit_remaining_bytes: Some(0),
+        });
+        assert_eq!(with_zero_limit["recommended_max_working_set_size"], 100);
+        assert_eq!(with_zero_limit["current_allocated_size"], 40);
+        assert_eq!(with_zero_limit["working_set_headroom_bytes"], 60);
+        assert_eq!(with_zero_limit["process_limit_remaining_bytes"], 0);
+
+        let underflow = memory_signals_json(MetalMemorySignals {
+            recommended_max_bytes: 40,
+            current_allocated_bytes: 100,
+            process_limit_remaining_bytes: None,
+        });
+        assert!(underflow["working_set_headroom_bytes"].is_null());
+        assert!(underflow["process_limit_remaining_bytes"].is_null());
     }
 
     #[test]

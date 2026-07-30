@@ -9,6 +9,7 @@ target/
 # benchmark scratch
 bench/results/
 *.trace/
+/scripts/bench/ring0_quant_eval.py
 
 # python cache
 __pycache__/

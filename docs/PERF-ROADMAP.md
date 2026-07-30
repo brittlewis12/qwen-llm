@@ -1084,6 +1084,15 @@ material in advance.
    embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
    three-shard topology-preserving population floor. Belief high on memory,
    medium on copy wall, difficulty M-L.
+
+   v0.653 accepts v0.538's exact native-embedding stream/warm parity and v0.594's
+   split-resource proof only as a benchmark-local force-native premise. Its
+   stage-0 preregistration authorizes policy/describe instrumentation and one
+   metadata-only derivation. A separately reviewed exact freeze may preregister
+   one copied-versus-W4-pread floor. This grants no native default, runtime loader,
+   or product authority; a GO can authorize only one separately preregistered
+   force-only full-state/product pilot.
+
 3. **Grammar run and admissible-row oracle**: replay real structured traces and
    count maximal forced-token runs plus branch vocabulary rows. Require
    `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally

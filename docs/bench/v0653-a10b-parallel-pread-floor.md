@@ -1,10 +1,10 @@
 # v0.653 A10B Topology-Preserving Parallel-Pread Floor
 
-Status: stage-0 preregistration. This revision authorizes only benchmark-local
-embedding-policy/describe instrumentation and one metadata-only describe. It
-authorizes no A10B floor profile or materialization child. A separately reviewed
-freeze commit must bind the raw describe digest, complete profile, literal W4
-schedule, and exactly one ABBA packet before payload timing.
+Status: profile freeze. The sole stage-0 metadata describe is complete. This
+revision binds its content digest, the exact A10B profile, the literal W4
+schedule, and the sole ABBA packet. It authorizes implementation and review of
+the frozen measurement seams, but no payload observation may precede a clean
+implementation commit and separate pre-run review against this contract.
 
 ## Intent
 
@@ -36,23 +36,23 @@ separately preregistered force-only full-state/product pilot.
 
 ## Metadata-First Freeze
 
-Before any payload timing, extend `gguf-arena-floor` with an explicit
+Before any payload timing, stage 0 extended `gguf-arena-floor` with an explicit
 `--embedding-policy production-auto|force-native-if-supported` option. The
-default remains `production-auto`. The forced choice must:
+default remained `production-auto`. The forced choice:
 
-- call the existing structural support predicate;
-- emit `bench-force-native-if-supported` rather than an automatic-policy label;
-- reject any inherited `QWEN_NATIVE_QUANT_EMBED` value;
-- change no runtime selector or model-loading default;
-- permit metadata-only `--describe` before an A10B profile exists.
+- called the existing structural support predicate;
+- emitted `bench-force-native-if-supported`, not an automatic-policy label;
+- rejected any inherited `QWEN_NATIVE_QUANT_EMBED` value;
+- changed no runtime selector or model-loading default;
+- permitted metadata-only `--describe` before an A10B profile existed.
 
-Run one metadata-only describe under the forced policy. It may parse headers,
-create a Metal context, and compute schedules, but it must not resolve tensor
-payload bytes, allocate model-sized resources, call `buffer.contents`, or issue
-a GPU command. Preserve its raw JSON as one content-addressed record. A later
-freeze commit must cite that digest and bind its exact admitted fields in a
-committed profile before implementing or running either materialization arm. No
-timing observation may precede that profile-freeze commit or its separate review.
+Exactly one metadata-only describe ran under the forced policy. It parsed
+headers, created a Metal context, and computed schedules, but did not resolve
+tensor payload bytes, allocate model-sized resources, call `buffer.contents`,
+or issue a GPU command. Its raw JSON is preserved as one content-addressed
+record. This freeze cites that digest and binds its exact admitted fields in a
+committed profile before either materialization arm is implemented or run. No
+timing observation preceded this profile freeze or its separate review.
 
 Known immutable fields are:
 
@@ -86,16 +86,81 @@ Known immutable fields are:
 - 16,384-byte host pages, 32-byte binding alignment, unified memory, device
   `Apple M4 Max`, and Metal maximum buffer length `77,309,411,328`.
 
-The freeze commit must add the ordered request-inventory digest and the complete
-literal four-worker `minimax-contiguous-v1` schedule: cuts, task counts, worker
-bytes, maximum-to-ideal ratio, and first/last
-`(request_index,name,shard,source_offset,n_bytes)` identity for every partition.
-Cuts and integer worker bytes are schedule identity; maximum-to-ideal is derived
-reporting. Materialization must be driven only by the literal schedule. Any
-retained optimizer recomputation is equality-only diagnosis and cannot select or
-change the materialization schedule. The later separately reviewed profile-freeze
-commit must explicitly authorize replacing the current dynamic materialization
-selector for this exact A10B W4 profile.
+The ordered request-inventory digest and complete literal four-worker
+`minimax-contiguous-v1` schedule are frozen below. Cuts and integer worker bytes
+are schedule identity; maximum-to-ideal is derived reporting. Materialization
+must be driven only by the literal schedule. Any retained optimizer
+recomputation is equality-only diagnosis and cannot select or change the
+materialization schedule. This freeze authorizes a later implementation commit
+to replace the current dynamic materialization selector only for this exact
+A10B W4 profile.
+
+## Frozen Stage-0 Record And Profile
+
+The sole authorized describe record is the tracked
+`docs/bench/v0653-a10b-parallel-pread-floor.describe.json`. Its raw-file SHA-256
+is
+`ce1b3ccfd67a1a5b8cdaf71050dfd9547ec4ca06f29559da1b4a19473a0cdef9`.
+It was produced by clean release commit
+`41a12b0eed70e9d667b0fb213db931a64ebc6529`, with equal build/runtime source
+state
+`git-source-sha256-v2:8e7304b336116a3a555098b9e27aaec6d967aba2af609eca0a43a0a94b7f2360`.
+The child reported `mode=describe`, forced benchmark-local native embedding,
+no matched profile, and `materialization_supported=false`; it touched no tensor
+payload and issued no GPU command.
+
+The record directly reported the architecture tuple, attachment state, mapped
+lengths, descriptor and inventory digests, request and byte totals, device
+geometry, schedule, and memory signals. It freezes:
+
+- profile `a10b-q4xl-v1`;
+- inventory digest
+  `b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8`;
+- 879 direct requests and `77,018,996,736` logical bytes;
+- cuts `[214, 435, 658]` and task counts `[214, 221, 223, 221]`;
+- worker bytes
+  `[19,474,295,808, 19,228,744,704, 19,231,902,720, 19,084,053,504]`;
+- maximum-to-ideal `1.011402206380462` and descriptive maximum-to-minimum
+  `1.0204486066819194`.
+
+The profile ID, shard SHA-256 values, embedding dtype/shape and baseline byte
+arithmetic, mapped-byte subtraction, and page counts are preregistered or
+derived fields rather than direct describe outputs. They remain frozen packet
+inputs and must be independently revalidated where the packet requires them;
+the no-payload describe did not recompute shard hashes.
+
+The literal source-order partition identities are:
+
+```text
+W0:
+  range [0,214), tasks 214, bytes 19474295808
+  first (2, "output.weight", 1, 35488, 810516480)
+  last  (220, "blk.11.ffn_down_exps.weight", 1, 18920683168, 553648128)
+W1:
+  range [214,435), tasks 221, bytes 19228744704
+  first (213, "blk.11.ffn_down_shexp.weight", 1, 19474331296, 3342336)
+  last  (437, "blk.23.ffn_gate_exps.weight", 1, 38250091168, 452984832)
+W2:
+  range [435,658), tasks 223, bytes 19231902720
+  first (436, "blk.23.ffn_gate_inp.weight", 1, 38703076000, 3145728)
+  last  (657, "blk.35.ffn_up_exps.weight", 2, 7841234720, 452984832)
+W3:
+  range [658,879), tasks 221, bytes 19084053504
+  first (650, "blk.35.ffn_up_shexp.weight", 2, 8294219552, 3342336)
+  last  (867, "blk.47.post_attention_norm.weight", 2, 27378260768, 12288)
+```
+
+The describe-time raw memory signals were recommended working set
+`103,079,215,104`, current allocation `475,136`, checked headroom
+`103,078,739,968`, and process-limit remaining `0`. The zero process signal is
+the API's omitted-limit value, not a positive finite budget. It does not replace
+the packet's fresh parent and in-child headroom checks.
+
+The committed profile makes this exact metadata/schedule recognizable, but the
+current force-native materialization prohibition remains intact. The next
+implementation must narrow admission to profile `a10b-q4xl-v1`, arms `copied`
+and `parallel-pread`, and W4 only; no other profile or production selector gains
+authority from this freeze.
 
 ## Arms
 
@@ -127,9 +192,9 @@ B reports contiguous allocation, source, copy, and binding intervals from one
 clock and requires their sum to reconcile with `ready_us` within 4 microseconds.
 Capture timer-local `getrusage` and `proc_pid_rusage` immediately around the same
 endpoint. Report user/system/total CPU, minor and major faults, block input,
-swaps, instructions, cycles, and available energy counters. The later separately
-reviewed profile-freeze commit must explicitly authorize adding `ru_inblock` and
-`ru_nswap` capability samples and JSON deltas to the floor's timer-local `Usage`;
+swaps, instructions, cycles, and available energy counters. This freeze
+explicitly authorizes adding `ru_inblock` and `ru_nswap` capability samples and
+JSON deltas to the floor's timer-local `Usage`;
 missing, regressing, or unparsable controlling counters are not interpreted as
 zero. Unphased whole-process counters remain descriptive.
 
@@ -164,7 +229,9 @@ Before every child:
 2. Emit `recommendedMaxWorkingSetSize`, `currentAllocatedSize`, and their checked
    difference. Require
    `recommendedMaxWorkingSetSize - currentAllocatedSize >= 85,608,931,328`.
-   Any positive `process_limit_remaining_bytes` must also be at least
+   Require `process_limit_remaining_bytes` to be a parsed JSON integer. Missing,
+   null, non-integer, or negative values are invalid. Zero is accepted only as
+   the API's omitted-limit sentinel; every positive value must be at least
    `85,608,931,328`. Apply this before packet reservation and repeat it inside
    each child immediately before timing/allocation.
 3. Capture VM, compressor, process, source pathname, and complete path-bound file
@@ -177,8 +244,8 @@ Before every child:
 6. Recheck path-bound stamps and launch within five seconds of the residency
    proof.
 
-The later separately reviewed profile-freeze commit must authorize one separate
-non-payload live headroom probe, or an equivalent runner-local Metal query,
+This freeze authorizes one separate non-payload live headroom probe, or an
+equivalent runner-local Metal query,
 immediately before packet reservation. It is distinct from the sole stage-0
 describe, is not an attempt, allocates no payload, and is retained in the
 aggregate seal.
@@ -190,10 +257,9 @@ exceed the 128 GiB host envelope and is not part of validity.
 
 Each child must expose and revalidate the complete stamp of each descriptor
 retained by its `GgufFile`, and used by B for pread, immediately before timing and
-again after full verification. The later separately reviewed profile-freeze
-commit must explicitly authorize one narrow read-only GGUF shard-stamp accessor
-and revalidation seam; parent path evidence cannot substitute for child
-descriptor identity.
+again after full verification. This freeze explicitly authorizes one narrow
+read-only GGUF shard-stamp accessor and revalidation seam; parent path evidence
+cannot substitute for child descriptor identity.
 
 The child environment removes every inherited `QWEN_*`, `METAL_*`, `MTL_*`, and
 `RUST_LOG` key. The embedding policy is a command argument, not an environment

@@ -1,0 +1,343 @@
+{
+  "architecture": "qwen35moe",
+  "architecture_tuple": {
+    "attn_head_dim": 256,
+    "expert_count": 256,
+    "expert_feed_forward_length": 1024,
+    "expert_shared_feed_forward_length": 1024,
+    "expert_used_count": 8,
+    "full_attention_interval": 4,
+    "gdn_conv_kernel": 4,
+    "gdn_head_dim": 128,
+    "gdn_n_k_heads": 16,
+    "gdn_n_v_heads": 64,
+    "hidden_size": 3072,
+    "intermediate_size": 0,
+    "kind": "moe",
+    "mtp_n_hidden_layers": 0,
+    "n_kv_heads": 2,
+    "n_layer": 48,
+    "n_q_heads": 32,
+    "partial_rotary_factor": 0.25,
+    "rope_theta": 10000000.0,
+    "vocab_size": 248320
+  },
+  "build_identity": {
+    "build_commit": "41a12b0eed70e9d667b0fb213db931a64ebc6529",
+    "build_commit_short": "41a12b0ee",
+    "build_dirty": false,
+    "build_source_state": "git-source-sha256-v2:8e7304b336116a3a555098b9e27aaec6d967aba2af609eca0a43a0a94b7f2360",
+    "overrides": [],
+    "problems": [],
+    "runtime_commit": "41a12b0eed70e9d667b0fb213db931a64ebc6529",
+    "runtime_dirty": false,
+    "runtime_source_state": "git-source-sha256-v2:8e7304b336116a3a555098b9e27aaec6d967aba2af609eca0a43a0a94b7f2360",
+    "schema_version": 2,
+    "stamp_error": null,
+    "stamp_source": "git",
+    "status": "match"
+  },
+  "computed_schedule": {
+    "algorithm": "minimax-contiguous-v1",
+    "cuts": [
+      214,
+      435,
+      658
+    ],
+    "max_to_ideal": 1.011402206380462,
+    "max_to_min": 1.0204486066819194,
+    "partitions": [
+      {
+        "bytes": 19474295808,
+        "end": 214,
+        "first": {
+          "n_bytes": 810516480,
+          "name": "output.weight",
+          "request_index": 2,
+          "shard_idx": 1,
+          "source_offset": 35488
+        },
+        "first_shard": 1,
+        "first_source_offset": 35488,
+        "last": {
+          "n_bytes": 553648128,
+          "name": "blk.11.ffn_down_exps.weight",
+          "request_index": 220,
+          "shard_idx": 1,
+          "source_offset": 18920683168
+        },
+        "last_shard": 1,
+        "last_source_offset": 18920683168,
+        "start": 0,
+        "task_count": 214
+      },
+      {
+        "bytes": 19228744704,
+        "end": 435,
+        "first": {
+          "n_bytes": 3342336,
+          "name": "blk.11.ffn_down_shexp.weight",
+          "request_index": 213,
+          "shard_idx": 1,
+          "source_offset": 19474331296
+        },
+        "first_shard": 1,
+        "first_source_offset": 19474331296,
+        "last": {
+          "n_bytes": 452984832,
+          "name": "blk.23.ffn_gate_exps.weight",
+          "request_index": 437,
+          "shard_idx": 1,
+          "source_offset": 38250091168
+        },
+        "last_shard": 1,
+        "last_source_offset": 38250091168,
+        "start": 214,
+        "task_count": 221
+      },
+      {
+        "bytes": 19231902720,
+        "end": 658,
+        "first": {
+          "n_bytes": 3145728,
+          "name": "blk.23.ffn_gate_inp.weight",
+          "request_index": 436,
+          "shard_idx": 1,
+          "source_offset": 38703076000
+        },
+        "first_shard": 1,
+        "first_source_offset": 38703076000,
+        "last": {
+          "n_bytes": 452984832,
+          "name": "blk.35.ffn_up_exps.weight",
+          "request_index": 657,
+          "shard_idx": 2,
+          "source_offset": 7841234720
+        },
+        "last_shard": 2,
+        "last_source_offset": 7841234720,
+        "start": 435,
+        "task_count": 223
+      },
+      {
+        "bytes": 19084053504,
+        "end": 879,
+        "first": {
+          "n_bytes": 3342336,
+          "name": "blk.35.ffn_up_shexp.weight",
+          "request_index": 650,
+          "shard_idx": 2,
+          "source_offset": 8294219552
+        },
+        "first_shard": 2,
+        "first_source_offset": 8294219552,
+        "last": {
+          "n_bytes": 12288,
+          "name": "blk.47.post_attention_norm.weight",
+          "request_index": 867,
+          "shard_idx": 2,
+          "source_offset": 27378260768
+        },
+        "last_shard": 2,
+        "last_source_offset": 27378260768,
+        "start": 658,
+        "task_count": 221
+      }
+    ],
+    "task_counts": [
+      214,
+      221,
+      223,
+      221
+    ],
+    "worker_bytes": [
+      19474295808,
+      19228744704,
+      19231902720,
+      19084053504
+    ],
+    "workers": 4
+  },
+  "descriptor_layout_digest": "0x3eb290915bec2041",
+  "device_name": "Apple M4 Max",
+  "embedding_policy": "force-native-if-supported",
+  "frozen_schedule": null,
+  "inventory_digest": "b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8",
+  "logical_copy_bytes": 77018996736,
+  "matched_profile": null,
+  "materialization_environment_admissible": true,
+  "materialization_supported": false,
+  "max_buffer_length": 77309411328,
+  "memory_signals": {
+    "current_allocated_size": 475136,
+    "process_limit_remaining_bytes": 0,
+    "recommended_max_working_set_size": 103079215104,
+    "working_set_headroom_bytes": 103078739968
+  },
+  "mode": "describe",
+  "model": "/Users/tito/models/unsloth-Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf",
+  "mtp_present": false,
+  "native_quant_embedding": true,
+  "native_quant_embedding_selection": "bench-force-native-if-supported",
+  "native_quant_embedding_supported": true,
+  "page_size": 16384,
+  "parallel_copy_schedule": {
+    "algorithm": "minimax-contiguous-v1",
+    "cuts": [
+      214,
+      435,
+      658
+    ],
+    "max_to_ideal": 1.011402206380462,
+    "max_to_min": 1.0204486066819194,
+    "partitions": [
+      {
+        "bytes": 19474295808,
+        "end": 214,
+        "first": {
+          "n_bytes": 810516480,
+          "name": "output.weight",
+          "request_index": 2,
+          "shard_idx": 1,
+          "source_offset": 35488
+        },
+        "first_shard": 1,
+        "first_source_offset": 35488,
+        "last": {
+          "n_bytes": 553648128,
+          "name": "blk.11.ffn_down_exps.weight",
+          "request_index": 220,
+          "shard_idx": 1,
+          "source_offset": 18920683168
+        },
+        "last_shard": 1,
+        "last_source_offset": 18920683168,
+        "start": 0,
+        "task_count": 214
+      },
+      {
+        "bytes": 19228744704,
+        "end": 435,
+        "first": {
+          "n_bytes": 3342336,
+          "name": "blk.11.ffn_down_shexp.weight",
+          "request_index": 213,
+          "shard_idx": 1,
+          "source_offset": 19474331296
+        },
+        "first_shard": 1,
+        "first_source_offset": 19474331296,
+        "last": {
+          "n_bytes": 452984832,
+          "name": "blk.23.ffn_gate_exps.weight",
+          "request_index": 437,
+          "shard_idx": 1,
+          "source_offset": 38250091168
+        },
+        "last_shard": 1,
+        "last_source_offset": 38250091168,
+        "start": 214,
+        "task_count": 221
+      },
+      {
+        "bytes": 19231902720,
+        "end": 658,
+        "first": {
+          "n_bytes": 3145728,
+          "name": "blk.23.ffn_gate_inp.weight",
+          "request_index": 436,
+          "shard_idx": 1,
+          "source_offset": 38703076000
+        },
+        "first_shard": 1,
+        "first_source_offset": 38703076000,
+        "last": {
+          "n_bytes": 452984832,
+          "name": "blk.35.ffn_up_exps.weight",
+          "request_index": 657,
+          "shard_idx": 2,
+          "source_offset": 7841234720
+        },
+        "last_shard": 2,
+        "last_source_offset": 7841234720,
+        "start": 435,
+        "task_count": 223
+      },
+      {
+        "bytes": 19084053504,
+        "end": 879,
+        "first": {
+          "n_bytes": 3342336,
+          "name": "blk.35.ffn_up_shexp.weight",
+          "request_index": 650,
+          "shard_idx": 2,
+          "source_offset": 8294219552
+        },
+        "first_shard": 2,
+        "first_source_offset": 8294219552,
+        "last": {
+          "n_bytes": 12288,
+          "name": "blk.47.post_attention_norm.weight",
+          "request_index": 867,
+          "shard_idx": 2,
+          "source_offset": 27378260768
+        },
+        "last_shard": 2,
+        "last_source_offset": 27378260768,
+        "start": 658,
+        "task_count": 221
+      }
+    ],
+    "task_counts": [
+      214,
+      221,
+      223,
+      221
+    ],
+    "worker_bytes": [
+      19474295808,
+      19228744704,
+      19231902720,
+      19084053504
+    ],
+    "workers": 4
+  },
+  "request_count": 879,
+  "required_alignment": 32,
+  "retained_planner": {
+    "alias_count": 0,
+    "arena_copy_bytes": 77019017216,
+    "fallback_bytes": 3354624,
+    "fallback_count": 2,
+    "fallback_reasons": [
+      "FinalPartialPage",
+      "FinalPartialPage"
+    ],
+    "logical_view_bytes": 77015642112,
+    "planner_digest": "6bddf083c6c4f0dc1c3bc1371fa87f84a202e2101331dfbd18c32fb88dddc9f2",
+    "planner_gap_bytes": 20480,
+    "status": "ok",
+    "unique_view_bytes": 77015642112,
+    "view_count": 877,
+    "window_bytes": 77015662592,
+    "window_count": 2
+  },
+  "schema_version": 2,
+  "shard_mapped_lengths": [
+    10943552,
+    49640779424,
+    27378273056
+  ],
+  "tied_embeddings": false,
+  "unified_memory": true,
+  "usage_capability": {
+    "getrusage": true,
+    "proc_pid_rusage_v4": true,
+    "sample_billed_energy_raw": 8641770,
+    "sample_cycles_raw": 371943809,
+    "sample_instructions_raw": 1483275713,
+    "sample_major_faults": 792,
+    "sample_minor_faults": 4076,
+    "sample_serviced_energy_raw": 0
+  }
+}

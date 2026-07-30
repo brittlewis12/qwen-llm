@@ -51,6 +51,8 @@ const A3B_BLIT_FALLBACK_BYTES: u64 = 8_192;
 enum FloorProfileId {
     #[value(name = "a3b-q4km-v1")]
     A3bQ4kmV1,
+    #[value(name = "a10b-q4xl-v1")]
+    A10bQ4xlV1,
     #[value(name = "dense27b-q4km-v1")]
     Dense27bQ4kmV1,
 }
@@ -59,6 +61,7 @@ impl FloorProfileId {
     fn label(self) -> &'static str {
         match self {
             Self::A3bQ4kmV1 => "a3b-q4km-v1",
+            Self::A10bQ4xlV1 => "a10b-q4xl-v1",
             Self::Dense27bQ4kmV1 => "dense27b-q4km-v1",
         }
     }
@@ -148,8 +151,25 @@ struct ScheduleBoundary {
     last: ScheduleIdentity,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FloorProfileStage {
+    MaterializationAdmitted,
+    MetadataOnly,
+}
+
+impl FloorProfileStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MaterializationAdmitted => "materialization-admitted",
+            Self::MetadataOnly => "metadata-only",
+        }
+    }
+}
+
 struct FloorProfile {
     id: FloorProfileId,
+    stage: FloorProfileStage,
+    allowed_arms: &'static [ArenaFloorArm],
     architecture: &'static str,
     arch: Arch,
     tied_embeddings: bool,
@@ -212,9 +232,39 @@ const DENSE27B_ARCH: Arch = Arch {
     mtp_n_hidden_layers: 0,
 };
 
-const FLOOR_PROFILES: [FloorProfile; 2] = [
+const A10B_ARCH: Arch = Arch {
+    kind: ArchKind::Moe,
+    n_layer: 48,
+    hidden_size: 3072,
+    intermediate_size: 0,
+    vocab_size: 248_320,
+    full_attention_interval: 4,
+    n_q_heads: 32,
+    n_kv_heads: 2,
+    attn_head_dim: 256,
+    rope_theta: 10_000_000.0,
+    partial_rotary_factor: 0.25,
+    gdn_n_v_heads: 64,
+    gdn_n_k_heads: 16,
+    gdn_head_dim: 128,
+    gdn_conv_kernel: 4,
+    expert_count: 256,
+    expert_used_count: 8,
+    expert_feed_forward_length: 1024,
+    expert_shared_feed_forward_length: 1024,
+    mtp_n_hidden_layers: 0,
+};
+
+const FLOOR_PROFILES: [FloorProfile; 3] = [
     FloorProfile {
         id: FloorProfileId::A3bQ4kmV1,
+        stage: FloorProfileStage::MaterializationAdmitted,
+        allowed_arms: &[
+            ArenaFloorArm::Copied,
+            ArenaFloorArm::ParallelCopied,
+            ArenaFloorArm::ParallelPread,
+            ArenaFloorArm::TransientMmapBlit,
+        ],
         architecture: "qwen35moe",
         arch: A3B_ARCH,
         tied_embeddings: false,
@@ -297,6 +347,12 @@ const FLOOR_PROFILES: [FloorProfile; 2] = [
     },
     FloorProfile {
         id: FloorProfileId::Dense27bQ4kmV1,
+        stage: FloorProfileStage::MaterializationAdmitted,
+        allowed_arms: &[
+            ArenaFloorArm::Copied,
+            ArenaFloorArm::ParallelCopied,
+            ArenaFloorArm::ParallelPread,
+        ],
         architecture: "qwen35",
         arch: DENSE27B_ARCH,
         tied_embeddings: false,
@@ -377,6 +433,95 @@ const FLOOR_PROFILES: [FloorProfile; 2] = [
             },
         ],
     },
+    FloorProfile {
+        id: FloorProfileId::A10bQ4xlV1,
+        stage: FloorProfileStage::MetadataOnly,
+        allowed_arms: &[],
+        architecture: "qwen35moe",
+        arch: A10B_ARCH,
+        tied_embeddings: false,
+        mtp_present: false,
+        shard_mapped_lengths: &[10_943_552, 49_640_779_424, 27_378_273_056],
+        descriptor_digest: "0x3eb290915bec2041",
+        inventory_digest: "b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8",
+        request_count: 879,
+        logical_copy_bytes: 77_018_996_736,
+        device_name: "Apple M4 Max",
+        cuts: [214, 435, 658],
+        task_counts: [214, 221, 223, 221],
+        worker_bytes: [
+            19_474_295_808,
+            19_228_744_704,
+            19_231_902_720,
+            19_084_053_504,
+        ],
+        boundaries: [
+            ScheduleBoundary {
+                first: ScheduleIdentity {
+                    request_index: 2,
+                    name: "output.weight",
+                    shard_idx: 1,
+                    source_offset: 35_488,
+                    n_bytes: 810_516_480,
+                },
+                last: ScheduleIdentity {
+                    request_index: 220,
+                    name: "blk.11.ffn_down_exps.weight",
+                    shard_idx: 1,
+                    source_offset: 18_920_683_168,
+                    n_bytes: 553_648_128,
+                },
+            },
+            ScheduleBoundary {
+                first: ScheduleIdentity {
+                    request_index: 213,
+                    name: "blk.11.ffn_down_shexp.weight",
+                    shard_idx: 1,
+                    source_offset: 19_474_331_296,
+                    n_bytes: 3_342_336,
+                },
+                last: ScheduleIdentity {
+                    request_index: 437,
+                    name: "blk.23.ffn_gate_exps.weight",
+                    shard_idx: 1,
+                    source_offset: 38_250_091_168,
+                    n_bytes: 452_984_832,
+                },
+            },
+            ScheduleBoundary {
+                first: ScheduleIdentity {
+                    request_index: 436,
+                    name: "blk.23.ffn_gate_inp.weight",
+                    shard_idx: 1,
+                    source_offset: 38_703_076_000,
+                    n_bytes: 3_145_728,
+                },
+                last: ScheduleIdentity {
+                    request_index: 657,
+                    name: "blk.35.ffn_up_exps.weight",
+                    shard_idx: 2,
+                    source_offset: 7_841_234_720,
+                    n_bytes: 452_984_832,
+                },
+            },
+            ScheduleBoundary {
+                first: ScheduleIdentity {
+                    request_index: 650,
+                    name: "blk.35.ffn_up_shexp.weight",
+                    shard_idx: 2,
+                    source_offset: 8_294_219_552,
+                    n_bytes: 3_342_336,
+                },
+                last: ScheduleIdentity {
+                    request_index: 867,
+                    name: "blk.47.post_attention_norm.weight",
+                    shard_idx: 2,
+                    source_offset: 27_378_260_768,
+                    n_bytes: 12_288,
+                },
+            },
+        ],
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -403,6 +548,22 @@ impl ArenaFloorArm {
 
     fn uses_parallel_schedule(self) -> bool {
         matches!(self, Self::ParallelCopied | Self::ParallelPread)
+    }
+}
+
+fn profile_materialization_supported(profile: &FloorProfile) -> bool {
+    profile.stage == FloorProfileStage::MaterializationAdmitted && !profile.allowed_arms.is_empty()
+}
+
+fn validate_profile_materialization_arm(profile: &FloorProfile, arm: ArenaFloorArm) -> Result<()> {
+    if profile_materialization_supported(profile) && profile.allowed_arms.contains(&arm) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "floor profile {} does not admit materialization arm {}",
+            profile.id.label(),
+            arm.label()
+        ))
     }
 }
 
@@ -479,7 +640,7 @@ fn validate_embedding_policy_scope(
 ) -> Result<()> {
     if !describe && embedding_policy == FloorEmbeddingPolicy::ForceNativeIfSupported {
         Err(anyhow!(
-            "force-native-if-supported is metadata-describe-only until an exact profile freeze"
+            "force-native-if-supported materialization requires a separately reviewed profile admission"
         ))
     } else {
         Ok(())
@@ -2214,6 +2375,9 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
         let matched_profile = matching.first().map(|(profile, _)| *profile);
         validate_describe_worker_scope(args.workers, matched_profile.map(|profile| profile.id))?;
         let frozen_schedule = matching.first().map(|(_, schedule)| schedule);
+        let materialization_supported = matched_profile
+            .map(profile_materialization_supported)
+            .unwrap_or(false);
         let computed_schedule_json = parallel_copy_schedule_json(&computed_schedule, &direct)?;
         let usage_capability_json = json!({
             "getrusage": true,
@@ -2229,9 +2393,18 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             "schema_version": 2,
             "mode": "describe",
             "model": args.model,
-            "materialization_supported": matched_profile.is_some(),
+            "materialization_supported": materialization_supported,
             "materialization_environment_admissible": !embedding_environment_present,
+            "recognized_profile": matched_profile.map(|profile| profile.id.label()),
             "matched_profile": matched_profile.map(|profile| profile.id.label()),
+            "profile_stage": matched_profile.map(|profile| profile.stage.label()),
+            "materialization_allowed_arms": matched_profile.map(|profile| {
+                profile
+                    .allowed_arms
+                    .iter()
+                    .map(|arm| arm.label())
+                    .collect::<Vec<_>>()
+            }),
             "architecture": gguf.architecture(),
             "descriptor_layout_digest": descriptor_digest,
             "inventory_digest": inventory_digest,
@@ -2296,6 +2469,7 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
             profile_id.label()
         ));
     }
+    validate_profile_materialization_arm(profile, arm)?;
     validate_source_endpoints(&gguf, &direct)?;
     if arm == ArenaFloorArm::TransientMmapBlit && profile.id != FloorProfileId::A3bQ4kmV1 {
         return Err(anyhow!(
@@ -2662,12 +2836,14 @@ pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOWED_DIAGNOSTIC_WORKERS, ArenaFloorArm, FROZEN_PARALLEL_COPY_WORKERS,
-        FloorEmbeddingPolicy, FloorProfileId, GgufArenaFloorArgs, PARALLEL_COPY_ALGORITHM,
-        memory_signals_json, minimax_partition_cuts, parallel_copy_schedule,
-        parallel_copy_schedule_json, parse_worker_count, resolve_embedding_selection, source_order,
+        A10B_ARCH, ALLOWED_DIAGNOSTIC_WORKERS, ArenaFloorArm, FLOOR_PROFILES,
+        FROZEN_PARALLEL_COPY_WORKERS, FloorEmbeddingPolicy, FloorProfileId, FloorProfileStage,
+        GgufArenaFloorArgs, PARALLEL_COPY_ALGORITHM, memory_signals_json, minimax_partition_cuts,
+        parallel_copy_schedule, parallel_copy_schedule_json, parse_worker_count,
+        profile_materialization_supported, resolve_embedding_selection, source_order,
         validate_describe_worker_scope, validate_embedding_environment,
-        validate_embedding_policy_scope, validate_parallel_copy_schedule, validate_worker_scope,
+        validate_embedding_policy_scope, validate_parallel_copy_schedule,
+        validate_profile_materialization_arm, validate_worker_scope,
     };
     use clap::Parser;
     use qwen_llm::metal::MetalMemorySignals;
@@ -2853,6 +3029,41 @@ mod tests {
         });
         assert!(underflow["working_set_headroom_bytes"].is_null());
         assert!(underflow["process_limit_remaining_bytes"].is_null());
+    }
+
+    #[test]
+    fn a10b_profile_freezes_metadata_without_materialization_admission() {
+        let profile = FLOOR_PROFILES
+            .iter()
+            .find(|profile| profile.id == FloorProfileId::A10bQ4xlV1)
+            .expect("A10B floor profile");
+        assert_eq!(profile.id.label(), "a10b-q4xl-v1");
+        assert_eq!(profile.stage, FloorProfileStage::MetadataOnly);
+        assert!(profile.allowed_arms.is_empty());
+        assert!(!profile_materialization_supported(profile));
+        assert_eq!(profile.arch, A10B_ARCH);
+        assert_eq!(profile.request_count, 879);
+        assert_eq!(profile.logical_copy_bytes, 77_018_996_736);
+        assert_eq!(profile.cuts, [214, 435, 658]);
+        assert_eq!(profile.task_counts, [214, 221, 223, 221]);
+        assert_eq!(
+            profile.worker_bytes.iter().sum::<u64>(),
+            profile.logical_copy_bytes
+        );
+        assert!(
+            validate_embedding_policy_scope(false, FloorEmbeddingPolicy::ForceNativeIfSupported,)
+                .is_err()
+        );
+        for arm in [
+            ArenaFloorArm::Copied,
+            ArenaFloorArm::ParallelCopied,
+            ArenaFloorArm::ParallelPread,
+            ArenaFloorArm::TransientMmapBlit,
+            ArenaFloorArm::ArenaSerial,
+            ArenaFloorArm::ArenaFour,
+        ] {
+            assert!(validate_profile_materialization_arm(profile, arm).is_err());
+        }
     }
 
     #[test]

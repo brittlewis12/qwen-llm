@@ -693,11 +693,27 @@ match explicit touch; that closes the API choice, not broader cold residency.
 
 Likewise, `target-cpu`, PGO, allocator swaps, QoS, CPU SIMD, and Accelerate are
 deferred, not falsified: first require a host profile that puts at least 2-3% of
-first byte in their scope. BOLT does not target Mach-O. `MTLIO`, broad
-`MADV_WILLNEED`, and `F_NOCACHE` are complexity-deferred because cache-warm
-file-to-Metal behavior is unmeasured, not because a storage-cold ceiling closes
-them. Heaps, superpages, right-sized attention partials, and dead-scratch
-deletion are memory work until pressure or wall attribution says otherwise.
+first byte in their scope. BOLT does not target Mach-O. On current copied-storage
+product paths, steady loaded decode and prefill issue no model-file reads; their
+measured limits are GPU/DRAM, not current syscall wall. Rank syscall work from
+attributed lifecycle kernel/VM time, not arithmetic intensity.
+
+Current A3B Auto already direct-preads into final independent Shared resources
+and suppresses its redundant `ColdOnly` pass. The serial retained-view
+`prefault_read` loop is force-only diagnostic work, not current product wall.
+v0.642 closes W5/W7, QoS, CPU-guard relaxation, cache/storage-cold transfer,
+Auto change, and production promotion only for the direct-pread worker-count
+treatment. It neither tests nor closes `MADV_WILLNEED` or parallel retained-view
+touching; keep those separately deferred and do not present them as v0.642
+successors. `MTLIO` remains a distinct conditional file-to-resource primitive;
+v0.643's non-authoritative bounded row supplies no scored MTLIO mechanism
+evidence. Measure it only beside a live A10B population baseline with exact
+topology, CPU, cache, and full-state gates. `F_RDADVISE` has no measured
+advantage over current destination pread, while `F_NOCACHE` changes
+cache/pollution semantics; defer both pending a named storage-cold or pressure
+profile. Heaps, superpages, right-sized attention partials, and dead-scratch
+deletion remain memory work until pressure or wall attribution says otherwise.
+
 Paged KV, COW state, and a resident daemon remain reuse/serving work rather
 than fresh-prompt acceleration. Durable snapshots now have a measured
 process-cold continuation case in v0.612; keep that result labeled reuse rather
@@ -1025,6 +1041,39 @@ automatic A3B GPU-greedy admission permanently under the current mechanism;
 retain explicit `=1` and do not create a v0.653 A3B automatic-admission
 successor.
 
+The syscall/VM audit adds a secondary lifecycle queue without changing the
+fresh-prompt ranking. On installed `rustc 1.96.1` for
+`aarch64-apple-darwin`, both `File::sync_all` and `File::sync_data` map to
+`F_FULLFSYNC`. Checkpoint blobs and the 128-byte identity cache each full-sync
+their file and parent directory. Blob synchronization is post-response
+publication/exit work. Identity-cache synchronization is a separate small case
+and can enter pre-restore TTFT when managed blobs exist but the identity entry
+misses or is invalid. Measure the exact `582,854,188`-byte blob floor and
+identity-entry policy separately before changing either contract.
+
+The restore path also has one changed premise. It decodes and hashes the full
+record into CPU arenas, then copies those arenas into independent Shared session
+buffers. A quarantined positional-vector-read path could populate a fresh
+session directly and hash the canonical bytes before any GPU use. Cross-packet,
+non-causal subtraction suggests only a rough `60-80 ms` optimistic screening
+band. The measured authorities are `330.6-335.6 ms` total restore and
+`17.4/18.1 ms` from removing staged snapshot allocation/population; neither
+measures direct-to-session saving. Keep it below the fresh queue and discard the
+complete candidate session on any short read, shape, EOF, inode, or digest
+failure.
+
+Two narrow follow-ons survive. Replace the misleading
+`has_managed_blobs` accounting scan only with a separately documented may-exist
+hint that may short-circuit on the first recognized nofollow regular blob; full
+scans remain mandatory for eviction, publication, budgeting, and integrity.
+Positive-temperature product decode also deserves one attribution profile:
+current execution allocates and copies a full-vocabulary logits `Vec`, constructs
+a full-vocabulary candidate vector before top-k truncation, and then allocates
+probability weights for the retained candidates on every transition. Measure
+GPU, wait/readback, allocation, copy, and selection wall before reusable
+workspaces; do not import greedy GPU-argmax evidence or call the allocation
+material in advance.
+
 1. **Choose the remaining cold/product branch explicitly**: if A10B is a current
    deployment target, run its native-embedding residency decision and
    three-shard split-copy floor. Otherwise run the grammar forced-run/admissible-
@@ -1049,6 +1098,15 @@ successor.
 Dense GPU-greedy deconfounding remains a separate diagnostic-only question that
 v0.652 neither answers nor closes; it is intentionally deprioritized below the
 active queue on leverage.
+
+Checkpoint durability and the may-exist probe may run as CPU-only work without
+displacing items 1-4. Sampled-product attribution is conditional timed Metal
+work and remains serialized. A direct-restore codec/population floor is CPU-only
+only while it issues no GPU command; product continuation remains serialized and
+reuse-only. `MTLIO` is a conditional fresh-load population primitive whose timed
+floor remains serialized; it may follow a live A10B baseline but does not preempt
+the A10B-versus-grammar decision.
+
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
 allocation removal under the same latency gate; typed metadata retains only an
@@ -1138,6 +1196,27 @@ control. It is no longer an active experiment; keep `decode` as the default.
   pending token, and suffix. Uninterrupted, RAM-restored, and disk-restored
   continuations must preserve the declared exactness contract. Keep the current
   prompt-boundary checkpoint whenever the completed boundary is unavailable.
+- **Checkpoint durability**: hold encoding, BLAKE3, no-clobber publication, and
+  later decode validation fixed. Compare raw `F_FULLFSYNC`, capability-checked
+  `F_BARRIERFSYNC`, raw `fsync`, and no-sync for file data and parent directory
+  separately; unsupported operations fail the arm rather than silently falling
+  back. No-sync is admissible only under the explicit disposable-cache contract:
+  hard-link publication provides no-clobber live final-name publication within
+  the documented private, cooperating namespace, while crash or power loss may
+  erase, truncate, or corrupt the entry and must fall back to replay. It does not
+  strengthen the store against malicious concurrent parent-component
+  replacement.
+- **Direct durable restore**: parse and bound the complete canonical record before
+  constructing destination spans. Retain the validated descriptor, handle
+  positional-vector short reads, `EINTR`, `IOV_MAX`, EOF, and section boundaries,
+  then hash in canonical wire order before GPU use. Poison and discard the whole
+  candidate session on failure. The first floor is disposable-only and disables
+  RAM-prefix promotion. Preregister a material wall gate; use `60-80 ms` only as
+  rough non-causal sizing, not measured authority or a hard ceiling.
+- **Checkpoint existence hint**: a short-circuit may-exist probe is not a store
+  audit. It may skip later foreign-entry or I/O discovery after a valid hit. Keep
+  complete scans for byte accounting, eviction, publication, cleanup, and any
+  explicit integrity operation.
 - **Retained storage**: planner windows are read-only weight resources, never
   unqualified scratch tensors. Synthetic overlapping resources must preserve
   bytes and lifetime under either destruction order. Every live model must match

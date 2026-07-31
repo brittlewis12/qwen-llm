@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-31 - v0.654 Grammar Topology Oracle
+
+Status: complete CPU-only oracle. Forced-run fast-forward is killed for the
+exact response-shape language and Qwen3.6 token-piece policy. The same cell
+supplies a positive restricted-lm-head topology signal only.
+
+- The oracle enumerates all 36 ordered minified enum objects and all 616
+  productive byte-prefix states. Exact token-piece IDs define admissibility;
+  control, user-defined, unknown, unused, padded, and empty pieces are excluded.
+  All 616 indexed sets match a naive scan over 248,044 ordinary nonempty rows,
+  and all productive states are token-reachable.
+- The 580 nonterminal states contain 129 singleton states and 451 branch states,
+  but maximum forced suffix length is only `1`. Every one of the 36 canonical
+  18-token paths has zero forced positions. At `r=1`, even the most favorable
+  pending/nonterminal fixed-N8 cursor case loses `40.395 ms`; the aligned cases
+  lose `79.014-117.633 ms`. This closes engine work for forced runs in this exact
+  cell, not other grammars or tokenizers.
+- Branch admissible rows are p50/p90/p95/max `3/5/6/17`. The maximum is
+  `0.006846%` of the 248,320-row vocabulary, or `99.993154%` topological pruning.
+  The whole grammar uses only 223 unique token rows and 1,597 state-token
+  incidences; branch states use 222 unique rows and 1,468 incidences.
+- Dense `output.weight` is `1,042,944,000` Q6_K bytes, exactly 4,200 bytes per
+  row. The maximum state names 71,400 logical bytes; a unique-row bank is
+  936,600 bytes, while a contiguous state-major branch bank has 6,165,600 bytes
+  (`5.88 MiB`) of unpadded Q6_K payload. These are layout arithmetic, not a
+  physical allocation or charged reader; alignment, padding, offset tables, and
+  token maps remain costs.
+- The 20 real Qwen3-4B records are preserved exactly and split 10/10 by source
+  prompt. They weight four output combinations after target retokenization; they
+  are not target-model sampled token traces or broad request archetypes.
+- Advance only to a bench-only state-major Q6_K restricted-head floor. Charge
+  bank construction against TTFT, preserve constrained selected-logit and
+  greedy/seeded-sampling semantics, require at least 70% head-wall removal and
+  a 5% whole-token projection, and do not build a general grammar engine first.
+
+Artifacts: `docs/bench/v0654-grammar-response-shape.json`,
+`docs/bench/v0654-grammar-response-shape-traces.json`,
+`docs/bench/v0654-grammar-response-shape-result.json`, and
+`docs/bench/v0654-grammar-trace-oracle.md`. Result SHA-256
+`85f0d719411fd20a0a66011cc07dd3c20cd4a3bbb2f98b8f54644c54577dcea7`.
+Independent design and result review: `cx` session
+`019fb654-ce35-7d90-9987-326e405cc5a2`.
+
 ## 2026-07-30 - v0.653 A10B Population Floor Unsealed
 
 Status: consumed permanently unsealed before the first durable child launch;

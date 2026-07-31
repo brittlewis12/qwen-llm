@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "fixture_id": "spike-rf-qwen-predictions-v1",
+  "source": {
+    "source_model": "Qwen/Qwen3-4B",
+    "results_path": "self_trajectory/spike_rf/analysis/cache/spike_rf/results.json",
+    "results_sha256": "4a6de539fbad9cfe89f8210fa3aff542137b4b6bb15ab95dacadafb891e8afcc",
+    "prompt_builder_path": "self_traj_spike_rf.py",
+    "prompt_builder_sha256": "1c7e3595a938aeb13676e85f4e7ff02431e667b3db466c8ced766f9c371a4740"
+  },
+  "records": [
+    {
+      "item_id": "0.5-rb-005",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"partial-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 37420, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 156,
+      "rendered_sha256": "ced0b70db701449fbcf5e8006b55979a3d5e44b27ed3b86e0813798cf409f5f8"
+    },
+    {
+      "item_id": "0.5-rb-005",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 172,
+      "rendered_sha256": "08160086e393aeaa22eb839fe97df3a2e61f4ef1a0c20078ccfe6187c361b0ac"
+    },
+    {
+      "item_id": "0.5-rb-015",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 158,
+      "rendered_sha256": "a1126e262ec8fbeda8511ca995cf79690a14ac8d4194245f66c7e0c1b0acd61c"
+    },
+    {
+      "item_id": "0.5-rb-015",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 174,
+      "rendered_sha256": "b0aadf3ff87a0ff21bf24911f192fe4f2556184e99c1c30a9a8e638b79426a45"
+    },
+    {
+      "item_id": "0.5-fu-016",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"high\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 11892, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 156,
+      "rendered_sha256": "f12fc373a5872b6b3aab04145d23d9151d76b569a7a5cad3faafd8cac37aff97"
+    },
+    {
+      "item_id": "0.5-fu-016",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"high\",\"length\":\"short\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 11892, 2198, 4129, 3252, 8676, 9207, 151645],
+      "n_prompt": 172,
+      "rendered_sha256": "b33331fdcb71e4e2c4b18a56514794382ccdf1e1d4626ae16053d7fc60c3e6d6"
+    },
+    {
+      "item_id": "0.5-fu-008",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"high\",\"length\":\"short\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 11892, 2198, 4129, 3252, 8676, 9207, 151645],
+      "n_prompt": 151,
+      "rendered_sha256": "a55b3fc57b4a6b04630ea6f57853752ed26dca9b33618444c7c783e30fdf1c48"
+    },
+    {
+      "item_id": "0.5-fu-008",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"high\",\"length\":\"short\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 11892, 2198, 4129, 3252, 8676, 9207, 151645],
+      "n_prompt": 167,
+      "rendered_sha256": "86220654a023df1616b22b470a8fb03b544649887970dc3bf990bbce98f8b709"
+    },
+    {
+      "item_id": "0.5-pd-009",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 155,
+      "rendered_sha256": "f190c6c6e58508c966d38d8199b7299c11bd020683022dae18de619e13df4735"
+    },
+    {
+      "item_id": "0.5-pd-009",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 171,
+      "rendered_sha256": "22e902e9fa53ef76b7e549e0cad8c6b2bbf06692c41d8f56f95fcabfbd8598cd"
+    },
+    {
+      "item_id": "0.5-pd-008",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"partial-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 37420, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 156,
+      "rendered_sha256": "2a71f6ca16df98da9764f79313b8e63f43b3f8e10ed13dec188dff624eca7d8c"
+    },
+    {
+      "item_id": "0.5-pd-008",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"partial-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 37420, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 172,
+      "rendered_sha256": "4c0adbb771bf301ae15a896ac717a4f0f1b6e6a617db685cb726db72da944e53"
+    },
+    {
+      "item_id": "0.5-sk-033",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"high\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 11892, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 157,
+      "rendered_sha256": "c6c1f62f2342d6b34de42c3a5b1fc939e6e672d9b60ba6431fe430d26177e6b6"
+    },
+    {
+      "item_id": "0.5-sk-033",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"partial-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 37420, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 173,
+      "rendered_sha256": "a669df3f7c63b7eb27ca191b3492cd00fc6c5250192be30bee61a12d0c6ebfff"
+    },
+    {
+      "item_id": "0.5-sk-032",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 159,
+      "rendered_sha256": "fb6bd88157e49fa8a50d0d0a1e0e1b91e88d5e6a3bfb43660fcd07363b130c9f"
+    },
+    {
+      "item_id": "0.5-sk-032",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"partial-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 37420, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 175,
+      "rendered_sha256": "d55dffaa5d28eb7cc79e7006fc56e2e24bbaafa4727971aad718c2cc2131c6f9"
+    },
+    {
+      "item_id": "0.5-ls-022",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"partial-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 37420, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 155,
+      "rendered_sha256": "82644bcc9072e71c6cb5a6352d54b99536f0bf65fdeb9b3841b9a75e6c6d3cd8"
+    },
+    {
+      "item_id": "0.5-ls-022",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"partial-answer\",\"expressed_confidence\":\"medium\",\"length\":\"medium\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 37420, 95777, 2198, 13788, 291, 16059, 7087, 3252, 26086, 2198, 4129, 3252, 26086, 9207, 151645],
+      "n_prompt": 171,
+      "rendered_sha256": "8ffedc7625f2e3952d48f22697cee200b68fbed2cf61b1b82f1059fb6d2d92cb"
+    },
+    {
+      "item_id": "0.5-ls-016",
+      "branch": "Q-self-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"high\",\"length\":\"short\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 11892, 2198, 4129, 3252, 8676, 9207, 151645],
+      "n_prompt": 155,
+      "rendered_sha256": "cce391d19ebfda719986aa82f7ac5c279221cdee7c69d1041c6a4a3dcbb0fc08"
+    },
+    {
+      "item_id": "0.5-ls-016",
+      "branch": "Q-other-pred",
+      "gen_text": "{\"response_mode\":\"full-answer\",\"expressed_confidence\":\"high\",\"length\":\"short\"}",
+      "gen_tokens": [4913, 2322, 7302, 3252, 8878, 95777, 2198, 13788, 291, 16059, 7087, 3252, 11892, 2198, 4129, 3252, 8676, 9207, 151645],
+      "n_prompt": 171,
+      "rendered_sha256": "602d2f63437474ea1565bbad6f1367454bde3ff26eb08cbc024ee8796d2b3ec8"
+    }
+  ]
+}

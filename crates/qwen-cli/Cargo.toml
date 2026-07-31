@@ -22,6 +22,10 @@ path = "src/tok.rs"
 name = "qwen-census"
 path = "src/census.rs"
 
+[[bin]]
+name = "qwen-grammar-oracle"
+path = "src/grammar_oracle.rs"
+
 [lints]
 workspace = true
 

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "grammar_id": "response-shape-v1",
+  "kind": "ordered_enum_object",
+  "fields": [
+    {
+      "name": "response_mode",
+      "values": [
+        "full-answer",
+        "partial-answer",
+        "refusal",
+        "clarification"
+      ]
+    },
+    {
+      "name": "expressed_confidence",
+      "values": ["low", "medium", "high"]
+    },
+    {
+      "name": "length",
+      "values": ["short", "medium", "long"]
+    }
+  ]
+}

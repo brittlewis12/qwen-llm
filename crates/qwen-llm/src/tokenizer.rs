@@ -743,6 +743,30 @@ impl NativeTokenizer {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    /// Return the exact decoded bytes for one token.
+    ///
+    /// Unlike [`Self::try_decode_piece`], this accessor does not replace
+    /// invalid UTF-8. It is the required primitive for byte-level grammar
+    /// matching, where lossy text conversion can change admissibility.
+    pub fn try_decode_piece_bytes_exact(&self, token: i32) -> Result<&[u8], TokError> {
+        let token = self.checked_token(token)?;
+        Ok(self.decode_token_bytes(token))
+    }
+
+    /// Whether a token is ordinary generated content rather than control,
+    /// unknown, user-defined, unused, or padded vocabulary state.
+    ///
+    /// This is a conservative Qwen grammar-content policy, not a universal
+    /// protocol rule: another model may intentionally generate user-defined
+    /// tokens. Callers must still reject empty decoded pieces before
+    /// constructing a token-level grammar graph.
+    pub fn is_ordinary_content_token(&self, token: i32) -> Result<bool, TokError> {
+        let token = self.checked_token(token)?;
+        let data = &self.id_to_token[token];
+        Ok(matches!(data.attr, TokenAttr::Normal | TokenAttr::Byte)
+            && !is_qwen_control_text(&data.text))
+    }
+
     pub fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError> {
         let mut ids = Vec::with_capacity(tokens.len());
         let mut total = 0usize;
@@ -1752,6 +1776,80 @@ mod tests {
             native.try_decode(&[native.n_vocab() as i32]),
             Err(TokError::InvalidToken(_))
         ));
+        assert!(matches!(
+            native.try_decode_piece_bytes_exact(-1),
+            Err(TokError::InvalidToken(-1))
+        ));
+        assert!(matches!(
+            native.is_ordinary_content_token(native.n_vocab() as i32),
+            Err(TokError::InvalidToken(_))
+        ));
+    }
+
+    #[test]
+    fn native_exact_piece_bytes_preserve_utf8_boundaries() {
+        let Some(path) = fixture() else { return };
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
+        let text = "JSON: {\"emoji\":\"🙂\",\"city\":\"上海\"}";
+        let ids = native
+            .encode(text, false)
+            .expect("encode exact-byte fixture");
+        let mut decoded = Vec::new();
+        for id in ids {
+            assert!(
+                native
+                    .is_ordinary_content_token(id)
+                    .expect("classify content token")
+            );
+            decoded.extend_from_slice(
+                native
+                    .try_decode_piece_bytes_exact(id)
+                    .expect("decode exact piece bytes"),
+            );
+        }
+        assert_eq!(decoded, text.as_bytes());
+    }
+
+    #[test]
+    fn native_exact_piece_bytes_do_not_replace_invalid_utf8() {
+        let Some(path) = fixture() else { return };
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
+        let token = native.byte_token_ids[0xff];
+        assert_eq!(
+            native
+                .try_decode_piece_bytes_exact(token)
+                .expect("decode exact byte token"),
+            &[0xff]
+        );
+        assert_eq!(
+            native
+                .try_decode_piece(token)
+                .expect("decode lossy byte token"),
+            "\u{fffd}"
+        );
+    }
+
+    #[test]
+    fn native_content_policy_excludes_chat_control_tokens() {
+        let Some(path) = fixture() else { return };
+        let native = NativeTokenizer::open(path).expect("open native tokenizer");
+        let control = native
+            .encode("<|im_start|>", false)
+            .expect("encode control token");
+        assert_eq!(control.len(), 1);
+        assert!(
+            !native
+                .is_ordinary_content_token(control[0])
+                .expect("classify control token")
+        );
+
+        let content = native.encode("json", false).expect("encode content token");
+        assert!(!content.is_empty());
+        assert!(content.into_iter().all(|id| {
+            native
+                .is_ordinary_content_token(id)
+                .expect("classify ordinary token")
+        }));
     }
 
     #[test]

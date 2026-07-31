@@ -1077,11 +1077,21 @@ GPU, wait/readback, allocation, copy, and selection wall before reusable
 workspaces; do not import greedy GPU-argmax evidence or call the allocation
 material in advance.
 
-1. **Grammar run and admissible-row oracle**: this is now the active branch.
-   Replay real structured traces and count maximal forced-token runs plus branch
-   vocabulary rows. Require `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`;
-   runs below four are not locally positive at current N8 cost. Contract-exact,
-   belief medium-low until traces exist, difficulty S oracle/M product.
+1. **Grammar-row lm-head charged floor**: this is now the active branch. v0.654
+   closes forced-run fast-forward for its exact 36-string response-shape cell:
+   all 616 productive states are reachable, 129 states are singleton, maximum
+   forced suffix is only one, and all 36 canonical paths have zero forced
+   positions. The same cell admits at most 17 vocabulary rows at any state,
+   branch p50/p90/p95 `3/5/6`, only 223 unique rows globally, and only 1,468
+   branch-state row incidences. Against the authenticated dense Q6_K head, a
+   duplicated contiguous state-major branch bank has `6,165,600` bytes of
+   unpadded Q6_K payload; physical alignment, padding, offset tables, and token
+   maps remain unpriced.
+   Build one bench-only exact row-bank floor before a grammar runtime: charge
+   construction against TTFT, preserve constrained selected logits and
+   greedy/seeded sampling, remove `>=70%` of head wall, and project `>=5%`
+   whole-token gain. Contract-exact, belief medium, difficulty S-M floor/M-L
+   product.
 2. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
    sole packet unsealed before the first durable child launch. The no-payload
    headroom probe passed, but ordered hashing of all three shards followed by a
@@ -1129,8 +1139,9 @@ independent memory or changed-representation case. Repack-on-load needs a named
 current-kernel instruction attribution; global allocators and tokenizer automata
 need new independent cases. Adaptive MoE top-k also falls below the active queue:
 router mass is diffuse and ideal k8-to-k6 removal is only about `4.55%` before
-overhead or quality loss. Certified lm-head screening remains behind a positive
-grammar-row signal.
+overhead or quality loss. v0.654 clears only the topology prerequisite for exact
+grammar-row restriction; generic norm-certified lm-head screening remains a
+separate lane.
 
 Blocked cold follow-ons remain conditional. v0.602 satisfies the first
 prerequisite for async retained-to-copied promotion, but command-buffer-safe
@@ -1195,8 +1206,10 @@ control. It is no longer an active experiment; keep `decode` as the default.
    timing inference, do not retry its global full-residency method, and park A10B
    loading until a changed-premise phase-local I/O oracle becomes deployment-
    relevant.
-4. Execute the grammar forced-run/admissible-row trace oracle. Its output is run-
-   length and admissible-vocabulary mass, not a product speedup claim.
+4. v0.654 kills forced-run fast-forward in its exact response-shape cell and
+   exposes a strong exact row-restriction signal. Execute only the bench-local
+   contiguous state-major Q6_K head floor next; do not build general grammar
+   parsing, masking, sampling, or product integration before its charged gate.
 5. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
@@ -1301,6 +1314,11 @@ control. It is no longer an active experiment; keep `decode` as the default.
   `sum(H_r * (r*C1-Cpack(r))) - overhead >= T0/11` independently on named request
   archetypes before engine work. Grammar-row lm_head restriction may contribute to
   the same savings but must preserve the declared constrained-output contract.
+  v0.654 finds maximum grammar-global run one and no canonical forced positions
+  across its 36-string response-shape language. This kills fast-forward only for
+  that fingerprinted language/token-piece-policy cell. A multi-ID state or
+  terminal, not trace frequency, ends every singleton chain; the oracle does not
+  attribute each multi-ID state solely to same-target token segmentation.
 - **External drafting**: use per-depth survival and `Q=1+sum(P(A>=j))`; never infer
   economics from mean alpha alone or from llama.cpp wall time. Require exact
   tokenizer/special-ID compatibility and charge draft prefill, D7 work, full-accept
@@ -1312,7 +1330,13 @@ control. It is no longer an active experiment; keep `decode` as the default.
   safely prunes `>=80%` of rows with `<=30%` baseline bytes touched after metadata.
   Then add production dequant/accumulation error and require about `70%` charged
   head-wall removal plus `>=5%` whole-token projection. The claim is exact selected
-  argmax, not bitwise full-logit equivalence.
+  argmax, not bitwise full-logit equivalence. Exact grammar-row restriction is a
+  separate direct-row contract and does not require norm screening. v0.654 clears
+  its topology screen with at most 17 rows per state and 223 rows across the whole
+  grammar. Its first floor must use one prebuilt contiguous state-major quantized
+  bank, charge bank construction and state lookup, reproduce selected logits, and
+  clear the same `70%` head-wall / `5%` whole-token gates before grammar-runtime
+  work. Seeded sampling must preserve the declared grammar-masked distribution.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.

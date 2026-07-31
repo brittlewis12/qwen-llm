@@ -1,0 +1,385 @@
+{
+  "schema": "grammar-trace-oracle/v1",
+  "decision": {
+    "authority": "scoped forced-run KILL and row-topology signal only",
+    "forced_run": "KILL_MAX_RUN_BELOW_LOCAL_FLOOR",
+    "maximum_admissible_row_fraction": 0.00006846005154639175,
+    "maximum_admissible_rows": 17,
+    "minimum_topological_row_pruning_fraction": 0.9999315399484536,
+    "observed_maximum_forced_suffix_tokens": 1,
+    "restricted_lm_head": "POSITIVE_TOPOLOGY_SIGNAL_ONLY",
+    "restricted_lm_head_missing_evidence": [
+      "quantized block bytes touched",
+      "metadata traffic",
+      "restricted dispatch cost",
+      "exact selected-argmax implementation",
+      "whole-token projection"
+    ],
+    "restricted_lm_head_row_limit": 49664,
+    "roadmap_minimum_local_run_tokens": 4
+  },
+  "claim_boundary": {
+    "additional_logit_masks_in_forcedness": false,
+    "canonical_path_fingerprint_scope": "these 36 target-tokenizer retokenizations",
+    "clean_assistant_output_boundary": true,
+    "grammar_mask_scope": "full_vocabulary_before_sampling",
+    "piece_decoding": "exact_concatenated_bytes",
+    "scope": "exact finite language and fingerprinted token-piece policy only",
+    "terminal_action": "separate_from_content_rows",
+    "token_healing": false
+  },
+  "inputs": {
+    "grammar_file_sha256": "f3a053733738aa8e05c10c2f078ca5a36c26a3bc5746487903463cdcf31b2634",
+    "grammar_path": "docs/bench/v0654-grammar-response-shape.json",
+    "model_path": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "trace_file_sha256": "eb702b6b93fe58255cc16783363150f886dbfd0d6f7c032c1798bae1c41b74b1",
+    "trace_path": "docs/bench/v0654-grammar-response-shape-traces.json"
+  },
+  "tokenizer": {
+    "admissible_ordinary_nonempty_rows": 248044,
+    "duplicate_eligible_piece_groups": 0,
+    "excluded_noncontent_empty_rows": 243,
+    "excluded_noncontent_nonempty_rows": 33,
+    "grammar_piece_policy_sha256": "58748dfe811c1710c732239ae59053f2888bf32c1c3ee4f8ec10f0ac089fdd60",
+    "inventory_counts_are_disjoint": true,
+    "max_token_ids_per_eligible_piece": 1,
+    "ordinary_content_empty_rows": 0,
+    "stop_token_ids": [
+      248046
+    ],
+    "vocab_rows": 248320
+  },
+  "grammar": {
+    "finite_language_sha256": "94dc537ecb3d9209cfbc8e28b502916b20ee7b685393b6cf85ab610c08be0faf",
+    "language_strings": 36,
+    "prefix_free": true,
+    "spec": {
+      "fields": [
+        {
+          "name": "response_mode",
+          "values": [
+            "full-answer",
+            "partial-answer",
+            "refusal",
+            "clarification"
+          ]
+        },
+        {
+          "name": "expressed_confidence",
+          "values": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "name": "length",
+          "values": [
+            "short",
+            "medium",
+            "long"
+          ]
+        }
+      ],
+      "grammar_id": "response-shape-v1",
+      "kind": "ordered_enum_object",
+      "schema_version": 1
+    }
+  },
+  "global_topology": {
+    "admissible_row_count_histogram": {
+      "1": 129,
+      "11": 4,
+      "12": 12,
+      "17": 1,
+      "2": 207,
+      "3": 123,
+      "4": 55,
+      "5": 38,
+      "6": 7,
+      "7": 4
+    },
+    "admissible_row_count_quantiles": {
+      "convention": "nearest_rank",
+      "count": 580,
+      "max": 17,
+      "min": 1,
+      "p50": 2,
+      "p90": 5,
+      "p95": 5
+    },
+    "branch_admissible_row_count_quantiles": {
+      "convention": "nearest_rank",
+      "count": 451,
+      "max": 17,
+      "min": 2,
+      "p50": 3,
+      "p90": 5,
+      "p95": 6
+    },
+    "branch_state_token_incidences": 1468,
+    "branch_states": 451,
+    "indexed_naive_cross_checks": 616,
+    "maximum_admissible_row_fraction": 0.00006846005154639175,
+    "maximum_forced_suffix_tokens": 1,
+    "minimum_topological_row_pruning_fraction": 0.9999315399484536,
+    "nonterminal_states": 580,
+    "productive_prefix_states": 616,
+    "reachable_prefix_states": 616,
+    "singleton_states": 129,
+    "state_sha256": "afa64a9a91677309fffbc54833b73d8881d7c4745127ae5ec10eebc87d70be40",
+    "state_token_incidences": 1597,
+    "states_attaining_maximum_forced_suffix": {
+      "count": 129,
+      "examples": [
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "22",
+            "utf8": "\""
+          },
+          "prefix": {
+            "byte_length": 1,
+            "hex": "7b",
+            "utf8": "{"
+          },
+          "token_id": 1
+        },
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "65",
+            "utf8": "e"
+          },
+          "prefix": {
+            "byte_length": 9,
+            "hex": "7b22726573706f6e73",
+            "utf8": "{\"respons"
+          },
+          "token_id": 68
+        },
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "65",
+            "utf8": "e"
+          },
+          "prefix": {
+            "byte_length": 14,
+            "hex": "7b22726573706f6e73655f6d6f64",
+            "utf8": "{\"response_mod"
+          },
+          "token_id": 68
+        },
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "6e",
+            "utf8": "n"
+          },
+          "prefix": {
+            "byte_length": 30,
+            "hex": "7b22726573706f6e73655f6d6f6465223a22636c6172696669636174696f",
+            "utf8": "{\"response_mode\":\"clarificatio"
+          },
+          "token_id": 77
+        },
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "22",
+            "utf8": "\""
+          },
+          "prefix": {
+            "byte_length": 33,
+            "hex": "7b22726573706f6e73655f6d6f6465223a22636c6172696669636174696f6e222c",
+            "utf8": "{\"response_mode\":\"clarification\","
+          },
+          "token_id": 1
+        },
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "64",
+            "utf8": "d"
+          },
+          "prefix": {
+            "byte_length": 42,
+            "hex": "7b22726573706f6e73655f6d6f6465223a22636c6172696669636174696f6e222c226578707265737365",
+            "utf8": "{\"response_mode\":\"clarification\",\"expresse"
+          },
+          "token_id": 67
+        },
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "65",
+            "utf8": "e"
+          },
+          "prefix": {
+            "byte_length": 53,
+            "hex": "7b22726573706f6e73655f6d6f6465223a22636c6172696669636174696f6e222c226578707265737365645f636f6e666964656e63",
+            "utf8": "{\"response_mode\":\"clarification\",\"expressed_confidenc"
+          },
+          "token_id": 68
+        },
+        {
+          "piece": {
+            "byte_length": 1,
+            "hex": "68",
+            "utf8": "h"
+          },
+          "prefix": {
+            "byte_length": 60,
+            "hex": "7b22726573706f6e73655f6d6f6465223a22636c6172696669636174696f6e222c226578707265737365645f636f6e666964656e6365223a22686967",
+            "utf8": "{\"response_mode\":\"clarification\",\"expressed_confidence\":\"hig"
+          },
+          "token_id": 71
+        }
+      ],
+      "sha256": "b2d7358a58a465fb8c414f17632584b7395d075be95cf975c59f1ca90d4e6130"
+    },
+    "terminal_states": 36,
+    "unique_admissible_token_row_fraction": 0.0008980347938144329,
+    "unique_admissible_token_rows": 223,
+    "unique_admissible_token_rows_sha256": "9e32d9e8b7fd80b71de35751ad13af346abe2b5987d1de7f6b557a2bf98eeee6",
+    "unique_branch_token_row_fraction": 0.0008940077319587629,
+    "unique_branch_token_rows": 222,
+    "unique_branch_token_rows_sha256": "c5fd62c703b9fb32fb9b505963754063a43ee827cdcff0d0e3e1c7cd8d9b763a",
+    "unreachable_prefix_states": 0
+  },
+  "canonical_paths": {
+    "admissible_row_count_quantiles": {
+      "convention": "nearest_rank",
+      "count": 648,
+      "max": 17,
+      "min": 2,
+      "p50": 4,
+      "p90": 12,
+      "p95": 17
+    },
+    "canonical_path_sha256": "b72213294b55231dd4eaa12a05276be7dfe4e5ce994ff7a9451c258876333401",
+    "forced_run_count": 0,
+    "forced_run_histogram": {},
+    "forced_token_positions": 0,
+    "maximum_forced_run": 0,
+    "path_count": 36,
+    "token_count_histogram": {
+      "18": 36
+    }
+  },
+  "real_trace_weighting": {
+    "fixture_id": "spike-rf-qwen-predictions-v1",
+    "interpretation": "real source-model output bytes retokenized canonically by target tokenizer",
+    "not_authority_for": [
+      "target-model sampled token paths",
+      "broad structured-output trigger rate",
+      "product speedup"
+    ],
+    "pooled": {
+      "canonical_retokenized_admissible_rows": {
+        "convention": "nearest_rank",
+        "count": 360,
+        "max": 17,
+        "min": 2,
+        "p50": 4,
+        "p90": 12,
+        "p95": 17
+      },
+      "canonical_retokenized_forced_run_histogram": {},
+      "distinct_outputs": 4,
+      "original_source_final_token_id_histogram": {
+        "151645": 20
+      },
+      "original_source_token_count_histogram": {
+        "19": 20
+      },
+      "records": 20
+    },
+    "source": {
+      "prompt_builder_path": "self_traj_spike_rf.py",
+      "prompt_builder_sha256": "1c7e3595a938aeb13676e85f4e7ff02431e667b3db466c8ced766f9c371a4740",
+      "results_path": "self_trajectory/spike_rf/analysis/cache/spike_rf/results.json",
+      "results_sha256": "4a6de539fbad9cfe89f8210fa3aff542137b4b6bb15ab95dacadafb891e8afcc",
+      "source_model": "Qwen/Qwen3-4B"
+    },
+    "strata": {
+      "Q-other-pred": {
+        "canonical_retokenized_admissible_rows": {
+          "convention": "nearest_rank",
+          "count": 180,
+          "max": 17,
+          "min": 2,
+          "p50": 4,
+          "p90": 12,
+          "p95": 17
+        },
+        "canonical_retokenized_forced_run_histogram": {},
+        "distinct_outputs": 3,
+        "original_source_final_token_id_histogram": {
+          "151645": 10
+        },
+        "original_source_token_count_histogram": {
+          "19": 10
+        },
+        "records": 10
+      },
+      "Q-self-pred": {
+        "canonical_retokenized_admissible_rows": {
+          "convention": "nearest_rank",
+          "count": 180,
+          "max": 17,
+          "min": 2,
+          "p50": 4,
+          "p90": 12,
+          "p95": 17
+        },
+        "canonical_retokenized_forced_run_histogram": {},
+        "distinct_outputs": 4,
+        "original_source_final_token_id_histogram": {
+          "151645": 10
+        },
+        "original_source_token_count_histogram": {
+          "19": 10
+        },
+        "records": 10
+      }
+    },
+    "strata_are_not_broad_request_archetypes": true
+  },
+  "counterfactual_fixed_n8_screen": {
+    "all_observed_max_cases_negative": true,
+    "cost_scope": "observed-max counterfactual only; no grammar scan or measured Cpack(r)",
+    "cursor_cases": [
+      {
+        "case": "aligned_nonterminal",
+        "fixed_n8_saving_ms": -108.313,
+        "required_transitions": 1
+      },
+      {
+        "case": "aligned_direct_terminal",
+        "fixed_n8_saving_ms": -117.633,
+        "required_transitions": 0
+      },
+      {
+        "case": "leading_pending_terminal",
+        "fixed_n8_saving_ms": -108.313,
+        "required_transitions": 1
+      },
+      {
+        "case": "leading_pending_nonterminal",
+        "fixed_n8_saving_ms": -98.993,
+        "required_transitions": 2
+      }
+    ],
+    "cursor_definitions": {
+      "aligned_direct_terminal": "r-1 transitions",
+      "aligned_nonterminal": "r transitions",
+      "leading_pending_nonterminal": "r+1 transitions",
+      "leading_pending_terminal": "r transitions"
+    },
+    "fixed_n8_packet_ms": 117.633,
+    "run_tokens": 1,
+    "serial_transition_ms": 9.32
+  }
+}

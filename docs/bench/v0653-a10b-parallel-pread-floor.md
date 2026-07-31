@@ -1,12 +1,19 @@
 # v0.653 A10B Topology-Preserving Parallel-Pread Floor
 
-Status: implementation and runner complete; no payload observation has run. The
-sole stage-0 metadata describe and exact profile freeze are complete. The
-implementation admits only the exact A10B copied and W4 parallel-pread arms and
-adds the frozen counter, headroom, descriptor-stamp, allocation, and
-no-GPU-command seals. This change must land cleanly, the release binary must be
-rebuilt from that commit, and a separate pre-run identity review must pass before
-any payload observation.
+Status: consumed unsealed before the first durable child launch;
+`authority=none`, with no retry. Clean commit `9b982fd` and its matching release
+binary passed pre-run review and the no-payload headroom probe admitted the exact
+`85,608,931,328`-byte envelope. The first source-conditioning pass then failed
+the frozen all-shards-full-residency predicate on shard 1 after hashing all three
+shards. No attempt, arm, payload allocation, timing, correctness, decision, or
+completion observation exists.
+
+The packet binds this contract at SHA-256
+`bba3ea8fbb4da3a12cffdb240abbf7c0b461afcc0f1a0ccc161ecc17ed065d07`.
+A non-authoritative post-stop `mincore` diagnostic reported shard residency
+`0/668`, `2,944,390/3,029,833`, and `1,671,006/1,671,038` pages in read order.
+That recency gradient invalidates this exact ordered hash-then-global-residency
+method on the host; it does not compare copied with W4 parallel-pread.
 
 The frozen standalone runner is
 `scripts/profile/v0653_a10b_parallel_pread_floor.py`. Its CPU-only synthetic
@@ -394,10 +401,10 @@ infeasible on the host and returns the active queue to grammar without reserving
 a packet or allocating the payload. After reservation, any failure before a
 complete attempt ledger, during final identity or cutoff, or before the valid
 completion marker leaves the packet permanently unsealed with no authority and
-no retry. An
-in-child headroom failure after its durable launch record is a complete terminal
-inconclusive attempt when its ledger can be finished. Any repair requires a new
-successor preregistration; v0.653 itself is never replayed.
+no retry. An in-child headroom failure after its durable launch record is a
+complete terminal inconclusive attempt when its ledger can be finished. Any
+repair requires a new successor preregistration; v0.653 itself is never
+replayed.
 
 The complete ABBA packet contains one raw metadata describe, four immutable
 attempt bundles, and one aggregate decision/completion seal. A terminal packet
@@ -468,3 +475,7 @@ Adversarial design review: `cx ask` session
 
 Adversarial runner review: `cx ask` session
 `019fb54e-f61b-77b0-b30a-34bd7f0c3ce1`.
+
+Consumed artifacts: `target/profiles/v0653-a10b-parallel-pread-floor-p1/`
+and `target/profiles/v0653-a10b-parallel-pread-floor-work/`. The same `cx`
+session independently reviewed the pre-run identity and result interpretation.

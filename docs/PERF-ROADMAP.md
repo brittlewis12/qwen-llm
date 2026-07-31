@@ -99,6 +99,9 @@ Decision rules:
 - Do not treat process-wide major faults as a generic cache-warm invalidity
   predicate. Require a causal I/O contract such as block-input operations,
   explicit physical-read/residency evidence, or arm-symmetric warm-up.
+- Do not infer simultaneous multi-shard residency from an ordered integrity
+  scan. Hashing can perturb the file-cache condition it intends to certify;
+  measure phase-local I/O symmetrically or separate identity from conditioning.
 - Keep dense 27B in analysis while optimizing MoE.
 - Use limiter captures for kernel-shape claims and untraced runs for throughput.
 - Treat `prefill_chunk=1024` as a safe cap, not a universal long-prompt optimum.
@@ -1074,16 +1077,20 @@ GPU, wait/readback, allocation, copy, and selection wall before reusable
 workspaces; do not import greedy GPU-argmax evidence or call the allocation
 material in advance.
 
-1. **Choose the remaining cold/product branch explicitly**: if A10B is a current
-   deployment target, run its native-embedding residency decision and
-   three-shard split-copy floor. Otherwise run the grammar forced-run/admissible-
-   row trace oracle below. Do not spend another packet on this A3B automatic-
-   admission mechanism.
-2. **A10B cold residency plus split-copy floor**: proceed only if the heavy
-   anchor remains deployment-relevant. First adjudicate the bit-exact native
-   embedding's 2.24 GB removal, then require at least 1.5 seconds from a frozen
-   three-shard topology-preserving population floor. Belief high on memory,
-   medium on copy wall, difficulty M-L.
+1. **Grammar run and admissible-row oracle**: this is now the active branch.
+   Replay real structured traces and count maximal forced-token runs plus branch
+   vocabulary rows. Require `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`;
+   runs below four are not locally positive at current N8 cost. Contract-exact,
+   belief medium-low until traces exist, difficulty S oracle/M product.
+2. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
+   sole packet unsealed before the first durable child launch. The no-payload
+   headroom probe passed, but ordered hashing of all three shards followed by a
+   global full-residency check found shard 1 nonresident. A post-stop diagnostic
+   showed `0/668`, `2,944,390/3,029,833`, and
+   `1,671,006/1,671,038` resident pages in read order. This invalidates the exact
+   conditioning method, not either population arm; no timing or effect estimate
+   exists. Reopen only with current deployment relevance and a changed-premise,
+   phase-local physical-I/O oracle. It does not outrank item 1.
 
    v0.653 accepts v0.538's exact native-embedding stream/warm parity and v0.594's
    split-resource proof only as a benchmark-local force-native premise. Its sole
@@ -1093,18 +1100,11 @@ material in advance.
    879 requests, `77,018,996,736` bytes, and literal W4 cuts
    `[214,435,658]`. The implementation admits only exact-profile force-native
    copied and W4 parallel-pread, with in-child headroom, retained-descriptor,
-   timer-local I/O/swap, allocation-drop, and no-GPU-command seals. Payload
-   timing remains prohibited until the implementation and sealed runner receive
-   separate pre-run review. The frozen ABBA floor grants no native default,
-   runtime loader, or product authority; a GO can authorize only one separately
-   preregistered force-only full-state/product pilot.
+   timer-local I/O/swap, allocation-drop, and no-GPU-command seals. The consumed
+   packet supplies no native default, runtime loader, product, or mechanism
+   authority.
 
-3. **Grammar run and admissible-row oracle**: replay real structured traces and
-   count maximal forced-token runs plus branch vocabulary rows. Require
-   `sum(H_r*(r*C1-Cpack(r))) - overhead >= T0/11`; runs below four are not locally
-   positive at current N8 cost. Contract-exact, belief medium-low until traces
-   exist, difficulty S oracle/M product.
-4. **High-ceiling structural options**: true-long attention needs a source-free
+3. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -1115,12 +1115,12 @@ v0.652 neither answers nor closes; it is intentionally deprioritized below the
 active queue on leverage.
 
 Checkpoint durability and the may-exist probe may run as CPU-only work without
-displacing items 1-4. Sampled-product attribution is conditional timed Metal
+displacing items 1-3. Sampled-product attribution is conditional timed Metal
 work and remains serialized. A direct-restore codec/population floor is CPU-only
 only while it issues no GPU command; product continuation remains serialized and
 reuse-only. `MTLIO` is a conditional fresh-load population primitive whose timed
-floor remains serialized; it may follow a live A10B baseline but does not preempt
-the A10B-versus-grammar decision.
+floor remains serialized; without a live A10B baseline it does not preempt the
+grammar oracle.
 
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
@@ -1191,15 +1191,16 @@ control. It is no longer an active experiment; keep `decode` as the default.
    automatic-admission successor.
 2. v0.644 closes the tested Q4 ladder. Do not schedule B/C widening, E-arm
    diagnosis, P4096 replication, or a local source/dequant implementation.
-3. A10B is the selected deployment branch. v0.653 stage 0, exact profile freeze,
-   and narrow child implementation are complete without payload timing. Seal and
-   separately review the sole ABBA runner, then execute only if every source,
-   counter, headroom, and no-GPU-command seal holds. Every non-GO disposition
-   returns the active queue to the grammar trace oracle.
-4. Keep prompt reduction explicitly input-changing. Keep true-long attention,
+3. v0.653 is consumed unsealed before its first child launch. Record no arm or
+   timing inference, do not retry its global full-residency method, and park A10B
+   loading until a changed-premise phase-local I/O oracle becomes deployment-
+   relevant.
+4. Execute the grammar forced-run/admissible-row trace oracle. Its output is run-
+   length and admissible-vocabulary mass, not a product speedup claim.
+5. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
-5. Do not resume the closed page-rounded image route, transient mmap-source
+6. Do not resume the closed page-rounded image route, transient mmap-source
    Shared-destination blits, broad topology attribution,
    generic command-graph or compiler work, retained-view retunes, broad external
    drafting, matrix/compressed attention, sparse retrieval, routed-tail work,

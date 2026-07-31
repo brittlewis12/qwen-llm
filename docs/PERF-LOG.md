@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-30 - v0.653 A10B Population Floor Unsealed
+
+Status: consumed permanently unsealed before the first durable child launch;
+`authority=none`, with no retry. The exact A10B copied-versus-W4-pread branch
+returns the active queue to the grammar trace oracle.
+
+- Clean commit and release identity matched at `9b982fd`. The no-payload probe
+  admitted the frozen `85,608,931,328`-byte allocation envelope with
+  `103,078,739,968` bytes of reported Metal working-set headroom. Reservation,
+  manifest, and probe records are durable and no operator signal occurred.
+- Source conditioning opened and hashed the exact three retained descriptors in
+  shard order, then applied the frozen global `mincore` predicate. Shard 1 was no
+  longer fully resident, so the runner stopped before writing lifecycle or
+  attempt evidence. No arm launched; no allocation, timing, CPU, RSS, footprint,
+  correctness, decision, or completion observation exists.
+- A post-stop diagnostic, which has no packet authority, measured residency
+  `0/668`, `2,944,390/3,029,833` (`97.179944%`), and
+  `1,671,006/1,671,038` (`99.998085%`) pages in read order. The total missing
+  `86,143` pages equal `1,411,366,912` bytes. The sharp recency gradient is
+  consistent with file-cache turnover or sequential drop-behind while later
+  shards were hashed; `mincore` alone does not identify the exact XNU policy.
+- This falsifies the exact ordered hash-then-global-full-residency conditioning
+  method on this host. It is not evidence for or against copied population or W4
+  pread. Metal allocation headroom and pageable file-cache persistence are
+  separate predicates, and integrity hashing can perturb the cache state it was
+  intended to certify.
+- Do not repair or replay v0.653. Reopen A10B loading only from a newly ranked,
+  changed-premise oracle that measures phase-local physical I/O symmetrically and
+  clears current deployment relevance. The active next step is the contract-exact
+  grammar forced-run/admissible-row trace oracle.
+
+Artifacts: `target/profiles/v0653-a10b-parallel-pread-floor-p1/` and
+`target/profiles/v0653-a10b-parallel-pread-floor-work/`. Implementation/runner:
+`f4febe6` / `9b982fd`. Independent design, runner, pre-run, and result review:
+`cx` session `019fb54e-f61b-77b0-b30a-34bd7f0c3ce1`.
+
 ## 2026-07-28 - v0.652 Final A3B GPU-Greedy Admission Invalid
 
 Status: sealed `INVALID` with `authority=none`; the final admission packet is

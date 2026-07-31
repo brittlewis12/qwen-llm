@@ -2097,6 +2097,41 @@ impl MetalTensor {
         })
     }
 
+    /// Build a read-only Q6_K row-bank view with the fixed alignment required
+    /// by the grammar-row lm-head floor. This deliberately exposes neither a
+    /// caller-selected dtype nor a caller-selected alignment.
+    #[doc(hidden)]
+    pub fn q6_k_row_bank_weight_view(
+        buffer: Buffer,
+        offset: u64,
+        n_in: usize,
+        n_out: usize,
+    ) -> Result<Self, MetalError> {
+        if n_in == 0 || n_out == 0 || n_in % 256 != 0 {
+            return Err(MetalError::BadShape {
+                kernel: "q6_k_row_bank_weight_view",
+                detail: format!(
+                    "expected nonzero Q6_K rows with n_in divisible by 256, got n_in={n_in} n_out={n_out}"
+                ),
+            });
+        }
+        let n_in_u32 = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+            kernel: "q6_k_row_bank_weight_view",
+            detail: format!("n_in={n_in} does not fit the Q6_K kernel argument"),
+        })?;
+        let n_out_u32 = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+            kernel: "q6_k_row_bank_weight_view",
+            detail: format!("n_out={n_out} does not fit the Q6_K kernel argument"),
+        })?;
+        Self::owned_weight_view(
+            buffer,
+            offset,
+            vec![u64::from(n_in_u32), u64::from(n_out_u32)],
+            GgmlType::Q6_K,
+            32,
+        )
+    }
+
     /// Allocate an F32 activation/scratch tensor of the given shape,
     /// uninitialized.
     pub fn zeros_f32(ctx: &MetalContext, shape: Vec<u64>) -> Result<Self, MetalError> {
@@ -20074,6 +20109,34 @@ mod tests {
             MetalTensor::owned_weight_view(buffer.clone(), 1, vec![1], GgmlType::F32, 32,).is_err()
         );
         assert!(MetalTensor::owned_weight_view(buffer, 64, vec![16], GgmlType::F32, 32).is_err());
+    }
+
+    #[test]
+    fn q6_k_row_bank_view_fixes_geometry_alignment_and_provenance() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        let buffer = ctx.buffer_uninit(480).expect("Q6_K row-bank backing");
+        let view = MetalTensor::q6_k_row_bank_weight_view(buffer.clone(), 32, 256, 2)
+            .expect("valid Q6_K row-bank view");
+        assert_eq!(view.shape, [256, 2]);
+        assert_eq!(view.dtype, GgmlType::Q6_K);
+        assert_eq!(view.offset, 32);
+        assert_eq!(view.n_bytes(), 420);
+        assert_eq!(
+            view.provenance(),
+            MetalTensorProvenance::OwnedWeightReadOnly
+        );
+        assert!(!view.is_writable());
+
+        assert!(MetalTensor::q6_k_row_bank_weight_view(buffer.clone(), 1, 256, 2).is_err());
+        assert!(MetalTensor::q6_k_row_bank_weight_view(buffer.clone(), 32, 0, 2).is_err());
+        assert!(MetalTensor::q6_k_row_bank_weight_view(buffer.clone(), 32, 128, 2).is_err());
+        assert!(MetalTensor::q6_k_row_bank_weight_view(buffer.clone(), 32, 256, 0).is_err());
+        assert!(MetalTensor::q6_k_row_bank_weight_view(buffer.clone(), 64, 256, 2).is_err());
+        assert!(MetalTensor::q6_k_row_bank_weight_view(buffer.clone(), 0, usize::MAX, 1).is_err());
+        assert!(MetalTensor::q6_k_row_bank_weight_view(buffer, 0, 256, usize::MAX).is_err());
     }
 
     fn f32_desc(name: &str, shard_idx: usize, data_offset: u64, elements: u64) -> TensorDesc {

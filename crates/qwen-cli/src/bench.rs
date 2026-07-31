@@ -19,6 +19,7 @@
 mod attn_capture;
 mod attn_stage_floor;
 mod gguf_arena_floor;
+mod grammar_lm_head_row_floor;
 mod messages;
 mod q4_mma_ceiling;
 #[path = "../source_identity.rs"]
@@ -512,6 +513,8 @@ enum Cmd {
     Roofline(RooflineArgs),
     /// Attribute the production-grid Q4_K N64 schedule with synthetic bounds.
     Q4MmaCeiling(q4_mma_ceiling::Q4MmaCeilingArgs),
+    /// Measure the charged exact grammar-row Q6_K lm-head floor.
+    GrammarLmHeadRowFloor(grammar_lm_head_row_floor::GrammarLmHeadRowFloorArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),
     /// Report Metal compute-pipeline resource hints for hot kernels.
@@ -2768,6 +2771,11 @@ fn main() -> Result<()> {
         Cmd::Q4MmaCeiling(a) => {
             q4_mma_ceiling::run(a, serde_json::to_value(recorded_build_identity())?)
         }
+        Cmd::GrammarLmHeadRowFloor(a) => grammar_lm_head_row_floor::run(
+            a,
+            serde_json::to_value(recorded_build_identity())?,
+            capture_qwen_env(),
+        ),
         Cmd::MetalCounters(a) => run_metal_counters(a),
         Cmd::MetalPipelines(a) => run_metal_pipelines(a),
         Cmd::TopologyProbe(a) => run_topology_probe(a),

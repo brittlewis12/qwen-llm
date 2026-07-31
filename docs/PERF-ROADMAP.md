@@ -1077,20 +1077,33 @@ GPU, wait/readback, allocation, copy, and selection wall before reusable
 workspaces; do not import greedy GPU-argmax evidence or call the allocation
 material in advance.
 
-1. **One A3B integrated grammar-row packet**: v0.655 clears the exact charged
-   primitive floor. A3B moves `0.992333 -> 0.150366 ms`, removes `84.8472%` of
-   head wall, projects `9.03398%` whole-token saving, and retains a minimum
-   `+8.047171 ms` net across all 36 paths after `7.099042 ms` setup. Every width,
-   selected-logit, sampler-v1, guard, bank, and command gate passes. The dense
-   guard moves `2.240866 -> 0.160238 ms` and projects `5.38758%`, strengthening
-   primitive transfer without authorizing dense integration.
-   Preregister and execute the one authorized A3B real-hidden product packet.
-   Charge grammar-state tracking, branch lookup, bank setup in TTFT,
-   singleton/terminal handling, constrained sampling, decode, and total request
-   wall. Keep the response-shape grammar, tokenizer policy, A3B profile, and
-   state-major Q6_K organization frozen. Do not build a general grammar engine
-   under this authority. Contract-exact, belief medium-high, difficulty M-L.
-2. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
+1. **Positive-temperature sampling attribution**: measure the current
+   full-vocabulary GPU head, wait/readback, logits copy, candidate construction,
+   retained-candidate weights, allocation, and selection wall separately on one
+   named 128-output product request. This is a fresh-prompt, distribution-exact
+   diagnostic; greedy GPU-argmax savings do not transfer. Authorize reusable
+   workspaces only if avoidable allocation, copy, and vector construction project
+   to both `>=5%` decode and `>=5 ms` request-wall saving while preserving
+   sampler-v1 ordering, RNG draws, errors, and seeded output exactly. Belief high
+   on decisiveness, unknown on prize, difficulty S-M.
+2. **Generic certified lm-head screening oracle**: in the frozen integrated
+   cell, v0.656's compact-tail arm reduces transition-command wall by
+   `14.197064 ms`, about `0.835 ms` per transition; v0.655, not v0.656, supplies
+   isolated primitive authority. Run only the existing optimistic screening
+   bound first. Every primary capture must safely prune `>=80%` of rows while
+   touching `<=30%` of baseline bytes. A production successor must remove about
+   70% of charged head wall and project `>=5%` whole-token saving after metadata,
+   screening, survivors, and any second pass. This is exact argmax and
+   greedy-only, not positive-temperature distribution authority. Belief
+   medium-low, prize medium, difficulty M-H.
+3. **Direct-to-session checkpoint-restore floor**: this is exact process-cold
+   continuation, not fresh-prompt acceleration. Preregister `>=60 ms` restore
+   saving on the frozen `582,854,188`-byte record. Populate a disposable session
+   through checked positional reads, hash canonical wire order before GPU use,
+   and discard the whole candidate on any short read, EOF, shape, inode, or
+   digest failure. The current `60-80 ms` band is non-causal sizing, not evidence.
+   Belief medium, prize bounded, difficulty M.
+4. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
    sole packet unsealed before the first durable child launch. The no-payload
    headroom probe passed, but ordered hashing of all three shards followed by a
    global full-residency check found shard 1 nonresident. A post-stop diagnostic
@@ -1098,7 +1111,7 @@ material in advance.
    `1,671,006/1,671,038` resident pages in read order. This invalidates the exact
    conditioning method, not either population arm; no timing or effect estimate
    exists. Reopen only with current deployment relevance and a changed-premise,
-   phase-local physical-I/O oracle. It does not outrank item 1.
+   phase-local physical-I/O oracle. It does not outrank items 1-3.
 
    v0.653 accepts v0.538's exact native-embedding stream/warm parity and v0.594's
    split-resource proof only as a benchmark-local force-native premise. Its sole
@@ -1112,7 +1125,7 @@ material in advance.
    packet supplies no native default, runtime loader, product, or mechanism
    authority.
 
-3. **High-ceiling structural options**: true-long attention needs a source-free
+5. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -1123,12 +1136,12 @@ v0.652 neither answers nor closes; it is intentionally deprioritized below the
 active queue on leverage.
 
 Checkpoint durability and the may-exist probe may run as CPU-only work without
-displacing items 1-3. Sampled-product attribution is conditional timed Metal
+displacing items 1-5. Sampled-product attribution is conditional timed Metal
 work and remains serialized. A direct-restore codec/population floor is CPU-only
 only while it issues no GPU command; product continuation remains serialized and
 reuse-only. `MTLIO` is a conditional fresh-load population primitive whose timed
 floor remains serialized; without a live A10B baseline it does not preempt the
-integrated grammar-row packet.
+active queue.
 
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
@@ -1205,15 +1218,18 @@ control. It is no longer an active experiment; keep `decode` as the default.
    loading until a changed-premise phase-local I/O oracle becomes deployment-
    relevant.
 4. v0.654 kills forced-run fast-forward in its exact response-shape cell;
-   v0.655 clears the charged direct-row floor on A3B and the dense guard. Execute
-   the one authorized A3B integrated packet next. Keep the exact grammar,
-   tokenizer, model, Q6_K bank, and sampler-v1 contract fixed; charge real-hidden
-   state tracking, TTFT setup, decode, and total request wall. Do not widen into a
-   general grammar runtime or dense product path first.
-5. Keep prompt reduction explicitly input-changing. Keep true-long attention,
+   v0.655 clears the charged direct-row floor; v0.656 then kills the integrated
+   request-local bank organization. It saves `14.229 ms` of generation but loses
+   `7.662 ms` total request and regresses TTFT `15.100 ms`. Schedule no repair or
+   rerun. A grammar successor needs a changed bank-lifetime, lazy-organization,
+   or materially longer constrained-workload premise.
+5. Run the positive-temperature sampling attribution next. Advance reusable
+   workspaces only through its fresh 128-output request gate. Then run the
+   optimistic generic lm-head screening oracle before any production screener.
+6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
-6. Do not resume the closed page-rounded image route, transient mmap-source
+7. Do not resume the closed page-rounded image route, transient mmap-source
    Shared-destination blits, broad topology attribution,
    generic command-graph or compiler work, retained-view retunes, broad external
    drafting, matrix/compressed attention, sparse retrieval, routed-tail work,
@@ -1332,12 +1348,20 @@ control. It is no longer an active experiment; keep `decode` as the default.
   head-wall removal plus `>=5%` whole-token projection. The claim is exact selected
   argmax, not bitwise full-logit equivalence. Exact grammar-row restriction is a
   separate direct-row contract and does not require norm screening. v0.655 clears
-  its state-major Q6_K floor at `84.85%` A3B and `92.85%` dense head-wall removal,
-  with `9.03%` and `5.39%` frozen-denominator projections. This authorizes exactly
-  one A3B integrated packet. It must charge setup, real grammar-state lookup,
-  singleton/terminal handling, real-hidden execution, decode, and request wall;
-  seeded sampling must preserve the declared grammar-masked distribution. Dense
-  integration and general grammar transfer require independent authority.
+  its state-major Q6_K floor at `84.85%` A3B and `92.85%` dense head-wall removal.
+  v0.656 then kills the A3B integrated request-local bank: generation saves
+  `14.229 ms`, but setup plus post-terminal cost produces `-7.662 ms` request
+  saving and `+15.100 ms` TTFT. Reopen grammar rows only on authenticated
+  cross-request bank reuse, a lazy/indexed organization, or a materially longer
+  constrained workload. Generic screening retains its independent optimistic
+  oracle; it cannot inherit grammar's distribution-exact contract.
+- **Positive-temperature sampling**: attribute full-head GPU wall, completion and
+  readback, full-logit copy, candidate construction, retained-candidate weight
+  allocation, and selection separately. Kill reusable workspace work unless
+  avoidable allocation/copy/vector construction projects to `>=5%` decode and
+  `>=5 ms` on the named 128-output request. Preserve sampler-v1 candidate order,
+  RNG draws, error behavior, and seeded output exactly. Mandatory full-logit or
+  probability work receives no avoidable-work credit.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.

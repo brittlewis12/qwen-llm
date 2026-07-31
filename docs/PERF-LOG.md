@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-31 - v0.656 Integrated Grammar-Row KILL
+
+Status: mechanically `KILL` on the exact A3B response-shape request. The
+compact Q6_K tail saves generation work, but request-local bank ownership loses
+complete request wall and TTFT. The packet grants no performance authority.
+
+- Clean build/runtime/source identity matches at `5b05882`. All 451 branch and
+  129 singleton states pass four-hidden-seed bank validation: 6,388 selected
+  logits are bit-identical across four full and 2,320 compact dispatches, with
+  guards, padding, uploads, post-use hashes, and command status green.
+- Four fresh A/B lockstep streams pass exact selected logits, post-norm hidden
+  state, sampler draws, grammar edges, callbacks, full KV/GDN/conv state, and
+  pending-token semantics. Each emits 18 tokens over 17 transitions. Across 72
+  B tails there are zero full-head and zero terminal-head dispatches.
+- The 12-pair median generation saving is `+14.229042 ms`. The separate
+  transition-command saving is `14.197064 ms`, approximately `0.835 ms` per
+  transition. But manifest validation, complete bank preparation, and upload
+  cost `16.136 ms` before first token; post-terminal checks and teardown add
+  about `7.05 ms`.
+- Median request saving `A-B` is `-7.662104 ms`, only 1/12 pairs is positive,
+  and B regresses TTFT by `15.099958 ms`. AB/BA medians are
+  `-7.106459/-7.901708 ms`; both halves and every leave-one-out median remain
+  negative. Correctness, environment, and generation gates pass; request,
+  pair-count, and TTFT gates fail.
+- The sole positive pair follows the three-second host-validity interval and
+  contains an A-first prefill outlier. The same pattern occurs in warmup pair
+  zero. It favors B, is not causally localized, and cannot rescue the KILL.
+- Close complete request-local bank materialization for this cell. Reopen only
+  on authenticated cross-request bank reuse, a genuinely lazy/indexed head, or
+  a named constrained workload with roughly high-20s transitions or more. Do
+  not rerun v0.656, subtract frozen costs, widen to dense, or claim general
+  grammar authority.
+
+Artifacts: `target/profiles/v0656-a3b-integrated-grammar-row/`.
+Summary: `docs/bench/v0656-a3b-integrated-grammar-row-result.md`. Independent
+review: `cx` session `019fb694-8a53-7482-b65b-7592f729be32`.
+
 ## 2026-07-31 - v0.655 Grammar-Row Lm-Head Charged Floor
 
 Status: `GO` on the A3B primary and conditional dense guard. The exact

@@ -194,7 +194,8 @@ fn main() {
             .clamp(8, 64)
             .min(n_rows_total);
 
-        let full = qwen_llm::codec::dequant_to_f32(t, g.try_slice(t).expect("slice")).expect("dequant");
+        let full =
+            qwen_llm::codec::dequant_to_f32(t, g.try_slice(t).expect("slice")).expect("dequant");
 
         // Seeded distinct row sample.
         let mut s = 0x9B_2026u64 ^ (n_in as u64);
